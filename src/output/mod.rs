@@ -196,6 +196,55 @@ impl Default for JsonBuilder {
     }
 }
 
+pub struct ResponseEnvelope {
+    builder: JsonBuilder,
+}
+
+impl ResponseEnvelope {
+    #[must_use]
+    pub fn success() -> Self {
+        let mut builder = JsonBuilder::with_capacity(256);
+        builder.field_str("schema", RESPONSE_SCHEMA_V1);
+        builder.field_bool("success", true);
+        Self { builder }
+    }
+
+    #[must_use]
+    pub fn failure() -> Self {
+        let mut builder = JsonBuilder::with_capacity(256);
+        builder.field_str("schema", RESPONSE_SCHEMA_V1);
+        builder.field_bool("success", false);
+        Self { builder }
+    }
+
+    pub fn data<F>(mut self, build: F) -> Self
+    where
+        F: FnOnce(&mut JsonBuilder),
+    {
+        self.builder.field_object("data", build);
+        self
+    }
+
+    pub fn data_raw(mut self, raw_json: &str) -> Self {
+        self.builder.field_raw("data", raw_json);
+        self
+    }
+
+    pub fn degraded_array<T, F>(mut self, items: &[T], build: F) -> Self
+    where
+        F: Fn(&mut JsonBuilder, &T),
+    {
+        self.builder
+            .field_array_of_objects("degraded", items, build);
+        self
+    }
+
+    #[must_use]
+    pub fn finish(self) -> String {
+        self.builder.finish()
+    }
+}
+
 #[must_use]
 pub fn status_response_json() -> String {
     let storage = CapabilityStatus::Unimplemented.as_str();
@@ -269,8 +318,8 @@ fn escape_json_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        JsonBuilder, OutputContext, Renderer, error_response_json, escape_json_string, help_text,
-        human_status, status_response_json,
+        JsonBuilder, OutputContext, Renderer, ResponseEnvelope, error_response_json,
+        escape_json_string, help_text, human_status, status_response_json,
     };
     use crate::models::DomainError;
 
@@ -486,5 +535,42 @@ mod tests {
     fn output_context_format_override_takes_precedence() -> TestResult {
         let ctx = OutputContext::detect_with_hints(true, true, Some(Renderer::Toon));
         ensure_equal(&ctx.renderer, &Renderer::Toon, "format override")
+    }
+
+    #[test]
+    fn response_envelope_success_has_stable_schema() -> TestResult {
+        let json = ResponseEnvelope::success()
+            .data(|d| {
+                d.field_str("command", "test");
+            })
+            .finish();
+        ensure_starts_with(&json, "{\"schema\":\"ee.response.v1\"", "schema")?;
+        ensure_contains(&json, "\"success\":true", "success flag")?;
+        ensure_contains(&json, "\"data\":{\"command\":\"test\"}", "data object")
+    }
+
+    #[test]
+    fn response_envelope_failure_has_success_false() -> TestResult {
+        let json = ResponseEnvelope::failure()
+            .data_raw("{\"error\":\"something\"}")
+            .finish();
+        ensure_contains(&json, "\"success\":false", "failure flag")?;
+        ensure_contains(&json, "\"data\":{\"error\":\"something\"}", "data raw")
+    }
+
+    #[test]
+    fn response_envelope_degraded_array() -> TestResult {
+        let degradations = vec![("code1", "message1")];
+        let json = ResponseEnvelope::success()
+            .data(|d| {
+                d.field_str("status", "ok");
+            })
+            .degraded_array(&degradations, |obj, (code, msg)| {
+                obj.field_str("code", code);
+                obj.field_str("message", msg);
+            })
+            .finish();
+        ensure_contains(&json, "\"degraded\":[{", "degraded array start")?;
+        ensure_contains(&json, "\"code\":\"code1\"", "degradation code")
     }
 }
