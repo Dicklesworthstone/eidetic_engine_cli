@@ -20,3 +20,6 @@ MODE_OUTPUT_*.md
 *.swo
 .idea/
 .vscode/
+
+# bv (beads viewer) local config and caches
+.bv/
