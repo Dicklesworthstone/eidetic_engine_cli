@@ -1,9 +1,13 @@
-//! High-level handle for the CASS CLI subprocess (EE-100).
+//! High-level handle for the CASS CLI subprocess (EE-100, EE-101).
 //!
 //! `CassClient` is the thin facade `ee` core code uses to talk to the
 //! installed `cass` binary. It owns the binary path, the static set of
 //! environment overrides we always apply (per the contract-stability
 //! spike), and the CLI surface for building [`CassInvocation`]s.
+//!
+//! EE-101 adds binary discovery: [`discover`] searches `$PATH` for `cass`,
+//! [`discover_with_override`] accepts an explicit config path, and both
+//! return a [`DiscoveredBinary`] with provenance for diagnostics.
 //!
 //! What this slice deliberately does **not** do:
 //!
@@ -27,6 +31,130 @@ use super::process::CassInvocation;
 /// Default binary name `ee` resolves through `$PATH` when the config
 /// does not pin an explicit location.
 pub const DEFAULT_BINARY: &str = "cass";
+
+/// How the CASS binary was located (EE-101).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiscoverySource {
+    /// Found via `$PATH` lookup.
+    Path,
+    /// Explicit path from `[cass.binary]` config.
+    Config,
+    /// Explicit path from `EE_CASS_BINARY` environment variable.
+    EnvVar,
+}
+
+impl DiscoverySource {
+    /// Stable lowercase tag for JSON status output and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Path => "path",
+            Self::Config => "config",
+            Self::EnvVar => "env_var",
+        }
+    }
+}
+
+/// Result of CASS binary discovery (EE-101).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiscoveredBinary {
+    /// Absolute path to the discovered binary.
+    pub path: PathBuf,
+    /// How the binary was located.
+    pub source: DiscoverySource,
+}
+
+impl DiscoveredBinary {
+    /// Create a new discovery result.
+    #[must_use]
+    pub fn new(path: PathBuf, source: DiscoverySource) -> Self {
+        Self { path, source }
+    }
+}
+
+/// Discover the CASS binary by searching `$PATH` for `cass`.
+///
+/// Returns the first executable `cass` found in `$PATH`, or
+/// [`CassError::BinaryNotFound`] if none exists.
+///
+/// # Errors
+///
+/// Returns [`CassError::BinaryNotFound`] if `cass` is not in `$PATH`.
+pub fn discover() -> Result<DiscoveredBinary, CassError> {
+    discover_with_override(None)
+}
+
+/// Discover the CASS binary with an optional explicit override.
+///
+/// Priority order:
+/// 1. `EE_CASS_BINARY` environment variable (if set)
+/// 2. `config_override` parameter (if `Some`)
+/// 3. `$PATH` lookup for `cass`
+///
+/// # Errors
+///
+/// Returns [`CassError::BinaryNotFound`] if no binary is found.
+/// Returns [`CassError::InvalidBinary`] if an override path does not exist.
+pub fn discover_with_override(
+    config_override: Option<&Path>,
+) -> Result<DiscoveredBinary, CassError> {
+    // Check EE_CASS_BINARY env var first
+    if let Ok(env_path) = std::env::var("EE_CASS_BINARY") {
+        let path = PathBuf::from(&env_path);
+        if path.is_file() {
+            return Ok(DiscoveredBinary::new(
+                canonicalize_path(&path)?,
+                DiscoverySource::EnvVar,
+            ));
+        }
+        return Err(CassError::InvalidBinary {
+            binary: path,
+            reason: "EE_CASS_BINARY path does not exist or is not a file".to_string(),
+        });
+    }
+
+    // Check config override
+    if let Some(override_path) = config_override {
+        if override_path.is_file() {
+            return Ok(DiscoveredBinary::new(
+                canonicalize_path(override_path)?,
+                DiscoverySource::Config,
+            ));
+        }
+        return Err(CassError::InvalidBinary {
+            binary: override_path.to_path_buf(),
+            reason: "config [cass.binary] path does not exist or is not a file".to_string(),
+        });
+    }
+
+    // Search $PATH
+    if let Some(path) = search_path_for(DEFAULT_BINARY) {
+        return Ok(DiscoveredBinary::new(path, DiscoverySource::Path));
+    }
+
+    Err(CassError::BinaryNotFound {
+        binary: PathBuf::from(DEFAULT_BINARY),
+    })
+}
+
+/// Search `$PATH` for the named binary and return the first match.
+fn search_path_for(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Canonicalize a path, mapping I/O errors to CassError.
+fn canonicalize_path(path: &Path) -> Result<PathBuf, CassError> {
+    path.canonicalize().map_err(|e| CassError::Io {
+        message: format!("failed to canonicalize {}: {}", path.display(), e),
+    })
+}
 
 /// Stable environment overrides `ee` applies on every CASS subprocess.
 ///
@@ -61,12 +189,24 @@ impl CassClient {
         Self::with_binary(DEFAULT_BINARY)
     }
 
+    /// Build a client from a discovered binary (EE-101).
+    ///
+    /// This is the preferred constructor after discovery: it records the
+    /// absolute path so invocations bypass the allowlist check and run
+    /// the validated binary directly.
+    #[must_use]
+    pub fn from_discovered(discovered: DiscoveredBinary) -> Self {
+        Self {
+            binary: discovered.path,
+            extra_env: Vec::new(),
+        }
+    }
+
     /// Build a client that records `binary` in the invocation intent.
     ///
-    /// EE-100 only spawns the fixed `cass` executable; explicit binary
-    /// path discovery and validation land in EE-101. Until then,
-    /// non-default binaries are useful for provenance tests but
-    /// [`CassInvocation::run`] rejects them with `invalid_binary`.
+    /// For production use, prefer [`discover`] + [`Self::from_discovered`]
+    /// which validates the binary exists. This constructor is useful for
+    /// tests and provenance fixtures.
     pub fn with_binary(binary: impl Into<PathBuf>) -> Self {
         Self {
             binary: binary.into(),
@@ -191,7 +331,10 @@ impl Default for CassClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{CassClient, DEFAULT_BINARY, STABLE_ENV_OVERRIDES};
+    use super::{
+        CassClient, DEFAULT_BINARY, DiscoveredBinary, DiscoverySource, STABLE_ENV_OVERRIDES,
+        discover, discover_with_override,
+    };
 
     use std::path::Path;
 
@@ -285,14 +428,58 @@ mod tests {
     }
 
     #[test]
-    fn run_rejects_non_default_binary_before_spawn() -> TestResult {
+    fn run_rejects_non_existent_binary() -> TestResult {
         let client = CassClient::with_binary("/no/such/cass-binary-eeplaceholder");
         let inv = client.invocation(["health", "--json"]);
         let error = match client.run(&inv) {
-            Ok(_) => return Err("custom binary should fail before spawn".to_string()),
+            Ok(_) => return Err("non-existent binary should fail".to_string()),
             Err(error) => error,
         };
         assert_eq!(error.kind_str(), "invalid_binary");
         Ok(())
+    }
+
+    #[test]
+    fn discovery_source_strings_are_stable() {
+        assert_eq!(DiscoverySource::Path.as_str(), "path");
+        assert_eq!(DiscoverySource::Config.as_str(), "config");
+        assert_eq!(DiscoverySource::EnvVar.as_str(), "env_var");
+    }
+
+    #[test]
+    fn discover_finds_cass_in_path() {
+        // This test only passes if cass is installed
+        match discover() {
+            Ok(discovered) => {
+                assert!(discovered.path.is_absolute());
+                assert!(discovered.path.is_file());
+                assert_eq!(discovered.source, DiscoverySource::Path);
+            }
+            Err(e) => {
+                // cass not installed is acceptable in test env
+                assert_eq!(e.kind_str(), "binary_not_found");
+            }
+        }
+    }
+
+    #[test]
+    fn discover_with_override_rejects_missing_config_path() -> TestResult {
+        let result = discover_with_override(Some(Path::new("/no/such/cass-config-path")));
+        let error = match result {
+            Ok(_) => return Err("missing config path should fail".to_string()),
+            Err(e) => e,
+        };
+        assert_eq!(error.kind_str(), "invalid_binary");
+        Ok(())
+    }
+
+    #[test]
+    fn from_discovered_creates_client_with_absolute_path() {
+        let discovered = DiscoveredBinary::new(
+            Path::new("/usr/bin/cass").to_path_buf(),
+            DiscoverySource::Path,
+        );
+        let client = CassClient::from_discovered(discovered);
+        assert_eq!(client.binary(), Path::new("/usr/bin/cass"));
     }
 }

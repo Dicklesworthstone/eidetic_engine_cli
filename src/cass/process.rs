@@ -208,15 +208,21 @@ impl CassInvocation {
     }
 
     fn ensure_allowlisted_binary(&self) -> Result<(), CassError> {
+        // Allow the default "cass" name (PATH lookup at spawn time)
         if self.binary == Path::new(ALLOWLISTED_CASS_EXECUTABLE) {
+            return Ok(());
+        }
+
+        // Allow absolute paths from discovery (EE-101) - these are
+        // pre-validated by discover() or discover_with_override()
+        if self.binary.is_absolute() && self.binary.is_file() {
             return Ok(());
         }
 
         Err(CassError::InvalidBinary {
             binary: self.binary.clone(),
-            reason: format!(
-                "EE-100 only spawns the fixed `{ALLOWLISTED_CASS_EXECUTABLE}` executable; explicit binary discovery lands in EE-101"
-            ),
+            reason: "binary must be 'cass' (PATH lookup) or an absolute path to an existing file"
+                .to_string(),
         })
     }
 }

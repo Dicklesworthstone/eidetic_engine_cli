@@ -1,9 +1,13 @@
-//! CASS (`coding_agent_session_search`) adapter (EE-100).
+//! CASS (`coding_agent_session_search`) adapter (EE-100, EE-101).
 //!
 //! `ee` consumes CASS as a versioned CLI dependency rather than
 //! linking to its internals. This module establishes the surfaces
 //! `ee-core` will use to talk to it:
 //!
+//! * [`discover`] / [`discover_with_override`] — find the `cass` binary
+//!   via `$PATH`, env var, or config override (EE-101);
+//! * [`DiscoveredBinary`] / [`DiscoverySource`] — provenance for how
+//!   the binary was located;
 //! * [`CassClient`] — owns the binary path and stable env overrides;
 //! * [`CassInvocation`] / [`CassOutcome`] — captured intent and result
 //!   for one subprocess call (with provenance metadata baked in);
@@ -31,7 +35,10 @@ pub mod contract;
 pub mod error;
 pub mod process;
 
-pub use client::{CassClient, DEFAULT_BINARY, STABLE_ENV_OVERRIDES};
+pub use client::{
+    CassClient, DEFAULT_BINARY, DiscoveredBinary, DiscoverySource, STABLE_ENV_OVERRIDES, discover,
+    discover_with_override,
+};
 pub use contract::{
     CassContract, REQUIRED_API_VERSION, REQUIRED_CAPABILITIES, REQUIRED_CONTRACT_VERSION,
 };
@@ -52,9 +59,11 @@ pub const fn subsystem_name() -> &'static str {
 mod tests {
     use super::{
         CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassClient, CassContract, CassError, CassExitClass,
-        CassInvocation, CassOutcome, DEFAULT_BINARY, REQUIRED_API_VERSION, REQUIRED_CAPABILITIES,
-        REQUIRED_CONTRACT_VERSION, STABLE_ENV_OVERRIDES, subsystem_name,
+        CassInvocation, CassOutcome, DEFAULT_BINARY, DiscoveredBinary, DiscoverySource,
+        REQUIRED_API_VERSION, REQUIRED_CAPABILITIES, REQUIRED_CONTRACT_VERSION,
+        STABLE_ENV_OVERRIDES, discover, discover_with_override, subsystem_name,
     };
+    use std::path::Path;
 
     #[test]
     fn subsystem_name_is_stable() {
@@ -74,6 +83,15 @@ mod tests {
         let _ = STABLE_ENV_OVERRIDES;
         let _ = CASS_EXIT_OK;
         let _ = CASS_EXIT_DEGRADED;
+
+        // EE-101 discovery types
+        let _ = DiscoverySource::Path.as_str();
+        let _ = DiscoveredBinary::new(
+            Path::new("/usr/bin/cass").to_path_buf(),
+            DiscoverySource::Path,
+        );
+        let _ = discover;
+        let _ = discover_with_override;
 
         let client: CassClient = CassClient::new_default();
         let inv: CassInvocation = client.invocation(["health"]);
