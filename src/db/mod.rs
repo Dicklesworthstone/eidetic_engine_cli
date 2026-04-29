@@ -794,9 +794,73 @@ CREATE INDEX idx_curation_candidates_ttl ON curation_candidates(ttl_expires_at) 
     "blake3:v003_curation_candidates_2026_04_29",
 );
 
+/// V004: Add procedural_rules table (EE-084).
+pub const V004_PROCEDURAL_RULES: Migration = Migration::new(
+    4,
+    "procedural_rules",
+    r#"
+-- Procedural rules table (EE-084)
+-- Distilled lessons, patterns, and policies from experience.
+CREATE TABLE procedural_rules (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'rule_*' AND length(id) = 31),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    content TEXT NOT NULL CHECK (length(trim(content)) > 0 AND length(content) <= 8192),
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    utility REAL NOT NULL CHECK (utility >= 0.0 AND utility <= 1.0),
+    importance REAL NOT NULL CHECK (importance >= 0.0 AND importance <= 1.0),
+    trust_class TEXT NOT NULL CHECK (trust_class IN (
+        'human_explicit', 'agent_validated', 'agent_assertion', 'cass_evidence', 'legacy_import'
+    )),
+    scope TEXT NOT NULL DEFAULT 'workspace' CHECK (scope IN (
+        'global', 'workspace', 'project', 'directory', 'file_pattern'
+    )),
+    scope_pattern TEXT CHECK (scope_pattern IS NULL OR length(trim(scope_pattern)) > 0),
+    maturity TEXT NOT NULL DEFAULT 'candidate' CHECK (maturity IN (
+        'draft', 'candidate', 'validated', 'deprecated', 'superseded'
+    )),
+    positive_feedback_count INTEGER NOT NULL DEFAULT 0 CHECK (positive_feedback_count >= 0),
+    negative_feedback_count INTEGER NOT NULL DEFAULT 0 CHECK (negative_feedback_count >= 0),
+    last_applied_at TEXT CHECK (last_applied_at IS NULL OR length(trim(last_applied_at)) > 0),
+    last_validated_at TEXT CHECK (last_validated_at IS NULL OR length(trim(last_validated_at)) > 0),
+    superseded_by TEXT REFERENCES procedural_rules(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    tombstoned_at TEXT CHECK (tombstoned_at IS NULL OR length(trim(tombstoned_at)) > 0)
+);
+
+CREATE INDEX idx_procedural_rules_workspace ON procedural_rules(workspace_id);
+CREATE INDEX idx_procedural_rules_maturity ON procedural_rules(maturity);
+CREATE INDEX idx_procedural_rules_trust_class ON procedural_rules(trust_class);
+CREATE INDEX idx_procedural_rules_scope ON procedural_rules(scope);
+CREATE INDEX idx_procedural_rules_confidence ON procedural_rules(confidence);
+CREATE INDEX idx_procedural_rules_tombstoned ON procedural_rules(tombstoned_at);
+
+-- Rule source memories junction (many-to-many)
+CREATE TABLE rule_source_memories (
+    rule_id TEXT NOT NULL REFERENCES procedural_rules(id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    PRIMARY KEY (rule_id, memory_id)
+);
+CREATE INDEX idx_rule_source_memories_memory ON rule_source_memories(memory_id);
+
+-- Rule tags (many-to-many)
+CREATE TABLE rule_tags (
+    rule_id TEXT NOT NULL REFERENCES procedural_rules(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL CHECK (length(trim(tag)) > 0 AND length(tag) <= 64),
+    PRIMARY KEY (rule_id, tag)
+);
+CREATE INDEX idx_rule_tags_tag ON rule_tags(tag);
+"#,
+    "blake3:v004_procedural_rules_2026_04_29",
+);
+
 /// All migrations in version order.
-pub const MIGRATIONS: &[Migration] =
-    &[V001_INIT_SCHEMA, V002_TRUST_CLASS, V003_CURATION_CANDIDATES];
+pub const MIGRATIONS: &[Migration] = &[
+    V001_INIT_SCHEMA,
+    V002_TRUST_CLASS,
+    V003_CURATION_CANDIDATES,
+    V004_PROCEDURAL_RULES,
+];
 
 /// Result of applying migrations.
 #[derive(Debug, Clone, PartialEq, Eq)]
