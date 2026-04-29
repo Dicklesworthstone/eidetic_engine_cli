@@ -8,6 +8,79 @@ pub const CONTEXT_COMMAND: &str = "context";
 pub const DEFAULT_CONTEXT_MAX_TOKENS: u32 = 4_000;
 pub const DEFAULT_CANDIDATE_POOL: u32 = 64;
 
+/// Conservative characters-per-token ratio for heuristic estimation.
+/// Uses 3.5 instead of 4.0 to bias toward overestimation.
+pub const DEFAULT_CHARS_PER_TOKEN: f32 = 3.5;
+
+/// Token estimation strategy (EE-143).
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum TokenEstimationStrategy {
+    /// Use character count divided by chars-per-token ratio.
+    /// Conservative and fast, suitable for most use cases.
+    #[default]
+    CharacterHeuristic,
+    /// Count whitespace-separated words, multiplied by 1.3.
+    /// More accurate for code but slower.
+    WordHeuristic,
+}
+
+impl TokenEstimationStrategy {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CharacterHeuristic => "character_heuristic",
+            Self::WordHeuristic => "word_heuristic",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 2] {
+        [Self::CharacterHeuristic, Self::WordHeuristic]
+    }
+}
+
+impl fmt::Display for TokenEstimationStrategy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Estimate the number of tokens in the given text.
+///
+/// This is a deterministic heuristic that intentionally overestimates
+/// to ensure packs fit within budgets. The default strategy uses a
+/// character-based ratio; pass a custom strategy for different behavior.
+///
+/// Returns at least 1 for any non-empty trimmed input.
+#[must_use]
+pub fn estimate_tokens(content: &str, strategy: TokenEstimationStrategy) -> u32 {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+
+    match strategy {
+        TokenEstimationStrategy::CharacterHeuristic => {
+            let char_count = trimmed.chars().count();
+            // Divide by chars-per-token, round up for conservatism.
+            let estimate = (char_count as f32 / DEFAULT_CHARS_PER_TOKEN).ceil();
+            (estimate as u32).max(1)
+        }
+        TokenEstimationStrategy::WordHeuristic => {
+            let word_count = trimmed.split_whitespace().count();
+            // Multiply by 1.3 to account for punctuation and subword tokens.
+            let estimate = (word_count as f32 * 1.3).ceil();
+            (estimate as u32).max(1)
+        }
+    }
+}
+
+/// Estimate tokens using the default character heuristic strategy.
+#[must_use]
+pub fn estimate_tokens_default(content: &str) -> u32 {
+    estimate_tokens(content, TokenEstimationStrategy::default())
+}
+
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
     SUBSYSTEM
@@ -621,9 +694,10 @@ mod tests {
 
     use super::{
         CONTEXT_COMMAND, ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
-        ContextResponseDegradation, ContextResponseSeverity, PackCandidate, PackCandidateInput,
-        PackOmissionReason, PackProvenance, PackSection, PackValidationError, TokenBudget,
-        assemble_draft, subsystem_name,
+        ContextResponseDegradation, ContextResponseSeverity, DEFAULT_CHARS_PER_TOKEN,
+        PackCandidate, PackCandidateInput, PackOmissionReason, PackProvenance, PackSection,
+        PackValidationError, TokenBudget, TokenEstimationStrategy, assemble_draft,
+        estimate_tokens, estimate_tokens_default, subsystem_name,
     };
     use crate::models::{MemoryId, ProvenanceUri, UnitScore};
 
@@ -705,6 +779,127 @@ mod tests {
     #[test]
     fn subsystem_name_is_stable() -> TestResult {
         ensure_equal(&subsystem_name(), &"pack", "subsystem name")
+    }
+
+    #[test]
+    fn default_chars_per_token_is_conservative() -> TestResult {
+        ensure(
+            DEFAULT_CHARS_PER_TOKEN < 4.0,
+            "default ratio should be below 4.0 for conservative estimation",
+        )?;
+        ensure(
+            DEFAULT_CHARS_PER_TOKEN > 2.0,
+            "default ratio should be above 2.0 to avoid extreme overestimation",
+        )
+    }
+
+    #[test]
+    fn token_estimation_strategy_strings_are_stable() -> TestResult {
+        ensure_equal(
+            &TokenEstimationStrategy::CharacterHeuristic.as_str(),
+            &"character_heuristic",
+            "character heuristic strategy",
+        )?;
+        ensure_equal(
+            &TokenEstimationStrategy::WordHeuristic.as_str(),
+            &"word_heuristic",
+            "word heuristic strategy",
+        )?;
+        ensure_equal(
+            &TokenEstimationStrategy::all().len(),
+            &2,
+            "all strategies count",
+        )?;
+        ensure_equal(
+            &TokenEstimationStrategy::default(),
+            &TokenEstimationStrategy::CharacterHeuristic,
+            "default strategy",
+        )
+    }
+
+    #[test]
+    fn estimate_tokens_returns_zero_for_empty_input() -> TestResult {
+        ensure_equal(
+            &estimate_tokens("", TokenEstimationStrategy::CharacterHeuristic),
+            &0,
+            "empty string",
+        )?;
+        ensure_equal(
+            &estimate_tokens("   ", TokenEstimationStrategy::CharacterHeuristic),
+            &0,
+            "whitespace only",
+        )?;
+        ensure_equal(
+            &estimate_tokens("\n\t", TokenEstimationStrategy::WordHeuristic),
+            &0,
+            "whitespace with word heuristic",
+        )
+    }
+
+    #[test]
+    fn estimate_tokens_returns_at_least_one_for_non_empty() -> TestResult {
+        ensure(
+            estimate_tokens("x", TokenEstimationStrategy::CharacterHeuristic) >= 1,
+            "single char should estimate at least 1 token",
+        )?;
+        ensure(
+            estimate_tokens("word", TokenEstimationStrategy::WordHeuristic) >= 1,
+            "single word should estimate at least 1 token",
+        )
+    }
+
+    #[test]
+    fn estimate_tokens_character_heuristic_is_deterministic() -> TestResult {
+        let content = "This is a test string for token estimation.";
+        let first = estimate_tokens(content, TokenEstimationStrategy::CharacterHeuristic);
+        let second = estimate_tokens(content, TokenEstimationStrategy::CharacterHeuristic);
+        ensure_equal(&first, &second, "deterministic estimation")
+    }
+
+    #[test]
+    fn estimate_tokens_character_heuristic_scales_with_length() -> TestResult {
+        let short = estimate_tokens("hello", TokenEstimationStrategy::CharacterHeuristic);
+        let long = estimate_tokens(
+            "hello world this is a much longer string",
+            TokenEstimationStrategy::CharacterHeuristic,
+        );
+        ensure(
+            long > short,
+            "longer content should estimate more tokens",
+        )
+    }
+
+    #[test]
+    fn estimate_tokens_word_heuristic_counts_words() -> TestResult {
+        let one_word = estimate_tokens("hello", TokenEstimationStrategy::WordHeuristic);
+        let five_words = estimate_tokens(
+            "one two three four five",
+            TokenEstimationStrategy::WordHeuristic,
+        );
+        ensure(
+            five_words > one_word,
+            "more words should estimate more tokens",
+        )?;
+        ensure(
+            five_words >= 5,
+            "five words should estimate at least 5 tokens (with 1.3 multiplier)",
+        )
+    }
+
+    #[test]
+    fn estimate_tokens_default_uses_character_heuristic() -> TestResult {
+        let content = "test content";
+        let default_result = estimate_tokens_default(content);
+        let explicit_result = estimate_tokens(content, TokenEstimationStrategy::CharacterHeuristic);
+        ensure_equal(&default_result, &explicit_result, "default matches character heuristic")
+    }
+
+    #[test]
+    fn estimate_tokens_trims_input_before_counting() -> TestResult {
+        let clean = estimate_tokens("hello world", TokenEstimationStrategy::CharacterHeuristic);
+        let padded =
+            estimate_tokens("  hello world  ", TokenEstimationStrategy::CharacterHeuristic);
+        ensure_equal(&clean, &padded, "trimmed content should match")
     }
 
     #[test]
