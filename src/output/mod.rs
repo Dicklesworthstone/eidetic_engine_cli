@@ -7,7 +7,7 @@ pub fn status_response_json() -> String {
     let runtime = CapabilityStatus::Pending.as_str();
 
     format!(
-        "{{\"schema\":\"{schema}\",\"ok\":true,\"data\":{{\"command\":\"status\",\"version\":\"{version}\",\"capabilities\":{{\"runtime\":\"{runtime}\",\"storage\":\"{storage}\",\"search\":\"{search}\"}},\"degraded\":[{{\"code\":\"storage_not_implemented\",\"severity\":\"medium\",\"message\":\"Storage subsystem is not wired yet.\",\"repair\":\"Implement EE-040 through EE-044.\"}},{{\"code\":\"search_not_implemented\",\"severity\":\"medium\",\"message\":\"Search subsystem is not wired yet.\",\"repair\":\"Implement EE-120 and dependent search beads.\"}}]}}}}",
+        "{{\"schema\":\"{schema}\",\"success\":true,\"data\":{{\"command\":\"status\",\"version\":\"{version}\",\"capabilities\":{{\"runtime\":\"{runtime}\",\"storage\":\"{storage}\",\"search\":\"{search}\"}},\"degraded\":[{{\"code\":\"storage_not_implemented\",\"severity\":\"medium\",\"message\":\"Storage subsystem is not wired yet.\",\"repair\":\"Implement EE-040 through EE-044.\"}},{{\"code\":\"search_not_implemented\",\"severity\":\"medium\",\"message\":\"Search subsystem is not wired yet.\",\"repair\":\"Implement EE-120 and dependent search beads.\"}}]}}}}",
         schema = RESPONSE_SCHEMA_V1,
         version = env!("CARGO_PKG_VERSION"),
         runtime = runtime,
@@ -34,6 +34,7 @@ mod tests {
     fn status_json_has_stable_schema_and_degradation_codes() {
         let json = status_response_json();
         assert!(json.starts_with("{\"schema\":\"ee.response.v1\""));
+        assert!(json.contains("\"success\":true"));
         assert!(json.contains("\"storage_not_implemented\""));
         assert!(json.contains("\"search_not_implemented\""));
     }

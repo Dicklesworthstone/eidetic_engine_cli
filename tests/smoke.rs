@@ -16,6 +16,7 @@ fn status_json_stdout_is_stable_machine_data() {
     assert!(output.status.success(), "stderr: {stderr}");
     assert!(stderr.is_empty(), "stderr must be empty for JSON status");
     assert!(stdout.starts_with("{\"schema\":\"ee.response.v1\""));
+    assert!(stdout.contains("\"success\":true"));
     assert!(stdout.contains("\"command\":\"status\""));
     assert!(stdout.ends_with('\n'));
 }
