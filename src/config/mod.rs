@@ -1,6 +1,10 @@
 pub mod path;
+pub mod workspace;
 
 pub use path::{PathExpander, PathExpansionError};
+pub use workspace::{
+    WORKSPACE_MARKER, WorkspaceError, WorkspaceLocation, discover, discover_from_current_dir,
+};
 
 pub const SUBSYSTEM: &str = "config";
 
