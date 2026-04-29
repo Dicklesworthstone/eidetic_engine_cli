@@ -2405,7 +2405,7 @@ mod tests {
 
         connection.insert_audit("audit_target00000000000000000001", &entry1)?;
         connection.insert_audit("audit_target00000000000000000002", &entry2)?;
-        connection.insert_audit("audit_target0000000000000000003", &entry3)?;
+        connection.insert_audit("audit_target00000000000000000003", &entry3)?;
 
         let memory_entries = connection.list_audit_by_target(
             "memory",
@@ -2448,9 +2448,9 @@ mod tests {
             details: None,
         };
 
-        connection.insert_audit("audit_action0000000000000000001", &create)?;
-        connection.insert_audit("audit_action0000000000000000002", &create)?;
-        connection.insert_audit("audit_action0000000000000000003", &update)?;
+        connection.insert_audit("audit_action00000000000000000001", &create)?;
+        connection.insert_audit("audit_action00000000000000000002", &create)?;
+        connection.insert_audit("audit_action00000000000000000003", &update)?;
 
         let create_entries = connection.list_audit_by_action("memory.create", None)?;
         ensure_equal(&create_entries.len(), &2, "two create entries")?;
