@@ -1569,9 +1569,7 @@ impl DbConnection {
         sql.push_str(" ORDER BY created_at DESC");
 
         let rows = self.query_for(DbOperation::Query, &sql, &params)?;
-        rows.iter()
-            .map(stored_search_index_job_from_row)
-            .collect()
+        rows.iter().map(stored_search_index_job_from_row).collect()
     }
 
     /// Start a search index job (set status to running).
@@ -3058,6 +3056,359 @@ mod tests {
 
         connection.begin_transaction(sqlmodel_core::IsolationLevel::Serializable)?;
         connection.rollback()?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn search_index_job_type_enum_stable() -> TestResult {
+        ensure_equal(
+            &super::SearchIndexJobType::FullRebuild.as_str(),
+            &"full_rebuild",
+            "full_rebuild string",
+        )?;
+        ensure_equal(
+            &super::SearchIndexJobType::Incremental.as_str(),
+            &"incremental",
+            "incremental string",
+        )?;
+        ensure_equal(
+            &super::SearchIndexJobType::SingleDocument.as_str(),
+            &"single_document",
+            "single_document string",
+        )?;
+
+        ensure_equal(
+            &super::SearchIndexJobType::from_str("full_rebuild"),
+            &Some(super::SearchIndexJobType::FullRebuild),
+            "parse full_rebuild",
+        )?;
+        ensure_equal(
+            &super::SearchIndexJobType::from_str("invalid"),
+            &None,
+            "invalid returns None",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn search_index_job_status_enum_stable() -> TestResult {
+        ensure_equal(
+            &super::SearchIndexJobStatus::Pending.as_str(),
+            &"pending",
+            "pending string",
+        )?;
+        ensure_equal(
+            &super::SearchIndexJobStatus::Running.as_str(),
+            &"running",
+            "running string",
+        )?;
+        ensure_equal(
+            &super::SearchIndexJobStatus::Completed.as_str(),
+            &"completed",
+            "completed string",
+        )?;
+        ensure_equal(
+            &super::SearchIndexJobStatus::Failed.as_str(),
+            &"failed",
+            "failed string",
+        )?;
+        ensure_equal(
+            &super::SearchIndexJobStatus::Cancelled.as_str(),
+            &"cancelled",
+            "cancelled string",
+        )?;
+
+        ensure(
+            !super::SearchIndexJobStatus::Pending.is_terminal(),
+            "pending is not terminal",
+        )?;
+        ensure(
+            !super::SearchIndexJobStatus::Running.is_terminal(),
+            "running is not terminal",
+        )?;
+        ensure(
+            super::SearchIndexJobStatus::Completed.is_terminal(),
+            "completed is terminal",
+        )?;
+        ensure(
+            super::SearchIndexJobStatus::Failed.is_terminal(),
+            "failed is terminal",
+        )?;
+        ensure(
+            super::SearchIndexJobStatus::Cancelled.is_terminal(),
+            "cancelled is terminal",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn insert_and_get_search_index_job() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateSearchIndexJobInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            job_type: super::SearchIndexJobType::FullRebuild,
+            document_source: None,
+            document_id: None,
+            documents_total: 100,
+        };
+
+        connection.insert_search_index_job("sidx_01234567890123456789012345", &input)?;
+
+        let job = connection.get_search_index_job("sidx_01234567890123456789012345")?;
+        ensure(job.is_some(), "job must be found")?;
+
+        let job = job.ok_or_else(|| TestFailure::new("job not found"))?;
+        ensure_equal(&job.id.as_str(), &"sidx_01234567890123456789012345", "id")?;
+        ensure_equal(
+            &job.workspace_id.as_str(),
+            &"wsp_01234567890123456789012345",
+            "workspace_id",
+        )?;
+        ensure_equal(&job.job_type.as_str(), &"full_rebuild", "job_type")?;
+        ensure(job.document_source.is_none(), "document_source is None")?;
+        ensure(job.document_id.is_none(), "document_id is None")?;
+        ensure_equal(&job.status.as_str(), &"pending", "status is pending")?;
+        ensure_equal(&job.documents_total, &100, "documents_total")?;
+        ensure_equal(&job.documents_indexed, &0, "documents_indexed starts at 0")?;
+        ensure(job.error_message.is_none(), "no error message")?;
+        ensure(job.started_at.is_none(), "not started yet")?;
+        ensure(job.completed_at.is_none(), "not completed yet")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn search_index_job_lifecycle() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateSearchIndexJobInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            job_type: super::SearchIndexJobType::Incremental,
+            document_source: Some("memory".to_string()),
+            document_id: None,
+            documents_total: 50,
+        };
+
+        connection.insert_search_index_job("sidx_lifecycle000000000000000", &input)?;
+
+        let started = connection.start_search_index_job("sidx_lifecycle000000000000000")?;
+        ensure(started, "job started successfully")?;
+
+        let job = connection
+            .get_search_index_job("sidx_lifecycle000000000000000")?
+            .ok_or_else(|| TestFailure::new("job not found"))?;
+        ensure_equal(&job.status.as_str(), &"running", "status is running")?;
+        ensure(job.started_at.is_some(), "started_at is set")?;
+
+        let progress_updated =
+            connection.update_search_index_job_progress("sidx_lifecycle000000000000000", 25)?;
+        ensure(progress_updated, "progress updated")?;
+
+        let job = connection
+            .get_search_index_job("sidx_lifecycle000000000000000")?
+            .ok_or_else(|| TestFailure::new("job not found"))?;
+        ensure_equal(&job.documents_indexed, &25, "25 documents indexed")?;
+
+        let completed =
+            connection.complete_search_index_job("sidx_lifecycle000000000000000", 50)?;
+        ensure(completed, "job completed successfully")?;
+
+        let job = connection
+            .get_search_index_job("sidx_lifecycle000000000000000")?
+            .ok_or_else(|| TestFailure::new("job not found"))?;
+        ensure_equal(&job.status.as_str(), &"completed", "status is completed")?;
+        ensure_equal(&job.documents_indexed, &50, "all 50 documents indexed")?;
+        ensure(job.completed_at.is_some(), "completed_at is set")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn search_index_job_failure() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateSearchIndexJobInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            job_type: super::SearchIndexJobType::SingleDocument,
+            document_source: Some("memory".to_string()),
+            document_id: Some("mem_01234567890123456789012345".to_string()),
+            documents_total: 1,
+        };
+
+        connection.insert_search_index_job("sidx_failure000000000000000000", &input)?;
+        connection.start_search_index_job("sidx_failure000000000000000000")?;
+
+        let failed =
+            connection.fail_search_index_job("sidx_failure000000000000000000", "Document not found")?;
+        ensure(failed, "job failed successfully")?;
+
+        let job = connection
+            .get_search_index_job("sidx_failure000000000000000000")?
+            .ok_or_else(|| TestFailure::new("job not found"))?;
+        ensure_equal(&job.status.as_str(), &"failed", "status is failed")?;
+        ensure_equal(
+            &job.error_message,
+            &Some("Document not found".to_string()),
+            "error message set",
+        )?;
+        ensure(job.completed_at.is_some(), "completed_at is set on failure")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn search_index_job_cancellation() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateSearchIndexJobInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            job_type: super::SearchIndexJobType::FullRebuild,
+            document_source: None,
+            document_id: None,
+            documents_total: 200,
+        };
+
+        connection.insert_search_index_job("sidx_cancel0000000000000000000", &input)?;
+
+        let cancelled = connection.cancel_search_index_job("sidx_cancel0000000000000000000")?;
+        ensure(cancelled, "job cancelled successfully")?;
+
+        let job = connection
+            .get_search_index_job("sidx_cancel0000000000000000000")?
+            .ok_or_else(|| TestFailure::new("job not found"))?;
+        ensure_equal(&job.status.as_str(), &"cancelled", "status is cancelled")?;
+        ensure(job.completed_at.is_some(), "completed_at is set on cancel")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_search_index_jobs_by_status() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let pending = super::CreateSearchIndexJobInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            job_type: super::SearchIndexJobType::FullRebuild,
+            document_source: None,
+            document_id: None,
+            documents_total: 10,
+        };
+
+        connection.insert_search_index_job("sidx_list_pending0000000000000", &pending)?;
+        connection.insert_search_index_job("sidx_list_running0000000000000", &pending)?;
+        connection.start_search_index_job("sidx_list_running0000000000000")?;
+
+        let all = connection.list_search_index_jobs("wsp_01234567890123456789012345", None)?;
+        ensure_equal(&all.len(), &2, "two jobs total")?;
+
+        let pending_jobs = connection.list_search_index_jobs(
+            "wsp_01234567890123456789012345",
+            Some(super::SearchIndexJobStatus::Pending),
+        )?;
+        ensure_equal(&pending_jobs.len(), &1, "one pending job")?;
+
+        let running_jobs = connection.list_search_index_jobs(
+            "wsp_01234567890123456789012345",
+            Some(super::SearchIndexJobStatus::Running),
+        )?;
+        ensure_equal(&running_jobs.len(), &1, "one running job")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn latest_search_index_job() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateSearchIndexJobInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            job_type: super::SearchIndexJobType::FullRebuild,
+            document_source: None,
+            document_id: None,
+            documents_total: 10,
+        };
+
+        connection.insert_search_index_job("sidx_latest0000000000000000001", &input)?;
+        connection.insert_search_index_job("sidx_latest0000000000000000002", &input)?;
+
+        let latest = connection.latest_search_index_job("wsp_01234567890123456789012345")?;
+        ensure(latest.is_some(), "latest job found")?;
+
+        let latest = latest.ok_or_else(|| TestFailure::new("latest not found"))?;
+        ensure_equal(
+            &latest.id.as_str(),
+            &"sidx_latest0000000000000000002",
+            "latest is most recent",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn search_index_job_stored_accessors() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateSearchIndexJobInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            job_type: super::SearchIndexJobType::FullRebuild,
+            document_source: None,
+            document_id: None,
+            documents_total: 10,
+        };
+
+        connection.insert_search_index_job("sidx_accessors0000000000000000", &input)?;
+
+        let job = connection
+            .get_search_index_job("sidx_accessors0000000000000000")?
+            .ok_or_else(|| TestFailure::new("job not found"))?;
+
+        ensure_equal(
+            &job.job_type_enum(),
+            &Some(super::SearchIndexJobType::FullRebuild),
+            "job_type_enum",
+        )?;
+        ensure_equal(
+            &job.status_enum(),
+            &Some(super::SearchIndexJobStatus::Pending),
+            "status_enum",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn get_nonexistent_search_index_job_returns_none() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let job = connection.get_search_index_job("sidx_nonexistent00000000000000")?;
+        ensure(job.is_none(), "nonexistent job must be None")?;
 
         connection.close()?;
         Ok(())
