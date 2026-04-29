@@ -89,6 +89,65 @@ impl OutputContext {
     }
 }
 
+/// Severity level for degradation notices in the ee.response.v1 envelope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DegradationSeverity {
+    Low,
+    Medium,
+    High,
+}
+
+impl DegradationSeverity {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+/// A single degradation notice in the ee.response.v1 envelope.
+///
+/// Degradation notices tell consumers that the response is valid but
+/// incomplete or limited in some way. The repair field suggests how to
+/// resolve the degradation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Degradation {
+    pub code: String,
+    pub severity: DegradationSeverity,
+    pub message: String,
+    pub repair: String,
+}
+
+impl Degradation {
+    #[must_use]
+    pub fn new(
+        code: impl Into<String>,
+        severity: DegradationSeverity,
+        message: impl Into<String>,
+        repair: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            severity,
+            message: message.into(),
+            repair: repair.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let mut b = JsonBuilder::new();
+        b.field_str("code", &self.code);
+        b.field_str("severity", self.severity.as_str());
+        b.field_str("message", &self.message);
+        b.field_str("repair", &self.repair);
+        b.finish()
+    }
+}
+
 pub struct JsonBuilder {
     buffer: String,
     first: bool,
@@ -318,8 +377,8 @@ fn escape_json_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        JsonBuilder, OutputContext, Renderer, ResponseEnvelope, error_response_json,
-        escape_json_string, help_text, human_status, status_response_json,
+        Degradation, DegradationSeverity, JsonBuilder, OutputContext, Renderer, ResponseEnvelope,
+        error_response_json, escape_json_string, help_text, human_status, status_response_json,
     };
     use crate::models::DomainError;
 
@@ -572,5 +631,31 @@ mod tests {
             .finish();
         ensure_contains(&json, "\"degraded\":[{", "degraded array start")?;
         ensure_contains(&json, "\"code\":\"code1\"", "degradation code")
+    }
+
+    #[test]
+    fn degradation_severity_strings_are_stable() -> TestResult {
+        ensure_equal(&DegradationSeverity::Low.as_str(), &"low", "low")?;
+        ensure_equal(&DegradationSeverity::Medium.as_str(), &"medium", "medium")?;
+        ensure_equal(&DegradationSeverity::High.as_str(), &"high", "high")
+    }
+
+    #[test]
+    fn degradation_to_json_has_stable_structure() -> TestResult {
+        let d = Degradation::new(
+            "storage_stale",
+            DegradationSeverity::Medium,
+            "Storage index is stale.",
+            "ee index rebuild",
+        );
+        let json = d.to_json();
+        ensure_contains(&json, "\"code\":\"storage_stale\"", "code field")?;
+        ensure_contains(&json, "\"severity\":\"medium\"", "severity field")?;
+        ensure_contains(
+            &json,
+            "\"message\":\"Storage index is stale.\"",
+            "message field",
+        )?;
+        ensure_contains(&json, "\"repair\":\"ee index rebuild\"", "repair field")
     }
 }
