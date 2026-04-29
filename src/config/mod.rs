@@ -1,3 +1,7 @@
+pub mod path;
+
+pub use path::{PathExpander, PathExpansionError};
+
 pub const SUBSYSTEM: &str = "config";
 
 #[must_use]
