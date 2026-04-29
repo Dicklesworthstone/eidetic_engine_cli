@@ -1,16 +1,1747 @@
+use chrono::Utc;
+use sqlmodel_core::{Row, Value};
+use sqlmodel_frankensqlite::FrankenConnection;
+use std::error::Error;
+use std::fmt;
+use std::path::{Path, PathBuf};
+
 pub const SUBSYSTEM: &str = "db";
+pub const MIGRATION_TABLE_NAME: &str = "ee_schema_migrations";
+
+const MIGRATION_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS ee_schema_migrations (
+    version INTEGER PRIMARY KEY CHECK (version > 0),
+    name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    checksum TEXT NOT NULL CHECK (length(trim(checksum)) > 0),
+    applied_at TEXT NOT NULL CHECK (length(trim(applied_at)) > 0)
+)";
+const MIGRATION_TABLE_NAME_INDEX_DDL: &str =
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_ee_schema_migrations_name ON ee_schema_migrations(name)";
+
+pub type Result<T> = std::result::Result<T, DbError>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatabaseLocation {
+    Memory,
+    File(PathBuf),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseOpenMode {
+    ReadWrite,
+    SchemaOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatabaseConfig {
+    location: DatabaseLocation,
+    mode: DatabaseOpenMode,
+}
+
+impl DatabaseConfig {
+    pub fn memory() -> Self {
+        Self {
+            location: DatabaseLocation::Memory,
+            mode: DatabaseOpenMode::ReadWrite,
+        }
+    }
+
+    pub fn file(path: impl Into<PathBuf>) -> Self {
+        Self {
+            location: DatabaseLocation::File(path.into()),
+            mode: DatabaseOpenMode::ReadWrite,
+        }
+    }
+
+    pub fn schema_only(path: impl Into<PathBuf>) -> Self {
+        Self {
+            location: DatabaseLocation::File(path.into()),
+            mode: DatabaseOpenMode::SchemaOnly,
+        }
+    }
+
+    pub const fn location(&self) -> &DatabaseLocation {
+        &self.location
+    }
+
+    pub const fn mode(&self) -> DatabaseOpenMode {
+        self.mode
+    }
+}
+
+pub struct DbConnection {
+    inner: FrankenConnection,
+    location: DatabaseLocation,
+    mode: DatabaseOpenMode,
+}
+
+impl DbConnection {
+    pub fn open(config: DatabaseConfig) -> Result<Self> {
+        let inner = match (&config.location, config.mode) {
+            (DatabaseLocation::Memory, DatabaseOpenMode::ReadWrite) => {
+                FrankenConnection::open_memory()
+                    .map_err(|source| DbError::sqlmodel(DbOperation::OpenMemory, source))?
+            }
+            (DatabaseLocation::Memory, DatabaseOpenMode::SchemaOnly) => {
+                return Err(DbError::InvalidMode {
+                    location: config.location,
+                    mode: config.mode,
+                    message: "schema-only mode requires a file database".to_string(),
+                });
+            }
+            (DatabaseLocation::File(path), DatabaseOpenMode::ReadWrite) => {
+                let path = database_path_string(path, DbOperation::OpenReadWrite)?;
+                FrankenConnection::open_file(path)
+                    .map_err(|source| DbError::sqlmodel(DbOperation::OpenReadWrite, source))?
+            }
+            (DatabaseLocation::File(path), DatabaseOpenMode::SchemaOnly) => {
+                let path = database_path_string(path, DbOperation::OpenSchemaOnly)?;
+                FrankenConnection::open_schema_only(path)
+                    .map_err(|source| DbError::sqlmodel(DbOperation::OpenSchemaOnly, source))?
+            }
+        };
+
+        Ok(Self {
+            inner,
+            location: config.location,
+            mode: config.mode,
+        })
+    }
+
+    pub fn open_memory() -> Result<Self> {
+        Self::open(DatabaseConfig::memory())
+    }
+
+    pub fn open_file(path: impl Into<PathBuf>) -> Result<Self> {
+        Self::open(DatabaseConfig::file(path))
+    }
+
+    pub fn open_schema_only(path: impl Into<PathBuf>) -> Result<Self> {
+        Self::open(DatabaseConfig::schema_only(path))
+    }
+
+    pub fn path(&self) -> &str {
+        self.inner.path()
+    }
+
+    pub const fn location(&self) -> &DatabaseLocation {
+        &self.location
+    }
+
+    pub const fn mode(&self) -> DatabaseOpenMode {
+        self.mode
+    }
+
+    pub fn ping(&self) -> Result<()> {
+        self.query("SELECT 1", &[]).map(|_| ())
+    }
+
+    pub fn close(self) -> Result<()> {
+        self.inner
+            .close_sync()
+            .map_err(|source| DbError::sqlmodel(DbOperation::Close, source))
+    }
+
+    pub fn execute_raw(&self, sql: &str) -> Result<()> {
+        self.inner
+            .execute_raw(sql)
+            .map_err(|source| DbError::sqlmodel(DbOperation::Execute, source))
+    }
+
+    pub fn ensure_migration_table(&self) -> Result<()> {
+        self.execute_raw_for(DbOperation::EnsureMigrationTable, MIGRATION_TABLE_DDL)?;
+        self.execute_raw_for(
+            DbOperation::EnsureMigrationTable,
+            MIGRATION_TABLE_NAME_INDEX_DDL,
+        )
+    }
+
+    pub fn migration_table_exists(&self) -> Result<bool> {
+        let rows = self.query_for(
+            DbOperation::InspectMigrationTable,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            &[Value::Text(MIGRATION_TABLE_NAME.to_string())],
+        )?;
+
+        Ok(!rows.is_empty())
+    }
+
+    pub fn migration_table_columns(&self) -> Result<Vec<MigrationTableColumn>> {
+        let rows = self.query_for(
+            DbOperation::InspectMigrationTable,
+            "PRAGMA table_info(ee_schema_migrations)",
+            &[],
+        )?;
+
+        rows.iter()
+            .map(MigrationTableColumn::from_pragma_row)
+            .collect()
+    }
+
+    pub fn record_migration(&self, migration: &MigrationRecord) -> Result<()> {
+        migration.validate()?;
+
+        self.execute_for(
+            DbOperation::RecordMigration,
+            "INSERT INTO ee_schema_migrations (version, name, checksum, applied_at) VALUES (?1, ?2, ?3, ?4)",
+            &[
+                Value::BigInt(i64::from(migration.version)),
+                Value::Text(migration.name.clone()),
+                Value::Text(migration.checksum.clone()),
+                Value::Text(migration.applied_at.clone()),
+            ],
+        )
+        .map(|_| ())
+    }
+
+    pub fn applied_migrations(&self) -> Result<Vec<MigrationRecord>> {
+        let rows = self.query_for(
+            DbOperation::ListMigrations,
+            "SELECT version, name, checksum, applied_at FROM ee_schema_migrations ORDER BY version ASC",
+            &[],
+        )?;
+
+        rows.iter().map(MigrationRecord::from_row).collect()
+    }
+
+    pub fn has_migration(&self, version: u32) -> Result<bool> {
+        validate_migration_version(version)?;
+
+        let rows = self.query_for(
+            DbOperation::CheckMigration,
+            "SELECT 1 FROM ee_schema_migrations WHERE version = ?1 LIMIT 1",
+            &[Value::BigInt(i64::from(version))],
+        )?;
+
+        Ok(!rows.is_empty())
+    }
+
+    pub(crate) fn query(&self, sql: &str, params: &[Value]) -> Result<Vec<Row>> {
+        self.query_for(DbOperation::Query, sql, params)
+    }
+
+    fn execute_raw_for(&self, operation: DbOperation, sql: &str) -> Result<()> {
+        self.inner
+            .execute_raw(sql)
+            .map_err(|source| DbError::sqlmodel(operation, source))
+    }
+
+    fn execute_for(&self, operation: DbOperation, sql: &str, params: &[Value]) -> Result<u64> {
+        self.inner
+            .execute_sync(sql, params)
+            .map_err(|source| DbError::sqlmodel(operation, source))
+    }
+
+    fn query_for(&self, operation: DbOperation, sql: &str, params: &[Value]) -> Result<Vec<Row>> {
+        self.inner
+            .query_sync(sql, params)
+            .map_err(|source| DbError::sqlmodel(operation, source))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationRecord {
+    version: u32,
+    name: String,
+    checksum: String,
+    applied_at: String,
+}
+
+impl MigrationRecord {
+    pub fn new(
+        version: u32,
+        name: impl Into<String>,
+        checksum: impl Into<String>,
+        applied_at: impl Into<String>,
+    ) -> Result<Self> {
+        let record = Self {
+            version,
+            name: name.into().trim().to_string(),
+            checksum: checksum.into().trim().to_string(),
+            applied_at: applied_at.into().trim().to_string(),
+        };
+        record.validate()?;
+        Ok(record)
+    }
+
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn checksum(&self) -> &str {
+        &self.checksum
+    }
+
+    pub fn applied_at(&self) -> &str {
+        &self.applied_at
+    }
+
+    fn validate(&self) -> Result<()> {
+        validate_migration_version(self.version)?;
+        validate_required_text(MigrationField::Name, &self.name)?;
+        validate_required_text(MigrationField::Checksum, &self.checksum)?;
+        validate_required_text(MigrationField::AppliedAt, &self.applied_at)
+    }
+
+    fn from_row(row: &Row) -> Result<Self> {
+        let version = required_i64(row, 0, DbOperation::ListMigrations, "version")?;
+        let version = u32::try_from(version).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::ListMigrations,
+            message: format!("migration version must fit u32, got {version}"),
+        })?;
+        let name = required_text(row, 1, DbOperation::ListMigrations, "name")?;
+        let checksum = required_text(row, 2, DbOperation::ListMigrations, "checksum")?;
+        let applied_at = required_text(row, 3, DbOperation::ListMigrations, "applied_at")?;
+
+        Self::new(version, name, checksum, applied_at)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationTableColumn {
+    name: String,
+    sql_type: String,
+    not_null: bool,
+    primary_key_position: u32,
+}
+
+impl MigrationTableColumn {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn sql_type(&self) -> &str {
+        &self.sql_type
+    }
+
+    pub const fn not_null(&self) -> bool {
+        self.not_null
+    }
+
+    pub const fn primary_key_position(&self) -> u32 {
+        self.primary_key_position
+    }
+
+    fn from_pragma_row(row: &Row) -> Result<Self> {
+        let name = required_text(row, 1, DbOperation::InspectMigrationTable, "name")?;
+        let sql_type = required_text(row, 2, DbOperation::InspectMigrationTable, "type")?;
+        let not_null = required_i64(row, 3, DbOperation::InspectMigrationTable, "notnull")? != 0;
+        let primary_key_position = required_i64(row, 5, DbOperation::InspectMigrationTable, "pk")?;
+        let primary_key_position =
+            u32::try_from(primary_key_position).map_err(|_| DbError::MalformedRow {
+                operation: DbOperation::InspectMigrationTable,
+                message: "migration table primary-key position must fit u32".to_string(),
+            })?;
+
+        Ok(Self {
+            name: name.to_string(),
+            sql_type: sql_type.to_string(),
+            not_null,
+            primary_key_position,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum DbError {
+    SqlModel {
+        operation: DbOperation,
+        source: Box<sqlmodel_core::Error>,
+    },
+    InvalidPath {
+        operation: DbOperation,
+        path: PathBuf,
+        message: String,
+    },
+    InvalidMode {
+        location: DatabaseLocation,
+        mode: DatabaseOpenMode,
+        message: String,
+    },
+    InvalidMigration {
+        field: MigrationField,
+        message: String,
+    },
+    MalformedRow {
+        operation: DbOperation,
+        message: String,
+    },
+}
+
+impl DbError {
+    fn sqlmodel(operation: DbOperation, source: sqlmodel_core::Error) -> Self {
+        Self::SqlModel {
+            operation,
+            source: Box::new(source),
+        }
+    }
+
+    pub const fn operation(&self) -> Option<DbOperation> {
+        match self {
+            Self::SqlModel { operation, .. } | Self::InvalidPath { operation, .. } => {
+                Some(*operation)
+            }
+            Self::MalformedRow { operation, .. } => Some(*operation),
+            Self::InvalidMode { .. } | Self::InvalidMigration { .. } => None,
+        }
+    }
+}
+
+impl fmt::Display for DbError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SqlModel { operation, source } => {
+                write!(f, "database {} failed: {}", operation, source)
+            }
+            Self::InvalidPath {
+                operation,
+                path,
+                message,
+            } => write!(
+                f,
+                "database {} failed for path '{}': {}",
+                operation,
+                path.display(),
+                message
+            ),
+            Self::InvalidMode {
+                location,
+                mode,
+                message,
+            } => write!(
+                f,
+                "database open mode {:?} is invalid for {:?}: {}",
+                mode, location, message
+            ),
+            Self::InvalidMigration { field, message } => {
+                write!(f, "invalid migration {}: {}", field, message)
+            }
+            Self::MalformedRow { operation, message } => {
+                write!(
+                    f,
+                    "database {} returned malformed row: {}",
+                    operation, message
+                )
+            }
+        }
+    }
+}
+
+impl Error for DbError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::SqlModel { source, .. } => Some(source.as_ref()),
+            Self::InvalidPath { .. }
+            | Self::InvalidMode { .. }
+            | Self::InvalidMigration { .. }
+            | Self::MalformedRow { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DbOperation {
+    OpenMemory,
+    OpenReadWrite,
+    OpenSchemaOnly,
+    Query,
+    Execute,
+    Close,
+    EnsureMigrationTable,
+    InspectMigrationTable,
+    RecordMigration,
+    ListMigrations,
+    CheckMigration,
+}
+
+impl fmt::Display for DbOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OpenMemory => f.write_str("memory open"),
+            Self::OpenReadWrite => f.write_str("read-write open"),
+            Self::OpenSchemaOnly => f.write_str("schema-only open"),
+            Self::Query => f.write_str("query"),
+            Self::Execute => f.write_str("execute"),
+            Self::Close => f.write_str("close"),
+            Self::EnsureMigrationTable => f.write_str("migration table ensure"),
+            Self::InspectMigrationTable => f.write_str("migration table inspect"),
+            Self::RecordMigration => f.write_str("migration record insert"),
+            Self::ListMigrations => f.write_str("migration list"),
+            Self::CheckMigration => f.write_str("migration check"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrationField {
+    Version,
+    Name,
+    Checksum,
+    AppliedAt,
+}
+
+impl fmt::Display for MigrationField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Version => f.write_str("version"),
+            Self::Name => f.write_str("name"),
+            Self::Checksum => f.write_str("checksum"),
+            Self::AppliedAt => f.write_str("applied_at"),
+        }
+    }
+}
+
+fn database_path_string(path: &Path, operation: DbOperation) -> Result<String> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| DbError::InvalidPath {
+            operation,
+            path: path.to_path_buf(),
+            message: "FrankenSQLite database paths must be valid UTF-8".to_string(),
+        })
+}
+
+fn validate_migration_version(version: u32) -> Result<()> {
+    if version == 0 {
+        Err(DbError::InvalidMigration {
+            field: MigrationField::Version,
+            message: "version must be greater than zero".to_string(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_required_text(field: MigrationField, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        Err(DbError::InvalidMigration {
+            field,
+            message: "value must not be empty".to_string(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn required_value<'a>(
+    row: &'a Row,
+    index: usize,
+    operation: DbOperation,
+    column: &str,
+) -> Result<&'a Value> {
+    row.get(index).ok_or_else(|| DbError::MalformedRow {
+        operation,
+        message: format!("missing {column} column at index {index}"),
+    })
+}
+
+fn required_i64(row: &Row, index: usize, operation: DbOperation, column: &str) -> Result<i64> {
+    required_value(row, index, operation, column)?
+        .as_i64()
+        .ok_or_else(|| DbError::MalformedRow {
+            operation,
+            message: format!("{column} column at index {index} is not an integer"),
+        })
+}
+
+fn required_text<'a>(
+    row: &'a Row,
+    index: usize,
+    operation: DbOperation,
+    column: &str,
+) -> Result<&'a str> {
+    required_value(row, index, operation, column)?
+        .as_str()
+        .ok_or_else(|| DbError::MalformedRow {
+            operation,
+            message: format!("{column} column at index {index} is not text"),
+        })
+}
 
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
     SUBSYSTEM
 }
 
+/// A migration definition with version, name, SQL statements, and checksum.
+#[derive(Debug, Clone)]
+pub struct Migration {
+    version: u32,
+    name: &'static str,
+    sql: &'static str,
+    checksum: &'static str,
+}
+
+impl Migration {
+    /// Construct a migration. Checksum is `blake3:<hex>` of the SQL text.
+    pub const fn new(
+        version: u32,
+        name: &'static str,
+        sql: &'static str,
+        checksum: &'static str,
+    ) -> Self {
+        Self {
+            version,
+            name,
+            sql,
+            checksum,
+        }
+    }
+
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub const fn sql(&self) -> &'static str {
+        self.sql
+    }
+
+    pub const fn checksum(&self) -> &'static str {
+        self.checksum
+    }
+}
+
+/// V001: Initial schema — workspaces, agents, memories, memory_tags, audit_log.
+pub const V001_INIT_SCHEMA: Migration = Migration::new(
+    1,
+    "init_schema",
+    r#"
+-- Workspace registry
+CREATE TABLE workspaces (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'wsp_*' AND length(id) = 30),
+    path TEXT NOT NULL UNIQUE CHECK (length(trim(path)) > 0),
+    name TEXT CHECK (name IS NULL OR length(trim(name)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0)
+);
+CREATE INDEX idx_workspaces_path ON workspaces(path);
+
+-- Agent registry (tracks agents that have interacted with this ee instance)
+CREATE TABLE agents (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'agt_*' AND length(id) = 30),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    model TEXT CHECK (model IS NULL OR length(trim(model)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    last_seen_at TEXT NOT NULL CHECK (length(trim(last_seen_at)) > 0)
+);
+CREATE INDEX idx_agents_workspace ON agents(workspace_id);
+CREATE INDEX idx_agents_name ON agents(name);
+
+-- Memories (core storage)
+CREATE TABLE memories (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'mem_*' AND length(id) = 30),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    level TEXT NOT NULL CHECK (level IN ('working', 'episodic', 'semantic', 'procedural')),
+    kind TEXT NOT NULL CHECK (length(trim(kind)) > 0),
+    content TEXT NOT NULL CHECK (length(trim(content)) > 0 AND length(content) <= 65536),
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    utility REAL NOT NULL CHECK (utility >= 0.0 AND utility <= 1.0),
+    importance REAL NOT NULL CHECK (importance >= 0.0 AND importance <= 1.0),
+    provenance_uri TEXT CHECK (provenance_uri IS NULL OR length(trim(provenance_uri)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    tombstoned_at TEXT CHECK (tombstoned_at IS NULL OR length(trim(tombstoned_at)) > 0)
+);
+CREATE INDEX idx_memories_workspace ON memories(workspace_id);
+CREATE INDEX idx_memories_level ON memories(level);
+CREATE INDEX idx_memories_kind ON memories(kind);
+CREATE INDEX idx_memories_tombstoned ON memories(tombstoned_at);
+
+-- Memory tags (many-to-many)
+CREATE TABLE memory_tags (
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL CHECK (length(trim(tag)) > 0 AND length(tag) <= 64),
+    PRIMARY KEY (memory_id, tag)
+);
+CREATE INDEX idx_memory_tags_tag ON memory_tags(tag);
+
+-- Audit log
+CREATE TABLE audit_log (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'audit_*' AND length(id) = 32),
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
+    timestamp TEXT NOT NULL CHECK (length(trim(timestamp)) > 0),
+    actor TEXT CHECK (actor IS NULL OR length(trim(actor)) > 0),
+    action TEXT NOT NULL CHECK (length(trim(action)) > 0),
+    target_type TEXT CHECK (target_type IS NULL OR length(trim(target_type)) > 0),
+    target_id TEXT CHECK (target_id IS NULL OR length(trim(target_id)) > 0),
+    details TEXT CHECK (details IS NULL OR length(trim(details)) > 0)
+);
+CREATE INDEX idx_audit_log_workspace ON audit_log(workspace_id);
+CREATE INDEX idx_audit_log_timestamp ON audit_log(timestamp);
+CREATE INDEX idx_audit_log_action ON audit_log(action);
+CREATE INDEX idx_audit_log_target ON audit_log(target_type, target_id);
+"#,
+    "blake3:v001_wsp_audit_2026_04_29",
+);
+
+/// All migrations in version order.
+pub const MIGRATIONS: &[Migration] = &[V001_INIT_SCHEMA];
+
+/// Result of applying migrations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationResult {
+    applied: Vec<u32>,
+    skipped: Vec<u32>,
+}
+
+impl MigrationResult {
+    pub fn applied(&self) -> &[u32] {
+        &self.applied
+    }
+
+    pub fn skipped(&self) -> &[u32] {
+        &self.skipped
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.applied.is_empty() && self.skipped.is_empty()
+    }
+}
+
+impl DbConnection {
+    /// Apply all pending migrations in version order.
+    pub fn migrate(&self) -> Result<MigrationResult> {
+        self.ensure_migration_table()?;
+
+        let mut applied = Vec::new();
+        let mut skipped = Vec::new();
+
+        for migration in MIGRATIONS {
+            if self.has_migration(migration.version)? {
+                skipped.push(migration.version);
+                continue;
+            }
+
+            self.execute_raw_for(DbOperation::Execute, migration.sql)?;
+
+            let now = Utc::now().to_rfc3339();
+            let record =
+                MigrationRecord::new(migration.version, migration.name, migration.checksum, now)?;
+            self.record_migration(&record)?;
+            applied.push(migration.version);
+        }
+
+        Ok(MigrationResult { applied, skipped })
+    }
+
+    /// Check if the database schema is up to date.
+    pub fn needs_migration(&self) -> Result<bool> {
+        if !self.migration_table_exists()? {
+            return Ok(true);
+        }
+
+        for migration in MIGRATIONS {
+            if !self.has_migration(migration.version)? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Return the current schema version (highest applied migration).
+    pub fn schema_version(&self) -> Result<Option<u32>> {
+        if !self.migration_table_exists()? {
+            return Ok(None);
+        }
+
+        let migrations = self.applied_migrations()?;
+        Ok(migrations.last().map(|m| m.version()))
+    }
+}
+
+/// Input for creating a new memory.
+#[derive(Debug, Clone)]
+pub struct CreateMemoryInput {
+    pub workspace_id: String,
+    pub level: String,
+    pub kind: String,
+    pub content: String,
+    pub confidence: f32,
+    pub utility: f32,
+    pub importance: f32,
+    pub provenance_uri: Option<String>,
+    pub tags: Vec<String>,
+}
+
+/// A stored memory row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredMemory {
+    pub id: String,
+    pub workspace_id: String,
+    pub level: String,
+    pub kind: String,
+    pub content: String,
+    pub confidence: f32,
+    pub utility: f32,
+    pub importance: f32,
+    pub provenance_uri: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub tombstoned_at: Option<String>,
+}
+
+impl DbConnection {
+    /// Insert a new memory and its tags.
+    pub fn insert_memory(&self, id: &str, input: &CreateMemoryInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.level.clone()),
+                Value::Text(input.kind.clone()),
+                Value::Text(input.content.clone()),
+                Value::Float(input.confidence),
+                Value::Float(input.utility),
+                Value::Float(input.importance),
+                input.provenance_uri.as_ref().map_or(Value::Null, |uri| Value::Text(uri.clone())),
+                Value::Text(now.clone()),
+                Value::Text(now),
+            ],
+        )?;
+
+        for tag in &input.tags {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO memory_tags (memory_id, tag) VALUES (?1, ?2)",
+                &[Value::Text(id.to_string()), Value::Text(tag.clone())],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Get a memory by ID.
+    pub fn get_memory(&self, id: &str) -> Result<Option<StoredMemory>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, created_at, updated_at, tombstoned_at FROM memories WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first().map(stored_memory_from_row).transpose()
+    }
+
+    /// List memories in a workspace, optionally filtering by level and/or tombstone status.
+    pub fn list_memories(
+        &self,
+        workspace_id: &str,
+        level: Option<&str>,
+        include_tombstoned: bool,
+    ) -> Result<Vec<StoredMemory>> {
+        let mut sql = String::from(
+            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, created_at, updated_at, tombstoned_at FROM memories WHERE workspace_id = ?1",
+        );
+        let mut params: Vec<Value> = vec![Value::Text(workspace_id.to_string())];
+
+        if let Some(lvl) = level {
+            sql.push_str(" AND level = ?2");
+            params.push(Value::Text(lvl.to_string()));
+        }
+
+        if !include_tombstoned {
+            sql.push_str(" AND tombstoned_at IS NULL");
+        }
+
+        sql.push_str(" ORDER BY id ASC");
+
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter().map(stored_memory_from_row).collect()
+    }
+
+    /// Tombstone a memory (soft delete).
+    pub fn tombstone_memory(&self, id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET tombstoned_at = ?1, updated_at = ?1 WHERE id = ?2 AND tombstoned_at IS NULL",
+            &[Value::Text(now), Value::Text(id.to_string())],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Get tags for a memory.
+    pub fn get_memory_tags(&self, memory_id: &str) -> Result<Vec<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT tag FROM memory_tags WHERE memory_id = ?1 ORDER BY tag ASC",
+            &[Value::Text(memory_id.to_string())],
+        )?;
+
+        rows.iter()
+            .map(|row| required_text(row, 0, DbOperation::Query, "tag").map(|s| s.to_string()))
+            .collect()
+    }
+
+    /// Add tags to a memory (idempotent).
+    pub fn add_memory_tags(&self, memory_id: &str, tags: &[String]) -> Result<()> {
+        for tag in tags {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT OR IGNORE INTO memory_tags (memory_id, tag) VALUES (?1, ?2)",
+                &[Value::Text(memory_id.to_string()), Value::Text(tag.clone())],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Remove tags from a memory.
+    pub fn remove_memory_tags(&self, memory_id: &str, tags: &[String]) -> Result<()> {
+        for tag in tags {
+            self.execute_for(
+                DbOperation::Execute,
+                "DELETE FROM memory_tags WHERE memory_id = ?1 AND tag = ?2",
+                &[Value::Text(memory_id.to_string()), Value::Text(tag.clone())],
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn stored_memory_from_row(row: &Row) -> Result<StoredMemory> {
+    Ok(StoredMemory {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        level: required_text(row, 2, DbOperation::Query, "level")?.to_string(),
+        kind: required_text(row, 3, DbOperation::Query, "kind")?.to_string(),
+        content: required_text(row, 4, DbOperation::Query, "content")?.to_string(),
+        confidence: required_f64(row, 5, DbOperation::Query, "confidence")? as f32,
+        utility: required_f64(row, 6, DbOperation::Query, "utility")? as f32,
+        importance: required_f64(row, 7, DbOperation::Query, "importance")? as f32,
+        provenance_uri: optional_text(row, 8)?.map(str::to_string),
+        created_at: required_text(row, 9, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 10, DbOperation::Query, "updated_at")?.to_string(),
+        tombstoned_at: optional_text(row, 11)?.map(str::to_string),
+    })
+}
+
+fn required_f64(row: &Row, index: usize, operation: DbOperation, column: &str) -> Result<f64> {
+    required_value(row, index, operation, column)?
+        .as_f64()
+        .ok_or_else(|| DbError::MalformedRow {
+            operation,
+            message: format!("{column} column at index {index} is not a float"),
+        })
+}
+
+fn optional_text(row: &Row, index: usize) -> Result<Option<&str>> {
+    match row.get(index) {
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => Ok(value.as_str()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::subsystem_name;
+    use std::error::Error as StdError;
+    use std::fmt;
+    use std::path::PathBuf;
+
+    use super::{
+        DatabaseConfig, DatabaseLocation, DatabaseOpenMode, DbConnection, DbError, DbOperation,
+        MIGRATION_TABLE_NAME, MigrationRecord, MigrationTableColumn, subsystem_name,
+    };
+    use sqlmodel_core::Row;
+    use sqlmodel_core::Value;
+
+    type TestResult = std::result::Result<(), TestFailure>;
+
+    #[derive(Debug)]
+    struct TestFailure(String);
+
+    impl TestFailure {
+        fn new(message: impl Into<String>) -> Self {
+            Self(message.into())
+        }
+    }
+
+    impl fmt::Display for TestFailure {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    impl StdError for TestFailure {}
+
+    impl From<DbError> for TestFailure {
+        fn from(error: DbError) -> Self {
+            Self(error.to_string())
+        }
+    }
+
+    fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
+        if condition {
+            Ok(())
+        } else {
+            Err(TestFailure::new(message))
+        }
+    }
+
+    fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> TestResult
+    where
+        T: fmt::Debug + PartialEq,
+    {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(TestFailure::new(format!(
+                "{context}: expected {expected:?}, got {actual:?}"
+            )))
+        }
+    }
+
+    fn first_value<'a>(
+        rows: &'a [Row],
+        index: usize,
+        context: &str,
+    ) -> std::result::Result<&'a Value, TestFailure> {
+        rows.first()
+            .and_then(|row| row.get(index))
+            .ok_or_else(|| TestFailure::new(format!("{context}: missing first-row column {index}")))
+    }
+
+    fn first_migration<'a>(
+        migrations: &'a [MigrationRecord],
+        context: &str,
+    ) -> std::result::Result<&'a MigrationRecord, TestFailure> {
+        migrations
+            .first()
+            .ok_or_else(|| TestFailure::new(format!("{context}: missing first migration")))
+    }
+
+    fn column_signature(columns: &[MigrationTableColumn]) -> Vec<(&str, &str, bool, u32)> {
+        columns
+            .iter()
+            .map(|column| {
+                (
+                    column.name(),
+                    column.sql_type(),
+                    column.not_null(),
+                    column.primary_key_position(),
+                )
+            })
+            .collect()
+    }
 
     #[test]
-    fn subsystem_name_is_stable() {
-        assert_eq!(subsystem_name(), "db");
+    fn subsystem_name_is_stable() -> TestResult {
+        ensure_equal(&subsystem_name(), &"db", "db subsystem name")
+    }
+
+    #[test]
+    fn memory_config_uses_read_write_mode() -> TestResult {
+        let config = DatabaseConfig::memory();
+
+        ensure_equal(
+            config.location(),
+            &DatabaseLocation::Memory,
+            "memory config location",
+        )?;
+        ensure_equal(
+            &config.mode(),
+            &DatabaseOpenMode::ReadWrite,
+            "memory config mode",
+        )
+    }
+
+    #[test]
+    fn schema_only_config_requires_file_location() -> TestResult {
+        let path = PathBuf::from("memory.db");
+        let config = DatabaseConfig::schema_only(&path);
+
+        ensure_equal(
+            config.location(),
+            &DatabaseLocation::File(PathBuf::from("memory.db")),
+            "schema-only config location",
+        )?;
+        ensure_equal(
+            &config.mode(),
+            &DatabaseOpenMode::SchemaOnly,
+            "schema-only config mode",
+        )
+    }
+
+    #[test]
+    fn opens_memory_connection_through_sqlmodel_frankensqlite() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+
+        ensure_equal(&connection.path(), &":memory:", "memory database path")?;
+        ensure_equal(
+            connection.location(),
+            &DatabaseLocation::Memory,
+            "memory connection location",
+        )?;
+        ensure_equal(
+            &connection.mode(),
+            &DatabaseOpenMode::ReadWrite,
+            "memory connection mode",
+        )?;
+        connection.ping()?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn executes_queries_through_sqlmodel_frankensqlite() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+
+        connection
+            .execute_raw("CREATE TABLE memories (id INTEGER PRIMARY KEY, body TEXT NOT NULL)")?;
+        connection.execute_raw(
+            "INSERT INTO memories (id, body) VALUES (1, 'Run cargo fmt --check before release.')",
+        )?;
+        let rows = connection.query(
+            "SELECT body FROM memories WHERE id = ?1",
+            &[Value::BigInt(1)],
+        )?;
+
+        ensure_equal(&rows.len(), &1, "memory query row count")?;
+        ensure_equal(
+            &first_value(&rows, 0, "memory query")?.as_str(),
+            &Some("Run cargo fmt --check before release."),
+            "memory query body",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_schema_only_memory_connections() -> TestResult {
+        let result = DbConnection::open(DatabaseConfig {
+            location: DatabaseLocation::Memory,
+            mode: DatabaseOpenMode::SchemaOnly,
+        });
+
+        ensure(
+            matches!(result, Err(DbError::InvalidMode { .. })),
+            "schema-only memory connection must return InvalidMode",
+        )
+    }
+
+    #[test]
+    fn migration_table_name_is_stable() -> TestResult {
+        ensure_equal(
+            &MIGRATION_TABLE_NAME,
+            &"ee_schema_migrations",
+            "migration table name",
+        )
+    }
+
+    #[test]
+    fn ensure_migration_table_is_idempotent_and_introspectable() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+
+        ensure(
+            !connection.migration_table_exists()?,
+            "fresh database must not report migration table",
+        )?;
+        connection.ensure_migration_table()?;
+        connection.ensure_migration_table()?;
+
+        ensure(
+            connection.migration_table_exists()?,
+            "migration table must exist after ensure",
+        )?;
+        let columns = connection.migration_table_columns()?;
+        let signature = column_signature(&columns);
+        ensure_equal(
+            &signature,
+            &vec![
+                ("version", "INTEGER", false, 1),
+                ("name", "TEXT", true, 0),
+                ("checksum", "TEXT", true, 0),
+                ("applied_at", "TEXT", true, 0),
+            ],
+            "migration table column signature",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn record_migration_persists_deterministic_order() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_migration_table()?;
+        let second = MigrationRecord::new(
+            2,
+            "add_memory_indexes",
+            "sha256:22222222222222222222222222222222",
+            "2026-04-29T20:00:00Z",
+        )?;
+        let first = MigrationRecord::new(
+            1,
+            "init_schema",
+            "sha256:11111111111111111111111111111111",
+            "2026-04-29T19:59:00Z",
+        )?;
+
+        connection.record_migration(&second)?;
+        connection.record_migration(&first)?;
+
+        let applied = connection.applied_migrations()?;
+        ensure_equal(
+            &applied,
+            &vec![first.clone(), second.clone()],
+            "applied migrations must be ordered by version",
+        )?;
+        ensure(connection.has_migration(1)?, "version 1 must be present")?;
+        ensure(connection.has_migration(2)?, "version 2 must be present")?;
+        ensure(!connection.has_migration(3)?, "version 3 must be absent")?;
+        let first_applied = first_migration(&applied, "applied migrations")?;
+        ensure_equal(&first_applied.version(), &1, "first migration version")?;
+        ensure_equal(
+            &first_applied.name(),
+            &"init_schema",
+            "first migration name",
+        )?;
+        ensure_equal(
+            &first_applied.checksum(),
+            &"sha256:11111111111111111111111111111111",
+            "first migration checksum",
+        )?;
+        ensure_equal(
+            &first_applied.applied_at(),
+            &"2026-04-29T19:59:00Z",
+            "first migration timestamp",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn record_migration_rejects_invalid_metadata_without_writing() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_migration_table()?;
+        let invalid = MigrationRecord {
+            version: 0,
+            name: "init_schema".to_string(),
+            checksum: "sha256:11111111111111111111111111111111".to_string(),
+            applied_at: "2026-04-29T19:59:00Z".to_string(),
+        };
+        let result = connection.record_migration(&invalid);
+
+        ensure(
+            matches!(
+                result,
+                Err(DbError::InvalidMigration {
+                    field: super::MigrationField::Version,
+                    ..
+                })
+            ),
+            "zero migration version must be rejected",
+        )?;
+        ensure_equal(
+            &connection.applied_migrations()?.len(),
+            &0,
+            "invalid migration must not be written",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_migration_version_is_rejected_by_storage() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_migration_table()?;
+        let first = MigrationRecord::new(
+            1,
+            "init_schema",
+            "sha256:11111111111111111111111111111111",
+            "2026-04-29T19:59:00Z",
+        )?;
+        let duplicate = MigrationRecord::new(
+            1,
+            "duplicate_schema",
+            "sha256:22222222222222222222222222222222",
+            "2026-04-29T20:00:00Z",
+        )?;
+
+        connection.record_migration(&first)?;
+        let result = connection.record_migration(&duplicate);
+
+        ensure(
+            matches!(
+                result,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::RecordMigration,
+                    ..
+                })
+            ),
+            "duplicate migration version must return a storage error",
+        )?;
+        ensure_equal(
+            &connection.applied_migrations()?.len(),
+            &1,
+            "duplicate insert must preserve one migration row",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn v001_migration_creates_all_core_tables() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        let result = connection.migrate()?;
+
+        ensure_equal(
+            &result.applied().to_vec(),
+            &vec![1u32],
+            "V001 must be applied",
+        )?;
+        ensure_equal(&result.skipped().len(), &0, "no migrations skipped")?;
+
+        let tables = connection.query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+            &[],
+        )?;
+        let table_names: Vec<&str> = tables
+            .iter()
+            .filter_map(|row| row.get(0).and_then(|v| v.as_str()))
+            .collect();
+
+        ensure(
+            table_names.contains(&"workspaces"),
+            "workspaces table must exist",
+        )?;
+        ensure(table_names.contains(&"agents"), "agents table must exist")?;
+        ensure(
+            table_names.contains(&"memories"),
+            "memories table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"memory_tags"),
+            "memory_tags table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"audit_log"),
+            "audit_log table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"ee_schema_migrations"),
+            "migration table must exist",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_is_idempotent() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+
+        let first = connection.migrate()?;
+        ensure_equal(
+            &first.applied().to_vec(),
+            &vec![1u32],
+            "first run applies V001",
+        )?;
+
+        let second = connection.migrate()?;
+        ensure_equal(&second.applied().len(), &0, "second run applies nothing")?;
+        ensure_equal(
+            &second.skipped().to_vec(),
+            &vec![1u32],
+            "second run skips V001",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn needs_migration_detects_fresh_database() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+
+        ensure(
+            connection.needs_migration()?,
+            "fresh database needs migration",
+        )?;
+
+        connection.migrate()?;
+
+        ensure(
+            !connection.needs_migration()?,
+            "migrated database does not need migration",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn schema_version_tracks_applied_migrations() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+
+        ensure_equal(
+            &connection.schema_version()?,
+            &None,
+            "fresh database has no schema version",
+        )?;
+
+        connection.migrate()?;
+
+        ensure_equal(
+            &connection.schema_version()?,
+            &Some(1),
+            "after V001, schema version is 1",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn v001_enforces_id_format_constraints() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let bad_workspace = connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('bad', '/tmp', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        );
+        ensure(
+            bad_workspace.is_err(),
+            "workspace with invalid id format must be rejected",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn v001_enforces_memory_level_enum() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_01234567890123456789012345', '/tmp/test', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+
+        let bad_level = connection.execute_raw(
+            "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, created_at, updated_at) VALUES ('mem_01234567890123456789012345', 'wsp_01234567890123456789012345', 'invalid', 'rule', 'test', 0.5, 0.5, 0.5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        );
+        ensure(
+            bad_level.is_err(),
+            "memory with invalid level must be rejected",
+        )?;
+
+        let good_level = connection.execute_raw(
+            "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, created_at, updated_at) VALUES ('mem_01234567890123456789012345', 'wsp_01234567890123456789012345', 'procedural', 'rule', 'test', 0.5, 0.5, 0.5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        );
+        ensure(
+            good_level.is_ok(),
+            "memory with valid level must be accepted",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn v001_enforces_score_bounds() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_01234567890123456789012345', '/tmp/test', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+
+        let bad_confidence = connection.execute_raw(
+            "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, created_at, updated_at) VALUES ('mem_01234567890123456789012345', 'wsp_01234567890123456789012345', 'semantic', 'fact', 'test', 1.5, 0.5, 0.5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        );
+        ensure(
+            bad_confidence.is_err(),
+            "memory with confidence > 1.0 must be rejected",
+        )?;
+
+        let bad_negative = connection.execute_raw(
+            "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, created_at, updated_at) VALUES ('mem_01234567890123456789012345', 'wsp_01234567890123456789012345', 'semantic', 'fact', 'test', -0.1, 0.5, 0.5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        );
+        ensure(
+            bad_negative.is_err(),
+            "memory with negative confidence must be rejected",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn migration_struct_accessors() -> TestResult {
+        let migration = super::Migration::new(42, "test_migration", "SELECT 1", "blake3:abc123");
+
+        ensure_equal(&migration.version(), &42, "migration version")?;
+        ensure_equal(&migration.name(), &"test_migration", "migration name")?;
+        ensure_equal(&migration.sql(), &"SELECT 1", "migration sql")?;
+        ensure_equal(
+            &migration.checksum(),
+            &"blake3:abc123",
+            "migration checksum",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn migration_result_accessors() -> TestResult {
+        let result = super::MigrationResult {
+            applied: vec![1, 2],
+            skipped: vec![3],
+        };
+
+        ensure_equal(
+            &result.applied().to_vec(),
+            &vec![1u32, 2],
+            "applied migrations",
+        )?;
+        ensure_equal(
+            &result.skipped().to_vec(),
+            &vec![3u32],
+            "skipped migrations",
+        )?;
+        ensure(!result.is_empty(), "result with content is not empty")?;
+
+        let empty = super::MigrationResult {
+            applied: vec![],
+            skipped: vec![],
+        };
+        ensure(empty.is_empty(), "empty result is empty")?;
+
+        Ok(())
+    }
+
+    fn setup_workspace(connection: &DbConnection) -> TestResult {
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_01234567890123456789012345', '/tmp/test', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_and_get_memory() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "procedural".to_string(),
+            kind: "rule".to_string(),
+            content: "Always run cargo fmt before commit.".to_string(),
+            confidence: 0.9,
+            utility: 0.7,
+            importance: 0.8,
+            provenance_uri: Some("file://AGENTS.md#L42".to_string()),
+            tags: vec!["cargo".to_string(), "formatting".to_string()],
+        };
+
+        connection.insert_memory("mem_01234567890123456789012345", &input)?;
+
+        let memory = connection.get_memory("mem_01234567890123456789012345")?;
+        ensure(memory.is_some(), "memory must be found")?;
+
+        let memory = memory.ok_or_else(|| TestFailure::new("memory not found"))?;
+        ensure_equal(&memory.id, &"mem_01234567890123456789012345", "id")?;
+        ensure_equal(
+            &memory.workspace_id,
+            &"wsp_01234567890123456789012345",
+            "workspace_id",
+        )?;
+        ensure_equal(&memory.level, &"procedural", "level")?;
+        ensure_equal(&memory.kind, &"rule", "kind")?;
+        ensure_equal(
+            &memory.content,
+            &"Always run cargo fmt before commit.",
+            "content",
+        )?;
+        ensure(
+            (memory.confidence - 0.9).abs() < 0.001,
+            "confidence must be ~0.9",
+        )?;
+        ensure((memory.utility - 0.7).abs() < 0.001, "utility must be ~0.7")?;
+        ensure(
+            (memory.importance - 0.8).abs() < 0.001,
+            "importance must be ~0.8",
+        )?;
+        ensure_equal(
+            &memory.provenance_uri,
+            &Some("file://AGENTS.md#L42".to_string()),
+            "provenance_uri",
+        )?;
+        ensure(memory.tombstoned_at.is_none(), "not tombstoned")?;
+
+        let tags = connection.get_memory_tags("mem_01234567890123456789012345")?;
+        ensure_equal(
+            &tags,
+            &vec!["cargo".to_string(), "formatting".to_string()],
+            "tags",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn get_nonexistent_memory_returns_none() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let memory = connection.get_memory("mem_nonexistent0000000000000")?;
+        ensure(memory.is_none(), "nonexistent memory must be None")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_memories_filters_by_workspace_and_level() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let rule = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "procedural".to_string(),
+            kind: "rule".to_string(),
+            content: "Rule content".to_string(),
+            confidence: 0.9,
+            utility: 0.7,
+            importance: 0.8,
+            provenance_uri: None,
+            tags: vec![],
+        };
+
+        let fact = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "semantic".to_string(),
+            kind: "fact".to_string(),
+            content: "Fact content".to_string(),
+            confidence: 0.8,
+            utility: 0.6,
+            importance: 0.5,
+            provenance_uri: None,
+            tags: vec![],
+        };
+
+        connection.insert_memory("mem_00000000000000000000000001", &rule)?;
+        connection.insert_memory("mem_00000000000000000000000002", &fact)?;
+
+        let all = connection.list_memories("wsp_01234567890123456789012345", None, false)?;
+        ensure_equal(&all.len(), &2, "list all returns 2")?;
+
+        let procedural =
+            connection.list_memories("wsp_01234567890123456789012345", Some("procedural"), false)?;
+        ensure_equal(&procedural.len(), &1, "filter by procedural returns 1")?;
+        ensure_equal(&procedural[0].kind, &"rule", "filtered memory is rule")?;
+
+        let semantic =
+            connection.list_memories("wsp_01234567890123456789012345", Some("semantic"), false)?;
+        ensure_equal(&semantic.len(), &1, "filter by semantic returns 1")?;
+        ensure_equal(&semantic[0].kind, &"fact", "filtered memory is fact")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn tombstone_memory_soft_deletes() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "episodic".to_string(),
+            kind: "decision".to_string(),
+            content: "Decided to use Rust.".to_string(),
+            confidence: 1.0,
+            utility: 0.5,
+            importance: 0.9,
+            provenance_uri: None,
+            tags: vec![],
+        };
+
+        connection.insert_memory("mem_00000000000000000000000003", &input)?;
+
+        let before = connection.list_memories("wsp_01234567890123456789012345", None, false)?;
+        ensure_equal(&before.len(), &1, "before tombstone: 1 memory")?;
+
+        let affected = connection.tombstone_memory("mem_00000000000000000000000003")?;
+        ensure(affected, "tombstone must affect a row")?;
+
+        let after = connection.list_memories("wsp_01234567890123456789012345", None, false)?;
+        ensure_equal(&after.len(), &0, "after tombstone: 0 non-tombstoned")?;
+
+        let with_tombstoned =
+            connection.list_memories("wsp_01234567890123456789012345", None, true)?;
+        ensure_equal(&with_tombstoned.len(), &1, "include tombstoned: 1 memory")?;
+        ensure(
+            with_tombstoned[0].tombstoned_at.is_some(),
+            "memory has tombstoned_at",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn add_and_remove_tags() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "working".to_string(),
+            kind: "command".to_string(),
+            content: "cargo test".to_string(),
+            confidence: 0.5,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: None,
+            tags: vec!["initial".to_string()],
+        };
+
+        connection.insert_memory("mem_00000000000000000000000004", &input)?;
+
+        connection.add_memory_tags(
+            "mem_00000000000000000000000004",
+            &["added".to_string(), "initial".to_string()],
+        )?;
+
+        let tags = connection.get_memory_tags("mem_00000000000000000000000004")?;
+        ensure_equal(&tags.len(), &2, "2 unique tags after add")?;
+        ensure(tags.contains(&"initial".to_string()), "has initial")?;
+        ensure(tags.contains(&"added".to_string()), "has added")?;
+
+        connection
+            .remove_memory_tags("mem_00000000000000000000000004", &["initial".to_string()])?;
+
+        let tags_after = connection.get_memory_tags("mem_00000000000000000000000004")?;
+        ensure_equal(
+            &tags_after,
+            &vec!["added".to_string()],
+            "only added remains",
+        )?;
+
+        connection.close()?;
+        Ok(())
     }
 }
