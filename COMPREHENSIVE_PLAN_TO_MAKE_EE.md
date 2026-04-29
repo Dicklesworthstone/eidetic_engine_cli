@@ -39,6 +39,7 @@ The CLI should feel like `git`, `ripgrep`, and `cass`: fast, scriptable, determi
 - `rusqlite` is not allowed in `ee`.
 - `/dp/coding_agent_session_search` is the source of raw coding-agent session history.
 - `/dp/frankensearch` is the general search stack.
+- The Frankensearch feature profile used by `ee` must pass the forbidden-dependency audit. Semantic or download features that pull Tokio, Hyper, Tower, Reqwest, or other forbidden runtime/network crates are not allowed in the core binary until upstream exposes a clean local-only profile.
 - `/dp/franken_networkx` is the graph analytics stack.
 - `/dp/cass_memory_system` provides the conceptual model for procedural memory, confidence decay, rule validation, and agent-native curation.
 - The original Eidetic Engine provides conceptual material only. Do not copy its Python/FastAPI/MCP-first architecture.
@@ -89,7 +90,7 @@ The UMS idea remains valuable. The AML idea should mostly be retired because age
 | Memory steward loop | A supervised, cancellable maintenance app using Asupersync |
 | Goal stack | Session/task records and workflow DAGs |
 | Reflection | Agent-native review commands that produce proposed memory deltas |
-| MCP tools | Optional thin adapter over the same CLI/core APIs |
+| MCP tools | Optional thin adapter over the same CLI and `ee-core` service APIs |
 | Semantic memory | Curated facts and rules with evidence, confidence, and decay |
 
 ## Migration From Old Eidetic Artifacts
@@ -425,9 +426,58 @@ If semantic search is unavailable, lexical search still works. If graph metrics 
 
 The system may propose rules, promotions, consolidations, and tombstones. It should not silently rewrite important procedural memory without a recorded audit entry.
 
+### Immutable Memory Revisions
+
+Memory content should be immutable by default. If a memory's meaning, instruction, scope, or rationale changes, `ee` creates a new revision linked to the old one instead of overwriting the old row.
+
+Mutable operational fields are allowed:
+
+- access counters
+- last-accessed timestamps
+- effective utility scores
+- trust review timestamps
+- index freshness metadata
+- curation state
+
+Substantive edits are revisions:
+
+- changed procedural rule text
+- changed rationale
+- changed scope
+- changed validity interval
+- redaction that changes what an agent can see
+- replacement by a newer convention
+
+This preserves auditability, makes `ee why` honest, and prevents the memory system from laundering old advice into new advice without evidence.
+
 ### Evidence Over Vibes
 
 Procedural rules need evidence pointers. A rule with no source session, no feedback, and no validation should remain low-confidence.
+
+### Validate At Boundaries, Enforce Invariants Internally
+
+Untrusted input is validated at CLI, hook, MCP, JSONL, CASS import, config, and file-system boundaries. Inside the application, typed domain constructors, SQL constraints, and repository contracts should carry invariants instead of revalidating ad hoc at every call site.
+
+Practical rules:
+
+- no `unwrap` or `expect` in storage, import, retrieval, or curation paths
+- no defensive `Option` chains that hide impossible states instead of modeling them
+- DB repositories return typed domain values or typed errors
+- import adapters quarantine malformed external data before it reaches core services
+- JSON schemas and golden fixtures define the external contract
+
+### Gates Over Roadmap Gravity
+
+The comprehensive roadmap is useful as a map, not as permission to build every interesting subsystem immediately. M0 through M2 are authoritative for initial implementation. Later graph, daemon, curation, export, and advanced scoring work should start only after the walking skeleton proves that agents actually get better context from the core loop.
+
+Before starting a later milestone, ask:
+
+- did the prior milestone pass its acceptance gate?
+- did an evaluation fixture show that this subsystem improves agent outcomes?
+- can the feature be disabled without weakening the core `ee context` workflow?
+- does the feature preserve the no-Tokio, no-rusqlite, CLI-first posture?
+
+If the answer is no, defer the subsystem and keep the plan as a future option.
 
 ## Architectural Decision Records
 
@@ -5510,7 +5560,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-Add project-specific checks as the crate matures. Do not introduce a Cargo workspace in the first slice unless there is a concrete dependency-boundary reason.
+Add project-specific checks as the crates mature. The workspace boundary is part of the first slice, so dependency audits should run per crate and against the final `ee-cli` binary feature set.
 
 ## Implementation Roadmap
 
@@ -5533,19 +5583,22 @@ This spine is intentionally narrower than the full roadmap. If a feature does no
 
 ### M0: Repository Foundation
 
-Goal: create a clean single-crate Rust package ready for real implementation.
+Goal: create a clean Rust workspace ready for real implementation without losing delivery speed.
 
 Tasks:
 
-- Create single-crate `Cargo.toml` with `main.rs` and `lib.rs`.
+- Create root workspace `Cargo.toml` with shared package metadata and dependency versions.
+- Create `crates/ee-cli` with the `ee` binary.
+- Create initial library crates: `ee-core`, `ee-models`, `ee-runtime`, `ee-output`, and `ee-test-support`.
+- Add `ee-db` immediately if the walking skeleton includes real FrankenSQLite migrations in M0; otherwise create it in M1 before any storage command lands.
 - Add `rust-toolchain.toml` for the selected nightly if needed.
-- Add the initial module skeleton for `cli`, `core`, `models`, `db`, `output`, and `test_support`.
-- Add `#![forbid(unsafe_code)]` to the crate and keep unsafe out of all `ee` modules.
+- Add initial module skeletons inside each crate.
+- Add `#![forbid(unsafe_code)]` to every workspace crate and keep unsafe out of all `ee` modules.
 - Add `clap`, `serde`, `serde_json`, `thiserror` or equivalent error strategy.
 - Add Asupersync dependency without Tokio features.
-- Add a dependency audit gate for forbidden runtime crates in core crates.
-- Add SQLModel Rust and FrankenSQLite path dependencies.
-- Add `core` runtime bootstrap around `RuntimeBuilder`.
+- Add a dependency audit gate for forbidden runtime crates in core crates and final binary features.
+- Add SQLModel Rust and FrankenSQLite path dependencies to `ee-db` when the storage crate is created.
+- Add `ee-runtime` bootstrap around `RuntimeBuilder`.
 - Add initial `Outcome` to CLI exit-code mapping.
 - Add initial budget constants for CLI request classes.
 - Add a small capability-narrowing example in the command boundary.
@@ -5579,7 +5632,7 @@ Tasks:
 - Implement Asupersync runtime bootstrap.
 - Implement SQLModel/FrankenSQLite connection factory.
 - Implement schema migrations table.
-- Add initial tables: workspaces, agents, sessions, memories, memory_tags, audit_log.
+- Add initial tables: workspaces, agents, sessions, memories, memory_tags, idempotency_keys, audit_log.
 - Implement `ee init`.
 - Implement `ee health --json`.
 - Implement `ee status --json`.
@@ -5605,8 +5658,11 @@ Tasks:
 - Implement `ee remember`.
 - Implement `ee memory show`.
 - Implement `ee memory list`.
+- Implement `ee memory history`.
+- Implement `ee memory revise` as immutable revision creation.
 - Implement tags.
 - Implement content hash and dedupe hash.
+- Implement revision group IDs, supersession links, idempotency keys, and legal-hold checks.
 - Implement audit entries for writes.
 - Implement `ee outcome` feedback events.
 - Implement score recomputation for feedback.
@@ -5616,6 +5672,7 @@ Exit criteria:
 
 - manual memory creation works
 - duplicate detection warns
+- revision updates create a new row and preserve the old row
 - feedback changes utility score
 - JSON output is stable
 
@@ -5889,7 +5946,7 @@ Exit criteria:
 
 | ID | Task | Depends On |
 | --- | --- | --- |
-| EE-001 | Create single-crate Rust skeleton with module boundaries | none |
+| EE-001 | Create Cargo workspace skeleton with dependency-boundary crates | none |
 | EE-002 | Add project-wide lint and formatting policy | EE-001 |
 | EE-003 | Add `#![forbid(unsafe_code)]` to the crate and keep `ee` modules unsafe-free | EE-001 |
 | EE-004 | Add Asupersync runtime bootstrap | EE-001 |
@@ -5959,11 +6016,14 @@ Exit criteria:
 | EE-062 | Implement `ee remember` | EE-044, EE-061 |
 | EE-063 | Implement `ee memory show` | EE-044 |
 | EE-064 | Implement `ee memory list` | EE-044 |
-| EE-065 | Implement tag storage | EE-044 |
-| EE-066 | Implement dedupe warnings | EE-044 |
-| EE-067 | Implement audit entries for memory writes | EE-045, EE-062 |
-| EE-068 | Implement provenance URI parser and renderer | EE-060 |
-| EE-069 | Preserve provenance through memory JSON output | EE-063, EE-068 |
+| EE-065 | Implement `ee memory history` | EE-044 |
+| EE-066 | Implement immutable `ee memory revise` | EE-065 |
+| EE-067 | Implement revision group IDs, supersession links, idempotency keys, and legal-hold checks | EE-044 |
+| EE-068 | Implement tag storage | EE-044 |
+| EE-069 | Implement dedupe warnings | EE-044 |
+| EE-070 | Implement audit entries for memory writes | EE-045, EE-062 |
+| EE-071 | Implement provenance URI parser and renderer | EE-060 |
+| EE-072 | Preserve provenance through memory JSON output | EE-063, EE-071 |
 
 ### Feedback And Rules
 
@@ -6623,6 +6683,129 @@ Decision:
 - Spikes must not introduce forbidden dependencies.
 - Spike artifacts should include tests or fixtures whenever possible.
 
+## M0 Dependency Readiness Gates
+
+Before implementing user-visible features, prove that the local franken-stack can support the walking skeleton. These gates are not optional polish. They are the reality check that prevents the plan from assuming APIs, feature names, and runtime behavior that do not exist.
+
+### Gate 1: Forbidden-Dependency-Clean Feature Tree
+
+Run dependency audits against the exact planned feature profile:
+
+```bash
+cargo tree --edges features
+cargo tree --edges normal
+```
+
+Pass criteria:
+
+- no `tokio`, `tokio-util`, `hyper`, `axum`, `tower`, `reqwest`, `rusqlite`, `sqlx`, `diesel`, `sea-orm`, `async-std`, `smol`, or `petgraph`
+- Frankensearch uses a local clean profile, initially `default-features = false` with `hash`, `lexical`, and `storage`
+- any optional feature that pulls forbidden crates is documented as blocked, not hidden behind an `ee` feature
+
+### Gate 2: SQLModel Plus FrankenSQLite Contract Test
+
+Create the first storage contract test before feature code:
+
+```text
+tests/contracts/sqlmodel_frankensqlite.rs
+```
+
+Pass criteria:
+
+- open a temporary FrankenSQLite database through `sqlmodel-frankensqlite`
+- run migrations
+- insert, fetch, update, and transactionally roll back a memory row
+- verify score `CHECK` constraints reject out-of-range values
+- verify cancellation or panic during transaction setup, query, commit, or rollback leaves the database coherent
+- verify the test uses no `rusqlite` or SQLx path
+
+### Gate 3: Asupersync Contract Fixtures
+
+Create deterministic LabRuntime fixtures:
+
+```text
+tests/contracts/asupersync_budget.rs
+tests/contracts/asupersync_cancellation.rs
+tests/contracts/asupersync_quiescence.rs
+```
+
+Pass criteria:
+
+- budget exhaustion maps to the documented CLI outcome
+- `Outcome::Cancelled` survives service layers and maps to a documented cancellation exit
+- `Outcome::Panicked` is never treated as retryable domain failure
+- a cancelled `remember`, `search`, or `context` path has no orphan tasks and no partial durable writes
+- region close implies quiescence
+
+### Gate 4: Frankensearch Local Search Contract
+
+Create a minimal search contract test:
+
+```text
+tests/contracts/frankensearch_local.rs
+```
+
+Pass criteria:
+
+- build a deterministic hash-embedder index with fixed fixture documents
+- run a lexical/hash query and receive stable ordering
+- persist and reopen the index
+- emit index manifest metadata with document schema, index generation, and Frankensearch version
+- audit the feature tree for forbidden dependencies under the selected profile
+
+### Gate 5: FrankenNetworkX Compile And Feature Gate
+
+Run an explicit compile check against the graph dependency:
+
+```bash
+cargo check -p fnx-runtime --features asupersync-integration
+```
+
+Pass criteria:
+
+- `fnx-runtime` resolves locally and compiles with `asupersync-integration`
+- graph crates do not pull `petgraph` or forbidden async/network crates into `ee`
+- if any required fnx crate fails, the graph module is feature-gated off and graph-enhanced retrieval is removed from v1 acceptance gates
+
+### Gate 6: CASS Robot Contract Fixture
+
+Create CASS compatibility fixtures before `ee import cass`:
+
+```text
+tests/fixtures/cass/v1/
+tests/contracts/cass_robot.rs
+```
+
+Pass criteria:
+
+- `cass capabilities --json` declares the commands `ee` needs
+- `cass search --robot`, `cass view --json`, and `cass expand --json` parse against vendored schemas
+- a tiny fixture CASS database or exported session set imports idempotently
+- unknown CASS schema versions fail with `external_adapter_schema_mismatch`
+- subprocess calls have explicit budgets and are cancelled and reaped on timeout
+
+### Gate 7: Walking-Skeleton Golden Contracts
+
+Create golden output before declaring M2 complete:
+
+```text
+tests/golden/skeleton/status.json
+tests/golden/skeleton/health.robot.json
+tests/golden/skeleton/capabilities.json
+tests/golden/skeleton/remember_response.json
+tests/golden/skeleton/search_minimal.robot.json
+tests/golden/skeleton/context_pack.json
+tests/golden/skeleton/context_pack.md
+tests/golden/skeleton/why.json
+```
+
+Pass criteria:
+
+- every robot/machine response has `api_version`, `schema`, `command`, `success`, `data`, and `error`
+- stdout contains only data in robot/machine mode
+- golden fixtures validate against exported JSON schemas
+- schema changes require version and golden updates in the same change
+
 ## First Implementation Slice
 
 The first useful slice should be intentionally narrow:
@@ -6632,6 +6815,8 @@ ee init
 ee health --robot
 ee capabilities --json
 ee --help-json
+ee quickstart --robot
+ee bootstrap --workspace . --from-docs --dry-run --json
 ee status --json
 ee remember ...
 ee memory show <id> --json
@@ -6678,6 +6863,7 @@ Required commands:
 ee init --workspace .
 ee health --workspace . --robot
 ee capabilities --json
+ee bootstrap --workspace . --from-docs --dry-run --json
 ee remember --workspace . --level procedural --kind rule "Run cargo fmt --check before release." --json
 ee search "format before release" --workspace . --robot --fields minimal
 ee context "prepare release" --workspace . --format markdown
@@ -6691,6 +6877,8 @@ Acceptance criteria:
 - all commands have stable JSON mode
 - robot mode uses the shared envelope and keeps stdout data-only
 - capability and help discovery work without reading docs
+- `ee quickstart --robot` exposes the five-command golden path without a TUI
+- `ee bootstrap --from-docs --dry-run --json` can propose initial memories from README, AGENTS.md, CLAUDE.md, or project docs without mutating state
 - memory is stored in FrankenSQLite through `db`
 - search result comes from Frankensearch or a documented degraded lexical path
 - context pack includes provenance
@@ -6727,6 +6915,22 @@ Exclude:
 
 The point is to make the core loop undeniable before adding more sources and intelligence.
 
+### Scope Guardrails
+
+Do not let the comprehensive backlog become the product. Until the walking skeleton has been used on real tasks for at least two weeks, the only non-negotiable product metric is:
+
+```text
+Does `ee context "<task>" --workspace .` return compact, provenance-backed advice that helps the agent avoid repeated mistakes?
+```
+
+If a proposed task does not directly improve that metric, a readiness gate, or a trust/safety failure in that path, defer it. In particular:
+
+- graph analytics stay diagnostic until evaluation proves ranking value
+- confidence decay and trauma guard start as observable fields and fixtures, then become ranking-active after feedback data exists
+- daemon mode waits until lock contention is visible in `contention_events`
+- CASS import starts compatibility-first through robot/JSON contracts before relying on direct DB internals
+- semantic model support waits for a forbidden-dependency-clean local profile
+
 ### Walking Skeleton DDL Sketch
 
 The first migration should be small enough to inspect manually.
@@ -6746,6 +6950,12 @@ CREATE TABLE workspaces (
 CREATE TABLE memories (
     id INTEGER PRIMARY KEY,
     public_id TEXT NOT NULL UNIQUE,
+    revision_group_id TEXT NOT NULL,
+    revision_number INTEGER NOT NULL DEFAULT 1 CHECK (revision_number >= 1),
+    supersedes_memory_id INTEGER,
+    superseded_by_memory_id INTEGER,
+    legal_hold INTEGER NOT NULL DEFAULT 0 CHECK (legal_hold IN (0, 1)),
+    idempotency_key TEXT,
     workspace_id INTEGER,
     level TEXT NOT NULL,
     kind TEXT NOT NULL,
@@ -6755,15 +6965,19 @@ CREATE TABLE memories (
     summary TEXT,
     content_hash TEXT NOT NULL,
     dedupe_hash TEXT,
-    importance REAL NOT NULL DEFAULT 0.5,
-    confidence REAL NOT NULL DEFAULT 1.0,
-    utility_score REAL NOT NULL DEFAULT 0.5,
+    importance REAL NOT NULL DEFAULT 0.5 CHECK (importance >= 0.0 AND importance <= 1.0),
+    confidence REAL NOT NULL DEFAULT 1.0 CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    utility_score REAL NOT NULL DEFAULT 0.5 CHECK (utility_score >= 0.0 AND utility_score <= 1.0),
     trust_class TEXT NOT NULL DEFAULT 'agent_observed',
+    trust_score REAL NOT NULL DEFAULT 0.5 CHECK (trust_score >= 0.0 AND trust_score <= 1.0),
     redaction_class TEXT NOT NULL DEFAULT 'private',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     metadata_json TEXT,
-    FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+    FOREIGN KEY (supersedes_memory_id) REFERENCES memories(id),
+    FOREIGN KEY (superseded_by_memory_id) REFERENCES memories(id),
+    UNIQUE (revision_group_id, revision_number)
 );
 
 CREATE INDEX idx_memories_workspace_level_kind
@@ -6771,6 +6985,13 @@ CREATE INDEX idx_memories_workspace_level_kind
 
 CREATE INDEX idx_memories_content_hash
     ON memories(content_hash);
+
+CREATE INDEX idx_memories_supersedes
+    ON memories(supersedes_memory_id);
+
+CREATE UNIQUE INDEX idx_memories_idempotency_key
+    ON memories(idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE memory_tags (
     memory_id INTEGER NOT NULL,
@@ -6794,6 +7015,16 @@ CREATE TABLE pack_records (
     FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
 );
 
+CREATE TABLE idempotency_keys (
+    key TEXT PRIMARY KEY,
+    operation TEXT NOT NULL,
+    target_type TEXT,
+    target_id TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT,
+    metadata_json TEXT
+);
+
 CREATE TABLE audit_log (
     id INTEGER PRIMARY KEY,
     public_id TEXT NOT NULL UNIQUE,
@@ -6812,63 +7043,64 @@ If FTS5 is ready, add a virtual table and triggers. If not, add the temporary in
 ## Suggested Initial File Tree
 
 ```text
-src/main.rs
-src/lib.rs
+crates/ee-cli/src/main.rs
+crates/ee-cli/src/args.rs
+crates/ee-cli/src/commands.rs
+crates/ee-cli/src/init.rs
+crates/ee-cli/src/remember.rs
+crates/ee-cli/src/search.rs
+crates/ee-cli/src/context.rs
+crates/ee-cli/src/health.rs
+crates/ee-cli/src/capabilities.rs
+crates/ee-cli/src/robot_docs.rs
+crates/ee-cli/src/schema.rs
+crates/ee-cli/src/introspect.rs
 
-src/cli/mod.rs
-src/cli/args.rs
-src/cli/commands.rs
-src/cli/init.rs
-src/cli/remember.rs
-src/cli/search.rs
-src/cli/context.rs
-src/cli/health.rs
-src/cli/capabilities.rs
-src/cli/robot_docs.rs
-src/cli/schema.rs
-src/cli/introspect.rs
+crates/ee-core/src/lib.rs
+crates/ee-core/src/services.rs
+crates/ee-core/src/errors.rs
+crates/ee-core/src/error_codes.rs
 
-src/core/mod.rs
-src/core/services.rs
-src/core/runtime.rs
-src/core/errors.rs
-src/core/error_codes.rs
+crates/ee-runtime/src/lib.rs
+crates/ee-runtime/src/budget.rs
+crates/ee-runtime/src/capabilities.rs
+crates/ee-runtime/src/outcome.rs
 
-src/models/mod.rs
-src/models/ids.rs
-src/models/memory.rs
-src/models/context.rs
-src/models/config.rs
-src/models/response.rs
+crates/ee-models/src/lib.rs
+crates/ee-models/src/ids.rs
+crates/ee-models/src/memory.rs
+crates/ee-models/src/context.rs
+crates/ee-models/src/config.rs
+crates/ee-models/src/response.rs
 
-src/db/mod.rs
-src/db/connection.rs
-src/db/migrations.rs
-src/db/queries.rs
-src/db/repositories/memory.rs
-src/db/repositories/workspace.rs
+crates/ee-db/src/lib.rs
+crates/ee-db/src/connection.rs
+crates/ee-db/src/migrations.rs
+crates/ee-db/src/queries.rs
+crates/ee-db/src/repositories/memory.rs
+crates/ee-db/src/repositories/workspace.rs
 
-src/search/mod.rs
-src/search/documents.rs
-src/search/index.rs
+crates/ee-search/src/lib.rs
+crates/ee-search/src/documents.rs
+crates/ee-search/src/index.rs
 
-src/pack/mod.rs
-src/pack/mmr.rs
-src/pack/render.rs
+crates/ee-pack/src/lib.rs
+crates/ee-pack/src/mmr.rs
+crates/ee-pack/src/render.rs
 
-src/output/mod.rs
-src/output/json.rs
-src/output/toon.rs
-src/output/envelope.rs
-src/output/fields.rs
-src/output/markdown.rs
+crates/ee-output/src/lib.rs
+crates/ee-output/src/json.rs
+crates/ee-output/src/toon.rs
+crates/ee-output/src/envelope.rs
+crates/ee-output/src/fields.rs
+crates/ee-output/src/markdown.rs
 
-src/test_support/mod.rs
+crates/ee-test-support/src/lib.rs
 tests/golden/robot/
 tests/golden/robot_docs/
 ```
 
-Only split these modules into separate crates when the dependency graph justifies it. The first useful binary should not wait for a workspace refactor.
+This tree is intentionally smaller than the full crate list. Add `ee-cass`, `ee-graph`, `ee-curate`, and `ee-policy` when their first real command or contract test lands, not as empty placeholders.
 
 ## Documentation To Write Alongside Code
 
@@ -6930,6 +7162,18 @@ When `ee` reports degraded state, prefer:
 ```
 
 This keeps the harness in charge while letting `ee` provide durable memory.
+
+When context is wrong, stale, or unsafe, agents should use the trust-repair loop:
+
+```text
+1. Inspect:      ee why <memory-or-result-id> --workspace . --robot --fields full
+2. Mark outcome: ee outcome --memory <id> --harmful|--contradicted --note "..." --json
+3. Retire/repair: ee curate retire <id> --reason "..." --json
+4. Replace:      ee remember --workspace . --level procedural --kind rule "..." --json
+5. Refresh:      ee index status --json; ee doctor --fix-plan --json if degraded
+```
+
+The correction flow matters as much as the happy path. A memory system that cannot recover from bad advice will lose agent trust quickly.
 
 ## Concrete End-To-End Agent Trace
 
@@ -7070,17 +7314,20 @@ Version targets:
 ### `0.1.0`
 
 - init/status
+- bootstrap from project docs
 - manual memory
 - basic search
 - basic context pack
 - JSON output contracts
+- dependency readiness gates and walking-skeleton golden tests
 
 ### `0.2.0`
 
 - CASS import
 - evidence spans
 - better context pack sections
-- feedback scoring
+- pack-to-outcome linking
+- basic feedback scoring
 
 ### `0.3.0`
 
@@ -7088,12 +7335,13 @@ Version targets:
 - curation candidates
 - maturity and decay
 - anti-patterns
+- curation TTL and trust-repair loop
 
 ### `0.4.0`
 
-- graph analytics
-- graph-enhanced retrieval
-- autolink candidates
+- graph analytics only if fnx readiness and eval fixtures justify it
+- graph-enhanced retrieval behind a feature gate
+- autolink candidates as proposals, not silent truth
 
 ### `0.5.0`
 
