@@ -1,8 +1,166 @@
+use std::collections::HashMap;
+
 use crate::models::CapabilityStatus;
 
+pub use frankensearch::core::types::IndexableDocument;
+pub use frankensearch::{
+    Embedder, EmbedderStack, HashEmbedder, IndexBuilder, TwoTierConfig, TwoTierIndex,
+    TwoTierSearcher,
+};
+
 pub const SUBSYSTEM: &str = "search";
+pub const CANONICAL_DOCUMENT_SCHEMA: &str = "ee.search.document.v1";
+
+/// Source type for canonical search documents.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DocumentSource {
+    Memory,
+    Session,
+    Rule,
+    Import,
+}
+
+impl DocumentSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Session => "session",
+            Self::Rule => "rule",
+            Self::Import => "import",
+        }
+    }
+}
+
+/// Canonical search document for ee.
+///
+/// This is the unified document format that all indexable content
+/// (memories, sessions, rules, imports) must produce before indexing.
+/// It converts directly to frankensearch's [`IndexableDocument`].
+#[derive(Clone, Debug)]
+pub struct CanonicalSearchDocument {
+    id: String,
+    content: String,
+    title: Option<String>,
+    source: DocumentSource,
+    workspace: Option<String>,
+    level: Option<String>,
+    kind: Option<String>,
+    created_at: Option<String>,
+    tags: Vec<String>,
+}
+
+impl CanonicalSearchDocument {
+    /// Create a new canonical document with required fields.
+    #[must_use]
+    pub fn new(id: impl Into<String>, content: impl Into<String>, source: DocumentSource) -> Self {
+        Self {
+            id: id.into(),
+            content: content.into(),
+            title: None,
+            source,
+            workspace: None,
+            level: None,
+            kind: None,
+            created_at: None,
+            tags: Vec::new(),
+        }
+    }
+
+    /// Set the document title (receives BM25 boost in lexical search).
+    #[must_use]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set the workspace path.
+    #[must_use]
+    pub fn with_workspace(mut self, workspace: impl Into<String>) -> Self {
+        self.workspace = Some(workspace.into());
+        self
+    }
+
+    /// Set the memory level (working, episodic, semantic, procedural).
+    #[must_use]
+    pub fn with_level(mut self, level: impl Into<String>) -> Self {
+        self.level = Some(level.into());
+        self
+    }
+
+    /// Set the memory kind (rule, fact, decision, etc.).
+    #[must_use]
+    pub fn with_kind(mut self, kind: impl Into<String>) -> Self {
+        self.kind = Some(kind.into());
+        self
+    }
+
+    /// Set the creation timestamp (RFC 3339).
+    #[must_use]
+    pub fn with_created_at(mut self, timestamp: impl Into<String>) -> Self {
+        self.created_at = Some(timestamp.into());
+        self
+    }
+
+    /// Add tags for filtering.
+    #[must_use]
+    pub fn with_tags(mut self, tags: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.tags = tags.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Return the document ID.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Return the searchable content.
+    #[must_use]
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    /// Return the document source type.
+    #[must_use]
+    pub const fn source(&self) -> DocumentSource {
+        self.source
+    }
+
+    /// Convert to frankensearch's [`IndexableDocument`].
+    #[must_use]
+    pub fn into_indexable(self) -> IndexableDocument {
+        let mut metadata = HashMap::new();
+        metadata.insert("source".to_owned(), self.source.as_str().to_owned());
+        metadata.insert("schema".to_owned(), CANONICAL_DOCUMENT_SCHEMA.to_owned());
+
+        if let Some(ref workspace) = self.workspace {
+            metadata.insert("workspace".to_owned(), workspace.clone());
+        }
+        if let Some(ref level) = self.level {
+            metadata.insert("level".to_owned(), level.clone());
+        }
+        if let Some(ref kind) = self.kind {
+            metadata.insert("kind".to_owned(), kind.clone());
+        }
+        if let Some(ref created_at) = self.created_at {
+            metadata.insert("created_at".to_owned(), created_at.clone());
+        }
+        if !self.tags.is_empty() {
+            metadata.insert("tags".to_owned(), self.tags.join(","));
+        }
+
+        let mut doc = IndexableDocument::new(self.id, self.content);
+        if let Some(title) = self.title {
+            doc = doc.with_title(title);
+        }
+        doc.metadata = metadata;
+        doc
+    }
+}
 pub const MODULE_CONTRACT: &str = "ee.search.module.v1";
 pub const REQUIRED_RETRIEVAL_ENGINE: &str = "frankensearch::TwoTierSearcher";
+pub const FRANKENSEARCH_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 static SEARCH_CAPABILITIES: [SearchCapability; 7] = [
     SearchCapability::ready(
@@ -10,15 +168,15 @@ static SEARCH_CAPABILITIES: [SearchCapability; 7] = [
         SearchSurface::Status,
         "Search module is present.",
     ),
-    SearchCapability::pending(
+    SearchCapability::ready(
         SearchCapabilityName::FrankensearchDependency,
         SearchSurface::IndexAndQuery,
-        "Add the frankensearch dependency profile before indexing or querying.",
+        "Frankensearch dependency is wired.",
     ),
-    SearchCapability::pending(
+    SearchCapability::ready(
         SearchCapabilityName::CanonicalDocument,
         SearchSurface::Indexing,
-        "Define canonical search documents before rebuilding indexes.",
+        "Canonical search document is defined.",
     ),
     SearchCapability::pending(
         SearchCapabilityName::IndexJobs,
@@ -216,8 +374,8 @@ mod tests {
     use crate::models::CapabilityStatus;
 
     use super::{
-        REQUIRED_RETRIEVAL_ENGINE, SearchCapabilityName, SearchSurface, module_readiness,
-        subsystem_name,
+        CanonicalSearchDocument, DocumentSource, Embedder, HashEmbedder, REQUIRED_RETRIEVAL_ENGINE,
+        SearchCapabilityName, SearchSurface, module_readiness, subsystem_name,
     };
 
     #[test]
@@ -250,7 +408,7 @@ mod tests {
                 .map(|capability| capability.status()),
             Some(CapabilityStatus::Ready)
         );
-        assert_eq!(readiness.missing_capabilities().count(), 6);
+        assert_eq!(readiness.missing_capabilities().count(), 4);
     }
 
     #[test]
@@ -303,17 +461,86 @@ mod tests {
 
         assert_eq!(
             missing.first().map(|capability| capability.name()),
-            Some(SearchCapabilityName::FrankensearchDependency)
+            Some(SearchCapabilityName::IndexJobs)
         );
         assert_eq!(
             missing.first().map(|capability| capability.surface()),
-            Some(SearchSurface::IndexAndQuery)
+            Some(SearchSurface::Indexing)
         );
         assert!(
             missing
                 .first()
-                .map(|capability| capability.repair().contains("frankensearch"))
+                .map(|capability| capability.repair().contains("index"))
                 .unwrap_or(false)
         );
+    }
+
+    #[test]
+    fn frankensearch_hash_embedder_produces_deterministic_vectors() {
+        let embedder = HashEmbedder::default_256();
+
+        let text = "Rust ownership and borrowing";
+        let embedding_a = embedder.embed_sync(text);
+        let embedding_b = embedder.embed_sync(text);
+
+        assert_eq!(embedding_a.len(), 256);
+        assert_eq!(
+            embedding_a, embedding_b,
+            "hash embedder must be deterministic"
+        );
+    }
+
+    #[test]
+    fn frankensearch_hash_embedder_dimension_matches_config() {
+        let embedder_256 = HashEmbedder::default_256();
+        let embedder_384 = HashEmbedder::default_384();
+
+        let text = "test document";
+        assert_eq!(embedder_256.embed_sync(text).len(), 256);
+        assert_eq!(embedder_384.embed_sync(text).len(), 384);
+        assert_eq!(embedder_256.dimension(), 256);
+        assert_eq!(embedder_384.dimension(), 384);
+    }
+
+    #[test]
+    fn canonical_document_converts_to_indexable() {
+        let doc = CanonicalSearchDocument::new("mem-001", "Always run tests before commit", DocumentSource::Memory)
+            .with_title("pre-commit rule")
+            .with_workspace("/home/user/project")
+            .with_level("procedural")
+            .with_kind("rule")
+            .with_created_at("2026-04-29T12:00:00Z")
+            .with_tags(["ci", "testing"]);
+
+        let indexable = doc.into_indexable();
+
+        assert_eq!(indexable.id, "mem-001");
+        assert_eq!(indexable.content, "Always run tests before commit");
+        assert_eq!(indexable.title.as_deref(), Some("pre-commit rule"));
+        assert_eq!(indexable.metadata.get("source"), Some(&"memory".to_owned()));
+        assert_eq!(indexable.metadata.get("workspace"), Some(&"/home/user/project".to_owned()));
+        assert_eq!(indexable.metadata.get("level"), Some(&"procedural".to_owned()));
+        assert_eq!(indexable.metadata.get("kind"), Some(&"rule".to_owned()));
+        assert_eq!(indexable.metadata.get("tags"), Some(&"ci,testing".to_owned()));
+    }
+
+    #[test]
+    fn canonical_document_source_types_are_stable() {
+        assert_eq!(DocumentSource::Memory.as_str(), "memory");
+        assert_eq!(DocumentSource::Session.as_str(), "session");
+        assert_eq!(DocumentSource::Rule.as_str(), "rule");
+        assert_eq!(DocumentSource::Import.as_str(), "import");
+    }
+
+    #[test]
+    fn canonical_document_minimal_conversion() {
+        let doc = CanonicalSearchDocument::new("doc-1", "content only", DocumentSource::Session);
+        let indexable = doc.into_indexable();
+
+        assert_eq!(indexable.id, "doc-1");
+        assert_eq!(indexable.content, "content only");
+        assert!(indexable.title.is_none());
+        assert_eq!(indexable.metadata.get("source"), Some(&"session".to_owned()));
+        assert!(indexable.metadata.get("workspace").is_none());
     }
 }
