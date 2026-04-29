@@ -1,24 +1,137 @@
-use crate::models::{CapabilityStatus, RESPONSE_SCHEMA_V1};
+use crate::core;
+use crate::models::{CapabilityStatus, DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
+
+pub struct JsonBuilder {
+    buffer: String,
+    first: bool,
+}
+
+impl JsonBuilder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            buffer: String::from("{"),
+            first: true,
+        }
+    }
+
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        let mut buffer = String::with_capacity(capacity);
+        buffer.push('{');
+        Self {
+            buffer,
+            first: true,
+        }
+    }
+
+    pub fn field_str(&mut self, key: &str, value: &str) -> &mut Self {
+        self.separator();
+        self.buffer.push('"');
+        self.buffer.push_str(key);
+        self.buffer.push_str("\":\"");
+        self.buffer.push_str(&escape_json_string(value));
+        self.buffer.push('"');
+        self
+    }
+
+    pub fn field_raw(&mut self, key: &str, raw_json: &str) -> &mut Self {
+        self.separator();
+        self.buffer.push('"');
+        self.buffer.push_str(key);
+        self.buffer.push_str("\":");
+        self.buffer.push_str(raw_json);
+        self
+    }
+
+    pub fn field_bool(&mut self, key: &str, value: bool) -> &mut Self {
+        self.field_raw(key, if value { "true" } else { "false" })
+    }
+
+    pub fn field_u32(&mut self, key: &str, value: u32) -> &mut Self {
+        self.separator();
+        self.buffer.push('"');
+        self.buffer.push_str(key);
+        self.buffer.push_str("\":");
+        self.buffer.push_str(&value.to_string());
+        self
+    }
+
+    pub fn field_object<F>(&mut self, key: &str, build: F) -> &mut Self
+    where
+        F: FnOnce(&mut JsonBuilder),
+    {
+        let mut nested = JsonBuilder::new();
+        build(&mut nested);
+        let nested_json = nested.finish();
+        self.field_raw(key, &nested_json)
+    }
+
+    pub fn field_array_of_objects<T, F>(&mut self, key: &str, items: &[T], build: F) -> &mut Self
+    where
+        F: Fn(&mut JsonBuilder, &T),
+    {
+        self.separator();
+        self.buffer.push('"');
+        self.buffer.push_str(key);
+        self.buffer.push_str("\":[");
+        for (i, item) in items.iter().enumerate() {
+            if i > 0 {
+                self.buffer.push(',');
+            }
+            let mut nested = JsonBuilder::new();
+            build(&mut nested, item);
+            self.buffer.push_str(&nested.finish());
+        }
+        self.buffer.push(']');
+        self
+    }
+
+    fn separator(&mut self) {
+        if self.first {
+            self.first = false;
+        } else {
+            self.buffer.push(',');
+        }
+    }
+
+    #[must_use]
+    pub fn finish(mut self) -> String {
+        self.buffer.push('}');
+        self.buffer
+    }
+}
+
+impl Default for JsonBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[must_use]
 pub fn status_response_json() -> String {
     let storage = CapabilityStatus::Unimplemented.as_str();
     let search = CapabilityStatus::Unimplemented.as_str();
-    let runtime = CapabilityStatus::Pending.as_str();
+    let runtime = CapabilityStatus::Ready.as_str();
+    let runtime_status = core::runtime_status();
 
     format!(
-        "{{\"schema\":\"{schema}\",\"success\":true,\"data\":{{\"command\":\"status\",\"version\":\"{version}\",\"capabilities\":{{\"runtime\":\"{runtime}\",\"storage\":\"{storage}\",\"search\":\"{search}\"}},\"degraded\":[{{\"code\":\"storage_not_implemented\",\"severity\":\"medium\",\"message\":\"Storage subsystem is not wired yet.\",\"repair\":\"Implement EE-040 through EE-044.\"}},{{\"code\":\"search_not_implemented\",\"severity\":\"medium\",\"message\":\"Search subsystem is not wired yet.\",\"repair\":\"Implement EE-120 and dependent search beads.\"}}]}}}}",
+        "{{\"schema\":\"{schema}\",\"success\":true,\"data\":{{\"command\":\"status\",\"version\":\"{version}\",\"capabilities\":{{\"runtime\":\"{runtime}\",\"storage\":\"{storage}\",\"search\":\"{search}\"}},\"runtime\":{{\"engine\":\"{engine}\",\"profile\":\"{profile}\",\"workerThreads\":{worker_threads},\"asyncBoundary\":\"{async_boundary}\"}},\"degraded\":[{{\"code\":\"storage_not_implemented\",\"severity\":\"medium\",\"message\":\"Storage subsystem is not wired yet.\",\"repair\":\"Implement EE-040 through EE-044.\"}},{{\"code\":\"search_not_implemented\",\"severity\":\"medium\",\"message\":\"Search subsystem is not wired yet.\",\"repair\":\"Implement EE-120 and dependent search beads.\"}}]}}}}",
         schema = RESPONSE_SCHEMA_V1,
         version = env!("CARGO_PKG_VERSION"),
         runtime = runtime,
         storage = storage,
-        search = search
+        search = search,
+        engine = runtime_status.engine,
+        profile = runtime_status.profile.as_str(),
+        worker_threads = runtime_status.worker_threads(),
+        async_boundary = runtime_status.async_boundary
     )
 }
 
 #[must_use]
 pub fn human_status() -> &'static str {
-    "ee status\n\nstorage: unimplemented\nsearch: unimplemented\nruntime: pending\n\nNext:\n  ee status --json\n"
+    "ee status\n\nstorage: unimplemented\nsearch: unimplemented\nruntime: ready (asupersync current_thread)\n\nNext:\n  ee status --json\n"
 }
 
 #[must_use]
@@ -26,30 +139,206 @@ pub fn help_text() -> &'static str {
     "ee - durable memory substrate for coding agents\n\nUsage:\n  ee status [--json]\n  ee --version\n  ee --help\n"
 }
 
+#[must_use]
+pub fn error_response_json(error: &DomainError) -> String {
+    let code = error.code();
+    let message = escape_json_string(error.message());
+    match error.repair() {
+        Some(repair) => {
+            let repair = escape_json_string(repair);
+            format!(
+                "{{\"schema\":\"{schema}\",\"error\":{{\"code\":\"{code}\",\"message\":\"{message}\",\"repair\":\"{repair}\"}}}}",
+                schema = ERROR_SCHEMA_V1
+            )
+        }
+        None => {
+            format!(
+                "{{\"schema\":\"{schema}\",\"error\":{{\"code\":\"{code}\",\"message\":\"{message}\"}}}}",
+                schema = ERROR_SCHEMA_V1
+            )
+        }
+    }
+}
+
+fn escape_json_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => result.push_str("\\\""),
+            '\\' => result.push_str("\\\\"),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            c if c.is_control() => {
+                result.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => result.push(c),
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{help_text, human_status, status_response_json};
+    use super::{
+        JsonBuilder, error_response_json, escape_json_string, help_text, human_status,
+        status_response_json,
+    };
+    use crate::models::DomainError;
+
+    type TestResult = Result<(), String>;
+
+    fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
+        if condition {
+            Ok(())
+        } else {
+            Err(message.into())
+        }
+    }
+
+    fn ensure_contains(haystack: &str, needle: &str, context: &str) -> TestResult {
+        ensure(
+            haystack.contains(needle),
+            format!("{context}: expected output to contain {needle:?}, got {haystack:?}"),
+        )
+    }
+
+    fn ensure_starts_with(haystack: &str, prefix: &str, context: &str) -> TestResult {
+        ensure(
+            haystack.starts_with(prefix),
+            format!("{context}: expected output to start with {prefix:?}, got {haystack:?}"),
+        )
+    }
 
     #[test]
-    fn status_json_has_stable_schema_and_degradation_codes() {
+    fn status_json_has_stable_schema_and_degradation_codes() -> TestResult {
         let json = status_response_json();
-        assert!(json.starts_with("{\"schema\":\"ee.response.v1\""));
-        assert!(json.contains("\"success\":true"));
-        assert!(json.contains("\"storage_not_implemented\""));
-        assert!(json.contains("\"search_not_implemented\""));
+        ensure_starts_with(&json, "{\"schema\":\"ee.response.v1\"", "status schema")?;
+        ensure_contains(&json, "\"success\":true", "status success flag")?;
+        ensure_contains(&json, "\"runtime\":\"ready\"", "status runtime capability")?;
+        ensure_contains(&json, "\"engine\":\"asupersync\"", "status runtime engine")?;
+        ensure_contains(
+            &json,
+            "\"profile\":\"current_thread\"",
+            "status runtime profile",
+        )?;
+        ensure_contains(
+            &json,
+            "\"storage_not_implemented\"",
+            "status storage degradation",
+        )?;
+        ensure_contains(
+            &json,
+            "\"search_not_implemented\"",
+            "status search degradation",
+        )
     }
 
     #[test]
-    fn human_status_is_not_json() {
+    fn human_status_is_not_json() -> TestResult {
         let status = human_status();
-        assert!(status.starts_with("ee status"));
-        assert!(!status.starts_with('{'));
+        ensure_starts_with(status, "ee status", "human status heading")?;
+        ensure(!status.starts_with('{'), "human status must not be JSON")
     }
 
     #[test]
-    fn help_mentions_supported_skeleton_commands() {
+    fn help_mentions_supported_skeleton_commands() -> TestResult {
         let help = help_text();
-        assert!(help.contains("ee status [--json]"));
-        assert!(help.contains("ee --version"));
+        ensure_contains(help, "ee status [--json]", "help status command")?;
+        ensure_contains(help, "ee --version", "help version command")
+    }
+
+    #[test]
+    fn error_json_has_stable_schema_and_code() -> TestResult {
+        let error = DomainError::Usage {
+            message: "unrecognized subcommand 'foo'".to_string(),
+            repair: Some("ee --help".to_string()),
+        };
+        let json = error_response_json(&error);
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "error schema")?;
+        ensure_contains(&json, "\"code\":\"usage\"", "error code")?;
+        ensure_contains(
+            &json,
+            "\"message\":\"unrecognized subcommand 'foo'\"",
+            "error message",
+        )?;
+        ensure_contains(&json, "\"repair\":\"ee --help\"", "error repair")
+    }
+
+    #[test]
+    fn error_json_without_repair_omits_field() -> TestResult {
+        let error = DomainError::Storage {
+            message: "Database locked".to_string(),
+            repair: None,
+        };
+        let json = error_response_json(&error);
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "error schema")?;
+        ensure_contains(&json, "\"code\":\"storage\"", "error code")?;
+        ensure(!json.contains("repair"), "repair field should be absent")
+    }
+
+    #[test]
+    fn escape_json_handles_special_chars() -> TestResult {
+        let escaped = escape_json_string("line1\nline2\ttab\"quote\\backslash");
+        ensure_contains(&escaped, "\\n", "newline escape")?;
+        ensure_contains(&escaped, "\\t", "tab escape")?;
+        ensure_contains(&escaped, "\\\"", "quote escape")?;
+        ensure_contains(&escaped, "\\\\", "backslash escape")
+    }
+
+    #[test]
+    fn json_builder_constructs_simple_object() -> TestResult {
+        let json = JsonBuilder::new()
+            .field_str("name", "test")
+            .field_bool("active", true)
+            .field_u32("count", 42)
+            .finish();
+        ensure_contains(&json, "\"name\":\"test\"", "string field")?;
+        ensure_contains(&json, "\"active\":true", "bool field")?;
+        ensure_contains(&json, "\"count\":42", "u32 field")?;
+        ensure(
+            json.starts_with('{') && json.ends_with('}'),
+            "valid JSON object",
+        )
+    }
+
+    #[test]
+    fn json_builder_escapes_string_values() -> TestResult {
+        let json = JsonBuilder::new()
+            .field_str("message", "line1\nline2")
+            .finish();
+        ensure_contains(&json, "\"message\":\"line1\\nline2\"", "escaped newline")
+    }
+
+    #[test]
+    fn json_builder_supports_nested_objects() -> TestResult {
+        let json = JsonBuilder::new()
+            .field_str("schema", "test.v1")
+            .field_object("data", |obj| {
+                obj.field_str("inner", "value");
+            })
+            .finish();
+        ensure_contains(&json, "\"schema\":\"test.v1\"", "outer field")?;
+        ensure_contains(&json, "\"data\":{\"inner\":\"value\"}", "nested object")
+    }
+
+    #[test]
+    fn json_builder_supports_array_of_objects() -> TestResult {
+        let items = vec![("a", 1u32), ("b", 2u32)];
+        let json = JsonBuilder::new()
+            .field_array_of_objects("items", &items, |obj, (name, val)| {
+                obj.field_str("name", name);
+                obj.field_u32("value", *val);
+            })
+            .finish();
+        ensure_contains(&json, "\"items\":[", "array start")?;
+        ensure_contains(&json, "{\"name\":\"a\",\"value\":1}", "first item")?;
+        ensure_contains(&json, "{\"name\":\"b\",\"value\":2}", "second item")
+    }
+
+    #[test]
+    fn json_builder_raw_field_allows_prebuilt_json() -> TestResult {
+        let json = JsonBuilder::new().field_raw("config", "[1,2,3]").finish();
+        ensure_contains(&json, "\"config\":[1,2,3]", "raw json array")
     }
 }
