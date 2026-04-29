@@ -1,11 +1,15 @@
 use std::process::ExitCode;
 
 pub mod id;
+pub mod memory;
 
 pub use id::{
-    AuditId, AuditKind, BackupId, BackupKind, CandidateId, CandidateKind, EvidenceId, EvidenceKind,
-    Id, IdKind, MemoryId, MemoryKind, PackId, PackKind, ParseIdError, RuleId, RuleKind, SessionId,
-    SessionKind, WorkspaceId, WorkspaceKind,
+    AuditId, BackupId, CandidateId, EvidenceId, Id, IdKind, MemoryId, PackId, ParseIdError, RuleId,
+    SessionId, WorkspaceId,
+};
+pub use memory::{
+    Confidence, Importance, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES, MemoryContent,
+    MemoryKind, MemoryLevel, MemoryValidationError, Tag, UnitScore, Utility,
 };
 
 pub const RESPONSE_SCHEMA_V1: &str = "ee.response.v1";
