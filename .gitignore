@@ -1,0 +1,22 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# ee project-local state
+.ee/
+
+# Agent swarm / coordination state
+.ntm/
+.beads/
+
+# Modes-of-reasoning analysis artifacts
+MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md
+MODES_ANALYSIS_PROGRESS.md
+MODE_OUTPUT_*.md
+
+# Editor / OS junk
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
