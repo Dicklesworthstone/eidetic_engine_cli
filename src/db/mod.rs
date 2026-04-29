@@ -1,5 +1,5 @@
 use chrono::Utc;
-use sqlmodel_core::{Row, Value};
+use sqlmodel_core::{IsolationLevel, Row, Value};
 use sqlmodel_frankensqlite::FrankenConnection;
 use std::error::Error;
 use std::fmt;
@@ -139,6 +139,51 @@ impl DbConnection {
         self.inner
             .close_sync()
             .map_err(|source| DbError::sqlmodel(DbOperation::Close, source))
+    }
+
+    /// Begin a transaction with the specified isolation level.
+    /// For SQLite, uses DEFERRED (default), IMMEDIATE, or EXCLUSIVE.
+    pub fn begin_transaction(&self, isolation: IsolationLevel) -> Result<()> {
+        let sql = match isolation {
+            IsolationLevel::ReadUncommitted | IsolationLevel::ReadCommitted => "BEGIN DEFERRED",
+            IsolationLevel::RepeatableRead => "BEGIN IMMEDIATE",
+            IsolationLevel::Serializable => "BEGIN EXCLUSIVE",
+        };
+        self.execute_raw_for(DbOperation::BeginTransaction, sql)
+    }
+
+    /// Begin a transaction with the default isolation level (DEFERRED).
+    pub fn begin(&self) -> Result<()> {
+        self.execute_raw_for(DbOperation::BeginTransaction, "BEGIN DEFERRED")
+    }
+
+    /// Commit the current transaction.
+    pub fn commit(&self) -> Result<()> {
+        self.execute_raw_for(DbOperation::CommitTransaction, "COMMIT")
+    }
+
+    /// Rollback the current transaction.
+    pub fn rollback(&self) -> Result<()> {
+        self.execute_raw_for(DbOperation::RollbackTransaction, "ROLLBACK")
+    }
+
+    /// Execute a closure within a transaction.
+    /// Commits on success, rolls back on error.
+    pub fn with_transaction<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce() -> Result<T>,
+    {
+        self.begin()?;
+        match f() {
+            Ok(result) => {
+                self.commit()?;
+                Ok(result)
+            }
+            Err(err) => {
+                let _ = self.rollback();
+                Err(err)
+            }
+        }
     }
 
     pub fn execute_raw(&self, sql: &str) -> Result<()> {
@@ -450,6 +495,9 @@ pub enum DbOperation {
     Query,
     Execute,
     Close,
+    BeginTransaction,
+    CommitTransaction,
+    RollbackTransaction,
     EnsureMigrationTable,
     InspectMigrationTable,
     RecordMigration,
@@ -466,6 +514,9 @@ impl fmt::Display for DbOperation {
             Self::Query => f.write_str("query"),
             Self::Execute => f.write_str("execute"),
             Self::Close => f.write_str("close"),
+            Self::BeginTransaction => f.write_str("transaction begin"),
+            Self::CommitTransaction => f.write_str("transaction commit"),
+            Self::RollbackTransaction => f.write_str("transaction rollback"),
             Self::EnsureMigrationTable => f.write_str("migration table ensure"),
             Self::InspectMigrationTable => f.write_str("migration table inspect"),
             Self::RecordMigration => f.write_str("migration record insert"),
@@ -2353,16 +2404,12 @@ mod tests {
         connection.insert_audit("audit_aaaaaaaaaaaaaaaaaaaaaaaaaa", &entry1)?;
         connection.insert_audit("audit_bbbbbbbbbbbbbbbbbbbbbbbbbb", &entry2)?;
 
-        let entries = connection.list_audit_entries(
-            Some("wsp_01234567890123456789012345"),
-            None,
-        )?;
+        let entries =
+            connection.list_audit_entries(Some("wsp_01234567890123456789012345"), None)?;
         ensure_equal(&entries.len(), &2, "two entries for workspace")?;
 
-        let limited = connection.list_audit_entries(
-            Some("wsp_01234567890123456789012345"),
-            Some(1),
-        )?;
+        let limited =
+            connection.list_audit_entries(Some("wsp_01234567890123456789012345"), Some(1))?;
         ensure_equal(&limited.len(), &1, "limited to 1")?;
 
         let all = connection.list_audit_entries(None, None)?;
@@ -2407,19 +2454,17 @@ mod tests {
         connection.insert_audit("audit_target00000000000000000002", &entry2)?;
         connection.insert_audit("audit_target00000000000000000003", &entry3)?;
 
-        let memory_entries = connection.list_audit_by_target(
-            "memory",
-            "mem_target00000000000000000001",
-            None,
-        )?;
+        let memory_entries =
+            connection.list_audit_by_target("memory", "mem_target00000000000000000001", None)?;
         ensure_equal(&memory_entries.len(), &2, "two entries for memory target")?;
 
-        let workspace_entries = connection.list_audit_by_target(
-            "workspace",
-            "wsp_01234567890123456789012345",
-            None,
+        let workspace_entries =
+            connection.list_audit_by_target("workspace", "wsp_01234567890123456789012345", None)?;
+        ensure_equal(
+            &workspace_entries.len(),
+            &1,
+            "one entry for workspace target",
         )?;
-        ensure_equal(&workspace_entries.len(), &1, "one entry for workspace target")?;
 
         connection.close()?;
         Ok(())
@@ -2487,6 +2532,120 @@ mod tests {
         let audit = audit.ok_or_else(|| TestFailure::new("audit not found"))?;
         ensure(audit.workspace_id.is_none(), "workspace_id is None")?;
         ensure_equal(&audit.action.as_str(), &"global.init", "action")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_commit_persists_changes() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        connection.begin()?;
+
+        let input = super::CreateWorkspaceInput {
+            path: "/tmp/txn-commit".to_string(),
+            name: Some("Transaction Test".to_string()),
+        };
+        connection.insert_workspace("wsp_txncommit00000000000000000", &input)?;
+
+        connection.commit()?;
+
+        let workspace = connection.get_workspace("wsp_txncommit00000000000000000")?;
+        ensure(workspace.is_some(), "committed workspace must persist")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_rollback_discards_changes() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        connection.begin()?;
+
+        let input = super::CreateWorkspaceInput {
+            path: "/tmp/txn-rollback".to_string(),
+            name: Some("Rollback Test".to_string()),
+        };
+        connection.insert_workspace("wsp_txnrollback000000000000000", &input)?;
+
+        connection.rollback()?;
+
+        let workspace = connection.get_workspace("wsp_txnrollback000000000000000")?;
+        ensure(workspace.is_none(), "rolled back workspace must not exist")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn with_transaction_commits_on_success() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let result = connection.with_transaction(|| {
+            let input = super::CreateWorkspaceInput {
+                path: "/tmp/with-txn-ok".to_string(),
+                name: Some("With Transaction OK".to_string()),
+            };
+            connection.insert_workspace("wsp_withtxnok00000000000000000", &input)?;
+            Ok("success")
+        })?;
+
+        ensure_equal(&result, &"success", "transaction returned success")?;
+
+        let workspace = connection.get_workspace("wsp_withtxnok00000000000000000")?;
+        ensure(workspace.is_some(), "workspace persisted after success")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn with_transaction_rollbacks_on_error() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let input = super::CreateWorkspaceInput {
+            path: "/tmp/with-txn-err".to_string(),
+            name: Some("With Transaction Err".to_string()),
+        };
+        connection.insert_workspace("wsp_withtxnerr0000000000000000", &input)?;
+
+        let result: std::result::Result<(), _> = connection.with_transaction(|| {
+            let duplicate = super::CreateWorkspaceInput {
+                path: "/tmp/with-txn-err".to_string(),
+                name: Some("Duplicate".to_string()),
+            };
+            connection.insert_workspace("wsp_withtxnerr0000000000000001", &duplicate)?;
+            Ok(())
+        });
+
+        ensure(result.is_err(), "transaction failed on duplicate path")?;
+
+        let workspace = connection.get_workspace("wsp_withtxnerr0000000000000001")?;
+        ensure(workspace.is_none(), "failed insert was rolled back")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn begin_transaction_with_isolation_levels() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        connection.begin_transaction(sqlmodel_core::IsolationLevel::ReadCommitted)?;
+        connection.rollback()?;
+
+        connection.begin_transaction(sqlmodel_core::IsolationLevel::RepeatableRead)?;
+        connection.rollback()?;
+
+        connection.begin_transaction(sqlmodel_core::IsolationLevel::Serializable)?;
+        connection.rollback()?;
 
         connection.close()?;
         Ok(())
