@@ -1,9 +1,51 @@
 use crate::models::CapabilityStatus;
 
+#[cfg(feature = "graph")]
+pub use fnx_algorithms::{
+    BetweennessCentralityResult, PageRankResult, betweenness_centrality, pagerank,
+};
+#[cfg(feature = "graph")]
+pub use fnx_classes::{Graph, digraph::DiGraph};
+
 pub const SUBSYSTEM: &str = "graph";
 pub const MODULE_CONTRACT: &str = "ee.graph.module.v1";
 pub const REQUIRED_GRAPH_ENGINE: &str = "franken_networkx";
 
+#[cfg(feature = "graph")]
+static GRAPH_CAPABILITIES: [GraphCapability; 6] = [
+    GraphCapability::ready(
+        GraphCapabilityName::ModuleBoundary,
+        GraphSurface::Status,
+        "Graph module is present.",
+    ),
+    GraphCapability::ready(
+        GraphCapabilityName::FrankenNetworkXDependency,
+        GraphSurface::Projection,
+        "FrankenNetworkX dependency is wired.",
+    ),
+    GraphCapability::pending(
+        GraphCapabilityName::MemoryLinkTable,
+        GraphSurface::Storage,
+        "Add memory_links table for edge storage.",
+    ),
+    GraphCapability::pending(
+        GraphCapabilityName::ProjectionBuilder,
+        GraphSurface::Projection,
+        "Wire graph projection from memory links.",
+    ),
+    GraphCapability::pending(
+        GraphCapabilityName::CentralityMetrics,
+        GraphSurface::Analytics,
+        "Compute centrality metrics (PageRank, betweenness).",
+    ),
+    GraphCapability::pending(
+        GraphCapabilityName::JsonGraph,
+        GraphSurface::Query,
+        "Expose graph metrics through stable JSON response envelope.",
+    ),
+];
+
+#[cfg(not(feature = "graph"))]
 static GRAPH_CAPABILITIES: [GraphCapability; 6] = [
     GraphCapability::ready(
         GraphCapabilityName::ModuleBoundary,
@@ -235,6 +277,9 @@ mod tests {
                 .map(|capability| capability.status()),
             Some(CapabilityStatus::Ready)
         );
+        #[cfg(feature = "graph")]
+        assert_eq!(readiness.missing_capabilities().count(), 4);
+        #[cfg(not(feature = "graph"))]
         assert_eq!(readiness.missing_capabilities().count(), 5);
     }
 
@@ -269,10 +314,18 @@ mod tests {
 
         assert_eq!(
             surfaces,
-            vec!["status", "projection", "storage", "projection", "analytics", "query",]
+            vec![
+                "status",
+                "projection",
+                "storage",
+                "projection",
+                "analytics",
+                "query",
+            ]
         );
     }
 
+    #[cfg(not(feature = "graph"))]
     #[test]
     fn missing_capabilities_keep_repair_metadata() {
         let missing: Vec<_> = module_readiness().missing_capabilities().collect();
@@ -289,6 +342,27 @@ mod tests {
             missing
                 .first()
                 .map(|capability| capability.repair().contains("franken_networkx"))
+                .unwrap_or(false)
+        );
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn missing_capabilities_keep_repair_metadata() {
+        let missing: Vec<_> = module_readiness().missing_capabilities().collect();
+
+        assert_eq!(
+            missing.first().map(|capability| capability.name()),
+            Some(GraphCapabilityName::MemoryLinkTable)
+        );
+        assert_eq!(
+            missing.first().map(|capability| capability.surface()),
+            Some(GraphSurface::Storage)
+        );
+        assert!(
+            missing
+                .first()
+                .map(|capability| capability.repair().contains("memory_links"))
                 .unwrap_or(false)
         );
     }

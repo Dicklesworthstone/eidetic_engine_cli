@@ -23,6 +23,7 @@ json = []
 embed-fast = ["frankensearch/model2vec"]
 embed-quality = ["frankensearch/fastembed"]
 lexical-bm25 = ["frankensearch/lexical"]
+graph = ["dep:fnx-runtime", "dep:fnx-classes", "dep:fnx-algorithms"]
 mcp = []
 serve = []
 
@@ -31,6 +32,9 @@ asupersync = { version = "0.3.1", default-features = false, features = ["tracing
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = { version = "4.6.1" }
+fnx-algorithms = { version = "0.1.0", path = "/data/projects/franken_networkx/crates/fnx-algorithms", optional = true }
+fnx-classes = { version = "0.1.0", path = "/data/projects/franken_networkx/crates/fnx-classes", optional = true }
+fnx-runtime = { version = "0.1.0", path = "/data/projects/franken_networkx/crates/fnx-runtime", default-features = false, features = ["asupersync-integration"], optional = true }
 frankensearch = { version = "0.3.0", path = "/data/projects/frankensearch/frankensearch", default-features = false, features = ["hash", "storage"] }
 sqlmodel-core = { version = "0.2.2", path = "/data/projects/sqlmodel_rust/crates/sqlmodel-core" }
 sqlmodel-frankensqlite = { version = "0.2.2", path = "/data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite" }
@@ -67,6 +71,13 @@ frankensearch-fusion = { path = "/data/projects/frankensearch/crates/frankensear
 frankensearch-rerank = { path = "/data/projects/frankensearch/crates/frankensearch-rerank" }
 frankensearch-storage = { path = "/data/projects/frankensearch/crates/frankensearch-storage" }
 frankensearch-durability = { path = "/data/projects/frankensearch/crates/frankensearch-durability" }
+fnx-runtime = { path = "/data/projects/franken_networkx/crates/fnx-runtime" }
+fnx-classes = { path = "/data/projects/franken_networkx/crates/fnx-classes" }
+fnx-algorithms = { path = "/data/projects/franken_networkx/crates/fnx-algorithms" }
+fnx-views = { path = "/data/projects/franken_networkx/crates/fnx-views" }
+fnx-dispatch = { path = "/data/projects/franken_networkx/crates/fnx-dispatch" }
+fnx-convert = { path = "/data/projects/franken_networkx/crates/fnx-convert" }
+fnx-generators = { path = "/data/projects/franken_networkx/crates/fnx-generators" }
 
 [lints.rust]
 unsafe_code = "forbid"
