@@ -288,11 +288,11 @@ mod tests {
 
     #[test]
     fn json_builder_constructs_simple_object() -> TestResult {
-        let json = JsonBuilder::new()
-            .field_str("name", "test")
-            .field_bool("active", true)
-            .field_u32("count", 42)
-            .finish();
+        let mut b = JsonBuilder::new();
+        b.field_str("name", "test");
+        b.field_bool("active", true);
+        b.field_u32("count", 42);
+        let json = b.finish();
         ensure_contains(&json, "\"name\":\"test\"", "string field")?;
         ensure_contains(&json, "\"active\":true", "bool field")?;
         ensure_contains(&json, "\"count\":42", "u32 field")?;
@@ -304,20 +304,20 @@ mod tests {
 
     #[test]
     fn json_builder_escapes_string_values() -> TestResult {
-        let json = JsonBuilder::new()
-            .field_str("message", "line1\nline2")
-            .finish();
+        let mut b = JsonBuilder::new();
+        b.field_str("message", "line1\nline2");
+        let json = b.finish();
         ensure_contains(&json, "\"message\":\"line1\\nline2\"", "escaped newline")
     }
 
     #[test]
     fn json_builder_supports_nested_objects() -> TestResult {
-        let json = JsonBuilder::new()
-            .field_str("schema", "test.v1")
-            .field_object("data", |obj| {
-                obj.field_str("inner", "value");
-            })
-            .finish();
+        let mut b = JsonBuilder::new();
+        b.field_str("schema", "test.v1");
+        b.field_object("data", |obj| {
+            obj.field_str("inner", "value");
+        });
+        let json = b.finish();
         ensure_contains(&json, "\"schema\":\"test.v1\"", "outer field")?;
         ensure_contains(&json, "\"data\":{\"inner\":\"value\"}", "nested object")
     }
@@ -325,12 +325,12 @@ mod tests {
     #[test]
     fn json_builder_supports_array_of_objects() -> TestResult {
         let items = vec![("a", 1u32), ("b", 2u32)];
-        let json = JsonBuilder::new()
-            .field_array_of_objects("items", &items, |obj, (name, val)| {
-                obj.field_str("name", name);
-                obj.field_u32("value", *val);
-            })
-            .finish();
+        let mut b = JsonBuilder::new();
+        b.field_array_of_objects("items", &items, |obj, (name, val)| {
+            obj.field_str("name", name);
+            obj.field_u32("value", *val);
+        });
+        let json = b.finish();
         ensure_contains(&json, "\"items\":[", "array start")?;
         ensure_contains(&json, "{\"name\":\"a\",\"value\":1}", "first item")?;
         ensure_contains(&json, "{\"name\":\"b\",\"value\":2}", "second item")
@@ -338,7 +338,9 @@ mod tests {
 
     #[test]
     fn json_builder_raw_field_allows_prebuilt_json() -> TestResult {
-        let json = JsonBuilder::new().field_raw("config", "[1,2,3]").finish();
+        let mut b = JsonBuilder::new();
+        b.field_raw("config", "[1,2,3]");
+        let json = b.finish();
         ensure_contains(&json, "\"config\":[1,2,3]", "raw json array")
     }
 }

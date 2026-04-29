@@ -1558,16 +1558,16 @@ mod tests {
         ensure(memory.is_some(), "memory must be found")?;
 
         let memory = memory.ok_or_else(|| TestFailure::new("memory not found"))?;
-        ensure_equal(&memory.id, &"mem_01234567890123456789012345", "id")?;
+        ensure_equal(&memory.id.as_str(), &"mem_01234567890123456789012345", "id")?;
         ensure_equal(
-            &memory.workspace_id,
+            &memory.workspace_id.as_str(),
             &"wsp_01234567890123456789012345",
             "workspace_id",
         )?;
-        ensure_equal(&memory.level, &"procedural", "level")?;
-        ensure_equal(&memory.kind, &"rule", "kind")?;
+        ensure_equal(&memory.level.as_str(), &"procedural", "level")?;
+        ensure_equal(&memory.kind.as_str(), &"rule", "kind")?;
         ensure_equal(
-            &memory.content,
+            &memory.content.as_str(),
             &"Always run cargo fmt before commit.",
             "content",
         )?;
@@ -1646,15 +1646,26 @@ mod tests {
         let all = connection.list_memories("wsp_01234567890123456789012345", None, false)?;
         ensure_equal(&all.len(), &2, "list all returns 2")?;
 
-        let procedural =
-            connection.list_memories("wsp_01234567890123456789012345", Some("procedural"), false)?;
+        let procedural = connection.list_memories(
+            "wsp_01234567890123456789012345",
+            Some("procedural"),
+            false,
+        )?;
         ensure_equal(&procedural.len(), &1, "filter by procedural returns 1")?;
-        ensure_equal(&procedural[0].kind, &"rule", "filtered memory is rule")?;
+        ensure_equal(
+            &procedural[0].kind.as_str(),
+            &"rule",
+            "filtered memory is rule",
+        )?;
 
         let semantic =
             connection.list_memories("wsp_01234567890123456789012345", Some("semantic"), false)?;
         ensure_equal(&semantic.len(), &1, "filter by semantic returns 1")?;
-        ensure_equal(&semantic[0].kind, &"fact", "filtered memory is fact")?;
+        ensure_equal(
+            &semantic[0].kind.as_str(),
+            &"fact",
+            "filtered memory is fact",
+        )?;
 
         connection.close()?;
         Ok(())
