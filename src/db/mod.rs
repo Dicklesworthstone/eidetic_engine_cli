@@ -3199,32 +3199,32 @@ mod tests {
             documents_total: 50,
         };
 
-        connection.insert_search_index_job("sidx_lifecycle000000000000000", &input)?;
+        connection.insert_search_index_job("sidx_lifecycle00000000000000000", &input)?;
 
-        let started = connection.start_search_index_job("sidx_lifecycle000000000000000")?;
+        let started = connection.start_search_index_job("sidx_lifecycle00000000000000000")?;
         ensure(started, "job started successfully")?;
 
         let job = connection
-            .get_search_index_job("sidx_lifecycle000000000000000")?
+            .get_search_index_job("sidx_lifecycle00000000000000000")?
             .ok_or_else(|| TestFailure::new("job not found"))?;
         ensure_equal(&job.status.as_str(), &"running", "status is running")?;
         ensure(job.started_at.is_some(), "started_at is set")?;
 
         let progress_updated =
-            connection.update_search_index_job_progress("sidx_lifecycle000000000000000", 25)?;
+            connection.update_search_index_job_progress("sidx_lifecycle00000000000000000", 25)?;
         ensure(progress_updated, "progress updated")?;
 
         let job = connection
-            .get_search_index_job("sidx_lifecycle000000000000000")?
+            .get_search_index_job("sidx_lifecycle00000000000000000")?
             .ok_or_else(|| TestFailure::new("job not found"))?;
         ensure_equal(&job.documents_indexed, &25, "25 documents indexed")?;
 
         let completed =
-            connection.complete_search_index_job("sidx_lifecycle000000000000000", 50)?;
+            connection.complete_search_index_job("sidx_lifecycle00000000000000000", 50)?;
         ensure(completed, "job completed successfully")?;
 
         let job = connection
-            .get_search_index_job("sidx_lifecycle000000000000000")?
+            .get_search_index_job("sidx_lifecycle00000000000000000")?
             .ok_or_else(|| TestFailure::new("job not found"))?;
         ensure_equal(&job.status.as_str(), &"completed", "status is completed")?;
         ensure_equal(&job.documents_indexed, &50, "all 50 documents indexed")?;
@@ -3248,15 +3248,15 @@ mod tests {
             documents_total: 1,
         };
 
-        connection.insert_search_index_job("sidx_failure000000000000000000", &input)?;
-        connection.start_search_index_job("sidx_failure000000000000000000")?;
+        connection.insert_search_index_job("sidx_failure0000000000000000000", &input)?;
+        connection.start_search_index_job("sidx_failure0000000000000000000")?;
 
-        let failed =
-            connection.fail_search_index_job("sidx_failure000000000000000000", "Document not found")?;
+        let failed = connection
+            .fail_search_index_job("sidx_failure0000000000000000000", "Document not found")?;
         ensure(failed, "job failed successfully")?;
 
         let job = connection
-            .get_search_index_job("sidx_failure000000000000000000")?
+            .get_search_index_job("sidx_failure0000000000000000000")?
             .ok_or_else(|| TestFailure::new("job not found"))?;
         ensure_equal(&job.status.as_str(), &"failed", "status is failed")?;
         ensure_equal(
@@ -3284,13 +3284,13 @@ mod tests {
             documents_total: 200,
         };
 
-        connection.insert_search_index_job("sidx_cancel0000000000000000000", &input)?;
+        connection.insert_search_index_job("sidx_cancel00000000000000000000", &input)?;
 
-        let cancelled = connection.cancel_search_index_job("sidx_cancel0000000000000000000")?;
+        let cancelled = connection.cancel_search_index_job("sidx_cancel00000000000000000000")?;
         ensure(cancelled, "job cancelled successfully")?;
 
         let job = connection
-            .get_search_index_job("sidx_cancel0000000000000000000")?
+            .get_search_index_job("sidx_cancel00000000000000000000")?
             .ok_or_else(|| TestFailure::new("job not found"))?;
         ensure_equal(&job.status.as_str(), &"cancelled", "status is cancelled")?;
         ensure(job.completed_at.is_some(), "completed_at is set on cancel")?;
@@ -3313,9 +3313,9 @@ mod tests {
             documents_total: 10,
         };
 
-        connection.insert_search_index_job("sidx_list_pending0000000000000", &pending)?;
-        connection.insert_search_index_job("sidx_list_running0000000000000", &pending)?;
-        connection.start_search_index_job("sidx_list_running0000000000000")?;
+        connection.insert_search_index_job("sidx_list_pending00000000000000", &pending)?;
+        connection.insert_search_index_job("sidx_list_running00000000000000", &pending)?;
+        connection.start_search_index_job("sidx_list_running00000000000000")?;
 
         let all = connection.list_search_index_jobs("wsp_01234567890123456789012345", None)?;
         ensure_equal(&all.len(), &2, "two jobs total")?;
@@ -3350,8 +3350,8 @@ mod tests {
             documents_total: 10,
         };
 
-        connection.insert_search_index_job("sidx_latest0000000000000000001", &input)?;
-        connection.insert_search_index_job("sidx_latest0000000000000000002", &input)?;
+        connection.insert_search_index_job("sidx_latest00000000000000000001", &input)?;
+        connection.insert_search_index_job("sidx_latest00000000000000000002", &input)?;
 
         let latest = connection.latest_search_index_job("wsp_01234567890123456789012345")?;
         ensure(latest.is_some(), "latest job found")?;
@@ -3359,7 +3359,7 @@ mod tests {
         let latest = latest.ok_or_else(|| TestFailure::new("latest not found"))?;
         ensure_equal(
             &latest.id.as_str(),
-            &"sidx_latest0000000000000000002",
+            &"sidx_latest00000000000000000002",
             "latest is most recent",
         )?;
 
@@ -3381,10 +3381,10 @@ mod tests {
             documents_total: 10,
         };
 
-        connection.insert_search_index_job("sidx_accessors0000000000000000", &input)?;
+        connection.insert_search_index_job("sidx_accessors00000000000000000", &input)?;
 
         let job = connection
-            .get_search_index_job("sidx_accessors0000000000000000")?
+            .get_search_index_job("sidx_accessors00000000000000000")?
             .ok_or_else(|| TestFailure::new("job not found"))?;
 
         ensure_equal(
@@ -3407,7 +3407,7 @@ mod tests {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
 
-        let job = connection.get_search_index_job("sidx_nonexistent00000000000000")?;
+        let job = connection.get_search_index_job("sidx_nonexistent000000000000000")?;
         ensure(job.is_none(), "nonexistent job must be None")?;
 
         connection.close()?;
