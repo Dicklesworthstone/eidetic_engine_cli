@@ -90,17 +90,17 @@ $ ee import cass --workspace . --since 30d --json | jq '.summary'
 $ ee context "fix the failing release workflow" --workspace . --profile release
 ## Project Rules
 - Run `cargo fmt --check` before tagging  (mem_01HQ3K5Z · confidence 0.71)
-- Push to both main AND master after release  (mem_01HPCC3T · confidence 0.92)
+- Push release changes to main after verification  (mem_01HPCC3T · confidence 0.92)
 
 ## Prior Failures
-- Release v0.2.13 failed because master was 497 commits behind main
+- Release v0.2.13 failed because release artifacts were generated from stale branch state
   evidence: cass session 7f4e · 2026-03-12
 
 ## Verification Commands
   cargo test --lib && cargo clippy -- -D warnings && ./scripts/e2e_test.sh
 
 ## Warnings
-⚠  HIGH  Forced pushes to master have caused user-visible installer staleness
+⚠  HIGH  Forced pushes around release time have caused user-visible installer staleness
 
 provenance footer: 14 memories, 3 sessions, 1 graph snapshot, pack hash 4b1c…7e90
 
