@@ -829,6 +829,7 @@ No. The steward proposes; you approve. Every promotion, consolidation, replaceme
 | [`docs/privacy.md`](docs/privacy.md) | Redaction, secret handling, remote-model policy |
 | [`docs/diagnostics.md`](docs/diagnostics.md) | `status`, `doctor`, degradation codes, repair plans |
 | [`docs/evaluation.md`](docs/evaluation.md) | Eval fixtures, retrieval metrics, pack quality gates |
+| [`docs/agent-outcome-scenarios.md`](docs/agent-outcome-scenarios.md) | North-star agent journey matrix and acceptance scenarios |
 | [`docs/dependency-contracts.md`](docs/dependency-contracts.md) | Asupersync / SQLModel / FrankenSQLite / CASS / Frankensearch / FrankenNetworkX integration contracts |
 | [`docs/trust-model.md`](docs/trust-model.md) | Memory advisory priority, trust classes, prompt-injection defenses |
 | [`docs/schema-evolution.md`](docs/schema-evolution.md) | Versioned JSON contracts, JSONL headers, index manifests |
