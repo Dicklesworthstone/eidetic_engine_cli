@@ -1,0 +1,1 @@
+{"schema":"ee.error.v1","error":{"code":"usage","message":"Unknown command 'xyz'.","repair":"ee --help"}}

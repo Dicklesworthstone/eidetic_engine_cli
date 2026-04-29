@@ -682,4 +682,215 @@ mod tests {
         )?;
         ensure_contains(&json, "\"repair\":\"ee index rebuild\"", "repair field")
     }
+
+    // ========================================================================
+    // Error JSON Schema Tests (EE-015)
+    //
+    // These tests verify the ee.error.v1 JSON schema contract for all
+    // DomainError variants. Each error type must produce valid JSON with:
+    // - schema: "ee.error.v1"
+    // - error.code: stable string matching the error variant
+    // - error.message: human-readable description
+    // - error.repair: optional remediation command (present when provided)
+    // ========================================================================
+
+    #[test]
+    fn error_schema_usage_has_stable_structure() -> TestResult {
+        let error = DomainError::Usage {
+            message: "Unknown command 'xyz'.".to_string(),
+            repair: Some("ee --help".to_string()),
+        };
+        let json = error_response_json(&error);
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_contains(&json, "\"code\":\"usage\"", "code")?;
+        ensure_contains(&json, "\"message\":\"Unknown command 'xyz'.\"", "message")?;
+        ensure_contains(&json, "\"repair\":\"ee --help\"", "repair")
+    }
+
+    #[test]
+    fn error_schema_configuration_has_stable_structure() -> TestResult {
+        let error = DomainError::Configuration {
+            message: "Invalid config file format.".to_string(),
+            repair: Some("ee config validate".to_string()),
+        };
+        let json = error_response_json(&error);
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_contains(&json, "\"code\":\"configuration\"", "code")?;
+        ensure_contains(
+            &json,
+            "\"message\":\"Invalid config file format.\"",
+            "message",
+        )?;
+        ensure_contains(&json, "\"repair\":\"ee config validate\"", "repair")
+    }
+
+    #[test]
+    fn error_schema_storage_has_stable_structure() -> TestResult {
+        let error = DomainError::Storage {
+            message: "Database file corrupted.".to_string(),
+            repair: Some("ee db repair".to_string()),
+        };
+        let json = error_response_json(&error);
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_contains(&json, "\"code\":\"storage\"", "code")?;
+        ensure_contains(&json, "\"message\":\"Database file corrupted.\"", "message")?;
+        ensure_contains(&json, "\"repair\":\"ee db repair\"", "repair")
+    }
+
+    #[test]
+    fn error_schema_search_index_has_stable_structure() -> TestResult {
+        let error = DomainError::SearchIndex {
+            message: "Index is stale (generation 9, database generation 12).".to_string(),
+            repair: Some("ee index rebuild".to_string()),
+        };
+        let json = error_response_json(&error);
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_contains(&json, "\"code\":\"search_index\"", "code")?;
+        ensure_contains(&json, "generation 9", "message contains details")?;
+        ensure_contains(&json, "\"repair\":\"ee index rebuild\"", "repair")
+    }
+
+    #[test]
+    fn error_schema_import_has_stable_structure() -> TestResult {
+        let error = DomainError::Import {
+            message: "CASS session file not found.".to_string(),
+            repair: Some("ee import --dry-run".to_string()),
+        };
+        let json = error_response_json(&error);
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_contains(&json, "\"code\":\"import\"", "code")?;
+        ensure_contains(
+            &json,
+            "\"message\":\"CASS session file not found.\"",
+            "message",
+        )?;
+        ensure_contains(&json, "\"repair\":\"ee import --dry-run\"", "repair")
+    }
+
+    #[test]
+    fn error_schema_unsatisfied_degraded_mode_has_stable_structure() -> TestResult {
+        let error = DomainError::UnsatisfiedDegradedMode {
+            message: "Semantic search unavailable and --require-semantic was set.".to_string(),
+            repair: Some("ee search --lexical-only".to_string()),
+        };
+        let json = error_response_json(&error);
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_contains(&json, "\"code\":\"unsatisfied_degraded_mode\"", "code")?;
+        ensure_contains(&json, "--require-semantic", "message contains flag")?;
+        ensure_contains(&json, "\"repair\":\"ee search --lexical-only\"", "repair")
+    }
+
+    #[test]
+    fn error_schema_policy_denied_has_stable_structure() -> TestResult {
+        let error = DomainError::PolicyDenied {
+            message: "Redaction policy prevents this operation.".to_string(),
+            repair: Some("ee policy review".to_string()),
+        };
+        let json = error_response_json(&error);
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_contains(&json, "\"code\":\"policy_denied\"", "code")?;
+        ensure_contains(
+            &json,
+            "\"message\":\"Redaction policy prevents this operation.\"",
+            "message",
+        )?;
+        ensure_contains(&json, "\"repair\":\"ee policy review\"", "repair")
+    }
+
+    #[test]
+    fn error_schema_migration_required_has_stable_structure() -> TestResult {
+        let error = DomainError::MigrationRequired {
+            message: "Database schema version 3 requires migration to version 5.".to_string(),
+            repair: Some("ee db migrate".to_string()),
+        };
+        let json = error_response_json(&error);
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_contains(&json, "\"code\":\"migration_required\"", "code")?;
+        ensure_contains(&json, "version 3", "message contains version")?;
+        ensure_contains(&json, "\"repair\":\"ee db migrate\"", "repair")
+    }
+
+    #[test]
+    fn error_schema_all_codes_are_covered() -> TestResult {
+        // Ensure we have tests for all 8 error types
+        let codes = [
+            "usage",
+            "configuration",
+            "storage",
+            "search_index",
+            "import",
+            "unsatisfied_degraded_mode",
+            "policy_denied",
+            "migration_required",
+        ];
+
+        // Verify each code produces valid JSON
+        let errors = [
+            DomainError::Usage {
+                message: "test".to_string(),
+                repair: None,
+            },
+            DomainError::Configuration {
+                message: "test".to_string(),
+                repair: None,
+            },
+            DomainError::Storage {
+                message: "test".to_string(),
+                repair: None,
+            },
+            DomainError::SearchIndex {
+                message: "test".to_string(),
+                repair: None,
+            },
+            DomainError::Import {
+                message: "test".to_string(),
+                repair: None,
+            },
+            DomainError::UnsatisfiedDegradedMode {
+                message: "test".to_string(),
+                repair: None,
+            },
+            DomainError::PolicyDenied {
+                message: "test".to_string(),
+                repair: None,
+            },
+            DomainError::MigrationRequired {
+                message: "test".to_string(),
+                repair: None,
+            },
+        ];
+
+        for (error, expected_code) in errors.iter().zip(codes.iter()) {
+            let json = error_response_json(error);
+            ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", expected_code)?;
+            ensure_contains(
+                &json,
+                &format!("\"code\":\"{expected_code}\""),
+                expected_code,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn error_schema_without_repair_omits_field() -> TestResult {
+        // Verify that when repair is None, the field is absent (not null)
+        for error in [
+            DomainError::Usage {
+                message: "test".to_string(),
+                repair: None,
+            },
+            DomainError::Storage {
+                message: "test".to_string(),
+                repair: None,
+            },
+        ] {
+            let json = error_response_json(&error);
+            ensure(
+                !json.contains("repair"),
+                format!("{}: repair field should be absent when None", error.code()),
+            )?;
+        }
+        Ok(())
+    }
 }

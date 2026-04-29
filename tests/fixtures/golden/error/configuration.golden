@@ -1,0 +1,1 @@
+{"schema":"ee.error.v1","error":{"code":"configuration","message":"Invalid config file format.","repair":"ee config validate"}}

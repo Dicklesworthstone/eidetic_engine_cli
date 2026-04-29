@@ -1,0 +1,1 @@
+{"schema":"ee.error.v1","error":{"code":"search_index","message":"Index is stale (generation 9, database generation 12).","repair":"ee index rebuild"}}
