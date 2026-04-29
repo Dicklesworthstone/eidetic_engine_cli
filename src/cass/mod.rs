@@ -33,6 +33,7 @@
 pub mod client;
 pub mod contract;
 pub mod error;
+pub mod health;
 pub mod process;
 
 pub use client::{
@@ -43,6 +44,7 @@ pub use contract::{
     CassContract, REQUIRED_API_VERSION, REQUIRED_CAPABILITIES, REQUIRED_CONTRACT_VERSION,
 };
 pub use error::CassError;
+pub use health::{CassDbHealth, CassHealth, CassIndexHealth};
 pub use process::{CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassExitClass, CassInvocation, CassOutcome};
 
 /// Stable subsystem name surfaced through `ee status` and audit logs.

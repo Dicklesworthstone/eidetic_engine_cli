@@ -1,0 +1,57 @@
+{
+  "status": "healthy",
+  "healthy": true,
+  "errors": [],
+  "latency_ms": 15,
+  "db": {
+    "exists": true,
+    "opened": true,
+    "conversations": 42,
+    "messages": 1234,
+    "open_error": null,
+    "counts_skipped": false
+  },
+  "state": {
+    "index": {
+      "exists": true,
+      "status": "fresh",
+      "reason": null,
+      "fresh": true,
+      "last_indexed_at": "2026-04-29T20:00:00.000+00:00",
+      "age_seconds": 60,
+      "stale": false,
+      "stale_threshold_seconds": 300,
+      "rebuilding": false,
+      "activity_at": null,
+      "documents": 1234,
+      "empty_with_messages": false,
+      "fingerprint": {
+        "current_db_fingerprint": "abc123",
+        "checkpoint_fingerprint": "abc123",
+        "matches_current_db_fingerprint": true
+      },
+      "checkpoint": {
+        "present": true,
+        "completed": true,
+        "db_matches": true,
+        "schema_matches": true,
+        "page_size_matches": true
+      }
+    },
+    "database": {
+      "exists": true,
+      "opened": true,
+      "conversations": 42,
+      "messages": 1234,
+      "open_error": null,
+      "open_retryable": false,
+      "messages_last_7_days": 100,
+      "messages_last_30_days": 500,
+      "agents_active": ["claude_code", "codex"],
+      "agents_count": 2
+    }
+  },
+  "cass_version": "0.3.0",
+  "api_version": 1,
+  "contract_version": "1"
+}
