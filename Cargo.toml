@@ -28,7 +28,22 @@ serve = []
 
 [dependencies]
 asupersync = { version = "0.3.1", default-features = false, features = ["tracing-integration"] }
+chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }
+clap = { version = "4.6.1", features = ["derive"] }
+clap_complete = { version = "4.6.1" }
+sqlmodel-core = { version = "0.2.2", path = "/data/projects/sqlmodel_rust/crates/sqlmodel-core" }
+sqlmodel-frankensqlite = { version = "0.2.2", path = "/data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite" }
+toml_edit = { version = "0.25.11", default-features = false, features = ["parse"] }
 uuid = { version = "1", features = ["v7"] }
+
+[dev-dependencies]
+serde_json = { version = "1.0.149" }
+
+[patch.crates-io]
+fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
+fsqlite-core = { path = "/data/projects/frankensqlite/crates/fsqlite-core" }
+fsqlite-error = { path = "/data/projects/frankensqlite/crates/fsqlite-error" }
+fsqlite-types = { path = "/data/projects/frankensqlite/crates/fsqlite-types" }
 
 [lints.rust]
 unsafe_code = "forbid"

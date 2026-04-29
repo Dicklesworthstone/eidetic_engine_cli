@@ -2,6 +2,11 @@
 /target
 **/*.rs.bk
 
+# The project has a real Rust module at src/core. Some developer machines have
+# broad global ignores for "core", so keep this module visible to Git.
+!src/core/
+!src/core/**
+
 # ee project-local state
 .ee/
 
