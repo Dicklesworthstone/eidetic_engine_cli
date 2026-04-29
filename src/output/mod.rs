@@ -1,5 +1,93 @@
+use std::env;
+use std::io::IsTerminal;
+
 use crate::core;
 use crate::models::{CapabilityStatus, DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Renderer {
+    #[default]
+    Human,
+    Json,
+    Toon,
+    Jsonl,
+    Compact,
+    Hook,
+}
+
+impl Renderer {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Json => "json",
+            Self::Toon => "toon",
+            Self::Jsonl => "jsonl",
+            Self::Compact => "compact",
+            Self::Hook => "hook",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_machine_readable(self) -> bool {
+        matches!(self, Self::Json | Self::Jsonl | Self::Compact | Self::Hook)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OutputContext {
+    pub renderer: Renderer,
+    pub is_tty: bool,
+    pub color_enabled: bool,
+}
+
+impl OutputContext {
+    #[must_use]
+    pub fn detect() -> Self {
+        Self::detect_with_hints(false, false, None)
+    }
+
+    #[must_use]
+    pub fn detect_with_hints(
+        json_flag: bool,
+        robot_flag: bool,
+        format_override: Option<Renderer>,
+    ) -> Self {
+        let is_tty = std::io::stdout().is_terminal();
+        let no_color = env::var("NO_COLOR").is_ok();
+        let ee_format = env::var("EE_FORMAT").ok();
+
+        let renderer = if let Some(r) = format_override {
+            r
+        } else if json_flag || robot_flag {
+            Renderer::Json
+        } else if let Some(fmt) = ee_format {
+            match fmt.to_lowercase().as_str() {
+                "json" => Renderer::Json,
+                "toon" => Renderer::Toon,
+                "jsonl" => Renderer::Jsonl,
+                "compact" => Renderer::Compact,
+                "hook" => Renderer::Hook,
+                _ => Renderer::Human,
+            }
+        } else {
+            Renderer::Human
+        };
+
+        let color_enabled = is_tty && !no_color && !renderer.is_machine_readable();
+
+        Self {
+            renderer,
+            is_tty,
+            color_enabled,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_machine_output(&self) -> bool {
+        self.renderer.is_machine_readable()
+    }
+}
 
 pub struct JsonBuilder {
     buffer: String,
@@ -181,8 +269,8 @@ fn escape_json_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        JsonBuilder, error_response_json, escape_json_string, help_text, human_status,
-        status_response_json,
+        JsonBuilder, OutputContext, Renderer, error_response_json, escape_json_string, help_text,
+        human_status, status_response_json,
     };
     use crate::models::DomainError;
 
@@ -342,5 +430,61 @@ mod tests {
         b.field_raw("config", "[1,2,3]");
         let json = b.finish();
         ensure_contains(&json, "\"config\":[1,2,3]", "raw json array")
+    }
+
+    #[test]
+    fn renderer_wire_names_are_stable() -> TestResult {
+        ensure_equal(&Renderer::Human.as_str(), &"human", "human")?;
+        ensure_equal(&Renderer::Json.as_str(), &"json", "json")?;
+        ensure_equal(&Renderer::Toon.as_str(), &"toon", "toon")?;
+        ensure_equal(&Renderer::Jsonl.as_str(), &"jsonl", "jsonl")?;
+        ensure_equal(&Renderer::Compact.as_str(), &"compact", "compact")?;
+        ensure_equal(&Renderer::Hook.as_str(), &"hook", "hook")
+    }
+
+    fn ensure_equal<T: std::fmt::Debug + PartialEq>(
+        actual: &T,
+        expected: &T,
+        ctx: &str,
+    ) -> TestResult {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
+        }
+    }
+
+    #[test]
+    fn renderer_machine_readable_classification() -> TestResult {
+        ensure(
+            !Renderer::Human.is_machine_readable(),
+            "human is not machine",
+        )?;
+        ensure(!Renderer::Toon.is_machine_readable(), "toon is not machine")?;
+        ensure(Renderer::Json.is_machine_readable(), "json is machine")?;
+        ensure(Renderer::Jsonl.is_machine_readable(), "jsonl is machine")?;
+        ensure(
+            Renderer::Compact.is_machine_readable(),
+            "compact is machine",
+        )?;
+        ensure(Renderer::Hook.is_machine_readable(), "hook is machine")
+    }
+
+    #[test]
+    fn output_context_json_flag_forces_json() -> TestResult {
+        let ctx = OutputContext::detect_with_hints(true, false, None);
+        ensure_equal(&ctx.renderer, &Renderer::Json, "json flag")
+    }
+
+    #[test]
+    fn output_context_robot_flag_forces_json() -> TestResult {
+        let ctx = OutputContext::detect_with_hints(false, true, None);
+        ensure_equal(&ctx.renderer, &Renderer::Json, "robot flag")
+    }
+
+    #[test]
+    fn output_context_format_override_takes_precedence() -> TestResult {
+        let ctx = OutputContext::detect_with_hints(true, true, Some(Renderer::Toon));
+        ensure_equal(&ctx.renderer, &Renderer::Toon, "format override")
     }
 }
