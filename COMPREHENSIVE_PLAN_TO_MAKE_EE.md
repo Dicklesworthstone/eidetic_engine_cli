@@ -583,6 +583,34 @@ Expected behavior:
 - detects current workspace and agent session metadata
 - reports degraded capabilities without failing unnecessarily
 
+### Bootstrap A Fresh Workspace
+
+Fresh repositories should not train agents to ignore `ee` by returning an empty first pack. Bootstrap is an explicit, reviewable way to seed initial memory from project-owned documents.
+
+```bash
+ee bootstrap --workspace . --from-docs --dry-run --json
+ee bootstrap --workspace . --from-docs --apply --json
+```
+
+Initial sources:
+
+- `AGENTS.md`
+- `CLAUDE.md`
+- `README.md`
+- `CONTRIBUTING.md`
+- `.github/workflows/*.yml`
+- project-local release or install docs
+
+Expected behavior:
+
+- proposes memories and rules before applying them
+- defaults to dry-run
+- extracts only durable conventions, commands, branch rules, test rules, release rules, and safety warnings
+- tags each proposal with source file, line range, and content hash
+- routes instruction-like or risky content through curation candidates
+- does not treat arbitrary documentation prose as high-trust instructions
+- gives a useful non-empty `ee context` path for new workspaces without requiring old CASS history
+
 ### Get Context Before Work
 
 ```bash
@@ -629,6 +657,7 @@ Expected behavior:
 ```bash
 ee outcome --memory <id> --helpful --note "Prevented a failed clippy run"
 ee outcome --memory <id> --harmful --note "This rule caused the agent to overfit an obsolete pattern"
+ee outcome --pack <pack-id> --session <session-id> --succeeded --json
 ```
 
 Expected behavior:
@@ -637,6 +666,8 @@ Expected behavior:
 - updates utility score
 - applies harmful feedback more strongly than helpful feedback
 - may demote, promote, or flag the memory for review
+- can link a task/session outcome back to the context pack that preceded the work
+- can update only the memories that were actually present in that pack, not unrelated memories that happened to match the task later
 
 ### Import Session History
 
@@ -4214,6 +4245,7 @@ Agents should not need to scrape README text. `ee` must expose its own machine-r
 
 ```bash
 ee capabilities --json
+ee quickstart --robot
 ee robot-docs guide
 ee robot-docs schemas --format json
 ee robot-docs paths --format json
@@ -4250,6 +4282,14 @@ ee introspect --json
 - config keys
 
 Use sorted maps for stable diffs and golden tests.
+
+`ee quickstart --robot` should return the small golden path, not the full command catalog:
+
+```text
+init -> bootstrap -> context -> remember -> outcome -> doctor
+```
+
+It should include copy-paste commands, expected output schemas, and the correction loop for bad context. This is for first-time agents and harness integrators who need the minimum useful surface without reading the whole manual.
 
 ### Health, Status, Check, Doctor
 
@@ -4811,9 +4851,19 @@ Required tests:
 - TOON parity tests that decode TOON and compare to JSON payloads
 - invalid-version rejection tests
 - migration tests for database schema changes
+- schema drift test comparing SQLModel-generated DDL, committed canonical DDL, and live FrankenSQLite introspection
+- repository tests proving immutable revisions create new rows and preserve old rows
+- legal-hold tests proving physical purge/redaction cannot destroy protected evidence
 - export/import round-trip tests
 - index manifest mismatch tests
 - graph snapshot version mismatch tests
+
+Schema generation note:
+
+- public JSON schemas should be generated from the same Rust domain/output types used by command handlers when possible
+- `schemars` is an acceptable candidate only if its feature tree passes the forbidden-dependency audit
+- generated schemas are checked into `docs/json-schema/` and golden-tested against command output
+- schema generation is not allowed to reach into storage internals or expose private DB fields by accident
 
 ## Observability, Diagnostics, And Repair
 
