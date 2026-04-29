@@ -1109,6 +1109,148 @@ fn optional_text(row: &Row, index: usize) -> Result<Option<&str>> {
     }
 }
 
+/// Input for creating a new audit log entry.
+#[derive(Debug, Clone)]
+pub struct CreateAuditInput {
+    pub workspace_id: Option<String>,
+    pub actor: Option<String>,
+    pub action: String,
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
+    pub details: Option<String>,
+}
+
+/// A stored audit log entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAuditEntry {
+    pub id: String,
+    pub workspace_id: Option<String>,
+    pub timestamp: String,
+    pub actor: Option<String>,
+    pub action: String,
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
+    pub details: Option<String>,
+}
+
+impl DbConnection {
+    /// Insert a new audit log entry.
+    pub fn insert_audit(&self, id: &str, input: &CreateAuditInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO audit_log (id, workspace_id, timestamp, actor, action, target_type, target_id, details) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            &[
+                Value::Text(id.to_string()),
+                input.workspace_id.as_ref().map_or(Value::Null, |w| Value::Text(w.clone())),
+                Value::Text(now),
+                input.actor.as_ref().map_or(Value::Null, |a| Value::Text(a.clone())),
+                Value::Text(input.action.clone()),
+                input.target_type.as_ref().map_or(Value::Null, |t| Value::Text(t.clone())),
+                input.target_id.as_ref().map_or(Value::Null, |t| Value::Text(t.clone())),
+                input.details.as_ref().map_or(Value::Null, |d| Value::Text(d.clone())),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get an audit log entry by ID.
+    pub fn get_audit(&self, id: &str) -> Result<Option<StoredAuditEntry>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details FROM audit_log WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first().map(stored_audit_from_row).transpose()
+    }
+
+    /// List audit log entries for a workspace, ordered by timestamp descending.
+    pub fn list_audit_entries(
+        &self,
+        workspace_id: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Vec<StoredAuditEntry>> {
+        let mut sql = String::from(
+            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details FROM audit_log",
+        );
+        let mut params: Vec<Value> = Vec::new();
+
+        if let Some(wid) = workspace_id {
+            sql.push_str(" WHERE workspace_id = ?1");
+            params.push(Value::Text(wid.to_string()));
+        }
+
+        sql.push_str(" ORDER BY timestamp DESC");
+
+        if let Some(lim) = limit {
+            sql.push_str(&format!(" LIMIT {}", lim));
+        }
+
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter().map(stored_audit_from_row).collect()
+    }
+
+    /// List audit log entries for a specific target.
+    pub fn list_audit_by_target(
+        &self,
+        target_type: &str,
+        target_id: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<StoredAuditEntry>> {
+        let mut sql = String::from(
+            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details FROM audit_log WHERE target_type = ?1 AND target_id = ?2 ORDER BY timestamp DESC",
+        );
+
+        if let Some(lim) = limit {
+            sql.push_str(&format!(" LIMIT {}", lim));
+        }
+
+        let rows = self.query_for(
+            DbOperation::Query,
+            &sql,
+            &[
+                Value::Text(target_type.to_string()),
+                Value::Text(target_id.to_string()),
+            ],
+        )?;
+        rows.iter().map(stored_audit_from_row).collect()
+    }
+
+    /// List audit log entries by action type.
+    pub fn list_audit_by_action(
+        &self,
+        action: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<StoredAuditEntry>> {
+        let mut sql = String::from(
+            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details FROM audit_log WHERE action = ?1 ORDER BY timestamp DESC",
+        );
+
+        if let Some(lim) = limit {
+            sql.push_str(&format!(" LIMIT {}", lim));
+        }
+
+        let rows = self.query_for(DbOperation::Query, &sql, &[Value::Text(action.to_string())])?;
+        rows.iter().map(stored_audit_from_row).collect()
+    }
+}
+
+fn stored_audit_from_row(row: &Row) -> Result<StoredAuditEntry> {
+    Ok(StoredAuditEntry {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: optional_text(row, 1)?.map(str::to_string),
+        timestamp: required_text(row, 2, DbOperation::Query, "timestamp")?.to_string(),
+        actor: optional_text(row, 3)?.map(str::to_string),
+        action: required_text(row, 4, DbOperation::Query, "action")?.to_string(),
+        target_type: optional_text(row, 5)?.map(str::to_string),
+        target_id: optional_text(row, 6)?.map(str::to_string),
+        details: optional_text(row, 7)?.map(str::to_string),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error as StdError;
@@ -1968,11 +2110,7 @@ mod tests {
             &"/home/user/projects/test",
             "path",
         )?;
-        ensure_equal(
-            &workspace.name,
-            &Some("Test Project".to_string()),
-            "name",
-        )?;
+        ensure_equal(&workspace.name, &Some("Test Project".to_string()), "name")?;
 
         connection.close()?;
         Ok(())
@@ -2043,6 +2181,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn update_workspace_name() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
@@ -2056,18 +2195,19 @@ mod tests {
 
         let before = connection.get_workspace("wsp_update00000000000000000000")?;
         ensure(before.is_some(), "workspace exists")?;
-        ensure(before.unwrap().name.is_none(), "name is None before update")?;
-
-        let affected = connection.update_workspace_name(
-            "wsp_update00000000000000000000",
-            Some("Updated Name"),
+        ensure(
+            before.expect("checked above").name.is_none(),
+            "name is None before update",
         )?;
+
+        let affected = connection
+            .update_workspace_name("wsp_update00000000000000000000", Some("Updated Name"))?;
         ensure(affected, "update affected a row")?;
 
         let after = connection.get_workspace("wsp_update00000000000000000000")?;
         ensure(after.is_some(), "workspace still exists")?;
         ensure_equal(
-            &after.unwrap().name,
+            &after.expect("checked above").name,
             &Some("Updated Name".to_string()),
             "name updated",
         )?;
@@ -2076,7 +2216,11 @@ mod tests {
         ensure(cleared, "clear affected a row")?;
 
         let final_state = connection.get_workspace("wsp_update00000000000000000000")?;
-        ensure(final_state.unwrap().name.is_none(), "name cleared to None")?;
+        ensure(final_state.is_some(), "workspace still exists")?;
+        ensure(
+            final_state.expect("checked above").name.is_none(),
+            "name cleared to None",
+        )?;
 
         connection.close()?;
         Ok(())
@@ -2113,6 +2257,236 @@ mod tests {
 
         let workspace = connection.get_workspace("wsp_nonexistent00000000000000")?;
         ensure(workspace.is_none(), "nonexistent workspace must be None")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_and_get_audit() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateAuditInput {
+            workspace_id: Some("wsp_01234567890123456789012345".to_string()),
+            actor: Some("human:jeff".to_string()),
+            action: "memory.create".to_string(),
+            target_type: Some("memory".to_string()),
+            target_id: Some("mem_01234567890123456789012345".to_string()),
+            details: Some(r#"{"kind":"rule"}"#.to_string()),
+        };
+
+        connection.insert_audit("audit_01234567890123456789012345", &input)?;
+
+        let audit = connection.get_audit("audit_01234567890123456789012345")?;
+        ensure(audit.is_some(), "audit entry must be found")?;
+
+        let audit = audit.ok_or_else(|| TestFailure::new("audit not found"))?;
+        ensure_equal(
+            &audit.id.as_str(),
+            &"audit_01234567890123456789012345",
+            "id",
+        )?;
+        ensure_equal(
+            &audit.workspace_id,
+            &Some("wsp_01234567890123456789012345".to_string()),
+            "workspace_id",
+        )?;
+        ensure_equal(&audit.actor, &Some("human:jeff".to_string()), "actor")?;
+        ensure_equal(&audit.action.as_str(), &"memory.create", "action")?;
+        ensure_equal(
+            &audit.target_type,
+            &Some("memory".to_string()),
+            "target_type",
+        )?;
+        ensure_equal(
+            &audit.target_id,
+            &Some("mem_01234567890123456789012345".to_string()),
+            "target_id",
+        )?;
+        ensure_equal(
+            &audit.details,
+            &Some(r#"{"kind":"rule"}"#.to_string()),
+            "details",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn get_nonexistent_audit_returns_none() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let audit = connection.get_audit("audit_nonexistent000000000000000")?;
+        ensure(audit.is_none(), "nonexistent audit must be None")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_audit_entries_by_workspace() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let entry1 = super::CreateAuditInput {
+            workspace_id: Some("wsp_01234567890123456789012345".to_string()),
+            actor: None,
+            action: "memory.create".to_string(),
+            target_type: None,
+            target_id: None,
+            details: None,
+        };
+        let entry2 = super::CreateAuditInput {
+            workspace_id: Some("wsp_01234567890123456789012345".to_string()),
+            actor: None,
+            action: "memory.update".to_string(),
+            target_type: None,
+            target_id: None,
+            details: None,
+        };
+
+        connection.insert_audit("audit_aaaaaaaaaaaaaaaaaaaaaaaaaa", &entry1)?;
+        connection.insert_audit("audit_bbbbbbbbbbbbbbbbbbbbbbbbbb", &entry2)?;
+
+        let entries = connection.list_audit_entries(
+            Some("wsp_01234567890123456789012345"),
+            None,
+        )?;
+        ensure_equal(&entries.len(), &2, "two entries for workspace")?;
+
+        let limited = connection.list_audit_entries(
+            Some("wsp_01234567890123456789012345"),
+            Some(1),
+        )?;
+        ensure_equal(&limited.len(), &1, "limited to 1")?;
+
+        let all = connection.list_audit_entries(None, None)?;
+        ensure_equal(&all.len(), &2, "all entries")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_audit_by_target() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let entry1 = super::CreateAuditInput {
+            workspace_id: Some("wsp_01234567890123456789012345".to_string()),
+            actor: None,
+            action: "memory.create".to_string(),
+            target_type: Some("memory".to_string()),
+            target_id: Some("mem_target00000000000000000001".to_string()),
+            details: None,
+        };
+        let entry2 = super::CreateAuditInput {
+            workspace_id: Some("wsp_01234567890123456789012345".to_string()),
+            actor: None,
+            action: "memory.update".to_string(),
+            target_type: Some("memory".to_string()),
+            target_id: Some("mem_target00000000000000000001".to_string()),
+            details: None,
+        };
+        let entry3 = super::CreateAuditInput {
+            workspace_id: Some("wsp_01234567890123456789012345".to_string()),
+            actor: None,
+            action: "workspace.create".to_string(),
+            target_type: Some("workspace".to_string()),
+            target_id: Some("wsp_01234567890123456789012345".to_string()),
+            details: None,
+        };
+
+        connection.insert_audit("audit_target00000000000000000001", &entry1)?;
+        connection.insert_audit("audit_target00000000000000000002", &entry2)?;
+        connection.insert_audit("audit_target0000000000000000003", &entry3)?;
+
+        let memory_entries = connection.list_audit_by_target(
+            "memory",
+            "mem_target00000000000000000001",
+            None,
+        )?;
+        ensure_equal(&memory_entries.len(), &2, "two entries for memory target")?;
+
+        let workspace_entries = connection.list_audit_by_target(
+            "workspace",
+            "wsp_01234567890123456789012345",
+            None,
+        )?;
+        ensure_equal(&workspace_entries.len(), &1, "one entry for workspace target")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_audit_by_action() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let create = super::CreateAuditInput {
+            workspace_id: Some("wsp_01234567890123456789012345".to_string()),
+            actor: None,
+            action: "memory.create".to_string(),
+            target_type: None,
+            target_id: None,
+            details: None,
+        };
+        let update = super::CreateAuditInput {
+            workspace_id: Some("wsp_01234567890123456789012345".to_string()),
+            actor: None,
+            action: "memory.update".to_string(),
+            target_type: None,
+            target_id: None,
+            details: None,
+        };
+
+        connection.insert_audit("audit_action0000000000000000001", &create)?;
+        connection.insert_audit("audit_action0000000000000000002", &create)?;
+        connection.insert_audit("audit_action0000000000000000003", &update)?;
+
+        let create_entries = connection.list_audit_by_action("memory.create", None)?;
+        ensure_equal(&create_entries.len(), &2, "two create entries")?;
+
+        let update_entries = connection.list_audit_by_action("memory.update", None)?;
+        ensure_equal(&update_entries.len(), &1, "one update entry")?;
+
+        let limited = connection.list_audit_by_action("memory.create", Some(1))?;
+        ensure_equal(&limited.len(), &1, "limited to 1")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn audit_with_null_workspace() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let input = super::CreateAuditInput {
+            workspace_id: None,
+            actor: Some("system".to_string()),
+            action: "global.init".to_string(),
+            target_type: None,
+            target_id: None,
+            details: None,
+        };
+
+        connection.insert_audit("audit_nullws00000000000000000000", &input)?;
+
+        let audit = connection.get_audit("audit_nullws00000000000000000000")?;
+        ensure(audit.is_some(), "audit with null workspace must be found")?;
+
+        let audit = audit.ok_or_else(|| TestFailure::new("audit not found"))?;
+        ensure(audit.workspace_id.is_none(), "workspace_id is None")?;
+        ensure_equal(&audit.action.as_str(), &"global.init", "action")?;
 
         connection.close()?;
         Ok(())
