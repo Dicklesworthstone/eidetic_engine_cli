@@ -178,10 +178,10 @@ static SEARCH_CAPABILITIES: [SearchCapability; 7] = [
         SearchSurface::Indexing,
         "Canonical search document is defined.",
     ),
-    SearchCapability::pending(
+    SearchCapability::ready(
         SearchCapabilityName::IndexJobs,
         SearchSurface::Indexing,
-        "Persist search index jobs through the database layer.",
+        "Search index jobs table added (V005 migration).",
     ),
     SearchCapability::pending(
         SearchCapabilityName::IndexRebuild,
@@ -408,7 +408,7 @@ mod tests {
                 .map(|capability| capability.status()),
             Some(CapabilityStatus::Ready)
         );
-        assert_eq!(readiness.missing_capabilities().count(), 4);
+        assert_eq!(readiness.missing_capabilities().count(), 3);
     }
 
     #[test]
@@ -461,7 +461,7 @@ mod tests {
 
         assert_eq!(
             missing.first().map(|capability| capability.name()),
-            Some(SearchCapabilityName::IndexJobs)
+            Some(SearchCapabilityName::IndexRebuild)
         );
         assert_eq!(
             missing.first().map(|capability| capability.surface()),
