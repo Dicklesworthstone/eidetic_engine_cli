@@ -890,6 +890,66 @@ CREATE INDEX idx_search_index_jobs_type ON search_index_jobs(job_type);
     "blake3:v005_search_index_jobs_2026_04_29",
 );
 
+/// V006: Add pack_records table (EE-142).
+pub const V006_PACK_RECORDS: Migration = Migration::new(
+    6,
+    "pack_records",
+    r#"
+-- Pack records table (EE-142)
+-- Stores persisted context packs for audit, inspection, and ee why support.
+CREATE TABLE pack_records (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'pack_*' AND length(id) = 31),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    query TEXT NOT NULL CHECK (length(trim(query)) > 0),
+    profile TEXT NOT NULL CHECK (profile IN ('compact', 'balanced', 'thorough')),
+    max_tokens INTEGER NOT NULL CHECK (max_tokens > 0),
+    used_tokens INTEGER NOT NULL CHECK (used_tokens >= 0 AND used_tokens <= max_tokens),
+    item_count INTEGER NOT NULL CHECK (item_count >= 0),
+    omitted_count INTEGER NOT NULL CHECK (omitted_count >= 0),
+    pack_hash TEXT NOT NULL CHECK (length(trim(pack_hash)) > 0),
+    degraded_json TEXT CHECK (degraded_json IS NULL OR json_valid(degraded_json)),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    created_by TEXT CHECK (created_by IS NULL OR length(trim(created_by)) > 0)
+);
+
+CREATE INDEX idx_pack_records_workspace ON pack_records(workspace_id);
+CREATE INDEX idx_pack_records_created ON pack_records(created_at);
+CREATE INDEX idx_pack_records_hash ON pack_records(pack_hash);
+
+-- Pack items junction (many-to-many, ordered by rank)
+CREATE TABLE pack_items (
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    rank INTEGER NOT NULL CHECK (rank > 0),
+    section TEXT NOT NULL CHECK (section IN (
+        'procedural_rules', 'decisions', 'failures', 'evidence', 'artifacts'
+    )),
+    estimated_tokens INTEGER NOT NULL CHECK (estimated_tokens > 0),
+    relevance REAL NOT NULL CHECK (relevance >= 0.0 AND relevance <= 1.0),
+    utility REAL NOT NULL CHECK (utility >= 0.0 AND utility <= 1.0),
+    why TEXT NOT NULL CHECK (length(trim(why)) > 0),
+    diversity_key TEXT CHECK (diversity_key IS NULL OR length(trim(diversity_key)) > 0),
+    PRIMARY KEY (pack_id, memory_id)
+);
+
+CREATE INDEX idx_pack_items_memory ON pack_items(memory_id);
+CREATE INDEX idx_pack_items_section ON pack_items(section);
+CREATE INDEX idx_pack_items_rank ON pack_items(pack_id, rank);
+
+-- Pack omissions (tracks what was left out and why)
+CREATE TABLE pack_omissions (
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    estimated_tokens INTEGER NOT NULL CHECK (estimated_tokens > 0),
+    reason TEXT NOT NULL CHECK (reason IN ('token_budget_exceeded')),
+    PRIMARY KEY (pack_id, memory_id)
+);
+
+CREATE INDEX idx_pack_omissions_memory ON pack_omissions(memory_id);
+"#,
+    "blake3:v006_pack_records_2026_04_29",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -897,6 +957,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V003_CURATION_CANDIDATES,
     V004_PROCEDURAL_RULES,
     V005_SEARCH_INDEX_JOBS,
+    V006_PACK_RECORDS,
 ];
 
 /// Result of applying migrations.
@@ -2068,8 +2129,8 @@ mod tests {
 
         ensure_equal(
             &result.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5],
-            "V001-V005 must be applied",
+            &vec![1u32, 2, 3, 4, 5, 6],
+            "V001-V006 must be applied",
         )?;
         ensure_equal(&result.skipped().len(), &0, "no migrations skipped")?;
 
@@ -2107,6 +2168,18 @@ mod tests {
             table_names.contains(&"search_index_jobs"),
             "search_index_jobs table must exist",
         )?;
+        ensure(
+            table_names.contains(&"pack_records"),
+            "pack_records table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"pack_items"),
+            "pack_items table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"pack_omissions"),
+            "pack_omissions table must exist",
+        )?;
 
         connection.close()?;
         Ok(())
@@ -2119,16 +2192,16 @@ mod tests {
         let first = connection.migrate()?;
         ensure_equal(
             &first.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5],
-            "first run applies V001-V005",
+            &vec![1u32, 2, 3, 4, 5, 6],
+            "first run applies V001-V006",
         )?;
 
         let second = connection.migrate()?;
         ensure_equal(&second.applied().len(), &0, "second run applies nothing")?;
         ensure_equal(
             &second.skipped().to_vec(),
-            &vec![1u32, 2, 3, 4, 5],
-            "second run skips V001-V005",
+            &vec![1u32, 2, 3, 4, 5, 6],
+            "second run skips V001-V006",
         )?;
 
         connection.close()?;
@@ -2169,8 +2242,8 @@ mod tests {
 
         ensure_equal(
             &connection.schema_version()?,
-            &Some(5),
-            "after migrations, schema version is 5",
+            &Some(6),
+            "after migrations, schema version is 6",
         )?;
 
         connection.close()?;

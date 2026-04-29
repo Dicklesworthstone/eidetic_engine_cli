@@ -4,6 +4,8 @@
 //! The health check is the first command `ee` runs to verify CASS is
 //! available and the index is usable.
 
+use serde_json;
+
 use super::error::CassError;
 use super::process::CassOutcome;
 

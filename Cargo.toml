@@ -40,9 +40,9 @@ sqlmodel-core = { version = "0.2.2", path = "/data/projects/sqlmodel_rust/crates
 sqlmodel-frankensqlite = { version = "0.2.2", path = "/data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite" }
 toml_edit = { version = "0.25.11", default-features = false, features = ["parse"] }
 uuid = { version = "1", features = ["v7"] }
+serde_json = { version = "1.0.149" }
 
 [dev-dependencies]
-serde_json = { version = "1.0.149" }
 
 [patch.crates-io]
 fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
