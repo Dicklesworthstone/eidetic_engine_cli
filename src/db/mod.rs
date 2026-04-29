@@ -1469,8 +1469,8 @@ mod tests {
 
         ensure_equal(
             &result.applied().to_vec(),
-            &vec![1u32, 2],
-            "V001 and V002 must be applied",
+            &vec![1u32, 2, 3],
+            "V001, V002, V003 must be applied",
         )?;
         ensure_equal(&result.skipped().len(), &0, "no migrations skipped")?;
 
@@ -1516,16 +1516,16 @@ mod tests {
         let first = connection.migrate()?;
         ensure_equal(
             &first.applied().to_vec(),
-            &vec![1u32, 2],
-            "first run applies V001 and V002",
+            &vec![1u32, 2, 3],
+            "first run applies V001, V002, V003",
         )?;
 
         let second = connection.migrate()?;
         ensure_equal(&second.applied().len(), &0, "second run applies nothing")?;
         ensure_equal(
             &second.skipped().to_vec(),
-            &vec![1u32, 2],
-            "second run skips V001 and V002",
+            &vec![1u32, 2, 3],
+            "second run skips V001, V002, V003",
         )?;
 
         connection.close()?;
@@ -1566,8 +1566,8 @@ mod tests {
 
         ensure_equal(
             &connection.schema_version()?,
-            &Some(2),
-            "after migrations, schema version is 2",
+            &Some(3),
+            "after migrations, schema version is 3",
         )?;
 
         connection.close()?;
@@ -1937,6 +1937,182 @@ mod tests {
             &vec!["added".to_string()],
             "only added remains",
         )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_and_get_workspace() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let input = super::CreateWorkspaceInput {
+            path: "/home/user/projects/test".to_string(),
+            name: Some("Test Project".to_string()),
+        };
+
+        connection.insert_workspace("wsp_01234567890123456789012345", &input)?;
+
+        let workspace = connection.get_workspace("wsp_01234567890123456789012345")?;
+        ensure(workspace.is_some(), "workspace must be found")?;
+
+        let workspace = workspace.ok_or_else(|| TestFailure::new("workspace not found"))?;
+        ensure_equal(
+            &workspace.id.as_str(),
+            &"wsp_01234567890123456789012345",
+            "id",
+        )?;
+        ensure_equal(
+            &workspace.path.as_str(),
+            &"/home/user/projects/test",
+            "path",
+        )?;
+        ensure_equal(
+            &workspace.name,
+            &Some("Test Project".to_string()),
+            "name",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn get_workspace_by_path() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let input = super::CreateWorkspaceInput {
+            path: "/home/user/projects/by-path".to_string(),
+            name: None,
+        };
+
+        connection.insert_workspace("wsp_bypath00000000000000000000", &input)?;
+
+        let workspace = connection.get_workspace_by_path("/home/user/projects/by-path")?;
+        ensure(workspace.is_some(), "workspace must be found by path")?;
+
+        let workspace = workspace.ok_or_else(|| TestFailure::new("workspace not found"))?;
+        ensure_equal(
+            &workspace.id.as_str(),
+            &"wsp_bypath00000000000000000000",
+            "id matches",
+        )?;
+        ensure(workspace.name.is_none(), "name is None")?;
+
+        let not_found = connection.get_workspace_by_path("/nonexistent")?;
+        ensure(not_found.is_none(), "nonexistent path returns None")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_workspaces_ordered_by_path() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let ws1 = super::CreateWorkspaceInput {
+            path: "/z/last".to_string(),
+            name: Some("Last".to_string()),
+        };
+        let ws2 = super::CreateWorkspaceInput {
+            path: "/a/first".to_string(),
+            name: Some("First".to_string()),
+        };
+
+        connection.insert_workspace("wsp_zzzzzzzzzzzzzzzzzzzzzzzzzz", &ws1)?;
+        connection.insert_workspace("wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa", &ws2)?;
+
+        let workspaces = connection.list_workspaces()?;
+        ensure_equal(&workspaces.len(), &2, "two workspaces")?;
+        ensure_equal(
+            &workspaces[0].path.as_str(),
+            &"/a/first",
+            "first by path order",
+        )?;
+        ensure_equal(
+            &workspaces[1].path.as_str(),
+            &"/z/last",
+            "second by path order",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn update_workspace_name() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let input = super::CreateWorkspaceInput {
+            path: "/home/user/update-name".to_string(),
+            name: None,
+        };
+
+        connection.insert_workspace("wsp_update00000000000000000000", &input)?;
+
+        let before = connection.get_workspace("wsp_update00000000000000000000")?;
+        ensure(before.is_some(), "workspace exists")?;
+        ensure(before.unwrap().name.is_none(), "name is None before update")?;
+
+        let affected = connection.update_workspace_name(
+            "wsp_update00000000000000000000",
+            Some("Updated Name"),
+        )?;
+        ensure(affected, "update affected a row")?;
+
+        let after = connection.get_workspace("wsp_update00000000000000000000")?;
+        ensure(after.is_some(), "workspace still exists")?;
+        ensure_equal(
+            &after.unwrap().name,
+            &Some("Updated Name".to_string()),
+            "name updated",
+        )?;
+
+        let cleared = connection.update_workspace_name("wsp_update00000000000000000000", None)?;
+        ensure(cleared, "clear affected a row")?;
+
+        let final_state = connection.get_workspace("wsp_update00000000000000000000")?;
+        ensure(final_state.unwrap().name.is_none(), "name cleared to None")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_path_uniqueness_enforced() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let input = super::CreateWorkspaceInput {
+            path: "/unique/path".to_string(),
+            name: None,
+        };
+
+        connection.insert_workspace("wsp_unique00000000000000000000", &input)?;
+
+        let duplicate = super::CreateWorkspaceInput {
+            path: "/unique/path".to_string(),
+            name: Some("Different Name".to_string()),
+        };
+
+        let result = connection.insert_workspace("wsp_dup0000000000000000000000", &duplicate);
+        ensure(result.is_err(), "duplicate path must be rejected")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn get_nonexistent_workspace_returns_none() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let workspace = connection.get_workspace("wsp_nonexistent00000000000000")?;
+        ensure(workspace.is_none(), "nonexistent workspace must be None")?;
 
         connection.close()?;
         Ok(())
