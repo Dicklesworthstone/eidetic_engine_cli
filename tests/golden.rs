@@ -58,7 +58,11 @@ impl GoldenTest {
         let path = self.golden_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
-                format!("Failed to create golden directory {}: {}", parent.display(), error)
+                format!(
+                    "Failed to create golden directory {}: {}",
+                    parent.display(),
+                    error
+                )
             })?;
         }
         fs::write(&path, content).map_err(|error| {
