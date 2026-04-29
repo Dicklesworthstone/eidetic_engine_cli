@@ -504,13 +504,17 @@ mod tests {
 
     #[test]
     fn canonical_document_converts_to_indexable() {
-        let doc = CanonicalSearchDocument::new("mem-001", "Always run tests before commit", DocumentSource::Memory)
-            .with_title("pre-commit rule")
-            .with_workspace("/home/user/project")
-            .with_level("procedural")
-            .with_kind("rule")
-            .with_created_at("2026-04-29T12:00:00Z")
-            .with_tags(["ci", "testing"]);
+        let doc = CanonicalSearchDocument::new(
+            "mem-001",
+            "Always run tests before commit",
+            DocumentSource::Memory,
+        )
+        .with_title("pre-commit rule")
+        .with_workspace("/home/user/project")
+        .with_level("procedural")
+        .with_kind("rule")
+        .with_created_at("2026-04-29T12:00:00Z")
+        .with_tags(["ci", "testing"]);
 
         let indexable = doc.into_indexable();
 
@@ -518,10 +522,19 @@ mod tests {
         assert_eq!(indexable.content, "Always run tests before commit");
         assert_eq!(indexable.title.as_deref(), Some("pre-commit rule"));
         assert_eq!(indexable.metadata.get("source"), Some(&"memory".to_owned()));
-        assert_eq!(indexable.metadata.get("workspace"), Some(&"/home/user/project".to_owned()));
-        assert_eq!(indexable.metadata.get("level"), Some(&"procedural".to_owned()));
+        assert_eq!(
+            indexable.metadata.get("workspace"),
+            Some(&"/home/user/project".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("level"),
+            Some(&"procedural".to_owned())
+        );
         assert_eq!(indexable.metadata.get("kind"), Some(&"rule".to_owned()));
-        assert_eq!(indexable.metadata.get("tags"), Some(&"ci,testing".to_owned()));
+        assert_eq!(
+            indexable.metadata.get("tags"),
+            Some(&"ci,testing".to_owned())
+        );
     }
 
     #[test]
@@ -540,7 +553,10 @@ mod tests {
         assert_eq!(indexable.id, "doc-1");
         assert_eq!(indexable.content, "content only");
         assert!(indexable.title.is_none());
-        assert_eq!(indexable.metadata.get("source"), Some(&"session".to_owned()));
-        assert!(indexable.metadata.get("workspace").is_none());
+        assert_eq!(
+            indexable.metadata.get("source"),
+            Some(&"session".to_owned())
+        );
+        assert!(!indexable.metadata.contains_key("workspace"));
     }
 }
