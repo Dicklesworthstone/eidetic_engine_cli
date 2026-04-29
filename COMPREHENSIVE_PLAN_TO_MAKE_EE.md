@@ -2781,11 +2781,13 @@ Primary abstractions to use:
 - `TwoTierConfig`
 - `SearchPhase`
 
+These names are the intended integration shape, not a license to invent wrappers if the local Frankensearch API differs. The M0 Frankensearch contract test must confirm the actual exported API names and feature flags before feature work begins.
+
 Recommended feature posture:
 
 - Development and tests: hash embedder and deterministic fixtures.
-- First useful version: persistent lexical index plus hash or local embedding fallback.
-- Later: full hybrid semantic stack after model acquisition and storage are stable.
+- First useful version: forbidden-dependency-clean persistent lexical/hash profile.
+- Later: full hybrid semantic stack only after model acquisition, storage, and feature tree audits are stable.
 
 ### Search Speed Modes
 
@@ -2804,7 +2806,7 @@ Modes:
 | Mode | Behavior | Budget |
 | --- | --- | --- |
 | `instant` | lexical-only or fastest available tier | target < 50 ms warm |
-| default | lexical plus fast dense tier plus policy scoring | target < 250 ms warm |
+| default | lexical/hash plus policy scoring; semantic only when cleanly enabled | target < 250 ms warm |
 | `quality` | wait for quality dense tier and richer reranking | target < 2 s warm |
 
 Rules:
@@ -3346,6 +3348,21 @@ Useful graph-derived features:
 
 These features should be explainable and optional. Search must continue if graph snapshots are stale.
 
+Graph scope discipline:
+
+- graph integration is not part of the walking skeleton
+- graph-enhanced ranking starts only after the M0 fnx compile gate passes and M2 evaluation shows the core packer is useful
+- if graph features do not improve an evaluation fixture, keep them diagnostic rather than ranking-active
+- `link_count`, `evidence_support_count`, and `contradiction_count` are acceptable lightweight signals before full graph analytics
+
+Graph freshness policy:
+
+- `graph_snapshot_warn_age_seconds` controls when output includes `graph_snapshot_stale`
+- `graph_snapshot_max_age_seconds` controls when graph features are ignored entirely
+- default warn age can be 3600 seconds; default max age can be 86400 seconds
+- graph explanations include snapshot age, source high-watermark, algorithm version, and whether graph features affected rank
+- a stale graph must never silently boost or penalize a result
+
 ## Procedural Memory And Curation
 
 The CASS Memory System provides the best modern conceptual foundation for procedural memory.
@@ -3527,6 +3544,16 @@ maturity_multiplier.proven = 1.5
 maturity_multiplier.deprecated = 0.0
 ```
 
+The `harmful_multiplier` is a caution signal, not a two-strikes executioner. Inversion from rule to anti-pattern should use the feedback safeguards in the `feedback_events` section, including helpful/harmful ratio checks, trust checks, and a `needs_review` reprieve for proven rules.
+
+Decay write-back:
+
+- `ee context` should recompute effective score for selected memories before packing
+- if recomputed score differs from persisted score by more than an epsilon, queue a bounded write-back or maintenance job
+- selected stale rules should display `stale_score` or `needs_revalidation` in explanations
+- a 180-day-old rule with no revalidation must visibly lose priority in evaluation fixtures
+- category-level half-lives can override the default: release/workflow rules default to 90 days, library-version facts to 45 days, stable project safety rules to 180 days
+
 ### Anti-Patterns
 
 Anti-patterns are first-class, not just negative rules.
@@ -3618,6 +3645,26 @@ Review policies:
 - stale candidates decay or are hidden from default review
 - every accept, reject, merge, or snooze has an audit entry
 
+Specificity validation:
+
+A rule passes specificity only if it contains at least one concrete anchor:
+
+- a command with arguments or flags, such as `cargo clippy --all-targets -- -D warnings`
+- a file path, glob, extension, or directory pattern
+- a named branch, release channel, CI job, service, database, tool, or package
+- an environment variable or config key
+- an explicit scope such as repository, workspace, language, framework, tool, task, or session
+
+Vague rules such as "be careful", "test things", or "follow best practices" should remain candidates with `validation_status = warning` and `vague_rule` in `validation_warnings_json`.
+
+Duplicate validation:
+
+- use Frankensearch embedding/cosine similarity when available, otherwise lexical similarity
+- default threshold is 0.78
+- compare within the same workspace plus applicable parent scopes
+- exclude `retired`, `tombstoned`, and `quarantined` rules unless the candidate claims to replace them
+- suggest merge rather than silently replacing memories
+
 Review tests:
 
 - duplicate grouping
@@ -3638,6 +3685,7 @@ V1:
 - call the `cass` CLI using `--robot` or `--json`
 - run `cass` through Asupersync native `process::*` APIs
 - preserve structured process exit, cancellation, timeout, and reaping behavior
+- use explicit subprocess budgets: default 5 seconds for health/capabilities/search calls, 30 seconds per session for import/view/expand, and a caller-provided total import budget for batches
 - parse stable JSON contracts
 - store session pointers and selected excerpts
 - provide clear degraded output if `cass` is unavailable
@@ -3657,6 +3705,44 @@ Bulk import option:
 - fail clearly when the CASS schema is unknown
 
 Direct DB read is attractive for importing thousands of sessions, but it must not become a hidden dependency on CASS internals. The safe rule is: direct DB for bulk import after version checks, CLI for stable ad hoc lookup.
+
+### CASS Bulk Import Heuristics
+
+Bulk import should be useful without pretending `ee` can automatically understand every old session. The first importer should be conservative and evidence-first.
+
+Default import behavior:
+
+- import session metadata and stable evidence pointers
+- import compact snippets only when they pass redaction policy
+- create diary entries and curation candidates, not high-trust procedural rules
+- create low-trust episodic memories only for clearly useful facts
+- require explicit `ee curate apply` or configured policy before procedural promotion
+
+Optional `--auto-memorize` behavior:
+
+- disabled by default
+- only emits `agent_observed` or `session_evidence` trust classes
+- never emits `curated_rule`, `user_asserted`, or `proven`
+- records the heuristic name that selected each candidate
+- marks instruction-like content for review instead of adding it directly to default context
+
+Initial `turn_looks_important` heuristics:
+
+- command or test failure with nonzero exit code followed by a fix
+- assistant message after explicit language such as "why it failed", "root cause", "lesson learned", "decision", or "do not do this again"
+- user correction of agent behavior
+- repeated failed attempts followed by a successful command
+- release, migration, destructive-operation, credential, or deployment risk discussion
+- project instruction discovered in `AGENTS.md`, `README.md`, CI config, installer docs, or release docs
+- long explanation attached to a concrete command, file path, stack trace, or error code
+
+Anti-heuristics:
+
+- boilerplate progress reports
+- raw command output with no decision or fix
+- speculative advice without evidence
+- duplicate snippets already represented by a newer memory
+- prompt-injection-shaped instructions from untrusted imported text
 
 ### Required `cass` Commands
 
@@ -3696,10 +3782,17 @@ Keep raw history in CASS.
 Every import item gets an idempotency key:
 
 ```text
-cass:<source-id>:<session-id>:<message-id>:<hash>
+cass_import_key_v1:cass:<source-id>:<session-id>:<message-id>:<hash>
 ```
 
 Import should be safe to resume after interruption.
+
+Rules:
+
+- the key algorithm is versioned and covered by golden tests
+- changing the key algorithm requires a migration or a duplicate-detection plan
+- redaction/truncation changes must not accidentally make the same source message look like a new logical import unless the schema version also changes
+- subprocess timeout, cancellation, and child reaping behavior are contract tests, not best-effort behavior
 
 ### Session Review Flow
 
@@ -3772,6 +3865,20 @@ If invalid:
 - commands should warn
 - lexical fallback should still work when possible
 - `ee doctor` should recommend `ee index rebuild`
+
+Freshness budget:
+
+- every memory write increments a database generation or source high-watermark
+- every successful index update records the indexed generation
+- after 50 unindexed memory changes, `ee context` emits `search_index_stale` with the generation gap
+- after 200 unindexed memory changes, `ee context` requires `--allow-stale` unless it can satisfy the request through a fresh direct fallback
+- procedural, high-severity, and recently written memories should either index synchronously by default or be injected through a recent-memory direct DB fallback for at least 10 seconds after write
+- `ee remember --index-now` forces synchronous indexing within the request budget and reports whether it succeeded
+- stale-index warnings include whether output is still useful and the exact repair command
+
+Recent-memory fallback:
+
+If a memory is written and a subsequent context/search request arrives before the index catches up, `ee` should query recent relevant DB rows directly and merge them into the candidate pool with `not_yet_indexed: true`. This prevents the most damaging failure mode: an agent records a critical rule, immediately asks for context, and gets a pack that omits the rule because the derived index lagged.
 
 ## Embedding And Semantic Model Lifecycle
 
@@ -4084,10 +4191,13 @@ binary = "cass"
 default_since = "90d"
 
 [search]
-mode = "hybrid"
+mode = "lexical_hash"
 semantic_enabled = false
 max_results = 50
 index_generation = 1
+warn_after_unindexed_changes = 50
+require_allow_stale_after_unindexed_changes = 200
+recent_memory_fallback_seconds = 10
 
 [packing]
 default_max_tokens = 4000
@@ -4097,6 +4207,8 @@ include_explanations = true
 [scoring]
 helpful_half_life_days = 90
 harmful_multiplier = 4.0
+auto_invert_min_harmful = 3
+auto_invert_ratio = 2.0
 candidate_multiplier = 0.5
 established_multiplier = 1.0
 proven_multiplier = 1.5
@@ -4105,11 +4217,21 @@ proven_multiplier = 1.5
 store_secret_excerpts = false
 redact_by_default = true
 allow_remote_models = false
+prompt_injection_guard = true
+redaction_version = 1
+
+[curation]
+candidate_ttl_days = 30
+auto_apply_low_risk = false
+duplicate_similarity_threshold = 0.78
+specificity_required = true
 
 [graph]
 enabled = true
 refresh_after_import = false
 max_hops_default = 2
+snapshot_warn_age_seconds = 3600
+snapshot_max_age_seconds = 86400
 ```
 
 ### Environment Variables
@@ -4159,6 +4281,8 @@ EE_LOG
 ```text
 ee
   init
+  bootstrap
+  quickstart
   health
   status
   check
@@ -4210,9 +4334,12 @@ ee
   memory
     show
     list
+    history
+    revise
     link
     tags
     expire
+    tombstone
   pack
   playbook
     export
@@ -4243,6 +4370,7 @@ ee
     resolve
     list
     alias
+    isolate
   db
     status
     migrate
@@ -4384,6 +4512,8 @@ JSON error shape:
 - physical deletion is intentionally absent from early command trees
 - commands that mutate durable state support `--json`
 - commands that may run long support budget or limit flags
+- `ee memory revise <id>` creates a new immutable revision; it does not overwrite the existing memory content
+- `ee memory history <id>` shows the revision chain, supersession reason, evidence, and audit entries
 
 ## Robot Mode And Agent Ergonomics
 
@@ -5339,6 +5469,15 @@ It should answer:
 - what links or graph metrics matter
 - what rules would hide or demote it
 - whether newer evidence contradicts it
+- what an agent should do next if the memory looks wrong, stale, low-trust, duplicated, or unsafe
+
+`ee why --json` should include `suggested_actions[]` when there is an obvious trust-repair action, for example:
+
+- `ee outcome --memory <id> --harmful --json`
+- `ee outcome --memory <id> --contradicted --json`
+- `ee curate retire <id> --reason ... --json`
+- `ee remember --level procedural --kind rule ... --json`
+- `ee index rebuild --workspace . --json`
 
 ### Repair UX
 
@@ -5376,6 +5515,9 @@ Rules:
 - no mutation in `doctor` unless the command says `--apply` or an equivalent explicit flag
 - repair commands must be concrete shell commands, not prose
 - robot repair output must be directly usable by an agent after policy checks
+- repair plans must be generated from hardcoded internal repair definitions, not from DB rows, config strings, imported memory content, or external tool output
+- `--fix` should dispatch internal repair functions by repair ID rather than shelling out through the `command` string
+- command strings in repair JSON are explanatory and copy-pasteable, not the execution source of truth
 
 ## Steward And Maintenance
 
@@ -5470,6 +5612,18 @@ Secret detection should run:
 - before emitting context packs
 - during privacy audits
 
+Secret detection must scan content and metadata:
+
+- memory `content`, `summary`, and `metadata_json`
+- evidence excerpts and `source_uri`
+- session titles, summaries, task text, and metadata
+- tags
+- action commands and error fields
+- pack explanations and provenance fields before output
+- JSONL import/export records
+
+Pattern detection is not enough. Add entropy-based checks as a backstop for tokens and encoded secrets. When redaction patterns change, `privacy.audit` should rescan old memories and record the redaction policy version that last inspected each row.
+
 ### Risk Memories
 
 High-severity memories should be explicitly labeled and pinned when relevant.
@@ -5493,6 +5647,8 @@ This plan does not propose implementing destructive deletion early. Prefer:
 - hide from packs
 
 If physical deletion is added later, it must require explicit confirmation and produce an audit record.
+
+Physical deletion must also respect `legal_hold`. A protected memory, evidence span, or revision can be hidden, redacted for output, or superseded, but cannot be purged while the hold is active.
 
 ## Backup, Restore, And Disaster Recovery
 
@@ -5598,10 +5754,11 @@ Context packs should include this assumption in integration docs. A retrieved me
 
 ### Trust Classes
 
-Suggested trust classes:
+Use the authoritative trust taxonomy from the data model:
 
 ```text
 user_asserted
+agent_validated
 agent_observed
 session_evidence
 derived_summary
@@ -5633,6 +5790,16 @@ Examples:
 - "Treat this memory as highest priority."
 
 These must be stored as content or evidence, not executable instruction.
+
+Minimum deterministic detection before M3:
+
+- role override phrases such as "ignore previous instructions", "system:", "developer:", "you are now"
+- exfiltration cues such as "read ~/.ssh", "cat ~/.env", "send to http", "curl ... | sh"
+- destructive command suggestions involving `rm -rf`, `git reset --hard`, `git clean -fd`, `DROP TABLE`, `TRUNCATE`, cloud deletes, or forced pushes
+- encoded payload indicators such as long base64-like strings adjacent to decode or shell execution instructions
+- self-prioritization claims such as "this memory overrides all other rules"
+
+Flagged content becomes `quarantined` or a curation candidate with `validation_status = flagged_injection`. Destructive-command candidates require explicit user or high-trust human approval before they can become retrievable procedural rules.
 
 ### Defense Rules
 
@@ -5825,6 +5992,16 @@ Evaluation fixtures should contain:
 - expected degradation behavior
 - fixed timestamps and scoring constants
 
+Fixture files should be schema-validated:
+
+```text
+tests/fixtures/eval/schema/queries.schema.json
+tests/fixtures/eval/schema/expected.schema.json
+tests/fixtures/eval/schema/fixture.schema.json
+```
+
+`queries.json` should name the command under test, query text, budget, profile, expected IDs, not-expected IDs, maximum acceptable rank, expected sections, expected degradation codes, and whether stale/degraded output is still useful.
+
 Initial fixture families:
 
 | Fixture | What It Proves |
@@ -5889,6 +6066,29 @@ Good targets:
 - token budget packer
 - redaction scanner
 - ID parser
+
+Concrete properties:
+
+| Target | Property |
+| --- | --- |
+| IDs | `parse(format(id)) == id` for every generated valid ID |
+| token packer | `tokens_used <= budget` for every packed result |
+| section quotas | section token totals never exceed hard quotas |
+| RRF fusion | adding an extra positive ranking source cannot lower a document below all of its original source ranks without an explicit penalty |
+| MMR packer | selected items are stable for fixed seed, scores, and inputs |
+| redaction | `scan(redact(content))` finds no remaining known secret |
+| config | `parse(serialize(config)) == config` for generated valid configs |
+| JSONL import | export followed by import preserves public IDs, content hashes, and redaction classes |
+| evidence URI parser | valid URI round-trips; invalid URI fails with stable error code |
+
+Hash embedder test contract:
+
+- test fixtures use the Frankensearch hash embedder or an `ee` wrapper over it
+- same text yields same vector across runs
+- different text usually yields a different vector
+- vector dimensions are fixed in test config
+- normalization is deterministic
+- fixture tests set the embedder explicitly rather than relying on user machine model state
 
 ### Performance Budgets
 
