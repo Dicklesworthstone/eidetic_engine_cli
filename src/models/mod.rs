@@ -2,6 +2,7 @@ use std::process::ExitCode;
 
 pub mod id;
 pub mod memory;
+pub mod provenance;
 
 pub use id::{
     AuditId, BackupId, CandidateId, EvidenceId, Id, IdKind, MemoryId, PackId, ParseIdError, RuleId,
@@ -11,6 +12,7 @@ pub use memory::{
     Confidence, Importance, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES, MemoryContent,
     MemoryKind, MemoryLevel, MemoryValidationError, Tag, UnitScore, Utility,
 };
+pub use provenance::{LineSpan, ProvenanceUri, ProvenanceUriError};
 
 pub const RESPONSE_SCHEMA_V1: &str = "ee.response.v1";
 pub const ERROR_SCHEMA_V1: &str = "ee.error.v1";
