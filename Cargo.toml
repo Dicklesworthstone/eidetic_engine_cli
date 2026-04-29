@@ -1,0 +1,36 @@
+[package]
+name = "ee"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Durable, local-first, explainable memory for coding agents."
+repository = "https://github.com/Dicklesworthstone/eidetic_engine_cli"
+default-run = "ee"
+
+[lib]
+name = "ee"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ee"
+path = "src/main.rs"
+
+[features]
+default = ["fts5", "json", "embed-fast", "lexical-bm25"]
+fts5 = []
+json = []
+embed-fast = []
+embed-quality = []
+lexical-bm25 = []
+mcp = []
+serve = []
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
