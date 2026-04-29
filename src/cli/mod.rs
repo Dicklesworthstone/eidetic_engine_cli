@@ -639,4 +639,141 @@ mod tests {
         ensure_equal(&FieldsLevel::Standard.as_str(), &"standard", "standard")?;
         ensure_equal(&FieldsLevel::Full.as_str(), &"full", "full")
     }
+
+    // ========================================================================
+    // Stream Isolation Tests (EE-019)
+    //
+    // These tests enforce the CLI output contract:
+    // - stdout: machine data only (JSON responses, human output, help text)
+    // - stderr: diagnostics only (errors in human mode, progress, debugging)
+    //
+    // When --json/--robot/--format=json is set, errors go to stdout as JSON.
+    // When human mode is active, errors go to stderr as plain text.
+    // ========================================================================
+
+    #[test]
+    fn stream_isolation_human_status_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "status"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "human status exit")?;
+        ensure(!stdout.is_empty(), "human status stdout has content")?;
+        ensure(stderr.is_empty(), "human status stderr must be empty")
+    }
+
+    #[test]
+    fn stream_isolation_human_help_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "help"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "human help exit")?;
+        ensure_contains(&stdout, "Usage:", "human help contains usage")?;
+        ensure(stderr.is_empty(), "human help stderr must be empty")
+    }
+
+    #[test]
+    fn stream_isolation_human_version_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "version"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "human version exit")?;
+        ensure_contains(&stdout, env!("CARGO_PKG_VERSION"), "version in stdout")?;
+        ensure(stderr.is_empty(), "human version stderr must be empty")
+    }
+
+    #[test]
+    fn stream_isolation_human_error_writes_to_stderr_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "not-a-command"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "human error exit")?;
+        ensure(stdout.is_empty(), "human error stdout must be empty")?;
+        ensure(!stderr.is_empty(), "human error stderr has diagnostic")
+    }
+
+    #[test]
+    fn stream_isolation_json_error_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--json", "not-a-command"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "json error exit")?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.error.v1\"",
+            "json error envelope",
+        )?;
+        ensure(stderr.is_empty(), "json error stderr must be empty")
+    }
+
+    #[test]
+    fn stream_isolation_robot_error_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--robot", "badcmd"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "robot error exit")?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.error.v1\"",
+            "robot error envelope",
+        )?;
+        ensure(stderr.is_empty(), "robot error stderr must be empty")
+    }
+
+    #[test]
+    fn stream_isolation_format_json_error_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--format=json", "badcmd"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "format json error exit")?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.error.v1\"",
+            "format json error env",
+        )?;
+        ensure(stderr.is_empty(), "format json error stderr must be empty")
+    }
+
+    #[test]
+    fn stream_isolation_meta_flags_with_json_writes_to_stdout_only() -> TestResult {
+        for flag in &["--schema", "--help-json", "--agent-docs"] {
+            let (exit, stdout, stderr) = invoke(&["ee", flag]);
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            {
+                ensure_equal(&exit, &ProcessExitCode::Success, &format!("{flag} exit"))?;
+                ensure_starts_with(
+                    &stdout,
+                    "{\"schema\":\"ee.response.v1\"",
+                    &format!("{flag} envelope"),
+                )?;
+                ensure(stderr.is_empty(), &format!("{flag} stderr must be empty"))?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stream_isolation_contract_documentation() -> TestResult {
+        // This test documents the stream isolation contract for agent consumers.
+        //
+        // stdout receives:
+        // - JSON responses (ee.response.v1 envelope) in machine mode
+        // - JSON errors (ee.error.v1 envelope) when --json/--robot/--format=json is set
+        // - Human-readable output (help, status, version) in human mode
+        //
+        // stderr receives:
+        // - Diagnostic errors in human mode (parse failures, unknown commands)
+        // - Progress indicators (when TTY is attached, future feature)
+        // - Debug/trace output (when --verbose is set, future feature)
+        //
+        // Agents should:
+        // 1. Always pass --json, --robot, or --format=json to get structured output
+        // 2. Parse stdout for data, ignore stderr unless exit code is non-zero
+        // 3. Check exit codes to detect error conditions
+        //
+        // The contract is stable: stdout is data, stderr is diagnostics.
+
+        // Verify success output goes to stdout
+        let (exit, stdout, stderr) = invoke(&["ee", "--json", "status"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "doc: success exit")?;
+        ensure(!stdout.is_empty(), "doc: success stdout has data")?;
+        ensure(stderr.is_empty(), "doc: success stderr empty")?;
+
+        // Verify error output in json mode goes to stdout
+        let (exit, stdout, stderr) = invoke(&["ee", "--json", "badcmd"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "doc: error exit")?;
+        ensure(!stdout.is_empty(), "doc: error stdout has json")?;
+        ensure(stderr.is_empty(), "doc: error stderr empty in json mode")?;
+
+        // Verify error output in human mode goes to stderr
+        let (exit, stdout, stderr) = invoke(&["ee", "badcmd"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "doc: human error exit")?;
+        ensure(stdout.is_empty(), "doc: human error stdout empty")?;
+        ensure(!stderr.is_empty(), "doc: human error stderr has diagnostic")
+    }
 }
