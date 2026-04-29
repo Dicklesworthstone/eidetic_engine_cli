@@ -744,7 +744,8 @@ CREATE INDEX idx_curation_candidates_ttl ON curation_candidates(ttl_expires_at) 
 );
 
 /// All migrations in version order.
-pub const MIGRATIONS: &[Migration] = &[V001_INIT_SCHEMA, V002_TRUST_CLASS, V003_CURATION_CANDIDATES];
+pub const MIGRATIONS: &[Migration] =
+    &[V001_INIT_SCHEMA, V002_TRUST_CLASS, V003_CURATION_CANDIDATES];
 
 /// Result of applying migrations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -817,6 +818,102 @@ impl DbConnection {
         let migrations = self.applied_migrations()?;
         Ok(migrations.last().map(|m| m.version()))
     }
+}
+
+/// Input for creating a new workspace.
+#[derive(Debug, Clone)]
+pub struct CreateWorkspaceInput {
+    pub path: String,
+    pub name: Option<String>,
+}
+
+/// A stored workspace row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredWorkspace {
+    pub id: String,
+    pub path: String,
+    pub name: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl DbConnection {
+    /// Insert a new workspace.
+    pub fn insert_workspace(&self, id: &str, input: &CreateWorkspaceInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO workspaces (id, path, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.path.clone()),
+                input.name.as_ref().map_or(Value::Null, |n| Value::Text(n.clone())),
+                Value::Text(now.clone()),
+                Value::Text(now),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get a workspace by ID.
+    pub fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, path, name, created_at, updated_at FROM workspaces WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first().map(stored_workspace_from_row).transpose()
+    }
+
+    /// Get a workspace by path.
+    pub fn get_workspace_by_path(&self, path: &str) -> Result<Option<StoredWorkspace>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, path, name, created_at, updated_at FROM workspaces WHERE path = ?1",
+            &[Value::Text(path.to_string())],
+        )?;
+
+        rows.first().map(stored_workspace_from_row).transpose()
+    }
+
+    /// List all workspaces.
+    pub fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, path, name, created_at, updated_at FROM workspaces ORDER BY path ASC",
+            &[],
+        )?;
+
+        rows.iter().map(stored_workspace_from_row).collect()
+    }
+
+    /// Update workspace name.
+    pub fn update_workspace_name(&self, id: &str, name: Option<&str>) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE workspaces SET name = ?1, updated_at = ?2 WHERE id = ?3",
+            &[
+                name.map_or(Value::Null, |n| Value::Text(n.to_string())),
+                Value::Text(now),
+                Value::Text(id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+}
+
+fn stored_workspace_from_row(row: &Row) -> Result<StoredWorkspace> {
+    Ok(StoredWorkspace {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        path: required_text(row, 1, DbOperation::Query, "path")?.to_string(),
+        name: optional_text(row, 2)?.map(str::to_string),
+        created_at: required_text(row, 3, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 4, DbOperation::Query, "updated_at")?.to_string(),
+    })
 }
 
 /// Input for creating a new memory.

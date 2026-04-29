@@ -336,6 +336,30 @@ pub fn help_text() -> &'static str {
 }
 
 #[must_use]
+pub fn schema_json() -> String {
+    format!(
+        "{{\"schema\":\"{}\",\"success\":true,\"data\":{{\"command\":\"schema\",\"schemas\":{{\"response\":\"{}\",\"error\":\"{}\"}}}}}}",
+        RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V1, ERROR_SCHEMA_V1
+    )
+}
+
+#[must_use]
+pub fn help_json() -> String {
+    format!(
+        "{{\"schema\":\"{}\",\"success\":true,\"data\":{{\"command\":\"help\",\"usage\":\"ee [OPTIONS] [COMMAND]\",\"commands\":[\"status\",\"version\",\"help\"],\"globalOptions\":[\"--json\",\"--robot\",\"--schema\",\"--help-json\",\"--agent-docs\"]}}}}",
+        RESPONSE_SCHEMA_V1
+    )
+}
+
+#[must_use]
+pub fn agent_docs() -> String {
+    format!(
+        "{{\"schema\":\"{}\",\"success\":true,\"data\":{{\"command\":\"agent-docs\",\"description\":\"Durable, local-first, explainable memory for coding agents.\",\"primaryWorkflow\":\"ee context \\\"<task>\\\" --workspace . --max-tokens 4000 --json\",\"coreCommands\":[\"init\",\"remember\",\"search\",\"context\",\"why\",\"status\"]}}}}",
+        RESPONSE_SCHEMA_V1
+    )
+}
+
+#[must_use]
 pub fn error_response_json(error: &DomainError) -> String {
     let code = error.code();
     let message = escape_json_string(error.message());

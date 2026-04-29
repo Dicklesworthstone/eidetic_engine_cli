@@ -38,6 +38,26 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Human)]
     pub format: OutputFormat,
 
+    /// Control the verbosity level of output fields.
+    #[arg(long, global = true, value_enum, default_value_t = FieldsLevel::Standard)]
+    pub fields: FieldsLevel,
+
+    /// Print the JSON schema for the response envelope and exit.
+    #[arg(long, global = true, action = ArgAction::SetTrue)]
+    pub schema: bool,
+
+    /// Print JSON-formatted help and exit.
+    #[arg(long, global = true, action = ArgAction::SetTrue)]
+    pub help_json: bool,
+
+    /// Print agent-oriented documentation and exit.
+    #[arg(long, global = true, action = ArgAction::SetTrue)]
+    pub agent_docs: bool,
+
+    /// Include additional metadata in the response envelope.
+    #[arg(long, global = true, action = ArgAction::SetTrue)]
+    pub meta: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -45,7 +65,17 @@ pub struct Cli {
 impl Cli {
     #[must_use]
     pub const fn wants_json(&self) -> bool {
-        self.json || self.robot || matches!(self.format, OutputFormat::Json)
+        self.json || self.robot || self.format.is_machine_readable()
+    }
+
+    #[must_use]
+    pub const fn fields_level(&self) -> FieldsLevel {
+        self.fields
+    }
+
+    #[must_use]
+    pub const fn wants_meta(&self) -> bool {
+        self.meta
     }
 }
 
@@ -64,6 +94,50 @@ pub enum OutputFormat {
     #[default]
     Human,
     Json,
+    Toon,
+    Jsonl,
+    Compact,
+    Hook,
+}
+
+impl OutputFormat {
+    #[must_use]
+    pub const fn is_machine_readable(self) -> bool {
+        matches!(self, Self::Json | Self::Jsonl | Self::Compact | Self::Hook)
+    }
+
+    #[must_use]
+    pub const fn to_renderer(self) -> output::Renderer {
+        match self {
+            Self::Human => output::Renderer::Human,
+            Self::Json => output::Renderer::Json,
+            Self::Toon => output::Renderer::Toon,
+            Self::Jsonl => output::Renderer::Jsonl,
+            Self::Compact => output::Renderer::Compact,
+            Self::Hook => output::Renderer::Hook,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum FieldsLevel {
+    Minimal,
+    Summary,
+    #[default]
+    Standard,
+    Full,
+}
+
+impl FieldsLevel {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Summary => "summary",
+            Self::Standard => "standard",
+            Self::Full => "full",
+        }
+    }
 }
 
 pub fn run_from_env() -> ProcessExitCode {
@@ -83,6 +157,16 @@ where
         Ok(cli) => cli,
         Err(error) => return write_parse_error(error, &args, stdout, stderr),
     };
+
+    if cli.schema {
+        return write_stdout(stdout, &(output::schema_json() + "\n"));
+    }
+    if cli.help_json {
+        return write_stdout(stdout, &(output::help_json() + "\n"));
+    }
+    if cli.agent_docs {
+        return write_stdout(stdout, &(output::agent_docs() + "\n"));
+    }
 
     match cli.command {
         None | Some(Command::Help) => write_help(stdout),
@@ -196,7 +280,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Cli, Command, OutputFormat, run};
+    use super::{Cli, Command, FieldsLevel, OutputFormat, run};
     use crate::models::ProcessExitCode;
 
     type TestResult = Result<(), String>;
@@ -435,5 +519,124 @@ mod tests {
             "\"repair\":\"ee --help\"",
             "json error repair hint",
         )
+    }
+
+    #[test]
+    fn schema_flag_outputs_json_schema_info() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--schema"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "schema exit")?;
+        ensure_starts_with(&stdout, "{\"schema\":\"ee.response.v1\"", "schema envelope")?;
+        ensure_contains(&stdout, "\"command\":\"schema\"", "schema command field")?;
+        ensure(stderr.is_empty(), "schema stderr must be empty")
+    }
+
+    #[test]
+    fn help_json_flag_outputs_json_help() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--help-json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "help-json exit")?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.response.v1\"",
+            "help-json envelope",
+        )?;
+        ensure_contains(&stdout, "\"command\":\"help\"", "help-json command field")?;
+        ensure(stderr.is_empty(), "help-json stderr must be empty")
+    }
+
+    #[test]
+    fn agent_docs_flag_outputs_documentation() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--agent-docs"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "agent-docs exit")?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.response.v1\"",
+            "agent-docs envelope",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"command\":\"agent-docs\"",
+            "agent-docs command field",
+        )?;
+        ensure(stderr.is_empty(), "agent-docs stderr must be empty")
+    }
+
+    #[test]
+    fn parser_accepts_fields_flag() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "--fields", "minimal", "status"])
+            .map(|cli| cli.fields)
+            .map_err(|error| format!("failed to parse fields flag: {:?}", error.kind()))?;
+        ensure_equal(&parsed, &FieldsLevel::Minimal, "fields minimal")
+    }
+
+    #[test]
+    fn parser_accepts_all_fields_levels() -> TestResult {
+        for (arg, expected) in [
+            ("minimal", FieldsLevel::Minimal),
+            ("summary", FieldsLevel::Summary),
+            ("standard", FieldsLevel::Standard),
+            ("full", FieldsLevel::Full),
+        ] {
+            let parsed = Cli::try_parse_from(["ee", "--fields", arg, "status"])
+                .map(|cli| cli.fields)
+                .map_err(|error| format!("failed to parse --fields {arg}: {:?}", error.kind()))?;
+            ensure_equal(&parsed, &expected, &format!("fields {arg}"))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parser_accepts_meta_flag() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "--meta", "status"])
+            .map(|cli| cli.meta)
+            .map_err(|error| format!("failed to parse meta flag: {:?}", error.kind()))?;
+        ensure_equal(&parsed, &true, "meta flag")
+    }
+
+    #[test]
+    fn parser_accepts_all_format_values() -> TestResult {
+        for (arg, expected) in [
+            ("human", OutputFormat::Human),
+            ("json", OutputFormat::Json),
+            ("toon", OutputFormat::Toon),
+            ("jsonl", OutputFormat::Jsonl),
+            ("compact", OutputFormat::Compact),
+            ("hook", OutputFormat::Hook),
+        ] {
+            let parsed = Cli::try_parse_from(["ee", "--format", arg, "status"])
+                .map(|cli| cli.format)
+                .map_err(|error| format!("failed to parse --format {arg}: {:?}", error.kind()))?;
+            ensure_equal(&parsed, &expected, &format!("format {arg}"))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn format_is_machine_readable_classification() -> TestResult {
+        ensure(
+            !OutputFormat::Human.is_machine_readable(),
+            "human not machine",
+        )?;
+        ensure(
+            !OutputFormat::Toon.is_machine_readable(),
+            "toon not machine",
+        )?;
+        ensure(OutputFormat::Json.is_machine_readable(), "json is machine")?;
+        ensure(
+            OutputFormat::Jsonl.is_machine_readable(),
+            "jsonl is machine",
+        )?;
+        ensure(
+            OutputFormat::Compact.is_machine_readable(),
+            "compact is machine",
+        )?;
+        ensure(OutputFormat::Hook.is_machine_readable(), "hook is machine")
+    }
+
+    #[test]
+    fn fields_level_as_str_returns_stable_names() -> TestResult {
+        ensure_equal(&FieldsLevel::Minimal.as_str(), &"minimal", "minimal")?;
+        ensure_equal(&FieldsLevel::Summary.as_str(), &"summary", "summary")?;
+        ensure_equal(&FieldsLevel::Standard.as_str(), &"standard", "standard")?;
+        ensure_equal(&FieldsLevel::Full.as_str(), &"full", "full")
     }
 }
