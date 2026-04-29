@@ -1,0 +1,28 @@
+# ee - Formatting Policy (EE-002)
+# Run: cargo fmt --check  (verify)
+# Run: cargo fmt          (apply)
+
+edition = "2024"
+
+# Line width - 100 is more practical than 80 for modern screens
+max_width = 100
+
+# Use default heuristics for deciding when to break lines
+use_small_heuristics = "Default"
+
+# Trailing commas in multi-line sequences
+trailing_comma = "Vertical"
+
+# Braces on same line as function/struct declaration
+brace_style = "SameLineWhere"
+
+# Don't reformat comments
+normalize_comments = false
+wrap_comments = false
+
+# Format code examples in doc comments
+format_code_in_doc_comments = true
+
+# Use shorthand where possible
+use_field_init_shorthand = true
+use_try_shorthand = true

@@ -79,11 +79,19 @@ fnx-dispatch = { path = "/data/projects/franken_networkx/crates/fnx-dispatch" }
 fnx-convert = { path = "/data/projects/franken_networkx/crates/fnx-convert" }
 fnx-generators = { path = "/data/projects/franken_networkx/crates/fnx-generators" }
 
+# Lint Policy (EE-002)
+# CI runs: cargo clippy --all-targets -- -D warnings
+# See AGENTS.md for rationale.
+
 [lints.rust]
 unsafe_code = "forbid"
 
 [lints.clippy]
+# Core safety lints - discourage panic paths in library code
 dbg_macro = "warn"
 todo = "warn"
 unwrap_used = "warn"
 expect_used = "warn"
+
+# Tests may use #[allow(clippy::unwrap_used)] or #[allow(clippy::expect_used)]
+# when the context makes the assertion obvious
