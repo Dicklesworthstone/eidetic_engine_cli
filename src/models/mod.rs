@@ -1,5 +1,6 @@
 use std::process::ExitCode;
 
+pub mod error_codes;
 pub mod id;
 pub mod memory;
 pub mod provenance;

@@ -198,9 +198,7 @@ impl FromStr for RuleMaturity {
 mod tests {
     use std::str::FromStr;
 
-    use super::{
-        ParseRuleMaturityError, ParseRuleScopeError, RuleMaturity, RuleScope,
-    };
+    use super::{ParseRuleMaturityError, ParseRuleScopeError, RuleMaturity, RuleScope};
 
     #[test]
     fn rule_scope_round_trip_for_every_variant() {

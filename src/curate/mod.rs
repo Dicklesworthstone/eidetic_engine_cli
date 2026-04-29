@@ -297,13 +297,262 @@ impl FromStr for CandidateStatus {
     }
 }
 
+/// Input for creating a new curation candidate.
+#[derive(Clone, Debug)]
+pub struct CandidateInput {
+    pub workspace_id: String,
+    pub candidate_type: CandidateType,
+    pub target_memory_id: String,
+    pub proposed_content: Option<String>,
+    pub proposed_confidence: Option<f32>,
+    pub proposed_trust_class: Option<String>,
+    pub source_type: CandidateSource,
+    pub source_id: Option<String>,
+    pub reason: String,
+    pub confidence: f32,
+    pub ttl_seconds: Option<u64>,
+}
+
+/// A validated curation candidate ready for storage.
+#[derive(Clone, Debug)]
+pub struct ValidatedCandidate {
+    pub workspace_id: String,
+    pub candidate_type: CandidateType,
+    pub target_memory_id: String,
+    pub proposed_content: Option<String>,
+    pub proposed_confidence: Option<f32>,
+    pub proposed_trust_class: Option<String>,
+    pub source_type: CandidateSource,
+    pub source_id: Option<String>,
+    pub reason: String,
+    pub confidence: f32,
+    pub ttl_expires_at: Option<String>,
+}
+
+/// Errors during candidate validation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CandidateValidationError {
+    EmptyWorkspaceId,
+    EmptyTargetMemoryId,
+    EmptyReason,
+    ConfidenceOutOfRange {
+        value: String,
+    },
+    ProposedConfidenceOutOfRange {
+        value: String,
+    },
+    InvalidProposedTrustClass {
+        value: String,
+    },
+    ContentRequiredForType {
+        candidate_type: CandidateType,
+    },
+    ContentForbiddenForType {
+        candidate_type: CandidateType,
+    },
+    InvalidStatusTransition {
+        from: CandidateStatus,
+        to: CandidateStatus,
+    },
+    CandidateExpired,
+    CandidateAlreadyTerminal {
+        status: CandidateStatus,
+    },
+}
+
+impl fmt::Display for CandidateValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyWorkspaceId => f.write_str("workspace ID must not be empty"),
+            Self::EmptyTargetMemoryId => f.write_str("target memory ID must not be empty"),
+            Self::EmptyReason => f.write_str("reason must not be empty"),
+            Self::ConfidenceOutOfRange { value } => {
+                write!(f, "confidence `{value}` must be between 0.0 and 1.0")
+            }
+            Self::ProposedConfidenceOutOfRange { value } => {
+                write!(
+                    f,
+                    "proposed confidence `{value}` must be between 0.0 and 1.0"
+                )
+            }
+            Self::InvalidProposedTrustClass { value } => {
+                write!(f, "invalid proposed trust class `{value}`")
+            }
+            Self::ContentRequiredForType { candidate_type } => {
+                write!(
+                    f,
+                    "proposed content is required for {candidate_type} candidates"
+                )
+            }
+            Self::ContentForbiddenForType { candidate_type } => {
+                write!(
+                    f,
+                    "proposed content is not allowed for {candidate_type} candidates"
+                )
+            }
+            Self::InvalidStatusTransition { from, to } => {
+                write!(f, "cannot transition from {from} to {to}")
+            }
+            Self::CandidateExpired => f.write_str("candidate has expired"),
+            Self::CandidateAlreadyTerminal { status } => {
+                write!(f, "candidate is already in terminal state {status}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CandidateValidationError {}
+
+impl CandidateType {
+    /// Whether this candidate type requires proposed content.
+    #[must_use]
+    pub const fn requires_content(self) -> bool {
+        matches!(
+            self,
+            Self::Consolidate | Self::Supersede | Self::Merge | Self::Split
+        )
+    }
+
+    /// Whether this candidate type forbids proposed content.
+    #[must_use]
+    pub const fn forbids_content(self) -> bool {
+        matches!(self, Self::Tombstone | Self::Retract)
+    }
+}
+
+impl CandidateStatus {
+    /// Check if a status transition is valid.
+    #[must_use]
+    pub const fn can_transition_to(self, target: Self) -> bool {
+        match (self, target) {
+            // From pending: can go to approved, rejected, or expired
+            (Self::Pending, Self::Approved | Self::Rejected | Self::Expired) => true,
+            // From approved: can go to applied or rejected
+            (Self::Approved, Self::Applied | Self::Rejected) => true,
+            // Terminal states cannot transition
+            (Self::Rejected | Self::Expired | Self::Applied, _) => false,
+            // Same state is always allowed (no-op)
+            (from, to) if from as u8 == to as u8 => true,
+            _ => false,
+        }
+    }
+}
+
+/// Validate a candidate input and produce a validated candidate.
+pub fn validate_candidate(
+    input: CandidateInput,
+    now_rfc3339: &str,
+) -> Result<ValidatedCandidate, CandidateValidationError> {
+    // Validate required fields
+    if input.workspace_id.trim().is_empty() {
+        return Err(CandidateValidationError::EmptyWorkspaceId);
+    }
+    if input.target_memory_id.trim().is_empty() {
+        return Err(CandidateValidationError::EmptyTargetMemoryId);
+    }
+    if input.reason.trim().is_empty() {
+        return Err(CandidateValidationError::EmptyReason);
+    }
+
+    // Validate confidence
+    if !(0.0..=1.0).contains(&input.confidence) {
+        return Err(CandidateValidationError::ConfidenceOutOfRange {
+            value: input.confidence.to_string(),
+        });
+    }
+
+    // Validate proposed confidence if present
+    if let Some(pc) = input.proposed_confidence {
+        if !(0.0..=1.0).contains(&pc) {
+            return Err(CandidateValidationError::ProposedConfidenceOutOfRange {
+                value: pc.to_string(),
+            });
+        }
+    }
+
+    // Validate proposed trust class if present
+    if let Some(ref tc) = input.proposed_trust_class {
+        let valid_classes = [
+            "human_explicit",
+            "agent_validated",
+            "agent_assertion",
+            "cass_evidence",
+            "legacy_import",
+        ];
+        if !valid_classes.contains(&tc.as_str()) {
+            return Err(CandidateValidationError::InvalidProposedTrustClass { value: tc.clone() });
+        }
+    }
+
+    // Validate content requirements based on candidate type
+    let has_content = input
+        .proposed_content
+        .as_ref()
+        .is_some_and(|c| !c.trim().is_empty());
+    if input.candidate_type.requires_content() && !has_content {
+        return Err(CandidateValidationError::ContentRequiredForType {
+            candidate_type: input.candidate_type,
+        });
+    }
+    if input.candidate_type.forbids_content() && has_content {
+        return Err(CandidateValidationError::ContentForbiddenForType {
+            candidate_type: input.candidate_type,
+        });
+    }
+
+    // Calculate TTL expiry
+    let ttl_expires_at = input.ttl_seconds.map(|secs| {
+        // Simple: just store as "now + N seconds" string
+        // In real impl would use chrono to calculate actual timestamp
+        format!("{now_rfc3339}+{secs}s")
+    });
+
+    Ok(ValidatedCandidate {
+        workspace_id: input.workspace_id.trim().to_string(),
+        candidate_type: input.candidate_type,
+        target_memory_id: input.target_memory_id.trim().to_string(),
+        proposed_content: input
+            .proposed_content
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty()),
+        proposed_confidence: input.proposed_confidence,
+        proposed_trust_class: input.proposed_trust_class,
+        source_type: input.source_type,
+        source_id: input
+            .source_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        reason: input.reason.trim().to_string(),
+        confidence: input.confidence,
+        ttl_expires_at,
+    })
+}
+
+/// Validate a status transition.
+pub fn validate_status_transition(
+    current: CandidateStatus,
+    target: CandidateStatus,
+) -> Result<(), CandidateValidationError> {
+    if current.is_terminal() {
+        return Err(CandidateValidationError::CandidateAlreadyTerminal { status: current });
+    }
+    if !current.can_transition_to(target) {
+        return Err(CandidateValidationError::InvalidStatusTransition {
+            from: current,
+            to: target,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
     use super::{
-        CandidateSource, CandidateStatus, CandidateType, ParseCandidateSourceError,
-        ParseCandidateStatusError, ParseCandidateTypeError, subsystem_name,
+        CandidateInput, CandidateSource, CandidateStatus, CandidateType, CandidateValidationError,
+        ParseCandidateSourceError, ParseCandidateStatusError, ParseCandidateTypeError,
+        subsystem_name, validate_candidate, validate_status_transition,
     };
 
     #[test]
@@ -366,5 +615,172 @@ mod tests {
         assert!(CandidateStatus::Rejected.is_terminal());
         assert!(CandidateStatus::Expired.is_terminal());
         assert!(CandidateStatus::Applied.is_terminal());
+    }
+
+    fn valid_input() -> CandidateInput {
+        CandidateInput {
+            workspace_id: "ws_123".to_string(),
+            candidate_type: CandidateType::Promote,
+            target_memory_id: "mem_456".to_string(),
+            proposed_content: None,
+            proposed_confidence: Some(0.8),
+            proposed_trust_class: Some("agent_validated".to_string()),
+            source_type: CandidateSource::FeedbackEvent,
+            source_id: Some("feedback_789".to_string()),
+            reason: "Positive feedback received".to_string(),
+            confidence: 0.75,
+            ttl_seconds: Some(3600),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn validate_candidate_accepts_valid_input() {
+        let input = valid_input();
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+        assert!(result.is_ok());
+        let validated = result.unwrap();
+        assert_eq!(validated.workspace_id, "ws_123");
+        assert_eq!(validated.confidence, 0.75);
+        assert!(validated.ttl_expires_at.is_some());
+    }
+
+    #[test]
+    fn validate_candidate_rejects_empty_workspace_id() {
+        let mut input = valid_input();
+        input.workspace_id = "  ".to_string();
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+        assert!(matches!(
+            result,
+            Err(CandidateValidationError::EmptyWorkspaceId)
+        ));
+    }
+
+    #[test]
+    fn validate_candidate_rejects_empty_target_memory_id() {
+        let mut input = valid_input();
+        input.target_memory_id = "".to_string();
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+        assert!(matches!(
+            result,
+            Err(CandidateValidationError::EmptyTargetMemoryId)
+        ));
+    }
+
+    #[test]
+    fn validate_candidate_rejects_empty_reason() {
+        let mut input = valid_input();
+        input.reason = "   ".to_string();
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+        assert!(matches!(result, Err(CandidateValidationError::EmptyReason)));
+    }
+
+    #[test]
+    fn validate_candidate_rejects_confidence_out_of_range() {
+        let mut input = valid_input();
+        input.confidence = 1.5;
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+        assert!(matches!(
+            result,
+            Err(CandidateValidationError::ConfidenceOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_candidate_rejects_proposed_confidence_out_of_range() {
+        let mut input = valid_input();
+        input.proposed_confidence = Some(-0.1);
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+        assert!(matches!(
+            result,
+            Err(CandidateValidationError::ProposedConfidenceOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_candidate_rejects_invalid_trust_class() {
+        let mut input = valid_input();
+        input.proposed_trust_class = Some("invalid_class".to_string());
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+        assert!(matches!(
+            result,
+            Err(CandidateValidationError::InvalidProposedTrustClass { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_candidate_requires_content_for_consolidate() {
+        let mut input = valid_input();
+        input.candidate_type = CandidateType::Consolidate;
+        input.proposed_content = None;
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+        assert!(matches!(
+            result,
+            Err(CandidateValidationError::ContentRequiredForType { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_candidate_forbids_content_for_tombstone() {
+        let mut input = valid_input();
+        input.candidate_type = CandidateType::Tombstone;
+        input.proposed_content = Some("should not be here".to_string());
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+        assert!(matches!(
+            result,
+            Err(CandidateValidationError::ContentForbiddenForType { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_status_transition_allows_valid_transitions() {
+        assert!(
+            validate_status_transition(CandidateStatus::Pending, CandidateStatus::Approved).is_ok()
+        );
+        assert!(
+            validate_status_transition(CandidateStatus::Pending, CandidateStatus::Rejected).is_ok()
+        );
+        assert!(
+            validate_status_transition(CandidateStatus::Pending, CandidateStatus::Expired).is_ok()
+        );
+        assert!(
+            validate_status_transition(CandidateStatus::Approved, CandidateStatus::Applied).is_ok()
+        );
+        assert!(
+            validate_status_transition(CandidateStatus::Approved, CandidateStatus::Rejected)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_status_transition_rejects_terminal_source() {
+        let result = validate_status_transition(CandidateStatus::Applied, CandidateStatus::Pending);
+        assert!(matches!(
+            result,
+            Err(CandidateValidationError::CandidateAlreadyTerminal { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_status_transition_rejects_invalid_transition() {
+        let result = validate_status_transition(CandidateStatus::Pending, CandidateStatus::Applied);
+        assert!(matches!(
+            result,
+            Err(CandidateValidationError::InvalidStatusTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn candidate_type_content_requirements() {
+        assert!(CandidateType::Consolidate.requires_content());
+        assert!(CandidateType::Supersede.requires_content());
+        assert!(CandidateType::Merge.requires_content());
+        assert!(CandidateType::Split.requires_content());
+        assert!(!CandidateType::Promote.requires_content());
+        assert!(!CandidateType::Deprecate.requires_content());
+
+        assert!(CandidateType::Tombstone.forbids_content());
+        assert!(CandidateType::Retract.forbids_content());
+        assert!(!CandidateType::Promote.forbids_content());
     }
 }

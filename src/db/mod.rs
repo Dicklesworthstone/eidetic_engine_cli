@@ -854,12 +854,49 @@ CREATE INDEX idx_rule_tags_tag ON rule_tags(tag);
     "blake3:v004_procedural_rules_2026_04_29",
 );
 
+/// V005: Add search_index_jobs table (EE-123).
+pub const V005_SEARCH_INDEX_JOBS: Migration = Migration::new(
+    5,
+    "search_index_jobs",
+    r#"
+-- Search index jobs table (EE-123)
+-- Tracks indexing jobs for Frankensearch integration.
+CREATE TABLE search_index_jobs (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'sidx_*' AND length(id) = 31),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    job_type TEXT NOT NULL CHECK (job_type IN (
+        'full_rebuild', 'incremental', 'single_document'
+    )),
+    document_source TEXT CHECK (document_source IS NULL OR document_source IN (
+        'memory', 'session', 'rule', 'import'
+    )),
+    document_id TEXT CHECK (document_id IS NULL OR length(trim(document_id)) > 0),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
+        'pending', 'running', 'completed', 'failed', 'cancelled'
+    )),
+    documents_total INTEGER NOT NULL DEFAULT 0 CHECK (documents_total >= 0),
+    documents_indexed INTEGER NOT NULL DEFAULT 0 CHECK (documents_indexed >= 0),
+    error_message TEXT CHECK (error_message IS NULL OR length(trim(error_message)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    started_at TEXT CHECK (started_at IS NULL OR length(trim(started_at)) > 0),
+    completed_at TEXT CHECK (completed_at IS NULL OR length(trim(completed_at)) > 0)
+);
+
+CREATE INDEX idx_search_index_jobs_workspace ON search_index_jobs(workspace_id);
+CREATE INDEX idx_search_index_jobs_status ON search_index_jobs(status);
+CREATE INDEX idx_search_index_jobs_created ON search_index_jobs(created_at);
+CREATE INDEX idx_search_index_jobs_type ON search_index_jobs(job_type);
+"#,
+    "blake3:v005_search_index_jobs_2026_04_29",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
     V002_TRUST_CLASS,
     V003_CURATION_CANDIDATES,
     V004_PROCEDURAL_RULES,
+    V005_SEARCH_INDEX_JOBS,
 ];
 
 /// Result of applying migrations.
@@ -1366,6 +1403,313 @@ fn stored_audit_from_row(row: &Row) -> Result<StoredAuditEntry> {
     })
 }
 
+/// Job type for search indexing operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchIndexJobType {
+    FullRebuild,
+    Incremental,
+    SingleDocument,
+}
+
+impl SearchIndexJobType {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FullRebuild => "full_rebuild",
+            Self::Incremental => "incremental",
+            Self::SingleDocument => "single_document",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "full_rebuild" => Some(Self::FullRebuild),
+            "incremental" => Some(Self::Incremental),
+            "single_document" => Some(Self::SingleDocument),
+            _ => None,
+        }
+    }
+}
+
+/// Status of a search index job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchIndexJobStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl SearchIndexJobStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(Self::Pending),
+            "running" => Some(Self::Running),
+            "completed" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
+/// Input for creating a new search index job.
+#[derive(Debug, Clone)]
+pub struct CreateSearchIndexJobInput {
+    pub workspace_id: String,
+    pub job_type: SearchIndexJobType,
+    pub document_source: Option<String>,
+    pub document_id: Option<String>,
+    pub documents_total: u32,
+}
+
+/// A stored search index job row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSearchIndexJob {
+    pub id: String,
+    pub workspace_id: String,
+    pub job_type: String,
+    pub document_source: Option<String>,
+    pub document_id: Option<String>,
+    pub status: String,
+    pub documents_total: u32,
+    pub documents_indexed: u32,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+impl StoredSearchIndexJob {
+    #[must_use]
+    pub fn job_type_enum(&self) -> Option<SearchIndexJobType> {
+        SearchIndexJobType::from_str(&self.job_type)
+    }
+
+    #[must_use]
+    pub fn status_enum(&self) -> Option<SearchIndexJobStatus> {
+        SearchIndexJobStatus::from_str(&self.status)
+    }
+}
+
+impl DbConnection {
+    /// Insert a new search index job.
+    pub fn insert_search_index_job(
+        &self,
+        id: &str,
+        input: &CreateSearchIndexJobInput,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO search_index_jobs (id, workspace_id, job_type, document_source, document_id, status, documents_total, documents_indexed, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.job_type.as_str().to_string()),
+                input.document_source.as_ref().map_or(Value::Null, |s| Value::Text(s.clone())),
+                input.document_id.as_ref().map_or(Value::Null, |s| Value::Text(s.clone())),
+                Value::Text(SearchIndexJobStatus::Pending.as_str().to_string()),
+                Value::BigInt(i64::from(input.documents_total)),
+                Value::BigInt(0),
+                Value::Text(now),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get a search index job by ID.
+    pub fn get_search_index_job(&self, id: &str) -> Result<Option<StoredSearchIndexJob>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, job_type, document_source, document_id, status, documents_total, documents_indexed, error_message, created_at, started_at, completed_at FROM search_index_jobs WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first()
+            .map(stored_search_index_job_from_row)
+            .transpose()
+    }
+
+    /// List search index jobs for a workspace, optionally filtered by status.
+    pub fn list_search_index_jobs(
+        &self,
+        workspace_id: &str,
+        status: Option<SearchIndexJobStatus>,
+    ) -> Result<Vec<StoredSearchIndexJob>> {
+        let mut sql = String::from(
+            "SELECT id, workspace_id, job_type, document_source, document_id, status, documents_total, documents_indexed, error_message, created_at, started_at, completed_at FROM search_index_jobs WHERE workspace_id = ?1",
+        );
+        let mut params: Vec<Value> = vec![Value::Text(workspace_id.to_string())];
+
+        if let Some(s) = status {
+            sql.push_str(" AND status = ?2");
+            params.push(Value::Text(s.as_str().to_string()));
+        }
+
+        sql.push_str(" ORDER BY created_at DESC");
+
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter()
+            .map(stored_search_index_job_from_row)
+            .collect()
+    }
+
+    /// Start a search index job (set status to running).
+    pub fn start_search_index_job(&self, id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE search_index_jobs SET status = ?1, started_at = ?2 WHERE id = ?3 AND status = ?4",
+            &[
+                Value::Text(SearchIndexJobStatus::Running.as_str().to_string()),
+                Value::Text(now),
+                Value::Text(id.to_string()),
+                Value::Text(SearchIndexJobStatus::Pending.as_str().to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Update progress of a search index job.
+    pub fn update_search_index_job_progress(
+        &self,
+        id: &str,
+        documents_indexed: u32,
+    ) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE search_index_jobs SET documents_indexed = ?1 WHERE id = ?2 AND status = ?3",
+            &[
+                Value::BigInt(i64::from(documents_indexed)),
+                Value::Text(id.to_string()),
+                Value::Text(SearchIndexJobStatus::Running.as_str().to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Complete a search index job successfully.
+    pub fn complete_search_index_job(&self, id: &str, documents_indexed: u32) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE search_index_jobs SET status = ?1, documents_indexed = ?2, completed_at = ?3 WHERE id = ?4 AND status = ?5",
+            &[
+                Value::Text(SearchIndexJobStatus::Completed.as_str().to_string()),
+                Value::BigInt(i64::from(documents_indexed)),
+                Value::Text(now),
+                Value::Text(id.to_string()),
+                Value::Text(SearchIndexJobStatus::Running.as_str().to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Fail a search index job with an error message.
+    pub fn fail_search_index_job(&self, id: &str, error_message: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE search_index_jobs SET status = ?1, error_message = ?2, completed_at = ?3 WHERE id = ?4 AND status = ?5",
+            &[
+                Value::Text(SearchIndexJobStatus::Failed.as_str().to_string()),
+                Value::Text(error_message.to_string()),
+                Value::Text(now),
+                Value::Text(id.to_string()),
+                Value::Text(SearchIndexJobStatus::Running.as_str().to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Cancel a pending search index job.
+    pub fn cancel_search_index_job(&self, id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE search_index_jobs SET status = ?1, completed_at = ?2 WHERE id = ?3 AND status = ?4",
+            &[
+                Value::Text(SearchIndexJobStatus::Cancelled.as_str().to_string()),
+                Value::Text(now),
+                Value::Text(id.to_string()),
+                Value::Text(SearchIndexJobStatus::Pending.as_str().to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Get the latest search index job for a workspace (regardless of status).
+    pub fn latest_search_index_job(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<StoredSearchIndexJob>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, job_type, document_source, document_id, status, documents_total, documents_indexed, error_message, created_at, started_at, completed_at FROM search_index_jobs WHERE workspace_id = ?1 ORDER BY created_at DESC LIMIT 1",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+
+        rows.first()
+            .map(stored_search_index_job_from_row)
+            .transpose()
+    }
+}
+
+fn stored_search_index_job_from_row(row: &Row) -> Result<StoredSearchIndexJob> {
+    Ok(StoredSearchIndexJob {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        job_type: required_text(row, 2, DbOperation::Query, "job_type")?.to_string(),
+        document_source: optional_text(row, 3)?.map(str::to_string),
+        document_id: optional_text(row, 4)?.map(str::to_string),
+        status: required_text(row, 5, DbOperation::Query, "status")?.to_string(),
+        documents_total: u32::try_from(required_i64(
+            row,
+            6,
+            DbOperation::Query,
+            "documents_total",
+        )?)
+        .map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "documents_total must fit u32".to_string(),
+        })?,
+        documents_indexed: u32::try_from(required_i64(
+            row,
+            7,
+            DbOperation::Query,
+            "documents_indexed",
+        )?)
+        .map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "documents_indexed must fit u32".to_string(),
+        })?,
+        error_message: optional_text(row, 8)?.map(str::to_string),
+        created_at: required_text(row, 9, DbOperation::Query, "created_at")?.to_string(),
+        started_at: optional_text(row, 10)?.map(str::to_string),
+        completed_at: optional_text(row, 11)?.map(str::to_string),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error as StdError;
@@ -1726,8 +2070,8 @@ mod tests {
 
         ensure_equal(
             &result.applied().to_vec(),
-            &vec![1u32, 2, 3],
-            "V001, V002, V003 must be applied",
+            &vec![1u32, 2, 3, 4, 5],
+            "V001-V005 must be applied",
         )?;
         ensure_equal(&result.skipped().len(), &0, "no migrations skipped")?;
 
@@ -1761,6 +2105,10 @@ mod tests {
             table_names.contains(&"ee_schema_migrations"),
             "migration table must exist",
         )?;
+        ensure(
+            table_names.contains(&"search_index_jobs"),
+            "search_index_jobs table must exist",
+        )?;
 
         connection.close()?;
         Ok(())
@@ -1773,16 +2121,16 @@ mod tests {
         let first = connection.migrate()?;
         ensure_equal(
             &first.applied().to_vec(),
-            &vec![1u32, 2, 3],
-            "first run applies V001, V002, V003",
+            &vec![1u32, 2, 3, 4, 5],
+            "first run applies V001-V005",
         )?;
 
         let second = connection.migrate()?;
         ensure_equal(&second.applied().len(), &0, "second run applies nothing")?;
         ensure_equal(
             &second.skipped().to_vec(),
-            &vec![1u32, 2, 3],
-            "second run skips V001, V002, V003",
+            &vec![1u32, 2, 3, 4, 5],
+            "second run skips V001-V005",
         )?;
 
         connection.close()?;
@@ -1823,8 +2171,8 @@ mod tests {
 
         ensure_equal(
             &connection.schema_version()?,
-            &Some(3),
-            "after migrations, schema version is 3",
+            &Some(5),
+            "after migrations, schema version is 5",
         )?;
 
         connection.close()?;
