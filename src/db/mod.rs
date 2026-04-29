@@ -682,8 +682,69 @@ CREATE INDEX idx_audit_log_target ON audit_log(target_type, target_id);
     "blake3:v001_wsp_audit_2026_04_29",
 );
 
+/// V002: Add trust class fields to memories (ADR-0009).
+pub const V002_TRUST_CLASS: Migration = Migration::new(
+    2,
+    "add_trust_class",
+    r#"
+-- Add trust class fields to memories (ADR-0009)
+ALTER TABLE memories ADD COLUMN trust_class TEXT NOT NULL DEFAULT 'agent_assertion'
+    CHECK (trust_class IN ('human_explicit', 'agent_validated', 'agent_assertion', 'cass_evidence', 'legacy_import'));
+
+ALTER TABLE memories ADD COLUMN trust_subclass TEXT
+    CHECK (trust_subclass IS NULL OR length(trim(trust_subclass)) > 0);
+
+-- Create index for trust class filtering
+CREATE INDEX idx_memories_trust_class ON memories(trust_class);
+"#,
+    "blake3:v002_trust_class_2026_04_29",
+);
+
+/// V003: Add curation candidates table (EE-180, ADR-0006).
+pub const V003_CURATION_CANDIDATES: Migration = Migration::new(
+    3,
+    "curation_candidates",
+    r#"
+-- Curation candidates table (EE-180, ADR-0006)
+-- Every promotion, consolidation, or tombstone goes through this auditable queue.
+CREATE TABLE curation_candidates (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'curate_*' AND length(id) = 33),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    candidate_type TEXT NOT NULL CHECK (candidate_type IN (
+        'consolidate', 'promote', 'deprecate', 'supersede', 'tombstone', 'merge', 'split', 'retract'
+    )),
+    target_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    proposed_content TEXT CHECK (proposed_content IS NULL OR length(trim(proposed_content)) > 0),
+    proposed_confidence REAL CHECK (proposed_confidence IS NULL OR (proposed_confidence >= 0.0 AND proposed_confidence <= 1.0)),
+    proposed_trust_class TEXT CHECK (proposed_trust_class IS NULL OR proposed_trust_class IN (
+        'human_explicit', 'agent_validated', 'agent_assertion', 'cass_evidence', 'legacy_import'
+    )),
+    source_type TEXT NOT NULL CHECK (source_type IN (
+        'agent_inference', 'rule_engine', 'human_request', 'feedback_event', 'contradiction_detected', 'decay_trigger'
+    )),
+    source_id TEXT CHECK (source_id IS NULL OR length(trim(source_id)) > 0),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'applied')),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    reviewed_at TEXT CHECK (reviewed_at IS NULL OR length(trim(reviewed_at)) > 0),
+    reviewed_by TEXT CHECK (reviewed_by IS NULL OR length(trim(reviewed_by)) > 0),
+    applied_at TEXT CHECK (applied_at IS NULL OR length(trim(applied_at)) > 0),
+    ttl_expires_at TEXT CHECK (ttl_expires_at IS NULL OR length(trim(ttl_expires_at)) > 0)
+);
+
+CREATE INDEX idx_curation_candidates_workspace ON curation_candidates(workspace_id);
+CREATE INDEX idx_curation_candidates_target ON curation_candidates(target_memory_id);
+CREATE INDEX idx_curation_candidates_status ON curation_candidates(status);
+CREATE INDEX idx_curation_candidates_type ON curation_candidates(candidate_type);
+CREATE INDEX idx_curation_candidates_created ON curation_candidates(created_at);
+CREATE INDEX idx_curation_candidates_ttl ON curation_candidates(ttl_expires_at) WHERE ttl_expires_at IS NOT NULL;
+"#,
+    "blake3:v003_curation_candidates_2026_04_29",
+);
+
 /// All migrations in version order.
-pub const MIGRATIONS: &[Migration] = &[V001_INIT_SCHEMA];
+pub const MIGRATIONS: &[Migration] = &[V001_INIT_SCHEMA, V002_TRUST_CLASS, V003_CURATION_CANDIDATES];
 
 /// Result of applying migrations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -769,6 +830,8 @@ pub struct CreateMemoryInput {
     pub utility: f32,
     pub importance: f32,
     pub provenance_uri: Option<String>,
+    pub trust_class: String,
+    pub trust_subclass: Option<String>,
     pub tags: Vec<String>,
 }
 
@@ -784,6 +847,8 @@ pub struct StoredMemory {
     pub utility: f32,
     pub importance: f32,
     pub provenance_uri: Option<String>,
+    pub trust_class: String,
+    pub trust_subclass: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub tombstoned_at: Option<String>,
@@ -796,7 +861,7 @@ impl DbConnection {
 
         self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             &[
                 Value::Text(id.to_string()),
                 Value::Text(input.workspace_id.clone()),
@@ -807,6 +872,8 @@ impl DbConnection {
                 Value::Float(input.utility),
                 Value::Float(input.importance),
                 input.provenance_uri.as_ref().map_or(Value::Null, |uri| Value::Text(uri.clone())),
+                Value::Text(input.trust_class.clone()),
+                input.trust_subclass.as_ref().map_or(Value::Null, |s| Value::Text(s.clone())),
                 Value::Text(now.clone()),
                 Value::Text(now),
             ],
@@ -827,7 +894,7 @@ impl DbConnection {
     pub fn get_memory(&self, id: &str) -> Result<Option<StoredMemory>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, created_at, updated_at, tombstoned_at FROM memories WHERE id = ?1",
+            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, created_at, updated_at, tombstoned_at FROM memories WHERE id = ?1",
             &[Value::Text(id.to_string())],
         )?;
 
@@ -842,7 +909,7 @@ impl DbConnection {
         include_tombstoned: bool,
     ) -> Result<Vec<StoredMemory>> {
         let mut sql = String::from(
-            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, created_at, updated_at, tombstoned_at FROM memories WHERE workspace_id = ?1",
+            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, created_at, updated_at, tombstoned_at FROM memories WHERE workspace_id = ?1",
         );
         let mut params: Vec<Value> = vec![Value::Text(workspace_id.to_string())];
 
@@ -921,9 +988,11 @@ fn stored_memory_from_row(row: &Row) -> Result<StoredMemory> {
         utility: required_f64(row, 6, DbOperation::Query, "utility")? as f32,
         importance: required_f64(row, 7, DbOperation::Query, "importance")? as f32,
         provenance_uri: optional_text(row, 8)?.map(str::to_string),
-        created_at: required_text(row, 9, DbOperation::Query, "created_at")?.to_string(),
-        updated_at: required_text(row, 10, DbOperation::Query, "updated_at")?.to_string(),
-        tombstoned_at: optional_text(row, 11)?.map(str::to_string),
+        trust_class: required_text(row, 9, DbOperation::Query, "trust_class")?.to_string(),
+        trust_subclass: optional_text(row, 10)?.map(str::to_string),
+        created_at: required_text(row, 11, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 12, DbOperation::Query, "updated_at")?.to_string(),
+        tombstoned_at: optional_text(row, 13)?.map(str::to_string),
     })
 }
 
@@ -1303,8 +1372,8 @@ mod tests {
 
         ensure_equal(
             &result.applied().to_vec(),
-            &vec![1u32],
-            "V001 must be applied",
+            &vec![1u32, 2],
+            "V001 and V002 must be applied",
         )?;
         ensure_equal(&result.skipped().len(), &0, "no migrations skipped")?;
 
@@ -1350,16 +1419,16 @@ mod tests {
         let first = connection.migrate()?;
         ensure_equal(
             &first.applied().to_vec(),
-            &vec![1u32],
-            "first run applies V001",
+            &vec![1u32, 2],
+            "first run applies V001 and V002",
         )?;
 
         let second = connection.migrate()?;
         ensure_equal(&second.applied().len(), &0, "second run applies nothing")?;
         ensure_equal(
             &second.skipped().to_vec(),
-            &vec![1u32],
-            "second run skips V001",
+            &vec![1u32, 2],
+            "second run skips V001 and V002",
         )?;
 
         connection.close()?;
@@ -1400,8 +1469,8 @@ mod tests {
 
         ensure_equal(
             &connection.schema_version()?,
-            &Some(1),
-            "after V001, schema version is 1",
+            &Some(2),
+            "after migrations, schema version is 2",
         )?;
 
         connection.close()?;
@@ -1549,6 +1618,8 @@ mod tests {
             utility: 0.7,
             importance: 0.8,
             provenance_uri: Some("file://AGENTS.md#L42".to_string()),
+            trust_class: "human_explicit".to_string(),
+            trust_subclass: Some("project-rule".to_string()),
             tags: vec!["cargo".to_string(), "formatting".to_string()],
         };
 
@@ -1584,6 +1655,16 @@ mod tests {
             &memory.provenance_uri,
             &Some("file://AGENTS.md#L42".to_string()),
             "provenance_uri",
+        )?;
+        ensure_equal(
+            &memory.trust_class.as_str(),
+            &"human_explicit",
+            "trust_class",
+        )?;
+        ensure_equal(
+            &memory.trust_subclass,
+            &Some("project-rule".to_string()),
+            "trust_subclass",
         )?;
         ensure(memory.tombstoned_at.is_none(), "not tombstoned")?;
 
@@ -1625,6 +1706,8 @@ mod tests {
             utility: 0.7,
             importance: 0.8,
             provenance_uri: None,
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
             tags: vec![],
         };
 
@@ -1637,6 +1720,8 @@ mod tests {
             utility: 0.6,
             importance: 0.5,
             provenance_uri: None,
+            trust_class: "cass_evidence".to_string(),
+            trust_subclass: None,
             tags: vec![],
         };
 
@@ -1686,6 +1771,8 @@ mod tests {
             utility: 0.5,
             importance: 0.9,
             provenance_uri: None,
+            trust_class: "human_explicit".to_string(),
+            trust_subclass: None,
             tags: vec![],
         };
 
@@ -1727,6 +1814,8 @@ mod tests {
             utility: 0.5,
             importance: 0.5,
             provenance_uri: None,
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
             tags: vec!["initial".to_string()],
         };
 

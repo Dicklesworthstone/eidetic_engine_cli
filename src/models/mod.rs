@@ -3,6 +3,7 @@ use std::process::ExitCode;
 pub mod id;
 pub mod memory;
 pub mod provenance;
+pub mod trust;
 
 pub use id::{
     AuditId, BackupId, CandidateId, EvidenceId, Id, IdKind, MemoryId, PackId, ParseIdError, RuleId,
@@ -13,6 +14,7 @@ pub use memory::{
     MemoryKind, MemoryLevel, MemoryValidationError, Tag, UnitScore, Utility,
 };
 pub use provenance::{LineSpan, ProvenanceUri, ProvenanceUriError};
+pub use trust::{ParseTrustClassError, TrustClass};
 
 pub const RESPONSE_SCHEMA_V1: &str = "ee.response.v1";
 pub const ERROR_SCHEMA_V1: &str = "ee.error.v1";
