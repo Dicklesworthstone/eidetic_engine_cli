@@ -1,5 +1,13 @@
 use std::process::ExitCode;
 
+pub mod id;
+
+pub use id::{
+    AuditId, AuditKind, BackupId, BackupKind, CandidateId, CandidateKind, EvidenceId, EvidenceKind,
+    Id, IdKind, MemoryId, MemoryKind, PackId, PackKind, ParseIdError, RuleId, RuleKind, SessionId,
+    SessionKind, WorkspaceId, WorkspaceKind,
+};
+
 pub const RESPONSE_SCHEMA_V1: &str = "ee.response.v1";
 pub const ERROR_SCHEMA_V1: &str = "ee.error.v1";
 

@@ -26,6 +26,10 @@ lexical-bm25 = []
 mcp = []
 serve = []
 
+[dependencies]
+asupersync = { version = "0.3.1", default-features = false, features = ["tracing-integration"] }
+uuid = { version = "1", features = ["v7"] }
+
 [lints.rust]
 unsafe_code = "forbid"
 
