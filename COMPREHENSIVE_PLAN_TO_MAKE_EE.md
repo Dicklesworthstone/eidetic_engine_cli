@@ -771,58 +771,65 @@ Agent/Human
   |
   | ee context/search/remember/import/curate
   v
-cli
+ee-cli
   |
   v
-core -----------------+
-  |                   |
-  v                   v
-db                 search
-  |                   |
-  v                   v
-SQLModel          Frankensearch
-  |                   |
-  v                   v
-FrankenSQLite     Derived lexical/vector indexes
+ee-core ----------------------+
+  |                           |
+  v                           v
+ee-db                      ee-search
+  |                           |
+  v                           v
+SQLModel                   Frankensearch
+  |                           |
+  v                           v
+FrankenSQLite              Derived lexical/vector indexes
   |
-  +--> cass imports evidence from coding_agent_session_search
+  +--> ee-cass imports evidence from coding_agent_session_search
   |
-  +--> graph builds graph views with FrankenNetworkX
+  +--> ee-graph builds graph views with FrankenNetworkX
   |
-  +--> pack builds context packs
+  +--> ee-pack builds context packs
   |
-  +--> steward performs maintenance jobs
+  +--> steward jobs perform maintenance through typed services
 ```
 
 ### Crate Layout
 
-The implementation should start as a single binary crate with a library surface in the same package. That is the fastest path to a working `ee`, aligns with the repository's no-proliferation discipline, and avoids premature crate-boundary churn.
+`ee` should be a Cargo workspace from day one. The scope is large enough that crate boundaries are not ceremony; they are dependency firewalls, test seams, and ownership boundaries for the Franken stack integrations.
 
-The module boundaries below are the phase-0 shape. They can later become separate crates only when the dependency graph or release process clearly justifies it.
+The rule is not "one crate per idea." The rule is "one crate per dependency boundary." A crate must justify itself by isolating a dependency family, protecting a domain layer from implementation details, or giving tests a stable surface.
 
 ```text
 eidetic_engine_cli/
   Cargo.toml
-  src/
-    main.rs
-    lib.rs
-    cli/
-    core/
-    models/
-    db/
-    search/
-    cass/
-    graph/
-    pack/
-    curate/
-    steward/
-    policy/
-    output/
-    config/
-    hooks/
-    mcp/
-    serve/
-    obs/
+  crates/
+    ee-cli/
+      src/main.rs
+    ee-core/
+      src/
+    ee-models/
+      src/
+    ee-db/
+      src/
+    ee-search/
+      src/
+    ee-cass/
+      src/
+    ee-graph/
+      src/
+    ee-pack/
+      src/
+    ee-curate/
+      src/
+    ee-policy/
+      src/
+    ee-output/
+      src/
+    ee-runtime/
+      src/
+    ee-test-support/
+      src/
   docs/
     query-schema.md
     storage.md
@@ -834,56 +841,82 @@ eidetic_engine_cli/
 
 ### Crate Responsibilities
 
-These are module responsibilities in phase 0 and possible crate responsibilities later.
+Planned workspace members:
 
-| Module | Responsibility |
+| Crate | Responsibility |
 | --- | --- |
-| `cli` | Clap command definitions, process I/O, formatting selection, exit codes |
-| `core` | Use cases, application services, runtime wiring, common traits |
-| `models` | Domain types, IDs, enums, serializable output contracts |
-| `db` | SQLModel models, migrations, repositories, transactions, raw SQL helpers |
-| `search` | Frankensearch integration, indexing jobs, retrieval scoring |
-| `cass` | Import adapter for `coding_agent_session_search` robot/JSON commands and optional read-only DB import |
-| `graph` | Graph projection, FrankenNetworkX algorithms, graph metrics |
-| `pack` | Context packing, token budgets, MMR, provenance bundles |
-| `curate` | Rule candidates, validation, feedback scoring, maturity transitions |
-| `steward` | Maintenance jobs, daemon mode, scheduled refreshes |
-| `policy` | Redaction, privacy, scope, retention, trust policy |
-| `output` | JSON, Markdown, TOON, and human terminal rendering |
-| `config` | Config loading, path resolution, workspace discovery |
-| `hooks` | Optional hook helpers for agent harnesses |
-| `mcp` | Optional MCP stdio adapter |
-| `serve` | Optional localhost HTTP/SSE adapter |
-| `obs` | Tracing, audit log, diagnostics |
-| `test_support` | LabRuntime helpers, fixtures, golden output utilities |
+| `ee-cli` | Clap command definitions, process I/O, formatting selection, exit codes, shell completions |
+| `ee-core` | Use cases, application services, service traits, orchestration, runtime-independent policy flow |
+| `ee-models` | Domain types, IDs, enums, serializable output contracts, schema version constants |
+| `ee-runtime` | Asupersync bootstrap, `Cx` construction, budgets, capability narrowing, cancellation mapping |
+| `ee-db` | SQLModel models, FrankenSQLite connection factory, migrations, repositories, transactions, raw SQL helpers |
+| `ee-search` | Frankensearch integration, indexing jobs, retrieval scoring, degraded search modes |
+| `ee-cass` | Import adapter for `coding_agent_session_search` robot/JSON commands and optional read-only DB import |
+| `ee-graph` | Graph projection, FrankenNetworkX algorithms, graph metrics, graph freshness snapshots |
+| `ee-pack` | Context packing, token budgets, MMR, provenance bundles, Markdown/TOON pack rendering coordination |
+| `ee-curate` | Rule candidates, validation, feedback scoring, maturity transitions, curation workflows |
+| `ee-policy` | Redaction, privacy, scope, retention, trust policy, prompt-injection quarantine policy |
+| `ee-output` | JSON envelopes, robot contracts, human terminal rendering, field filtering, schema emission |
+| `ee-test-support` | LabRuntime helpers, fixtures, golden output utilities, dependency-audit helpers |
+
+Later or optional members:
+
+| Crate | When To Add |
+| --- | --- |
+| `ee-hooks` | when hook integration has more than simple command examples |
+| `ee-mcp` | when MCP mode is ready and its dependencies pass the forbidden-runtime audit |
+| `ee-serve` | when localhost daemon or HTTP/SSE mode exists |
+| `ee-obs` | if tracing, audit export, and diagnostics need a reusable library surface |
+
+Workspace discipline:
+
+- root `Cargo.toml` owns dependency versions through `[workspace.dependencies]`
+- crates opt into only the dependencies they actually need
+- `ee-models`, `ee-output`, and `ee-policy` must remain free of FrankenSQLite, Frankensearch, CASS, and graph dependencies unless an ADR explicitly changes that
+- `ee-cli` may depend on every product crate, but no product crate may depend on `ee-cli`
+- integration crates own their external dependency family; other crates call them through typed services
+- optional crates that require suspect features are excluded from default members until the dependency audit is clean
+- cross-crate cycles are forbidden and checked in CI
 
 ### Concrete Dependency Manifest Sketch
 
 The exact versions must be verified at implementation time, but the intended manifest shape should be concrete enough to catch wrong dependencies early.
 
+This is the target workspace shape once the core integrations land. M0 may include only the crates needed for the walking skeleton; later members are added when their first command or contract test is ready.
+
 ```toml
-[package]
-name = "ee"
+[workspace]
+resolver = "2"
+members = [
+    "crates/ee-cli",
+    "crates/ee-core",
+    "crates/ee-models",
+    "crates/ee-runtime",
+    "crates/ee-db",
+    "crates/ee-search",
+    "crates/ee-cass",
+    "crates/ee-graph",
+    "crates/ee-pack",
+    "crates/ee-curate",
+    "crates/ee-policy",
+    "crates/ee-output",
+    "crates/ee-test-support",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
-[[bin]]
-name = "ee"
-path = "src/main.rs"
-
-[lib]
-name = "ee_core"
-path = "src/lib.rs"
-
-[dependencies]
+[workspace.dependencies]
 asupersync = { version = "0.3", features = ["proc-macros"] }
 
 fsqlite = "0.1"
 fsqlite-core = "0.1"
 fsqlite-types = "0.1"
 fsqlite-error = "0.1"
-fsqlite-ext-fts5 = { version = "0.1", optional = true }
-fsqlite-ext-json = { version = "0.1", optional = true }
+fsqlite-ext-fts5 = "0.1"
+fsqlite-ext-json = "0.1"
 
 sqlmodel = "0.2"
 sqlmodel-core = "0.2"
@@ -893,7 +926,7 @@ sqlmodel-session = "0.2"
 sqlmodel-pool = "0.2"
 sqlmodel-frankensqlite = "0.2"
 
-frankensearch = { version = "0.3", features = ["hybrid", "persistent"] }
+frankensearch = { version = "0.3", default-features = false, features = ["hash", "lexical", "storage"] }
 
 fnx-runtime = { path = "../franken_networkx/crates/fnx-runtime", features = ["asupersync-integration"] }
 fnx-classes = { path = "../franken_networkx/crates/fnx-classes" }
@@ -915,20 +948,63 @@ sha2 = "0.10"
 tiktoken-rs = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-rust-mcp-sdk = { version = "0.4", optional = true }
+rust-mcp-sdk = "0.4"
+
+ee-core = { path = "crates/ee-core" }
+ee-models = { path = "crates/ee-models" }
+ee-runtime = { path = "crates/ee-runtime" }
+ee-db = { path = "crates/ee-db" }
+ee-search = { path = "crates/ee-search" }
+ee-cass = { path = "crates/ee-cass" }
+ee-graph = { path = "crates/ee-graph" }
+ee-pack = { path = "crates/ee-pack" }
+ee-curate = { path = "crates/ee-curate" }
+ee-policy = { path = "crates/ee-policy" }
+ee-output = { path = "crates/ee-output" }
+```
+
+`crates/ee-cli/Cargo.toml` owns binary feature selection:
+
+```toml
+[package]
+name = "ee-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ee"
+path = "src/main.rs"
+
+[dependencies]
+ee-core.workspace = true
+ee-runtime.workspace = true
+ee-output.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
 
 [features]
-default = ["fts5", "json", "embed-fast", "lexical-bm25"]
-fts5 = ["fsqlite-ext-fts5"]
-json = ["fsqlite-ext-json"]
-embed-fast = []
-embed-quality = []
-lexical-bm25 = []
-mcp = ["dep:rust-mcp-sdk"]
+default = ["fts5", "json", "frankensearch-local"]
+fts5 = ["ee-core/fts5"]
+json = ["ee-core/json"]
+frankensearch-local = ["ee-core/frankensearch-local"]
+semantic-local = ["ee-core/semantic-local"]
+mcp = []
 serve = []
 ```
 
-The `embed-fast`, `embed-quality`, and `lexical-bm25` feature mappings are placeholders until the Frankensearch integration spike confirms the current crate feature names. The product requirements are concrete; the exact Cargo feature spellings must be verified against the local Frankensearch version before coding.
+Optional dependency wiring lives in the member crate that owns the integration. For example, `ee-db` marks FTS/JSON extensions optional, `ee-mcp` marks `rust-mcp-sdk` optional until MCP mode is promoted, `ee-core` forwards product-level capability flags to integration crates, and `ee-cli` exposes user-facing feature flags through `ee-core`.
+
+The Frankensearch integration spike has to verify the exact feature profile against the local `/dp/frankensearch` source before coding. As of the plan review, the clean local profile is expected to be:
+
+```text
+default-features = false
+features = ["hash", "lexical", "storage"]
+```
+
+That profile gives deterministic hash embeddings, lexical search, and persistent storage without pulling the forbidden async/network stack. Profiles such as `persistent`, `hybrid`, `semantic`, `fastembed`, `download`, `api`, or `full` must be treated as suspect until `cargo tree --edges features` proves they do not pull Tokio, Hyper, Tower, Reqwest, or other forbidden crates into `ee`.
+
+If high-quality semantic embeddings require an upstream Frankensearch profile that currently pulls forbidden crates, do not hide that under `ee` feature flags. Keep lexical/hash mode as the working product path, file an upstream readiness issue, and add semantic quality later only after the feature tree is clean.
 
 Forbidden dependencies, enforced by CI or a dependency audit:
 
@@ -950,16 +1026,16 @@ Forbidden dependencies, enforced by CI or a dependency audit:
 
 ### Dependency Integration Contracts
 
-Each major dependency should enter `ee` through one narrow integration crate or module. This prevents API churn, forbidden feature leakage, and accidental reimplementation of solved problems.
+Each major dependency should enter `ee` through one narrow integration crate. This prevents API churn, forbidden feature leakage, and accidental reimplementation of solved problems.
 
 #### Asupersync Contract
 
 Owned by:
 
-- `core`
-- `steward`
-- `test_support`
-- command-boundary code in `cli`
+- `ee-runtime`
+- `ee-core`
+- `ee-test-support`
+- command-boundary code in `ee-cli`
 
 Use for:
 
@@ -990,7 +1066,7 @@ Verification:
 
 Owned by:
 
-- `db`
+- `ee-db`
 
 Use for:
 
@@ -1007,7 +1083,7 @@ Do not use:
 - Diesel
 - SeaORM
 - JSONL as primary storage
-- raw SQL outside `db`
+- raw SQL outside `ee-db`
 
 Verification:
 
@@ -1020,7 +1096,7 @@ Verification:
 
 Owned by:
 
-- `cass`
+- `ee-cass`
 
 Use for:
 
@@ -1046,7 +1122,7 @@ Verification:
 
 Owned by:
 
-- `search`
+- `ee-search`
 
 Use for:
 
@@ -1073,7 +1149,7 @@ Verification:
 
 Owned by:
 
-- `graph`
+- `ee-graph`
 
 Use for:
 
@@ -1101,9 +1177,10 @@ Verification:
 
 Owned by:
 
-- `curate`
-- `pack`
-- `models`
+- `ee-curate`
+- `ee-pack`
+- `ee-models`
+- `ee-policy`
 
 Use for:
 
@@ -1131,38 +1208,51 @@ Verification:
 ### Dependency Direction
 
 ```text
-cli
-  -> core
-core
-  -> db
-  -> search
-  -> cass
-  -> graph
-  -> pack
-  -> curate
-  -> policy
-  -> output
-db
-  -> models
-search
-  -> models
-graph
-  -> models
-pack
-  -> models
-curate
-  -> models
+ee-cli
+  -> ee-core
+  -> ee-runtime
+  -> ee-output
+ee-core
+  -> ee-models
+  -> ee-db
+  -> ee-search
+  -> ee-cass
+  -> ee-graph
+  -> ee-pack
+  -> ee-curate
+  -> ee-policy
+  -> ee-runtime
+ee-db
+  -> ee-models
+  -> ee-policy
+ee-search
+  -> ee-models
+  -> ee-policy
+ee-cass
+  -> ee-models
+  -> ee-runtime
+  -> ee-policy
+ee-graph
+  -> ee-models
+ee-pack
+  -> ee-models
+  -> ee-policy
+ee-curate
+  -> ee-models
+  -> ee-policy
+ee-output
+  -> ee-models
 ```
-
-In phase 0, read this as module dependency direction rather than separate crate direction. The split into `ee-cli`, `ee-core`, and other crates is a later mechanical refactor, not a prerequisite for the walking skeleton.
 
 Rules:
 
-- Lower-level modules must not depend on `cli`.
-- Domain types live in `models`, not in the CLI module.
+- Lower-level crates must not depend on `ee-cli`.
+- Domain types live in `ee-models`, not in command handlers.
 - Database repositories return domain types, not CLI output structs.
-- Search indexes are written through `search`, not directly from command handlers.
+- Search indexes are written through `ee-search`, not directly from command handlers.
 - Graph metrics are derived from database records, not hand-maintained in unrelated code.
+- `ee-output` formats domain responses but does not perform retrieval, storage, import, or curation.
+- `ee-runtime` exposes Asupersync runtime helpers without depending on product crates.
 
 ## Runtime Architecture With Asupersync
 
@@ -1314,7 +1404,7 @@ Boundary rule:
 - Treat `Cx::for_testing()` as test-only.
 - Treat `Cx::for_request()` as a convenience seam, not the whole production architecture.
 - Do not enable Asupersync's optional SQLite feature if it pulls in `rusqlite`.
-- Keep DB access behind `db`; do not mix runtime and storage concerns in command handlers.
+- Keep DB access behind `ee-db`; do not mix runtime and storage concerns in command handlers.
 
 ### Primitive Selection
 
@@ -1445,7 +1535,7 @@ Do not use:
 
 ### SQLModel Plus Raw SQL
 
-SQLModel should own ordinary typed CRUD, but a few paths should intentionally use raw parameterized SQL inside `db/queries.rs`.
+SQLModel should own ordinary typed CRUD, but a few paths should intentionally use raw parameterized SQL inside `ee-db` query modules.
 
 Use SQLModel for:
 
@@ -1466,11 +1556,11 @@ Use raw SQL for:
 
 Rules:
 
-- raw SQL stays inside `db`
+- raw SQL stays inside `ee-db`
 - raw SQL is parameterized
 - every raw query gets a focused test
 - every raw query documents why SQLModel is insufficient
-- raw SQL output is converted into domain types before leaving `db`
+- raw SQL output is converted into domain types before leaving `ee-db`
 
 This avoids contorting SQLModel into jobs it does not need to do while keeping SQL out of command handlers.
 
@@ -1482,7 +1572,7 @@ V1 storage posture:
 
 - one-shot CLI commands open one logical connection and complete quickly
 - write-heavy background work is serialized through a job lock or daemon write owner
-- multi-process writes use advisory lock files or database leases
+- multi-process writes use an OS exclusive lock primitive, not just the presence of a lock file
 - search indexes are rebuildable and can lag
 - imports are resumable through an import ledger
 - `BEGIN CONCURRENT` or FrankenSQLite MVCC features may be used only after the storage spike proves they are correct for this workload
@@ -1499,6 +1589,15 @@ Connection posture:
 - write commands should be short and explicit
 - long import and maintenance jobs should checkpoint and commit in batches
 - daemon mode may introduce a single write owner if contention becomes real
+
+Locking requirements:
+
+- use `flock`, `fcntl`, Windows `LockFileEx`, or a small crate that exposes equivalent exclusive lock semantics without forbidden runtime dependencies
+- record lock wait duration in `contention_events`
+- return a stable `db_lock_contention` degradation or error when the wait budget expires
+- include the owning process ID when cheaply available
+- never treat a stale lock-file path as proof that a writer is active; locks are acquired through the OS primitive
+- add an integration test with 10 concurrent `ee remember` calls that asserts exactly 10 distinct memories are stored or that timed-out writers fail with structured `db_lock_contention` errors
 
 ### Database Locations
 
@@ -1603,6 +1702,13 @@ ee playbook import --workspace . --path .ee/playbook.yaml --json
 
 This gives teams a reviewable artifact without making YAML the primary database.
 
+Implementation note:
+
+- expose a derived `playbook_bullets` view in the DB layer or repository API for export convenience
+- the view joins latest procedural memories, procedural rule metadata, tags, scope, maturity, and evidence summary
+- the view is read-only and rebuildable; it is not a second source of truth
+- import writes new memory revisions or curation candidates rather than mutating prior rows in place
+
 ### JSONL Export
 
 JSONL is useful for backup, review, and Git-friendly project memory, but it is not the source of truth.
@@ -1615,6 +1721,14 @@ Rules:
 - JSONL import is idempotent.
 - JSONL export never runs concurrently with migrations.
 - JSONL export omits secret-classified fields by default.
+
+JSONL import trust boundaries:
+
+- imported procedural memories default to `candidate` maturity and confidence no higher than 0.60 unless `--trust-import` is explicitly supplied
+- imported rows that claim `proven`, `curated_rule`, high confidence, or high importance are downgraded unless the export header verifies as an `ee export` and the user opts in
+- all imported instruction-like procedural content is routed through curation validation
+- JSONL imports have size limits with explicit override flags
+- unrecognized schema versions fail clearly instead of best-effort parsing
 
 ## Workspace Identity, Scope Resolution, And Precedence
 
@@ -1643,12 +1757,23 @@ No single signal is enough:
 - symlinks can obscure canonical paths
 - temporary clones may not deserve durable project memory
 
+Isolation requirements:
+
+- resolve workspace paths with canonical absolute paths before lookup
+- store both display path and canonical path hash
+- include a machine-local salt in path-derived hashes so private local paths are not portable identifiers
+- detect when a workspace path or `.ee/` directory is a symlink and report it in `workspace resolve`
+- reject symlinked `.ee/` state directories by default unless `--allow-symlink-state` is explicitly configured
+- never merge workspaces solely because they share a Git remote
+- expose `ee workspace isolate <path> --json` to force a separate workspace identity for monorepo packages, forks, or experiments
+
 ### Workspace Resolution Command
 
 ```bash
 ee workspace resolve --workspace . --json
 ee workspace list --json
 ee workspace alias set <workspace-id> <alias> --json
+ee workspace isolate <path> --json
 ```
 
 Resolution output should include:
@@ -1862,6 +1987,7 @@ Trust classes:
 
 ```text
 user_asserted
+agent_validated
 agent_observed
 session_evidence
 derived_summary
@@ -1871,6 +1997,41 @@ external_document
 untrusted_text
 quarantined
 ```
+
+This is the authoritative trust taxonomy. Do not introduce a second parallel set of classes in later docs or code. If a new class is needed, add it here, add a migration rule, and update the trust transition tests.
+
+Trust class initial scores:
+
+| Trust Class | Initial Score | Meaning |
+| --- | ---: | --- |
+| `user_asserted` | 0.85 | Explicit user-provided memory or approved bootstrap proposal |
+| `curated_rule` | 0.80 | Candidate accepted through `ee curate apply` or playbook import |
+| `agent_validated` | 0.65 | Agent-created memory with repeated positive evidence and no unresolved contradictions |
+| `agent_observed` | 0.50 | Direct agent assertion or observation, not yet validated |
+| `session_evidence` | 0.45 | Raw or lightly processed CASS/session evidence |
+| `derived_summary` | 0.40 | Extractive or derived summary from multiple lower-level items |
+| `external_document` | 0.35 | Imported docs or external text not explicitly approved as project policy |
+| `imported_legacy` | 0.30 | Old Eidetic artifacts and legacy imports |
+| `untrusted_text` | 0.15 | Text that may be useful as evidence but must not advise agents directly |
+| `quarantined` | 0.00 | Suspected injection, secret, blocked content, or unsafe import pending review |
+
+Trust transitions:
+
+| From | To | Trigger |
+| --- | --- | --- |
+| `agent_observed` | `agent_validated` | `helpful_count >= 2`, `harmful_count = 0`, `contradiction_count = 0`, and at least one evidence pointer |
+| `session_evidence` | `curated_rule` | accepted candidate with specific scope, evidence, and validation warnings resolved |
+| `derived_summary` | `curated_rule` | accepted candidate whose source set is preserved through `derived_from` links |
+| `external_document` | `user_asserted` | explicit user approval during bootstrap or import review |
+| any non-quarantined class | `quarantined` | suspected prompt injection, blocked secret, unsafe import, or policy denial |
+| any class | lower trust class | harmful, contradicted, obsolete, or low-evidence review result |
+
+Score field rules:
+
+- `importance`, `confidence`, `utility_score`, `trust_score`, `affect_valence` normalized variants, and link `confidence` are stored in `[0.0, 1.0]` unless a field explicitly documents another range.
+- Database migrations should add `CHECK` constraints for normalized `REAL` fields.
+- Retrieval formulas may apply floors such as `max(0.1, confidence)` at read time, but stored values outside the allowed range are invalid.
+- Multipliers are named as multipliers and additive boosts are named as boosts. Avoid ambiguous `score` fields when the unit is not clear.
 
 Link relations:
 
@@ -2014,6 +2175,12 @@ Fields:
 
 - `id`
 - `public_id`
+- `revision_group_id`
+- `revision_number`
+- `supersedes_memory_id`
+- `superseded_by_memory_id`
+- `legal_hold`
+- `idempotency_key`
 - `level`
 - `kind`
 - `scope`
@@ -2054,6 +2221,9 @@ Fields:
 Indexes:
 
 - `public_id`
+- `revision_group_id, revision_number`
+- `supersedes_memory_id`
+- unique `idempotency_key` where not null
 - `workspace_id, level, kind`
 - `scope, scope_key`
 - `content_hash`
@@ -2062,6 +2232,17 @@ Indexes:
 - `updated_at`
 - `confidence`
 - `utility_score`
+
+Revision rules:
+
+- `revision_group_id` groups all revisions of the same logical memory.
+- `revision_number` starts at 1 and increments on substantive changes.
+- `supersedes_memory_id` points to the prior revision when one exists.
+- `superseded_by_memory_id` is a convenience pointer maintained transactionally; links still work if it is rebuilt from `supersedes_memory_id`.
+- only the latest non-tombstoned revision participates in default retrieval.
+- old revisions remain visible through `ee memory history`, `ee why`, and audit export.
+- `legal_hold = true` blocks physical purge and redaction that would destroy required evidence.
+- `idempotency_key` prevents repeated imports, hook retries, and interrupted `remember` calls from creating duplicate rows.
 
 #### `memory_tags`
 
@@ -2099,6 +2280,70 @@ Constraints:
 
 - unique `src_memory_id, dst_memory_id, relation`
 - no self-links unless relation explicitly allows it
+
+#### `embeddings`
+
+Tracks semantic or hash embeddings as rebuildable derived records.
+
+Fields:
+
+- `id`
+- `public_id`
+- `source_type`
+- `source_id`
+- `source_content_hash`
+- `model_id`
+- `model_version`
+- `dimension`
+- `vector_ref`
+- `vector_blob`
+- `index_generation`
+- `created_at`
+- `stale_at`
+- `failure_code`
+- `failure_message`
+- `metadata_json`
+
+Rules:
+
+- source text stays in `memories`, `evidence_spans`, or CASS; embeddings do not become a parallel source of truth.
+- `source_content_hash` plus `model_id` determines freshness.
+- local hash embeddings may store compact vectors inline.
+- larger vectors may store a Frankensearch reference instead of a blob.
+- remote provider metadata must be explicit and visible in `ee status`.
+
+Indexes:
+
+- `source_type, source_id`
+- `model_id, source_content_hash`
+- `stale_at`
+
+#### `memory_fts`
+
+Lexical search is a derived index over visible memory text.
+
+Preferred shape:
+
+- FrankenSQLite FTS5 virtual table if the extension path is mature
+- Frankensearch lexical index if it is cleaner and faster under the no-Tokio profile
+- temporary inverted-index fallback only behind an explicit degraded feature
+
+Indexed fields:
+
+- memory ID
+- latest revision only by default
+- content
+- summary
+- tags
+- scope
+- kind
+- redaction visibility class
+
+Rules:
+
+- rebuilding `memory_fts` from `memories` must be deterministic
+- stale FTS data is a degraded mode, not silent behavior
+- hidden, tombstoned, quarantined, or redacted text must not leak through lexical snippets
 
 #### `artifacts`
 
@@ -2246,6 +2491,29 @@ Event types:
 - `duplicated`
 - `ignored`
 
+Feedback semantics:
+
+| Event | Meaning | Scoring Effect |
+| --- | --- | --- |
+| `helpful` | A memory or pack materially helped a task | increases utility and can promote maturity |
+| `harmful` | Applying the memory caused wasted work, damage, or a wrong action | strong demotion signal and possible review trigger |
+| `confirmed` | Independent evidence supports the claim, whether or not it was used in a task | raises confidence/trust more slowly than `helpful` |
+| `contradicted` | New evidence shows the claim is false or no longer valid | demotes confidence and increments contradiction count |
+| `obsolete` | The memory was true before but is no longer current | sets review/retirement path without implying prior harm |
+| `duplicated` | Another memory supersedes this one | suggests merge or hide |
+| `ignored` | The memory was shown but not useful for this task | weak negative signal only |
+
+`harmful` and `contradicted` are not synonyms. Use `harmful` when following the memory caused a bad outcome. Use `contradicted` when evidence falsifies the memory. A feedback event may carry both concepts in `metadata_json`, but the primary `event_type` should reflect the most important operational meaning.
+
+Feedback safeguards:
+
+- rate-limit harmful feedback by `created_by` and workspace
+- require an explicit note for `harmful`, `contradicted`, and `obsolete`
+- do not auto-invert `proven` rules directly from two low-trust harmful marks
+- auto-inversion should require `harmful_count >= max(3, helpful_count * 2 + 1)`, low trust, and no recent positive validation
+- highly used or proven rules enter `needs_review` before inversion unless a human explicitly confirms the inversion
+- all feedback is immutable; corrections are new events that supersede earlier events
+
 #### `diary_entries`
 
 Session-level summaries inspired by CASS Memory System.
@@ -2284,6 +2552,8 @@ Fields:
 - `validation_warnings_json`
 - `score`
 - `created_at`
+- `expires_at`
+- `disposition_policy`
 - `reviewed_at`
 - `reviewed_by`
 - `applied_at`
@@ -2297,6 +2567,15 @@ Candidate types:
 - `link`
 - `tombstone`
 - `diary_entry`
+
+Candidate disposition policy:
+
+- candidates default to `expires_at = created_at + 30 days`
+- expired candidates are hidden from default review but remain auditable
+- high-risk, instruction-like, destructive-command, secret-adjacent, or low-evidence candidates never auto-apply
+- low-risk duplicate, obsolete, and low-score candidates may auto-hide or auto-reject after TTL with an audit entry
+- auto-apply is allowed only for explicitly configured low-risk semantic facts with at least two independent evidence spans and no policy warnings
+- `ee status` and `ee context --robot-meta` should report pending candidate counts and stale candidate counts
 
 #### `pack_records`
 
@@ -2315,8 +2594,19 @@ Fields:
 - `pack_hash`
 - `selected_items_json`
 - `explain_json`
+- `used_by_session_id`
+- `outcome_status`
+- `outcome_recorded_at`
 - `created_at`
 - `metadata_json`
+
+Pack outcome rules:
+
+- every `ee context` response returns a stable pack ID
+- if the current agent session is known, `ee context` records the pack/session association immediately
+- `ee import cass` or `ee outcome --pack` can later attach success/failure/partial outcome to the pack
+- feedback derived from a pack applies only to memories actually selected into that pack
+- pack outcome inference is conservative; absence of a failure is not automatically strong positive feedback
 
 #### `retrieval_policies`
 
@@ -2355,6 +2645,50 @@ Operations:
 - `upsert`
 - `delete`
 - `rebuild`
+
+#### `steward_jobs`
+
+Tracks manual or daemon-scheduled maintenance jobs without requiring daemon mode for correctness.
+
+Fields:
+
+- `id`
+- `public_id`
+- `job_type`
+- `workspace_id`
+- `scope`
+- `scope_key`
+- `status`
+- `requested_by`
+- `budget_ms`
+- `attempts`
+- `input_hash`
+- `output_hash`
+- `last_error_code`
+- `last_error_message`
+- `created_at`
+- `started_at`
+- `completed_at`
+- `next_run_at`
+- `metadata_json`
+
+Job types:
+
+- `index_rebuild`
+- `reembed`
+- `graph_refresh`
+- `autolink`
+- `confidence_decay`
+- `curation_expire`
+- `backup_verify`
+- `cass_import_resume`
+
+Rules:
+
+- steward jobs are advisory records plus resumability metadata, not hidden background authority
+- every job has a bounded Asupersync budget
+- interrupted jobs must either roll back or resume from an explicit cursor
+- `ee doctor --fix-plan` may propose steward jobs but should not run them without an explicit command
 
 #### `graph_snapshots`
 
