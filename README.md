@@ -6,7 +6,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Dicklesworthstone/eidetic_engine_cli/ci.yml?branch=main&label=CI)](https://github.com/Dicklesworthstone/eidetic_engine_cli/actions)
 [![crates.io](https://img.shields.io/crates/v/ee.svg)](https://crates.io/crates/ee)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT+Rider](https://img.shields.io/badge/License-MIT%2BOpenAI%2FAnthropic%20Rider-yellow.svg)](./LICENSE)
 [![Rust 2024](https://img.shields.io/badge/rust-2024-orange.svg)](rust-toolchain.toml)
 [![No Tokio](https://img.shields.io/badge/runtime-Asupersync-blueviolet.svg)](#hard-requirements)
 
@@ -845,4 +845,6 @@ No. The steward proposes; you approve. Every promotion, consolidation, replaceme
 
 ## License
 
-[MIT](LICENSE) © Jeffrey Emanuel
+MIT License (with OpenAI/Anthropic Rider). See [`LICENSE`](LICENSE).
+
+© 2026 Jeffrey Emanuel
