@@ -10,7 +10,7 @@ pub use fnx_classes::{AttrMap, Graph, digraph::DiGraph};
 use fnx_runtime::{CgseValue, CompatibilityMode};
 
 #[cfg(feature = "graph")]
-use crate::db::{DbConnection, StoredMemoryLink};
+use crate::db::DbConnection;
 
 pub const SUBSYSTEM: &str = "graph";
 pub const MODULE_CONTRACT: &str = GRAPH_MODULE_SCHEMA_V1;
@@ -296,18 +296,14 @@ pub fn build_memory_graph(
         .map_err(|e| format!("Failed to query memory links: {e}"))?;
 
     let mut graph = DiGraph::new(CompatibilityMode::Strict);
-    let mut filtered_count = 0usize;
-
     for link in &links {
         if let Some(min_w) = options.min_weight {
             if link.weight < min_w {
-                filtered_count += 1;
                 continue;
             }
         }
         if let Some(min_c) = options.min_confidence {
             if link.confidence < min_c {
-                filtered_count += 1;
                 continue;
             }
         }
@@ -341,11 +337,16 @@ pub fn build_memory_graph(
         graph.add_node(&link.dst_memory_id);
 
         if link.directed {
-            graph.add_edge_with_attrs(&link.src_memory_id, &link.dst_memory_id, attrs);
+            add_projection_edge(&mut graph, &link.src_memory_id, &link.dst_memory_id, attrs)?;
         } else {
             let attrs_rev = attrs.clone();
-            graph.add_edge_with_attrs(&link.src_memory_id, &link.dst_memory_id, attrs);
-            graph.add_edge_with_attrs(&link.dst_memory_id, &link.src_memory_id, attrs_rev);
+            add_projection_edge(&mut graph, &link.src_memory_id, &link.dst_memory_id, attrs)?;
+            add_projection_edge(
+                &mut graph,
+                &link.dst_memory_id,
+                &link.src_memory_id,
+                attrs_rev,
+            )?;
         }
     }
 
@@ -359,6 +360,20 @@ pub fn build_memory_graph(
         edge_count,
         build_ms,
     })
+}
+
+#[cfg(feature = "graph")]
+fn add_projection_edge(
+    graph: &mut DiGraph,
+    src_memory_id: &str,
+    dst_memory_id: &str,
+    attrs: AttrMap,
+) -> Result<(), String> {
+    graph
+        .add_edge_with_attrs(src_memory_id, dst_memory_id, attrs)
+        .map_err(|error| {
+            format!("Failed to add graph edge {src_memory_id}->{dst_memory_id}: {error}")
+        })
 }
 
 /// Compute PageRank centrality on a memory graph projection.
@@ -377,11 +392,28 @@ pub fn compute_betweenness(projection: &MemoryGraphProjection) -> BetweennessCen
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "graph")]
+    use crate::db::{
+        CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
+        MemoryLinkRelation, MemoryLinkSource,
+    };
     use crate::models::CapabilityStatus;
 
     use super::{
         GraphCapabilityName, GraphSurface, REQUIRED_GRAPH_ENGINE, module_readiness, subsystem_name,
     };
+
+    #[cfg(feature = "graph")]
+    const WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
+    #[cfg(feature = "graph")]
+    const MEMORY_A: &str = "mem_00000000000000000000000011";
+    #[cfg(feature = "graph")]
+    const MEMORY_B: &str = "mem_00000000000000000000000012";
+    #[cfg(feature = "graph")]
+    const MEMORY_C: &str = "mem_00000000000000000000000013";
+
+    #[cfg(feature = "graph")]
+    type TestResult = Result<(), String>;
 
     #[test]
     fn subsystem_name_is_stable() {
@@ -527,5 +559,203 @@ mod tests {
     fn graph_feature_missing_count_is_one() {
         let readiness = module_readiness();
         assert_eq!(readiness.missing_capabilities().count(), 1);
+    }
+
+    #[cfg(feature = "graph")]
+    fn open_projection_db() -> Result<DbConnection, String> {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-graph-projection".to_string(),
+                    name: Some("graph projection".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        insert_memory(&connection, MEMORY_A, "Graph source memory")?;
+        insert_memory(&connection, MEMORY_B, "Graph bridge memory")?;
+        insert_memory(&connection, MEMORY_C, "Graph target memory")?;
+        Ok(connection)
+    }
+
+    #[cfg(feature = "graph")]
+    fn insert_memory(connection: &DbConnection, id: &str, content: &str) -> TestResult {
+        connection
+            .insert_memory(
+                id,
+                &CreateMemoryInput {
+                    workspace_id: WORKSPACE_ID.to_string(),
+                    level: "semantic".to_string(),
+                    kind: "fact".to_string(),
+                    content: content.to_string(),
+                    confidence: 0.8,
+                    utility: 0.6,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "agent_assertion".to_string(),
+                    trust_subclass: None,
+                    tags: vec![],
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    fn insert_link(
+        connection: &DbConnection,
+        id: &str,
+        src: &str,
+        dst: &str,
+        directed: bool,
+        weight: f32,
+        confidence: f32,
+    ) -> TestResult {
+        connection
+            .insert_memory_link(
+                id,
+                &CreateMemoryLinkInput {
+                    src_memory_id: src.to_string(),
+                    dst_memory_id: dst.to_string(),
+                    relation: MemoryLinkRelation::Supports,
+                    weight,
+                    confidence,
+                    directed,
+                    evidence_count: 2,
+                    last_reinforced_at: Some("2026-04-29T20:00:00Z".to_string()),
+                    source: MemoryLinkSource::Agent,
+                    created_by: Some("agent:test".to_string()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn projection_includes_directed_and_undirected_memory_links() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000011",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000012",
+            MEMORY_B,
+            MEMORY_C,
+            false,
+            0.7,
+            0.8,
+        )?;
+
+        let projection =
+            super::build_memory_graph(&connection, &super::ProjectionOptions::default())?;
+
+        assert_eq!(projection.node_count, 3);
+        assert_eq!(projection.edge_count, 3);
+        assert!(projection.graph.has_edge(MEMORY_A, MEMORY_B));
+        assert!(!projection.graph.has_edge(MEMORY_B, MEMORY_A));
+        assert!(projection.graph.has_edge(MEMORY_B, MEMORY_C));
+        assert!(projection.graph.has_edge(MEMORY_C, MEMORY_B));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn projection_filters_by_weight_and_confidence() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000021",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.8,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000022",
+            MEMORY_B,
+            MEMORY_C,
+            true,
+            0.2,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000023",
+            MEMORY_C,
+            MEMORY_A,
+            true,
+            0.8,
+            0.3,
+        )?;
+
+        let projection = super::build_memory_graph(
+            &connection,
+            &super::ProjectionOptions {
+                link_limit: None,
+                min_weight: Some(0.5),
+                min_confidence: Some(0.8),
+            },
+        )?;
+
+        assert_eq!(projection.node_count, 2);
+        assert_eq!(projection.edge_count, 1);
+        assert!(projection.graph.has_edge(MEMORY_A, MEMORY_B));
+        assert!(!projection.graph.has_edge(MEMORY_B, MEMORY_C));
+        assert!(!projection.graph.has_edge(MEMORY_C, MEMORY_A));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn centrality_wrappers_return_scores_for_projection_nodes() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000031",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000032",
+            MEMORY_B,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+        )?;
+
+        let projection =
+            super::build_memory_graph(&connection, &super::ProjectionOptions::default())?;
+        let pagerank = super::compute_pagerank(&projection);
+        let betweenness = super::compute_betweenness(&projection);
+
+        assert_eq!(pagerank.scores.len(), projection.node_count);
+        assert_eq!(betweenness.scores.len(), projection.node_count);
+        assert!(pagerank.scores.iter().any(|score| score.node == MEMORY_A));
+        assert!(
+            betweenness
+                .scores
+                .iter()
+                .any(|score| score.node == MEMORY_B)
+        );
+
+        connection.close().map_err(|error| error.to_string())
     }
 }
