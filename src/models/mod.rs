@@ -2,6 +2,7 @@ use std::process::ExitCode;
 
 pub mod certificate;
 pub mod degradation;
+pub mod episode;
 pub mod error_codes;
 pub mod id;
 pub mod memory;
@@ -24,6 +25,15 @@ pub use certificate::{
 pub use degradation::{
     ALL_DEGRADATION_CODES, ActiveDegradation, DegradationCode, DegradationSeverity,
     DegradedSubsystem,
+};
+pub use episode::{
+    ActionType, COUNTERFACTUAL_RUN_ID_PREFIX, COUNTERFACTUAL_RUN_SCHEMA_V1, CounterfactualMethod,
+    CounterfactualRun, EPISODE_ID_PREFIX, EpisodeAction, EpisodeOutcome, INTERVENTION_ID_PREFIX,
+    INTERVENTION_SCHEMA_V1, Intervention, InterventionType, ParseActionTypeError,
+    ParseCounterfactualMethodError, ParseEpisodeOutcomeError, ParseInterventionTypeError,
+    ParseRegretCategoryError, REGRET_ENTRY_ID_PREFIX, REGRET_ENTRY_SCHEMA_V1,
+    REGRET_LEDGER_SCHEMA_V1, RegretCategory, RegretEntry, RegretLedger, RegretSummary,
+    TASK_EPISODE_SCHEMA_V1, TaskEpisode,
 };
 pub use id::{
     AuditId, BackupId, CandidateId, ClaimId, DemoId, EXECUTABLE_ID_SCHEMA_V1, EvidenceId,
