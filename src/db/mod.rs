@@ -1141,6 +1141,45 @@ CREATE INDEX idx_sessions_content_hash ON sessions(content_hash);
     "blake3:v008_sessions_2026_04_30",
 );
 
+/// V009: Add evidence_spans table (EE-104).
+pub const V009_EVIDENCE_SPANS: Migration = Migration::new(
+    9,
+    "evidence_spans",
+    r#"
+-- Evidence spans imported from CASS session transcripts.
+CREATE TABLE evidence_spans (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'ev_*' AND length(id) = 29),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    memory_id TEXT REFERENCES memories(id) ON DELETE SET NULL,
+    cass_span_id TEXT NOT NULL CHECK (length(trim(cass_span_id)) > 0),
+    span_kind TEXT NOT NULL CHECK (span_kind IN (
+        'message', 'tool_call', 'tool_result', 'file', 'summary'
+    )),
+    start_line INTEGER NOT NULL CHECK (start_line > 0),
+    end_line INTEGER NOT NULL CHECK (end_line >= start_line),
+    start_byte INTEGER CHECK (start_byte IS NULL OR start_byte >= 0),
+    end_byte INTEGER CHECK (end_byte IS NULL OR (
+        end_byte >= 0 AND (start_byte IS NULL OR end_byte >= start_byte)
+    )),
+    role TEXT CHECK (role IS NULL OR length(trim(role)) > 0),
+    excerpt TEXT NOT NULL CHECK (length(trim(excerpt)) > 0 AND length(excerpt) <= 65536),
+    content_hash TEXT NOT NULL CHECK (length(trim(content_hash)) > 0),
+    metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    UNIQUE (session_id, cass_span_id)
+);
+
+CREATE INDEX idx_evidence_spans_workspace ON evidence_spans(workspace_id);
+CREATE INDEX idx_evidence_spans_session ON evidence_spans(session_id);
+CREATE INDEX idx_evidence_spans_memory ON evidence_spans(memory_id) WHERE memory_id IS NOT NULL;
+CREATE INDEX idx_evidence_spans_kind ON evidence_spans(span_kind);
+CREATE INDEX idx_evidence_spans_content_hash ON evidence_spans(content_hash);
+"#,
+    "blake3:v009_evidence_spans_2026_04_30",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -1151,6 +1190,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V006_PACK_RECORDS,
     V007_MEMORY_LINKS,
     V008_SESSIONS,
+    V009_EVIDENCE_SPANS,
 ];
 
 /// Result of applying migrations.
@@ -1463,6 +1503,150 @@ fn stored_session_from_row(row: &Row) -> Result<StoredSession> {
         metadata_json: optional_text(row, 11)?.map(str::to_string),
         imported_at: required_text(row, 12, DbOperation::Query, "imported_at")?.to_string(),
         updated_at: required_text(row, 13, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
+/// Input for recording a CASS evidence span.
+#[derive(Debug, Clone)]
+pub struct CreateEvidenceSpanInput {
+    pub workspace_id: String,
+    pub session_id: String,
+    pub memory_id: Option<String>,
+    pub cass_span_id: String,
+    pub span_kind: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub start_byte: Option<u32>,
+    pub end_byte: Option<u32>,
+    pub role: Option<String>,
+    pub excerpt: String,
+    pub content_hash: String,
+    pub metadata_json: Option<String>,
+}
+
+/// A stored evidence_spans row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredEvidenceSpan {
+    pub id: String,
+    pub workspace_id: String,
+    pub session_id: String,
+    pub memory_id: Option<String>,
+    pub cass_span_id: String,
+    pub span_kind: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub start_byte: Option<u32>,
+    pub end_byte: Option<u32>,
+    pub role: Option<String>,
+    pub excerpt: String,
+    pub content_hash: String,
+    pub metadata_json: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl DbConnection {
+    /// Insert a CASS evidence span row.
+    pub fn insert_evidence_span(&self, id: &str, input: &CreateEvidenceSpanInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO evidence_spans (id, workspace_id, session_id, memory_id, cass_span_id, span_kind, start_line, end_line, start_byte, end_byte, role, excerpt, content_hash, metadata_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.session_id.clone()),
+                input
+                    .memory_id
+                    .as_ref()
+                    .map_or(Value::Null, |memory| Value::Text(memory.clone())),
+                Value::Text(input.cass_span_id.clone()),
+                Value::Text(input.span_kind.clone()),
+                Value::BigInt(i64::from(input.start_line)),
+                Value::BigInt(i64::from(input.end_line)),
+                input
+                    .start_byte
+                    .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
+                input
+                    .end_byte
+                    .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
+                input
+                    .role
+                    .as_ref()
+                    .map_or(Value::Null, |role| Value::Text(role.clone())),
+                Value::Text(input.excerpt.clone()),
+                Value::Text(input.content_hash.clone()),
+                input
+                    .metadata_json
+                    .as_ref()
+                    .map_or(Value::Null, |metadata| Value::Text(metadata.clone())),
+                Value::Text(now.clone()),
+                Value::Text(now),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get an evidence span by its ee evidence ID.
+    pub fn get_evidence_span(&self, id: &str) -> Result<Option<StoredEvidenceSpan>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, session_id, memory_id, cass_span_id, span_kind, start_line, end_line, start_byte, end_byte, role, excerpt, content_hash, metadata_json, created_at, updated_at FROM evidence_spans WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first().map(stored_evidence_span_from_row).transpose()
+    }
+
+    /// List evidence spans for a session in transcript order.
+    pub fn list_evidence_spans_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<StoredEvidenceSpan>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, session_id, memory_id, cass_span_id, span_kind, start_line, end_line, start_byte, end_byte, role, excerpt, content_hash, metadata_json, created_at, updated_at FROM evidence_spans WHERE session_id = ?1 ORDER BY start_line ASC, end_line ASC, id ASC",
+            &[Value::Text(session_id.to_string())],
+        )?;
+
+        rows.iter().map(stored_evidence_span_from_row).collect()
+    }
+
+    /// List evidence spans linked to a memory in deterministic order.
+    pub fn list_evidence_spans_for_memory(
+        &self,
+        memory_id: &str,
+    ) -> Result<Vec<StoredEvidenceSpan>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, session_id, memory_id, cass_span_id, span_kind, start_line, end_line, start_byte, end_byte, role, excerpt, content_hash, metadata_json, created_at, updated_at FROM evidence_spans WHERE memory_id = ?1 ORDER BY session_id ASC, start_line ASC, end_line ASC, id ASC",
+            &[Value::Text(memory_id.to_string())],
+        )?;
+
+        rows.iter().map(stored_evidence_span_from_row).collect()
+    }
+}
+
+fn stored_evidence_span_from_row(row: &Row) -> Result<StoredEvidenceSpan> {
+    Ok(StoredEvidenceSpan {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        session_id: required_text(row, 2, DbOperation::Query, "session_id")?.to_string(),
+        memory_id: optional_text(row, 3)?.map(str::to_string),
+        cass_span_id: required_text(row, 4, DbOperation::Query, "cass_span_id")?.to_string(),
+        span_kind: required_text(row, 5, DbOperation::Query, "span_kind")?.to_string(),
+        start_line: required_u32(row, 6, DbOperation::Query, "start_line")?,
+        end_line: required_u32(row, 7, DbOperation::Query, "end_line")?,
+        start_byte: optional_u32(row, 8, DbOperation::Query, "start_byte")?,
+        end_byte: optional_u32(row, 9, DbOperation::Query, "end_byte")?,
+        role: optional_text(row, 10)?.map(str::to_string),
+        excerpt: required_text(row, 11, DbOperation::Query, "excerpt")?.to_string(),
+        content_hash: required_text(row, 12, DbOperation::Query, "content_hash")?.to_string(),
+        metadata_json: optional_text(row, 13)?.map(str::to_string),
+        created_at: required_text(row, 14, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 15, DbOperation::Query, "updated_at")?.to_string(),
     })
 }
 
@@ -2772,8 +2956,8 @@ mod tests {
 
         ensure_equal(
             &result.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7, 8],
-            "V001-V008 must be applied",
+            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9],
+            "V001-V009 must be applied",
         )?;
         ensure_equal(&result.skipped().len(), &0, "no migrations skipped")?;
 
@@ -2831,6 +3015,10 @@ mod tests {
             table_names.contains(&"sessions"),
             "sessions table must exist",
         )?;
+        ensure(
+            table_names.contains(&"evidence_spans"),
+            "evidence_spans table must exist",
+        )?;
 
         connection.close()?;
         Ok(())
@@ -2843,16 +3031,16 @@ mod tests {
         let first = connection.migrate()?;
         ensure_equal(
             &first.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7, 8],
-            "first run applies V001-V008",
+            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9],
+            "first run applies V001-V009",
         )?;
 
         let second = connection.migrate()?;
         ensure_equal(&second.applied().len(), &0, "second run applies nothing")?;
         ensure_equal(
             &second.skipped().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7, 8],
-            "second run skips V001-V008",
+            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9],
+            "second run skips V001-V009",
         )?;
 
         connection.close()?;
@@ -2893,8 +3081,8 @@ mod tests {
 
         ensure_equal(
             &connection.schema_version()?,
-            &Some(8),
-            "after migrations, schema version is 8",
+            &Some(9),
+            "after migrations, schema version is 9",
         )?;
 
         connection.close()?;
@@ -3044,6 +3232,31 @@ mod tests {
         }
     }
 
+    fn evidence_span_input(
+        session_id: &str,
+        cass_span_id: &str,
+        start_line: u32,
+    ) -> super::CreateEvidenceSpanInput {
+        super::CreateEvidenceSpanInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            session_id: session_id.to_string(),
+            memory_id: None,
+            cass_span_id: cass_span_id.to_string(),
+            span_kind: "message".to_string(),
+            start_line,
+            end_line: start_line + 2,
+            start_byte: Some(start_line * 100),
+            end_byte: Some(start_line * 100 + 80),
+            role: Some("assistant".to_string()),
+            excerpt: "Use SQLModel Rust plus FrankenSQLite for durable imports.".to_string(),
+            content_hash: "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_string(),
+            metadata_json: Some(
+                r#"{"source":"cass","schema":"cass.evidence_span.v1"}"#.to_string(),
+            ),
+        }
+    }
+
     #[test]
     fn insert_and_get_session() -> TestResult {
         let connection = DbConnection::open_memory()?;
@@ -3181,6 +3394,183 @@ mod tests {
         ensure(
             matches!(
                 invalid,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "metadata_json must be valid JSON when present",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_and_get_evidence_span() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.insert_session(
+            "sess_01234567890123456789012345",
+            &session_input("cass-session-evidence-a"),
+        )?;
+        connection.insert_memory(
+            "mem_01234567890123456789012345",
+            &super::CreateMemoryInput {
+                workspace_id: "wsp_01234567890123456789012345".to_string(),
+                level: "episodic".to_string(),
+                kind: "cass_import".to_string(),
+                content: "Imported CASS evidence.".to_string(),
+                confidence: 0.45,
+                utility: 0.5,
+                importance: 0.4,
+                provenance_uri: Some("cass-session://cass-session-evidence-a#L10-12".to_string()),
+                trust_class: "cass_evidence".to_string(),
+                trust_subclass: Some("session-span".to_string()),
+                tags: vec!["cass".to_string()],
+            },
+        )?;
+
+        let mut input = evidence_span_input("sess_01234567890123456789012345", "span-a", 10);
+        input.memory_id = Some("mem_01234567890123456789012345".to_string());
+        connection.insert_evidence_span("ev_01234567890123456789012345", &input)?;
+
+        let span = connection.get_evidence_span("ev_01234567890123456789012345")?;
+        ensure(span.is_some(), "evidence span must be found")?;
+        let span = span.ok_or_else(|| TestFailure::new("evidence span not found"))?;
+        ensure_equal(&span.id.as_str(), &"ev_01234567890123456789012345", "id")?;
+        ensure_equal(
+            &span.workspace_id.as_str(),
+            &"wsp_01234567890123456789012345",
+            "workspace_id",
+        )?;
+        ensure_equal(
+            &span.session_id.as_str(),
+            &"sess_01234567890123456789012345",
+            "session_id",
+        )?;
+        ensure_equal(
+            &span.memory_id,
+            &Some("mem_01234567890123456789012345".to_string()),
+            "memory_id",
+        )?;
+        ensure_equal(&span.cass_span_id.as_str(), &"span-a", "cass_span_id")?;
+        ensure_equal(&span.span_kind.as_str(), &"message", "span_kind")?;
+        ensure_equal(&span.start_line, &10, "start_line")?;
+        ensure_equal(&span.end_line, &12, "end_line")?;
+        ensure_equal(&span.start_byte, &Some(1000), "start_byte")?;
+        ensure_equal(&span.end_byte, &Some(1080), "end_byte")?;
+        ensure_equal(&span.role, &Some("assistant".to_string()), "role")?;
+        ensure_equal(&span.excerpt.as_str(), &input.excerpt.as_str(), "excerpt")?;
+        ensure_equal(
+            &span.content_hash.as_str(),
+            &input.content_hash.as_str(),
+            "content_hash",
+        )?;
+        ensure(!span.created_at.is_empty(), "created_at is populated")?;
+        ensure(!span.updated_at.is_empty(), "updated_at is populated")?;
+
+        let by_memory =
+            connection.list_evidence_spans_for_memory("mem_01234567890123456789012345")?;
+        ensure_equal(&by_memory, &vec![span], "linked memory evidence list")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_evidence_spans_for_session_filters_and_sorts() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.insert_session(
+            "sess_11234567890123456789012345",
+            &session_input("cass-session-evidence-b"),
+        )?;
+        connection.insert_session(
+            "sess_21234567890123456789012345",
+            &session_input("cass-session-evidence-c"),
+        )?;
+
+        connection.insert_evidence_span(
+            "ev_21234567890123456789012345",
+            &evidence_span_input("sess_11234567890123456789012345", "span-line-20", 20),
+        )?;
+        connection.insert_evidence_span(
+            "ev_11234567890123456789012345",
+            &evidence_span_input("sess_11234567890123456789012345", "span-line-10", 10),
+        )?;
+        connection.insert_evidence_span(
+            "ev_31234567890123456789012345",
+            &evidence_span_input("sess_21234567890123456789012345", "span-other", 5),
+        )?;
+
+        let spans =
+            connection.list_evidence_spans_for_session("sess_11234567890123456789012345")?;
+        let cass_span_ids: Vec<&str> = spans
+            .iter()
+            .map(|span| span.cass_span_id.as_str())
+            .collect();
+        ensure_equal(
+            &cass_span_ids,
+            &vec!["span-line-10", "span-line-20"],
+            "session evidence spans sorted by source position",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_spans_enforce_unique_upstream_id_bounds_and_json() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.insert_session(
+            "sess_31234567890123456789012345",
+            &session_input("cass-session-evidence-d"),
+        )?;
+
+        let input = evidence_span_input("sess_31234567890123456789012345", "span-unique", 10);
+        connection.insert_evidence_span("ev_41234567890123456789012345", &input)?;
+
+        let duplicate = connection.insert_evidence_span("ev_51234567890123456789012345", &input);
+        ensure(
+            matches!(
+                duplicate,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "duplicate CASS span id within a session must be rejected",
+        )?;
+
+        let mut inverted =
+            evidence_span_input("sess_31234567890123456789012345", "span-inverted-lines", 30);
+        inverted.end_line = 29;
+        let inverted_result =
+            connection.insert_evidence_span("ev_61234567890123456789012345", &inverted);
+        ensure(
+            matches!(
+                inverted_result,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "end_line before start_line must be rejected",
+        )?;
+
+        let mut invalid_json =
+            evidence_span_input("sess_31234567890123456789012345", "span-invalid-json", 40);
+        invalid_json.metadata_json = Some("{not-json}".to_string());
+        let invalid_json_result =
+            connection.insert_evidence_span("ev_71234567890123456789012345", &invalid_json);
+        ensure(
+            matches!(
+                invalid_json_result,
                 Err(DbError::SqlModel {
                     operation: DbOperation::Execute,
                     ..
@@ -4545,7 +4935,7 @@ mod tests {
         ensure(report.integrity_check.passed, "integrity passed")?;
         ensure(report.foreign_key_check.passed, "foreign keys passed")?;
         ensure(!report.needs_migration, "no migration needed")?;
-        ensure_equal(&report.schema_version, &Some(8), "schema version is 8")?;
+        ensure_equal(&report.schema_version, &Some(9), "schema version is 9")?;
 
         connection.close()?;
         Ok(())
