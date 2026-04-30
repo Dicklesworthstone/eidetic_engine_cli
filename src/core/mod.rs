@@ -20,13 +20,15 @@ pub mod search;
 pub mod situation;
 pub mod status;
 pub mod streams;
+pub mod verify;
 pub mod why;
 
 pub use budget::{BudgetDimension, BudgetExceeded, BudgetSnapshot, RequestBudget};
 pub use context::{AccessLevel, CapabilitySet, CommandContext};
 pub use outcome::{
     CliCancelReason, CliOutcomeClass, CliOutcomeSummary, EXIT_CANCELLED, EXIT_PANICKED,
-    outcome_class, outcome_exit_code,
+    OutcomeFeedbackSummary, OutcomeRecordOptions, OutcomeRecordReport, OutcomeRecordStatus,
+    outcome_class, outcome_exit_code, record_outcome,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

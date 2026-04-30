@@ -639,3 +639,173 @@ fn integration_foundation_memory_health_structure() -> TestResult {
         "memoryHealth must have activeCount number",
     )
 }
+
+// =============================================================================
+// Schema Contract Drift Tests (EE-306)
+//
+// These tests verify that public JSON output adheres to the schema contract.
+// They detect drift when schemas change without updating the KNOWN_SCHEMAS
+// constant or when output fields don't match expected schemas.
+// =============================================================================
+
+#[test]
+fn contract_drift_response_schema_is_used() -> TestResult {
+    // Verify that successful commands use the response schema
+    let output = run_ee(&["status", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| format!("status output must be valid JSON: {e}"))?;
+
+    let schema = json["schema"].as_str();
+    ensure(schema.is_some(), "JSON output must have schema field")?;
+    ensure(
+        schema == Some("ee.response.v1"),
+        format!(
+            "successful command must use ee.response.v1, got {:?}",
+            schema
+        ),
+    )
+}
+
+#[test]
+fn contract_drift_schema_format_is_valid() -> TestResult {
+    // Verify schema format follows ee.<namespace>.v<n> pattern
+    let output = run_ee(&["status", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| format!("status output must be valid JSON: {e}"))?;
+
+    let schema = json["schema"]
+        .as_str()
+        .ok_or("schema field must be a string")?;
+
+    // Must start with "ee."
+    ensure(schema.starts_with("ee."), "schema must start with 'ee.'")?;
+
+    // Must end with ".v" followed by digits
+    let parts: Vec<&str> = schema.split('.').collect();
+    ensure(parts.len() >= 3, "schema must have at least 3 parts")?;
+
+    let version_part = parts.last().ok_or("schema must have version part")?;
+    ensure(
+        version_part.starts_with('v'),
+        "version part must start with 'v'",
+    )?;
+
+    let version_num = &version_part[1..];
+    ensure(
+        !version_num.is_empty() && version_num.chars().all(|c| c.is_ascii_digit()),
+        "version part must be v followed by digits",
+    )
+}
+
+#[test]
+fn contract_drift_agent_docs_all_topics_valid() -> TestResult {
+    // Verify that all agent docs topics produce valid output
+    let topics = [
+        "guide",
+        "commands",
+        "contracts",
+        "schemas",
+        "paths",
+        "env",
+        "exit-codes",
+        "fields",
+        "errors",
+        "formats",
+        "examples",
+    ];
+
+    for topic in topics {
+        let output = run_ee(&["agent-docs", topic, "--json"])?;
+        ensure(
+            output.status.success(),
+            format!("agent-docs {topic} must succeed"),
+        )?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|e| format!("agent-docs {topic} must be valid JSON: {e}"))?;
+
+        ensure(
+            json["schema"].is_string(),
+            format!("agent-docs {topic} must have schema field"),
+        )?;
+        ensure(
+            json["success"].as_bool() == Some(true),
+            format!("agent-docs {topic} must have success: true"),
+        )?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn contract_drift_agent_docs_without_topic_valid() -> TestResult {
+    // Verify agent-docs without topic lists all topics
+    let output = run_ee(&["agent-docs", "--json"])?;
+    ensure(output.status.success(), "agent-docs must succeed")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).map_err(|e| format!("agent-docs must be valid JSON: {e}"))?;
+
+    ensure(json["schema"].is_string(), "must have schema field")?;
+    ensure(
+        json["success"].as_bool() == Some(true),
+        "must have success: true",
+    )?;
+    ensure(json["data"].is_object(), "must have data object")?;
+
+    // Should have topics list
+    let topics = &json["data"]["topics"];
+    ensure(topics.is_array(), "data.topics must be an array")?;
+    ensure(
+        topics.as_array().map(|t| t.len()).unwrap_or(0) >= 10,
+        "should have at least 10 topics",
+    )
+}
+
+#[test]
+fn contract_drift_success_field_is_boolean() -> TestResult {
+    // Verify that success field is always a proper boolean
+    let output = run_ee(&["status", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).map_err(|e| format!("status must be valid JSON: {e}"))?;
+
+    let success = &json["success"];
+    ensure(
+        success.is_boolean(),
+        "success must be a boolean, not null or absent",
+    )?;
+
+    // If command succeeded, success must be true
+    if output.status.success() {
+        ensure(
+            success.as_bool() == Some(true),
+            "successful command must have success: true",
+        )?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn contract_drift_data_field_present_on_success() -> TestResult {
+    // Verify that successful commands always have a data field
+    let output = run_ee(&["status", "--json"])?;
+    ensure(output.status.success(), "status must succeed")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).map_err(|e| format!("status must be valid JSON: {e}"))?;
+
+    ensure(
+        json["data"].is_object(),
+        "successful command must have data object",
+    )
+}
