@@ -712,6 +712,14 @@ fn required_i64(row: &Row, index: usize, operation: DbOperation, column: &str) -
         })
 }
 
+fn required_u32(row: &Row, index: usize, operation: DbOperation, column: &str) -> Result<u32> {
+    let value = required_i64(row, index, operation, column)?;
+    u32::try_from(value).map_err(|_| DbError::MalformedRow {
+        operation,
+        message: format!("{column} column at index {index} must fit u32"),
+    })
+}
+
 fn required_text<'a>(
     row: &'a Row,
     index: usize,
@@ -1101,6 +1109,38 @@ CREATE INDEX idx_memory_links_created ON memory_links(created_at);
     "blake3:v007_memory_links_2026_04_29",
 );
 
+/// V008: Add sessions table (EE-103).
+pub const V008_SESSIONS: Migration = Migration::new(
+    8,
+    "sessions",
+    r#"
+-- CASS sessions imported through the stable robot/JSON contract.
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'sess_*' AND length(id) = 31),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    cass_session_id TEXT NOT NULL CHECK (length(trim(cass_session_id)) > 0),
+    source_path TEXT CHECK (source_path IS NULL OR length(trim(source_path)) > 0),
+    agent_name TEXT CHECK (agent_name IS NULL OR length(trim(agent_name)) > 0),
+    model TEXT CHECK (model IS NULL OR length(trim(model)) > 0),
+    started_at TEXT CHECK (started_at IS NULL OR length(trim(started_at)) > 0),
+    ended_at TEXT CHECK (ended_at IS NULL OR length(trim(ended_at)) > 0),
+    message_count INTEGER NOT NULL DEFAULT 0 CHECK (message_count >= 0),
+    token_count INTEGER CHECK (token_count IS NULL OR token_count >= 0),
+    content_hash TEXT NOT NULL CHECK (length(trim(content_hash)) > 0),
+    metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+    imported_at TEXT NOT NULL CHECK (length(trim(imported_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    UNIQUE (workspace_id, cass_session_id)
+);
+
+CREATE INDEX idx_sessions_workspace ON sessions(workspace_id);
+CREATE INDEX idx_sessions_cass_id ON sessions(cass_session_id);
+CREATE INDEX idx_sessions_started ON sessions(started_at);
+CREATE INDEX idx_sessions_content_hash ON sessions(content_hash);
+"#,
+    "blake3:v008_sessions_2026_04_30",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -1110,6 +1150,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V005_SEARCH_INDEX_JOBS,
     V006_PACK_RECORDS,
     V007_MEMORY_LINKS,
+    V008_SESSIONS,
 ];
 
 /// Result of applying migrations.
@@ -1278,6 +1319,150 @@ fn stored_workspace_from_row(row: &Row) -> Result<StoredWorkspace> {
         name: optional_text(row, 2)?.map(str::to_string),
         created_at: required_text(row, 3, DbOperation::Query, "created_at")?.to_string(),
         updated_at: required_text(row, 4, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
+/// Input for recording a CASS session import row.
+#[derive(Debug, Clone)]
+pub struct CreateSessionInput {
+    pub workspace_id: String,
+    pub cass_session_id: String,
+    pub source_path: Option<String>,
+    pub agent_name: Option<String>,
+    pub model: Option<String>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub message_count: u32,
+    pub token_count: Option<u32>,
+    pub content_hash: String,
+    pub metadata_json: Option<String>,
+}
+
+/// A stored CASS session row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSession {
+    pub id: String,
+    pub workspace_id: String,
+    pub cass_session_id: String,
+    pub source_path: Option<String>,
+    pub agent_name: Option<String>,
+    pub model: Option<String>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub message_count: u32,
+    pub token_count: Option<u32>,
+    pub content_hash: String,
+    pub metadata_json: Option<String>,
+    pub imported_at: String,
+    pub updated_at: String,
+}
+
+impl DbConnection {
+    /// Insert a new CASS session row.
+    pub fn insert_session(&self, id: &str, input: &CreateSessionInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO sessions (id, workspace_id, cass_session_id, source_path, agent_name, model, started_at, ended_at, message_count, token_count, content_hash, metadata_json, imported_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.cass_session_id.clone()),
+                input
+                    .source_path
+                    .as_ref()
+                    .map_or(Value::Null, |path| Value::Text(path.clone())),
+                input
+                    .agent_name
+                    .as_ref()
+                    .map_or(Value::Null, |agent| Value::Text(agent.clone())),
+                input
+                    .model
+                    .as_ref()
+                    .map_or(Value::Null, |model| Value::Text(model.clone())),
+                input
+                    .started_at
+                    .as_ref()
+                    .map_or(Value::Null, |started| Value::Text(started.clone())),
+                input
+                    .ended_at
+                    .as_ref()
+                    .map_or(Value::Null, |ended| Value::Text(ended.clone())),
+                Value::BigInt(i64::from(input.message_count)),
+                input
+                    .token_count
+                    .map_or(Value::Null, |count| Value::BigInt(i64::from(count))),
+                Value::Text(input.content_hash.clone()),
+                input
+                    .metadata_json
+                    .as_ref()
+                    .map_or(Value::Null, |metadata| Value::Text(metadata.clone())),
+                Value::Text(now.clone()),
+                Value::Text(now),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get a CASS session by its internal ee session ID.
+    pub fn get_session(&self, id: &str) -> Result<Option<StoredSession>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, cass_session_id, source_path, agent_name, model, started_at, ended_at, message_count, token_count, content_hash, metadata_json, imported_at, updated_at FROM sessions WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first().map(stored_session_from_row).transpose()
+    }
+
+    /// Get a CASS session by the upstream CASS session identifier.
+    pub fn get_session_by_cass_id(
+        &self,
+        workspace_id: &str,
+        cass_session_id: &str,
+    ) -> Result<Option<StoredSession>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, cass_session_id, source_path, agent_name, model, started_at, ended_at, message_count, token_count, content_hash, metadata_json, imported_at, updated_at FROM sessions WHERE workspace_id = ?1 AND cass_session_id = ?2",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(cass_session_id.to_string()),
+            ],
+        )?;
+
+        rows.first().map(stored_session_from_row).transpose()
+    }
+
+    /// List CASS sessions for a workspace in stable upstream-id order.
+    pub fn list_sessions(&self, workspace_id: &str) -> Result<Vec<StoredSession>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, cass_session_id, source_path, agent_name, model, started_at, ended_at, message_count, token_count, content_hash, metadata_json, imported_at, updated_at FROM sessions WHERE workspace_id = ?1 ORDER BY cass_session_id ASC, id ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+
+        rows.iter().map(stored_session_from_row).collect()
+    }
+}
+
+fn stored_session_from_row(row: &Row) -> Result<StoredSession> {
+    Ok(StoredSession {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        cass_session_id: required_text(row, 2, DbOperation::Query, "cass_session_id")?.to_string(),
+        source_path: optional_text(row, 3)?.map(str::to_string),
+        agent_name: optional_text(row, 4)?.map(str::to_string),
+        model: optional_text(row, 5)?.map(str::to_string),
+        started_at: optional_text(row, 6)?.map(str::to_string),
+        ended_at: optional_text(row, 7)?.map(str::to_string),
+        message_count: required_u32(row, 8, DbOperation::Query, "message_count")?,
+        token_count: optional_u32(row, 9, DbOperation::Query, "token_count")?,
+        content_hash: required_text(row, 10, DbOperation::Query, "content_hash")?.to_string(),
+        metadata_json: optional_text(row, 11)?.map(str::to_string),
+        imported_at: required_text(row, 12, DbOperation::Query, "imported_at")?.to_string(),
+        updated_at: required_text(row, 13, DbOperation::Query, "updated_at")?.to_string(),
     })
 }
 
@@ -1540,6 +1725,30 @@ fn optional_text(row: &Row, index: usize) -> Result<Option<&str>> {
         Some(Value::Null) | None => Ok(None),
         Some(value) => Ok(value.as_str()),
     }
+}
+
+fn optional_u32(
+    row: &Row,
+    index: usize,
+    operation: DbOperation,
+    column: &str,
+) -> Result<Option<u32>> {
+    let Some(value) = row.get(index) else {
+        return Ok(None);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(None);
+    }
+    let value = value.as_i64().ok_or_else(|| DbError::MalformedRow {
+        operation,
+        message: format!("{column} column at index {index} is not an integer"),
+    })?;
+    u32::try_from(value)
+        .map(Some)
+        .map_err(|_| DbError::MalformedRow {
+            operation,
+            message: format!("{column} column at index {index} must fit u32"),
+        })
 }
 
 /// Input for creating a new audit log entry.
@@ -2563,8 +2772,8 @@ mod tests {
 
         ensure_equal(
             &result.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7],
-            "V001-V007 must be applied",
+            &vec![1u32, 2, 3, 4, 5, 6, 7, 8],
+            "V001-V008 must be applied",
         )?;
         ensure_equal(&result.skipped().len(), &0, "no migrations skipped")?;
 
@@ -2618,6 +2827,10 @@ mod tests {
             table_names.contains(&"memory_links"),
             "memory_links table must exist",
         )?;
+        ensure(
+            table_names.contains(&"sessions"),
+            "sessions table must exist",
+        )?;
 
         connection.close()?;
         Ok(())
@@ -2630,16 +2843,16 @@ mod tests {
         let first = connection.migrate()?;
         ensure_equal(
             &first.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7],
-            "first run applies V001-V007",
+            &vec![1u32, 2, 3, 4, 5, 6, 7, 8],
+            "first run applies V001-V008",
         )?;
 
         let second = connection.migrate()?;
         ensure_equal(&second.applied().len(), &0, "second run applies nothing")?;
         ensure_equal(
             &second.skipped().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7],
-            "second run skips V001-V007",
+            &vec![1u32, 2, 3, 4, 5, 6, 7, 8],
+            "second run skips V001-V008",
         )?;
 
         connection.close()?;
@@ -2680,8 +2893,8 @@ mod tests {
 
         ensure_equal(
             &connection.schema_version()?,
-            &Some(7),
-            "after migrations, schema version is 7",
+            &Some(8),
+            "after migrations, schema version is 8",
         )?;
 
         connection.close()?;
@@ -2811,6 +3024,172 @@ mod tests {
         connection.execute_raw(
             "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_01234567890123456789012345', '/tmp/test', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
         )?;
+        Ok(())
+    }
+
+    fn session_input(cass_session_id: &str) -> super::CreateSessionInput {
+        super::CreateSessionInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            cass_session_id: cass_session_id.to_string(),
+            source_path: Some("/home/agent/.cass/sessions/session.jsonl".to_string()),
+            agent_name: Some("codex".to_string()),
+            model: Some("gpt-5".to_string()),
+            started_at: Some("2026-04-29T20:00:00Z".to_string()),
+            ended_at: Some("2026-04-29T20:30:00Z".to_string()),
+            message_count: 42,
+            token_count: Some(12_345),
+            content_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            metadata_json: Some(r#"{"source":"cass","schema":"cass.session.v1"}"#.to_string()),
+        }
+    }
+
+    #[test]
+    fn insert_and_get_session() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = session_input("cass-session-2026-04-29-a");
+        connection.insert_session("sess_01234567890123456789012345", &input)?;
+
+        let session = connection.get_session("sess_01234567890123456789012345")?;
+        ensure(session.is_some(), "session must be found by ee id")?;
+        let session = session.ok_or_else(|| TestFailure::new("session not found"))?;
+        ensure_equal(
+            &session.id.as_str(),
+            &"sess_01234567890123456789012345",
+            "id",
+        )?;
+        ensure_equal(
+            &session.workspace_id.as_str(),
+            &"wsp_01234567890123456789012345",
+            "workspace_id",
+        )?;
+        ensure_equal(
+            &session.cass_session_id.as_str(),
+            &"cass-session-2026-04-29-a",
+            "cass_session_id",
+        )?;
+        ensure_equal(
+            &session.source_path,
+            &Some("/home/agent/.cass/sessions/session.jsonl".to_string()),
+            "source_path",
+        )?;
+        ensure_equal(
+            &session.agent_name,
+            &Some("codex".to_string()),
+            "agent_name",
+        )?;
+        ensure_equal(&session.model, &Some("gpt-5".to_string()), "model")?;
+        ensure_equal(
+            &session.started_at,
+            &Some("2026-04-29T20:00:00Z".to_string()),
+            "started_at",
+        )?;
+        ensure_equal(
+            &session.ended_at,
+            &Some("2026-04-29T20:30:00Z".to_string()),
+            "ended_at",
+        )?;
+        ensure_equal(&session.message_count, &42, "message_count")?;
+        ensure_equal(&session.token_count, &Some(12_345), "token_count")?;
+        ensure_equal(
+            &session.content_hash.as_str(),
+            &input.content_hash.as_str(),
+            "content_hash",
+        )?;
+        ensure_equal(
+            &session.metadata_json,
+            &Some(r#"{"source":"cass","schema":"cass.session.v1"}"#.to_string()),
+            "metadata_json",
+        )?;
+        ensure(!session.imported_at.is_empty(), "imported_at is populated")?;
+        ensure(!session.updated_at.is_empty(), "updated_at is populated")?;
+
+        let by_cass = connection.get_session_by_cass_id(
+            "wsp_01234567890123456789012345",
+            "cass-session-2026-04-29-a",
+        )?;
+        ensure_equal(&by_cass, &Some(session), "lookup by CASS id matches")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_sessions_filters_workspace_and_sorts_by_cass_id() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_11234567890123456789012345', '/tmp/other', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+
+        connection.insert_session(
+            "sess_21234567890123456789012345",
+            &session_input("cass-session-b"),
+        )?;
+        connection.insert_session(
+            "sess_11234567890123456789012345",
+            &session_input("cass-session-a"),
+        )?;
+
+        let mut other_workspace = session_input("cass-session-c");
+        other_workspace.workspace_id = "wsp_11234567890123456789012345".to_string();
+        connection.insert_session("sess_31234567890123456789012345", &other_workspace)?;
+
+        let sessions = connection.list_sessions("wsp_01234567890123456789012345")?;
+        let cass_ids: Vec<&str> = sessions
+            .iter()
+            .map(|session| session.cass_session_id.as_str())
+            .collect();
+        ensure_equal(
+            &cass_ids,
+            &vec!["cass-session-a", "cass-session-b"],
+            "sessions sorted within requested workspace",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn sessions_enforce_unique_upstream_id_and_valid_json() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = session_input("cass-session-unique");
+        connection.insert_session("sess_41234567890123456789012345", &input)?;
+
+        let duplicate = connection.insert_session("sess_51234567890123456789012345", &input);
+        ensure(
+            matches!(
+                duplicate,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "duplicate workspace CASS session id must be rejected",
+        )?;
+
+        let mut invalid_json = session_input("cass-session-invalid-json");
+        invalid_json.metadata_json = Some("{not-json}".to_string());
+        let invalid = connection.insert_session("sess_61234567890123456789012345", &invalid_json);
+        ensure(
+            matches!(
+                invalid,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "metadata_json must be valid JSON when present",
+        )?;
+
+        connection.close()?;
         Ok(())
     }
 
@@ -4166,7 +4545,7 @@ mod tests {
         ensure(report.integrity_check.passed, "integrity passed")?;
         ensure(report.foreign_key_check.passed, "foreign keys passed")?;
         ensure(!report.needs_migration, "no migration needed")?;
-        ensure_equal(&report.schema_version, &Some(7), "schema version is 7")?;
+        ensure_equal(&report.schema_version, &Some(8), "schema version is 8")?;
 
         connection.close()?;
         Ok(())
