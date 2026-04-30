@@ -60,6 +60,9 @@ pub const ERROR_SCHEMA_V1: &str = "ee.error.v1";
 /// Schema for CASS import reports (`ee import cass`).
 pub const IMPORT_CASS_SCHEMA_V1: &str = "ee.import.cass.v1";
 
+/// Schema for read-only legacy Eidetic import scans.
+pub const IMPORT_EIDETIC_LEGACY_SCAN_SCHEMA_V1: &str = "ee.import.eidetic_legacy.scan.v1";
+
 /// Schema for import ledger entries.
 pub const IMPORT_LEDGER_SCHEMA_V1: &str = "ee.import_ledger.v1";
 
