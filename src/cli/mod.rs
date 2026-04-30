@@ -173,6 +173,9 @@ pub enum Command {
     /// Counterfactual memory lab: capture, replay, and counterfactual task episodes.
     #[command(subcommand)]
     Lab(LabCommand),
+    /// Active learning agenda, uncertainty sampling, and knowledge gaps.
+    #[command(subcommand)]
+    Learn(LearnCommand),
     /// Manage stored memories (show, list, history).
     #[command(subcommand)]
     Memory(MemoryCommand),
@@ -181,6 +184,9 @@ pub enum Command {
     /// Run, show, or close preflight risk assessments.
     #[command(subcommand)]
     Preflight(PreflightCommand),
+    /// Agent goal planner and command recipe resolver.
+    #[command(subcommand)]
+    Plan(PlanCommand),
     /// Manage distilled procedures and skill capsules.
     #[command(subcommand)]
     Procedure(ProcedureCommand),
@@ -519,6 +525,69 @@ pub struct LabCounterfactualArgs {
     pub dry_run: bool,
 }
 
+/// Subcommands for `ee learn`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum LearnCommand {
+    /// Show active learning agenda with prioritized knowledge gaps.
+    Agenda(LearnAgendaArgs),
+    /// Show uncertainty estimates and sampling priorities.
+    Uncertainty(LearnUncertaintyArgs),
+    /// Report what the system has learned from recent activity.
+    Summary(LearnSummaryArgs),
+}
+
+/// Arguments for `ee learn agenda`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct LearnAgendaArgs {
+    /// Maximum items to show.
+    #[arg(long, short = 'n', default_value_t = 10)]
+    pub limit: u32,
+
+    /// Filter by topic/domain.
+    #[arg(long, value_name = "TOPIC")]
+    pub topic: Option<String>,
+
+    /// Include resolved items.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_resolved: bool,
+
+    /// Sort by: priority, uncertainty, recency.
+    #[arg(long, default_value = "priority")]
+    pub sort: String,
+}
+
+/// Arguments for `ee learn uncertainty`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct LearnUncertaintyArgs {
+    /// Maximum items to show.
+    #[arg(long, short = 'n', default_value_t = 10)]
+    pub limit: u32,
+
+    /// Minimum uncertainty threshold (0.0 to 1.0).
+    #[arg(long, default_value = "0.3")]
+    pub min_uncertainty: String,
+
+    /// Filter by memory kind.
+    #[arg(long, value_name = "KIND")]
+    pub kind: Option<String>,
+
+    /// Include low-confidence items only.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub low_confidence: bool,
+}
+
+/// Arguments for `ee learn summary`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct LearnSummaryArgs {
+    /// Time period: today, week, month, all.
+    #[arg(long, default_value = "week")]
+    pub period: String,
+
+    /// Include detailed breakdown.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub detailed: bool,
+}
+
 /// Subcommands for `ee preflight`.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum PreflightCommand {
@@ -584,6 +653,67 @@ pub struct PreflightCloseArgs {
     /// Report the close action without executing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+/// Subcommands for `ee plan`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum PlanCommand {
+    /// Map a goal to a recipe and return a command plan.
+    Goal(PlanGoalArgs),
+    /// List or show recipe definitions.
+    #[command(subcommand)]
+    Recipe(PlanRecipeCommand),
+    /// Explain why a recipe was selected.
+    Explain(PlanExplainArgs),
+}
+
+/// Subcommands for `ee plan recipe`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum PlanRecipeCommand {
+    /// List available recipes.
+    List(PlanRecipeListArgs),
+    /// Show details of a specific recipe.
+    Show(PlanRecipeShowArgs),
+}
+
+/// Arguments for `ee plan goal`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PlanGoalArgs {
+    /// Goal text or enum to plan for.
+    #[arg(long, value_name = "TEXT")]
+    pub goal: String,
+
+    /// Workspace ID to plan for.
+    #[arg(long, value_name = "ID")]
+    pub workspace: Option<String>,
+
+    /// Output profile (compact, full, safe).
+    #[arg(long, value_name = "PROFILE", default_value = "full")]
+    pub profile: String,
+}
+
+/// Arguments for `ee plan recipe list`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct PlanRecipeListArgs {
+    /// Filter by category.
+    #[arg(long, value_name = "CATEGORY")]
+    pub category: Option<String>,
+}
+
+/// Arguments for `ee plan recipe show`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PlanRecipeShowArgs {
+    /// Recipe ID to show.
+    #[arg(value_name = "RECIPE_ID")]
+    pub recipe_id: String,
+}
+
+/// Arguments for `ee plan explain`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PlanExplainArgs {
+    /// Plan ID or recipe ID to explain.
+    #[arg(value_name = "ID")]
+    pub id: String,
 }
 
 /// Subcommands for `ee procedure`.
@@ -1603,6 +1733,15 @@ where
         Some(Command::Lab(LabCommand::Counterfactual(ref args))) => {
             handle_lab_counterfactual(&cli, args, stdout, stderr)
         }
+        Some(Command::Learn(LearnCommand::Agenda(ref args))) => {
+            handle_learn_agenda(&cli, args, stdout, stderr)
+        }
+        Some(Command::Learn(LearnCommand::Uncertainty(ref args))) => {
+            handle_learn_uncertainty(&cli, args, stdout, stderr)
+        }
+        Some(Command::Learn(LearnCommand::Summary(ref args))) => {
+            handle_learn_summary(&cli, args, stdout, stderr)
+        }
         Some(Command::Graph(GraphCommand::CentralityRefresh(ref args))) => {
             handle_graph_centrality_refresh(&cli, args, stdout, stderr)
         }
@@ -1615,6 +1754,18 @@ where
         }
         Some(Command::Preflight(PreflightCommand::Close(ref args))) => {
             handle_preflight_close(&cli, args, stdout, stderr)
+        }
+        Some(Command::Plan(PlanCommand::Goal(ref args))) => {
+            handle_plan_goal(&cli, args, stdout, stderr)
+        }
+        Some(Command::Plan(PlanCommand::Recipe(PlanRecipeCommand::List(ref args)))) => {
+            handle_plan_recipe_list(&cli, args, stdout, stderr)
+        }
+        Some(Command::Plan(PlanCommand::Recipe(PlanRecipeCommand::Show(ref args)))) => {
+            handle_plan_recipe_show(&cli, args, stdout, stderr)
+        }
+        Some(Command::Plan(PlanCommand::Explain(ref args))) => {
+            handle_plan_explain(&cli, args, stdout, stderr)
         }
         Some(Command::Procedure(ProcedureCommand::Propose(ref args))) => {
             handle_procedure_propose(&cli, args, stdout, stderr)
@@ -2444,6 +2595,305 @@ where
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
+    }
+}
+
+// ============================================================================
+// EE-PLAN-001: Plan Command Handlers
+// ============================================================================
+
+fn handle_plan_goal<W, E>(
+    cli: &Cli,
+    args: &PlanGoalArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::plan::{
+        GOAL_PLAN_SCHEMA_V1, GoalCategory, PlanGoalOptions, PlanProfile, generate_plan,
+    };
+
+    let profile = PlanProfile::from_str(&args.profile).unwrap_or(PlanProfile::Full);
+
+    let options = PlanGoalOptions {
+        goal: args.goal.clone(),
+        workspace: args.workspace.clone(),
+        profile,
+    };
+
+    let plan = generate_plan(&options);
+
+    let human_output = || {
+        let mut out = String::from("Goal Plan\n=========\n\n");
+        out.push_str(&format!("Plan ID:    {}\n", plan.plan_id));
+        out.push_str(&format!("Goal:       {}\n", plan.goal_input));
+        out.push_str(&format!("Category:   {} (confidence: {:.0}%)\n",
+            plan.classification.primary.as_str(),
+            plan.classification.confidence * 100.0));
+        out.push_str(&format!("Recipe:     {}\n", plan.recipe_id));
+        out.push_str(&format!("Profile:    {}\n\n", plan.profile.as_str()));
+
+        if plan.classification.ambiguous {
+            out.push_str("[Goal is ambiguous - consider refining]\n\n");
+        }
+
+        out.push_str("Steps:\n");
+        for step in &plan.steps {
+            let dry_run_marker = if step.dry_run_available { " [dry-run available]" } else { "" };
+            out.push_str(&format!("  {}. {}{}\n", step.order, step.command, dry_run_marker));
+            out.push_str(&format!("      {}\n", step.description));
+        }
+
+        if plan.dry_run_recommended {
+            out.push_str("\n[Dry-run recommended for safe profile]\n");
+        }
+
+        out.push_str("\nNext:\n");
+        for cmd in &plan.next_inspection_commands {
+            out.push_str(&format!("  {cmd}\n"));
+        }
+        out
+    };
+
+    let toon_output = || {
+        format!(
+            "PLAN|{}|{}|{}|{}\n",
+            plan.plan_id,
+            plan.classification.primary.as_str(),
+            plan.recipe_id,
+            plan.steps.len()
+        )
+    };
+
+    let json_output = || {
+        let include_alternatives = profile == PlanProfile::Full;
+        serde_json::json!({
+            "schema": GOAL_PLAN_SCHEMA_V1,
+            "success": true,
+            "data": plan.data_json(include_alternatives),
+        })
+        .to_string()
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human_output()),
+        output::Renderer::Toon => write_stdout(stdout, &toon_output()),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(json_output() + "\n")),
+    }
+}
+
+fn handle_plan_recipe_list<W, E>(
+    cli: &Cli,
+    args: &PlanRecipeListArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::plan::{GoalCategory, RECIPE_LIST_SCHEMA_V1, recipes_by_category};
+
+    let category = args.category.as_ref().and_then(|c| {
+        GoalCategory::all().iter().find(|cat| cat.as_str() == c).copied()
+    });
+
+    let recipes = recipes_by_category(category);
+
+    let human_output = || {
+        let mut out = String::from("Available Recipes\n=================\n\n");
+        for recipe in &recipes {
+            out.push_str(&format!("{} (v{})\n", recipe.id, recipe.version));
+            out.push_str(&format!("  Category: {}\n", recipe.category.as_str()));
+            out.push_str(&format!("  Effect:   {}\n", recipe.effect_posture.as_str()));
+            out.push_str(&format!("  Steps:    {}\n\n", recipe.steps.len()));
+        }
+        out.push_str(&format!("Total: {} recipes\n", recipes.len()));
+        out
+    };
+
+    let toon_output = || {
+        recipes
+            .iter()
+            .map(|r| format!("RECIPE|{}|{}|{}", r.id, r.category.as_str(), r.steps.len()))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    };
+
+    let json_output = || {
+        serde_json::json!({
+            "schema": RECIPE_LIST_SCHEMA_V1,
+            "success": true,
+            "data": {
+                "command": "plan recipe list",
+                "totalCount": recipes.len(),
+                "category": category.map(|c| c.as_str()),
+                "recipes": recipes.iter().map(|r| r.summary_json()).collect::<Vec<_>>(),
+            }
+        })
+        .to_string()
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human_output()),
+        output::Renderer::Toon => write_stdout(stdout, &toon_output()),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(json_output() + "\n")),
+    }
+}
+
+fn handle_plan_recipe_show<W, E>(
+    cli: &Cli,
+    args: &PlanRecipeShowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::plan::{RECIPE_SHOW_SCHEMA_V1, get_recipe};
+
+    match get_recipe(&args.recipe_id) {
+        Some(recipe) => {
+            let human_output = || {
+                let mut out = format!("Recipe: {} (v{})\n", recipe.id, recipe.version);
+                out.push_str(&format!("{}\n\n", "=".repeat(40)));
+                out.push_str(&format!("Name:        {}\n", recipe.name));
+                out.push_str(&format!("Category:    {}\n", recipe.category.as_str()));
+                out.push_str(&format!("Description: {}\n", recipe.description));
+                out.push_str(&format!("Effect:      {}\n", recipe.effect_posture.as_str()));
+                out.push_str(&format!("Profiles:    {}\n\n", recipe.profiles.join(", ")));
+
+                out.push_str("Steps:\n");
+                for step in &recipe.steps {
+                    let required = if step.required { "[required]" } else { "[optional]" };
+                    out.push_str(&format!("  {}. {} {}\n", step.order, step.command, required));
+                    out.push_str(&format!("      {}\n", step.description));
+                }
+
+                if !recipe.degraded_branches.is_empty() {
+                    out.push_str("\nDegraded Branches:\n");
+                    for branch in &recipe.degraded_branches {
+                        out.push_str(&format!("  When: {}\n", branch.condition));
+                        out.push_str(&format!("    {}\n", branch.message));
+                    }
+                }
+
+                if !recipe.required_capabilities.is_empty() {
+                    out.push_str(&format!("\nRequired Capabilities: {}\n", recipe.required_capabilities.join(", ")));
+                }
+                out
+            };
+
+            let toon_output = || {
+                format!(
+                    "RECIPE_DETAIL|{}|{}|{}|{}\n",
+                    recipe.id,
+                    recipe.version,
+                    recipe.category.as_str(),
+                    recipe.steps.len()
+                )
+            };
+
+            let json_output = || {
+                serde_json::json!({
+                    "schema": RECIPE_SHOW_SCHEMA_V1,
+                    "success": true,
+                    "data": recipe.data_json(),
+                })
+                .to_string()
+            };
+
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human_output()),
+                output::Renderer::Toon => write_stdout(stdout, &toon_output()),
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => write_stdout(stdout, &(json_output() + "\n")),
+            }
+        }
+        None => {
+            let domain_error = crate::models::DomainError::NotFound {
+                resource: "recipe".to_string(),
+                id: args.recipe_id.clone(),
+                repair: Some("ee plan recipe list --json".to_string()),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_plan_explain<W, E>(
+    cli: &Cli,
+    args: &PlanExplainArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::plan::{PLAN_EXPLAIN_SCHEMA_V1, explain_recipe, get_recipe};
+
+    // Try to explain as recipe first
+    if let Some(explanation) = explain_recipe(&args.id) {
+        let human_output = || {
+            let mut out = format!("Explanation: {}\n", explanation.recipe_id);
+            out.push_str(&format!("{}\n\n", "=".repeat(40)));
+            out.push_str(&format!("Classification: {}\n", explanation.classification_reasoning));
+            out.push_str(&format!("Selection:      {}\n\n", explanation.selection_reasoning));
+
+            out.push_str("Posture Inputs:\n");
+            for input in &explanation.posture_inputs {
+                out.push_str(&format!("  - {input}\n"));
+            }
+
+            out.push_str("\nNext Inspection:\n");
+            for cmd in &explanation.next_inspection {
+                out.push_str(&format!("  {cmd}\n"));
+            }
+            out
+        };
+
+        let toon_output = || {
+            format!("EXPLAIN|{}|recipe\n", explanation.recipe_id)
+        };
+
+        let json_output = || {
+            serde_json::json!({
+                "schema": PLAN_EXPLAIN_SCHEMA_V1,
+                "success": true,
+                "data": explanation.data_json(),
+            })
+            .to_string()
+        };
+
+        match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human_output()),
+            output::Renderer::Toon => write_stdout(stdout, &toon_output()),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(json_output() + "\n")),
+        }
+    } else {
+        let domain_error = crate::models::DomainError::NotFound {
+            resource: "plan or recipe".to_string(),
+            id: args.id.clone(),
+            repair: Some("ee plan recipe list --json".to_string()),
+        };
+        write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
     }
 }
 
@@ -4721,6 +5171,11 @@ impl NormalizedInvocation {
                     LabCommand::Replay(_) => "lab replay".to_string(),
                     LabCommand::Counterfactual(_) => "lab counterfactual".to_string(),
                 },
+                Command::Learn(learn) => match learn {
+                    LearnCommand::Agenda(_) => "learn agenda".to_string(),
+                    LearnCommand::Uncertainty(_) => "learn uncertainty".to_string(),
+                    LearnCommand::Summary(_) => "learn summary".to_string(),
+                },
                 Command::Memory(mem) => match mem {
                     MemoryCommand::List(_) => "memory list".to_string(),
                     MemoryCommand::Show(_) => "memory show".to_string(),
@@ -4731,6 +5186,12 @@ impl NormalizedInvocation {
                     PreflightCommand::Run(_) => "preflight run".to_string(),
                     PreflightCommand::Show(_) => "preflight show".to_string(),
                     PreflightCommand::Close(_) => "preflight close".to_string(),
+                },
+                Command::Plan(plan) => match plan {
+                    PlanCommand::Goal(_) => "plan goal".to_string(),
+                    PlanCommand::Recipe(PlanRecipeCommand::List(_)) => "plan recipe list".to_string(),
+                    PlanCommand::Recipe(PlanRecipeCommand::Show(_)) => "plan recipe show".to_string(),
+                    PlanCommand::Explain(_) => "plan explain".to_string(),
                 },
                 Command::Procedure(proc) => match proc {
                     ProcedureCommand::Propose(_) => "procedure propose".to_string(),
