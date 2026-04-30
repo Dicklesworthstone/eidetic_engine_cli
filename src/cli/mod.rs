@@ -21,6 +21,7 @@ use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_so
 use crate::core::memory::{
     GetMemoryOptions, ListMemoriesOptions, get_memory_details, list_memories,
 };
+use crate::core::outcome::{OutcomeRecordOptions, record_outcome};
 use crate::core::quarantine::QuarantineReport;
 use crate::core::search::{SearchOptions, run_search};
 use crate::core::situation::{classify_task, explain_situation, show_situation};
@@ -154,6 +155,8 @@ pub enum Command {
     /// Manage stored memories (show, list, history).
     #[command(subcommand)]
     Memory(MemoryCommand),
+    /// Record observed feedback about a memory or related target.
+    Outcome(OutcomeArgs),
     /// Store a new memory.
     Remember(RememberArgs),
     /// List or export public response schemas.
@@ -342,6 +345,66 @@ pub struct RememberArgs {
     /// Perform a dry run without storing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+/// Arguments for `ee outcome`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct OutcomeArgs {
+    /// Target ID to receive feedback. Memory IDs are verified by default.
+    #[arg(value_name = "TARGET_ID")]
+    pub target_id: String,
+
+    /// Target type: memory, rule, session, source, pack, or candidate.
+    #[arg(long, default_value = "memory")]
+    pub target_type: String,
+
+    /// Workspace ID for non-memory targets.
+    #[arg(long)]
+    pub workspace_id: Option<String>,
+
+    /// Outcome signal: helpful, harmful, confirmation, contradiction, stale, inaccurate, outdated, positive, negative, or neutral.
+    #[arg(long)]
+    pub signal: String,
+
+    /// Explicit feedback weight from 0.0 to 10.0. Defaults from source type and signal.
+    #[arg(long)]
+    pub weight: Option<f32>,
+
+    /// Feedback source type.
+    #[arg(long, default_value = "outcome_observed")]
+    pub source_type: String,
+
+    /// Source identifier, such as a run, task, or external evidence ID.
+    #[arg(long)]
+    pub source_id: Option<String>,
+
+    /// Human-readable reason for the feedback.
+    #[arg(long)]
+    pub reason: Option<String>,
+
+    /// JSON evidence payload. Stored canonically; output reports only its presence.
+    #[arg(long)]
+    pub evidence_json: Option<String>,
+
+    /// Session ID associated with the observed outcome.
+    #[arg(long)]
+    pub session_id: Option<String>,
+
+    /// Optional caller-supplied feedback event ID for idempotent retries.
+    #[arg(long)]
+    pub event_id: Option<String>,
+
+    /// Actor recorded in the audit log.
+    #[arg(long)]
+    pub actor: Option<String>,
+
+    /// Validate and render the event without writing storage.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee why`.
@@ -851,6 +914,7 @@ where
         Some(Command::Index(IndexCommand::Status(ref args))) => {
             handle_index_status(&cli, args, stdout, stderr)
         }
+        Some(Command::Outcome(ref args)) => handle_outcome(&cli, args, stdout, stderr),
         Some(Command::Schema(ref schema_cmd)) => match schema_cmd {
             SchemaCommand::List => match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
@@ -1672,6 +1736,69 @@ where
     }
 }
 
+fn handle_outcome<W, E>(
+    cli: &Cli,
+    args: &OutcomeArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    let options = OutcomeRecordOptions {
+        database_path: &database_path,
+        target_type: args.target_type.clone(),
+        target_id: args.target_id.clone(),
+        workspace_id: args.workspace_id.clone(),
+        signal: args.signal.clone(),
+        weight: args.weight,
+        source_type: args.source_type.clone(),
+        source_id: args.source_id.clone(),
+        reason: args.reason.clone(),
+        evidence_json: args.evidence_json.clone(),
+        session_id: args.session_id.clone(),
+        event_id: args.event_id.clone(),
+        actor: args.actor.clone(),
+        dry_run: args.dry_run,
+    };
+
+    match record_outcome(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &format!(
+                    "OUTCOME|{}|{}|{}|{}\n",
+                    report.status.as_str(),
+                    report.target_type,
+                    report.target_id,
+                    report.event_id.as_deref().unwrap_or("")
+                ),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json(),
+                });
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn handle_why<W, E>(cli: &Cli, args: &WhyArgs, stdout: &mut W, stderr: &mut E) -> ProcessExitCode
 where
     W: Write,
@@ -2093,20 +2220,14 @@ where
     match detect_installed_agents(&options) {
         Ok(report) => {
             let human_output = || {
-                let mut out = format!(
-                    "Agent Detection Report (v{})\n\n",
-                    report.format_version
-                );
+                let mut out = format!("Agent Detection Report (v{})\n\n", report.format_version);
                 out.push_str(&format!(
                     "Summary: {} detected of {} checked\n\n",
                     report.summary.detected_count, report.summary.total_count
                 ));
                 for entry in &report.installed_agents {
                     let status = if entry.detected { "✓" } else { "✗" };
-                    out.push_str(&format!(
-                        "{} {}\n",
-                        status, entry.slug
-                    ));
+                    out.push_str(&format!("{} {}\n", status, entry.slug));
                     if entry.detected && !entry.root_paths.is_empty() {
                         for path in &entry.root_paths {
                             out.push_str(&format!("    {}\n", path));
@@ -2393,6 +2514,7 @@ impl NormalizedInvocation {
                     MemoryCommand::Show(_) => "memory show".to_string(),
                     MemoryCommand::History(_) => "memory history".to_string(),
                 },
+                Command::Outcome(_) => "outcome".to_string(),
                 Command::Remember(_) => "remember".to_string(),
                 Command::Schema(schema) => match schema {
                     SchemaCommand::List => "schema list".to_string(),
@@ -3598,6 +3720,42 @@ mod tests {
         ensure(stderr.is_empty(), "introspect toon stderr must be empty")
     }
 
+    #[test]
+    fn outcome_command_parses_feedback_contract() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "outcome",
+            "mem_00000000000000000000000001",
+            "--signal",
+            "helpful",
+            "--source-type",
+            "human_explicit",
+            "--event-id",
+            "fb_01234567890123456789012345",
+            "--dry-run",
+        ])
+        .map_err(|e| format!("failed to parse outcome: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Outcome(ref args)) => {
+                ensure_equal(
+                    &args.target_id,
+                    &"mem_00000000000000000000000001".to_string(),
+                    "outcome target id",
+                )?;
+                ensure_equal(&args.target_type, &"memory".to_string(), "target type")?;
+                ensure_equal(&args.signal, &"helpful".to_string(), "signal")?;
+                ensure_equal(
+                    &args.source_type,
+                    &"human_explicit".to_string(),
+                    "source type",
+                )?;
+                ensure_equal(&args.dry_run, &true, "dry run")
+            }
+            _ => Err("expected Outcome command".to_string()),
+        }
+    }
+
     // ========================================================================
     // Context Command Tests (EE-147)
     // ========================================================================
@@ -3800,7 +3958,16 @@ mod tests {
 
     #[test]
     fn search_json_returns_error_when_index_missing() -> TestResult {
-        let (exit, stdout, stderr) = invoke(&["ee", "search", "test query", "--json"]);
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().to_string_lossy().into_owned();
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "search",
+            "test query",
+            "--json",
+        ]);
         ensure_equal(&exit, &ProcessExitCode::SearchIndex, "search error exit")?;
         ensure_starts_with(
             &stdout,
@@ -3813,7 +3980,10 @@ mod tests {
 
     #[test]
     fn search_human_returns_error_when_index_missing() -> TestResult {
-        let (exit, stdout, stderr) = invoke(&["ee", "search", "test query"]);
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().to_string_lossy().into_owned();
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "--workspace", &workspace, "search", "test query"]);
         ensure_equal(&exit, &ProcessExitCode::SearchIndex, "search error exit")?;
         ensure(stdout.is_empty(), "search human error stdout must be empty")?;
         ensure_contains(&stderr, "error:", "search human error has diagnostic")

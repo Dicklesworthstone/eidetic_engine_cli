@@ -2586,7 +2586,11 @@ pub fn render_agent_detect_human(report: &InstalledAgentDetectionReport) -> Stri
     ));
 
     for agent in &report.installed_agents {
-        let status = if agent.detected { "[detected]" } else { "[missing]" };
+        let status = if agent.detected {
+            "[detected]"
+        } else {
+            "[missing]"
+        };
         out.push_str(&format!("{} {}\n", agent.slug, status));
         for path in &agent.root_paths {
             out.push_str(&format!("  - {}\n", path));
@@ -2599,7 +2603,6 @@ pub fn render_agent_detect_human(report: &InstalledAgentDetectionReport) -> Stri
 pub fn render_agent_detect_toon(report: &InstalledAgentDetectionReport) -> String {
     render_toon_from_json(&render_agent_detect_json(report))
 }
-
 
 use crate::core::agent_docs::{
     AgentDocsReport, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, ENV_VARS, EXAMPLES, EXIT_CODES,
