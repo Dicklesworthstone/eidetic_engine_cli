@@ -15,6 +15,7 @@ use crate::core::health::HealthReport;
 use crate::core::index::{
     IndexRebuildOptions, IndexStatusOptions, get_index_status, rebuild_index,
 };
+use crate::core::init::{InitOptions, init_workspace};
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
     GetMemoryOptions, ListMemoriesOptions, get_memory_details, list_memories,
@@ -135,6 +136,8 @@ pub enum Command {
     Health,
     /// Print command help.
     Help,
+    /// Initialize an ee workspace.
+    Init(InitArgs),
     /// Import memories and evidence from external sources.
     #[command(subcommand)]
     Import(ImportCommand),
@@ -272,6 +275,14 @@ pub struct DoctorArgs {
     /// Output a structured fix plan instead of the normal health report.
     #[arg(long, action = ArgAction::SetTrue)]
     pub fix_plan: bool,
+}
+
+/// Arguments for `ee init`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct InitArgs {
+    /// Report what would be done without creating files.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// Arguments for the remember command.
@@ -681,6 +692,31 @@ where
                     stdout,
                     &(output::render_health_json_filtered(&report, profile) + "\n"),
                 ),
+            }
+        }
+        Some(Command::Init(ref args)) => {
+            let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+            let options = InitOptions {
+                workspace_path,
+                dry_run: args.dry_run,
+            };
+            let report = init_workspace(&options);
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &report.human_summary())
+                }
+                output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    let json = serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V1,
+                        "success": true,
+                        "data": report.data_json(),
+                    });
+                    write_stdout(stdout, &(json.to_string() + "\n"))
+                }
             }
         }
         Some(Command::Eval(ref eval_cmd)) => match eval_cmd {
@@ -1971,6 +2007,7 @@ const COMMAND_NAMES: &[&str] = &[
     "eval",
     "health",
     "help",
+    "init",
     "import",
     "index",
     "introspect",
@@ -2045,6 +2082,7 @@ impl NormalizedInvocation {
                 },
                 Command::Health => "health".to_string(),
                 Command::Help => "help".to_string(),
+                Command::Init(_) => "init".to_string(),
                 Command::Import(import) => match import {
                     ImportCommand::Cass(_) => "import cass".to_string(),
                     ImportCommand::EideticLegacy(_) => "import eidetic-legacy".to_string(),
