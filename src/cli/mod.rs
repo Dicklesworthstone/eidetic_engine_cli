@@ -13,7 +13,9 @@ use crate::core::health::HealthReport;
 use crate::core::index::{
     IndexRebuildOptions, IndexStatusOptions, get_index_status, rebuild_index,
 };
-use crate::core::memory::{GetMemoryOptions, get_memory_details};
+use crate::core::memory::{
+    GetMemoryOptions, ListMemoriesOptions, get_memory_details, list_memories,
+};
 use crate::core::quarantine::QuarantineReport;
 use crate::core::search::{SearchOptions, run_search};
 use crate::core::status::StatusReport;
@@ -306,8 +308,34 @@ pub enum SchemaCommand {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum MemoryCommand {
+    /// List memories in the workspace.
+    List(MemoryListArgs),
     /// Show details of a single memory by ID.
     Show(MemoryShowArgs),
+}
+
+/// Arguments for `ee memory list`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MemoryListArgs {
+    /// Filter by memory level (working, episodic, semantic, procedural).
+    #[arg(long, short = 'l')]
+    pub level: Option<String>,
+
+    /// Filter by tag.
+    #[arg(long, short = 't')]
+    pub tag: Option<String>,
+
+    /// Maximum number of memories to return.
+    #[arg(long, short = 'n', default_value_t = 50)]
+    pub limit: u32,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Include tombstoned memories in the list.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
 }
 
 /// Arguments for `ee memory show`.
@@ -1966,6 +1994,97 @@ mod tests {
         ensure_contains(&stdout, "schema: ee.response.v1", "introspect toon schema")?;
         ensure_contains(&stdout, "command: introspect", "introspect toon command")?;
         ensure(stderr.is_empty(), "introspect toon stderr must be empty")
+    }
+
+    // ========================================================================
+    // Search Command Tests (EE-127)
+    // ========================================================================
+
+    #[test]
+    fn search_command_parses_with_query() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "search", "test query"])
+            .map_err(|e| format!("failed to parse search: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Search(ref args)) => {
+                ensure_equal(&args.query, &"test query".to_string(), "search query")?;
+                ensure_equal(&args.limit, &10, "search default limit")
+            }
+            _ => Err("expected Search command".to_string()),
+        }
+    }
+
+    #[test]
+    fn search_command_accepts_limit_flag() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "search", "test", "--limit", "25"])
+            .map_err(|e| format!("failed to parse search with limit: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Search(ref args)) => ensure_equal(&args.limit, &25, "search limit"),
+            _ => Err("expected Search command".to_string()),
+        }
+    }
+
+    #[test]
+    fn search_command_accepts_short_limit_flag() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "search", "test", "-n", "5"])
+            .map_err(|e| format!("failed to parse search with -n: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Search(ref args)) => ensure_equal(&args.limit, &5, "search short limit"),
+            _ => Err("expected Search command".to_string()),
+        }
+    }
+
+    #[test]
+    fn search_command_accepts_database_and_index_dir() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "search",
+            "test",
+            "--database",
+            "/tmp/ee.db",
+            "--index-dir",
+            "/tmp/index",
+        ])
+        .map_err(|e| format!("failed to parse search with paths: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Search(ref args)) => {
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("/tmp/ee.db")),
+                    "search database",
+                )?;
+                ensure_equal(
+                    &args.index_dir,
+                    &Some(std::path::PathBuf::from("/tmp/index")),
+                    "search index_dir",
+                )
+            }
+            _ => Err("expected Search command".to_string()),
+        }
+    }
+
+    #[test]
+    fn search_json_returns_error_when_index_missing() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "search", "test query", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::SearchIndex, "search error exit")?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.error.v1\"",
+            "search error schema",
+        )?;
+        ensure_contains(&stdout, "\"code\":\"search_index\"", "search error code")?;
+        ensure(stderr.is_empty(), "search json stderr must be empty")
+    }
+
+    #[test]
+    fn search_human_returns_error_when_index_missing() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "search", "test query"]);
+        ensure_equal(&exit, &ProcessExitCode::SearchIndex, "search error exit")?;
+        ensure(stdout.is_empty(), "search human error stdout must be empty")?;
+        ensure_contains(&stderr, "error:", "search human error has diagnostic")
     }
 
     // ========================================================================

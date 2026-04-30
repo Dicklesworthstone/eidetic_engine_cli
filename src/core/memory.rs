@@ -110,6 +110,170 @@ pub fn get_memory_details(options: &GetMemoryOptions<'_>) -> MemoryShowReport {
     MemoryShowReport::found(MemoryDetails { memory, tags })
 }
 
+/// Options for listing memories.
+#[derive(Clone, Debug)]
+pub struct ListMemoriesOptions<'a> {
+    /// Database path.
+    pub database_path: &'a Path,
+    /// Filter by memory level.
+    pub level: Option<&'a str>,
+    /// Filter by tag.
+    pub tag: Option<&'a str>,
+    /// Maximum number of memories to return.
+    pub limit: u32,
+    /// Whether to include tombstoned memories.
+    pub include_tombstoned: bool,
+}
+
+/// Result of a memory list operation.
+#[derive(Clone, Debug)]
+pub struct MemoryListReport {
+    /// Package version for stable output.
+    pub version: &'static str,
+    /// List of memory summaries.
+    pub memories: Vec<MemorySummary>,
+    /// Total count of memories matching the filter.
+    pub total_count: u32,
+    /// Whether results were truncated due to limit.
+    pub truncated: bool,
+    /// Filter applied.
+    pub filter: MemoryListFilter,
+    /// Error message if retrieval failed.
+    pub error: Option<String>,
+}
+
+/// Summary of a memory for list output.
+#[derive(Clone, Debug)]
+pub struct MemorySummary {
+    /// Memory ID.
+    pub id: String,
+    /// Memory level.
+    pub level: String,
+    /// Memory kind.
+    pub kind: String,
+    /// Content preview (truncated).
+    pub content_preview: String,
+    /// Confidence score.
+    pub confidence: f32,
+    /// Whether tombstoned.
+    pub is_tombstoned: bool,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
+/// Filter applied to memory list.
+#[derive(Clone, Debug, Default)]
+pub struct MemoryListFilter {
+    /// Level filter if applied.
+    pub level: Option<String>,
+    /// Tag filter if applied.
+    pub tag: Option<String>,
+    /// Include tombstoned.
+    pub include_tombstoned: bool,
+}
+
+impl MemoryListReport {
+    /// Create a successful report.
+    #[must_use]
+    pub fn success(
+        memories: Vec<MemorySummary>,
+        total_count: u32,
+        truncated: bool,
+        filter: MemoryListFilter,
+    ) -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            memories,
+            total_count,
+            truncated,
+            filter,
+            error: None,
+        }
+    }
+
+    /// Create an error report.
+    #[must_use]
+    pub fn error(message: String) -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            memories: Vec::new(),
+            total_count: 0,
+            truncated: false,
+            filter: MemoryListFilter::default(),
+            error: Some(message),
+        }
+    }
+}
+
+const CONTENT_PREVIEW_LEN: usize = 80;
+
+fn truncate_content(content: &str) -> String {
+    if content.len() <= CONTENT_PREVIEW_LEN {
+        content.to_string()
+    } else {
+        format!("{}...", &content[..CONTENT_PREVIEW_LEN])
+    }
+}
+
+/// List memories matching the given criteria.
+pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
+    let conn = match DbConnection::open_file(options.database_path) {
+        Ok(c) => c,
+        Err(e) => return MemoryListReport::error(format!("Failed to open database: {e}")),
+    };
+
+    let filter = MemoryListFilter {
+        level: options.level.map(String::from),
+        tag: options.tag.map(String::from),
+        include_tombstoned: options.include_tombstoned,
+    };
+
+    // Get workspace ID - for now use default
+    let workspace_id = "default";
+
+    // If filtering by tag, get memory IDs first
+    let memory_ids: Option<Vec<String>> = if let Some(tag) = options.tag {
+        match conn.list_memories_by_tag(workspace_id, tag) {
+            Ok(ids) => Some(ids),
+            Err(e) => return MemoryListReport::error(format!("Failed to query by tag: {e}")),
+        }
+    } else {
+        None
+    };
+
+    // Get memories
+    let stored = match conn.list_memories(workspace_id, options.level, options.include_tombstoned) {
+        Ok(m) => m,
+        Err(e) => return MemoryListReport::error(format!("Failed to list memories: {e}")),
+    };
+
+    // Filter by tag if needed
+    let filtered: Vec<_> = if let Some(ref ids) = memory_ids {
+        stored.into_iter().filter(|m| ids.contains(&m.id)).collect()
+    } else {
+        stored
+    };
+
+    let total_count = filtered.len() as u32;
+    let truncated = total_count > options.limit;
+
+    let memories: Vec<MemorySummary> = filtered
+        .into_iter()
+        .take(options.limit as usize)
+        .map(|m| MemorySummary {
+            id: m.id,
+            level: m.level,
+            kind: m.kind,
+            content_preview: truncate_content(&m.content),
+            confidence: m.confidence,
+            is_tombstoned: m.tombstoned_at.is_some(),
+            created_at: m.created_at,
+        })
+        .collect();
+
+    MemoryListReport::success(memories, total_count, truncated, filter)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
