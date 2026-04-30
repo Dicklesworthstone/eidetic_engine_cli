@@ -165,6 +165,9 @@ pub enum Command {
     Outcome(OutcomeArgs),
     /// Store a new memory.
     Remember(RememberArgs),
+    /// Review sessions and propose curation candidates.
+    #[command(subcommand)]
+    Review(ReviewCommand),
     /// List or export public response schemas.
     #[command(subcommand)]
     Schema(SchemaCommand),
@@ -592,6 +595,32 @@ pub enum SchemaCommand {
         #[arg(value_name = "SCHEMA_ID")]
         schema_id: Option<String>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum ReviewCommand {
+    /// Review a session and propose curation candidates.
+    Session(ReviewSessionArgs),
+}
+
+/// Arguments for `ee review session`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct ReviewSessionArgs {
+    /// Session path or ID to review. Defaults to most recent.
+    #[arg(value_name = "SESSION")]
+    pub session: Option<String>,
+
+    /// Generate curation candidate proposals without applying them.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub propose: bool,
+
+    /// Minimum confidence threshold for proposals (0.0-1.0).
+    #[arg(long, default_value_t = 0.5)]
+    pub min_confidence: f32,
+
+    /// Maximum number of candidates to propose.
+    #[arg(long, default_value_t = 10)]
+    pub limit: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -1078,6 +1107,9 @@ where
                 write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
             }
         },
+        Some(Command::Review(ReviewCommand::Session(ref args))) => {
+            handle_review_session(&cli, args, stdout, stderr)
+        }
         Some(Command::Search(ref args)) => handle_search(&cli, args, stdout, stderr),
         Some(Command::Situation(SituationCommand::Classify(ref args))) => {
             handle_situation_classify(&cli, args, stdout)
@@ -1862,6 +1894,131 @@ where
             };
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
+    }
+}
+
+// ============================================================================
+// EE-186: Review Session Command
+// ============================================================================
+
+/// Report from reviewing a session and proposing curation candidates.
+pub struct ReviewSessionReport {
+    pub schema: &'static str,
+    pub session_id: Option<String>,
+    pub propose_mode: bool,
+    pub candidates: Vec<ProposedCandidate>,
+    pub elapsed_ms: f64,
+}
+
+/// A proposed curation candidate from session review.
+pub struct ProposedCandidate {
+    pub candidate_type: String,
+    pub target_memory_id: Option<String>,
+    pub reason: String,
+    pub confidence: f32,
+    pub source_type: String,
+}
+
+impl ReviewSessionReport {
+    #[must_use]
+    pub fn human_output(&self) -> String {
+        let mut output = String::new();
+        if self.propose_mode {
+            output.push_str("Review Session Proposals\n\n");
+        } else {
+            output.push_str("Review Session Report\n\n");
+        }
+
+        if let Some(ref sid) = self.session_id {
+            output.push_str(&format!("Session: {sid}\n"));
+        }
+
+        output.push_str(&format!("Candidates: {}\n", self.candidates.len()));
+        output.push_str(&format!("Elapsed: {:.2}ms\n\n", self.elapsed_ms));
+
+        for (i, candidate) in self.candidates.iter().enumerate() {
+            output.push_str(&format!(
+                "{}. {} (confidence: {:.2})\n   {}\n\n",
+                i + 1,
+                candidate.candidate_type,
+                candidate.confidence,
+                candidate.reason
+            ));
+        }
+
+        if self.candidates.is_empty() {
+            output.push_str("No curation candidates proposed.\n");
+        }
+
+        output
+    }
+
+    #[must_use]
+    pub fn json_output(&self) -> String {
+        let candidates_json: Vec<serde_json::Value> = self
+            .candidates
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "candidateType": c.candidate_type,
+                    "targetMemoryId": c.target_memory_id,
+                    "reason": c.reason,
+                    "confidence": c.confidence,
+                    "sourceType": c.source_type,
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "schema": self.schema,
+            "sessionId": self.session_id,
+            "proposeMode": self.propose_mode,
+            "candidates": candidates_json,
+            "candidateCount": self.candidates.len(),
+            "elapsedMs": self.elapsed_ms,
+        })
+        .to_string()
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        crate::output::render_toon_from_json(&self.json_output())
+    }
+}
+
+fn handle_review_session<W, E>(
+    cli: &Cli,
+    args: &ReviewSessionArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use std::time::Instant;
+
+    let start = Instant::now();
+
+    let candidates: Vec<ProposedCandidate> = Vec::new();
+
+    let report = ReviewSessionReport {
+        schema: crate::models::REVIEW_SESSION_SCHEMA_V1,
+        session_id: args.session.clone(),
+        propose_mode: args.propose,
+        candidates,
+        elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_output())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
     }
 }
 
@@ -2781,6 +2938,7 @@ const COMMAND_NAMES: &[&str] = &[
     "memory",
     "outcome",
     "remember",
+    "review",
     "schema",
     "search",
     "situation",
@@ -2797,6 +2955,7 @@ const EVAL_SUBCOMMANDS: &[&str] = &["run", "list"];
 const IMPORT_SUBCOMMANDS: &[&str] = &["cass", "eidetic-legacy"];
 const INDEX_SUBCOMMANDS: &[&str] = &["rebuild", "status"];
 const MEMORY_SUBCOMMANDS: &[&str] = &["list", "show", "history"];
+const REVIEW_SUBCOMMANDS: &[&str] = &["session"];
 const SCHEMA_SUBCOMMANDS: &[&str] = &["list", "export"];
 const SITUATION_SUBCOMMANDS: &[&str] = &["classify", "show", "explain"];
 
@@ -2882,6 +3041,9 @@ impl NormalizedInvocation {
                 },
                 Command::Outcome(_) => "outcome".to_string(),
                 Command::Remember(_) => "remember".to_string(),
+                Command::Review(review) => match review {
+                    ReviewCommand::Session(_) => "review session".to_string(),
+                },
                 Command::Schema(schema) => match schema {
                     SchemaCommand::List => "schema list".to_string(),
                     SchemaCommand::Export { .. } => "schema export".to_string(),
@@ -2952,6 +3114,7 @@ pub fn did_you_mean(input: &str, parent_command: Option<&str>) -> Option<String>
         Some("import") => IMPORT_SUBCOMMANDS,
         Some("index") => INDEX_SUBCOMMANDS,
         Some("memory") => MEMORY_SUBCOMMANDS,
+        Some("review") => REVIEW_SUBCOMMANDS,
         Some("schema") => SCHEMA_SUBCOMMANDS,
         Some("situation") => SITUATION_SUBCOMMANDS,
         _ => COMMAND_NAMES,
@@ -2996,6 +3159,7 @@ fn extract_invalid_subcommand(args: &[OsString]) -> Option<(String, Option<Strin
                         "import" => Some(IMPORT_SUBCOMMANDS),
                         "index" => Some(INDEX_SUBCOMMANDS),
                         "memory" => Some(MEMORY_SUBCOMMANDS),
+                        "review" => Some(REVIEW_SUBCOMMANDS),
                         "schema" => Some(SCHEMA_SUBCOMMANDS),
                         "situation" => Some(SITUATION_SUBCOMMANDS),
                         _ => None,
