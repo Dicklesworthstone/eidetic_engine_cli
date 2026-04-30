@@ -2745,9 +2745,7 @@ where
     W: Write,
     E: Write,
 {
-    use crate::core::plan::{
-        GOAL_PLAN_SCHEMA_V1, GoalCategory, PlanGoalOptions, PlanProfile, generate_plan,
-    };
+    use crate::core::plan::{GOAL_PLAN_SCHEMA_V1, PlanGoalOptions, PlanProfile, generate_plan};
 
     let profile = PlanProfile::from_str(&args.profile).unwrap_or(PlanProfile::Full);
 
@@ -3008,7 +3006,7 @@ where
     W: Write,
     E: Write,
 {
-    use crate::core::plan::{PLAN_EXPLAIN_SCHEMA_V1, explain_recipe, get_recipe};
+    use crate::core::plan::{PLAN_EXPLAIN_SCHEMA_V1, explain_recipe};
 
     // Try to explain as recipe first
     if let Some(explanation) = explain_recipe(&args.id) {
