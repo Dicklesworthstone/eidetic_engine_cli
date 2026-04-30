@@ -483,6 +483,9 @@ pub struct Certificate {
     pub expires_at: Option<String>,
     /// Hash of the certificate payload for integrity.
     pub payload_hash: String,
+    /// Decision-plane tracking metadata (EE-364).
+    /// Links the certificate to the policy, decision, and trace that produced it.
+    pub decision_metadata: super::decision::DecisionPlaneMetadata,
 }
 
 impl Certificate {
@@ -509,6 +512,7 @@ mod tests {
         ParseCertificateKindError, ParseCertificateStatusError, ParseLifecycleEventError,
         PrivacyBudgetCertificate, TailRiskCertificate,
     };
+    use crate::models::DecisionPlaneMetadata;
 
     type TestResult = Result<(), String>;
 
@@ -798,6 +802,7 @@ mod tests {
             issued_at: "2026-04-29T12:00:00Z".to_string(),
             expires_at: None,
             payload_hash: "hash789".to_string(),
+            decision_metadata: DecisionPlaneMetadata::empty(),
         };
         ensure(valid.is_usable(), "valid cert should be usable")?;
         ensure(!valid.is_expired(), "valid cert should not be expired")?;
