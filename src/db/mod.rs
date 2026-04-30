@@ -8,6 +8,17 @@ use std::path::{Path, PathBuf};
 pub const SUBSYSTEM: &str = "db";
 pub const MIGRATION_TABLE_NAME: &str = "ee_schema_migrations";
 
+/// Standard audit action types for memory operations (EE-070).
+pub mod audit_actions {
+    pub const MEMORY_CREATE: &str = "memory.create";
+    pub const MEMORY_UPDATE: &str = "memory.update";
+    pub const MEMORY_TOMBSTONE: &str = "memory.tombstone";
+    pub const MEMORY_TAG_ADD: &str = "memory.tag.add";
+    pub const MEMORY_TAG_REMOVE: &str = "memory.tag.remove";
+    pub const MEMORY_TAG_SET: &str = "memory.tag.set";
+    pub const MEMORY_LINK_CREATE: &str = "memory.link.create";
+}
+
 const MIGRATION_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS ee_schema_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
     name TEXT NOT NULL CHECK (length(trim(name)) > 0),
@@ -2614,6 +2625,227 @@ fn stored_audit_from_row(row: &Row) -> Result<StoredAuditEntry> {
         target_id: optional_text(row, 6)?.map(str::to_string),
         details: optional_text(row, 7)?.map(str::to_string),
     })
+}
+
+/// Generate a stable audit ID from timestamp and content hash (EE-070).
+#[must_use]
+pub fn generate_audit_id() -> String {
+    let now = Utc::now();
+    let nanos = now.timestamp_nanos_opt().unwrap_or(0);
+    format!("audit_{:026x}", nanos as u128)
+}
+
+/// Input for audited memory creation (EE-070).
+#[derive(Debug, Clone)]
+pub struct AuditedMemoryInput {
+    pub memory: CreateMemoryInput,
+    pub actor: Option<String>,
+    pub details: Option<String>,
+}
+
+impl DbConnection {
+    /// Insert a memory with an audit log entry in a single transaction (EE-070).
+    pub fn insert_memory_audited(
+        &self,
+        memory_id: &str,
+        input: &AuditedMemoryInput,
+    ) -> Result<String> {
+        self.begin()?;
+
+        match self.insert_memory_audited_inner(memory_id, input) {
+            Ok(audit_id) => {
+                self.commit()?;
+                Ok(audit_id)
+            }
+            Err(err) => {
+                let _ = self.rollback();
+                Err(err)
+            }
+        }
+    }
+
+    fn insert_memory_audited_inner(
+        &self,
+        memory_id: &str,
+        input: &AuditedMemoryInput,
+    ) -> Result<String> {
+        self.insert_memory(memory_id, &input.memory)?;
+
+        let audit_id = generate_audit_id();
+        let details = input.details.clone().unwrap_or_else(|| {
+            format!(
+                r#"{{"level":"{}","kind":"{}","confidence":{},"trust_class":"{}"}}"#,
+                input.memory.level,
+                input.memory.kind,
+                input.memory.confidence,
+                input.memory.trust_class,
+            )
+        });
+
+        self.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(input.memory.workspace_id.clone()),
+                actor: input.actor.clone(),
+                action: audit_actions::MEMORY_CREATE.to_string(),
+                target_type: Some("memory".to_string()),
+                target_id: Some(memory_id.to_string()),
+                details: Some(details),
+            },
+        )?;
+
+        Ok(audit_id)
+    }
+
+    /// Tombstone a memory with an audit log entry (EE-070).
+    pub fn tombstone_memory_audited(
+        &self,
+        memory_id: &str,
+        workspace_id: &str,
+        actor: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<Option<String>> {
+        self.begin()?;
+
+        match self.tombstone_memory_audited_inner(memory_id, workspace_id, actor, reason) {
+            Ok(result) => {
+                self.commit()?;
+                Ok(result)
+            }
+            Err(err) => {
+                let _ = self.rollback();
+                Err(err)
+            }
+        }
+    }
+
+    fn tombstone_memory_audited_inner(
+        &self,
+        memory_id: &str,
+        workspace_id: &str,
+        actor: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<Option<String>> {
+        let tombstoned = self.tombstone_memory(memory_id)?;
+        if !tombstoned {
+            return Ok(None);
+        }
+
+        let audit_id = generate_audit_id();
+        let details = reason.map(|r| format!(r#"{{"reason":"{}"}}"#, r));
+
+        self.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.to_string()),
+                actor: actor.map(str::to_string),
+                action: audit_actions::MEMORY_TOMBSTONE.to_string(),
+                target_type: Some("memory".to_string()),
+                target_id: Some(memory_id.to_string()),
+                details,
+            },
+        )?;
+
+        Ok(Some(audit_id))
+    }
+
+    /// Add tags to a memory with an audit log entry (EE-070).
+    pub fn add_memory_tags_audited(
+        &self,
+        memory_id: &str,
+        workspace_id: &str,
+        tags: &[String],
+        actor: Option<&str>,
+    ) -> Result<String> {
+        self.begin()?;
+
+        match self.add_memory_tags_audited_inner(memory_id, workspace_id, tags, actor) {
+            Ok(audit_id) => {
+                self.commit()?;
+                Ok(audit_id)
+            }
+            Err(err) => {
+                let _ = self.rollback();
+                Err(err)
+            }
+        }
+    }
+
+    fn add_memory_tags_audited_inner(
+        &self,
+        memory_id: &str,
+        workspace_id: &str,
+        tags: &[String],
+        actor: Option<&str>,
+    ) -> Result<String> {
+        self.add_memory_tags(memory_id, tags)?;
+
+        let audit_id = generate_audit_id();
+        let details = format!(r#"{{"tags_added":{}}}"#, serde_json::json!(tags));
+
+        self.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.to_string()),
+                actor: actor.map(str::to_string),
+                action: audit_actions::MEMORY_TAG_ADD.to_string(),
+                target_type: Some("memory".to_string()),
+                target_id: Some(memory_id.to_string()),
+                details: Some(details),
+            },
+        )?;
+
+        Ok(audit_id)
+    }
+
+    /// Remove tags from a memory with an audit log entry (EE-070).
+    pub fn remove_memory_tags_audited(
+        &self,
+        memory_id: &str,
+        workspace_id: &str,
+        tags: &[String],
+        actor: Option<&str>,
+    ) -> Result<String> {
+        self.begin()?;
+
+        match self.remove_memory_tags_audited_inner(memory_id, workspace_id, tags, actor) {
+            Ok(audit_id) => {
+                self.commit()?;
+                Ok(audit_id)
+            }
+            Err(err) => {
+                let _ = self.rollback();
+                Err(err)
+            }
+        }
+    }
+
+    fn remove_memory_tags_audited_inner(
+        &self,
+        memory_id: &str,
+        workspace_id: &str,
+        tags: &[String],
+        actor: Option<&str>,
+    ) -> Result<String> {
+        self.remove_memory_tags(memory_id, tags)?;
+
+        let audit_id = generate_audit_id();
+        let details = format!(r#"{{"tags_removed":{}}}"#, serde_json::json!(tags));
+
+        self.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.to_string()),
+                actor: actor.map(str::to_string),
+                action: audit_actions::MEMORY_TAG_REMOVE.to_string(),
+                target_type: Some("memory".to_string()),
+                target_id: Some(memory_id.to_string()),
+                details: Some(details),
+            },
+        )?;
+
+        Ok(audit_id)
+    }
 }
 
 /// Job type for search indexing operations.
@@ -5288,6 +5520,203 @@ mod tests {
         ensure_equal(&audit.action.as_str(), &"global.init", "action")?;
 
         connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_memory_audited_creates_memory_and_audit_entry() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::AuditedMemoryInput {
+            memory: super::CreateMemoryInput {
+                workspace_id: "wsp_01234567890123456789012345".to_string(),
+                level: "procedural".to_string(),
+                kind: "rule".to_string(),
+                content: "Always run tests before commit.".to_string(),
+                confidence: 0.9,
+                utility: 0.8,
+                importance: 0.7,
+                provenance_uri: Some("agent://test".to_string()),
+                trust_class: "agent_validated".to_string(),
+                trust_subclass: None,
+                tags: vec!["testing".to_string()],
+            },
+            actor: Some("agent:claude".to_string()),
+            details: None,
+        };
+
+        let audit_id =
+            connection.insert_memory_audited("mem_audited0000000000000000001", &input)?;
+
+        let memory = connection.get_memory("mem_audited0000000000000000001")?;
+        ensure(memory.is_some(), "memory must be created")?;
+        let memory = memory.ok_or_else(|| TestFailure::new("memory not found"))?;
+        ensure_equal(&memory.level.as_str(), &"procedural", "memory level")?;
+
+        ensure(
+            audit_id.starts_with("audit_"),
+            "audit ID has correct prefix",
+        )?;
+        let audit = connection.get_audit(&audit_id)?;
+        ensure(audit.is_some(), "audit entry must be created")?;
+        let audit = audit.ok_or_else(|| TestFailure::new("audit not found"))?;
+        ensure_equal(
+            &audit.action.as_str(),
+            &super::audit_actions::MEMORY_CREATE,
+            "audit action",
+        )?;
+        ensure_equal(
+            &audit.target_id,
+            &Some("mem_audited0000000000000000001".to_string()),
+            "audit target_id",
+        )?;
+        ensure_equal(
+            &audit.actor,
+            &Some("agent:claude".to_string()),
+            "audit actor",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn tombstone_memory_audited_creates_audit_entry() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let memory_input = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "episodic".to_string(),
+            kind: "observation".to_string(),
+            content: "Build failed due to missing dependency.".to_string(),
+            confidence: 0.95,
+            utility: 0.6,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "cass_evidence".to_string(),
+            trust_subclass: None,
+            tags: vec![],
+        };
+        connection.insert_memory("mem_tombstone00000000000000001", &memory_input)?;
+
+        let audit_id = connection.tombstone_memory_audited(
+            "mem_tombstone00000000000000001",
+            "wsp_01234567890123456789012345",
+            Some("agent:cleanup"),
+            Some("outdated observation"),
+        )?;
+        ensure(audit_id.is_some(), "audit ID returned for tombstone")?;
+        let audit_id = audit_id.ok_or_else(|| TestFailure::new("no audit ID"))?;
+
+        let memory = connection.get_memory("mem_tombstone00000000000000001")?;
+        let memory = memory.ok_or_else(|| TestFailure::new("memory not found"))?;
+        ensure(memory.tombstoned_at.is_some(), "memory is tombstoned")?;
+
+        let audit = connection
+            .get_audit(&audit_id)?
+            .ok_or_else(|| TestFailure::new("audit not found"))?;
+        ensure_equal(
+            &audit.action.as_str(),
+            &super::audit_actions::MEMORY_TOMBSTONE,
+            "tombstone action",
+        )?;
+        ensure(
+            audit
+                .details
+                .as_ref()
+                .map_or(false, |d| d.contains("outdated")),
+            "audit details contain reason",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn tombstone_nonexistent_memory_returns_none() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let audit_id = connection.tombstone_memory_audited(
+            "mem_nonexistent000000000000001",
+            "wsp_01234567890123456789012345",
+            None,
+            None,
+        )?;
+        ensure(
+            audit_id.is_none(),
+            "no audit for nonexistent memory tombstone",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn add_memory_tags_audited_creates_audit_entry() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let memory_input = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "procedural".to_string(),
+            kind: "rule".to_string(),
+            content: "Use descriptive variable names.".to_string(),
+            confidence: 0.85,
+            utility: 0.7,
+            importance: 0.6,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
+            tags: vec!["style".to_string()],
+        };
+        connection.insert_memory("mem_tagsaudit00000000000000001", &memory_input)?;
+
+        let audit_id = connection.add_memory_tags_audited(
+            "mem_tagsaudit00000000000000001",
+            "wsp_01234567890123456789012345",
+            &["naming".to_string(), "conventions".to_string()],
+            Some("human:jeff"),
+        )?;
+
+        let tags = connection.get_memory_tags("mem_tagsaudit00000000000000001")?;
+        ensure_equal(&tags.len(), &3, "three tags after add")?;
+
+        let audit = connection
+            .get_audit(&audit_id)?
+            .ok_or_else(|| TestFailure::new("audit not found"))?;
+        ensure_equal(
+            &audit.action.as_str(),
+            &super::audit_actions::MEMORY_TAG_ADD,
+            "tag add action",
+        )?;
+        ensure(
+            audit
+                .details
+                .as_ref()
+                .map_or(false, |d| d.contains("naming")),
+            "audit details contain added tag",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn generate_audit_id_has_correct_format() -> TestResult {
+        let id1 = super::generate_audit_id();
+        let id2 = super::generate_audit_id();
+
+        ensure(id1.starts_with("audit_"), "ID starts with audit_")?;
+        ensure_equal(&id1.len(), &32, "ID has correct length")?;
+        ensure(id1 != id2, "IDs are unique")?;
+
         Ok(())
     }
 
