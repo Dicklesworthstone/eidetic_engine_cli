@@ -1,6 +1,7 @@
 use std::env;
 use std::io::IsTerminal;
 
+use crate::core::doctor::DoctorReport;
 use crate::core::status::StatusReport;
 use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
 
@@ -347,6 +348,93 @@ pub fn render_status_human(report: &StatusReport) -> String {
     )
 }
 
+/// Render a status report as TOON (Terse Object Output Notation).
+#[must_use]
+pub fn render_status_toon(report: &StatusReport) -> String {
+    render_toon_from_json(&render_status_json(report))
+}
+
+/// Render a doctor report as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_doctor_json(report: &DoctorReport) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", report.overall_healthy);
+    b.field_object("data", |d| {
+        d.field_str("command", "doctor");
+        d.field_str("version", report.version);
+        d.field_bool("healthy", report.overall_healthy);
+        d.field_array_of_objects("checks", &report.checks, |obj, check| {
+            obj.field_str("name", check.name);
+            obj.field_str("severity", check.severity.as_str());
+            obj.field_str("message", &check.message);
+            if let Some(code) = check.error_code {
+                obj.field_str("errorCode", code.id);
+            }
+            if let Some(repair) = check.repair {
+                obj.field_str("repair", repair);
+            }
+        });
+    });
+    b.finish()
+}
+
+/// Render a doctor report as human-readable text.
+#[must_use]
+pub fn render_doctor_human(report: &DoctorReport) -> String {
+    let mut output = String::from("ee doctor\n\n");
+
+    for check in &report.checks {
+        let icon = match check.severity {
+            crate::core::doctor::CheckSeverity::Ok => "✓",
+            crate::core::doctor::CheckSeverity::Warning => "⚠",
+            crate::core::doctor::CheckSeverity::Error => "✗",
+        };
+        output.push_str(&format!("{} {}: {}\n", icon, check.name, check.message));
+        if let Some(repair) = check.repair {
+            output.push_str(&format!("  repair: {}\n", repair));
+        }
+    }
+
+    if report.overall_healthy {
+        output.push_str("\nAll checks passed.\n");
+    } else {
+        output.push_str("\nSome checks failed. Run suggested repairs to fix issues.\n");
+    }
+
+    output
+}
+
+/// Render a doctor report as TOON.
+#[must_use]
+pub fn render_doctor_toon(report: &DoctorReport) -> String {
+    render_toon_from_json(&render_doctor_json(report))
+}
+
+fn render_toon_from_json(json: &str) -> String {
+    toon::json_to_toon(json).unwrap_or_else(|error| {
+        let message = escape_toon_quoted_string(&format!("TOON encoding failed: {error}"));
+        format!(
+            "schema: {ERROR_SCHEMA_V1}\nerror:\n  code: toon_encoding_failed\n  message: \"{message}\"\n"
+        )
+    })
+}
+
+fn escape_toon_quoted_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
 /// Legacy placeholder for backwards compatibility during transition.
 #[must_use]
 pub fn status_response_json() -> String {
@@ -431,8 +519,10 @@ fn escape_json_string(s: &str) -> String {
 mod tests {
     use super::{
         Degradation, DegradationSeverity, JsonBuilder, OutputContext, Renderer, ResponseEnvelope,
-        error_response_json, escape_json_string, help_text, human_status, status_response_json,
+        error_response_json, escape_json_string, help_text, human_status, render_status_json,
+        render_status_toon, status_response_json,
     };
+    use crate::core::status::StatusReport;
     use crate::models::DomainError;
 
     type TestResult = Result<(), String>;
@@ -919,6 +1009,96 @@ mod tests {
                 !json.contains("repair"),
                 format!("{}: repair field should be absent when None", error.code()),
             )?;
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // TOON Output Tests (EE-036)
+    //
+    // TOON is rendered from the canonical JSON envelope through /dp/toon_rust.
+    // These tests prove the public renderer is valid TOON and semantically
+    // equivalent to the JSON status output.
+    // ========================================================================
+
+    #[test]
+    fn toon_status_has_required_fields() -> TestResult {
+        let report = StatusReport::gather();
+        let toon = render_status_toon(&report);
+        ensure_contains(&toon, "schema: ee.response.v1", "toon schema")?;
+        ensure_contains(&toon, "success: true", "toon success")?;
+        ensure_contains(&toon, "command: status", "toon command")?;
+        ensure_contains(&toon, "capabilities:", "toon capabilities section")?;
+        ensure_contains(&toon, "runtime:", "toon runtime section")?;
+        ensure_contains(&toon, "engine: asupersync", "toon engine")
+    }
+
+    #[test]
+    fn toon_status_has_degradation_details() -> TestResult {
+        let report = StatusReport::gather();
+        let toon = render_status_toon(&report);
+        ensure_contains(
+            &toon,
+            "degraded[2]{code,severity,message,repair}:",
+            "degradation section",
+        )?;
+        ensure_contains(&toon, "storage_not_implemented", "storage degradation code")?;
+        ensure_contains(&toon, "search_not_implemented", "search degradation code")
+    }
+
+    #[test]
+    fn json_toon_parity_status_decodes_to_same_json() -> TestResult {
+        let report = StatusReport::gather();
+        let json = render_status_json(&report);
+        let toon = render_status_toon(&report);
+
+        let expected_json = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("status JSON should parse: {error}"))?;
+        let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
+        let decoded = toon::try_decode(&toon, None)
+            .map_err(|error| format!("status TOON should decode: {error}"))?;
+        let actual = serde_json::Value::from(decoded);
+
+        ensure_equal(&actual, &expected, "decoded TOON matches status JSON")
+    }
+
+    #[test]
+    fn invalid_json_to_toon_returns_stable_error() -> TestResult {
+        let toon = super::render_toon_from_json("{not valid json");
+        ensure_contains(&toon, "schema: ee.error.v1", "error schema")?;
+        ensure_contains(&toon, "code: toon_encoding_failed", "error code")
+    }
+
+    const TOON_STATUS_GOLDEN: &str = include_str!("../../tests/fixtures/golden/toon/status.golden");
+
+    #[test]
+    fn toon_status_matches_golden() -> TestResult {
+        let report = StatusReport::gather();
+        let actual = render_status_toon(&report);
+
+        // Normalize both for comparison (trim trailing whitespace)
+        let actual_lines: Vec<&str> = actual.lines().collect();
+        let golden_lines: Vec<&str> = TOON_STATUS_GOLDEN.lines().collect();
+
+        if actual_lines.len() != golden_lines.len() {
+            return Err(format!(
+                "line count mismatch: actual={} golden={}",
+                actual_lines.len(),
+                golden_lines.len()
+            ));
+        }
+
+        for (i, (actual_line, golden_line)) in
+            actual_lines.iter().zip(golden_lines.iter()).enumerate()
+        {
+            if actual_line.trim_end() != golden_line.trim_end() {
+                return Err(format!(
+                    "line {} mismatch:\n  actual:  {:?}\n  golden:  {:?}",
+                    i + 1,
+                    actual_line,
+                    golden_line
+                ));
+            }
         }
         Ok(())
     }

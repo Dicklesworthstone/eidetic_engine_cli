@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 
+use crate::core::doctor::DoctorReport;
 use crate::core::status::StatusReport;
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
@@ -70,6 +71,19 @@ impl Cli {
     }
 
     #[must_use]
+    pub const fn renderer(&self) -> output::Renderer {
+        match self.format {
+            OutputFormat::Human if self.json || self.robot => output::Renderer::Json,
+            OutputFormat::Human => output::Renderer::Human,
+            OutputFormat::Json => output::Renderer::Json,
+            OutputFormat::Toon => output::Renderer::Toon,
+            OutputFormat::Jsonl => output::Renderer::Jsonl,
+            OutputFormat::Compact => output::Renderer::Compact,
+            OutputFormat::Hook => output::Renderer::Hook,
+        }
+    }
+
+    #[must_use]
     pub const fn fields_level(&self) -> FieldsLevel {
         self.fields
     }
@@ -82,6 +96,8 @@ impl Cli {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Subcommand)]
 pub enum Command {
+    /// Run health checks on workspace and subsystems.
+    Doctor,
     /// Print command help.
     Help,
     /// Report workspace and subsystem readiness.
@@ -171,12 +187,38 @@ where
 
     match cli.command {
         None | Some(Command::Help) => write_help(stdout),
+        Some(Command::Doctor) => {
+            let report = DoctorReport::gather();
+            match cli.renderer() {
+                output::Renderer::Human => {
+                    write_stdout(stdout, &output::render_doctor_human(&report))
+                }
+                output::Renderer::Toon => {
+                    write_stdout(stdout, &(output::render_doctor_toon(&report) + "\n"))
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    write_stdout(stdout, &(output::render_doctor_json(&report) + "\n"))
+                }
+            }
+        }
         Some(Command::Status) => {
             let report = StatusReport::gather();
-            if cli.wants_json() {
-                write_stdout(stdout, &(output::render_status_json(&report) + "\n"))
-            } else {
-                write_stdout(stdout, &output::render_status_human(&report))
+            match cli.renderer() {
+                output::Renderer::Human => {
+                    write_stdout(stdout, &output::render_status_human(&report))
+                }
+                output::Renderer::Toon => {
+                    write_stdout(stdout, &(output::render_status_toon(&report) + "\n"))
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    write_stdout(stdout, &(output::render_status_json(&report) + "\n"))
+                }
             }
         }
         Some(Command::Version) => {
@@ -420,6 +462,21 @@ mod tests {
             "status format JSON schema",
         )?;
         ensure(stderr.is_empty(), "status format JSON stderr must be empty")
+    }
+
+    #[test]
+    fn status_format_toon_writes_toon_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "status", "--format", "toon"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "status format TOON exit")?;
+        ensure_starts_with(&stdout, "schema: ee.response.v1", "status TOON schema")?;
+        ensure_contains(&stdout, "command: status", "status TOON command")?;
+        ensure_contains(
+            &stdout,
+            "degraded[2]{code,severity,message,repair}:",
+            "status TOON degradation table",
+        )?;
+        ensure_ends_with(&stdout, '\n', "status TOON trailing newline")?;
+        ensure(stderr.is_empty(), "status format TOON stderr must be empty")
     }
 
     #[test]
