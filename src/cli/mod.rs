@@ -95,7 +95,7 @@ impl Cli {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Subcommand)]
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum Command {
     /// Quick posture summary: ready, degraded, or needs attention.
     Check,
@@ -103,10 +103,25 @@ pub enum Command {
     Doctor,
     /// Print command help.
     Help,
+    /// List or export public response schemas.
+    #[command(subcommand)]
+    Schema(SchemaCommand),
     /// Report workspace and subsystem readiness.
     Status,
     /// Print the ee version.
     Version,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum SchemaCommand {
+    /// List all available public schemas.
+    List,
+    /// Export a schema's JSON Schema definition.
+    Export {
+        /// Schema ID to export (e.g., "ee.response.v1"). Omit for all schemas.
+        #[arg(value_name = "SCHEMA_ID")]
+        schema_id: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
