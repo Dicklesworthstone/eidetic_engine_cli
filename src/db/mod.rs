@@ -7,6 +7,12 @@ use std::path::{Path, PathBuf};
 
 pub const SUBSYSTEM: &str = "db";
 pub const MIGRATION_TABLE_NAME: &str = "ee_schema_migrations";
+pub const PROVENANCE_CHAIN_HASH_VERSION: &str = "ee.memory.provenance_chain.v1";
+pub const PROVENANCE_STATUS_UNVERIFIED: &str = "unverified";
+pub const PROVENANCE_STATUS_VERIFIED: &str = "verified";
+pub const PROVENANCE_STATUS_MISSING: &str = "missing";
+pub const PROVENANCE_STATUS_MISMATCH: &str = "mismatch";
+pub const PROVENANCE_STATUS_SKIPPED: &str = "skipped";
 
 /// Standard audit action types for memory operations (EE-070).
 pub mod audit_actions {
@@ -1273,6 +1279,36 @@ CREATE INDEX idx_feedback_events_applied ON feedback_events(applied_at) WHERE ap
     "blake3:v011_feedback_events_2026_04_30",
 );
 
+/// V012: Add provenance chain hash and sampled verification fields (EE-275).
+pub const V012_PROVENANCE_CHAIN_HASH: Migration = Migration::new(
+    12,
+    "provenance_chain_hash",
+    r#"
+-- Provenance chain hash fields for sampled integrity verification (EE-275).
+ALTER TABLE memories ADD COLUMN provenance_chain_hash TEXT
+    CHECK (provenance_chain_hash IS NULL OR provenance_chain_hash GLOB 'blake3:*');
+
+ALTER TABLE memories ADD COLUMN provenance_chain_hash_version TEXT NOT NULL DEFAULT 'ee.memory.provenance_chain.v1'
+    CHECK (provenance_chain_hash_version = 'ee.memory.provenance_chain.v1');
+
+ALTER TABLE memories ADD COLUMN provenance_verification_status TEXT NOT NULL DEFAULT 'unverified'
+    CHECK (provenance_verification_status IN ('unverified', 'verified', 'missing', 'mismatch', 'skipped'));
+
+ALTER TABLE memories ADD COLUMN provenance_verified_at TEXT
+    CHECK (provenance_verified_at IS NULL OR length(trim(provenance_verified_at)) > 0);
+
+ALTER TABLE memories ADD COLUMN provenance_verification_note TEXT
+    CHECK (provenance_verification_note IS NULL OR length(trim(provenance_verification_note)) > 0);
+
+CREATE INDEX idx_memories_provenance_chain_hash
+    ON memories(provenance_chain_hash)
+    WHERE provenance_chain_hash IS NOT NULL;
+CREATE INDEX idx_memories_provenance_verification_status
+    ON memories(provenance_verification_status);
+"#,
+    "blake3:v012_provenance_chain_hash_2026_04_30",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -1286,6 +1322,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V009_EVIDENCE_SPANS,
     V010_IMPORT_LEDGER,
     V011_FEEDBACK_EVENTS,
+    V012_PROVENANCE_CHAIN_HASH,
 ];
 
 /// Result of applying migrations.
@@ -2373,19 +2410,120 @@ pub struct StoredMemory {
     pub provenance_uri: Option<String>,
     pub trust_class: String,
     pub trust_subclass: Option<String>,
+    pub provenance_chain_hash: Option<String>,
+    pub provenance_chain_hash_version: String,
+    pub provenance_verification_status: String,
+    pub provenance_verified_at: Option<String>,
+    pub provenance_verification_note: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub tombstoned_at: Option<String>,
+}
+
+struct MemoryProvenanceChainFields<'a> {
+    id: &'a str,
+    workspace_id: &'a str,
+    level: &'a str,
+    kind: &'a str,
+    content: &'a str,
+    confidence: f32,
+    utility: f32,
+    importance: f32,
+    provenance_uri: Option<&'a str>,
+    trust_class: &'a str,
+    trust_subclass: Option<&'a str>,
+    created_at: &'a str,
+}
+
+/// Compute the deterministic provenance chain hash for a stored memory.
+#[must_use]
+pub fn compute_memory_provenance_chain_hash(memory: &StoredMemory) -> String {
+    compute_memory_provenance_chain_hash_fields(&MemoryProvenanceChainFields {
+        id: &memory.id,
+        workspace_id: &memory.workspace_id,
+        level: &memory.level,
+        kind: &memory.kind,
+        content: &memory.content,
+        confidence: memory.confidence,
+        utility: memory.utility,
+        importance: memory.importance,
+        provenance_uri: memory.provenance_uri.as_deref(),
+        trust_class: &memory.trust_class,
+        trust_subclass: memory.trust_subclass.as_deref(),
+        created_at: &memory.created_at,
+    })
+}
+
+fn compute_memory_provenance_chain_hash_fields(fields: &MemoryProvenanceChainFields<'_>) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hash_text_field(&mut hasher, "version", PROVENANCE_CHAIN_HASH_VERSION);
+    hash_text_field(&mut hasher, "id", fields.id);
+    hash_text_field(&mut hasher, "workspace_id", fields.workspace_id);
+    hash_text_field(&mut hasher, "level", fields.level);
+    hash_text_field(&mut hasher, "kind", fields.kind);
+    hash_text_field(&mut hasher, "content", fields.content);
+    hash_text_field(
+        &mut hasher,
+        "confidence",
+        &format!("{:.6}", fields.confidence),
+    );
+    hash_text_field(&mut hasher, "utility", &format!("{:.6}", fields.utility));
+    hash_text_field(
+        &mut hasher,
+        "importance",
+        &format!("{:.6}", fields.importance),
+    );
+    hash_optional_text_field(&mut hasher, "provenance_uri", fields.provenance_uri);
+    hash_text_field(&mut hasher, "trust_class", fields.trust_class);
+    hash_optional_text_field(&mut hasher, "trust_subclass", fields.trust_subclass);
+    hash_text_field(&mut hasher, "created_at", fields.created_at);
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn hash_optional_text_field(hasher: &mut blake3::Hasher, field_name: &str, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hash_text_field(hasher, field_name, "some");
+            hash_text_field(hasher, field_name, value);
+        }
+        None => {
+            hash_text_field(hasher, field_name, "none");
+        }
+    }
+}
+
+fn hash_text_field(hasher: &mut blake3::Hasher, field_name: &str, value: &str) {
+    hasher.update(field_name.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+    hasher.update(b"\n");
 }
 
 impl DbConnection {
     /// Insert a new memory and its tags.
     pub fn insert_memory(&self, id: &str, input: &CreateMemoryInput) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        let provenance_chain_hash =
+            compute_memory_provenance_chain_hash_fields(&MemoryProvenanceChainFields {
+                id,
+                workspace_id: &input.workspace_id,
+                level: &input.level,
+                kind: &input.kind,
+                content: &input.content,
+                confidence: input.confidence,
+                utility: input.utility,
+                importance: input.importance,
+                provenance_uri: input.provenance_uri.as_deref(),
+                trust_class: &input.trust_class,
+                trust_subclass: input.trust_subclass.as_deref(),
+                created_at: &now,
+            });
 
         self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             &[
                 Value::Text(id.to_string()),
                 Value::Text(input.workspace_id.clone()),
@@ -2398,6 +2536,9 @@ impl DbConnection {
                 input.provenance_uri.as_ref().map_or(Value::Null, |uri| Value::Text(uri.clone())),
                 Value::Text(input.trust_class.clone()),
                 input.trust_subclass.as_ref().map_or(Value::Null, |s| Value::Text(s.clone())),
+                Value::Text(provenance_chain_hash),
+                Value::Text(PROVENANCE_CHAIN_HASH_VERSION.to_string()),
+                Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
                 Value::Text(now.clone()),
                 Value::Text(now),
             ],
@@ -2418,7 +2559,7 @@ impl DbConnection {
     pub fn get_memory(&self, id: &str) -> Result<Option<StoredMemory>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, created_at, updated_at, tombstoned_at FROM memories WHERE id = ?1",
+            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at FROM memories WHERE id = ?1",
             &[Value::Text(id.to_string())],
         )?;
 
@@ -2433,7 +2574,7 @@ impl DbConnection {
         include_tombstoned: bool,
     ) -> Result<Vec<StoredMemory>> {
         let mut sql = String::from(
-            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, created_at, updated_at, tombstoned_at FROM memories WHERE workspace_id = ?1",
+            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at FROM memories WHERE workspace_id = ?1",
         );
         let mut params: Vec<Value> = vec![Value::Text(workspace_id.to_string())];
 
@@ -2560,6 +2701,138 @@ impl DbConnection {
         }
         Ok(())
     }
+
+    /// Verify a deterministic sample of memory provenance chain hashes.
+    ///
+    /// This intentionally uses a stable sample order so repeated integrity runs
+    /// over the same database inspect the same rows until later callers choose a
+    /// different limit or add explicit rotation.
+    pub fn verify_sampled_memory_provenance(
+        &self,
+        workspace_id: &str,
+        sample_size: u32,
+    ) -> Result<ProvenanceSampleVerificationReport> {
+        let mut report =
+            ProvenanceSampleVerificationReport::new(workspace_id.to_string(), sample_size);
+        if sample_size == 0 {
+            return Ok(report);
+        }
+
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at FROM memories WHERE workspace_id = ?1 ORDER BY COALESCE(provenance_chain_hash, id) ASC, id ASC LIMIT ?2",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::BigInt(i64::from(sample_size)),
+            ],
+        )?;
+        let memories: Vec<StoredMemory> = rows
+            .iter()
+            .map(stored_memory_from_row)
+            .collect::<Result<_>>()?;
+        let verified_at = Utc::now().to_rfc3339();
+
+        for memory in memories {
+            let expected_hash = compute_memory_provenance_chain_hash(&memory);
+            let status = match memory.provenance_chain_hash.as_deref() {
+                Some(stored_hash) if stored_hash == expected_hash => PROVENANCE_STATUS_VERIFIED,
+                Some(_) => PROVENANCE_STATUS_MISMATCH,
+                None => PROVENANCE_STATUS_MISSING,
+            };
+            let note = provenance_verification_note(status);
+            self.execute_for(
+                DbOperation::Execute,
+                "UPDATE memories SET provenance_verification_status = ?1, provenance_verified_at = ?2, provenance_verification_note = ?3 WHERE id = ?4",
+                &[
+                    Value::Text(status.to_string()),
+                    Value::Text(verified_at.clone()),
+                    Value::Text(note.to_string()),
+                    Value::Text(memory.id.clone()),
+                ],
+            )?;
+
+            report.push(ProvenanceVerificationRecord {
+                memory_id: memory.id,
+                stored_hash: memory.provenance_chain_hash,
+                expected_hash,
+                status: status.to_string(),
+                verified_at: verified_at.clone(),
+                note: note.to_string(),
+            });
+        }
+
+        Ok(report)
+    }
+}
+
+fn provenance_verification_note(status: &str) -> &'static str {
+    match status {
+        PROVENANCE_STATUS_VERIFIED => "stored provenance chain hash matches memory fields",
+        PROVENANCE_STATUS_MISSING => "memory has no stored provenance chain hash",
+        PROVENANCE_STATUS_MISMATCH => "stored provenance chain hash does not match memory fields",
+        _ => "provenance chain verification skipped",
+    }
+}
+
+/// Result for a single sampled provenance-chain verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenanceVerificationRecord {
+    pub memory_id: String,
+    pub stored_hash: Option<String>,
+    pub expected_hash: String,
+    pub status: String,
+    pub verified_at: String,
+    pub note: String,
+}
+
+/// Deterministic sampled provenance-chain verification report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenanceSampleVerificationReport {
+    pub workspace_id: String,
+    pub requested_sample_size: u32,
+    pub checked_count: u32,
+    pub verified_count: u32,
+    pub missing_count: u32,
+    pub mismatch_count: u32,
+    pub records: Vec<ProvenanceVerificationRecord>,
+}
+
+impl ProvenanceSampleVerificationReport {
+    fn new(workspace_id: String, requested_sample_size: u32) -> Self {
+        Self {
+            workspace_id,
+            requested_sample_size,
+            checked_count: 0,
+            verified_count: 0,
+            missing_count: 0,
+            mismatch_count: 0,
+            records: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, record: ProvenanceVerificationRecord) {
+        self.checked_count = self.checked_count.saturating_add(1);
+        match record.status.as_str() {
+            PROVENANCE_STATUS_VERIFIED => {
+                self.verified_count = self.verified_count.saturating_add(1);
+            }
+            PROVENANCE_STATUS_MISSING => {
+                self.missing_count = self.missing_count.saturating_add(1);
+            }
+            PROVENANCE_STATUS_MISMATCH => {
+                self.mismatch_count = self.mismatch_count.saturating_add(1);
+            }
+            _ => {}
+        }
+        self.records.push(record);
+    }
+
+    #[must_use]
+    pub const fn is_clean(&self) -> bool {
+        self.checked_count == self.verified_count
+            && self.missing_count == 0
+            && self.mismatch_count == 0
+    }
 }
 
 /// Tag usage count.
@@ -2582,9 +2855,26 @@ fn stored_memory_from_row(row: &Row) -> Result<StoredMemory> {
         provenance_uri: optional_text(row, 8)?.map(str::to_string),
         trust_class: required_text(row, 9, DbOperation::Query, "trust_class")?.to_string(),
         trust_subclass: optional_text(row, 10)?.map(str::to_string),
-        created_at: required_text(row, 11, DbOperation::Query, "created_at")?.to_string(),
-        updated_at: required_text(row, 12, DbOperation::Query, "updated_at")?.to_string(),
-        tombstoned_at: optional_text(row, 13)?.map(str::to_string),
+        provenance_chain_hash: optional_text(row, 11)?.map(str::to_string),
+        provenance_chain_hash_version: required_text(
+            row,
+            12,
+            DbOperation::Query,
+            "provenance_chain_hash_version",
+        )?
+        .to_string(),
+        provenance_verification_status: required_text(
+            row,
+            13,
+            DbOperation::Query,
+            "provenance_verification_status",
+        )?
+        .to_string(),
+        provenance_verified_at: optional_text(row, 14)?.map(str::to_string),
+        provenance_verification_note: optional_text(row, 15)?.map(str::to_string),
+        created_at: required_text(row, 16, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 17, DbOperation::Query, "updated_at")?.to_string(),
+        tombstoned_at: optional_text(row, 18)?.map(str::to_string),
     })
 }
 
@@ -4122,8 +4412,8 @@ mod tests {
 
         ensure_equal(
             &result.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-            "V001-V010 must be applied",
+            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            "V001-V012 must be applied",
         )?;
         ensure_equal(&result.skipped().len(), &0, "no migrations skipped")?;
 
@@ -4189,6 +4479,10 @@ mod tests {
             table_names.contains(&"import_ledger"),
             "import_ledger table must exist",
         )?;
+        ensure(
+            table_names.contains(&"feedback_events"),
+            "feedback_events table must exist",
+        )?;
 
         connection.close()?;
         Ok(())
@@ -4201,16 +4495,16 @@ mod tests {
         let first = connection.migrate()?;
         ensure_equal(
             &first.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-            "first run applies V001-V010",
+            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            "first run applies V001-V012",
         )?;
 
         let second = connection.migrate()?;
         ensure_equal(&second.applied().len(), &0, "second run applies nothing")?;
         ensure_equal(
             &second.skipped().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-            "second run skips V001-V010",
+            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            "second run skips V001-V012",
         )?;
 
         connection.close()?;
@@ -4251,8 +4545,8 @@ mod tests {
 
         ensure_equal(
             &connection.schema_version()?,
-            &Some(10),
-            "after migrations, schema version is 10",
+            &Some(12),
+            "after migrations, schema version is 12",
         )?;
 
         connection.close()?;
@@ -5337,6 +5631,30 @@ mod tests {
             &Some("project-rule".to_string()),
             "trust_subclass",
         )?;
+        let expected_hash = super::compute_memory_provenance_chain_hash(&memory);
+        ensure_equal(
+            &memory.provenance_chain_hash,
+            &Some(expected_hash),
+            "provenance_chain_hash",
+        )?;
+        ensure_equal(
+            &memory.provenance_chain_hash_version.as_str(),
+            &super::PROVENANCE_CHAIN_HASH_VERSION,
+            "provenance_chain_hash_version",
+        )?;
+        ensure_equal(
+            &memory.provenance_verification_status.as_str(),
+            &super::PROVENANCE_STATUS_UNVERIFIED,
+            "provenance_verification_status",
+        )?;
+        ensure(
+            memory.provenance_verified_at.is_none(),
+            "new memory has no verification timestamp",
+        )?;
+        ensure(
+            memory.provenance_verification_note.is_none(),
+            "new memory has no verification note",
+        )?;
         ensure(memory.tombstoned_at.is_none(), "not tombstoned")?;
 
         let tags = connection.get_memory_tags("mem_01234567890123456789012345")?;
@@ -5344,6 +5662,153 @@ mod tests {
             &tags,
             &vec!["cargo".to_string(), "formatting".to_string()],
             "tags",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn provenance_chain_hash_is_deterministic_and_sensitive() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "procedural".to_string(),
+            kind: "rule".to_string(),
+            content: "Record source provenance for every imported rule.".to_string(),
+            confidence: 0.8,
+            utility: 0.7,
+            importance: 0.9,
+            provenance_uri: Some("file://runbook.md#L10".to_string()),
+            trust_class: "human_explicit".to_string(),
+            trust_subclass: Some("runbook".to_string()),
+            tags: Vec::new(),
+        };
+        connection.insert_memory("mem_01234567890123456789012345", &input)?;
+
+        let memory = connection
+            .get_memory("mem_01234567890123456789012345")?
+            .ok_or_else(|| TestFailure::new("memory not found"))?;
+        let first = super::compute_memory_provenance_chain_hash(&memory);
+        let second = super::compute_memory_provenance_chain_hash(&memory);
+        ensure_equal(&first, &second, "provenance hash is deterministic")?;
+        ensure_equal(
+            &memory.provenance_chain_hash,
+            &Some(first.clone()),
+            "stored provenance hash",
+        )?;
+
+        let mut changed_provenance = memory.clone();
+        changed_provenance.provenance_uri = Some("file://runbook.md#L11".to_string());
+        ensure(
+            super::compute_memory_provenance_chain_hash(&changed_provenance) != first,
+            "changing provenance changes the chain hash",
+        )?;
+
+        let mut changed_content = memory;
+        changed_content.content = "Record source provenance for every trusted rule.".to_string();
+        ensure(
+            super::compute_memory_provenance_chain_hash(&changed_content) != first,
+            "changing content changes the chain hash",
+        )?;
+
+        let mut missing_optional = changed_content.clone();
+        missing_optional.provenance_uri = None;
+        let mut literal_optional = missing_optional.clone();
+        literal_optional.provenance_uri = Some("<null>".to_string());
+        ensure(
+            super::compute_memory_provenance_chain_hash(&missing_optional)
+                != super::compute_memory_provenance_chain_hash(&literal_optional),
+            "missing optional provenance differs from literal optional text",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn sampled_provenance_verification_updates_status_counts() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        for (id, content) in [
+            (
+                "mem_01234567890123456789012345",
+                "Verified provenance memory.",
+            ),
+            (
+                "mem_01234567890123456789012346",
+                "Mismatched provenance memory.",
+            ),
+            (
+                "mem_01234567890123456789012347",
+                "Missing provenance memory.",
+            ),
+        ] {
+            let input = super::CreateMemoryInput {
+                workspace_id: "wsp_01234567890123456789012345".to_string(),
+                level: "procedural".to_string(),
+                kind: "rule".to_string(),
+                content: content.to_string(),
+                confidence: 0.8,
+                utility: 0.7,
+                importance: 0.9,
+                provenance_uri: Some("file://runbook.md#L10".to_string()),
+                trust_class: "human_explicit".to_string(),
+                trust_subclass: Some("runbook".to_string()),
+                tags: Vec::new(),
+            };
+            connection.insert_memory(id, &input)?;
+        }
+
+        connection.execute_raw(
+            "UPDATE memories SET provenance_chain_hash = 'blake3:bad' WHERE id = 'mem_01234567890123456789012346'",
+        )?;
+        connection.execute_raw(
+            "UPDATE memories SET provenance_chain_hash = NULL WHERE id = 'mem_01234567890123456789012347'",
+        )?;
+
+        let report =
+            connection.verify_sampled_memory_provenance("wsp_01234567890123456789012345", 10)?;
+        ensure_equal(&report.checked_count, &3, "checked count")?;
+        ensure_equal(&report.verified_count, &1, "verified count")?;
+        ensure_equal(&report.mismatch_count, &1, "mismatch count")?;
+        ensure_equal(&report.missing_count, &1, "missing count")?;
+        ensure(!report.is_clean(), "mixed sample is not clean")?;
+
+        let verified = connection
+            .get_memory("mem_01234567890123456789012345")?
+            .ok_or_else(|| TestFailure::new("verified memory not found"))?;
+        ensure_equal(
+            &verified.provenance_verification_status.as_str(),
+            &super::PROVENANCE_STATUS_VERIFIED,
+            "verified status",
+        )?;
+        ensure(
+            verified.provenance_verified_at.is_some(),
+            "verified timestamp recorded",
+        )?;
+
+        let mismatch = connection
+            .get_memory("mem_01234567890123456789012346")?
+            .ok_or_else(|| TestFailure::new("mismatch memory not found"))?;
+        ensure_equal(
+            &mismatch.provenance_verification_status.as_str(),
+            &super::PROVENANCE_STATUS_MISMATCH,
+            "mismatch status",
+        )?;
+
+        let missing = connection
+            .get_memory("mem_01234567890123456789012347")?
+            .ok_or_else(|| TestFailure::new("missing memory not found"))?;
+        ensure_equal(
+            &missing.provenance_verification_status.as_str(),
+            &super::PROVENANCE_STATUS_MISSING,
+            "missing status",
         )?;
 
         connection.close()?;
@@ -6820,7 +7285,7 @@ mod tests {
         ensure(report.integrity_check.passed, "integrity passed")?;
         ensure(report.foreign_key_check.passed, "foreign keys passed")?;
         ensure(!report.needs_migration, "no migration needed")?;
-        ensure_equal(&report.schema_version, &Some(10), "schema version is 10")?;
+        ensure_equal(&report.schema_version, &Some(12), "schema version is 12")?;
 
         connection.close()?;
         Ok(())
