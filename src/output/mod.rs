@@ -2368,6 +2368,12 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             description: "Procedure, verification, export, and render-only skill capsule schemas",
             category: "domain",
         },
+        SchemaEntry {
+            id: "ee.economy.schemas.v1",
+            version: "1",
+            description: "Utility, attention-cost, reserve, debt, recommendation, and report schemas",
+            category: "domain",
+        },
     ]
 }
 
@@ -2427,6 +2433,7 @@ fn render_single_schema_export(schema_id: &str) -> String {
         "ee.certificate.v1" => certificate_schema_definition(),
         "ee.executable_id_schemas.v1" => crate::models::executable_id_schema_catalog_json(),
         "ee.procedure.schemas.v1" => crate::models::procedure_schema_catalog_json(),
+        "ee.economy.schemas.v1" => crate::models::economy_schema_catalog_json(),
         _ => {
             let mut b = JsonBuilder::with_capacity(256);
             b.field_str("schema", ERROR_SCHEMA_V1);
@@ -2449,12 +2456,13 @@ fn render_all_schemas_export() -> String {
         d.field_raw(
             "schemas",
             &format!(
-                "[{},{},{},{},{}]",
+                "[{},{},{},{},{},{}]",
                 response_schema_definition(),
                 error_schema_definition(),
                 certificate_schema_definition(),
                 crate::models::executable_id_schema_catalog_json(),
-                crate::models::procedure_schema_catalog_json()
+                crate::models::procedure_schema_catalog_json(),
+                crate::models::economy_schema_catalog_json()
             ),
         );
     });
@@ -4405,7 +4413,11 @@ pub fn render_lab_capture_toon(report: &CaptureReport) -> String {
         report.episode_id,
         report.memories_captured,
         report.actions_captured,
-        if report.dry_run { "dry_run" } else { "captured" }
+        if report.dry_run {
+            "dry_run"
+        } else {
+            "captured"
+        }
     )
 }
 
@@ -4451,7 +4463,11 @@ pub fn render_lab_replay_toon(report: &ReplayReport) -> String {
         "LAB_REPLAY|{}|{}|{}",
         report.episode_id,
         report.status.as_str(),
-        if report.dry_run { "dry_run" } else { "replayed" }
+        if report.dry_run {
+            "dry_run"
+        } else {
+            "replayed"
+        }
     )
 }
 
@@ -4508,7 +4524,11 @@ pub fn render_lab_counterfactual_toon(report: &CounterfactualReport) -> String {
         report.episode_id,
         report.status.as_str(),
         report.interventions_applied,
-        if report.dry_run { "dry_run" } else { "executed" }
+        if report.dry_run {
+            "dry_run"
+        } else {
+            "executed"
+        }
     )
 }
 
@@ -4571,7 +4591,11 @@ pub fn render_preflight_run_toon(report: &RunReport) -> String {
         report.run_id,
         report.risk_level,
         if report.cleared { "cleared" } else { "blocked" },
-        if report.dry_run { "dry_run" } else { "executed" }
+        if report.dry_run {
+            "dry_run"
+        } else {
+            "executed"
+        }
     )
 }
 
@@ -4622,9 +4646,7 @@ pub fn render_preflight_show_human(report: &ShowReport) -> String {
 pub fn render_preflight_show_toon(report: &ShowReport) -> String {
     format!(
         "PREFLIGHT_SHOW|{}|{}|{}",
-        report.run.id,
-        report.run.risk_level,
-        report.run.status
+        report.run.id, report.run.risk_level, report.run.status
     )
 }
 
@@ -4675,6 +4697,189 @@ pub fn render_preflight_close_toon(report: &CloseReport) -> String {
         report.run_id,
         report.new_status,
         if report.dry_run { "dry_run" } else { "closed" }
+    )
+}
+
+// ============================================================================
+// EE-411: Procedure Output Rendering
+// ============================================================================
+
+use crate::core::procedure::{
+    ProcedureExportReport, ProcedureListReport, ProcedureProposeReport, ProcedureShowReport,
+};
+
+/// Render a procedure propose report as JSON.
+#[must_use]
+pub fn render_procedure_propose_json(report: &ProcedureProposeReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "success": true,
+        "procedureId": report.procedure_id,
+        "title": report.title,
+        "summary": report.summary,
+        "status": report.status,
+        "sourceRunCount": report.source_run_count,
+        "evidenceCount": report.evidence_count,
+        "dryRun": report.dry_run,
+        "createdAt": report.created_at,
+    })
+    .to_string()
+}
+
+/// Render a procedure propose report as human-readable text.
+#[must_use]
+pub fn render_procedure_propose_human(report: &ProcedureProposeReport) -> String {
+    let mut out = String::with_capacity(512);
+    out.push_str(&format!("Procedure Proposed: {}\n\n", report.procedure_id));
+    out.push_str(&format!("Title: {}\n", report.title));
+    out.push_str(&format!("Summary: {}\n", report.summary));
+    out.push_str(&format!("Status: {}\n", report.status));
+    out.push_str(&format!("Source runs: {}\n", report.source_run_count));
+    out.push_str(&format!("Evidence items: {}\n", report.evidence_count));
+    if report.dry_run {
+        out.push_str("\n[dry-run: no changes made]\n");
+    }
+    out.push_str("\nNext:\n  ee procedure show ");
+    out.push_str(&report.procedure_id);
+    out.push_str(" --json\n");
+    out
+}
+
+/// Render a procedure propose report as TOON.
+#[must_use]
+pub fn render_procedure_propose_toon(report: &ProcedureProposeReport) -> String {
+    format!(
+        "PROCEDURE_PROPOSE|{}|{}|{}",
+        report.procedure_id,
+        report.status,
+        if report.dry_run { "dry_run" } else { "created" }
+    )
+}
+
+/// Render a procedure show report as JSON.
+#[must_use]
+pub fn render_procedure_show_json(report: &ProcedureShowReport) -> String {
+    serde_json::to_string(report).unwrap_or_default()
+}
+
+/// Render a procedure show report as human-readable text.
+#[must_use]
+pub fn render_procedure_show_human(report: &ProcedureShowReport) -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str(&format!("Procedure: {}\n", report.procedure.procedure_id));
+    out.push_str(&format!("Title: {}\n", report.procedure.title));
+    out.push_str(&format!("Status: {}\n", report.procedure.status));
+    out.push_str(&format!("Steps: {}\n\n", report.procedure.step_count));
+    out.push_str(&format!("Summary: {}\n\n", report.procedure.summary));
+
+    if !report.steps.is_empty() {
+        out.push_str("Steps:\n");
+        for step in &report.steps {
+            out.push_str(&format!(
+                "  {}. {} {}\n",
+                step.sequence,
+                step.title,
+                if step.required { "" } else { "(optional)" }
+            ));
+            out.push_str(&format!("     {}\n", step.instruction));
+            if let Some(ref hint) = step.command_hint {
+                out.push_str(&format!("     Command: {}\n", hint));
+            }
+        }
+    }
+
+    if let Some(ref v) = report.verification {
+        out.push_str(&format!("\nVerification: {}\n", v.status));
+    }
+
+    out.push_str("\nNext:\n  ee procedure export ");
+    out.push_str(&report.procedure.procedure_id);
+    out.push_str(" --format markdown\n");
+    out
+}
+
+/// Render a procedure show report as TOON.
+#[must_use]
+pub fn render_procedure_show_toon(report: &ProcedureShowReport) -> String {
+    format!(
+        "PROCEDURE_SHOW|{}|{}|steps={}",
+        report.procedure.procedure_id, report.procedure.status, report.procedure.step_count
+    )
+}
+
+/// Render a procedure list report as JSON.
+#[must_use]
+pub fn render_procedure_list_json(report: &ProcedureListReport) -> String {
+    serde_json::to_string(report).unwrap_or_default()
+}
+
+/// Render a procedure list report as human-readable text.
+#[must_use]
+pub fn render_procedure_list_human(report: &ProcedureListReport) -> String {
+    let mut out = String::with_capacity(512);
+    out.push_str(&format!(
+        "Procedures: {} of {} shown\n\n",
+        report.filtered_count, report.total_count
+    ));
+
+    if report.procedures.is_empty() {
+        out.push_str("No procedures found.\n");
+    } else {
+        for p in &report.procedures {
+            out.push_str(&format!(
+                "  {} [{}] {} ({} steps)\n",
+                p.procedure_id, p.status, p.title, p.step_count
+            ));
+        }
+    }
+
+    out.push_str("\nNext:\n  ee procedure show <id> --json\n");
+    out
+}
+
+/// Render a procedure list report as TOON.
+#[must_use]
+pub fn render_procedure_list_toon(report: &ProcedureListReport) -> String {
+    format!(
+        "PROCEDURE_LIST|total={}|shown={}",
+        report.total_count, report.filtered_count
+    )
+}
+
+/// Render a procedure export report as JSON.
+#[must_use]
+pub fn render_procedure_export_json(report: &ProcedureExportReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "success": true,
+        "procedureId": report.procedure_id,
+        "format": report.format,
+        "outputPath": report.output_path,
+        "contentLength": report.content_length,
+        "exportedAt": report.exported_at,
+    })
+    .to_string()
+}
+
+/// Render a procedure export report as human-readable text.
+#[must_use]
+pub fn render_procedure_export_human(report: &ProcedureExportReport) -> String {
+    let mut out = String::with_capacity(256);
+    out.push_str(&format!("Exported: {}\n", report.procedure_id));
+    out.push_str(&format!("Format: {}\n", report.format));
+    out.push_str(&format!("Size: {} bytes\n", report.content_length));
+    if let Some(ref path) = report.output_path {
+        out.push_str(&format!("Output: {}\n", path));
+    }
+    out
+}
+
+/// Render a procedure export report as TOON.
+#[must_use]
+pub fn render_procedure_export_toon(report: &ProcedureExportReport) -> String {
+    format!(
+        "PROCEDURE_EXPORT|{}|{}|{}",
+        report.procedure_id, report.format, report.content_length
     )
 }
 

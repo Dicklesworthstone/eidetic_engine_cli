@@ -2646,6 +2646,145 @@ where
 }
 
 // ============================================================================
+// EE-401: Recorder Handlers
+// ============================================================================
+
+fn handle_recorder_start<W>(cli: &Cli, args: &RecorderStartArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let options = crate::core::recorder::RecorderStartOptions {
+        agent_id: args.agent_id.clone(),
+        session_id: args.session_id.clone(),
+        workspace_id: args.workspace_id.clone(),
+        dry_run: args.dry_run,
+    };
+
+    let report = crate::core::recorder::start_recording(&options);
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.data_json().to_string() + "\n")),
+    }
+}
+
+fn handle_recorder_event<W, E>(
+    cli: &Cli,
+    args: &RecorderEventArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let event_type = match args.event_type.parse::<crate::models::RecorderEventType>() {
+        Ok(t) => t,
+        Err(_) => {
+            let _ = writeln!(
+                stderr,
+                "error: invalid event type '{}'. Valid: tool_call, tool_result, user_message, assistant_message, error, state_change",
+                args.event_type
+            );
+            return ProcessExitCode::Usage;
+        }
+    };
+
+    let options = crate::core::recorder::RecorderEventOptions {
+        run_id: args.run_id.clone(),
+        event_type,
+        payload: args.payload.clone(),
+        redact: args.redact,
+        dry_run: args.dry_run,
+    };
+
+    let report = crate::core::recorder::record_event(&options, 1);
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.data_json().to_string() + "\n")),
+    }
+}
+
+fn handle_recorder_finish<W, E>(
+    cli: &Cli,
+    args: &RecorderFinishArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let status = match args.status.parse::<crate::models::RecorderRunStatus>() {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = writeln!(
+                stderr,
+                "error: invalid status '{}'. Valid: completed, abandoned",
+                args.status
+            );
+            return ProcessExitCode::Usage;
+        }
+    };
+
+    let options = crate::core::recorder::RecorderFinishOptions {
+        run_id: args.run_id.clone(),
+        status,
+        dry_run: args.dry_run,
+    };
+
+    let report = crate::core::recorder::finish_recording(&options, 0);
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.data_json().to_string() + "\n")),
+    }
+}
+
+fn handle_recorder_tail<W>(cli: &Cli, args: &RecorderTailArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let options = crate::core::recorder::RecorderTailOptions {
+        run_id: args.run_id.clone(),
+        limit: args.limit,
+        from_sequence: args.from_sequence,
+    };
+
+    let report = crate::core::recorder::tail_recording(&options);
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.data_json().to_string() + "\n")),
+    }
+}
+
+// ============================================================================
 // EE-243: Graph Diagnostic Output
 // ============================================================================
 
@@ -4598,6 +4737,12 @@ impl NormalizedInvocation {
                     ProcedureCommand::Show(_) => "procedure show".to_string(),
                     ProcedureCommand::List(_) => "procedure list".to_string(),
                     ProcedureCommand::Export(_) => "procedure export".to_string(),
+                },
+                Command::Recorder(rec) => match rec {
+                    RecorderCommand::Start(_) => "recorder start".to_string(),
+                    RecorderCommand::Event(_) => "recorder event".to_string(),
+                    RecorderCommand::Finish(_) => "recorder finish".to_string(),
+                    RecorderCommand::Tail(_) => "recorder tail".to_string(),
                 },
                 Command::Remember(_) => "remember".to_string(),
                 Command::Review(review) => match review {
