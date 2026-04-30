@@ -1,9 +1,12 @@
-//! Read-only legacy Eidetic Engine import scanner (EE-270).
+//! Read-only legacy Eidetic Engine import scanner (EE-270) and mapping report (EE-271).
 //!
 //! The scanner inventories pre-v1 Eidetic artifacts without mutating storage.
 //! It classifies likely memory/session/config/index files, computes provenance
 //! hashes, and flags content that must be quarantined or manually reviewed
 //! before any future import writes are implemented.
+//!
+//! The mapping report (EE-271) explains how each legacy artifact type maps to
+//! the new ee format, including field transformations and trust adjustments.
 
 use std::fmt;
 use std::fs::{self, File};
@@ -734,6 +737,438 @@ fn io_error(path: &Path, error: io::Error) -> LegacyImportScanError {
     }
 }
 
+// ============================================================================
+// EE-271: Legacy Mapping Report
+// ============================================================================
+
+/// Schema identifier for legacy mapping reports.
+pub const LEGACY_MAPPING_REPORT_SCHEMA_V1: &str = "ee.legacy_mapping.v1";
+
+/// A detailed mapping specification for a legacy artifact to ee format.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyMapping {
+    /// Original legacy artifact type.
+    pub source_type: LegacyArtifactType,
+    /// Target ee concept (memory, session, config, etc.).
+    pub target_concept: &'static str,
+    /// Target ee table or storage location.
+    pub target_table: &'static str,
+    /// Field transformations required.
+    pub field_transforms: Vec<FieldTransform>,
+    /// Trust adjustment applied during import.
+    pub trust_adjustment: TrustAdjustment,
+    /// Whether manual review is required.
+    pub requires_review: bool,
+    /// Import action to take.
+    pub action: MappingAction,
+}
+
+/// A field transformation during legacy import.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FieldTransform {
+    /// Source field name in legacy format.
+    pub source_field: &'static str,
+    /// Target field name in ee format.
+    pub target_field: &'static str,
+    /// Transformation type applied.
+    pub transform: TransformType,
+}
+
+/// Type of transformation applied to a field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransformType {
+    /// Direct copy without modification.
+    Direct,
+    /// Rename only.
+    Rename,
+    /// Parse and reformat (e.g., timestamps).
+    Parse,
+    /// Hash or normalize content.
+    Normalize,
+    /// Generate new value (e.g., IDs).
+    Generate,
+    /// Extract from nested structure.
+    Extract,
+    /// Combine multiple source fields.
+    Combine,
+    /// Discard field (not mapped).
+    Discard,
+}
+
+impl TransformType {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Rename => "rename",
+            Self::Parse => "parse",
+            Self::Normalize => "normalize",
+            Self::Generate => "generate",
+            Self::Extract => "extract",
+            Self::Combine => "combine",
+            Self::Discard => "discard",
+        }
+    }
+}
+
+/// Trust adjustment applied during import.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrustAdjustment {
+    /// Preserve original trust level.
+    Preserve,
+    /// Downgrade trust due to legacy source.
+    Downgrade,
+    /// Set to quarantine pending review.
+    Quarantine,
+    /// Set to untrusted until verified.
+    Untrusted,
+}
+
+impl TrustAdjustment {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Preserve => "preserve",
+            Self::Downgrade => "downgrade",
+            Self::Quarantine => "quarantine",
+            Self::Untrusted => "untrusted",
+        }
+    }
+}
+
+/// Action to take for a legacy artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MappingAction {
+    /// Import as memory candidate.
+    ImportAsMemory,
+    /// Import as session evidence.
+    ImportAsSession,
+    /// Skip (derived/index data).
+    Skip,
+    /// Queue for manual review.
+    ManualReview,
+    /// Reference only (architecture docs).
+    ReferenceOnly,
+}
+
+impl MappingAction {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ImportAsMemory => "import_as_memory",
+            Self::ImportAsSession => "import_as_session",
+            Self::Skip => "skip",
+            Self::ManualReview => "manual_review",
+            Self::ReferenceOnly => "reference_only",
+        }
+    }
+}
+
+/// Aggregate statistics for the mapping report.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MappingStatistics {
+    pub total_artifacts: u32,
+    pub importable_memories: u32,
+    pub importable_sessions: u32,
+    pub skipped: u32,
+    pub manual_review: u32,
+    pub reference_only: u32,
+    pub trust_downgrades: u32,
+    pub quarantined: u32,
+}
+
+/// Complete legacy mapping report.
+#[derive(Clone, Debug)]
+pub struct LegacyMappingReport {
+    pub schema: &'static str,
+    pub source_path: String,
+    pub mappings: Vec<ArtifactMapping>,
+    pub statistics: MappingStatistics,
+    pub type_summaries: Vec<TypeMappingSummary>,
+}
+
+/// Mapping for a specific artifact.
+#[derive(Clone, Debug)]
+pub struct ArtifactMapping {
+    pub path: String,
+    pub source_type: LegacyArtifactType,
+    pub target_concept: &'static str,
+    pub action: MappingAction,
+    pub trust_adjustment: TrustAdjustment,
+    pub requires_review: bool,
+    pub risk_flags: Vec<LegacyRiskFlag>,
+}
+
+/// Summary of mappings for a specific artifact type.
+#[derive(Clone, Debug)]
+pub struct TypeMappingSummary {
+    pub source_type: LegacyArtifactType,
+    pub target_concept: &'static str,
+    pub target_table: &'static str,
+    pub count: u32,
+    pub field_transforms: Vec<FieldTransform>,
+    pub notes: &'static str,
+}
+
+impl LegacyMappingReport {
+    /// Generate a mapping report from a scan report.
+    #[must_use]
+    pub fn from_scan(scan: &LegacyImportScanReport) -> Self {
+        let mut statistics = MappingStatistics::default();
+        let mut mappings = Vec::with_capacity(scan.artifacts.len());
+
+        for artifact in &scan.artifacts {
+            let mapping = map_artifact(artifact);
+
+            statistics.total_artifacts += 1;
+            match mapping.action {
+                MappingAction::ImportAsMemory => statistics.importable_memories += 1,
+                MappingAction::ImportAsSession => statistics.importable_sessions += 1,
+                MappingAction::Skip => statistics.skipped += 1,
+                MappingAction::ManualReview => statistics.manual_review += 1,
+                MappingAction::ReferenceOnly => statistics.reference_only += 1,
+            }
+            match mapping.trust_adjustment {
+                TrustAdjustment::Downgrade => statistics.trust_downgrades += 1,
+                TrustAdjustment::Quarantine => statistics.quarantined += 1,
+                _ => {}
+            }
+
+            mappings.push(mapping);
+        }
+
+        let type_summaries = generate_type_summaries();
+
+        Self {
+            schema: LEGACY_MAPPING_REPORT_SCHEMA_V1,
+            source_path: scan.source_path.clone(),
+            mappings,
+            statistics,
+            type_summaries,
+        }
+    }
+
+    /// Render the report as JSON.
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "schema": self.schema,
+            "command": "import legacy-mapping",
+            "sourcePath": self.source_path,
+            "statistics": {
+                "totalArtifacts": self.statistics.total_artifacts,
+                "importableMemories": self.statistics.importable_memories,
+                "importableSessions": self.statistics.importable_sessions,
+                "skipped": self.statistics.skipped,
+                "manualReview": self.statistics.manual_review,
+                "referenceOnly": self.statistics.reference_only,
+                "trustDowngrades": self.statistics.trust_downgrades,
+                "quarantined": self.statistics.quarantined,
+            },
+            "typeSummaries": self.type_summaries.iter().map(|s| {
+                json!({
+                    "sourceType": s.source_type.as_str(),
+                    "targetConcept": s.target_concept,
+                    "targetTable": s.target_table,
+                    "count": s.count,
+                    "fieldTransforms": s.field_transforms.iter().map(|t| {
+                        json!({
+                            "sourceField": t.source_field,
+                            "targetField": t.target_field,
+                            "transform": t.transform.as_str(),
+                        })
+                    }).collect::<Vec<_>>(),
+                    "notes": s.notes,
+                })
+            }).collect::<Vec<_>>(),
+            "mappings": self.mappings.iter().map(|m| {
+                json!({
+                    "path": m.path,
+                    "sourceType": m.source_type.as_str(),
+                    "targetConcept": m.target_concept,
+                    "action": m.action.as_str(),
+                    "trustAdjustment": m.trust_adjustment.as_str(),
+                    "requiresReview": m.requires_review,
+                    "riskFlags": m.risk_flags.iter().map(|f| f.as_str()).collect::<Vec<_>>(),
+                })
+            }).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Render a human-readable summary.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut out = String::with_capacity(1024);
+        out.push_str("Legacy Mapping Report\n");
+        out.push_str("=====================\n\n");
+        out.push_str(&format!("Source: {}\n\n", self.source_path));
+
+        out.push_str("Statistics:\n");
+        out.push_str(&format!("  Total artifacts:      {}\n", self.statistics.total_artifacts));
+        out.push_str(&format!("  Importable memories:  {}\n", self.statistics.importable_memories));
+        out.push_str(&format!("  Importable sessions:  {}\n", self.statistics.importable_sessions));
+        out.push_str(&format!("  Skipped (derived):    {}\n", self.statistics.skipped));
+        out.push_str(&format!("  Manual review:        {}\n", self.statistics.manual_review));
+        out.push_str(&format!("  Reference only:       {}\n", self.statistics.reference_only));
+        out.push_str(&format!("  Trust downgrades:     {}\n", self.statistics.trust_downgrades));
+        out.push_str(&format!("  Quarantined:          {}\n\n", self.statistics.quarantined));
+
+        out.push_str("Type Mappings:\n");
+        for summary in &self.type_summaries {
+            out.push_str(&format!(
+                "  {} -> {} ({})\n",
+                summary.source_type.as_str(),
+                summary.target_concept,
+                summary.target_table
+            ));
+            if !summary.notes.is_empty() {
+                out.push_str(&format!("    Note: {}\n", summary.notes));
+            }
+        }
+
+        out.push_str("\nNext:\n");
+        out.push_str("  ee import legacy-mapping --json\n");
+        out
+    }
+
+    /// Render as TOON output.
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        let json_str = serde_json::to_string(&self.data_json()).unwrap_or_default();
+        crate::output::render_toon_from_json(&json_str)
+    }
+}
+
+fn map_artifact(artifact: &LegacyArtifact) -> ArtifactMapping {
+    let (target_concept, action) = match artifact.mapping_target {
+        LegacyMappingTarget::MemoryCandidate => ("memory", MappingAction::ImportAsMemory),
+        LegacyMappingTarget::SessionEvidence => ("session", MappingAction::ImportAsSession),
+        LegacyMappingTarget::DerivedIndexSkip => ("index", MappingAction::Skip),
+        LegacyMappingTarget::ConfigReview => ("config", MappingAction::ManualReview),
+        LegacyMappingTarget::ArchitectureReferenceOnly => ("architecture", MappingAction::ReferenceOnly),
+        LegacyMappingTarget::ManualReview => ("unknown", MappingAction::ManualReview),
+    };
+
+    let trust_adjustment = if artifact.risk_flags.contains(&LegacyRiskFlag::SensitiveContent) {
+        TrustAdjustment::Quarantine
+    } else if artifact.instruction_like.detected {
+        TrustAdjustment::Quarantine
+    } else if !artifact.risk_flags.is_empty() {
+        TrustAdjustment::Downgrade
+    } else {
+        TrustAdjustment::Preserve
+    };
+
+    let requires_review = matches!(action, MappingAction::ManualReview)
+        || artifact.instruction_like.detected
+        || artifact.risk_flags.contains(&LegacyRiskFlag::SensitiveContent);
+
+    ArtifactMapping {
+        path: artifact.path.clone(),
+        source_type: artifact.artifact_type,
+        target_concept,
+        action,
+        trust_adjustment,
+        requires_review,
+        risk_flags: artifact.risk_flags.clone(),
+    }
+}
+
+fn generate_type_summaries() -> Vec<TypeMappingSummary> {
+    vec![
+        TypeMappingSummary {
+            source_type: LegacyArtifactType::MemoryStore,
+            target_concept: "memory",
+            target_table: "memories",
+            count: 0,
+            field_transforms: vec![
+                FieldTransform {
+                    source_field: "id",
+                    target_field: "legacy_id",
+                    transform: TransformType::Rename,
+                },
+                FieldTransform {
+                    source_field: "*",
+                    target_field: "id",
+                    transform: TransformType::Generate,
+                },
+                FieldTransform {
+                    source_field: "content",
+                    target_field: "content",
+                    transform: TransformType::Direct,
+                },
+                FieldTransform {
+                    source_field: "timestamp",
+                    target_field: "created_at",
+                    transform: TransformType::Parse,
+                },
+                FieldTransform {
+                    source_field: "embedding",
+                    target_field: "*",
+                    transform: TransformType::Discard,
+                },
+            ],
+            notes: "Embeddings regenerated using current model; legacy IDs preserved for provenance",
+        },
+        TypeMappingSummary {
+            source_type: LegacyArtifactType::SessionLog,
+            target_concept: "session",
+            target_table: "session_evidence",
+            count: 0,
+            field_transforms: vec![
+                FieldTransform {
+                    source_field: "session_id",
+                    target_field: "external_session_id",
+                    transform: TransformType::Rename,
+                },
+                FieldTransform {
+                    source_field: "messages",
+                    target_field: "content",
+                    transform: TransformType::Extract,
+                },
+                FieldTransform {
+                    source_field: "metadata",
+                    target_field: "provenance",
+                    transform: TransformType::Normalize,
+                },
+            ],
+            notes: "Session logs imported as evidence; CASS format preferred for new imports",
+        },
+        TypeMappingSummary {
+            source_type: LegacyArtifactType::Config,
+            target_concept: "config",
+            target_table: "N/A",
+            count: 0,
+            field_transforms: vec![],
+            notes: "Config files require manual review; may contain sensitive data",
+        },
+        TypeMappingSummary {
+            source_type: LegacyArtifactType::Index,
+            target_concept: "index",
+            target_table: "N/A",
+            count: 0,
+            field_transforms: vec![],
+            notes: "Indexes are derived assets; skip import and regenerate from source",
+        },
+        TypeMappingSummary {
+            source_type: LegacyArtifactType::ArchitectureSource,
+            target_concept: "reference",
+            target_table: "N/A",
+            count: 0,
+            field_transforms: vec![],
+            notes: "Architecture sources preserved for reference; not imported as memories",
+        },
+        TypeMappingSummary {
+            source_type: LegacyArtifactType::UnknownCandidate,
+            target_concept: "unknown",
+            target_table: "N/A",
+            count: 0,
+            field_transforms: vec![],
+            notes: "Unknown artifacts require manual classification before import",
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Debug;
@@ -867,5 +1302,153 @@ mod tests {
             &JsonValue::from(1_u64),
             "artifacts found",
         )
+    }
+
+    // ========================================================================
+    // EE-271: Mapping Report Tests
+    // ========================================================================
+
+    use crate::models::IMPORT_EIDETIC_LEGACY_SCAN_SCHEMA_V1;
+    use super::{
+        ArtifactMapping, FieldTransform, LegacyMappingReport, MappingAction, MappingStatistics,
+        TransformType, TrustAdjustment, LEGACY_MAPPING_REPORT_SCHEMA_V1, generate_type_summaries,
+    };
+
+    #[test]
+    fn mapping_report_schema_is_stable() -> TestResult {
+        ensure_equal(
+            &LEGACY_MAPPING_REPORT_SCHEMA_V1,
+            &"ee.legacy_mapping.v1",
+            "schema constant",
+        )
+    }
+
+    #[test]
+    fn transform_type_as_str() -> TestResult {
+        ensure_equal(&TransformType::Direct.as_str(), &"direct", "direct")?;
+        ensure_equal(&TransformType::Rename.as_str(), &"rename", "rename")?;
+        ensure_equal(&TransformType::Parse.as_str(), &"parse", "parse")?;
+        ensure_equal(&TransformType::Normalize.as_str(), &"normalize", "normalize")?;
+        ensure_equal(&TransformType::Generate.as_str(), &"generate", "generate")?;
+        ensure_equal(&TransformType::Extract.as_str(), &"extract", "extract")?;
+        ensure_equal(&TransformType::Combine.as_str(), &"combine", "combine")?;
+        ensure_equal(&TransformType::Discard.as_str(), &"discard", "discard")
+    }
+
+    #[test]
+    fn trust_adjustment_as_str() -> TestResult {
+        ensure_equal(&TrustAdjustment::Preserve.as_str(), &"preserve", "preserve")?;
+        ensure_equal(&TrustAdjustment::Downgrade.as_str(), &"downgrade", "downgrade")?;
+        ensure_equal(&TrustAdjustment::Quarantine.as_str(), &"quarantine", "quarantine")?;
+        ensure_equal(&TrustAdjustment::Untrusted.as_str(), &"untrusted", "untrusted")
+    }
+
+    #[test]
+    fn mapping_action_as_str() -> TestResult {
+        ensure_equal(&MappingAction::ImportAsMemory.as_str(), &"import_as_memory", "import_as_memory")?;
+        ensure_equal(&MappingAction::ImportAsSession.as_str(), &"import_as_session", "import_as_session")?;
+        ensure_equal(&MappingAction::Skip.as_str(), &"skip", "skip")?;
+        ensure_equal(&MappingAction::ManualReview.as_str(), &"manual_review", "manual_review")?;
+        ensure_equal(&MappingAction::ReferenceOnly.as_str(), &"reference_only", "reference_only")
+    }
+
+    #[test]
+    fn type_summaries_cover_all_artifact_types() {
+        let summaries = generate_type_summaries();
+        assert_eq!(summaries.len(), 6);
+
+        let types: Vec<_> = summaries.iter().map(|s| s.source_type).collect();
+        assert!(types.contains(&LegacyArtifactType::MemoryStore));
+        assert!(types.contains(&LegacyArtifactType::SessionLog));
+        assert!(types.contains(&LegacyArtifactType::Config));
+        assert!(types.contains(&LegacyArtifactType::Index));
+        assert!(types.contains(&LegacyArtifactType::ArchitectureSource));
+        assert!(types.contains(&LegacyArtifactType::UnknownCandidate));
+    }
+
+    #[test]
+    fn memory_store_has_field_transforms() {
+        let summaries = generate_type_summaries();
+        let memory_summary = summaries
+            .iter()
+            .find(|s| s.source_type == LegacyArtifactType::MemoryStore)
+            .expect("memory store summary");
+
+        assert!(!memory_summary.field_transforms.is_empty());
+        assert_eq!(memory_summary.target_table, "memories");
+        assert_eq!(memory_summary.target_concept, "memory");
+    }
+
+    #[test]
+    fn mapping_report_from_scan_empty() -> TestResult {
+        let scan = super::LegacyImportScanReport {
+            schema: IMPORT_EIDETIC_LEGACY_SCAN_SCHEMA_V1,
+            source_path: "/test".to_string(),
+            dry_run: true,
+            status: LegacyImportScanStatus::NoArtifacts,
+            scanned_files: 0,
+            skipped_files: 0,
+            artifacts: vec![],
+        };
+
+        let report = LegacyMappingReport::from_scan(&scan);
+        ensure_equal(&report.schema, &LEGACY_MAPPING_REPORT_SCHEMA_V1, "schema")?;
+        ensure_equal(&report.statistics.total_artifacts, &0, "total")
+    }
+
+    #[test]
+    fn mapping_report_json_has_required_fields() -> TestResult {
+        let scan = super::LegacyImportScanReport {
+            schema: IMPORT_EIDETIC_LEGACY_SCAN_SCHEMA_V1,
+            source_path: "/test/path".to_string(),
+            dry_run: true,
+            status: LegacyImportScanStatus::NoArtifacts,
+            scanned_files: 5,
+            skipped_files: 2,
+            artifacts: vec![],
+        };
+
+        let report = LegacyMappingReport::from_scan(&scan);
+        let json = report.data_json();
+
+        ensure_equal(
+            &json["schema"],
+            &JsonValue::String("ee.legacy_mapping.v1".to_string()),
+            "schema",
+        )?;
+        ensure_equal(
+            &json["command"],
+            &JsonValue::String("import legacy-mapping".to_string()),
+            "command",
+        )?;
+        ensure_equal(
+            &json["sourcePath"],
+            &JsonValue::String("/test/path".to_string()),
+            "sourcePath",
+        )?;
+        ensure(json["statistics"].is_object(), "statistics is object")?;
+        ensure(json["typeSummaries"].is_array(), "typeSummaries is array")?;
+        ensure(json["mappings"].is_array(), "mappings is array")
+    }
+
+    #[test]
+    fn mapping_report_human_summary_has_header() {
+        let scan = super::LegacyImportScanReport {
+            schema: IMPORT_EIDETIC_LEGACY_SCAN_SCHEMA_V1,
+            source_path: "/test".to_string(),
+            dry_run: true,
+            status: LegacyImportScanStatus::NoArtifacts,
+            scanned_files: 0,
+            skipped_files: 0,
+            artifacts: vec![],
+        };
+
+        let report = LegacyMappingReport::from_scan(&scan);
+        let human = report.human_summary();
+
+        assert!(human.contains("Legacy Mapping Report"));
+        assert!(human.contains("Source:"));
+        assert!(human.contains("Statistics:"));
+        assert!(human.contains("Type Mappings:"));
     }
 }
