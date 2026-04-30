@@ -302,7 +302,7 @@ mod tests {
             message: "Database locked".to_string(),
             repair: Some("ee db unlock".to_string()),
         };
-        ensure_equal(&err.message(), &"Database locked", "message")?;
+        ensure_equal(&err.message(), &"Database locked".to_string(), "message")?;
         ensure_equal(&err.repair(), &Some("ee db unlock"), "repair")
     }
 }
