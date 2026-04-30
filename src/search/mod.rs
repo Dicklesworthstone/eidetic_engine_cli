@@ -158,6 +158,105 @@ impl CanonicalSearchDocument {
         doc
     }
 }
+
+/// Builder for converting stored memories to canonical search documents.
+///
+/// This is the integration point between `ee-db` (StoredMemory) and
+/// `ee-search` (CanonicalSearchDocument). It maps memory fields to
+/// the unified document format for Frankensearch indexing.
+pub struct MemoryDocumentBuilder {
+    workspace_path: Option<String>,
+    tags: Vec<String>,
+}
+
+impl MemoryDocumentBuilder {
+    /// Create a new builder with no workspace path or tags.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            workspace_path: None,
+            tags: Vec::new(),
+        }
+    }
+
+    /// Set the workspace path for the document.
+    #[must_use]
+    pub fn with_workspace_path(mut self, path: impl Into<String>) -> Self {
+        self.workspace_path = Some(path.into());
+        self
+    }
+
+    /// Set the tags for the document.
+    #[must_use]
+    pub fn with_tags(mut self, tags: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.tags = tags.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Build a canonical search document from a stored memory.
+    ///
+    /// The content field is used as the primary searchable text.
+    /// Memory metadata (level, kind, timestamps) are preserved as
+    /// document metadata for filtering and scoring.
+    #[must_use]
+    pub fn build(self, memory: &crate::db::StoredMemory) -> CanonicalSearchDocument {
+        let mut doc =
+            CanonicalSearchDocument::new(&memory.id, &memory.content, DocumentSource::Memory)
+                .with_level(&memory.level)
+                .with_kind(&memory.kind)
+                .with_created_at(&memory.created_at);
+
+        if let Some(workspace) = self.workspace_path {
+            doc = doc.with_workspace(workspace);
+        }
+
+        if !self.tags.is_empty() {
+            doc = doc.with_tags(self.tags);
+        }
+
+        doc
+    }
+}
+
+impl Default for MemoryDocumentBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Convert a stored memory directly to a canonical search document.
+///
+/// This is a convenience function for simple cases where no additional
+/// context (workspace path, tags) is needed. For full control, use
+/// [`MemoryDocumentBuilder`].
+#[must_use]
+pub fn memory_to_document(memory: &crate::db::StoredMemory) -> CanonicalSearchDocument {
+    MemoryDocumentBuilder::new().build(memory)
+}
+
+/// Convert a stored memory with full context to a canonical search document.
+///
+/// This function fetches tags from the database and includes the workspace
+/// path in the document metadata.
+#[must_use]
+pub fn memory_to_document_with_context(
+    memory: &crate::db::StoredMemory,
+    workspace_path: Option<&str>,
+    tags: &[String],
+) -> CanonicalSearchDocument {
+    let mut builder = MemoryDocumentBuilder::new();
+
+    if let Some(path) = workspace_path {
+        builder = builder.with_workspace_path(path);
+    }
+
+    if !tags.is_empty() {
+        builder = builder.with_tags(tags.iter().cloned());
+    }
+
+    builder.build(memory)
+}
+
 pub const MODULE_CONTRACT: &str = "ee.search.module.v1";
 pub const REQUIRED_RETRIEVAL_ENGINE: &str = "frankensearch::TwoTierSearcher";
 pub const FRANKENSEARCH_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -558,5 +657,97 @@ mod tests {
             Some(&"session".to_owned())
         );
         assert!(!indexable.metadata.contains_key("workspace"));
+    }
+
+    fn make_test_memory() -> crate::db::StoredMemory {
+        crate::db::StoredMemory {
+            id: "mem_01234567890123456789012345".to_string(),
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "procedural".to_string(),
+            kind: "rule".to_string(),
+            content: "Always run cargo fmt before commit.".to_string(),
+            confidence: 0.9,
+            utility: 0.7,
+            importance: 0.8,
+            provenance_uri: Some("file://AGENTS.md#L42".to_string()),
+            trust_class: "human_explicit".to_string(),
+            trust_subclass: Some("project-rule".to_string()),
+            created_at: "2026-04-29T12:00:00Z".to_string(),
+            updated_at: "2026-04-29T12:00:00Z".to_string(),
+            tombstoned_at: None,
+        }
+    }
+
+    #[test]
+    fn memory_document_builder_minimal() {
+        let memory = make_test_memory();
+        let doc = super::memory_to_document(&memory);
+
+        assert_eq!(doc.id(), "mem_01234567890123456789012345");
+        assert_eq!(doc.content(), "Always run cargo fmt before commit.");
+        assert_eq!(doc.source(), DocumentSource::Memory);
+
+        let indexable = doc.into_indexable();
+        assert_eq!(
+            indexable.metadata.get("level"),
+            Some(&"procedural".to_owned())
+        );
+        assert_eq!(indexable.metadata.get("kind"), Some(&"rule".to_owned()));
+        assert_eq!(
+            indexable.metadata.get("created_at"),
+            Some(&"2026-04-29T12:00:00Z".to_owned())
+        );
+        assert!(!indexable.metadata.contains_key("workspace"));
+    }
+
+    #[test]
+    fn memory_document_builder_with_context() {
+        let memory = make_test_memory();
+        let tags = vec!["cargo".to_string(), "formatting".to_string()];
+        let doc =
+            super::memory_to_document_with_context(&memory, Some("/home/user/project"), &tags);
+
+        assert_eq!(doc.id(), "mem_01234567890123456789012345");
+        assert_eq!(doc.source(), DocumentSource::Memory);
+
+        let indexable = doc.into_indexable();
+        assert_eq!(
+            indexable.metadata.get("workspace"),
+            Some(&"/home/user/project".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("tags"),
+            Some(&"cargo,formatting".to_owned())
+        );
+    }
+
+    #[test]
+    fn memory_document_builder_fluent_api() {
+        let memory = make_test_memory();
+        let doc = super::MemoryDocumentBuilder::new()
+            .with_workspace_path("/data/projects/test")
+            .with_tags(["ci", "testing"])
+            .build(&memory);
+
+        let indexable = doc.into_indexable();
+        assert_eq!(
+            indexable.metadata.get("workspace"),
+            Some(&"/data/projects/test".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("tags"),
+            Some(&"ci,testing".to_owned())
+        );
+        assert_eq!(indexable.metadata.get("source"), Some(&"memory".to_owned()));
+    }
+
+    #[test]
+    fn memory_document_builder_default() {
+        let builder = super::MemoryDocumentBuilder::default();
+        let memory = make_test_memory();
+        let doc = builder.build(&memory);
+
+        assert_eq!(doc.id(), memory.id);
+        assert_eq!(doc.content(), memory.content);
     }
 }
