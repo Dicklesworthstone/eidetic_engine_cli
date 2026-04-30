@@ -613,6 +613,12 @@ fn complete_ledger(
         "completed"
     };
     let now = Utc::now().to_rfc3339();
+    // Preserve the attempt_count that `ensure_running_ledger` just bumped.
+    // Re-read the row instead of overwriting with a hard-coded value, otherwise
+    // the retry counter resets on every completion and never reflects reality.
+    let attempt_count = connection
+        .get_import_ledger(ledger_id)?
+        .map_or(1, |existing| existing.attempt_count);
     let _ = connection.update_import_ledger(
         ledger_id,
         &UpdateImportLedgerInput {
@@ -631,7 +637,7 @@ fn complete_ledger(
             ),
             imported_session_count: imported_sessions,
             imported_span_count: imported_spans,
-            attempt_count: 1,
+            attempt_count,
             error_code: error.map(|err| error_code(err).to_string()),
             error_message: error.map(ToString::to_string),
             started_at: None,

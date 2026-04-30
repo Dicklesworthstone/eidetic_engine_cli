@@ -345,6 +345,16 @@ impl FieldsLevel {
             Self::Full => "full",
         }
     }
+
+    #[must_use]
+    pub const fn to_field_profile(self) -> output::FieldProfile {
+        match self {
+            Self::Minimal => output::FieldProfile::Minimal,
+            Self::Summary => output::FieldProfile::Summary,
+            Self::Standard => output::FieldProfile::Standard,
+            Self::Full => output::FieldProfile::Full,
+        }
+    }
 }
 
 pub fn run_from_env() -> ProcessExitCode {
@@ -379,6 +389,7 @@ where
         None | Some(Command::Help) => write_help(stdout),
         Some(Command::Capabilities) => {
             let report = CapabilitiesReport::gather();
+            let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
                 output::Renderer::Human => {
                     write_stdout(stdout, &output::render_capabilities_human(&report))
@@ -389,13 +400,15 @@ where
                 output::Renderer::Json
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
-                | output::Renderer::Hook => {
-                    write_stdout(stdout, &(output::render_capabilities_json(&report) + "\n"))
-                }
+                | output::Renderer::Hook => write_stdout(
+                    stdout,
+                    &(output::render_capabilities_json_filtered(&report, profile) + "\n"),
+                ),
             }
         }
         Some(Command::Check) => {
             let report = CheckReport::gather();
+            let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
                 output::Renderer::Human => {
                     write_stdout(stdout, &output::render_check_human(&report))
@@ -406,14 +419,16 @@ where
                 output::Renderer::Json
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
-                | output::Renderer::Hook => {
-                    write_stdout(stdout, &(output::render_check_json(&report) + "\n"))
-                }
+                | output::Renderer::Hook => write_stdout(
+                    stdout,
+                    &(output::render_check_json_filtered(&report, profile) + "\n"),
+                ),
             }
         }
         Some(Command::Diag(ref diag_cmd)) => match diag_cmd {
             DiagCommand::Quarantine => {
                 let report = QuarantineReport::gather();
+                let profile = cli.fields_level().to_field_profile();
                 match cli.renderer() {
                     output::Renderer::Human => {
                         write_stdout(stdout, &output::render_quarantine_human(&report))
@@ -424,14 +439,16 @@ where
                     output::Renderer::Json
                     | output::Renderer::Jsonl
                     | output::Renderer::Compact
-                    | output::Renderer::Hook => {
-                        write_stdout(stdout, &(output::render_quarantine_json(&report) + "\n"))
-                    }
+                    | output::Renderer::Hook => write_stdout(
+                        stdout,
+                        &(output::render_quarantine_json_filtered(&report, profile) + "\n"),
+                    ),
                 }
             }
         },
         Some(Command::Doctor(ref args)) => {
             let report = DoctorReport::gather();
+            let profile = cli.fields_level().to_field_profile();
             if args.fix_plan {
                 let plan = report.to_fix_plan();
                 match cli.renderer() {
@@ -459,14 +476,16 @@ where
                     output::Renderer::Json
                     | output::Renderer::Jsonl
                     | output::Renderer::Compact
-                    | output::Renderer::Hook => {
-                        write_stdout(stdout, &(output::render_doctor_json(&report) + "\n"))
-                    }
+                    | output::Renderer::Hook => write_stdout(
+                        stdout,
+                        &(output::render_doctor_json_filtered(&report, profile) + "\n"),
+                    ),
                 }
             }
         }
         Some(Command::Health) => {
             let report = HealthReport::gather();
+            let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
                 output::Renderer::Human => {
                     write_stdout(stdout, &output::render_health_human(&report))
@@ -477,9 +496,10 @@ where
                 output::Renderer::Json
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
-                | output::Renderer::Hook => {
-                    write_stdout(stdout, &(output::render_health_json(&report) + "\n"))
-                }
+                | output::Renderer::Hook => write_stdout(
+                    stdout,
+                    &(output::render_health_json_filtered(&report, profile) + "\n"),
+                ),
             }
         }
         Some(Command::Eval(ref eval_cmd)) => match eval_cmd {
@@ -1031,10 +1051,19 @@ fn handle_remember(
 ) -> Result<RememberResult, MemoryValidationError> {
     let (level, kind) = validate_remember_args(args)?;
 
+    // Split on comma, trim whitespace, drop empties so `--tags "a,,b"` and
+    // `--tags " a, , b"` produce ["a","b"] instead of leaking empty entries
+    // into the JSON envelope.
     let tags: Vec<String> = args
         .tags
         .as_ref()
-        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+        .map(|t| {
+            t.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default();
 
     let memory_id = MemoryId::now();
