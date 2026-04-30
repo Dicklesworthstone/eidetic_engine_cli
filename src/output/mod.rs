@@ -2878,9 +2878,14 @@ mod tests {
 
     use super::{
         Degradation, DegradationSeverity, JsonBuilder, OutputContext, Renderer, ResponseEnvelope,
-        error_response_json, escape_json_string, help_text, human_status,
-        render_context_response_json, render_status_json, render_status_toon, status_response_json,
+        error_response_json, escape_json_string, help_text, human_status, render_agent_docs_json,
+        render_agent_docs_toon, render_context_response_json, render_context_response_toon,
+        render_doctor_json, render_doctor_toon, render_health_json, render_health_toon,
+        render_status_json, render_status_toon, status_response_json,
     };
+    use crate::core::agent_docs::AgentDocsReport;
+    use crate::core::doctor::DoctorReport;
+    use crate::core::health::HealthReport;
     use crate::core::status::StatusReport;
     use crate::models::{DomainError, MemoryId, ProvenanceUri, UnitScore};
     use crate::pack::{
@@ -3512,6 +3517,70 @@ mod tests {
         let actual = serde_json::Value::from(decoded);
 
         ensure_equal(&actual, &expected, "decoded TOON matches status JSON")
+    }
+
+    #[test]
+    fn json_toon_parity_health_decodes_to_same_json() -> TestResult {
+        let report = HealthReport::gather();
+        let json = render_health_json(&report);
+        let toon = render_health_toon(&report);
+
+        let expected_json = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("health JSON should parse: {error}"))?;
+        let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
+        let decoded = toon::try_decode(&toon, None)
+            .map_err(|error| format!("health TOON should decode: {error}"))?;
+        let actual = serde_json::Value::from(decoded);
+
+        ensure_equal(&actual, &expected, "decoded TOON matches health JSON")
+    }
+
+    #[test]
+    fn json_toon_parity_doctor_decodes_to_same_json() -> TestResult {
+        let report = DoctorReport::gather();
+        let json = render_doctor_json(&report);
+        let toon = render_doctor_toon(&report);
+
+        let expected_json = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("doctor JSON should parse: {error}"))?;
+        let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
+        let decoded = toon::try_decode(&toon, None)
+            .map_err(|error| format!("doctor TOON should decode: {error}"))?;
+        let actual = serde_json::Value::from(decoded);
+
+        ensure_equal(&actual, &expected, "decoded TOON matches doctor JSON")
+    }
+
+    #[test]
+    fn json_toon_parity_agent_docs_decodes_to_same_json() -> TestResult {
+        let report = AgentDocsReport::gather(None);
+        let json = render_agent_docs_json(&report);
+        let toon = render_agent_docs_toon(&report);
+
+        let expected_json = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("agent-docs JSON should parse: {error}"))?;
+        let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
+        let decoded = toon::try_decode(&toon, None)
+            .map_err(|error| format!("agent-docs TOON should decode: {error}"))?;
+        let actual = serde_json::Value::from(decoded);
+
+        ensure_equal(&actual, &expected, "decoded TOON matches agent-docs JSON")
+    }
+
+    #[test]
+    fn json_toon_parity_context_decodes_to_same_json() -> TestResult {
+        let response = context_response_fixture()?;
+        let json = render_context_response_json(&response);
+        let toon = render_context_response_toon(&response);
+
+        let expected_json = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("context JSON should parse: {error}"))?;
+        let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
+        let decoded = toon::try_decode(&toon, None)
+            .map_err(|error| format!("context TOON should decode: {error}"))?;
+        let actual = serde_json::Value::from(decoded);
+
+        ensure_equal(&actual, &expected, "decoded TOON matches context JSON")
     }
 
     #[test]
