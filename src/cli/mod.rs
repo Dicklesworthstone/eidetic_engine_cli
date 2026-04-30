@@ -703,7 +703,7 @@ impl RememberResult {
         };
 
         format!(
-            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","memory_id":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{},"dry_run":{}}}{}}}}"#,
+            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","memory_id":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{},"dry_run":{}}}{}}}"#,
             self.memory_id,
             escape_json_string(&self.content),
             self.level.as_str(),
