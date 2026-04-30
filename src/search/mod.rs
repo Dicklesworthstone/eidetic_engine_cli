@@ -1469,8 +1469,10 @@ mod tests {
 
     #[test]
     fn index_manifest_validate_schema_failure() {
-        let mut manifest = IndexManifest::default();
-        manifest.schema = "ee.index_manifest.v2".to_owned();
+        let manifest = IndexManifest {
+            schema: "ee.index_manifest.v2".to_owned(),
+            ..Default::default()
+        };
 
         let result = manifest.validate_schema();
         assert_eq!(

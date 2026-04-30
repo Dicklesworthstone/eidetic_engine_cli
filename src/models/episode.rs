@@ -748,6 +748,7 @@ pub struct RegretEntry {
 impl RegretEntry {
     /// Create a new regret entry.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: impl Into<String>,
         episode_id: impl Into<String>,

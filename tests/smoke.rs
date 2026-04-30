@@ -370,3 +370,272 @@ fn import_cass_json_uses_cass_robot_contract_and_is_idempotent() -> TestResult {
         "second session status",
     )
 }
+
+// =============================================================================
+// Integration Foundation Smoke Tests (EE-313)
+//
+// These tests verify that the foundational integrations are working:
+// - Response envelope schema (ee.response.v1)
+// - Asupersync runtime bootstrap
+// - SQLModel/FrankenSQLite repository shape (reports degraded until wired)
+// - Frankensearch persistent index (reports degraded until wired)
+// - CLI runtime boundary and exit codes
+// =============================================================================
+
+#[test]
+fn integration_foundation_response_envelope_schema() -> TestResult {
+    let output = run_ee(&["status", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    ensure(
+        output.status.success(),
+        "status --json must succeed for envelope test",
+    )?;
+
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| format!("response envelope must be valid JSON: {e}"))?;
+
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "response envelope schema must be ee.response.v1",
+    )?;
+    ensure(
+        json["success"].as_bool().unwrap_or(false),
+        "response envelope success must be true",
+    )?;
+    ensure(
+        json["data"].is_object(),
+        "response envelope must have data object",
+    )
+}
+
+#[test]
+fn integration_foundation_asupersync_runtime_reports_correctly() -> TestResult {
+    let output = run_ee(&["status", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    ensure(
+        output.status.success(),
+        "status must succeed for runtime test",
+    )?;
+
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| format!("status output must be valid JSON: {e}"))?;
+
+    let runtime = &json["data"]["runtime"];
+    ensure(runtime.is_object(), "status must include runtime object")?;
+    ensure_equal(
+        &runtime["engine"],
+        &serde_json::json!("asupersync"),
+        "runtime engine must be asupersync",
+    )?;
+    ensure(
+        runtime["profile"].is_string(),
+        "runtime profile must be a string",
+    )?;
+    ensure(
+        runtime["workerThreads"].is_number(),
+        "runtime workerThreads must be a number",
+    )
+}
+
+#[test]
+fn integration_foundation_capability_status_structure() -> TestResult {
+    let output = run_ee(&["status", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    ensure(
+        output.status.success(),
+        "status must succeed for capability test",
+    )?;
+
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| format!("status output must be valid JSON: {e}"))?;
+
+    let capabilities = &json["data"]["capabilities"];
+    ensure(
+        capabilities.is_object(),
+        "status must include capabilities object",
+    )?;
+    ensure_equal(
+        &capabilities["runtime"],
+        &serde_json::json!("ready"),
+        "runtime capability must be ready",
+    )?;
+    ensure(
+        capabilities["storage"].is_string(),
+        "storage capability status must be a string",
+    )?;
+    ensure(
+        capabilities["search"].is_string(),
+        "search capability status must be a string",
+    )
+}
+
+#[test]
+fn integration_foundation_degradation_codes_present_when_unimplemented() -> TestResult {
+    let output = run_ee(&["status", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    ensure(
+        output.status.success(),
+        "status must succeed for degradation test",
+    )?;
+
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| format!("status output must be valid JSON: {e}"))?;
+
+    let capabilities = &json["data"]["capabilities"];
+    let degradations = &json["data"]["degraded"];
+
+    ensure(
+        degradations.is_array(),
+        "status must include degraded array",
+    )?;
+
+    let storage_status = capabilities["storage"].as_str().unwrap_or("");
+    let search_status = capabilities["search"].as_str().unwrap_or("");
+
+    if storage_status == "unimplemented" {
+        let has_storage_degradation = degradations
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .any(|d| d["code"].as_str() == Some("storage_not_implemented"))
+            })
+            .unwrap_or(false);
+        ensure(
+            has_storage_degradation,
+            "storage_not_implemented degradation must be present when storage is unimplemented",
+        )?;
+    }
+
+    if search_status == "unimplemented" {
+        let has_search_degradation = degradations
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .any(|d| d["code"].as_str() == Some("search_not_implemented"))
+            })
+            .unwrap_or(false);
+        ensure(
+            has_search_degradation,
+            "search_not_implemented degradation must be present when search is unimplemented",
+        )?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn integration_foundation_degradation_includes_repair_hints() -> TestResult {
+    let output = run_ee(&["status", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    ensure(
+        output.status.success(),
+        "status must succeed for repair hint test",
+    )?;
+
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| format!("status output must be valid JSON: {e}"))?;
+
+    let degradations = &json["data"]["degraded"];
+    let arr = degradations.as_array().ok_or("degraded must be an array")?;
+
+    for degradation in arr {
+        ensure(
+            degradation["code"].is_string(),
+            "each degradation must have a code string",
+        )?;
+        ensure(
+            degradation["severity"].is_string(),
+            "each degradation must have a severity string",
+        )?;
+        ensure(
+            degradation["message"].is_string(),
+            "each degradation must have a message string",
+        )?;
+        ensure(
+            degradation["repair"].is_string(),
+            "each degradation must have a repair hint string",
+        )?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn integration_foundation_exit_code_zero_on_success() -> TestResult {
+    let output = run_ee(&["status"])?;
+
+    ensure(
+        output.status.success(),
+        "status command must exit with code 0",
+    )?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(0),
+        "exit code must be exactly 0 for successful status",
+    )
+}
+
+#[test]
+fn integration_foundation_version_reported_in_status() -> TestResult {
+    let output = run_ee(&["status", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    ensure(
+        output.status.success(),
+        "status must succeed for version test",
+    )?;
+
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| format!("status output must be valid JSON: {e}"))?;
+
+    let version = json["data"]["version"]
+        .as_str()
+        .ok_or("version must be a string in status data")?;
+    ensure(!version.is_empty(), "version string must not be empty")?;
+    ensure(
+        version
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false),
+        "version must start with a digit (semantic versioning)",
+    )
+}
+
+#[test]
+fn integration_foundation_memory_health_structure() -> TestResult {
+    let output = run_ee(&["status", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    ensure(
+        output.status.success(),
+        "status must succeed for memory health test",
+    )?;
+
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| format!("status output must be valid JSON: {e}"))?;
+
+    let memory_health = &json["data"]["memoryHealth"];
+    ensure(
+        memory_health.is_object(),
+        "status must include memoryHealth object",
+    )?;
+    ensure(
+        memory_health["status"].is_string(),
+        "memoryHealth must have status string",
+    )?;
+    ensure(
+        memory_health["totalCount"].is_number(),
+        "memoryHealth must have totalCount number",
+    )?;
+    ensure(
+        memory_health["activeCount"].is_number(),
+        "memoryHealth must have activeCount number",
+    )
+}
