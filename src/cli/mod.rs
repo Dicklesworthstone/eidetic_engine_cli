@@ -2270,6 +2270,86 @@ mod tests {
     }
 
     // ========================================================================
+    // Context Command Tests (EE-147)
+    // ========================================================================
+
+    #[test]
+    fn context_command_parses_with_query() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "context", "prepare release"])
+            .map_err(|e| format!("failed to parse context: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Context(ref args)) => {
+                ensure_equal(&args.query, &"prepare release".to_string(), "context query")?;
+                ensure_equal(&args.max_tokens, &4000, "context default max_tokens")
+            }
+            _ => Err("expected Context command".to_string()),
+        }
+    }
+
+    #[test]
+    fn context_command_accepts_max_tokens() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "context", "test", "--max-tokens", "8000"])
+            .map_err(|e| format!("failed to parse context with max-tokens: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Context(ref args)) => {
+                ensure_equal(&args.max_tokens, &8000, "context max_tokens")
+            }
+            _ => Err("expected Context command".to_string()),
+        }
+    }
+
+    #[test]
+    fn context_command_accepts_profile() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "context", "test", "--profile", "thorough"])
+            .map_err(|e| format!("failed to parse context with profile: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Context(ref args)) => {
+                ensure_equal(&args.profile, &"thorough".to_string(), "context profile")
+            }
+            _ => Err("expected Context command".to_string()),
+        }
+    }
+
+    #[test]
+    fn context_json_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "context", "test query", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "context json exit")?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.response.v1\"",
+            "context json schema",
+        )?;
+        ensure_contains(&stdout, "\"command\":\"context\"", "context json command")?;
+        ensure_contains(&stdout, "\"query\":\"test query\"", "context json query")?;
+        ensure_ends_with(&stdout, '\n', "context json trailing newline")?;
+        ensure(stderr.is_empty(), "context json stderr must be empty")
+    }
+
+    #[test]
+    fn context_json_includes_degradation_notice() -> TestResult {
+        let (exit, stdout, _) = invoke(&["ee", "context", "test", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "context exit")?;
+        ensure_contains(&stdout, "\"degraded\":", "context has degraded array")?;
+        ensure_contains(
+            &stdout,
+            "context_retrieval_not_wired",
+            "degradation code present",
+        )
+    }
+
+    #[test]
+    fn context_human_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "context", "test query"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "context human exit")?;
+        ensure_contains(&stdout, "ee context", "context human header")?;
+        ensure_contains(&stdout, "test query", "context human query")?;
+        ensure(stderr.is_empty(), "context human stderr must be empty")
+    }
+
+    // ========================================================================
     // Search Command Tests (EE-127)
     // ========================================================================
 
