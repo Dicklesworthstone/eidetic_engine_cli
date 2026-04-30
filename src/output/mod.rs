@@ -1644,7 +1644,7 @@ pub fn render_eval_report_json(report: &EvaluationReport, scenario_id: Option<&s
     b.finish()
 }
 
-fn render_scenario_result_json(obj: &mut JsonObjectBuilder<'_>, result: &ScenarioValidationResult) {
+fn render_scenario_result_json(obj: &mut JsonBuilder, result: &ScenarioValidationResult) {
     obj.field_str("scenarioId", &result.scenario_id);
     obj.field_bool("passed", result.passed);
     obj.field_raw("stepsPassed", &result.steps_passed.to_string());
