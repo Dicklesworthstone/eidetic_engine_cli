@@ -1180,6 +1180,46 @@ CREATE INDEX idx_evidence_spans_content_hash ON evidence_spans(content_hash);
     "blake3:v009_evidence_spans_2026_04_30",
 );
 
+/// V010: Add import_ledger table (EE-105).
+pub const V010_IMPORT_LEDGER: Migration = Migration::new(
+    10,
+    "import_ledger",
+    r#"
+-- Resumable import ledger for CASS robot/JSON imports.
+CREATE TABLE import_ledger (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'imp_*' AND length(id) = 30),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('cass')),
+    source_id TEXT NOT NULL CHECK (length(trim(source_id)) > 0),
+    status TEXT NOT NULL CHECK (status IN (
+        'pending', 'running', 'completed', 'failed', 'skipped'
+    )),
+    cursor_json TEXT CHECK (cursor_json IS NULL OR json_valid(cursor_json)),
+    imported_session_count INTEGER NOT NULL DEFAULT 0 CHECK (imported_session_count >= 0),
+    imported_span_count INTEGER NOT NULL DEFAULT 0 CHECK (imported_span_count >= 0),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    error_code TEXT CHECK (error_code IS NULL OR length(trim(error_code)) > 0),
+    error_message TEXT CHECK (error_message IS NULL OR length(trim(error_message)) > 0),
+    started_at TEXT CHECK (started_at IS NULL OR length(trim(started_at)) > 0),
+    completed_at TEXT CHECK (completed_at IS NULL OR length(trim(completed_at)) > 0),
+    metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    UNIQUE (workspace_id, source_kind, source_id),
+    CHECK (
+        (status = 'completed' AND completed_at IS NOT NULL)
+        OR status <> 'completed'
+    )
+);
+
+CREATE INDEX idx_import_ledger_workspace ON import_ledger(workspace_id);
+CREATE INDEX idx_import_ledger_source ON import_ledger(source_kind, source_id);
+CREATE INDEX idx_import_ledger_status ON import_ledger(status);
+CREATE INDEX idx_import_ledger_updated ON import_ledger(updated_at);
+"#,
+    "blake3:v010_import_ledger_2026_04_30",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -1191,6 +1231,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V007_MEMORY_LINKS,
     V008_SESSIONS,
     V009_EVIDENCE_SPANS,
+    V010_IMPORT_LEDGER,
 ];
 
 /// Result of applying migrations.

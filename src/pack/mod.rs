@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fmt;
 
 use crate::models::{MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, UnitScore};
@@ -492,6 +493,52 @@ impl PackProvenance {
         )?;
         Ok(Self { uri, note })
     }
+
+    /// Render this source reference into the stable shape used by pack
+    /// outputs.
+    #[must_use]
+    pub fn rendered(&self) -> RenderedPackProvenance {
+        RenderedPackProvenance::from(self)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenderedPackProvenance {
+    pub uri: String,
+    pub scheme: &'static str,
+    pub label: String,
+    pub locator: Option<String>,
+    pub note: String,
+}
+
+impl From<&PackProvenance> for RenderedPackProvenance {
+    fn from(provenance: &PackProvenance) -> Self {
+        let scheme = provenance.uri.scheme();
+        let (label, locator) = rendered_provenance_label(&provenance.uri);
+        Self {
+            uri: provenance.uri.to_string(),
+            scheme,
+            label,
+            locator,
+            note: provenance.note.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackItemProvenance {
+    pub rank: u32,
+    pub memory_id: MemoryId,
+    pub source_index: u32,
+    pub source: RenderedPackProvenance,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackProvenanceFooter {
+    pub memory_count: usize,
+    pub source_count: usize,
+    pub schemes: Vec<&'static str>,
+    pub entries: Vec<PackItemProvenance>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -584,6 +631,34 @@ impl PackDraft {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    #[must_use]
+    pub fn provenance_footer(&self) -> PackProvenanceFooter {
+        let mut memory_ids = BTreeSet::new();
+        let mut schemes = BTreeSet::new();
+        let mut entries = Vec::new();
+
+        for item in &self.items {
+            memory_ids.insert(item.memory_id.to_string());
+            for (index, provenance) in item.provenance.iter().enumerate() {
+                let source = provenance.rendered();
+                schemes.insert(source.scheme);
+                entries.push(PackItemProvenance {
+                    rank: item.rank,
+                    memory_id: item.memory_id,
+                    source_index: source_index(index),
+                    source,
+                });
+            }
+        }
+
+        PackProvenanceFooter {
+            memory_count: memory_ids.len(),
+            source_count: entries.len(),
+            schemes: schemes.into_iter().collect(),
+            entries,
+        }
     }
 }
 
@@ -710,6 +785,16 @@ pub struct PackDraftItem {
     pub diversity_key: Option<String>,
 }
 
+impl PackDraftItem {
+    #[must_use]
+    pub fn rendered_provenance(&self) -> Vec<RenderedPackProvenance> {
+        self.provenance
+            .iter()
+            .map(PackProvenance::rendered)
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackOmission {
     pub memory_id: MemoryId,
@@ -736,6 +821,51 @@ impl PackOmissionReason {
 impl fmt::Display for PackOmissionReason {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+fn rendered_provenance_label(uri: &ProvenanceUri) -> (String, Option<String>) {
+    match uri {
+        ProvenanceUri::CassSession { session, span } => {
+            let locator = span.map(line_span_locator);
+            let label = match locator.as_deref() {
+                Some(locator) => format!("cass-session {session}#{locator}"),
+                None => format!("cass-session {session}"),
+            };
+            (label, locator)
+        }
+        ProvenanceUri::File { path, span } => {
+            let locator = span.map(line_span_locator);
+            let label = match locator.as_deref() {
+                Some(locator) => format!("{path}:{locator}"),
+                None => path.clone(),
+            };
+            (label, locator)
+        }
+        ProvenanceUri::EeMemory(id) => (format!("memory {id}"), None),
+        ProvenanceUri::Web { url } => (url.clone(), None),
+        ProvenanceUri::AgentMail { thread, message } => {
+            let locator = message.clone();
+            let label = match message {
+                Some(message) => format!("agent-mail {thread}/{message}"),
+                None => format!("agent-mail {thread}"),
+            };
+            (label, locator)
+        }
+    }
+}
+
+fn line_span_locator(span: crate::models::LineSpan) -> String {
+    match span.end {
+        Some(end) if end != span.start => format!("L{}-{}", span.start, end),
+        _ => format!("L{}", span.start),
+    }
+}
+
+fn source_index(index: usize) -> u32 {
+    match u32::try_from(index.saturating_add(1)) {
+        Ok(value) => value,
+        Err(_) => u32::MAX,
     }
 }
 

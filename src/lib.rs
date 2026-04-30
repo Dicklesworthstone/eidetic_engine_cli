@@ -7,6 +7,7 @@ pub mod config;
 pub mod core;
 pub mod curate;
 pub mod db;
+pub mod eval;
 pub mod graph;
 pub mod hooks;
 pub mod models;

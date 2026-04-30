@@ -5,6 +5,7 @@ use crate::core::check::CheckReport;
 use crate::core::doctor::DoctorReport;
 use crate::core::status::StatusReport;
 use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
+use crate::pack::{ContextResponse, PackItemProvenance, RenderedPackProvenance};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Renderer {
@@ -304,6 +305,118 @@ impl ResponseEnvelope {
     pub fn finish(self) -> String {
         self.builder.finish()
     }
+}
+
+/// Render a context response as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_context_response_json(response: &ContextResponse) -> String {
+    let mut b = JsonBuilder::with_capacity(2048);
+    b.field_str("schema", response.schema);
+    b.field_bool("success", response.success);
+    b.field_object("data", |d| {
+        d.field_str("command", response.data.command);
+        d.field_object("request", |request| {
+            request.field_str("query", &response.data.request.query);
+            request.field_str("profile", response.data.request.profile.as_str());
+            request.field_u32("maxTokens", response.data.request.budget.max_tokens());
+            request.field_u32("candidatePool", response.data.request.candidate_pool);
+            let sections = string_array_json(
+                response
+                    .data
+                    .request
+                    .sections
+                    .iter()
+                    .map(|section| section.as_str()),
+            );
+            request.field_raw("sections", &sections);
+        });
+        d.field_object("pack", |pack| {
+            pack.field_str("query", &response.data.pack.query);
+            pack.field_object("budget", |budget| {
+                budget.field_u32("maxTokens", response.data.pack.budget.max_tokens());
+                budget.field_u32("usedTokens", response.data.pack.used_tokens);
+            });
+            pack.field_array_of_objects("items", &response.data.pack.items, |obj, item| {
+                obj.field_u32("rank", item.rank);
+                obj.field_str("memoryId", &item.memory_id.to_string());
+                obj.field_str("section", item.section.as_str());
+                obj.field_str("content", &item.content);
+                obj.field_u32("estimatedTokens", item.estimated_tokens);
+                obj.field_object("scores", |scores| {
+                    scores.field_raw("relevance", &score_json(item.relevance.into_inner()));
+                    scores.field_raw("utility", &score_json(item.utility.into_inner()));
+                });
+                let provenance = item.rendered_provenance();
+                obj.field_array_of_objects("provenance", &provenance, build_rendered_provenance);
+                obj.field_str("why", &item.why);
+                if let Some(diversity_key) = &item.diversity_key {
+                    obj.field_str("diversityKey", diversity_key);
+                }
+            });
+            pack.field_array_of_objects("omitted", &response.data.pack.omitted, |obj, omission| {
+                obj.field_str("memoryId", &omission.memory_id.to_string());
+                obj.field_u32("estimatedTokens", omission.estimated_tokens);
+                obj.field_str("reason", omission.reason.as_str());
+            });
+            let footer = response.data.pack.provenance_footer();
+            pack.field_object("provenanceFooter", |obj| {
+                obj.field_raw("memoryCount", &footer.memory_count.to_string());
+                obj.field_raw("sourceCount", &footer.source_count.to_string());
+                obj.field_raw("schemes", &string_array_json(footer.schemes.iter().copied()));
+                obj.field_array_of_objects("entries", &footer.entries, build_item_provenance);
+            });
+        });
+        d.field_array_of_objects("degraded", &response.data.degraded, |obj, degraded| {
+            obj.field_str("code", &degraded.code);
+            obj.field_str("severity", degraded.severity.as_str());
+            obj.field_str("message", &degraded.message);
+            if let Some(repair) = &degraded.repair {
+                obj.field_str("repair", repair);
+            }
+        });
+    });
+    b.finish()
+}
+
+fn build_rendered_provenance(obj: &mut JsonBuilder, source: &RenderedPackProvenance) {
+    obj.field_str("uri", &source.uri);
+    obj.field_str("scheme", source.scheme);
+    obj.field_str("label", &source.label);
+    if let Some(locator) = &source.locator {
+        obj.field_str("locator", locator);
+    }
+    obj.field_str("note", &source.note);
+}
+
+fn build_item_provenance(obj: &mut JsonBuilder, entry: &PackItemProvenance) {
+    obj.field_u32("rank", entry.rank);
+    obj.field_str("memoryId", &entry.memory_id.to_string());
+    obj.field_u32("sourceIndex", entry.source_index);
+    obj.field_object("source", |source| {
+        build_rendered_provenance(source, &entry.source);
+    });
+}
+
+fn score_json(score: f32) -> String {
+    format!("{score:.6}")
+}
+
+fn string_array_json<I, S>(values: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut output = String::from("[");
+    for (index, value) in values.into_iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        output.push('"');
+        output.push_str(&escape_json_string(value.as_ref()));
+        output.push('"');
+    }
+    output.push(']');
+    output
 }
 
 /// Render a status report as JSON (ee.response.v1 envelope).
