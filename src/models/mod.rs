@@ -2,6 +2,7 @@ use std::process::ExitCode;
 
 pub mod certificate;
 pub mod claims;
+pub mod decision;
 pub mod degradation;
 pub mod episode;
 pub mod error_codes;
@@ -33,6 +34,10 @@ pub use claims::{
     ParseClaimStatusError, ParseManifestVerificationStatusError, ParseVerificationFrequencyError,
     VerificationFrequency, is_valid_artifact_path, is_valid_blake3_hex, validate_artifact_entry,
     validate_manifest_structure,
+};
+pub use decision::{
+    DECISION_PLANE_SCHEMA_V1, DecisionPlane, DecisionPlaneMetadata, DecisionRecord,
+    DecisionRecordBuilder, ParseDecisionPlaneError,
 };
 pub use degradation::{
     ALL_DEGRADATION_CODES, ActiveDegradation, DegradationCode, DegradationSeverity,
@@ -172,6 +177,10 @@ pub enum DomainError {
         message: String,
         repair: Option<String>,
     },
+    Graph {
+        message: String,
+        repair: Option<String>,
+    },
     Import {
         message: String,
         repair: Option<String>,
@@ -203,6 +212,7 @@ impl DomainError {
             Self::Configuration { .. } => "configuration",
             Self::Storage { .. } => "storage",
             Self::SearchIndex { .. } => "search_index",
+            Self::Graph { .. } => "graph",
             Self::Import { .. } => "import",
             Self::NotFound { .. } => "not_found",
             Self::UnsatisfiedDegradedMode { .. } => "unsatisfied_degraded_mode",
@@ -218,6 +228,7 @@ impl DomainError {
             | Self::Configuration { message, .. }
             | Self::Storage { message, .. }
             | Self::SearchIndex { message, .. }
+            | Self::Graph { message, .. }
             | Self::Import { message, .. }
             | Self::UnsatisfiedDegradedMode { message, .. }
             | Self::PolicyDenied { message, .. }
@@ -235,6 +246,7 @@ impl DomainError {
             | Self::Configuration { repair, .. }
             | Self::Storage { repair, .. }
             | Self::SearchIndex { repair, .. }
+            | Self::Graph { repair, .. }
             | Self::Import { repair, .. }
             | Self::NotFound { repair, .. }
             | Self::UnsatisfiedDegradedMode { repair, .. }
@@ -250,6 +262,7 @@ impl DomainError {
             Self::Configuration { .. } => ProcessExitCode::Configuration,
             Self::Storage { .. } => ProcessExitCode::Storage,
             Self::SearchIndex { .. } => ProcessExitCode::SearchIndex,
+            Self::Graph { .. } => ProcessExitCode::Graph,
             Self::Import { .. } => ProcessExitCode::Import,
             Self::NotFound { .. } => ProcessExitCode::NotFound,
             Self::UnsatisfiedDegradedMode { .. } => ProcessExitCode::UnsatisfiedDegradedMode,
@@ -267,11 +280,12 @@ pub enum ProcessExitCode {
     Configuration = 2,
     Storage = 3,
     SearchIndex = 4,
-    Import = 5,
-    UnsatisfiedDegradedMode = 6,
-    PolicyDenied = 7,
-    MigrationRequired = 8,
-    NotFound = 9,
+    Graph = 5,
+    Import = 6,
+    UnsatisfiedDegradedMode = 7,
+    PolicyDenied = 8,
+    MigrationRequired = 9,
+    NotFound = 10,
 }
 
 impl From<ProcessExitCode> for ExitCode {
