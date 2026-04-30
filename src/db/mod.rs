@@ -194,11 +194,7 @@ impl DbConnection {
 
     /// Run SQLite PRAGMA integrity_check and return results.
     pub fn check_integrity(&self) -> Result<IntegrityCheckResult> {
-        let rows = self.query_for(
-            DbOperation::IntegrityCheck,
-            "PRAGMA integrity_check",
-            &[],
-        )?;
+        let rows = self.query_for(DbOperation::IntegrityCheck, "PRAGMA integrity_check", &[])?;
 
         let mut issues = Vec::new();
         for row in &rows {
@@ -225,9 +221,17 @@ impl DbConnection {
 
         let mut violations = Vec::new();
         for row in &rows {
-            let table = row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let table = row
+                .get(0)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let rowid = row.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
-            let parent = row.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let parent = row
+                .get(2)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let fkid = row.get(3).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
 
             violations.push(ForeignKeyViolation {
@@ -589,9 +593,7 @@ pub struct IntegrityReport {
 impl IntegrityReport {
     /// Returns true if the database passes all integrity checks.
     pub fn is_healthy(&self) -> bool {
-        self.integrity_check.passed
-            && self.foreign_key_check.passed
-            && !self.needs_migration
+        self.integrity_check.passed && self.foreign_key_check.passed && !self.needs_migration
     }
 }
 
@@ -1062,6 +1064,43 @@ CREATE INDEX idx_pack_omissions_memory ON pack_omissions(memory_id);
     "blake3:v006_pack_records_2026_04_29",
 );
 
+/// V007: Add memory_links table (EE-162).
+pub const V007_MEMORY_LINKS: Migration = Migration::new(
+    7,
+    "memory_links",
+    r#"
+-- Memory links table (EE-162)
+-- Durable typed graph edges between memories. Graph projections derive from
+-- these records and can be rebuilt through FrankenNetworkX.
+CREATE TABLE memory_links (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'link_*' AND length(id) = 31),
+    src_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    dst_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    relation TEXT NOT NULL CHECK (relation IN (
+        'supports', 'contradicts', 'derived_from', 'supersedes', 'related', 'co_tag', 'co_mention'
+    )),
+    weight REAL NOT NULL DEFAULT 1.0 CHECK (weight >= 0.0 AND weight <= 1.0),
+    confidence REAL NOT NULL DEFAULT 1.0 CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    directed INTEGER NOT NULL DEFAULT 1 CHECK (directed IN (0, 1)),
+    evidence_count INTEGER NOT NULL DEFAULT 1 CHECK (evidence_count >= 0),
+    last_reinforced_at TEXT CHECK (last_reinforced_at IS NULL OR length(trim(last_reinforced_at)) > 0),
+    source TEXT NOT NULL DEFAULT 'agent' CHECK (source IN ('agent', 'auto', 'import', 'maintenance', 'human')),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    created_by TEXT CHECK (created_by IS NULL OR length(trim(created_by)) > 0),
+    metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+    CHECK (src_memory_id <> dst_memory_id),
+    UNIQUE (src_memory_id, dst_memory_id, relation)
+);
+
+CREATE INDEX idx_memory_links_src ON memory_links(src_memory_id);
+CREATE INDEX idx_memory_links_dst ON memory_links(dst_memory_id);
+CREATE INDEX idx_memory_links_relation ON memory_links(relation);
+CREATE INDEX idx_memory_links_source ON memory_links(source);
+CREATE INDEX idx_memory_links_created ON memory_links(created_at);
+"#,
+    "blake3:v007_memory_links_2026_04_29",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -1070,6 +1109,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V004_PROCEDURAL_RULES,
     V005_SEARCH_INDEX_JOBS,
     V006_PACK_RECORDS,
+    V007_MEMORY_LINKS,
 ];
 
 /// Result of applying migrations.
@@ -1397,6 +1437,74 @@ impl DbConnection {
         }
         Ok(())
     }
+
+    /// List all unique tags in use across all memories in a workspace.
+    pub fn list_all_tags(&self, workspace_id: &str) -> Result<Vec<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT DISTINCT mt.tag FROM memory_tags mt JOIN memories m ON mt.memory_id = m.id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL ORDER BY mt.tag ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+
+        rows.iter()
+            .map(|row| required_text(row, 0, DbOperation::Query, "tag").map(|s| s.to_string()))
+            .collect()
+    }
+
+    /// Get tag usage counts for a workspace.
+    pub fn get_tag_counts(&self, workspace_id: &str) -> Result<Vec<TagCount>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT mt.tag, COUNT(*) as count FROM memory_tags mt JOIN memories m ON mt.memory_id = m.id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL GROUP BY mt.tag ORDER BY count DESC, mt.tag ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+
+        rows.iter()
+            .map(|row| {
+                let tag = required_text(row, 0, DbOperation::Query, "tag")?.to_string();
+                let count = required_i64(row, 1, DbOperation::Query, "count")? as u32;
+                Ok(TagCount { tag, count })
+            })
+            .collect()
+    }
+
+    /// List memory IDs that have a specific tag in a workspace.
+    pub fn list_memories_by_tag(&self, workspace_id: &str, tag: &str) -> Result<Vec<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT m.id FROM memories m JOIN memory_tags mt ON m.id = mt.memory_id WHERE m.workspace_id = ?1 AND mt.tag = ?2 AND m.tombstoned_at IS NULL ORDER BY m.id ASC",
+            &[Value::Text(workspace_id.to_string()), Value::Text(tag.to_string())],
+        )?;
+
+        rows.iter()
+            .map(|row| required_text(row, 0, DbOperation::Query, "id").map(|s| s.to_string()))
+            .collect()
+    }
+
+    /// Replace all tags on a memory atomically.
+    pub fn set_memory_tags(&self, memory_id: &str, tags: &[String]) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "DELETE FROM memory_tags WHERE memory_id = ?1",
+            &[Value::Text(memory_id.to_string())],
+        )?;
+
+        for tag in tags {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO memory_tags (memory_id, tag) VALUES (?1, ?2)",
+                &[Value::Text(memory_id.to_string()), Value::Text(tag.clone())],
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Tag usage count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagCount {
+    pub tag: String,
+    pub count: u32,
 }
 
 fn stored_memory_from_row(row: &Row) -> Result<StoredMemory> {
@@ -1881,6 +1989,220 @@ fn stored_search_index_job_from_row(row: &Row) -> Result<StoredSearchIndexJob> {
     })
 }
 
+/// Typed relation stored in the memory graph edge table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryLinkRelation {
+    Supports,
+    Contradicts,
+    DerivedFrom,
+    Supersedes,
+    Related,
+    CoTag,
+    CoMention,
+}
+
+impl MemoryLinkRelation {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Supports => "supports",
+            Self::Contradicts => "contradicts",
+            Self::DerivedFrom => "derived_from",
+            Self::Supersedes => "supersedes",
+            Self::Related => "related",
+            Self::CoTag => "co_tag",
+            Self::CoMention => "co_mention",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "supports" => Some(Self::Supports),
+            "contradicts" => Some(Self::Contradicts),
+            "derived_from" => Some(Self::DerivedFrom),
+            "supersedes" => Some(Self::Supersedes),
+            "related" => Some(Self::Related),
+            "co_tag" => Some(Self::CoTag),
+            "co_mention" => Some(Self::CoMention),
+            _ => None,
+        }
+    }
+}
+
+/// Origin of a stored memory link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryLinkSource {
+    Agent,
+    Auto,
+    Import,
+    Maintenance,
+    Human,
+}
+
+impl MemoryLinkSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Auto => "auto",
+            Self::Import => "import",
+            Self::Maintenance => "maintenance",
+            Self::Human => "human",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "agent" => Some(Self::Agent),
+            "auto" => Some(Self::Auto),
+            "import" => Some(Self::Import),
+            "maintenance" => Some(Self::Maintenance),
+            "human" => Some(Self::Human),
+            _ => None,
+        }
+    }
+}
+
+/// Input for creating a typed edge between two memories.
+#[derive(Debug, Clone)]
+pub struct CreateMemoryLinkInput {
+    pub src_memory_id: String,
+    pub dst_memory_id: String,
+    pub relation: MemoryLinkRelation,
+    pub weight: f32,
+    pub confidence: f32,
+    pub directed: bool,
+    pub evidence_count: u32,
+    pub last_reinforced_at: Option<String>,
+    pub source: MemoryLinkSource,
+    pub created_by: Option<String>,
+    pub metadata_json: Option<String>,
+}
+
+/// A stored memory_links row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredMemoryLink {
+    pub id: String,
+    pub src_memory_id: String,
+    pub dst_memory_id: String,
+    pub relation: String,
+    pub weight: f32,
+    pub confidence: f32,
+    pub directed: bool,
+    pub evidence_count: u32,
+    pub last_reinforced_at: Option<String>,
+    pub source: String,
+    pub created_at: String,
+    pub created_by: Option<String>,
+    pub metadata_json: Option<String>,
+}
+
+impl StoredMemoryLink {
+    #[must_use]
+    pub fn relation_enum(&self) -> Option<MemoryLinkRelation> {
+        MemoryLinkRelation::parse(&self.relation)
+    }
+
+    #[must_use]
+    pub fn source_enum(&self) -> Option<MemoryLinkSource> {
+        MemoryLinkSource::parse(&self.source)
+    }
+}
+
+impl DbConnection {
+    /// Insert a typed memory link.
+    pub fn insert_memory_link(&self, id: &str, input: &CreateMemoryLinkInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO memory_links (id, src_memory_id, dst_memory_id, relation, weight, confidence, directed, evidence_count, last_reinforced_at, source, created_at, created_by, metadata_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.src_memory_id.clone()),
+                Value::Text(input.dst_memory_id.clone()),
+                Value::Text(input.relation.as_str().to_string()),
+                Value::Float(input.weight),
+                Value::Float(input.confidence),
+                Value::BigInt(if input.directed { 1 } else { 0 }),
+                Value::BigInt(i64::from(input.evidence_count)),
+                input
+                    .last_reinforced_at
+                    .as_ref()
+                    .map_or(Value::Null, |timestamp| Value::Text(timestamp.clone())),
+                Value::Text(input.source.as_str().to_string()),
+                Value::Text(now),
+                input
+                    .created_by
+                    .as_ref()
+                    .map_or(Value::Null, |created_by| Value::Text(created_by.clone())),
+                input
+                    .metadata_json
+                    .as_ref()
+                    .map_or(Value::Null, |metadata| Value::Text(metadata.clone())),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get a memory link by ID.
+    pub fn get_memory_link(&self, id: &str) -> Result<Option<StoredMemoryLink>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, src_memory_id, dst_memory_id, relation, weight, confidence, directed, evidence_count, last_reinforced_at, source, created_at, created_by, metadata_json FROM memory_links WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first().map(stored_memory_link_from_row).transpose()
+    }
+
+    /// List links incident to a memory in deterministic graph-projection order.
+    pub fn list_memory_links_for_memory(
+        &self,
+        memory_id: &str,
+        relation: Option<MemoryLinkRelation>,
+    ) -> Result<Vec<StoredMemoryLink>> {
+        let mut sql = String::from(
+            "SELECT id, src_memory_id, dst_memory_id, relation, weight, confidence, directed, evidence_count, last_reinforced_at, source, created_at, created_by, metadata_json FROM memory_links WHERE (src_memory_id = ?1 OR dst_memory_id = ?1)",
+        );
+        let mut params: Vec<Value> = vec![Value::Text(memory_id.to_string())];
+
+        if let Some(relation) = relation {
+            sql.push_str(" AND relation = ?2");
+            params.push(Value::Text(relation.as_str().to_string()));
+        }
+
+        sql.push_str(" ORDER BY relation ASC, src_memory_id ASC, dst_memory_id ASC, id ASC");
+
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter().map(stored_memory_link_from_row).collect()
+    }
+}
+
+fn stored_memory_link_from_row(row: &Row) -> Result<StoredMemoryLink> {
+    let evidence_count = u32::try_from(required_i64(row, 7, DbOperation::Query, "evidence_count")?)
+        .map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "evidence_count must fit u32".to_string(),
+        })?;
+
+    Ok(StoredMemoryLink {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        src_memory_id: required_text(row, 1, DbOperation::Query, "src_memory_id")?.to_string(),
+        dst_memory_id: required_text(row, 2, DbOperation::Query, "dst_memory_id")?.to_string(),
+        relation: required_text(row, 3, DbOperation::Query, "relation")?.to_string(),
+        weight: required_f64(row, 4, DbOperation::Query, "weight")? as f32,
+        confidence: required_f64(row, 5, DbOperation::Query, "confidence")? as f32,
+        directed: required_i64(row, 6, DbOperation::Query, "directed")? != 0,
+        evidence_count,
+        last_reinforced_at: optional_text(row, 8)?.map(str::to_string),
+        source: required_text(row, 9, DbOperation::Query, "source")?.to_string(),
+        created_at: required_text(row, 10, DbOperation::Query, "created_at")?.to_string(),
+        created_by: optional_text(row, 11)?.map(str::to_string),
+        metadata_json: optional_text(row, 12)?.map(str::to_string),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error as StdError;
@@ -2241,8 +2563,8 @@ mod tests {
 
         ensure_equal(
             &result.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6],
-            "V001-V006 must be applied",
+            &vec![1u32, 2, 3, 4, 5, 6, 7],
+            "V001-V007 must be applied",
         )?;
         ensure_equal(&result.skipped().len(), &0, "no migrations skipped")?;
 
@@ -2292,6 +2614,10 @@ mod tests {
             table_names.contains(&"pack_omissions"),
             "pack_omissions table must exist",
         )?;
+        ensure(
+            table_names.contains(&"memory_links"),
+            "memory_links table must exist",
+        )?;
 
         connection.close()?;
         Ok(())
@@ -2304,16 +2630,16 @@ mod tests {
         let first = connection.migrate()?;
         ensure_equal(
             &first.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6],
-            "first run applies V001-V006",
+            &vec![1u32, 2, 3, 4, 5, 6, 7],
+            "first run applies V001-V007",
         )?;
 
         let second = connection.migrate()?;
         ensure_equal(&second.applied().len(), &0, "second run applies nothing")?;
         ensure_equal(
             &second.skipped().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6],
-            "second run skips V001-V006",
+            &vec![1u32, 2, 3, 4, 5, 6, 7],
+            "second run skips V001-V007",
         )?;
 
         connection.close()?;
@@ -2354,8 +2680,8 @@ mod tests {
 
         ensure_equal(
             &connection.schema_version()?,
-            &Some(6),
-            "after migrations, schema version is 6",
+            &Some(7),
+            "after migrations, schema version is 7",
         )?;
 
         connection.close()?;
@@ -3599,6 +3925,210 @@ mod tests {
         Ok(())
     }
 
+    fn insert_link_memory(connection: &DbConnection, id: &str, content: &str) -> TestResult {
+        let input = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "semantic".to_string(),
+            kind: "fact".to_string(),
+            content: content.to_string(),
+            confidence: 0.8,
+            utility: 0.6,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
+            tags: vec![],
+        };
+
+        connection.insert_memory(id, &input)?;
+        Ok(())
+    }
+
+    fn setup_link_memories(connection: &DbConnection) -> TestResult {
+        setup_workspace(connection)?;
+        insert_link_memory(
+            connection,
+            "mem_00000000000000000000000011",
+            "Graph source memory",
+        )?;
+        insert_link_memory(
+            connection,
+            "mem_00000000000000000000000012",
+            "Graph destination memory",
+        )
+    }
+
+    fn memory_link_input(relation: super::MemoryLinkRelation) -> super::CreateMemoryLinkInput {
+        super::CreateMemoryLinkInput {
+            src_memory_id: "mem_00000000000000000000000011".to_string(),
+            dst_memory_id: "mem_00000000000000000000000012".to_string(),
+            relation,
+            weight: 0.75,
+            confidence: 0.9,
+            directed: true,
+            evidence_count: 2,
+            last_reinforced_at: Some("2026-04-29T20:00:00Z".to_string()),
+            source: super::MemoryLinkSource::Agent,
+            created_by: Some("agent:test".to_string()),
+            metadata_json: Some(r#"{"reason":"explicit"}"#.to_string()),
+        }
+    }
+
+    #[test]
+    fn memory_link_relation_and_source_strings_are_stable() -> TestResult {
+        ensure_equal(
+            &super::MemoryLinkRelation::Supports.as_str(),
+            &"supports",
+            "supports relation",
+        )?;
+        ensure_equal(
+            &super::MemoryLinkRelation::DerivedFrom.as_str(),
+            &"derived_from",
+            "derived_from relation",
+        )?;
+        ensure_equal(
+            &super::MemoryLinkRelation::parse("co_tag"),
+            &Some(super::MemoryLinkRelation::CoTag),
+            "parse co_tag",
+        )?;
+        ensure_equal(
+            &super::MemoryLinkRelation::parse("unknown"),
+            &None,
+            "unknown relation",
+        )?;
+        ensure_equal(
+            &super::MemoryLinkSource::Maintenance.as_str(),
+            &"maintenance",
+            "maintenance source",
+        )?;
+        ensure_equal(
+            &super::MemoryLinkSource::parse("human"),
+            &Some(super::MemoryLinkSource::Human),
+            "parse human source",
+        )
+    }
+
+    #[test]
+    fn insert_and_get_memory_link() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_link_memories(&connection)?;
+
+        let input = memory_link_input(super::MemoryLinkRelation::Supports);
+        connection.insert_memory_link("link_00000000000000000000000001", &input)?;
+
+        let link = connection.get_memory_link("link_00000000000000000000000001")?;
+        ensure(link.is_some(), "memory link must be found")?;
+
+        let link = link.ok_or_else(|| TestFailure::new("memory link not found"))?;
+        ensure_equal(&link.id.as_str(), &"link_00000000000000000000000001", "id")?;
+        ensure_equal(
+            &link.src_memory_id.as_str(),
+            &"mem_00000000000000000000000011",
+            "src",
+        )?;
+        ensure_equal(
+            &link.dst_memory_id.as_str(),
+            &"mem_00000000000000000000000012",
+            "dst",
+        )?;
+        ensure_equal(
+            &link.relation_enum(),
+            &Some(super::MemoryLinkRelation::Supports),
+            "relation",
+        )?;
+        ensure_equal(
+            &link.source_enum(),
+            &Some(super::MemoryLinkSource::Agent),
+            "source",
+        )?;
+        ensure((link.weight - 0.75).abs() < 0.001, "weight must round-trip")?;
+        ensure(
+            (link.confidence - 0.9).abs() < 0.001,
+            "confidence must round-trip",
+        )?;
+        ensure(link.directed, "link is directed")?;
+        ensure_equal(&link.evidence_count, &2, "evidence count")?;
+        ensure_equal(
+            &link.last_reinforced_at,
+            &Some("2026-04-29T20:00:00Z".to_string()),
+            "last_reinforced_at",
+        )?;
+        ensure_equal(
+            &link.metadata_json,
+            &Some(r#"{"reason":"explicit"}"#.to_string()),
+            "metadata_json",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_memory_links_for_memory_orders_and_filters() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_link_memories(&connection)?;
+
+        connection.insert_memory_link(
+            "link_00000000000000000000000002",
+            &memory_link_input(super::MemoryLinkRelation::Supports),
+        )?;
+        connection.insert_memory_link(
+            "link_00000000000000000000000003",
+            &memory_link_input(super::MemoryLinkRelation::Contradicts),
+        )?;
+
+        let all =
+            connection.list_memory_links_for_memory("mem_00000000000000000000000011", None)?;
+        ensure_equal(&all.len(), &2, "two links incident to source")?;
+        ensure_equal(
+            &all[0].relation_enum(),
+            &Some(super::MemoryLinkRelation::Contradicts),
+            "contradicts sorts before supports",
+        )?;
+        ensure_equal(
+            &all[1].relation_enum(),
+            &Some(super::MemoryLinkRelation::Supports),
+            "supports second",
+        )?;
+
+        let supports = connection.list_memory_links_for_memory(
+            "mem_00000000000000000000000011",
+            Some(super::MemoryLinkRelation::Supports),
+        )?;
+        ensure_equal(&supports.len(), &1, "one supports link")?;
+        ensure_equal(
+            &supports[0].id.as_str(),
+            &"link_00000000000000000000000002",
+            "supports id",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn memory_links_reject_self_links_and_duplicate_edges() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_link_memories(&connection)?;
+
+        let mut self_link = memory_link_input(super::MemoryLinkRelation::Related);
+        self_link.dst_memory_id = self_link.src_memory_id.clone();
+        let self_result =
+            connection.insert_memory_link("link_00000000000000000000000004", &self_link);
+        ensure(self_result.is_err(), "self links must be rejected")?;
+
+        let input = memory_link_input(super::MemoryLinkRelation::Related);
+        connection.insert_memory_link("link_00000000000000000000000005", &input)?;
+        let duplicate = connection.insert_memory_link("link_00000000000000000000000006", &input);
+        ensure(duplicate.is_err(), "duplicate typed edge must be rejected")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
     #[test]
     fn check_integrity_passes_on_healthy_database() -> TestResult {
         let connection = DbConnection::open_memory()?;
@@ -3636,7 +4166,7 @@ mod tests {
         ensure(report.integrity_check.passed, "integrity passed")?;
         ensure(report.foreign_key_check.passed, "foreign keys passed")?;
         ensure(!report.needs_migration, "no migration needed")?;
-        ensure_equal(&report.schema_version, &Some(6), "schema version is 6")?;
+        ensure_equal(&report.schema_version, &Some(7), "schema version is 7")?;
 
         connection.close()?;
         Ok(())
@@ -3650,6 +4180,249 @@ mod tests {
         let report = connection.integrity_report()?;
         ensure(!report.is_healthy(), "database needs migration")?;
         ensure(report.needs_migration, "migration needed")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_all_tags_returns_unique_sorted_tags() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let mem1 = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "semantic".to_string(),
+            kind: "fact".to_string(),
+            content: "First memory".to_string(),
+            confidence: 0.8,
+            utility: 0.6,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
+            tags: vec!["zebra".to_string(), "apple".to_string()],
+        };
+        let mem2 = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "semantic".to_string(),
+            kind: "fact".to_string(),
+            content: "Second memory".to_string(),
+            confidence: 0.8,
+            utility: 0.6,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
+            tags: vec!["apple".to_string(), "banana".to_string()],
+        };
+
+        connection.insert_memory("mem_taglist0000000000000000001", &mem1)?;
+        connection.insert_memory("mem_taglist0000000000000000002", &mem2)?;
+
+        let tags = connection.list_all_tags("wsp_01234567890123456789012345")?;
+        ensure_equal(
+            &tags,
+            &vec![
+                "apple".to_string(),
+                "banana".to_string(),
+                "zebra".to_string(),
+            ],
+            "unique tags sorted alphabetically",
+        )?;
+
+        connection.tombstone_memory("mem_taglist0000000000000000001")?;
+        let tags_after = connection.list_all_tags("wsp_01234567890123456789012345")?;
+        ensure_equal(
+            &tags_after,
+            &vec!["apple".to_string(), "banana".to_string()],
+            "tombstoned memory tags excluded",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn get_tag_counts_returns_sorted_by_count() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let mem1 = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "semantic".to_string(),
+            kind: "fact".to_string(),
+            content: "Memory one".to_string(),
+            confidence: 0.8,
+            utility: 0.6,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
+            tags: vec!["common".to_string(), "rare".to_string()],
+        };
+        let mem2 = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "semantic".to_string(),
+            kind: "fact".to_string(),
+            content: "Memory two".to_string(),
+            confidence: 0.8,
+            utility: 0.6,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
+            tags: vec!["common".to_string()],
+        };
+        let mem3 = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "semantic".to_string(),
+            kind: "fact".to_string(),
+            content: "Memory three".to_string(),
+            confidence: 0.8,
+            utility: 0.6,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
+            tags: vec!["common".to_string()],
+        };
+
+        connection.insert_memory("mem_tagcount000000000000000001", &mem1)?;
+        connection.insert_memory("mem_tagcount000000000000000002", &mem2)?;
+        connection.insert_memory("mem_tagcount000000000000000003", &mem3)?;
+
+        let counts = connection.get_tag_counts("wsp_01234567890123456789012345")?;
+        ensure_equal(&counts.len(), &2, "two unique tags")?;
+        ensure_equal(
+            &counts[0].tag.as_str(),
+            &"common",
+            "common is first (count 3)",
+        )?;
+        ensure_equal(&counts[0].count, &3, "common count is 3")?;
+        ensure_equal(&counts[1].tag.as_str(), &"rare", "rare is second (count 1)")?;
+        ensure_equal(&counts[1].count, &1, "rare count is 1")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_memories_by_tag() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let mem1 = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "semantic".to_string(),
+            kind: "fact".to_string(),
+            content: "Tagged memory".to_string(),
+            confidence: 0.8,
+            utility: 0.6,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
+            tags: vec!["target".to_string()],
+        };
+        let mem2 = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "semantic".to_string(),
+            kind: "fact".to_string(),
+            content: "Also tagged".to_string(),
+            confidence: 0.8,
+            utility: 0.6,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
+            tags: vec!["target".to_string(), "extra".to_string()],
+        };
+        let mem3 = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "semantic".to_string(),
+            kind: "fact".to_string(),
+            content: "Not tagged".to_string(),
+            confidence: 0.8,
+            utility: 0.6,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
+            tags: vec!["other".to_string()],
+        };
+
+        connection.insert_memory("mem_bytag000000000000000000001", &mem1)?;
+        connection.insert_memory("mem_bytag000000000000000000002", &mem2)?;
+        connection.insert_memory("mem_bytag000000000000000000003", &mem3)?;
+
+        let memories =
+            connection.list_memories_by_tag("wsp_01234567890123456789012345", "target")?;
+        ensure_equal(&memories.len(), &2, "two memories with target tag")?;
+        ensure(
+            memories.contains(&"mem_bytag000000000000000000001".to_string()),
+            "first memory included",
+        )?;
+        ensure(
+            memories.contains(&"mem_bytag000000000000000000002".to_string()),
+            "second memory included",
+        )?;
+
+        let other = connection.list_memories_by_tag("wsp_01234567890123456789012345", "other")?;
+        ensure_equal(&other.len(), &1, "one memory with other tag")?;
+
+        let none =
+            connection.list_memories_by_tag("wsp_01234567890123456789012345", "nonexistent")?;
+        ensure(none.is_empty(), "no memories with nonexistent tag")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn set_memory_tags_replaces_all_tags() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "semantic".to_string(),
+            kind: "fact".to_string(),
+            content: "Replaceable tags".to_string(),
+            confidence: 0.8,
+            utility: 0.6,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
+            tags: vec!["old1".to_string(), "old2".to_string()],
+        };
+
+        connection.insert_memory("mem_settags0000000000000000001", &input)?;
+
+        let before = connection.get_memory_tags("mem_settags0000000000000000001")?;
+        ensure_equal(&before.len(), &2, "two initial tags")?;
+
+        connection.set_memory_tags(
+            "mem_settags0000000000000000001",
+            &["new1".to_string(), "new2".to_string(), "new3".to_string()],
+        )?;
+
+        let after = connection.get_memory_tags("mem_settags0000000000000000001")?;
+        ensure_equal(&after.len(), &3, "three new tags")?;
+        ensure(after.contains(&"new1".to_string()), "has new1")?;
+        ensure(after.contains(&"new2".to_string()), "has new2")?;
+        ensure(after.contains(&"new3".to_string()), "has new3")?;
+        ensure(!after.contains(&"old1".to_string()), "old1 removed")?;
+        ensure(!after.contains(&"old2".to_string()), "old2 removed")?;
+
+        connection.set_memory_tags("mem_settags0000000000000000001", &[])?;
+        let cleared = connection.get_memory_tags("mem_settags0000000000000000001")?;
+        ensure(cleared.is_empty(), "all tags cleared")?;
 
         connection.close()?;
         Ok(())
