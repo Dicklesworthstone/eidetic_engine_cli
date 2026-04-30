@@ -10,7 +10,8 @@ use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
 use crate::core::doctor::DoctorReport;
 use crate::core::status::StatusReport;
-use crate::models::{DomainError, ProcessExitCode};
+use crate::models::memory::{MemoryKind, MemoryLevel, MemoryValidationError};
+use crate::models::{DomainError, MemoryId, ProcessExitCode};
 use crate::output;
 
 #[derive(Clone, Debug, Parser, PartialEq)]
@@ -409,14 +410,24 @@ where
             },
         },
         Some(Command::Remember(ref args)) => {
-            let result = handle_remember(args, cli.wants_json());
-            match cli.renderer() {
-                output::Renderer::Human => write_stdout(stdout, &result.human_output()),
-                output::Renderer::Toon => write_stdout(stdout, &(result.toon_output() + "\n")),
-                output::Renderer::Json
-                | output::Renderer::Jsonl
-                | output::Renderer::Compact
-                | output::Renderer::Hook => write_stdout(stdout, &(result.json_output() + "\n")),
+            match handle_remember(args, cli.wants_json()) {
+                Ok(result) => match cli.renderer() {
+                    output::Renderer::Human => write_stdout(stdout, &result.human_output()),
+                    output::Renderer::Toon => write_stdout(stdout, &(result.toon_output() + "\n")),
+                    output::Renderer::Json
+                    | output::Renderer::Jsonl
+                    | output::Renderer::Compact
+                    | output::Renderer::Hook => {
+                        write_stdout(stdout, &(result.json_output() + "\n"))
+                    }
+                },
+                Err(error) => {
+                    let domain_error = DomainError::Usage {
+                        message: error.to_string(),
+                        repair: Some("ee remember --help".to_string()),
+                    };
+                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                }
             }
         }
         Some(Command::Status) => {
@@ -611,100 +622,134 @@ where
     error.exit_code()
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct RememberResult {
-    pub memory_id: String,
+    pub memory_id: MemoryId,
     pub content: String,
-    pub level: String,
-    pub kind: String,
+    pub level: MemoryLevel,
+    pub kind: MemoryKind,
     pub confidence: f32,
     pub tags: Vec<String>,
     pub source: Option<String>,
     pub dry_run: bool,
+    pub storage_degraded: bool,
 }
 
 impl RememberResult {
     #[must_use]
     pub fn human_output(&self) -> String {
-        if self.dry_run {
+        let mut output = if self.dry_run {
             format!(
                 "DRY RUN: Would store {} memory ({})\n  Content: {}\n  Confidence: {:.2}\n",
-                self.level, self.kind, self.content, self.confidence
+                self.level.as_str(),
+                self.kind.as_str(),
+                self.content,
+                self.confidence
             )
         } else {
             format!(
                 "Stored {} memory ({}): {}\n  ID: {}\n",
-                self.level, self.kind, self.content, self.memory_id
+                self.level.as_str(),
+                self.kind.as_str(),
+                self.content,
+                self.memory_id
             )
+        };
+        if self.storage_degraded {
+            output.push_str("\nNote: Storage is not wired yet. Memory was not persisted.\n");
         }
+        output
     }
 
     #[must_use]
     pub fn toon_output(&self) -> String {
         if self.dry_run {
-            format!("DRY_RUN|{}|{}|{}", self.level, self.kind, self.content)
+            format!(
+                "DRY_RUN|{}|{}|{}",
+                self.level.as_str(),
+                self.kind.as_str(),
+                self.content
+            )
         } else {
-            format!("STORED|{}|{}|{}", self.memory_id, self.level, self.kind)
+            format!(
+                "STORED|{}|{}|{}",
+                self.memory_id,
+                self.level.as_str(),
+                self.kind.as_str()
+            )
         }
     }
 
     #[must_use]
     pub fn json_output(&self) -> String {
+        use crate::output::escape_json_string;
         let tags_json = self
             .tags
             .iter()
-            .map(|t| format!("\"{t}\""))
+            .map(|t| format!("\"{}\"", escape_json_string(t)))
             .collect::<Vec<_>>()
-            .join(", ");
+            .join(",");
         let source_json = self
             .source
             .as_ref()
-            .map_or("null".to_string(), |s| format!("\"{s}\""));
+            .map_or("null".to_string(), |s| {
+                format!("\"{}\"", escape_json_string(s))
+            });
+
+        let degraded = if self.storage_degraded {
+            r#","degraded":[{"code":"storage_not_implemented","severity":"medium","message":"Storage is not wired yet. Memory was not persisted.","repair":"Implement EE-044."}]"#
+        } else {
+            ""
+        };
 
         format!(
-            r#"{{"schema":"ee.response.v1","data":{{"memory_id":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{},"dry_run":{}}}}}"#,
+            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","memory_id":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{},"dry_run":{}}}{}}}}"#,
             self.memory_id,
-            self.content.replace('"', "\\\""),
-            self.level,
-            self.kind,
+            escape_json_string(&self.content),
+            self.level.as_str(),
+            self.kind.as_str(),
             self.confidence,
             tags_json,
             source_json,
-            self.dry_run
+            self.dry_run,
+            degraded
         )
     }
 }
 
-fn handle_remember(args: &RememberArgs, _wants_json: bool) -> RememberResult {
+fn validate_remember_args(
+    args: &RememberArgs,
+) -> Result<(MemoryLevel, MemoryKind), MemoryValidationError> {
+    let level: MemoryLevel = args.level.parse()?;
+    let kind: MemoryKind = args.kind.parse()?;
+    Ok((level, kind))
+}
+
+fn handle_remember(
+    args: &RememberArgs,
+    _wants_json: bool,
+) -> Result<RememberResult, MemoryValidationError> {
+    let (level, kind) = validate_remember_args(args)?;
+
     let tags: Vec<String> = args
         .tags
         .as_ref()
         .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_default();
 
-    let memory_id = if args.dry_run {
-        "mem_00000000000000000000".to_string()
-    } else {
-        format!(
-            "mem_{:020}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-                % 100_000_000_000_000_000_000u128
-        )
-    };
+    let memory_id = MemoryId::now();
 
-    RememberResult {
+    Ok(RememberResult {
         memory_id,
         content: args.content.clone(),
-        level: args.level.clone(),
-        kind: args.kind.clone(),
+        level,
+        kind,
         confidence: args.confidence,
         tags,
         source: args.source.clone(),
         dry_run: args.dry_run,
-    }
+        storage_degraded: true,
+    })
 }
 
 #[cfg(test)]

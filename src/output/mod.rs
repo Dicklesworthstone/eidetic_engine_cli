@@ -1061,7 +1061,7 @@ pub fn error_response_json(error: &DomainError) -> String {
     }
 }
 
-fn escape_json_string(s: &str) -> String {
+pub fn escape_json_string(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
