@@ -1,10 +1,17 @@
-//! Evaluation fixture schema (EE-246).
+//! Evaluation fixture schema (EE-246, EE-254).
 //!
 //! Defines the schema for evaluation fixtures used to verify agent-facing
 //! scenarios, command sequences, expected outputs, and degraded branches.
 //!
+//! Also provides redaction leak detection (EE-254) to verify that sensitive
+//! data does not leak through command output.
+//!
 //! See `docs/agent-outcome-scenarios.md` and `docs/fixture-provenance-traceability.md`
 //! for the full contract definitions.
+
+pub mod redaction;
+
+pub use redaction::{LeakDetection, LeakPattern, RedactionLeakDetector, RedactionLeakEvaluation};
 
 /// Schema version for evaluation fixtures.
 pub const EVAL_FIXTURE_SCHEMA_V1: &str = "ee.eval_fixture.v1";

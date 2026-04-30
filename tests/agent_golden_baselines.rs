@@ -337,9 +337,9 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             category: "agent",
             golden_name: "health_unavailable.json",
             format: ContractFormat::Json,
-            expected_success: false,
-            expected_schema: Some("ee.error.v1"),
-            expected_command: None,
+            expected_success: true,
+            expected_schema: Some("ee.response.v1"),
+            expected_command: Some("health"),
         },
     ]
 }
@@ -351,6 +351,8 @@ fn validate_contract_case(case: ContractCase) -> TestResult {
     let stderr = String::from_utf8(output.stderr)
         .map_err(|error| format!("{} stderr was not UTF-8: {error}", case.command_display()))?;
     let exit_code = output.status.code();
+
+    write_contract_artifacts(case, &stdout, &stderr)?;
 
     if output.status.success() != case.expected_success {
         return Err(contract_failure(
@@ -387,6 +389,31 @@ fn validate_contract_case(case: ContractCase) -> TestResult {
 
     validate_contract_schema(case, &stdout, exit_code)?;
     validate_contract_golden(case, &stdout, exit_code)
+}
+
+fn write_contract_artifacts(case: ContractCase, stdout: &str, stderr: &str) -> TestResult {
+    let stdout_path = case.stdout_artifact_path();
+    let stderr_path = case.stderr_artifact_path();
+    if let Some(parent) = stdout_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create contract artifact directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(&stdout_path, stdout).map_err(|error| {
+        format!(
+            "failed to write contract stdout artifact {}: {error}",
+            stdout_path.display()
+        )
+    })?;
+    fs::write(&stderr_path, stderr).map_err(|error| {
+        format!(
+            "failed to write contract stderr artifact {}: {error}",
+            stderr_path.display()
+        )
+    })
 }
 
 fn validate_contract_schema(
@@ -584,7 +611,7 @@ fn contains_unredacted_secret(output: &str) -> bool {
     output.contains("BEGIN PRIVATE KEY")
         || output.contains("sk-")
         || output.contains("ghp_")
-        || output.contains("token=")
+        || (output.contains("token") && output.contains('='))
         || output.contains("api_key")
 }
 

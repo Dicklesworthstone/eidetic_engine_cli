@@ -38,6 +38,7 @@ fnx-algorithms = { version = "0.1.0", path = "/data/projects/franken_networkx/cr
 fnx-classes = { version = "0.1.0", path = "/data/projects/franken_networkx/crates/fnx-classes", optional = true }
 fnx-runtime = { version = "0.1.0", path = "/data/projects/franken_networkx/crates/fnx-runtime", default-features = false, features = ["asupersync-integration"], optional = true }
 frankensearch = { version = "0.3.0", path = "/data/projects/frankensearch/frankensearch", default-features = false, features = ["hash", "storage"] }
+regex-lite = { version = "0.1" }
 serde_json = { version = "1.0.149" }
 sqlmodel-core = { version = "0.2.2", path = "/data/projects/sqlmodel_rust/crates/sqlmodel-core" }
 sqlmodel-frankensqlite = { version = "0.2.2", path = "/data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite" }

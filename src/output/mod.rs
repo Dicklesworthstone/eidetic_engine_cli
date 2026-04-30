@@ -4,6 +4,8 @@ use std::io::IsTerminal;
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
 use crate::core::doctor::{DoctorReport, FixPlan};
+use crate::core::health::HealthReport;
+use crate::core::quarantine::{QuarantineEntry, QuarantineReport};
 use crate::core::status::StatusReport;
 use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
 use crate::pack::{
@@ -41,9 +43,57 @@ impl Renderer {
     }
 }
 
+/// Field profile controls the verbosity of JSON output.
+///
+/// - `Minimal`: IDs, status, version only — bare minimum for scripting
+/// - `Summary`: + top-level metrics and counts
+/// - `Standard`: + arrays with items, but without verbose details
+/// - `Full`: everything including provenance, why, debug info
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FieldProfile {
+    Minimal,
+    Summary,
+    #[default]
+    Standard,
+    Full,
+}
+
+impl FieldProfile {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Summary => "summary",
+            Self::Standard => "standard",
+            Self::Full => "full",
+        }
+    }
+
+    #[must_use]
+    pub const fn include_arrays(self) -> bool {
+        matches!(self, Self::Standard | Self::Full)
+    }
+
+    #[must_use]
+    pub const fn include_summary_metrics(self) -> bool {
+        !matches!(self, Self::Minimal)
+    }
+
+    #[must_use]
+    pub const fn include_verbose_details(self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    #[must_use]
+    pub const fn include_provenance(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct OutputContext {
     pub renderer: Renderer,
+    pub field_profile: FieldProfile,
     pub is_tty: bool,
     pub color_enabled: bool,
 }
@@ -85,9 +135,16 @@ impl OutputContext {
 
         Self {
             renderer,
+            field_profile: FieldProfile::Standard,
             is_tty,
             color_enabled,
         }
+    }
+
+    #[must_use]
+    pub fn with_field_profile(mut self, profile: FieldProfile) -> Self {
+        self.field_profile = profile;
+        self
     }
 
     #[must_use]
@@ -641,6 +698,122 @@ pub fn render_fix_plan_toon(plan: &FixPlan) -> String {
     render_toon_from_json(&render_fix_plan_json(plan))
 }
 
+/// Render a quarantine report as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_quarantine_json(report: &QuarantineReport) -> String {
+    let mut b = JsonBuilder::with_capacity(1024);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "diag quarantine");
+        d.field_str("version", report.version);
+        d.field_object("summary", |s| {
+            s.field_raw(
+                "quarantinedCount",
+                &report.summary.quarantined_count.to_string(),
+            );
+            s.field_raw("atRiskCount", &report.summary.at_risk_count.to_string());
+            s.field_raw("blockedCount", &report.summary.blocked_count.to_string());
+            s.field_raw("totalSources", &report.summary.total_sources.to_string());
+            s.field_raw("healthyCount", &report.summary.healthy_count.to_string());
+        });
+        d.field_array_of_objects(
+            "quarantinedSources",
+            &report.quarantined_sources,
+            build_quarantine_entry,
+        );
+        d.field_array_of_objects(
+            "atRiskSources",
+            &report.at_risk_sources,
+            build_quarantine_entry,
+        );
+        d.field_array_of_objects(
+            "blockedSources",
+            &report.blocked_sources,
+            build_quarantine_entry,
+        );
+    });
+    b.finish()
+}
+
+fn build_quarantine_entry(obj: &mut JsonBuilder, entry: &QuarantineEntry) {
+    obj.field_str("sourceId", &entry.source_id);
+    obj.field_str("advisory", entry.advisory.as_str());
+    obj.field_raw("effectiveTrust", &format!("{:.4}", entry.effective_trust));
+    obj.field_raw("decayFactor", &format!("{:.4}", entry.decay_factor));
+    obj.field_raw("negativeRate", &format!("{:.4}", entry.negative_rate));
+    obj.field_raw("negativeCount", &entry.negative_count.to_string());
+    obj.field_raw("totalImports", &entry.total_imports.to_string());
+    obj.field_str("message", &entry.message);
+    obj.field_bool("permitsImport", entry.permits_import);
+    obj.field_bool("requiresValidation", entry.requires_validation);
+}
+
+/// Render a quarantine report as human-readable text.
+#[must_use]
+pub fn render_quarantine_human(report: &QuarantineReport) -> String {
+    let mut output = format!("ee diag quarantine (v{})\n\n", report.version);
+
+    if !report.has_issues() {
+        output.push_str("No sources require attention.\n");
+        output.push_str(&format!(
+            "Tracked: {} sources, {} healthy\n\n",
+            report.summary.total_sources, report.summary.healthy_count
+        ));
+        output.push_str("Next:\n  ee diag quarantine --json\n");
+        return output;
+    }
+
+    output.push_str(&format!(
+        "Summary: {} quarantined, {} at risk, {} blocked\n\n",
+        report.summary.quarantined_count,
+        report.summary.at_risk_count,
+        report.summary.blocked_count
+    ));
+
+    if !report.blocked_sources.is_empty() {
+        output.push_str("Blocked Sources:\n");
+        for entry in &report.blocked_sources {
+            output.push_str(&format!(
+                "  ✗ {} (trust {:.2})\n    {}\n",
+                entry.source_id, entry.effective_trust, entry.message
+            ));
+        }
+        output.push('\n');
+    }
+
+    if !report.quarantined_sources.is_empty() {
+        output.push_str("Quarantined Sources:\n");
+        for entry in &report.quarantined_sources {
+            output.push_str(&format!(
+                "  ⚠ {} (trust {:.2}, decay {:.2})\n    {}\n",
+                entry.source_id, entry.effective_trust, entry.decay_factor, entry.message
+            ));
+        }
+        output.push('\n');
+    }
+
+    if !report.at_risk_sources.is_empty() {
+        output.push_str("At-Risk Sources:\n");
+        for entry in &report.at_risk_sources {
+            output.push_str(&format!(
+                "  ◐ {} (trust {:.2})\n    {}\n",
+                entry.source_id, entry.effective_trust, entry.message
+            ));
+        }
+        output.push('\n');
+    }
+
+    output.push_str("Next:\n  ee diag quarantine --json\n  ee import --validate-sources\n");
+    output
+}
+
+/// Render a quarantine report as TOON.
+#[must_use]
+pub fn render_quarantine_toon(report: &QuarantineReport) -> String {
+    render_toon_from_json(&render_quarantine_json(report))
+}
+
 /// Render a check report as JSON (ee.response.v1 envelope).
 #[must_use]
 pub fn render_check_json(report: &CheckReport) -> String {
@@ -711,6 +884,76 @@ pub fn render_check_human(report: &CheckReport) -> String {
 #[must_use]
 pub fn render_check_toon(report: &CheckReport) -> String {
     render_toon_from_json(&render_check_json(report))
+}
+
+/// Render a health report as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_health_json(report: &HealthReport) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", report.verdict.is_healthy());
+    b.field_object("data", |d| {
+        d.field_str("command", "health");
+        d.field_str("version", report.version);
+        d.field_str("verdict", report.verdict.as_str());
+        d.field_object("subsystems", |s| {
+            s.field_bool("runtime", report.runtime_ok);
+            s.field_bool("storage", report.storage_ok);
+            s.field_bool("search", report.search_ok);
+        });
+        d.field_object("summary", |s| {
+            s.field_raw("issueCount", &report.issue_count().to_string());
+            s.field_raw("highSeverity", &report.high_severity_count().to_string());
+            s.field_raw(
+                "mediumSeverity",
+                &report.medium_severity_count().to_string(),
+            );
+        });
+        d.field_array_of_objects("issues", &report.issues, |obj, issue| {
+            obj.field_str("subsystem", issue.subsystem);
+            obj.field_str("code", issue.code);
+            obj.field_str("severity", issue.severity);
+            obj.field_str("message", issue.message);
+        });
+    });
+    b.finish()
+}
+
+/// Render a health report as human-readable text.
+#[must_use]
+pub fn render_health_human(report: &HealthReport) -> String {
+    let mut output = format!(
+        "ee health (v{})\n\nVerdict: {}\n\n",
+        report.version,
+        report.verdict.as_str().to_uppercase()
+    );
+
+    output.push_str("Subsystems:\n");
+    output.push_str(&format!(
+        "  runtime: {}\n  storage: {}\n  search: {}\n",
+        if report.runtime_ok { "ok" } else { "not ok" },
+        if report.storage_ok { "ok" } else { "not ok" },
+        if report.search_ok { "ok" } else { "not ok" },
+    ));
+
+    if !report.issues.is_empty() {
+        output.push_str(&format!("\nIssues ({}):\n", report.issue_count()));
+        for issue in &report.issues {
+            output.push_str(&format!(
+                "  [{}] {} — {}\n",
+                issue.severity, issue.subsystem, issue.message
+            ));
+        }
+    }
+
+    output.push_str("\nNext:\n  ee health --json\n  ee doctor\n");
+    output
+}
+
+/// Render a health report as TOON.
+#[must_use]
+pub fn render_health_toon(report: &HealthReport) -> String {
+    render_toon_from_json(&render_health_json(report))
 }
 
 /// Render a capabilities report as JSON (ee.response.v1 envelope).
@@ -1142,6 +1385,279 @@ pub fn escape_json_string(s: &str) -> String {
         }
     }
     result
+}
+
+// ============================================================================
+// Field Profile Filtered Renderers (EE-037)
+//
+// These functions respect the `FieldProfile` setting to control output
+// verbosity. Each level progressively includes more fields:
+// - minimal: command, version, status only
+// - summary: + top-level metrics and summary counts
+// - standard: + arrays with items (default behavior)
+// - full: + verbose details like provenance, why, debug info
+// ============================================================================
+
+/// Render a status report as JSON with field filtering.
+#[must_use]
+pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_str("fields", profile.as_str());
+    b.field_object("data", |d| {
+        d.field_str("command", "status");
+        d.field_str("version", report.version);
+
+        if profile.include_summary_metrics() {
+            d.field_object("capabilities", |c| {
+                c.field_str("runtime", report.capabilities.runtime.as_str());
+                c.field_str("storage", report.capabilities.storage.as_str());
+                c.field_str("search", report.capabilities.search.as_str());
+            });
+        }
+
+        if profile.include_arrays() {
+            d.field_object("runtime", |r| {
+                r.field_str("engine", report.runtime.engine);
+                r.field_str("profile", report.runtime.profile);
+                r.field_raw("workerThreads", &report.runtime.worker_threads.to_string());
+                r.field_str("asyncBoundary", report.runtime.async_boundary);
+            });
+            d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
+                obj.field_str("code", deg.code);
+                obj.field_str("severity", deg.severity);
+                obj.field_str("message", deg.message);
+                if profile.include_verbose_details() {
+                    obj.field_str("repair", deg.repair);
+                }
+            });
+        }
+    });
+    b.finish()
+}
+
+/// Render a capabilities report as JSON with field filtering.
+#[must_use]
+pub fn render_capabilities_json_filtered(
+    report: &CapabilitiesReport,
+    profile: FieldProfile,
+) -> String {
+    let mut b = JsonBuilder::with_capacity(1024);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_str("fields", profile.as_str());
+    b.field_object("data", |d| {
+        d.field_str("command", "capabilities");
+        d.field_str("version", report.version);
+
+        if profile.include_arrays() {
+            d.field_array_of_objects("subsystems", &report.subsystems, |obj, sub| {
+                obj.field_str("name", sub.name);
+                obj.field_str("status", sub.status.as_str());
+                if profile.include_verbose_details() {
+                    obj.field_str("description", sub.description);
+                }
+            });
+            d.field_array_of_objects("features", &report.features, |obj, feat| {
+                obj.field_str("name", feat.name);
+                obj.field_bool("enabled", feat.enabled);
+                if profile.include_verbose_details() {
+                    obj.field_str("description", feat.description);
+                }
+            });
+            d.field_array_of_objects("commands", &report.commands, |obj, cmd| {
+                obj.field_str("name", cmd.name);
+                obj.field_bool("available", cmd.available);
+                if profile.include_verbose_details() {
+                    obj.field_str("description", cmd.description);
+                }
+            });
+        }
+
+        if profile.include_summary_metrics() {
+            d.field_object("summary", |s| {
+                s.field_raw(
+                    "readySubsystems",
+                    &report.ready_subsystem_count().to_string(),
+                );
+                s.field_raw("totalSubsystems", &report.subsystems.len().to_string());
+                s.field_raw(
+                    "enabledFeatures",
+                    &report.enabled_feature_count().to_string(),
+                );
+                s.field_raw("totalFeatures", &report.features.len().to_string());
+                s.field_raw(
+                    "availableCommands",
+                    &report.available_command_count().to_string(),
+                );
+                s.field_raw("totalCommands", &report.commands.len().to_string());
+            });
+        }
+    });
+    b.finish()
+}
+
+/// Render a doctor report as JSON with field filtering.
+#[must_use]
+pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", report.overall_healthy);
+    b.field_str("fields", profile.as_str());
+    b.field_object("data", |d| {
+        d.field_str("command", "doctor");
+        d.field_str("version", report.version);
+        d.field_bool("healthy", report.overall_healthy);
+
+        if profile.include_arrays() {
+            d.field_array_of_objects("checks", &report.checks, |obj, check| {
+                obj.field_str("name", check.name);
+                obj.field_str("severity", check.severity.as_str());
+                if profile.include_summary_metrics() {
+                    obj.field_str("message", &check.message);
+                }
+                if profile.include_verbose_details() {
+                    if let Some(code) = check.error_code {
+                        obj.field_str("errorCode", code.id);
+                    }
+                    if let Some(repair) = check.repair {
+                        obj.field_str("repair", repair);
+                    }
+                }
+            });
+        }
+    });
+    b.finish()
+}
+
+/// Render a health report as JSON with field filtering.
+#[must_use]
+pub fn render_health_json_filtered(report: &HealthReport, profile: FieldProfile) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", report.verdict.is_healthy());
+    b.field_str("fields", profile.as_str());
+    b.field_object("data", |d| {
+        d.field_str("command", "health");
+        d.field_str("version", report.version);
+        d.field_str("verdict", report.verdict.as_str());
+
+        if profile.include_summary_metrics() {
+            d.field_object("subsystems", |s| {
+                s.field_bool("runtime", report.runtime_ok);
+                s.field_bool("storage", report.storage_ok);
+                s.field_bool("search", report.search_ok);
+            });
+            d.field_object("summary", |s| {
+                s.field_raw("issueCount", &report.issue_count().to_string());
+                s.field_raw("highSeverity", &report.high_severity_count().to_string());
+                s.field_raw(
+                    "mediumSeverity",
+                    &report.medium_severity_count().to_string(),
+                );
+            });
+        }
+
+        if profile.include_arrays() {
+            d.field_array_of_objects("issues", &report.issues, |obj, issue| {
+                obj.field_str("subsystem", issue.subsystem);
+                obj.field_str("code", issue.code);
+                obj.field_str("severity", issue.severity);
+                if profile.include_verbose_details() {
+                    obj.field_str("message", issue.message);
+                }
+            });
+        }
+    });
+    b.finish()
+}
+
+/// Render a check report as JSON with field filtering.
+#[must_use]
+pub fn render_check_json_filtered(report: &CheckReport, profile: FieldProfile) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", report.posture.is_usable());
+    b.field_str("fields", profile.as_str());
+    b.field_object("data", |d| {
+        d.field_str("command", "check");
+        d.field_str("version", report.version);
+        d.field_str("posture", report.posture.as_str());
+
+        if profile.include_summary_metrics() {
+            d.field_bool("workspaceInitialized", report.workspace_initialized);
+            d.field_bool("databaseReady", report.database_ready);
+            d.field_bool("searchReady", report.search_ready);
+            d.field_bool("runtimeReady", report.runtime_ready);
+        }
+
+        if profile.include_arrays() {
+            d.field_array_of_objects(
+                "suggestedActions",
+                &report.suggested_actions,
+                |obj, action| {
+                    obj.field_raw("priority", &action.priority.to_string());
+                    obj.field_str("command", action.command);
+                    if profile.include_verbose_details() {
+                        obj.field_str("reason", action.reason);
+                    }
+                },
+            );
+        }
+    });
+    b.finish()
+}
+
+/// Render a quarantine report as JSON with field filtering.
+#[must_use]
+pub fn render_quarantine_json_filtered(report: &QuarantineReport, profile: FieldProfile) -> String {
+    let mut b = JsonBuilder::with_capacity(1024);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_str("fields", profile.as_str());
+    b.field_object("data", |d| {
+        d.field_str("command", "diag quarantine");
+        d.field_str("version", report.version);
+
+        if profile.include_summary_metrics() {
+            d.field_object("summary", |s| {
+                s.field_raw(
+                    "quarantinedCount",
+                    &report.summary.quarantined_count.to_string(),
+                );
+                s.field_raw("atRiskCount", &report.summary.at_risk_count.to_string());
+                s.field_raw("blockedCount", &report.summary.blocked_count.to_string());
+                s.field_raw("totalSources", &report.summary.total_sources.to_string());
+                s.field_raw("healthyCount", &report.summary.healthy_count.to_string());
+            });
+        }
+
+        if profile.include_arrays() {
+            let build_entry = |obj: &mut JsonBuilder, entry: &QuarantineEntry| {
+                obj.field_str("sourceId", &entry.source_id);
+                obj.field_str("advisory", entry.advisory.as_str());
+                obj.field_raw("effectiveTrust", &format!("{:.4}", entry.effective_trust));
+                if profile.include_verbose_details() {
+                    obj.field_raw("decayFactor", &format!("{:.4}", entry.decay_factor));
+                    obj.field_raw("negativeRate", &format!("{:.4}", entry.negative_rate));
+                    obj.field_raw("negativeCount", &entry.negative_count.to_string());
+                    obj.field_raw("totalImports", &entry.total_imports.to_string());
+                    obj.field_str("message", &entry.message);
+                    obj.field_bool("permitsImport", entry.permits_import);
+                    obj.field_bool("requiresValidation", entry.requires_validation);
+                }
+            };
+            d.field_array_of_objects(
+                "quarantinedSources",
+                &report.quarantined_sources,
+                build_entry,
+            );
+            d.field_array_of_objects("atRiskSources", &report.at_risk_sources, build_entry);
+            d.field_array_of_objects("blockedSources", &report.blocked_sources, build_entry);
+        }
+    });
+    b.finish()
 }
 
 #[cfg(test)]

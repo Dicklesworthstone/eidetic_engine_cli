@@ -443,10 +443,10 @@ static SEARCH_CAPABILITIES: [SearchCapability; 7] = [
         SearchSurface::Indexing,
         "Index rebuild wired through Frankensearch.",
     ),
-    SearchCapability::pending(
+    SearchCapability::ready(
         SearchCapabilityName::JsonSearch,
         SearchSurface::Query,
-        "Expose search results through the stable JSON response envelope.",
+        "Search results exposed through stable JSON response envelope.",
     ),
     SearchCapability::pending(
         SearchCapabilityName::ScoreExplanation,
@@ -663,7 +663,7 @@ mod tests {
                 .map(|capability| capability.status()),
             Some(CapabilityStatus::Ready)
         );
-        assert_eq!(readiness.missing_capabilities().count(), 2);
+        assert_eq!(readiness.missing_capabilities().count(), 1);
     }
 
     #[test]
@@ -716,16 +716,16 @@ mod tests {
 
         assert_eq!(
             missing.first().map(|capability| capability.name()),
-            Some(SearchCapabilityName::JsonSearch)
+            Some(SearchCapabilityName::ScoreExplanation)
         );
         assert_eq!(
             missing.first().map(|capability| capability.surface()),
-            Some(SearchSurface::Query)
+            Some(SearchSurface::Explanation)
         );
         assert!(
             missing
                 .first()
-                .map(|capability| capability.repair().contains("search"))
+                .map(|capability| capability.repair().contains("score"))
                 .unwrap_or(false)
         );
     }

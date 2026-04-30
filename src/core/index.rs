@@ -286,14 +286,14 @@ fn build_index_sync(
     stack: EmbedderStack,
     documents: Vec<crate::search::IndexableDocument>,
 ) -> Result<BuildStats, String> {
-    use asupersync::test_utils::run_test_with_cx;
-
     let index_dir_owned = index_dir.to_path_buf();
     let result_holder: Arc<Mutex<Option<Result<BuildStats, String>>>> = Arc::new(Mutex::new(None));
-    let result_clone = Arc::clone(&result_holder);
+    let task_result = Arc::clone(&result_holder);
+    let runtime_error_result = Arc::clone(&result_holder);
 
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_test_with_cx(|cx| async move {
+        let runtime_result = crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
             let mut builder = IndexBuilder::new(&index_dir_owned).with_embedder_stack(stack);
 
             for doc in documents {
@@ -308,10 +308,16 @@ fn build_index_sync(
                 }),
                 Err(e) => Err(format!("Index build failed: {e}")),
             };
-            if let Ok(mut guard) = result_clone.lock() {
+            if let Ok(mut guard) = task_result.lock() {
                 *guard = Some(converted);
             }
-        })
+        });
+
+        if let Err(e) = runtime_result
+            && let Ok(mut guard) = runtime_error_result.lock()
+        {
+            *guard = Some(Err(format!("Runtime failed: {e}")));
+        }
     }));
 
     match panic_result {

@@ -109,6 +109,7 @@ impl CassImportReport {
     pub fn data_json(&self) -> JsonValue {
         json!({
             "schema": self.schema,
+            "command": "import cass",
             "workspacePath": self.workspace_path,
             "databasePath": self.database_path,
             "sourceId": self.source_id,
@@ -248,49 +249,71 @@ pub fn import_cass_sessions(
     let mut skipped = 0_u32;
     let mut spans_imported = 0_u32;
 
-    for session in sessions {
-        cursor.record_discovered();
-        if let Some(existing) =
-            connection.get_session_by_cass_id(&workspace_id, &session.source_path)?
-        {
-            cursor.record_skipped();
-            skipped = skipped.saturating_add(1);
+    let import_result: Result<(), CassImportError> = (|| {
+        for session in sessions {
+            cursor.record_discovered();
+            if let Some(existing) =
+                connection.get_session_by_cass_id(&workspace_id, &session.source_path)?
+            {
+                cursor.record_skipped();
+                skipped = skipped.saturating_add(1);
+                session_reports.push(ImportedCassSession {
+                    source_path: session.source_path,
+                    session_id: Some(existing.id),
+                    status: ImportSessionStatus::Skipped,
+                    spans_imported: 0,
+                    message_count: session.message_count,
+                });
+                continue;
+            }
+
+            let session_id = stable_session_id(&session.source_path);
+            let spans = if options.include_spans {
+                view_session_spans(client, &session.source_path)?
+            } else {
+                Vec::new()
+            };
+
+            connection.with_transaction(|| {
+                connection.insert_session(&session_id, &session_input(&workspace_id, &session))?;
+                for span in &spans {
+                    connection.insert_evidence_span(
+                        &stable_evidence_id(&session_id, &span.cass_span_id),
+                        &evidence_input(&workspace_id, &session_id, span),
+                    )?;
+                }
+                Ok(())
+            })?;
+
+            for span in &spans {
+                cursor.record_span(&session.source_path, span.end_line);
+            }
+            let session_spans = saturating_len(spans.len());
+            spans_imported = spans_imported.saturating_add(session_spans);
+
+            cursor.record_imported(&session.source_path);
+            imported = imported.saturating_add(1);
             session_reports.push(ImportedCassSession {
                 source_path: session.source_path,
-                session_id: Some(existing.id),
-                status: ImportSessionStatus::Skipped,
-                spans_imported: 0,
+                session_id: Some(session_id),
+                status: ImportSessionStatus::Imported,
+                spans_imported: session_spans,
                 message_count: session.message_count,
             });
-            continue;
         }
+        Ok(())
+    })();
 
-        let session_id = stable_session_id(&session.source_path);
-        connection.insert_session(&session_id, &session_input(&workspace_id, &session))?;
-
-        let mut session_spans = 0_u32;
-        if options.include_spans {
-            let spans = view_session_spans(client, &session.source_path)?;
-            for span in spans {
-                connection.insert_evidence_span(
-                    &stable_evidence_id(&session_id, &span.cass_span_id),
-                    &evidence_input(&workspace_id, &session_id, &span),
-                )?;
-                cursor.record_span(&session.source_path, span.end_line);
-                session_spans = session_spans.saturating_add(1);
-                spans_imported = spans_imported.saturating_add(1);
-            }
-        }
-
-        cursor.record_imported(&session.source_path);
-        imported = imported.saturating_add(1);
-        session_reports.push(ImportedCassSession {
-            source_path: session.source_path,
-            session_id: Some(session_id),
-            status: ImportSessionStatus::Imported,
-            spans_imported: session_spans,
-            message_count: session.message_count,
-        });
+    if let Err(error) = import_result {
+        complete_ledger(
+            &connection,
+            &ledger_id,
+            &cursor,
+            imported,
+            spans_imported,
+            Some(&error),
+        )?;
+        return Err(error);
     }
 
     complete_ledger(
@@ -901,6 +924,35 @@ mod tests {
             &ImportSessionStatus::WouldImport,
             "would import",
         )
+    }
+
+    #[test]
+    fn report_json_identifies_import_command_and_session_status() -> TestResult {
+        let report = CassImportReport {
+            schema: "ee.import.cass.v1",
+            workspace_path: "/tmp/work".to_string(),
+            database_path: Some("/tmp/work/.ee/ee.db".to_string()),
+            source_id: "cass://x".to_string(),
+            ledger_id: Some("imp_abc".to_string()),
+            dry_run: false,
+            sessions_discovered: 1,
+            sessions_imported: 1,
+            sessions_skipped: 0,
+            spans_imported: 2,
+            status: "completed".to_string(),
+            sessions: vec![ImportedCassSession {
+                source_path: "/tmp/a.jsonl".to_string(),
+                session_id: Some("sess_abc".to_string()),
+                status: ImportSessionStatus::Imported,
+                spans_imported: 2,
+                message_count: Some(3),
+            }],
+        };
+
+        let json = report.data_json();
+        ensure_equal(&json["command"], &json!("import cass"), "command")?;
+        ensure_equal(&json["schema"], &json!("ee.import.cass.v1"), "schema")?;
+        ensure_equal(&json["sessions"][0]["status"], &json!("imported"), "status")
     }
 
     #[test]

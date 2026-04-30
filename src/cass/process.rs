@@ -18,7 +18,7 @@
 //! [`CassOutcome`] from any `(stdout, stderr, exit_code)` triple to
 //! exercise downstream logic without spawning a process.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -175,7 +175,7 @@ impl CassInvocation {
     pub fn run(&self) -> Result<CassOutcome, CassError> {
         self.ensure_allowlisted_binary()?;
         let started = Instant::now();
-        let mut command = Command::new("cass");
+        let mut command = self.command_for_spawn()?;
         command.args(&self.args);
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
@@ -207,6 +207,30 @@ impl CassInvocation {
         ))
     }
 
+    fn command_for_spawn(&self) -> Result<Command, CassError> {
+        let mut command = Command::new(ALLOWLISTED_CASS_EXECUTABLE);
+        if self.binary == Path::new(ALLOWLISTED_CASS_EXECUTABLE) {
+            return Ok(command);
+        }
+
+        let parent = self
+            .binary
+            .parent()
+            .ok_or_else(|| CassError::InvalidBinary {
+                binary: self.binary.clone(),
+                reason: "absolute CASS binary must have a parent directory".to_string(),
+            })?;
+        let mut path_entries = vec![parent.to_path_buf()];
+        if let Some(existing_path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&existing_path));
+        }
+        let path = std::env::join_paths(path_entries).map_err(|error| CassError::Io {
+            message: format!("failed to construct PATH for CASS binary: {error}"),
+        })?;
+        command.env("PATH", path);
+        Ok(command)
+    }
+
     fn ensure_allowlisted_binary(&self) -> Result<(), CassError> {
         // Allow the default "cass" name (PATH lookup at spawn time)
         if self.binary == Path::new(ALLOWLISTED_CASS_EXECUTABLE) {
@@ -215,14 +239,18 @@ impl CassInvocation {
 
         // Allow absolute paths from discovery (EE-101) - these are
         // pre-validated by discover() or discover_with_override()
-        if self.binary.is_absolute() && self.binary.is_file() {
+        if self.binary.is_absolute()
+            && self.binary.is_file()
+            && self.binary.file_name() == Some(OsStr::new(ALLOWLISTED_CASS_EXECUTABLE))
+        {
             return Ok(());
         }
 
         Err(CassError::InvalidBinary {
             binary: self.binary.clone(),
-            reason: "binary must be 'cass' (PATH lookup) or an absolute path to an existing file"
-                .to_string(),
+            reason:
+                "binary must be 'cass' (PATH lookup) or an absolute path to a file named 'cass'"
+                    .to_string(),
         })
     }
 }
@@ -354,11 +382,31 @@ impl CassOutcome {
 mod tests {
     use super::{CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassExitClass, CassInvocation, CassOutcome};
 
+    #[cfg(unix)]
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+    #[cfg(unix)]
+    use std::path::PathBuf;
     use std::time::Duration;
+    #[cfg(unix)]
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn invocation() -> CassInvocation {
         CassInvocation::new("cass", ["health", "--json"])
+    }
+
+    #[cfg(unix)]
+    fn unique_test_dir(prefix: &str) -> Result<PathBuf, String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("clock moved backwards: {error}"))?
+            .as_nanos();
+        Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("ee-cass-process-tests")
+            .join(format!("{prefix}-{}-{now}", std::process::id())))
     }
 
     #[test]
@@ -454,6 +502,29 @@ mod tests {
         };
         assert_eq!(error.kind_str(), "invalid_binary");
         assert!(error.to_string().contains("EE-100"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_uses_absolute_discovered_binary_path() -> Result<(), String> {
+        let dir = unique_test_dir("absolute-binary")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join("cass");
+        fs::write(&binary, "#!/bin/sh\nprintf '{\"ok\":true}\\n'\n")
+            .map_err(|error| error.to_string())?;
+        let mut permissions = fs::metadata(&binary)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&binary, permissions).map_err(|error| error.to_string())?;
+
+        let inv = CassInvocation::new(binary.clone(), ["health", "--json"]);
+        let outcome = inv.run().map_err(|error| error.to_string())?;
+
+        assert_eq!(outcome.invocation().binary(), binary.as_path());
+        assert_eq!(outcome.exit_code(), Some(CASS_EXIT_OK));
+        assert_eq!(outcome.stdout_utf8_lossy(), "{\"ok\":true}\n");
         Ok(())
     }
 }

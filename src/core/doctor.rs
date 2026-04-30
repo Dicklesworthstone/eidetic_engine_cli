@@ -267,4 +267,73 @@ mod tests {
         ensure(CheckSeverity::Warning.as_str(), "warning", "warning")?;
         ensure(CheckSeverity::Error.as_str(), "error", "error")
     }
+
+    #[test]
+    fn fix_plan_contains_only_fixable_issues() -> TestResult {
+        let report = DoctorReport::gather();
+        let plan = report.to_fix_plan();
+
+        for step in &plan.steps {
+            ensure(!step.command.is_empty(), true, "step has a command")?;
+            ensure(
+                step.severity != CheckSeverity::Ok,
+                true,
+                "step is not an ok check",
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn fix_plan_steps_are_ordered() -> TestResult {
+        let report = DoctorReport::gather();
+        let plan = report.to_fix_plan();
+
+        for (idx, step) in plan.steps.iter().enumerate() {
+            ensure(step.order, idx + 1, "step order is sequential")?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn fix_plan_counts_match() -> TestResult {
+        let report = DoctorReport::gather();
+        let plan = report.to_fix_plan();
+
+        let unhealthy_count = report
+            .checks
+            .iter()
+            .filter(|c| !c.severity.is_healthy())
+            .count();
+        ensure(plan.total_issues, unhealthy_count, "total_issues matches")?;
+
+        let fixable_count = report
+            .checks
+            .iter()
+            .filter(|c| !c.severity.is_healthy() && c.repair.is_some())
+            .count();
+        ensure(plan.fixable_issues, fixable_count, "fixable_issues matches")?;
+        ensure(plan.steps.len(), fixable_count, "steps count matches")?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn fix_plan_is_empty_when_all_healthy() -> TestResult {
+        let report = DoctorReport {
+            version: "0.1.0",
+            overall_healthy: true,
+            checks: vec![
+                CheckResult::ok("test1", "All good"),
+                CheckResult::ok("test2", "Also good"),
+            ],
+        };
+        let plan = report.to_fix_plan();
+
+        ensure(plan.is_empty(), true, "plan is empty when all healthy")?;
+        ensure(plan.total_issues, 0, "no total issues")?;
+        ensure(plan.fixable_issues, 0, "no fixable issues")
+    }
 }

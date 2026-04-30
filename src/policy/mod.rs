@@ -1,3 +1,12 @@
+//! Policy subsystem (EE-278).
+//!
+//! Implements trust, privacy, and access control policies for memories
+//! and import sources.
+
+pub mod trust_decay;
+
+pub use trust_decay::{DecayConfig, SourceTrustState, TrustAdvisory, TrustDecayCalculator};
+
 pub const SUBSYSTEM: &str = "policy";
 
 #[must_use]

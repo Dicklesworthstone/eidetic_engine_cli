@@ -2155,6 +2155,75 @@ impl DbConnection {
     }
 }
 
+/// Feedback scoring constants (EE-081).
+pub mod feedback_scoring {
+    /// Base weight for human-explicit feedback signals.
+    pub const WEIGHT_HUMAN_EXPLICIT: f32 = 2.0;
+    /// Base weight for agent-validated feedback signals.
+    pub const WEIGHT_AGENT_VALIDATED: f32 = 1.5;
+    /// Base weight for automated check feedback signals.
+    pub const WEIGHT_AUTOMATED_CHECK: f32 = 1.0;
+    /// Base weight for outcome-observed feedback signals.
+    pub const WEIGHT_OUTCOME_OBSERVED: f32 = 1.2;
+    /// Base weight for agent-inference feedback signals.
+    pub const WEIGHT_AGENT_INFERENCE: f32 = 0.8;
+    /// Base weight for usage-pattern feedback signals.
+    pub const WEIGHT_USAGE_PATTERN: f32 = 0.5;
+    /// Base weight for decay-trigger feedback signals.
+    pub const WEIGHT_DECAY_TRIGGER: f32 = 0.3;
+
+    /// Multiplier applied to negative signals (harmful effects outweigh helpful ones).
+    pub const NEGATIVE_MULTIPLIER: f32 = 1.5;
+    /// Multiplier applied to contradiction signals.
+    pub const CONTRADICTION_MULTIPLIER: f32 = 2.0;
+    /// Multiplier applied to decay signals (stale/outdated).
+    pub const DECAY_MULTIPLIER: f32 = 0.5;
+
+    /// Minimum feedback events before confidence adjustment applies.
+    pub const MIN_FEEDBACK_FOR_ADJUSTMENT: u32 = 2;
+    /// Maximum confidence boost from positive feedback.
+    pub const MAX_CONFIDENCE_BOOST: f32 = 0.2;
+    /// Maximum confidence penalty from negative feedback.
+    pub const MAX_CONFIDENCE_PENALTY: f32 = 0.4;
+    /// Confidence threshold below which a memory is considered unreliable.
+    pub const UNRELIABLE_THRESHOLD: f32 = 0.3;
+    /// Confidence threshold for promoting to validated status.
+    pub const VALIDATED_THRESHOLD: f32 = 0.8;
+
+    /// Decay rate per staleness event (multiplicative).
+    pub const STALENESS_DECAY_RATE: f32 = 0.95;
+    /// Minimum confidence floor (never decay below this).
+    pub const CONFIDENCE_FLOOR: f32 = 0.05;
+    /// Maximum confidence ceiling.
+    pub const CONFIDENCE_CEILING: f32 = 1.0;
+
+    /// Returns the base weight for a given source type.
+    #[must_use]
+    pub fn source_weight(source_type: &str) -> f32 {
+        match source_type {
+            "human_explicit" => WEIGHT_HUMAN_EXPLICIT,
+            "agent_validated" => WEIGHT_AGENT_VALIDATED,
+            "automated_check" => WEIGHT_AUTOMATED_CHECK,
+            "outcome_observed" => WEIGHT_OUTCOME_OBSERVED,
+            "agent_inference" => WEIGHT_AGENT_INFERENCE,
+            "usage_pattern" => WEIGHT_USAGE_PATTERN,
+            "decay_trigger" => WEIGHT_DECAY_TRIGGER,
+            _ => 1.0,
+        }
+    }
+
+    /// Returns the signal multiplier for a given signal type.
+    #[must_use]
+    pub fn signal_multiplier(signal: &str) -> f32 {
+        match signal {
+            "contradiction" => CONTRADICTION_MULTIPLIER,
+            "harmful" | "inaccurate" => NEGATIVE_MULTIPLIER,
+            "stale" | "outdated" => DECAY_MULTIPLIER,
+            _ => 1.0,
+        }
+    }
+}
+
 /// Aggregated feedback counts for scoring (EE-080).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FeedbackCounts {
@@ -2175,6 +2244,80 @@ impl FeedbackCounts {
 
     pub fn net_score(&self) -> f32 {
         self.positive_weight - self.negative_weight - (self.decay_weight * 0.5)
+    }
+
+    /// Calculate confidence adjustment based on feedback (EE-081).
+    /// Returns a value to add to current confidence (may be negative).
+    #[must_use]
+    pub fn confidence_adjustment(&self) -> f32 {
+        use feedback_scoring::*;
+
+        if self.total_count() < MIN_FEEDBACK_FOR_ADJUSTMENT {
+            return 0.0;
+        }
+
+        let positive_effect = (self.positive_weight / 10.0).min(MAX_CONFIDENCE_BOOST);
+        let negative_effect =
+            (self.negative_weight * NEGATIVE_MULTIPLIER / 10.0).min(MAX_CONFIDENCE_PENALTY);
+        let decay_effect = self.decay_weight * DECAY_MULTIPLIER / 20.0;
+
+        (positive_effect - negative_effect - decay_effect)
+            .clamp(-MAX_CONFIDENCE_PENALTY, MAX_CONFIDENCE_BOOST)
+    }
+
+    /// Apply confidence adjustment to a base confidence value (EE-081).
+    #[must_use]
+    pub fn apply_to_confidence(&self, base_confidence: f32) -> f32 {
+        use feedback_scoring::*;
+
+        let adjusted = base_confidence + self.confidence_adjustment();
+        adjusted.clamp(CONFIDENCE_FLOOR, CONFIDENCE_CEILING)
+    }
+
+    /// Returns true if feedback indicates the target is unreliable.
+    #[must_use]
+    pub fn is_unreliable(&self) -> bool {
+        use feedback_scoring::*;
+
+        if self.total_count() < MIN_FEEDBACK_FOR_ADJUSTMENT {
+            return false;
+        }
+
+        let negative_ratio = if self.total_count() > 0 {
+            (self.negative_count + self.decay_count) as f32 / self.total_count() as f32
+        } else {
+            0.0
+        };
+
+        negative_ratio > 0.5 || self.negative_weight > self.positive_weight * 2.0
+    }
+
+    /// Returns true if feedback supports validation/promotion.
+    #[must_use]
+    pub fn supports_validation(&self) -> bool {
+        use feedback_scoring::*;
+
+        self.positive_count >= MIN_FEEDBACK_FOR_ADJUSTMENT
+            && self.negative_count == 0
+            && self.positive_weight >= 2.0
+    }
+
+    /// Calculate a trust score from 0.0 to 1.0 based on feedback balance.
+    #[must_use]
+    pub fn trust_score(&self) -> f32 {
+        if self.total_count() == 0 {
+            return 0.5; // neutral when no feedback
+        }
+
+        let total_weight = self.positive_weight + self.negative_weight + self.neutral_weight;
+        if total_weight <= 0.0 {
+            return 0.5;
+        }
+
+        let positive_ratio = self.positive_weight / total_weight;
+        let negative_ratio = self.negative_weight / total_weight;
+
+        (0.5 + (positive_ratio - negative_ratio) * 0.5).clamp(0.0, 1.0)
     }
 }
 
@@ -5628,7 +5771,7 @@ mod tests {
             audit
                 .details
                 .as_ref()
-                .map_or(false, |d| d.contains("outdated")),
+                .is_some_and(|d| d.contains("outdated")),
             "audit details contain reason",
         )?;
 
@@ -5697,10 +5840,7 @@ mod tests {
             "tag add action",
         )?;
         ensure(
-            audit
-                .details
-                .as_ref()
-                .map_or(false, |d| d.contains("naming")),
+            audit.details.as_ref().is_some_and(|d| d.contains("naming")),
             "audit details contain added tag",
         )?;
 
@@ -6687,6 +6827,351 @@ mod tests {
         ensure(cleared.is_empty(), "all tags cleared")?;
 
         connection.close()?;
+        Ok(())
+    }
+
+    // EE-081: feedback_scoring module tests
+
+    #[test]
+    fn feedback_scoring_source_weight_returns_correct_values() -> TestResult {
+        use super::feedback_scoring::*;
+
+        ensure_equal(
+            &source_weight("human_explicit"),
+            &WEIGHT_HUMAN_EXPLICIT,
+            "human_explicit weight",
+        )?;
+        ensure_equal(
+            &source_weight("agent_validated"),
+            &WEIGHT_AGENT_VALIDATED,
+            "agent_validated weight",
+        )?;
+        ensure_equal(
+            &source_weight("automated_check"),
+            &WEIGHT_AUTOMATED_CHECK,
+            "automated_check weight",
+        )?;
+        ensure_equal(
+            &source_weight("outcome_observed"),
+            &WEIGHT_OUTCOME_OBSERVED,
+            "outcome_observed weight",
+        )?;
+        ensure_equal(
+            &source_weight("agent_inference"),
+            &WEIGHT_AGENT_INFERENCE,
+            "agent_inference weight",
+        )?;
+        ensure_equal(
+            &source_weight("usage_pattern"),
+            &WEIGHT_USAGE_PATTERN,
+            "usage_pattern weight",
+        )?;
+        ensure_equal(
+            &source_weight("decay_trigger"),
+            &WEIGHT_DECAY_TRIGGER,
+            "decay_trigger weight",
+        )?;
+        ensure_equal(
+            &source_weight("unknown_source"),
+            &1.0,
+            "unknown defaults to 1.0",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn feedback_scoring_signal_multiplier_returns_correct_values() -> TestResult {
+        use super::feedback_scoring::*;
+
+        ensure_equal(
+            &signal_multiplier("contradiction"),
+            &CONTRADICTION_MULTIPLIER,
+            "contradiction multiplier",
+        )?;
+        ensure_equal(
+            &signal_multiplier("harmful"),
+            &NEGATIVE_MULTIPLIER,
+            "harmful multiplier",
+        )?;
+        ensure_equal(
+            &signal_multiplier("inaccurate"),
+            &NEGATIVE_MULTIPLIER,
+            "inaccurate multiplier",
+        )?;
+        ensure_equal(
+            &signal_multiplier("stale"),
+            &DECAY_MULTIPLIER,
+            "stale multiplier",
+        )?;
+        ensure_equal(
+            &signal_multiplier("outdated"),
+            &DECAY_MULTIPLIER,
+            "outdated multiplier",
+        )?;
+        ensure_equal(
+            &signal_multiplier("positive"),
+            &1.0,
+            "positive defaults to 1.0",
+        )?;
+        ensure_equal(
+            &signal_multiplier("unknown"),
+            &1.0,
+            "unknown defaults to 1.0",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn feedback_counts_total_count_sums_all_categories() -> TestResult {
+        let counts = super::FeedbackCounts {
+            positive_weight: 2.0,
+            positive_count: 2,
+            negative_weight: 1.0,
+            negative_count: 1,
+            neutral_weight: 0.5,
+            neutral_count: 1,
+            decay_weight: 0.3,
+            decay_count: 1,
+        };
+
+        ensure_equal(&counts.total_count(), &5, "total count is sum of all")
+    }
+
+    #[test]
+    fn feedback_counts_net_score_computes_correctly() -> TestResult {
+        let counts = super::FeedbackCounts {
+            positive_weight: 4.0,
+            positive_count: 2,
+            negative_weight: 1.0,
+            negative_count: 1,
+            neutral_weight: 0.0,
+            neutral_count: 0,
+            decay_weight: 2.0,
+            decay_count: 1,
+        };
+
+        let expected = 4.0 - 1.0 - (2.0 * 0.5);
+        ensure_equal(&counts.net_score(), &expected, "net score formula")
+    }
+
+    #[test]
+    fn feedback_counts_confidence_adjustment_requires_min_feedback() -> TestResult {
+        let insufficient = super::FeedbackCounts {
+            positive_weight: 10.0,
+            positive_count: 1,
+            ..Default::default()
+        };
+
+        ensure_equal(
+            &insufficient.confidence_adjustment(),
+            &0.0,
+            "insufficient feedback returns zero adjustment",
+        )
+    }
+
+    #[test]
+    fn feedback_counts_confidence_adjustment_boosts_for_positive() -> TestResult {
+        let positive = super::FeedbackCounts {
+            positive_weight: 5.0,
+            positive_count: 3,
+            ..Default::default()
+        };
+
+        let adjustment = positive.confidence_adjustment();
+        ensure(
+            adjustment > 0.0,
+            "positive feedback yields positive adjustment",
+        )?;
+        ensure(
+            adjustment <= super::feedback_scoring::MAX_CONFIDENCE_BOOST,
+            "adjustment capped at max boost",
+        )
+    }
+
+    #[test]
+    fn feedback_counts_confidence_adjustment_penalizes_negative() -> TestResult {
+        let negative = super::FeedbackCounts {
+            negative_weight: 5.0,
+            negative_count: 3,
+            ..Default::default()
+        };
+
+        let adjustment = negative.confidence_adjustment();
+        ensure(
+            adjustment < 0.0,
+            "negative feedback yields negative adjustment",
+        )?;
+        ensure(
+            adjustment >= -super::feedback_scoring::MAX_CONFIDENCE_PENALTY,
+            "adjustment floored at max penalty",
+        )
+    }
+
+    #[test]
+    fn feedback_counts_apply_to_confidence_clamps_within_bounds() -> TestResult {
+        use super::feedback_scoring::*;
+
+        let strong_positive = super::FeedbackCounts {
+            positive_weight: 100.0,
+            positive_count: 10,
+            ..Default::default()
+        };
+        let strong_negative = super::FeedbackCounts {
+            negative_weight: 100.0,
+            negative_count: 10,
+            ..Default::default()
+        };
+
+        let boosted = strong_positive.apply_to_confidence(0.9);
+        ensure(
+            boosted <= CONFIDENCE_CEILING,
+            "boosted confidence at ceiling",
+        )?;
+
+        let penalized = strong_negative.apply_to_confidence(0.1);
+        ensure(
+            penalized >= CONFIDENCE_FLOOR,
+            "penalized confidence at floor",
+        )
+    }
+
+    #[test]
+    fn feedback_counts_is_unreliable_detects_heavy_negative() -> TestResult {
+        let unreliable = super::FeedbackCounts {
+            positive_weight: 1.0,
+            positive_count: 1,
+            negative_weight: 5.0,
+            negative_count: 3,
+            ..Default::default()
+        };
+
+        ensure(
+            unreliable.is_unreliable(),
+            "heavy negative feedback marks unreliable",
+        )
+    }
+
+    #[test]
+    fn feedback_counts_is_unreliable_false_for_insufficient_feedback() -> TestResult {
+        let insufficient = super::FeedbackCounts {
+            negative_weight: 100.0,
+            negative_count: 1,
+            ..Default::default()
+        };
+
+        ensure(
+            !insufficient.is_unreliable(),
+            "insufficient feedback not unreliable",
+        )
+    }
+
+    #[test]
+    fn feedback_counts_supports_validation_requires_positive_no_negative() -> TestResult {
+        let good = super::FeedbackCounts {
+            positive_weight: 3.0,
+            positive_count: 2,
+            ..Default::default()
+        };
+        let has_negative = super::FeedbackCounts {
+            positive_weight: 3.0,
+            positive_count: 2,
+            negative_weight: 0.1,
+            negative_count: 1,
+            ..Default::default()
+        };
+        let insufficient = super::FeedbackCounts {
+            positive_weight: 1.0,
+            positive_count: 1,
+            ..Default::default()
+        };
+
+        ensure(
+            good.supports_validation(),
+            "good feedback supports validation",
+        )?;
+        ensure(
+            !has_negative.supports_validation(),
+            "negative feedback blocks validation",
+        )?;
+        ensure(
+            !insufficient.supports_validation(),
+            "insufficient positive blocks validation",
+        )
+    }
+
+    #[test]
+    fn feedback_counts_trust_score_returns_neutral_for_empty() -> TestResult {
+        let empty = super::FeedbackCounts::default();
+        ensure_equal(
+            &empty.trust_score(),
+            &0.5,
+            "empty feedback is neutral trust",
+        )
+    }
+
+    #[test]
+    fn feedback_counts_trust_score_bounded_zero_to_one() -> TestResult {
+        let all_positive = super::FeedbackCounts {
+            positive_weight: 10.0,
+            positive_count: 5,
+            ..Default::default()
+        };
+        let all_negative = super::FeedbackCounts {
+            negative_weight: 10.0,
+            negative_count: 5,
+            ..Default::default()
+        };
+
+        let high = all_positive.trust_score();
+        let low = all_negative.trust_score();
+
+        ensure((0.0..=1.0).contains(&high), "trust score in [0,1]")?;
+        ensure((0.0..=1.0).contains(&low), "trust score in [0,1]")?;
+        ensure(high > 0.5, "positive feedback yields high trust")?;
+        ensure(low < 0.5, "negative feedback yields low trust")
+    }
+
+    #[test]
+    fn feedback_scoring_constants_have_expected_relationships() -> TestResult {
+        use super::feedback_scoring::*;
+
+        ensure(
+            WEIGHT_HUMAN_EXPLICIT > WEIGHT_AGENT_VALIDATED,
+            "human > agent_validated",
+        )?;
+        ensure(
+            WEIGHT_AGENT_VALIDATED > WEIGHT_AUTOMATED_CHECK,
+            "agent_validated > automated",
+        )?;
+        ensure(
+            WEIGHT_AUTOMATED_CHECK >= WEIGHT_AGENT_INFERENCE,
+            "automated >= inference",
+        )?;
+        ensure(
+            WEIGHT_AGENT_INFERENCE > WEIGHT_USAGE_PATTERN,
+            "inference > usage_pattern",
+        )?;
+        ensure(
+            WEIGHT_USAGE_PATTERN > WEIGHT_DECAY_TRIGGER,
+            "usage_pattern > decay",
+        )?;
+        ensure(NEGATIVE_MULTIPLIER > 1.0, "negative multiplier amplifies")?;
+        ensure(
+            CONTRADICTION_MULTIPLIER > NEGATIVE_MULTIPLIER,
+            "contradiction > negative",
+        )?;
+        ensure(DECAY_MULTIPLIER < 1.0, "decay multiplier dampens")?;
+        ensure(
+            MAX_CONFIDENCE_PENALTY > MAX_CONFIDENCE_BOOST,
+            "penalty range > boost range",
+        )?;
+        ensure(
+            UNRELIABLE_THRESHOLD < VALIDATED_THRESHOLD,
+            "unreliable < validated",
+        )?;
+        ensure(CONFIDENCE_FLOOR < CONFIDENCE_CEILING, "floor < ceiling")?;
+        ensure(CONFIDENCE_FLOOR > 0.0, "floor above zero")?;
+        ensure(CONFIDENCE_CEILING <= 1.0, "ceiling at or below 1.0")?;
         Ok(())
     }
 }
