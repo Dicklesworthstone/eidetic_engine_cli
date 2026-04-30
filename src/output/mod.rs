@@ -447,6 +447,56 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
     b.finish()
 }
 
+/// Render a context response as human-readable text.
+#[must_use]
+pub fn render_context_response_human(response: &ContextResponse) -> String {
+    let mut output = String::new();
+    output.push_str(&format!(
+        "ee context \"{}\"\n\n",
+        response.data.request.query
+    ));
+    output.push_str(&format!(
+        "Profile: {} | Budget: {}/{} tokens\n\n",
+        response.data.request.profile.as_str(),
+        response.data.pack.used_tokens,
+        response.data.pack.budget.max_tokens()
+    ));
+
+    if response.data.pack.items.is_empty() {
+        output.push_str("No items in pack.\n");
+    } else {
+        output.push_str("Items:\n");
+        for item in &response.data.pack.items {
+            output.push_str(&format!(
+                "  {}. [{}] {} ({}t)\n",
+                item.rank,
+                item.section.as_str(),
+                item.memory_id,
+                item.estimated_tokens
+            ));
+        }
+    }
+
+    if !response.data.degraded.is_empty() {
+        output.push_str("\nDegraded:\n");
+        for d in &response.data.degraded {
+            output.push_str(&format!("  [{}] {}\n", d.severity.as_str(), d.message));
+            if let Some(repair) = &d.repair {
+                output.push_str(&format!("    Next: {repair}\n"));
+            }
+        }
+    }
+
+    output.push_str("\nNext:\n  ee context --json \"<query>\"\n");
+    output
+}
+
+/// Render a context response as TOON.
+#[must_use]
+pub fn render_context_response_toon(response: &ContextResponse) -> String {
+    render_toon_from_json(&render_context_response_json(response))
+}
+
 fn build_pack_quality_metrics(obj: &mut JsonBuilder, metrics: &PackQualityMetrics) {
     obj.field_raw("itemCount", &metrics.item_count.to_string());
     obj.field_raw("omittedCount", &metrics.omitted_count.to_string());

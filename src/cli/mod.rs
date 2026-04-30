@@ -116,6 +116,8 @@ pub enum Command {
     Capabilities,
     /// Quick posture summary: ready, degraded, or needs attention.
     Check,
+    /// Assemble a task-specific context pack from relevant memories.
+    Context(ContextArgs),
     /// Run diagnostic commands for trust, quarantine, and streams.
     #[command(subcommand)]
     Diag(DiagCommand),
@@ -159,6 +161,30 @@ pub struct AgentDocsArgs {
     /// Topics: guide, commands, contracts, schemas, paths, env, exit-codes, fields, errors, formats, examples
     #[arg(value_name = "TOPIC")]
     pub topic: Option<String>,
+}
+
+/// Arguments for `ee context`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct ContextArgs {
+    /// Query describing the task or topic to retrieve context for.
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+
+    /// Maximum token budget for the context pack.
+    #[arg(long, short = 't', default_value_t = 4000)]
+    pub max_tokens: u32,
+
+    /// Context profile: compact, balanced, thorough.
+    #[arg(long, short = 'p', default_value = "balanced")]
+    pub profile: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Index directory. Defaults to <workspace>/.ee/index/.
+    #[arg(long, value_name = "PATH")]
+    pub index_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -496,6 +522,7 @@ where
                 ),
             }
         }
+        Some(Command::Context(ref args)) => handle_context(&cli, args, stdout, stderr),
         Some(Command::Diag(ref diag_cmd)) => match diag_cmd {
             DiagCommand::Quarantine => {
                 let report = QuarantineReport::gather();
@@ -1154,6 +1181,97 @@ where
         | output::Renderer::Hook => {
             write_stdout(stdout, &(output::render_memory_show_json(&report) + "\n"))
         }
+    }
+}
+
+fn handle_context<W, E>(
+    cli: &Cli,
+    args: &ContextArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::pack::{
+        ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
+        ContextResponseDegradation, ContextResponseSeverity, PackDraft, TokenBudget,
+    };
+
+    // Parse profile
+    let profile = match args.profile.to_lowercase().as_str() {
+        "compact" => ContextPackProfile::Compact,
+        "balanced" => ContextPackProfile::Balanced,
+        "thorough" => ContextPackProfile::Thorough,
+        _ => ContextPackProfile::Balanced,
+    };
+
+    // Build the request
+    let request_input = ContextRequestInput {
+        query: args.query.clone(),
+        profile: Some(profile),
+        max_tokens: Some(args.max_tokens),
+        candidate_pool: None,
+        sections: Vec::new(),
+    };
+
+    let request = match ContextRequest::new(request_input) {
+        Ok(r) => r,
+        Err(e) => {
+            let domain_error = DomainError::Usage {
+                message: format!("Invalid context request: {e}"),
+                repair: Some("ee context --help".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    // Create degraded pack (search/retrieval not yet wired)
+    let pack = PackDraft {
+        query: request.query.clone(),
+        budget: TokenBudget::new(args.max_tokens).unwrap_or_default(),
+        used_tokens: 0,
+        items: Vec::new(),
+        omitted: Vec::new(),
+    };
+
+    let degraded =
+        vec![ContextResponseDegradation::new(
+        "context_retrieval_not_wired".to_string(),
+        ContextResponseSeverity::Medium,
+        "Context packing requires search and memory retrieval which are not yet fully wired."
+            .to_string(),
+        Some("ee search <query> --json".to_string()),
+    )
+    .expect("degradation entry is valid")];
+
+    let response = match ContextResponse::new(request, pack, degraded) {
+        Ok(r) => r,
+        Err(e) => {
+            let domain_error = DomainError::Usage {
+                message: format!("Failed to build context response: {e}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human => {
+            write_stdout(stdout, &output::render_context_response_human(&response))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_context_response_toon(&response) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_context_response_json(&response) + "\n"),
+        ),
     }
 }
 
@@ -2304,5 +2422,186 @@ mod tests {
             ),
             _ => Err("expected Memory Show command".to_string()),
         }
+    }
+
+    // ========================================================================
+    // Provenance Preservation Tests (EE-072)
+    // ========================================================================
+
+    #[test]
+    fn remember_json_includes_provenance_uri_when_source_provided() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "remember",
+            "Test memory",
+            "--source",
+            "file:///path/to/file.rs#L42",
+            "--json",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "remember with source exit",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"source\":\"file:///path/to/file.rs#L42\"",
+            "source field present",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"provenance_uri\":\"file:///path/to/file.rs#L42\"",
+            "provenance_uri field present",
+        )?;
+        ensure(stderr.is_empty(), "remember json stderr must be empty")
+    }
+
+    #[test]
+    fn remember_json_omits_provenance_uri_when_no_source() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "remember", "Test memory", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "remember exit")?;
+        ensure_contains(
+            &stdout,
+            "\"source\":null",
+            "source is null when not provided",
+        )?;
+        ensure(
+            !stdout.contains("provenance_uri"),
+            "provenance_uri omitted when no source",
+        )?;
+        ensure(stderr.is_empty(), "remember json stderr must be empty")
+    }
+
+    // ========================================================================
+    // Agent Docs Command Tests (EE-034)
+    // ========================================================================
+
+    #[test]
+    fn agent_docs_command_parses_without_topic() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "agent-docs"])
+            .map_err(|e| format!("failed to parse agent-docs: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::AgentDocs(ref args)) => {
+                ensure_equal(&args.topic, &None, "agent-docs no topic")
+            }
+            _ => Err("expected AgentDocs command".to_string()),
+        }
+    }
+
+    #[test]
+    fn agent_docs_command_parses_with_topic() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "agent-docs", "guide"])
+            .map_err(|e| format!("failed to parse agent-docs guide: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::AgentDocs(ref args)) => ensure_equal(
+                &args.topic,
+                &Some("guide".to_string()),
+                "agent-docs guide topic",
+            ),
+            _ => Err("expected AgentDocs command".to_string()),
+        }
+    }
+
+    #[test]
+    fn agent_docs_json_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "agent-docs", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "agent-docs json exit")?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.response.v1\"",
+            "agent-docs json schema",
+        )?;
+        ensure_contains(&stdout, "\"command\":\"agent-docs\"", "agent-docs command")?;
+        ensure_contains(&stdout, "\"topics\":", "agent-docs has topics")?;
+        ensure_ends_with(&stdout, '\n', "agent-docs json trailing newline")?;
+        ensure(stderr.is_empty(), "agent-docs json stderr must be empty")
+    }
+
+    #[test]
+    fn agent_docs_with_topic_json_writes_topic_data() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "agent-docs", "guide", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "guide exit")?;
+        ensure_contains(&stdout, "\"topic\":\"guide\"", "guide topic field")?;
+        ensure_contains(&stdout, "\"sections\":", "guide has sections")?;
+        ensure(stderr.is_empty(), "guide stderr must be empty")
+    }
+
+    #[test]
+    fn agent_docs_exit_codes_json_has_all_codes() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "agent-docs", "exit-codes", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "exit-codes exit")?;
+        ensure_contains(&stdout, "\"exitCodes\":", "has exitCodes array")?;
+        ensure_contains(&stdout, "\"code\":0", "has success code")?;
+        ensure_contains(&stdout, "\"code\":1", "has usage code")?;
+        ensure(stderr.is_empty(), "exit-codes stderr must be empty")
+    }
+
+    #[test]
+    fn agent_docs_invalid_topic_returns_usage_error() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "agent-docs", "not-a-topic", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "invalid topic exit")?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.error.v1\"",
+            "invalid topic error schema",
+        )?;
+        ensure_contains(&stdout, "Unknown topic", "invalid topic message")?;
+        ensure_contains(
+            &stdout,
+            "\"repair\":\"ee agent-docs\"",
+            "invalid topic repair",
+        )?;
+        ensure(stderr.is_empty(), "invalid topic stderr must be empty")
+    }
+
+    #[test]
+    fn agent_docs_human_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "agent-docs"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "agent-docs human exit")?;
+        ensure_contains(&stdout, "ee agent-docs", "agent-docs human header")?;
+        ensure_contains(&stdout, "Available topics:", "agent-docs has topics list")?;
+        ensure(stderr.is_empty(), "agent-docs human stderr must be empty")
+    }
+
+    #[test]
+    fn agent_docs_toon_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "agent-docs", "--format", "toon"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "agent-docs toon exit")?;
+        ensure_contains(&stdout, "schema: ee.response.v1", "agent-docs toon schema")?;
+        ensure_contains(&stdout, "command: agent-docs", "agent-docs toon command")?;
+        ensure(stderr.is_empty(), "agent-docs toon stderr must be empty")
+    }
+
+    #[test]
+    fn agent_docs_all_topics_return_success() -> TestResult {
+        let topics = [
+            "guide",
+            "commands",
+            "contracts",
+            "schemas",
+            "paths",
+            "env",
+            "exit-codes",
+            "fields",
+            "errors",
+            "formats",
+            "examples",
+        ];
+        for topic in topics {
+            let (exit, stdout, stderr) = invoke(&["ee", "agent-docs", topic, "--json"]);
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            {
+                ensure_equal(&exit, &ProcessExitCode::Success, &format!("{topic} exit"))?;
+                ensure_contains(
+                    &stdout,
+                    &format!("\"topic\":\"{topic}\""),
+                    &format!("{topic} has topic field"),
+                )?;
+                ensure(stderr.is_empty(), &format!("{topic} stderr must be empty"))?;
+            }
+        }
+        Ok(())
     }
 }
