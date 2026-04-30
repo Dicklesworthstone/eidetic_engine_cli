@@ -536,7 +536,85 @@ mod tests {
         ensure(
             !provenance.is_empty(),
             "context item provenance must be present",
-        )
+        )?;
+
+        let normalized = normalize_context_pack_json(&stdout);
+        assert_golden("agent", "context_pack.json", &normalized)
+    }
+
+    #[test]
+    fn agent_context_markdown_returns_formatted_pack() -> TestResult {
+        let artifact_dir = unique_artifact_dir("context-markdown")?;
+        let workspace = artifact_dir.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        fs::create_dir_all(&workspace).map_err(|error| {
+            format!(
+                "failed to create workspace {}: {error}",
+                workspace.display()
+            )
+        })?;
+
+        seed_search_workspace(&workspace, &database)?;
+        build_search_index(&workspace, &database, &index_dir)?;
+
+        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .arg("--format")
+            .arg("markdown")
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("context")
+            .arg("format before release")
+            .arg("--database")
+            .arg(&database)
+            .arg("--index-dir")
+            .arg(&index_dir)
+            .arg("--profile")
+            .arg("compact")
+            .arg("--max-tokens")
+            .arg("4000")
+            .output()
+            .map_err(|error| format!("failed to run ee context --format markdown: {error}"))?;
+
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|error| format!("context markdown stdout was not UTF-8: {error}"))?;
+        let stderr = String::from_utf8(output.stderr)
+            .map_err(|error| format!("context markdown stderr was not UTF-8: {error}"))?;
+
+        ensure(
+            output.status.success(),
+            format!("context --format markdown should succeed; stderr: {stderr}"),
+        )?;
+        ensure(
+            stderr.is_empty(),
+            format!("context --format markdown stderr must be empty, got: {stderr:?}"),
+        )?;
+        ensure(
+            stdout.starts_with('#'),
+            format!("context markdown must start with # header, got: {stdout:?}"),
+        )?;
+        ensure_contains(&stdout, "Context Pack:", "should have pack header")?;
+        ensure_contains(&stdout, "format before release", "should have query")?;
+        ensure_contains(&stdout, "cargo fmt --check", "should have memory content")?;
+
+        assert_golden("agent", "context_pack.md", &stdout)
+    }
+
+    fn normalize_context_pack_json(json: &str) -> String {
+        let mut value: serde_json::Value = match serde_json::from_str(json) {
+            Ok(v) => v,
+            Err(_) => return json.to_string(),
+        };
+
+        if let Some(data) = value.get_mut("data") {
+            if let Some(pack) = data.get_mut("pack") {
+                if pack.get("elapsedMs").is_some() {
+                    pack["elapsedMs"] = serde_json::json!(0.0);
+                }
+            }
+        }
+
+        serde_json::to_string_pretty(&value).unwrap_or_else(|_| json.to_string()) + "\n"
     }
 
     #[test]

@@ -1,0 +1,122 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "context",
+    "request": {
+      "query": "format before release",
+      "profile": "compact",
+      "maxTokens": 4000,
+      "candidatePool": 10,
+      "sections": [
+        "procedural_rules",
+        "decisions",
+        "failures",
+        "evidence",
+        "artifacts"
+      ]
+    },
+    "pack": {
+      "query": "format before release",
+      "budget": {
+        "maxTokens": 4000,
+        "usedTokens": 11
+      },
+      "quality": {
+        "itemCount": 1,
+        "omittedCount": 0,
+        "usedTokens": 11,
+        "maxTokens": 4000,
+        "budgetUtilization": 0.00275,
+        "averageRelevance": 0.408205,
+        "averageUtility": 0.8,
+        "provenanceSourceCount": 1,
+        "provenanceSourcesPerItem": 1.0,
+        "provenanceComplete": true,
+        "sections": [
+          {
+            "section": "procedural_rules",
+            "itemCount": 1,
+            "usedTokens": 11
+          },
+          {
+            "section": "decisions",
+            "itemCount": 0,
+            "usedTokens": 0
+          },
+          {
+            "section": "failures",
+            "itemCount": 0,
+            "usedTokens": 0
+          },
+          {
+            "section": "evidence",
+            "itemCount": 0,
+            "usedTokens": 0
+          },
+          {
+            "section": "artifacts",
+            "itemCount": 0,
+            "usedTokens": 0
+          }
+        ],
+        "omissions": {
+          "tokenBudgetExceeded": 0,
+          "redundantCandidates": 0
+        }
+      },
+      "items": [
+        {
+          "rank": 1,
+          "memoryId": "mem_00000000000000000000000001",
+          "section": "procedural_rules",
+          "content": "Run cargo fmt --check before release.",
+          "estimatedTokens": 11,
+          "scores": {
+            "relevance": 0.408205,
+            "utility": 0.8
+          },
+          "provenance": [
+            {
+              "uri": "ee-mem://mem_00000000000000000000000001",
+              "scheme": "ee-mem",
+              "label": "memory mem_00000000000000000000000001",
+              "note": "Memory mem_00000000000000000000000001 selected for context pack"
+            }
+          ],
+          "why": "Selected for query `format before release` from semantic_fast search result with score 0.4082 and utility 0.8000.",
+          "diversityKey": "procedural:rule:cargo"
+        }
+      ],
+      "omitted": [],
+      "provenanceFooter": {
+        "memoryCount": 1,
+        "sourceCount": 1,
+        "schemes": [
+          "ee-mem"
+        ],
+        "entries": [
+          {
+            "rank": 1,
+            "memoryId": "mem_00000000000000000000000001",
+            "sourceIndex": 1,
+            "source": {
+              "uri": "ee-mem://mem_00000000000000000000000001",
+              "scheme": "ee-mem",
+              "label": "memory mem_00000000000000000000000001",
+              "note": "Memory mem_00000000000000000000000001 selected for context pack"
+            }
+          }
+        ]
+      }
+    },
+    "degraded": [
+      {
+        "code": "context_invalid_provenance",
+        "severity": "low",
+        "message": "Memory mem_00000000000000000000000001 has invalid provenance URI: provenance URI `file://AGENTS.md#compiler-checks` has an invalid line fragment `compiler-checks`; expected `L<n>` or `L<n>-<m>`",
+        "repair": "ee memory show mem_00000000000000000000000001 --json"
+      }
+    ]
+  }
+}
