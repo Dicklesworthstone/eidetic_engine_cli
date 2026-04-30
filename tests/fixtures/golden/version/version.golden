@@ -1,0 +1,19 @@
+{
+  "schema": "ee.response.v1",
+  "data": {
+    "package": "ee",
+    "version": "0.1.0",
+    "runtime": {
+      "engine": "asupersync",
+      "profile": "current_thread"
+    },
+    "features": {
+      "fts5": true,
+      "json": true,
+      "embed_fast": true,
+      "lexical_bm25": true,
+      "mcp": false,
+      "serve": false
+    }
+  }
+}

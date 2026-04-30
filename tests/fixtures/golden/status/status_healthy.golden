@@ -1,0 +1,24 @@
+{
+  "schema": "ee.response.v1",
+  "data": {
+    "workspace": {
+      "id": "wsp_test0000000000000000000000",
+      "path": "/tmp/test-workspace",
+      "initialized": true
+    },
+    "db": {
+      "status": "ready",
+      "schema_version": 7,
+      "needs_migration": false
+    },
+    "search": {
+      "status": "ready",
+      "index_generation": 1
+    },
+    "capabilities": {
+      "remember": "ready",
+      "search": "ready",
+      "context": "ready"
+    }
+  }
+}

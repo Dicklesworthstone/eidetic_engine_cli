@@ -1,0 +1,6 @@
+Remembered: Rule about cargo fmt
+
+Stored with ID mem_01234567890123456789012345 in workspace /tmp/test.
+Confidence: 0.85 (human_explicit)
+
+Next: ee search "cargo fmt" to verify retrieval.

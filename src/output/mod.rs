@@ -1102,4 +1102,79 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn golden_error_fixtures_are_valid_json() -> TestResult {
+        let fixtures = [
+            include_str!("../../tests/fixtures/golden/error/usage.golden"),
+            include_str!("../../tests/fixtures/golden/error/configuration.golden"),
+            include_str!("../../tests/fixtures/golden/error/storage.golden"),
+            include_str!("../../tests/fixtures/golden/error/search_index.golden"),
+            include_str!("../../tests/fixtures/golden/error/import.golden"),
+            include_str!("../../tests/fixtures/golden/error/policy_denied.golden"),
+            include_str!("../../tests/fixtures/golden/error/migration_required.golden"),
+            include_str!("../../tests/fixtures/golden/error/unsatisfied_degraded_mode.golden"),
+            include_str!("../../tests/fixtures/golden/error/no_repair.golden"),
+        ];
+
+        for (i, fixture) in fixtures.iter().enumerate() {
+            let parsed: Result<serde_json::Value, _> = serde_json::from_str(fixture);
+            if let Err(e) = parsed {
+                return Err(format!("error fixture {} is not valid JSON: {e}", i));
+            }
+            let value = parsed.unwrap();
+            if value.get("schema") != Some(&serde_json::Value::String("ee.error.v1".to_string())) {
+                return Err(format!("error fixture {} missing schema", i));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn golden_status_fixtures_are_valid_json() -> TestResult {
+        let fixtures = [
+            include_str!("../../tests/fixtures/golden/status/status_healthy.golden"),
+            include_str!("../../tests/fixtures/golden/status/status_degraded.golden"),
+        ];
+
+        for (i, fixture) in fixtures.iter().enumerate() {
+            let parsed: Result<serde_json::Value, _> = serde_json::from_str(fixture);
+            if let Err(e) = parsed {
+                return Err(format!("status fixture {} is not valid JSON: {e}", i));
+            }
+            let value = parsed.unwrap();
+            if value.get("schema") != Some(&serde_json::Value::String("ee.response.v1".to_string()))
+            {
+                return Err(format!("status fixture {} missing schema", i));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn golden_version_fixture_is_valid_json() -> TestResult {
+        let fixture = include_str!("../../tests/fixtures/golden/version/version.golden");
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(fixture);
+        if let Err(e) = parsed {
+            return Err(format!("version fixture is not valid JSON: {e}"));
+        }
+        let value = parsed.unwrap();
+        if value.get("schema") != Some(&serde_json::Value::String("ee.response.v1".to_string())) {
+            return Err("version fixture missing schema".to_string());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn golden_human_fixtures_have_expected_structure() -> TestResult {
+        let error_fixture =
+            include_str!("../../tests/fixtures/golden/human/error_with_repair.golden");
+        ensure_starts_with(error_fixture, "error:", "human error starts with 'error:'")?;
+        ensure_contains(error_fixture, "Next:", "human error has Next section")?;
+
+        let success_fixture =
+            include_str!("../../tests/fixtures/golden/human/success_with_summary.golden");
+        ensure_contains(success_fixture, "Next:", "human success has Next section")?;
+        ensure(!success_fixture.starts_with('{'), "human output is not JSON")
+    }
 }

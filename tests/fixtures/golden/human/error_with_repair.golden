@@ -1,0 +1,9 @@
+error: search index is stale
+
+The memory database has generation 12, but the search index was built at generation 9.
+
+Next:
+  ee index rebuild --workspace .
+
+Details:
+  ee index status --workspace . --json
