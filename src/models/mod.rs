@@ -4,6 +4,7 @@ pub mod certificate;
 pub mod claims;
 pub mod decision;
 pub mod degradation;
+pub mod economy;
 pub mod episode;
 pub mod error_codes;
 pub mod id;
@@ -14,13 +15,13 @@ pub mod mutation;
 pub mod posture;
 pub mod preflight;
 pub mod procedure;
+pub mod progress;
 pub mod provenance;
 pub mod recorder;
 pub mod repro;
 pub mod revision;
 pub mod rule;
 pub mod schema;
-pub mod progress;
 pub mod timing;
 pub mod trust;
 
@@ -46,6 +47,12 @@ pub use decision::{
 pub use degradation::{
     ALL_DEGRADATION_CODES, ActiveDegradation, DegradationCode, DegradationSeverity,
     DegradedSubsystem,
+};
+pub use economy::{
+    ATTENTION_COST_SCHEMA_V1, AggregateUtility, AttentionCost, DebtLevel,
+    ECONOMY_RECOMMENDATION_SCHEMA_V1, ECONOMY_REPORT_SCHEMA_V1, EconomyRecommendation,
+    EconomyReport, EconomyRiskCategory, Effort, Impact, MAINTENANCE_DEBT_SCHEMA_V1,
+    MaintenanceDebt, RecommendationType, RISK_RESERVE_SCHEMA_V1, RiskReserve, UtilityValue,
 };
 pub use episode::{
     ActionType, COUNTERFACTUAL_RUN_ID_PREFIX, COUNTERFACTUAL_RUN_SCHEMA_V1, CounterfactualMethod,
@@ -91,10 +98,6 @@ pub use mutation::{
     ParseMutationActionTypeError, PlannedAction,
 };
 pub use posture::{ActionCategory, Posture, PostureSummary, SuggestedAction};
-pub use progress::{
-    PROGRESS_EVENT_SCHEMA_V1, ParseProgressEventTypeError, ProgressEvent, ProgressEventBuilder,
-    ProgressEventType, progress_completed, progress_failed, progress_running, progress_started,
-};
 pub use preflight::{
     PREFLIGHT_RUN_ID_PREFIX, PREFLIGHT_RUN_SCHEMA_V1, ParsePreflightStatusError,
     ParseRiskCategoryError, ParseRiskLevelError, ParseTripwireActionError,
@@ -107,10 +110,14 @@ pub use preflight::{
 pub use procedure::{
     PROCEDURE_EXPORT_SCHEMA_V1, PROCEDURE_SCHEMA_CATALOG_V1, PROCEDURE_SCHEMA_V1,
     PROCEDURE_STEP_SCHEMA_V1, PROCEDURE_VERIFICATION_SCHEMA_V1, ParseProcedureValueError,
-    Procedure, ProcedureExport, ProcedureExportFormat, ProcedureFieldSchema,
-    ProcedureObjectSchema, ProcedureStatus, ProcedureStep, ProcedureVerification,
-    ProcedureVerificationStatus, SKILL_CAPSULE_SCHEMA_V1, SkillCapsule,
-    SkillCapsuleInstallMode, procedure_schema_catalog_json, procedure_schemas,
+    Procedure, ProcedureExport, ProcedureExportFormat, ProcedureFieldSchema, ProcedureObjectSchema,
+    ProcedureStatus, ProcedureStep, ProcedureVerification, ProcedureVerificationStatus,
+    SKILL_CAPSULE_SCHEMA_V1, SkillCapsule, SkillCapsuleInstallMode, procedure_schema_catalog_json,
+    procedure_schemas,
+};
+pub use progress::{
+    PROGRESS_EVENT_SCHEMA_V1, ParseProgressEventTypeError, ProgressEvent, ProgressEventBuilder,
+    ProgressEventType, progress_completed, progress_failed, progress_running, progress_started,
 };
 pub use provenance::{LineSpan, ProvenanceUri, ProvenanceUriError};
 pub use recorder::{

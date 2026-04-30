@@ -27,6 +27,10 @@ use crate::core::memory::{
     GetMemoryOptions, ListMemoriesOptions, get_memory_details, list_memories,
 };
 use crate::core::outcome::{OutcomeRecordOptions, record_outcome};
+use crate::core::preflight::{
+    CloseOptions as PreflightCloseOptions, RunOptions as PreflightRunOptions,
+    ShowOptions as PreflightShowOptions, close_preflight, run_preflight, show_preflight,
+};
 use crate::core::quarantine::QuarantineReport;
 use crate::core::search::{SearchOptions, run_search};
 use crate::core::situation::{classify_task, explain_situation, show_situation};
@@ -206,6 +210,38 @@ pub enum Command {
 pub enum AgentCommand {
     /// Detect installed coding agents on this system.
     Detect(AgentDetectArgs),
+    /// List known agent sources/connectors.
+    Sources(AgentSourcesArgs),
+    /// Scan and list probe paths for agent detection.
+    Scan(AgentScanArgs),
+}
+
+/// Arguments for `ee agent sources`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct AgentSourcesArgs {
+    /// Filter to a specific connector slug.
+    #[arg(long, value_name = "SLUG")]
+    pub only: Option<String>,
+
+    /// Include probe paths in output.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_paths: bool,
+}
+
+/// Arguments for `ee agent scan`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct AgentScanArgs {
+    /// Scan only specific connectors (comma-separated slugs).
+    #[arg(long, value_name = "SLUGS")]
+    pub only: Option<String>,
+
+    /// Root directory to scan from (defaults to home directory).
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<PathBuf>,
+
+    /// Show paths that exist on disk.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub existing_only: bool,
 }
 
 /// Arguments for `ee agent detect`.
@@ -473,6 +509,73 @@ pub struct LabCounterfactualArgs {
     pub weaken_memory: Vec<String>,
 
     /// Report the counterfactual plan without executing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Subcommands for `ee preflight`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum PreflightCommand {
+    /// Run a preflight risk assessment for a task.
+    Run(PreflightRunArgs),
+    /// Show details of a preflight run.
+    Show(PreflightShowArgs),
+    /// Close a preflight run (mark as completed or cancelled).
+    Close(PreflightCloseArgs),
+}
+
+/// Arguments for `ee preflight run`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PreflightRunArgs {
+    /// Task input/prompt to assess.
+    #[arg(value_name = "TASK")]
+    pub task_input: String,
+
+    /// Check for similar past failures.
+    #[arg(long, action = ArgAction::SetTrue, default_value_t = true)]
+    pub check_history: bool,
+
+    /// Check for related tripwires.
+    #[arg(long, action = ArgAction::SetTrue, default_value_t = true)]
+    pub check_tripwires: bool,
+
+    /// Report the assessment plan without executing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee preflight show`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PreflightShowArgs {
+    /// Preflight run ID to show.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+
+    /// Include risk brief details.
+    #[arg(long, action = ArgAction::SetTrue, default_value_t = true)]
+    pub include_brief: bool,
+
+    /// Include tripwire details.
+    #[arg(long, action = ArgAction::SetTrue, default_value_t = true)]
+    pub include_tripwires: bool,
+}
+
+/// Arguments for `ee preflight close`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PreflightCloseArgs {
+    /// Preflight run ID to close.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+
+    /// Mark as cleared for execution.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub cleared: bool,
+
+    /// Reason for closing.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+
+    /// Report the close action without executing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 }
@@ -1025,6 +1128,12 @@ where
         Some(Command::Agent(AgentCommand::Detect(ref args))) => {
             handle_agent_detect(&cli, args, stdout, stderr)
         }
+        Some(Command::Agent(AgentCommand::Sources(ref args))) => {
+            handle_agent_sources(&cli, args, stdout, stderr)
+        }
+        Some(Command::Agent(AgentCommand::Scan(ref args))) => {
+            handle_agent_scan(&cli, args, stdout, stderr)
+        }
         Some(Command::AgentDocs(ref args)) => handle_agent_docs(&cli, args, stdout, stderr),
         Some(Command::Capabilities) => {
             let report = CapabilitiesReport::gather();
@@ -1318,6 +1427,15 @@ where
             handle_graph_centrality_refresh(&cli, args, stdout, stderr)
         }
         Some(Command::Outcome(ref args)) => handle_outcome(&cli, args, stdout, stderr),
+        Some(Command::Preflight(PreflightCommand::Run(ref args))) => {
+            handle_preflight_run(&cli, args, stdout, stderr)
+        }
+        Some(Command::Preflight(PreflightCommand::Show(ref args))) => {
+            handle_preflight_show(&cli, args, stdout, stderr)
+        }
+        Some(Command::Preflight(PreflightCommand::Close(ref args))) => {
+            handle_preflight_close(&cli, args, stdout, stderr)
+        }
         Some(Command::Schema(ref schema_cmd)) => match schema_cmd {
             SchemaCommand::List => match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
@@ -1971,6 +2089,157 @@ where
             }
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+// ============================================================================
+// EE-391: Preflight Command Handlers
+// ============================================================================
+
+fn handle_preflight_run<W, E>(
+    cli: &Cli,
+    args: &PreflightRunArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = PreflightRunOptions {
+        workspace: workspace_path,
+        task_input: args.task_input.clone(),
+        check_history: args.check_history,
+        check_tripwires: args.check_tripwires,
+        dry_run: args.dry_run,
+        ..Default::default()
+    };
+
+    match run_preflight(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_preflight_run_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_preflight_run_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_preflight_run_json(&report) + "\n"))
+            }
+        },
+        Err(error) => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V1,
+                "success": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.message(),
+                    "repair": error.repair(),
+                }
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn handle_preflight_show<W, E>(
+    cli: &Cli,
+    args: &PreflightShowArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = PreflightShowOptions {
+        workspace: workspace_path,
+        run_id: args.run_id.clone(),
+        include_brief: args.include_brief,
+        include_tripwires: args.include_tripwires,
+    };
+
+    match show_preflight(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_preflight_show_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_preflight_show_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_preflight_show_json(&report) + "\n"))
+            }
+        },
+        Err(error) => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V1,
+                "success": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.message(),
+                    "repair": error.repair(),
+                }
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn handle_preflight_close<W, E>(
+    cli: &Cli,
+    args: &PreflightCloseArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = PreflightCloseOptions {
+        workspace: workspace_path,
+        run_id: args.run_id.clone(),
+        cleared: args.cleared,
+        reason: args.reason.clone(),
+        dry_run: args.dry_run,
+    };
+
+    match close_preflight(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_preflight_close_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_preflight_close_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_preflight_close_json(&report) + "\n"))
+            }
+        },
+        Err(error) => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V1,
+                "success": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.message(),
+                    "repair": error.repair(),
+                }
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
     }
 }
 
@@ -3096,6 +3365,225 @@ where
     }
 }
 
+// ============================================================================
+// EE-095: Agent Sources and Scan Handlers
+// ============================================================================
+
+fn handle_agent_sources<W, E>(
+    cli: &Cli,
+    args: &AgentSourcesArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use franken_agent_detection::default_probe_paths_tilde;
+
+    let all_sources = default_probe_paths_tilde();
+
+    let filtered: Vec<_> = if let Some(ref only) = args.only {
+        let only_lower = only.to_lowercase();
+        all_sources
+            .into_iter()
+            .filter(|(slug, _)| *slug == only_lower)
+            .collect()
+    } else {
+        all_sources
+    };
+
+    let human_output = || {
+        let mut out = String::from("Known Agent Sources\n===================\n\n");
+        for (slug, paths) in &filtered {
+            out.push_str(&format!("{slug}\n"));
+            if args.include_paths {
+                for path in paths {
+                    out.push_str(&format!("  {path}\n"));
+                }
+            }
+        }
+        out.push_str(&format!("\nTotal: {} connectors\n", filtered.len()));
+        out
+    };
+
+    let toon_output = || {
+        filtered
+            .iter()
+            .map(|(slug, _)| format!("AGENT_SOURCE|{slug}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    };
+
+    let json_output = || {
+        let sources: Vec<serde_json::Value> = filtered
+            .iter()
+            .map(|(slug, paths)| {
+                if args.include_paths {
+                    serde_json::json!({
+                        "slug": slug,
+                        "probePaths": paths,
+                    })
+                } else {
+                    serde_json::json!({
+                        "slug": slug,
+                    })
+                }
+            })
+            .collect();
+
+        serde_json::json!({
+            "schema": "ee.agent.sources.v1",
+            "success": true,
+            "data": {
+                "command": "agent sources",
+                "totalCount": filtered.len(),
+                "sources": sources,
+            }
+        })
+        .to_string()
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human_output()),
+        output::Renderer::Toon => write_stdout(stdout, &toon_output()),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(json_output() + "\n")),
+    }
+}
+
+fn handle_agent_scan<W, E>(
+    cli: &Cli,
+    args: &AgentScanArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use franken_agent_detection::default_probe_paths_tilde;
+
+    let all_sources = default_probe_paths_tilde();
+    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let home: Option<PathBuf> = std::env::var_os(home_var).map(PathBuf::from);
+
+    let only_slugs: Option<Vec<String>> = args.only.as_ref().map(|s| {
+        s.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_lowercase())
+            .collect()
+    });
+
+    let filtered: Vec<_> = if let Some(ref slugs) = only_slugs {
+        all_sources
+            .into_iter()
+            .filter(|(slug, _)| slugs.contains(&slug.to_string()))
+            .collect()
+    } else {
+        all_sources
+    };
+
+    let resolve_tilde = |path: &str| -> Option<std::path::PathBuf> {
+        if let Some(stripped) = path.strip_prefix("~/") {
+            home.as_ref().map(|h| h.join(stripped))
+        } else {
+            Some(std::path::PathBuf::from(path))
+        }
+    };
+
+    let scan_results: Vec<_> = filtered
+        .iter()
+        .flat_map(|(slug, paths)| {
+            paths.iter().filter_map(|path| {
+                let resolved = resolve_tilde(path)?;
+                let exists = resolved.exists();
+                if args.existing_only && !exists {
+                    None
+                } else {
+                    Some((slug.to_string(), path.clone(), resolved, exists))
+                }
+            })
+        })
+        .collect();
+
+    let human_output = || {
+        let mut out = String::from("Agent Scan Results\n==================\n\n");
+        let mut current_slug = String::new();
+        for (slug, tilde_path, resolved, exists) in &scan_results {
+            if *slug != current_slug {
+                if !current_slug.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&format!("{slug}:\n"));
+                current_slug = slug.clone();
+            }
+            let status = if *exists { "✓" } else { "✗" };
+            out.push_str(&format!("  {status} {tilde_path}\n"));
+            if *exists {
+                out.push_str(&format!("      -> {}\n", resolved.display()));
+            }
+        }
+        out.push_str(&format!("\nTotal paths scanned: {}\n", scan_results.len()));
+        let existing_count = scan_results.iter().filter(|(_, _, _, e)| *e).count();
+        out.push_str(&format!("Existing: {existing_count}\n"));
+        out
+    };
+
+    let toon_output = || {
+        scan_results
+            .iter()
+            .map(|(slug, _, resolved, exists)| {
+                let status = if *exists { "EXISTS" } else { "MISSING" };
+                format!("AGENT_SCAN|{slug}|{status}|{}", resolved.display())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    };
+
+    let json_output = || {
+        let paths: Vec<serde_json::Value> = scan_results
+            .iter()
+            .map(|(slug, tilde_path, resolved, exists)| {
+                serde_json::json!({
+                    "slug": slug,
+                    "tildePath": tilde_path,
+                    "resolvedPath": resolved.display().to_string(),
+                    "exists": exists,
+                })
+            })
+            .collect();
+
+        let existing_count = scan_results.iter().filter(|(_, _, _, e)| *e).count();
+
+        serde_json::json!({
+            "schema": "ee.agent.scan.v1",
+            "success": true,
+            "data": {
+                "command": "agent scan",
+                "totalPaths": scan_results.len(),
+                "existingPaths": existing_count,
+                "paths": paths,
+            }
+        })
+        .to_string()
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human_output()),
+        output::Renderer::Toon => write_stdout(stdout, &toon_output()),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(json_output() + "\n")),
+    }
+}
+
 fn handle_situation_classify<W>(
     cli: &Cli,
     args: &SituationClassifyArgs,
@@ -3593,7 +4081,7 @@ const COMMAND_NAMES: &[&str] = &[
 ];
 
 /// Subcommand names for nested commands.
-const AGENT_SUBCOMMANDS: &[&str] = &["detect"];
+const AGENT_SUBCOMMANDS: &[&str] = &["detect", "sources", "scan"];
 const CLAIM_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
 const DIAG_SUBCOMMANDS: &[&str] = &["dependencies", "graph", "quarantine", "streams"];
 const EVAL_SUBCOMMANDS: &[&str] = &["run", "list"];
@@ -3645,6 +4133,8 @@ impl NormalizedInvocation {
             Some(cmd) => match cmd {
                 Command::Agent(agent) => match agent {
                     AgentCommand::Detect(_) => "agent detect".to_string(),
+                    AgentCommand::Sources(_) => "agent sources".to_string(),
+                    AgentCommand::Scan(_) => "agent scan".to_string(),
                 },
                 Command::AgentDocs(_) => "agent-docs".to_string(),
                 Command::Capabilities => "capabilities".to_string(),
@@ -3696,6 +4186,11 @@ impl NormalizedInvocation {
                     MemoryCommand::History(_) => "memory history".to_string(),
                 },
                 Command::Outcome(_) => "outcome".to_string(),
+                Command::Preflight(preflight) => match preflight {
+                    PreflightCommand::Run(_) => "preflight run".to_string(),
+                    PreflightCommand::Show(_) => "preflight show".to_string(),
+                    PreflightCommand::Close(_) => "preflight close".to_string(),
+                },
                 Command::Remember(_) => "remember".to_string(),
                 Command::Review(review) => match review {
                     ReviewCommand::Session(_) => "review session".to_string(),

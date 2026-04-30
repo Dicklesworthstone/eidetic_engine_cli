@@ -4512,6 +4512,172 @@ pub fn render_lab_counterfactual_toon(report: &CounterfactualReport) -> String {
     )
 }
 
+// ============================================================================
+// EE-391: Preflight Rendering
+// ============================================================================
+
+use crate::core::preflight::{CloseReport, RunReport, ShowReport};
+
+/// Render a preflight run report as JSON.
+#[must_use]
+pub fn render_preflight_run_json(report: &RunReport) -> String {
+    let json = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "run_id": report.run_id,
+            "task_input": report.task_input,
+            "status": report.status,
+            "risk_level": report.risk_level,
+            "cleared": report.cleared,
+            "block_reason": report.block_reason,
+            "risk_brief_id": report.risk_brief_id,
+            "risks_identified": report.risks_identified,
+            "tripwires_set": report.tripwires_set,
+            "dry_run": report.dry_run,
+            "started_at": report.started_at,
+            "completed_at": report.completed_at,
+        }
+    });
+    json.to_string()
+}
+
+/// Render a preflight run report as human-readable text.
+#[must_use]
+pub fn render_preflight_run_human(report: &RunReport) -> String {
+    let mut lines = Vec::new();
+    if report.dry_run {
+        lines.push("Preflight run (dry run):".to_string());
+    } else {
+        lines.push("Preflight run:".to_string());
+    }
+    lines.push(format!("  Run ID: {}", report.run_id));
+    lines.push(format!("  Task: {}", report.task_input));
+    lines.push(format!("  Status: {}", report.status));
+    lines.push(format!("  Risk level: {}", report.risk_level));
+    lines.push(format!("  Cleared: {}", report.cleared));
+    if let Some(ref reason) = report.block_reason {
+        lines.push(format!("  Block reason: {}", reason));
+    }
+    lines.push(format!("  Started at: {}", report.started_at));
+    lines.join("\n")
+}
+
+/// Render a preflight run report as TOON.
+#[must_use]
+pub fn render_preflight_run_toon(report: &RunReport) -> String {
+    format!(
+        "PREFLIGHT_RUN|{}|{}|{}|{}",
+        report.run_id,
+        report.risk_level,
+        if report.cleared { "cleared" } else { "blocked" },
+        if report.dry_run { "dry_run" } else { "executed" }
+    )
+}
+
+/// Render a preflight show report as JSON.
+#[must_use]
+pub fn render_preflight_show_json(report: &ShowReport) -> String {
+    let json = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "run": report.run,
+            "brief": report.brief,
+            "tripwires": report.tripwires,
+        }
+    });
+    json.to_string()
+}
+
+/// Render a preflight show report as human-readable text.
+#[must_use]
+pub fn render_preflight_show_human(report: &ShowReport) -> String {
+    let mut lines = Vec::new();
+    lines.push("Preflight run details:".to_string());
+    lines.push(format!("  ID: {}", report.run.id));
+    lines.push(format!("  Task: {}", report.run.task_input));
+    lines.push(format!("  Status: {}", report.run.status));
+    lines.push(format!("  Risk level: {}", report.run.risk_level));
+    lines.push(format!("  Cleared: {}", report.run.cleared));
+    if let Some(ref reason) = report.run.block_reason {
+        lines.push(format!("  Block reason: {}", reason));
+    }
+    if let Some(ref brief) = report.brief {
+        lines.push("  Risk brief:".to_string());
+        lines.push(format!("    ID: {}", brief.id));
+        lines.push(format!("    Level: {}", brief.risk_level));
+        if let Some(ref summary) = brief.summary {
+            lines.push(format!("    Summary: {}", summary));
+        }
+    }
+    if !report.tripwires.is_empty() {
+        lines.push(format!("  Tripwires: {}", report.tripwires.len()));
+    }
+    lines.join("\n")
+}
+
+/// Render a preflight show report as TOON.
+#[must_use]
+pub fn render_preflight_show_toon(report: &ShowReport) -> String {
+    format!(
+        "PREFLIGHT_SHOW|{}|{}|{}",
+        report.run.id,
+        report.run.risk_level,
+        report.run.status
+    )
+}
+
+/// Render a preflight close report as JSON.
+#[must_use]
+pub fn render_preflight_close_json(report: &CloseReport) -> String {
+    let json = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "run_id": report.run_id,
+            "previous_status": report.previous_status,
+            "new_status": report.new_status,
+            "cleared": report.cleared,
+            "reason": report.reason,
+            "dry_run": report.dry_run,
+            "closed_at": report.closed_at,
+        }
+    });
+    json.to_string()
+}
+
+/// Render a preflight close report as human-readable text.
+#[must_use]
+pub fn render_preflight_close_human(report: &CloseReport) -> String {
+    let mut lines = Vec::new();
+    if report.dry_run {
+        lines.push("Preflight close (dry run):".to_string());
+    } else {
+        lines.push("Preflight closed:".to_string());
+    }
+    lines.push(format!("  Run ID: {}", report.run_id));
+    lines.push(format!("  Previous status: {}", report.previous_status));
+    lines.push(format!("  New status: {}", report.new_status));
+    lines.push(format!("  Cleared: {}", report.cleared));
+    if let Some(ref reason) = report.reason {
+        lines.push(format!("  Reason: {}", reason));
+    }
+    lines.push(format!("  Closed at: {}", report.closed_at));
+    lines.join("\n")
+}
+
+/// Render a preflight close report as TOON.
+#[must_use]
+pub fn render_preflight_close_toon(report: &CloseReport) -> String {
+    format!(
+        "PREFLIGHT_CLOSE|{}|{}|{}",
+        report.run_id,
+        report.new_status,
+        if report.dry_run { "dry_run" } else { "closed" }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;

@@ -20,6 +20,7 @@ pub mod lab;
 pub mod legacy_import;
 pub mod memory;
 pub mod outcome;
+pub mod preflight;
 pub mod quarantine;
 pub mod repro;
 pub mod search;
