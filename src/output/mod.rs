@@ -2362,6 +2362,12 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             description: "Executable claim/evidence/policy/trace/demo ID schemas",
             category: "id",
         },
+        SchemaEntry {
+            id: "ee.procedure.schemas.v1",
+            version: "1",
+            description: "Procedure, verification, export, and render-only skill capsule schemas",
+            category: "domain",
+        },
     ]
 }
 
@@ -2420,6 +2426,7 @@ fn render_single_schema_export(schema_id: &str) -> String {
         "ee.error.v1" => error_schema_definition(),
         "ee.certificate.v1" => certificate_schema_definition(),
         "ee.executable_id_schemas.v1" => crate::models::executable_id_schema_catalog_json(),
+        "ee.procedure.schemas.v1" => crate::models::procedure_schema_catalog_json(),
         _ => {
             let mut b = JsonBuilder::with_capacity(256);
             b.field_str("schema", ERROR_SCHEMA_V1);
@@ -2442,11 +2449,12 @@ fn render_all_schemas_export() -> String {
         d.field_raw(
             "schemas",
             &format!(
-                "[{},{},{},{}]",
+                "[{},{},{},{},{}]",
                 response_schema_definition(),
                 error_schema_definition(),
                 certificate_schema_definition(),
-                crate::models::executable_id_schema_catalog_json()
+                crate::models::executable_id_schema_catalog_json(),
+                crate::models::procedure_schema_catalog_json()
             ),
         );
     });
@@ -3999,6 +4007,115 @@ pub fn render_support_inspect_human(report: &InspectReport) -> String {
 #[must_use]
 pub fn render_support_inspect_toon(report: &InspectReport) -> String {
     render_toon_from_json(&render_support_inspect_json(report))
+}
+
+// ============================================================================
+// EE-431: Memory Economics Rendering
+// ============================================================================
+
+use crate::core::economy::{EconomyReport, EconomyScoreReport};
+
+#[must_use]
+pub fn render_economy_report_json(report: &EconomyReport) -> String {
+    let raw = serde_json::to_string(report).unwrap_or_default();
+    ResponseEnvelope::success().data_raw(&raw).finish()
+}
+
+#[must_use]
+pub fn render_economy_report_human(report: &EconomyReport) -> String {
+    let mut out = String::new();
+
+    out.push_str("Economy Report\n");
+    out.push_str(&format!("Total Artifacts: {}\n", report.total_artifacts));
+    out.push_str(&format!(
+        "Overall Utility: {:.2}\n",
+        report.overall_utility_score
+    ));
+    out.push_str(&format!(
+        "Attention Budget: {:.0}/{:.0} ({:.1}%)\n\n",
+        report.attention_budget_used,
+        report.attention_budget_total,
+        (report.attention_budget_used / report.attention_budget_total) * 100.0
+    ));
+
+    out.push_str("Artifact Breakdown:\n");
+    for stats in &report.artifact_breakdown {
+        out.push_str(&format!(
+            "  {}: {} items, avg utility {:.2}, cost {:.0}, false alarm {:.1}%\n",
+            stats.artifact_type,
+            stats.count,
+            stats.avg_utility,
+            stats.total_cost,
+            stats.false_alarm_rate * 100.0
+        ));
+    }
+
+    if let Some(ref debt) = report.maintenance_debt {
+        out.push_str(&format!(
+            "\nMaintenance Debt: {} stale, {} consolidation candidates, {} pending tombstone\n",
+            debt.stale_artifacts, debt.consolidation_candidates, debt.tombstone_pending
+        ));
+    }
+
+    if let Some(ref reserves) = report.tail_risk_reserves {
+        out.push_str(&format!(
+            "\nTail-Risk Reserves: {} critical memories, {} fallback procedures, {:.1}% degradation coverage\n",
+            reserves.critical_memories, reserves.fallback_procedures, reserves.degradation_coverage * 100.0
+        ));
+    }
+
+    out
+}
+
+#[must_use]
+pub fn render_economy_report_toon(report: &EconomyReport) -> String {
+    render_toon_from_json(&render_economy_report_json(report))
+}
+
+#[must_use]
+pub fn render_economy_score_json(report: &EconomyScoreReport) -> String {
+    let raw = serde_json::to_string(report).unwrap_or_default();
+    ResponseEnvelope::success().data_raw(&raw).finish()
+}
+
+#[must_use]
+pub fn render_economy_score_human(report: &EconomyScoreReport) -> String {
+    let mut out = String::new();
+
+    out.push_str(&format!(
+        "Economy Score: {} ({})\n",
+        report.artifact_id, report.artifact_type
+    ));
+    out.push_str(&format!("Overall: {:.2}\n", report.overall_score));
+    out.push_str(&format!("  Utility:    {:.2}\n", report.utility_score));
+    out.push_str(&format!("  Cost:       {:.2}\n", report.cost_score));
+    out.push_str(&format!("  Freshness:  {:.2}\n", report.freshness_score));
+    out.push_str(&format!("  Confidence: {:.2}\n", report.confidence_score));
+
+    if let Some(ref breakdown) = report.breakdown {
+        out.push_str("\nBreakdown:\n");
+        out.push_str(&format!(
+            "  Retrieval frequency: {}\n",
+            breakdown.retrieval_frequency
+        ));
+        out.push_str(&format!(
+            "  Last accessed: {} days ago\n",
+            breakdown.last_accessed_days_ago
+        ));
+        out.push_str(&format!("  Citation count: {}\n", breakdown.citation_count));
+        out.push_str(&format!(
+            "  Confidence delta: {:.3}\n",
+            breakdown.confidence_delta
+        ));
+        out.push_str(&format!("  Decay factor: {:.3}\n", breakdown.decay_factor));
+    }
+
+    out
+}
+
+#[must_use]
+pub fn render_economy_score_toon(report: &EconomyScoreReport) -> String {
+    render_toon_from_json(&render_economy_score_json(report))
 }
 
 /// Schema identifier for shadow-run reports.

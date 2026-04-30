@@ -199,6 +199,13 @@ impl WhyReport {
         self.degraded.push(degraded);
         self
     }
+
+    /// Add contradiction metadata to the report (EE-263).
+    #[must_use]
+    pub fn with_contradictions(mut self, contradictions: Vec<ContradictionMetadata>) -> Self {
+        self.contradictions = contradictions;
+        self
+    }
 }
 
 /// Options for the why query.
@@ -253,6 +260,9 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
         }
     };
 
+    // Fetch contradiction feedback events (EE-263)
+    let contradictions = fetch_contradictions(&conn, options.memory_id);
+
     let storage = StorageExplanation {
         origin: determine_origin(&memory.trust_class),
         trust_class: memory.trust_class.clone(),
@@ -286,6 +296,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
                 selection_score,
                 above_threshold,
                 None,
+                contradictions,
             );
             return report.with_degradation(WhyDegradation {
                 code: "why_pack_selection_unavailable",
@@ -304,6 +315,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
         selection_score,
         above_threshold,
         latest_pack_selection,
+        contradictions,
     )
 }
 
@@ -315,6 +327,7 @@ fn build_report(
     selection_score: f32,
     above_threshold: bool,
     latest_pack_selection: Option<PackSelectionExplanation>,
+    contradictions: Vec<ContradictionMetadata>,
 ) -> WhyReport {
     let selection = SelectionExplanation {
         selection_score,
@@ -328,6 +341,7 @@ fn build_report(
     };
 
     WhyReport::found(options.memory_id.to_string(), storage, retrieval, selection)
+        .with_contradictions(contradictions)
 }
 
 fn determine_origin(trust_class: &str) -> String {
@@ -401,6 +415,27 @@ fn required_f32(row: &Row, index: usize, column: &str) -> Result<f32, String> {
         .and_then(|value| value.as_f64())
         .map(|value| value as f32)
         .ok_or_else(|| format!("Pack selection column {column} was missing or not numeric"))
+}
+
+/// Fetch contradiction feedback events for a memory (EE-263).
+fn fetch_contradictions(conn: &DbConnection, memory_id: &str) -> Vec<ContradictionMetadata> {
+    let events = match conn.list_feedback_events_for_target("memory", memory_id) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    events
+        .into_iter()
+        .filter(|e| e.signal == "contradiction")
+        .map(|e| ContradictionMetadata {
+            event_id: e.id,
+            weight: e.weight,
+            source_type: e.source_type,
+            reason: e.reason,
+            created_at: e.created_at,
+            applied: e.applied_at.is_some(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -508,6 +543,7 @@ mod tests {
             0.83,
             true,
             Some(selection),
+            Vec::new(),
         );
 
         ensure(report.found, true, "found")?;

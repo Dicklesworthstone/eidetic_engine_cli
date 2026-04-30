@@ -413,13 +413,9 @@ mod tests {
     #[test]
     fn init_dry_run_does_not_create_files() -> TestResult {
         let temp_dir = std::env::temp_dir().join(format!("ee_init_test_{}", std::process::id()));
-let options = InitOptions {
-    workspace_path: temp_dir.clone(),
-    dry_run: false,
-    repair_plan: false,
-    force: false,
-    allow_symlink: false,
-};
+        let options = InitOptions {
+            workspace_path: temp_dir.clone(),
+            dry_run: true,
             repair_plan: false,
             force: false,
             allow_symlink: false,
@@ -443,13 +439,9 @@ let options = InitOptions {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
-let options = InitOptions {
-    workspace_path: temp_dir.clone(),
-    dry_run: false,
-    repair_plan: false,
-    force: false,
-    allow_symlink: false,
-};
+        let options = InitOptions {
+            workspace_path: temp_dir.clone(),
+            dry_run: false,
             repair_plan: false,
             force: false,
             allow_symlink: false,
@@ -476,13 +468,9 @@ let options = InitOptions {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
-let options = InitOptions {
-    workspace_path: temp_dir.clone(),
-    dry_run: false,
-    repair_plan: false,
-    force: false,
-    allow_symlink: false,
-};
+        let options = InitOptions {
+            workspace_path: temp_dir.clone(),
+            dry_run: false,
             repair_plan: false,
             force: false,
             allow_symlink: false,
@@ -564,13 +552,9 @@ let options = InitOptions {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
-let options = InitOptions {
-    workspace_path: temp_dir.clone(),
-    dry_run: false,
-    repair_plan: false,
-    force: false,
-    allow_symlink: false,
-};
+        let options = InitOptions {
+            workspace_path: temp_dir.clone(),
+            dry_run: false,
             repair_plan: true,
             force: false,
             allow_symlink: false,
