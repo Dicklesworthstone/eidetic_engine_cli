@@ -38,6 +38,7 @@ pub const PACK_CANDIDATE_POOL_KEY: &str = "pack.candidate_pool";
 pub const CURATION_DUPLICATE_SIMILARITY_KEY: &str = "curation.duplicate_similarity";
 pub const CURATION_HARMFUL_WEIGHT_KEY: &str = "curation.harmful_weight";
 pub const CURATION_DECAY_HALF_LIFE_DAYS_KEY: &str = "curation.decay_half_life_days";
+pub const CURATION_SPECIFICITY_MIN_KEY: &str = "curation.specificity_min";
 pub const PRIVACY_REDACT_SECRETS_KEY: &str = "privacy.redact_secrets";
 pub const PRIVACY_REDACTION_CLASSES_KEY: &str = "privacy.redaction_classes";
 pub const TRUST_DEFAULT_CLASS_KEY: &str = "trust.default_class";
@@ -155,6 +156,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             duplicate_similarity: Some(0.92),
             harmful_weight: Some(2.5),
             decay_half_life_days: Some(60),
+            specificity_min: Some(0.45),
         },
         privacy: PrivacyConfig {
             redact_secrets: Some(true),
@@ -453,6 +455,15 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.user.curation.decay_half_life_days,
                 &layers.defaults.curation.decay_half_life_days,
             ),
+            specificity_min: pick_field(
+                &mut sources,
+                CURATION_SPECIFICITY_MIN_KEY,
+                &layers.cli.curation.specificity_min,
+                &layers.environment.curation.specificity_min,
+                &layers.project.curation.specificity_min,
+                &layers.user.curation.specificity_min,
+                &layers.defaults.curation.specificity_min,
+            ),
         },
         privacy: PrivacyConfig {
             redact_secrets: pick_field(
@@ -584,12 +595,14 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        ConfigLayers, ConfigValueSource, EnvironmentConfigError, PACK_DEFAULT_MAX_TOKENS_KEY,
-        PACK_DEFAULT_PROFILE_KEY, SEARCH_DEFAULT_SPEED_KEY, STORAGE_DATABASE_PATH_KEY,
-        STORAGE_INDEX_DIR_KEY, built_in_config, config_from_env, merge_config,
+        CURATION_SPECIFICITY_MIN_KEY, ConfigLayers, ConfigValueSource, EnvironmentConfigError,
+        PACK_DEFAULT_MAX_TOKENS_KEY, PACK_DEFAULT_PROFILE_KEY, SEARCH_DEFAULT_SPEED_KEY,
+        STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY, built_in_config, config_from_env,
+        merge_config,
     };
     use crate::config::{
-        ConfigFile, PackConfig, PathExpander, SearchConfig, SearchSpeed, StorageConfig,
+        ConfigFile, CurationConfig, PackConfig, PathExpander, SearchConfig, SearchSpeed,
+        StorageConfig,
     };
 
     type TestResult = Result<(), String>;
@@ -631,6 +644,11 @@ mod tests {
             "search speed",
         )?;
         ensure_equal(&defaults.pack.default_max_tokens, &Some(4000), "max tokens")?;
+        ensure_equal(
+            &defaults.curation.specificity_min,
+            &Some(0.45),
+            "specificity min",
+        )?;
         ensure_equal(
             &defaults.trust.default_class.as_deref(),
             &Some("agent_assertion"),
@@ -718,6 +736,10 @@ mod tests {
                 default_speed: Some(SearchSpeed::Thorough),
                 ..SearchConfig::default()
             },
+            curation: CurationConfig {
+                specificity_min: Some(0.60),
+                ..CurationConfig::default()
+            },
             ..ConfigFile::default()
         };
         let environment = ConfigFile {
@@ -791,6 +813,16 @@ mod tests {
             &merged.source(PACK_DEFAULT_MAX_TOKENS_KEY),
             &Some(ConfigValueSource::Default),
             "default max tokens source",
+        )?;
+        ensure_equal(
+            &merged.values.curation.specificity_min,
+            &Some(0.60),
+            "project specificity threshold",
+        )?;
+        ensure_equal(
+            &merged.source(CURATION_SPECIFICITY_MIN_KEY),
+            &Some(ConfigValueSource::Project),
+            "specificity threshold source",
         )
     }
 

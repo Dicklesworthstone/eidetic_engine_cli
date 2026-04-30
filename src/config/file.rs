@@ -207,6 +207,7 @@ pub struct CurationConfig {
     pub duplicate_similarity: Option<f64>,
     pub harmful_weight: Option<f64>,
     pub decay_half_life_days: Option<u64>,
+    pub specificity_min: Option<f64>,
 }
 
 impl CurationConfig {
@@ -219,6 +220,7 @@ impl CurationConfig {
             )?,
             harmful_weight: optional_nonnegative_float(document, "curation", "harmful_weight")?,
             decay_half_life_days: optional_u64(document, "curation", "decay_half_life_days")?,
+            specificity_min: optional_unit_float(document, "curation", "specificity_min")?,
         })
     }
 }
@@ -560,6 +562,7 @@ candidate_pool = 100
 duplicate_similarity = 0.92
 harmful_weight = 2.5
 decay_half_life_days = 60
+specificity_min = 0.45
 
 [privacy]
 redact_secrets = true
@@ -608,6 +611,11 @@ prompt_injection_guard = true
             &config.curation.harmful_weight,
             &Some(2.5),
             "harmful weight",
+        )?;
+        ensure_equal(
+            &config.curation.specificity_min,
+            &Some(0.45),
+            "specificity min",
         )?;
         ensure_equal(
             &config.privacy.redaction_classes,

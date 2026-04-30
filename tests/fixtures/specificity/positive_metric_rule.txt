@@ -1,0 +1,1 @@
+Keep `ee context` packs under 4000 tokens and fail CI if p99 exceeds 250ms on Linux.

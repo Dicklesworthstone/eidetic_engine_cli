@@ -1,0 +1,1 @@
+Run `cargo fmt --check` before release work on main, then record failures with cass:release/2026-03-12.

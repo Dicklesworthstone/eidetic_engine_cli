@@ -41,29 +41,9 @@ const TECHNOLOGY_TOKENS: &[&str] = &[
     "yaml",
 ];
 const GENERIC_TOKENS: &[&str] = &[
-    "always",
-    "better",
-    "careful",
-    "clean",
-    "code",
-    "correct",
-    "function",
-    "good",
-    "handle",
-    "helpful",
-    "improve",
-    "logic",
-    "nice",
-    "properly",
-    "quality",
-    "review",
-    "safe",
-    "stuff",
-    "system",
-    "thing",
-    "things",
-    "useful",
-    "work",
+    "always", "better", "careful", "clean", "code", "correct", "function", "good", "handle",
+    "helpful", "improve", "logic", "nice", "properly", "quality", "review", "safe", "stuff",
+    "system", "thing", "things", "useful", "work",
 ];
 const METRIC_UNITS: &[&str] = &[
     "%", "b", "bytes", "gb", "kb", "mb", "ms", "s", "sec", "secs", "seconds", "tokens",
@@ -469,7 +449,7 @@ impl fmt::Display for CandidateValidationError {
             } => {
                 write!(
                     f,
-                    "candidate proposed content is too generic ({score} < {threshold}): {}",
+                    "candidate proposed content failed specificity (score {score}, threshold {threshold}): {}",
                     rejected_reasons.join(", ")
                 )
             }
@@ -704,11 +684,8 @@ pub fn specificity_score_with_config(
         .collect::<Vec<_>>();
     let generic_tokens = collect_generic_tokens(rule_text);
     let instruction_report = crate::policy::detect_instruction_like_content(rule_text);
-    let structural_signals = structural_signals(
-        rule_text,
-        &tokens,
-        instruction_report.is_instruction_like,
-    );
+    let structural_signals =
+        structural_signals(rule_text, &tokens, instruction_report.is_instruction_like);
     let scoring_token_count = tokens.iter().filter(|token| !token.redacted).count();
     let score = specificity_weighted_sum(scoring_token_count, &structural_signals, config);
     let passes_threshold = score >= config.minimum_score
@@ -946,12 +923,19 @@ fn lexical_tokens(input: &str) -> Vec<String> {
 }
 
 fn trim_token(token: &str) -> &str {
-    token.trim_matches(|ch: char| {
-        matches!(
-            ch,
-            ',' | ';' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}'
-        )
-    })
+    token
+        .trim_start_matches(|ch: char| {
+            matches!(
+                ch,
+                ',' | ';' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}'
+            )
+        })
+        .trim_end_matches(|ch: char| {
+            matches!(
+                ch,
+                ',' | ';' | ':' | '.' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}'
+            )
+        })
 }
 
 fn push_specificity_token(
@@ -1044,9 +1028,7 @@ fn looks_like_command(input: &str) -> bool {
 
 fn looks_like_file_path(token: &str) -> bool {
     let lower = token.to_ascii_lowercase();
-    let has_prefix = FILE_PREFIXES
-        .iter()
-        .any(|prefix| lower.starts_with(prefix));
+    let has_prefix = FILE_PREFIXES.iter().any(|prefix| lower.starts_with(prefix));
     let has_extension = FILE_EXTENSIONS
         .iter()
         .any(|extension| lower.ends_with(extension));
@@ -1270,13 +1252,189 @@ mod tests {
         CANDIDATE_TOO_GENERIC_CODE, CandidateInput, CandidateSource, CandidateStatus,
         CandidateType, CandidateValidationError, ParseCandidateSourceError,
         ParseCandidateStatusError, ParseCandidateTypeError, SpecificityPlatform,
-        SpecificityTokenKind, subsystem_name, specificity_score, validate_candidate,
+        SpecificityTokenKind, specificity_score, subsystem_name, validate_candidate,
         validate_status_transition,
     };
 
     #[test]
     fn subsystem_name_is_stable() {
         assert_eq!(subsystem_name(), "curate");
+    }
+
+    #[test]
+    fn specificity_score_rejects_empty_input() {
+        let report = specificity_score(" \n\t ");
+
+        assert_eq!(report.score, 0.0);
+        assert!(!report.passes_threshold);
+        assert!(report.concrete_tokens.is_empty());
+        assert!(report.rejected_reasons.contains(&"empty_input"));
+        assert!(
+            report
+                .rejected_reasons
+                .contains(&CANDIDATE_TOO_GENERIC_CODE)
+        );
+    }
+
+    #[test]
+    fn specificity_score_rejects_generic_platitudes() {
+        let report = specificity_score("Always write good code and improve the system.");
+
+        assert!(!report.passes_threshold);
+        assert!(report.score < report.threshold);
+        assert!(report.generic_tokens.contains(&"code".to_string()));
+        assert!(report.generic_tokens.contains(&"system".to_string()));
+        assert!(
+            report
+                .rejected_reasons
+                .contains(&"no_concrete_tokens_found")
+        );
+    }
+
+    #[test]
+    fn specificity_score_accepts_release_rule_fixture() {
+        let text = include_str!("../../tests/fixtures/specificity/positive_release_rule.txt");
+        let report = specificity_score(text);
+
+        assert!(report.passes_threshold, "{report:?}");
+        assert!(report.score >= report.threshold);
+        assert!(report.structural_signals.has_inline_command);
+        assert!(report.structural_signals.has_branch_or_tag);
+        assert!(report.structural_signals.has_provenance_uri);
+    }
+
+    #[test]
+    fn specificity_score_detects_structural_signals() {
+        let text = "\
+Run this on Linux:
+```bash
+rch exec -- cargo test db
+```
+Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main from file:docs/testing.md.";
+        let report = specificity_score(text);
+
+        assert!(report.passes_threshold, "{report:?}");
+        assert!(report.structural_signals.has_command_block);
+        assert!(report.structural_signals.has_file_path);
+        assert!(report.structural_signals.has_error_code);
+        assert!(report.structural_signals.has_metric_threshold);
+        assert!(report.structural_signals.has_branch_or_tag);
+        assert!(report.structural_signals.has_provenance_uri);
+        assert_eq!(report.platform, Some(SpecificityPlatform::Linux));
+    }
+
+    #[test]
+    fn specificity_score_redacts_sensitive_concrete_tokens() {
+        let key_name = concat!("OPENAI", "_", "API", "_", "KEY");
+        let key_value = concat!("sk", "-", "test");
+        let text =
+            format!("Run `cargo test` before using {key_name}={key_value} in src/config/file.rs.");
+
+        let report = specificity_score(&text);
+
+        assert!(report.passes_threshold, "{report:?}");
+        assert_eq!(report.redacted_concrete_tokens.len(), 1);
+        assert!(
+            report
+                .redacted_concrete_tokens
+                .iter()
+                .any(|token| token.value == concat!("REDACTED:", "api", "_", "key"))
+        );
+        assert!(
+            report
+                .concrete_tokens
+                .iter()
+                .all(|token| !token.value.contains(key_value))
+        );
+    }
+
+    #[test]
+    fn specificity_score_rejects_instruction_like_concrete_content() {
+        let text = include_str!("../../tests/fixtures/specificity/negative_instruction_like.txt");
+        let report = specificity_score(text);
+
+        assert!(!report.passes_threshold);
+        assert!(report.score >= report.threshold);
+        assert!(report.structural_signals.has_instruction_like_content);
+        assert!(
+            report
+                .rejected_reasons
+                .contains(&"instruction_like_content")
+        );
+    }
+
+    #[test]
+    fn specificity_score_is_idempotent_and_whitespace_stable() {
+        let compact =
+            specificity_score("Run `cargo fmt --check` before editing src/curate/mod.rs.");
+        let spaced =
+            specificity_score("Run   `cargo fmt --check`\n\nbefore\tediting   src/curate/mod.rs.");
+        let repeated =
+            specificity_score("Run `cargo fmt --check` before editing src/curate/mod.rs.");
+
+        assert_eq!(compact, repeated);
+        assert_eq!(compact.score, spaced.score);
+        assert_eq!(compact.concrete_tokens, spaced.concrete_tokens);
+    }
+
+    #[test]
+    fn specificity_score_is_monotonic_when_adding_concrete_tokens() {
+        let generic = specificity_score("Always write better code.");
+        let concrete = specificity_score("Always write better code. Run `cargo fmt --check`.");
+
+        assert!(concrete.score >= generic.score);
+        assert!(concrete.passes_threshold);
+    }
+
+    #[test]
+    fn specificity_fixture_corpus_matches_expectations() {
+        let positives = [
+            include_str!("../../tests/fixtures/specificity/positive_release_rule.txt"),
+            include_str!("../../tests/fixtures/specificity/positive_migration_rule.txt"),
+            include_str!("../../tests/fixtures/specificity/positive_metric_rule.txt"),
+        ];
+        for fixture in positives {
+            let report = specificity_score(fixture);
+            assert!(
+                report.passes_threshold,
+                "positive fixture failed: {report:?}"
+            );
+        }
+
+        let negatives = [
+            include_str!("../../tests/fixtures/specificity/negative_generic_platitude.txt"),
+            include_str!("../../tests/fixtures/specificity/negative_fake_path.txt"),
+            include_str!("../../tests/fixtures/specificity/negative_misspelled_command.txt"),
+            include_str!("../../tests/fixtures/specificity/negative_instruction_like.txt"),
+        ];
+        for fixture in negatives {
+            let report = specificity_score(fixture);
+            assert!(
+                !report.passes_threshold,
+                "negative fixture passed unexpectedly: {report:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn specificity_score_handles_multilingual_context_with_concrete_command() {
+        let report =
+            specificity_score("Antes de release, run `cargo clippy --all-targets` on main.");
+
+        assert!(report.passes_threshold, "{report:?}");
+        assert!(report.structural_signals.has_inline_command);
+    }
+
+    #[test]
+    fn specificity_score_handles_very_long_input_deterministically() {
+        let mut text = "Always write good code. ".repeat(600);
+        text.push_str("Run `rch exec -- cargo test curate` before editing src/curate/mod.rs.");
+
+        let first = specificity_score(&text);
+        let second = specificity_score(&text);
+
+        assert_eq!(first, second);
+        assert!(first.passes_threshold, "{first:?}");
     }
 
     #[test]
@@ -1437,6 +1595,57 @@ mod tests {
             result,
             Err(CandidateValidationError::ContentRequiredForType { .. })
         ));
+    }
+
+    #[test]
+    fn validate_candidate_rejects_generic_proposed_content() {
+        let mut input = valid_input();
+        input.candidate_type = CandidateType::Consolidate;
+        input.proposed_content = Some("Always write good code.".to_string());
+
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+
+        match result {
+            Err(CandidateValidationError::CandidateTooGeneric {
+                rejected_reasons, ..
+            }) => {
+                assert!(rejected_reasons.contains(&CANDIDATE_TOO_GENERIC_CODE));
+                assert!(rejected_reasons.contains(&"below_specificity_threshold"));
+            }
+            other => panic!("expected generic rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_candidate_accepts_specific_proposed_content() {
+        let mut input = valid_input();
+        input.candidate_type = CandidateType::Consolidate;
+        input.proposed_content =
+            Some("Run `cargo fmt --check` before editing src/curate/mod.rs on main.".to_string());
+
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+
+        match result {
+            Ok(candidate) => {
+                let Some(report) = candidate.specificity_report else {
+                    panic!("expected specificity report");
+                };
+                assert!(report.passes_threshold, "{report:?}");
+            }
+            Err(error) => panic!("specific candidate should pass: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn candidate_too_generic_error_exposes_stable_code() {
+        let error = CandidateValidationError::CandidateTooGeneric {
+            score: "0.0000".to_string(),
+            threshold: "0.4500".to_string(),
+            rejected_reasons: vec![CANDIDATE_TOO_GENERIC_CODE],
+        };
+
+        assert_eq!(error.code(), CANDIDATE_TOO_GENERIC_CODE);
+        assert!(error.to_string().contains(CANDIDATE_TOO_GENERIC_CODE));
     }
 
     #[test]
