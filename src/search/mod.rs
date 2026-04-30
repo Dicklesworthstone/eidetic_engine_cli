@@ -419,7 +419,7 @@ pub const MODULE_CONTRACT: &str = SEARCH_MODULE_SCHEMA_V1;
 pub const REQUIRED_RETRIEVAL_ENGINE: &str = "frankensearch::TwoTierSearcher";
 pub const FRANKENSEARCH_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-static SEARCH_CAPABILITIES: [SearchCapability; 7] = [
+static SEARCH_CAPABILITIES: [SearchCapability; 8] = [
     SearchCapability::ready(
         SearchCapabilityName::ModuleBoundary,
         SearchSurface::Status,
@@ -449,6 +449,11 @@ static SEARCH_CAPABILITIES: [SearchCapability; 7] = [
         SearchCapabilityName::JsonSearch,
         SearchSurface::Query,
         "Search results exposed through stable JSON response envelope.",
+    ),
+    SearchCapability::ready(
+        SearchCapabilityName::RetrievalMetrics,
+        SearchSurface::Evaluation,
+        "Search JSON includes deterministic retrieval metrics.",
     ),
     SearchCapability::pending(
         SearchCapabilityName::ScoreExplanation,
@@ -571,6 +576,7 @@ pub enum SearchCapabilityName {
     IndexJobs,
     IndexRebuild,
     JsonSearch,
+    RetrievalMetrics,
     ScoreExplanation,
 }
 
@@ -584,6 +590,7 @@ impl SearchCapabilityName {
             Self::IndexJobs => "index_jobs",
             Self::IndexRebuild => "index_rebuild",
             Self::JsonSearch => "json_search",
+            Self::RetrievalMetrics => "retrieval_metrics",
             Self::ScoreExplanation => "score_explanation",
         }
     }
@@ -594,6 +601,7 @@ pub enum SearchSurface {
     Status,
     Indexing,
     Query,
+    Evaluation,
     Explanation,
     IndexAndQuery,
 }
@@ -605,6 +613,7 @@ impl SearchSurface {
             Self::Status => "status",
             Self::Indexing => "indexing",
             Self::Query => "query",
+            Self::Evaluation => "evaluation",
             Self::Explanation => "explanation",
             Self::IndexAndQuery => "index_and_query",
         }
@@ -991,6 +1000,7 @@ mod tests {
                 "index_jobs",
                 "index_rebuild",
                 "json_search",
+                "retrieval_metrics",
                 "score_explanation",
             ]
         );
@@ -1013,6 +1023,7 @@ mod tests {
                 "indexing",
                 "indexing",
                 "query",
+                "evaluation",
                 "explanation",
             ]
         );

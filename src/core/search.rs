@@ -28,9 +28,48 @@ impl SearchOptions {
 pub struct SearchReport {
     pub status: SearchStatus,
     pub query: String,
+    pub requested_limit: u32,
     pub results: Vec<SearchHit>,
     pub elapsed_ms: f64,
     pub errors: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RetrievalMetrics {
+    pub requested_limit: u32,
+    pub returned_count: usize,
+    pub error_count: usize,
+    pub elapsed_ms: f64,
+    pub source_counts: RetrievalSourceCounts,
+    pub score_distribution: RetrievalScoreDistribution,
+    pub field_coverage: RetrievalFieldCoverage,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RetrievalSourceCounts {
+    pub lexical: usize,
+    pub semantic_fast: usize,
+    pub semantic_quality: usize,
+    pub hybrid: usize,
+    pub reranked: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RetrievalScoreDistribution {
+    pub top: Option<f32>,
+    pub min: Option<f32>,
+    pub max: Option<f32>,
+    pub mean: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RetrievalFieldCoverage {
+    pub fast_score_count: usize,
+    pub quality_score_count: usize,
+    pub lexical_score_count: usize,
+    pub rerank_score_count: usize,
+    pub metadata_count: usize,
+    pub explanation_count: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +141,16 @@ impl SearchStatus {
 }
 
 impl SearchReport {
+    #[must_use]
+    pub fn retrieval_metrics(&self) -> RetrievalMetrics {
+        RetrievalMetrics::from_hits(
+            self.requested_limit,
+            self.elapsed_ms,
+            &self.results,
+            self.errors.len(),
+        )
+    }
+
     #[must_use]
     pub fn human_summary(&self) -> String {
         let mut output = String::new();
@@ -210,9 +259,135 @@ impl SearchReport {
             "results": results,
             "result_count": self.results.len(),
             "elapsed_ms": self.elapsed_ms,
+            "metrics": self.retrieval_metrics().data_json(),
             "errors": self.errors,
         })
     }
+}
+
+impl RetrievalMetrics {
+    #[must_use]
+    pub fn from_hits(
+        requested_limit: u32,
+        elapsed_ms: f64,
+        hits: &[SearchHit],
+        error_count: usize,
+    ) -> Self {
+        let mut source_counts = RetrievalSourceCounts::default();
+        let mut field_coverage = RetrievalFieldCoverage::default();
+        let mut min_score: Option<f32> = None;
+        let mut max_score: Option<f32> = None;
+        let mut score_sum = 0.0_f32;
+
+        for hit in hits {
+            source_counts.record(hit.source);
+            field_coverage.record(hit);
+            min_score = Some(min_score.map_or(hit.score, |score| score.min(hit.score)));
+            max_score = Some(max_score.map_or(hit.score, |score| score.max(hit.score)));
+            score_sum += hit.score;
+        }
+
+        let mean = if hits.is_empty() {
+            None
+        } else {
+            Some(score_sum / hits.len() as f32)
+        };
+
+        Self {
+            requested_limit,
+            returned_count: hits.len(),
+            error_count,
+            elapsed_ms,
+            source_counts,
+            score_distribution: RetrievalScoreDistribution {
+                top: hits.first().map(|hit| hit.score),
+                min: min_score,
+                max: max_score,
+                mean,
+            },
+            field_coverage,
+        }
+    }
+
+    #[must_use]
+    pub fn data_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "requested_limit": self.requested_limit,
+            "returned_count": self.returned_count,
+            "error_count": self.error_count,
+            "elapsed_ms": round_metric_f64(self.elapsed_ms),
+            "source_counts": {
+                "lexical": self.source_counts.lexical,
+                "semantic_fast": self.source_counts.semantic_fast,
+                "semantic_quality": self.source_counts.semantic_quality,
+                "hybrid": self.source_counts.hybrid,
+                "reranked": self.source_counts.reranked,
+            },
+            "score_distribution": {
+                "top": optional_score_json(self.score_distribution.top),
+                "min": optional_score_json(self.score_distribution.min),
+                "max": optional_score_json(self.score_distribution.max),
+                "mean": optional_score_json(self.score_distribution.mean),
+            },
+            "field_coverage": {
+                "fast_score_count": self.field_coverage.fast_score_count,
+                "quality_score_count": self.field_coverage.quality_score_count,
+                "lexical_score_count": self.field_coverage.lexical_score_count,
+                "rerank_score_count": self.field_coverage.rerank_score_count,
+                "metadata_count": self.field_coverage.metadata_count,
+                "explanation_count": self.field_coverage.explanation_count,
+            },
+        })
+    }
+}
+
+impl RetrievalSourceCounts {
+    fn record(&mut self, source: ScoreSource) {
+        match source {
+            ScoreSource::Lexical => self.lexical += 1,
+            ScoreSource::SemanticFast => self.semantic_fast += 1,
+            ScoreSource::SemanticQuality => self.semantic_quality += 1,
+            ScoreSource::Hybrid => self.hybrid += 1,
+            ScoreSource::Reranked => self.reranked += 1,
+        }
+    }
+}
+
+impl RetrievalFieldCoverage {
+    fn record(&mut self, hit: &SearchHit) {
+        if hit.fast_score.is_some() {
+            self.fast_score_count += 1;
+        }
+        if hit.quality_score.is_some() {
+            self.quality_score_count += 1;
+        }
+        if hit.lexical_score.is_some() {
+            self.lexical_score_count += 1;
+        }
+        if hit.rerank_score.is_some() {
+            self.rerank_score_count += 1;
+        }
+        if hit.metadata.is_some() {
+            self.metadata_count += 1;
+        }
+        if hit.explanation.is_some() {
+            self.explanation_count += 1;
+        }
+    }
+}
+
+fn optional_score_json(score: Option<f32>) -> serde_json::Value {
+    score.map_or(serde_json::Value::Null, |score| {
+        serde_json::json!(round_metric_f32(score))
+    })
+}
+
+fn round_metric_f32(score: f32) -> f32 {
+    (score * 1_000_000.0).round() / 1_000_000.0
+}
+
+fn round_metric_f64(score: f64) -> f64 {
+    (score * 1_000_000.0).round() / 1_000_000.0
 }
 
 #[derive(Debug)]
@@ -360,6 +535,7 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
             Ok(SearchReport {
                 status,
                 query: options.query.clone(),
+                requested_limit: options.limit,
                 results: hits,
                 elapsed_ms,
                 errors,
@@ -368,6 +544,7 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
         Err(e) => Ok(SearchReport {
             status: SearchStatus::IndexError,
             query: options.query.clone(),
+            requested_limit: options.limit,
             results: Vec::new(),
             elapsed_ms,
             errors: vec![e],
@@ -488,6 +665,7 @@ mod tests {
         let report = SearchReport {
             status: SearchStatus::Success,
             query: "test query".to_string(),
+            requested_limit: 10,
             results: vec![SearchHit {
                 doc_id: "doc-1".to_string(),
                 score: 0.95,
@@ -509,6 +687,9 @@ mod tests {
         assert_eq!(json["query"], "test query");
         assert_eq!(json["result_count"], 1);
         assert!(json["results"].is_array());
+        assert_eq!(json["metrics"]["requested_limit"], 10);
+        assert_eq!(json["metrics"]["returned_count"], 1);
+        assert_eq!(json["metrics"]["error_count"], 0);
     }
 
     #[test]
@@ -568,6 +749,7 @@ mod tests {
         let report = SearchReport {
             status: SearchStatus::Success,
             query: "hybrid query".to_string(),
+            requested_limit: 5,
             results: vec![SearchHit {
                 doc_id: "doc-hybrid".to_string(),
                 score: 0.88,
@@ -602,6 +784,7 @@ mod tests {
         let report = SearchReport {
             status: SearchStatus::Success,
             query: "minimal".to_string(),
+            requested_limit: 3,
             results: vec![SearchHit {
                 doc_id: "doc-min".to_string(),
                 score: 0.5,
@@ -626,6 +809,98 @@ mod tests {
         assert!(result.get("metadata").is_none());
         assert!(result.get("explanation").is_none());
         assert!((result["lexical_score"].as_f64().unwrap_or(f64::NAN) - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn retrieval_metrics_summarize_sources_scores_and_coverage() {
+        let mut explained_hit = SearchHit {
+            doc_id: "doc-hybrid".to_string(),
+            score: 0.9,
+            source: ScoreSource::Hybrid,
+            fast_score: Some(0.7),
+            quality_score: Some(0.9),
+            lexical_score: Some(0.6),
+            rerank_score: None,
+            metadata: Some(serde_json::json!({"level": "procedural"})),
+            explanation: None,
+        };
+        explained_hit.explanation = Some(ScoreExplanation::generate(&explained_hit));
+
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "metrics".to_string(),
+            requested_limit: 4,
+            results: vec![
+                explained_hit,
+                SearchHit {
+                    doc_id: "doc-lexical".to_string(),
+                    score: 0.3,
+                    source: ScoreSource::Lexical,
+                    fast_score: None,
+                    quality_score: None,
+                    lexical_score: Some(0.3),
+                    rerank_score: None,
+                    metadata: None,
+                    explanation: None,
+                },
+            ],
+            elapsed_ms: 2.345_678_9,
+            errors: vec!["semantic tier unavailable".to_string()],
+        };
+
+        let metrics = report.retrieval_metrics();
+        assert_eq!(metrics.requested_limit, 4);
+        assert_eq!(metrics.returned_count, 2);
+        assert_eq!(metrics.error_count, 1);
+        assert_eq!(metrics.source_counts.hybrid, 1);
+        assert_eq!(metrics.source_counts.lexical, 1);
+        assert_eq!(metrics.score_distribution.top, Some(0.9));
+        assert_eq!(metrics.score_distribution.min, Some(0.3));
+        assert_eq!(metrics.score_distribution.max, Some(0.9));
+        assert!((metrics.score_distribution.mean.unwrap_or(f32::NAN) - 0.6).abs() < 0.001);
+        assert_eq!(metrics.field_coverage.fast_score_count, 1);
+        assert_eq!(metrics.field_coverage.quality_score_count, 1);
+        assert_eq!(metrics.field_coverage.lexical_score_count, 2);
+        assert_eq!(metrics.field_coverage.metadata_count, 1);
+        assert_eq!(metrics.field_coverage.explanation_count, 1);
+
+        let json = metrics.data_json();
+        assert_eq!(json["requested_limit"], 4);
+        assert_eq!(json["returned_count"], 2);
+        assert_eq!(json["error_count"], 1);
+        assert_eq!(json["source_counts"]["hybrid"], 1);
+        assert_eq!(json["source_counts"]["lexical"], 1);
+        assert_eq!(json["field_coverage"]["explanation_count"], 1);
+        let mean = json["score_distribution"]["mean"]
+            .as_f64()
+            .unwrap_or(f64::NAN);
+        assert!((mean - 0.6).abs() < 0.000_001);
+        assert_eq!(json["elapsed_ms"], serde_json::json!(2.345679));
+    }
+
+    #[test]
+    fn retrieval_metrics_are_stable_for_empty_results() {
+        let report = SearchReport {
+            status: SearchStatus::NoResults,
+            query: "empty".to_string(),
+            requested_limit: 7,
+            results: Vec::new(),
+            elapsed_ms: 0.0,
+            errors: Vec::new(),
+        };
+
+        let json = report.data_json();
+        assert_eq!(json["metrics"]["requested_limit"], 7);
+        assert_eq!(json["metrics"]["returned_count"], 0);
+        assert_eq!(json["metrics"]["source_counts"]["lexical"], 0);
+        assert_eq!(
+            json["metrics"]["score_distribution"]["top"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            json["metrics"]["score_distribution"]["mean"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]
@@ -715,6 +990,7 @@ mod tests {
         let report = SearchReport {
             status: SearchStatus::Success,
             query: "explained".to_string(),
+            requested_limit: 1,
             results: vec![hit],
             elapsed_ms: 2.0,
             errors: Vec::new(),
@@ -758,6 +1034,7 @@ mod tests {
         let report = SearchReport {
             status: SearchStatus::Success,
             query: "human test".to_string(),
+            requested_limit: 1,
             results: vec![hit],
             elapsed_ms: 1.5,
             errors: Vec::new(),
