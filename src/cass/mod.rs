@@ -35,6 +35,7 @@ pub mod contract;
 pub mod error;
 pub mod health;
 pub mod process;
+pub mod session;
 
 pub use client::{
     CassClient, DEFAULT_BINARY, DiscoveredBinary, DiscoverySource, STABLE_ENV_OVERRIDES, discover,
@@ -46,6 +47,10 @@ pub use contract::{
 pub use error::CassError;
 pub use health::{CassDbHealth, CassHealth, CassIndexHealth};
 pub use process::{CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassExitClass, CassInvocation, CassOutcome};
+pub use session::{
+    CassAgent, CassRole, CassSessionInfo, CassSpanKind, CassViewSpan, ImportCursor,
+    ImportSessionResult,
+};
 
 /// Stable subsystem name surfaced through `ee status` and audit logs.
 pub const SUBSYSTEM: &str = "cass";
