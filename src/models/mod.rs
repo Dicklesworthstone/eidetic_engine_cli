@@ -7,6 +7,7 @@ pub mod error_codes;
 pub mod id;
 pub mod memory;
 pub mod posture;
+pub mod preflight;
 pub mod provenance;
 pub mod recorder;
 pub mod repro;
@@ -46,6 +47,15 @@ pub use memory::{
     MemoryKind, MemoryLevel, MemoryValidationError, Tag, UnitScore, Utility,
 };
 pub use posture::{ActionCategory, Posture, PostureSummary, SuggestedAction};
+pub use preflight::{
+    PREFLIGHT_RUN_ID_PREFIX, PREFLIGHT_RUN_SCHEMA_V1, ParsePreflightStatusError,
+    ParseRiskCategoryError, ParseRiskLevelError, ParseTripwireActionError,
+    ParseTripwireEventTypeError, ParseTripwireStateError, ParseTripwireTypeError, PreflightRun,
+    PreflightStatus, RISK_BRIEF_ID_PREFIX, RISK_BRIEF_SCHEMA_V1, RiskBrief, RiskCategory, RiskItem,
+    RiskLevel, TRIPWIRE_EVENT_ID_PREFIX, TRIPWIRE_EVENT_SCHEMA_V1, TRIPWIRE_ID_PREFIX,
+    TRIPWIRE_SCHEMA_V1, Tripwire, TripwireAction, TripwireEvent, TripwireEventType, TripwireState,
+    TripwireType,
+};
 pub use provenance::{LineSpan, ProvenanceUri, ProvenanceUriError};
 pub use recorder::{
     IMPORT_CURSOR_SCHEMA_V1, ImportCursor, ImportSourceType, ParseImportSourceTypeError,
