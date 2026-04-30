@@ -4398,13 +4398,13 @@ mod tests {
             session_id: None,
         };
 
-        connection.insert_feedback_event("fb_0123456789012345678901234", &input)?;
+        connection.insert_feedback_event("fb_01234567890123456789012345", &input)?;
 
-        let event = connection.get_feedback_event("fb_0123456789012345678901234")?;
+        let event = connection.get_feedback_event("fb_01234567890123456789012345")?;
         ensure(event.is_some(), "feedback event must be found")?;
 
         let event = event.ok_or_else(|| TestFailure::new("feedback event not found"))?;
-        ensure_equal(&event.id.as_str(), &"fb_0123456789012345678901234", "id")?;
+        ensure_equal(&event.id.as_str(), &"fb_01234567890123456789012345", "id")?;
         ensure_equal(
             &event.workspace_id.as_str(),
             &"wsp_01234567890123456789012345",
@@ -4463,7 +4463,7 @@ mod tests {
             evidence_json: None,
             session_id: None,
         };
-        connection.insert_feedback_event("fb_1123456789012345678901234", &positive_input)?;
+        connection.insert_feedback_event("fb_11234567890123456789012345", &positive_input)?;
 
         let negative_input = super::CreateFeedbackEventInput {
             workspace_id: "wsp_01234567890123456789012345".to_string(),
@@ -4477,26 +4477,26 @@ mod tests {
             evidence_json: None,
             session_id: None,
         };
-        connection.insert_feedback_event("fb_2123456789012345678901234", &negative_input)?;
+        connection.insert_feedback_event("fb_21234567890123456789012345", &negative_input)?;
 
         let events = connection
             .list_feedback_events_for_target("memory", "mem_01234567890123456789012345")?;
         ensure_equal(&events.len(), &2, "two feedback events for target")?;
         ensure_equal(
             &events[0].id.as_str(),
-            &"fb_1123456789012345678901234",
+            &"fb_11234567890123456789012345",
             "first event by create order",
         )?;
 
-        let applied = connection.apply_feedback_event("fb_1123456789012345678901234")?;
+        let applied = connection.apply_feedback_event("fb_11234567890123456789012345")?;
         ensure(applied, "apply_feedback_event must succeed")?;
 
         let applied_event = connection
-            .get_feedback_event("fb_1123456789012345678901234")?
+            .get_feedback_event("fb_11234567890123456789012345")?
             .ok_or_else(|| TestFailure::new("applied event not found"))?;
         ensure(applied_event.applied_at.is_some(), "applied_at is now set")?;
 
-        let re_apply = connection.apply_feedback_event("fb_1123456789012345678901234")?;
+        let re_apply = connection.apply_feedback_event("fb_11234567890123456789012345")?;
         ensure(!re_apply, "second apply returns false (already applied)")?;
 
         connection.close()?;
@@ -4513,12 +4513,12 @@ mod tests {
         let target_id = "rule_01234567890123456789012345";
 
         let signals = [
-            ("fb_a123456789012345678901234", "positive", 1.0),
-            ("fb_b123456789012345678901234", "helpful", 2.0),
-            ("fb_c123456789012345678901234", "negative", 1.0),
-            ("fb_d123456789012345678901234", "harmful", 0.5),
-            ("fb_e123456789012345678901234", "stale", 1.0),
-            ("fb_f123456789012345678901234", "neutral", 1.0),
+            ("fb_a1234567890123456789012345", "positive", 1.0),
+            ("fb_b1234567890123456789012345", "helpful", 2.0),
+            ("fb_c1234567890123456789012345", "negative", 1.0),
+            ("fb_d1234567890123456789012345", "harmful", 0.5),
+            ("fb_e1234567890123456789012345", "stale", 1.0),
+            ("fb_f1234567890123456789012345", "neutral", 1.0),
         ];
 
         for (id, signal, weight) in signals {
@@ -4581,7 +4581,7 @@ mod tests {
             session_id: None,
         };
         let result =
-            connection.insert_feedback_event("fb_x123456789012345678901234", &invalid_target_type);
+            connection.insert_feedback_event("fb_x1234567890123456789012345", &invalid_target_type);
         ensure(
             matches!(
                 result,
@@ -4606,7 +4606,7 @@ mod tests {
             session_id: None,
         };
         let result =
-            connection.insert_feedback_event("fb_y123456789012345678901234", &invalid_signal);
+            connection.insert_feedback_event("fb_y1234567890123456789012345", &invalid_signal);
         ensure(
             matches!(
                 result,
@@ -4631,7 +4631,7 @@ mod tests {
             session_id: None,
         };
         let result =
-            connection.insert_feedback_event("fb_z123456789012345678901234", &invalid_source_type);
+            connection.insert_feedback_event("fb_z1234567890123456789012345", &invalid_source_type);
         ensure(
             matches!(
                 result,
