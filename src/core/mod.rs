@@ -1,5 +1,6 @@
 use std::future::Future;
 
+pub mod agent_detect;
 pub mod agent_docs;
 pub mod budget;
 pub mod capabilities;
@@ -16,6 +17,7 @@ pub mod memory;
 pub mod outcome;
 pub mod quarantine;
 pub mod search;
+pub mod situation;
 pub mod status;
 pub mod streams;
 pub mod why;

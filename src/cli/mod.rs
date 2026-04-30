@@ -22,6 +22,7 @@ use crate::core::memory::{
 };
 use crate::core::quarantine::QuarantineReport;
 use crate::core::search::{SearchOptions, run_search};
+use crate::core::situation::{classify_task, explain_situation, show_situation};
 use crate::core::status::StatusReport;
 use crate::core::why::{WhyOptions, explain_memory};
 use crate::models::memory::{MemoryKind, MemoryLevel, MemoryValidationError};
@@ -156,6 +157,9 @@ pub enum Command {
     Schema(SchemaCommand),
     /// Search indexed memories and sessions.
     Search(SearchArgs),
+    /// Classify, show, or explain task situations.
+    #[command(subcommand)]
+    Situation(SituationCommand),
     /// Report workspace and subsystem readiness.
     Status,
     /// Print the ee version.
@@ -188,7 +192,7 @@ pub struct ContextArgs {
     #[arg(long, default_value_t = 100)]
     pub candidate_pool: u32,
 
-    /// Context profile: compact, balanced, thorough.
+    /// Context profile: compact, balanced, thorough, submodular.
     #[arg(long, short = 'p', default_value = "balanced")]
     pub profile: String,
 
@@ -465,6 +469,40 @@ pub struct MemoryHistoryArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum SituationCommand {
+    /// Classify task text into a situation category.
+    Classify(SituationClassifyArgs),
+    /// Show details of a stored situation.
+    Show(SituationShowArgs),
+    /// Explain a situation with recommendations.
+    Explain(SituationExplainArgs),
+}
+
+/// Arguments for `ee situation classify`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct SituationClassifyArgs {
+    /// Task text to classify.
+    #[arg(value_name = "TEXT")]
+    pub text: String,
+}
+
+/// Arguments for `ee situation show`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct SituationShowArgs {
+    /// Situation ID to show.
+    #[arg(value_name = "SITUATION_ID")]
+    pub situation_id: String,
+}
+
+/// Arguments for `ee situation explain`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct SituationExplainArgs {
+    /// Situation ID to explain.
+    #[arg(value_name = "SITUATION_ID")]
+    pub situation_id: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -840,6 +878,15 @@ where
             }
         },
         Some(Command::Search(ref args)) => handle_search(&cli, args, stdout, stderr),
+        Some(Command::Situation(SituationCommand::Classify(ref args))) => {
+            handle_situation_classify(&cli, args, stdout)
+        }
+        Some(Command::Situation(SituationCommand::Show(ref args))) => {
+            handle_situation_show(&cli, args, stdout, stderr)
+        }
+        Some(Command::Situation(SituationCommand::Explain(ref args))) => {
+            handle_situation_explain(&cli, args, stdout, stderr)
+        }
         Some(Command::Status) => {
             let timing_capture = crate::models::TimingCapture::start();
             let report = StatusReport::gather();
@@ -1479,10 +1526,11 @@ where
         "compact" => ContextPackProfile::Compact,
         "balanced" => ContextPackProfile::Balanced,
         "thorough" => ContextPackProfile::Thorough,
+        "submodular" => ContextPackProfile::Submodular,
         _ => {
             let domain_error = DomainError::Usage {
                 message: format!(
-                    "Invalid context profile '{}'. Expected compact, balanced, or thorough.",
+                    "Invalid context profile '{}'. Expected compact, balanced, thorough, or submodular.",
                     args.profile
                 ),
                 repair: Some("ee context --help".to_string()),
@@ -1992,6 +2040,113 @@ fn handle_remember(
     })
 }
 
+fn handle_situation_classify<W>(
+    cli: &Cli,
+    args: &SituationClassifyArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let result = classify_task(&args.text);
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &result.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(result.toon_output() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::core::situation::SITUATION_CLASSIFY_SCHEMA_V1,
+                "success": true,
+                "data": result.data_json(),
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn handle_situation_show<W, E>(
+    cli: &Cli,
+    args: &SituationShowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match show_situation(&args.situation_id) {
+        Some(details) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &details.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(details.toon_output() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = serde_json::json!({
+                    "schema": crate::core::situation::SITUATION_SHOW_SCHEMA_V1,
+                    "success": true,
+                    "data": details.data_json(),
+                });
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        None => {
+            let domain_error = DomainError::NotFound {
+                resource: "situation".to_string(),
+                id: args.situation_id.clone(),
+                repair: Some("ee situation classify <text>".to_string()),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_situation_explain<W, E>(
+    cli: &Cli,
+    args: &SituationExplainArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match explain_situation(&args.situation_id) {
+        Some(explanation) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &explanation.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(explanation.toon_output() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = serde_json::json!({
+                    "schema": crate::core::situation::SITUATION_EXPLAIN_SCHEMA_V1,
+                    "success": true,
+                    "data": explanation.data_json(),
+                });
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        None => {
+            let domain_error = DomainError::NotFound {
+                resource: "situation".to_string(),
+                id: args.situation_id.clone(),
+                repair: Some("ee situation classify <text>".to_string()),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
 // ============================================================================
 // EE-040: Read-only Invocation Normalization and Did-You-Mean Errors
 // ============================================================================
@@ -2015,6 +2170,7 @@ const COMMAND_NAMES: &[&str] = &[
     "remember",
     "schema",
     "search",
+    "situation",
     "status",
     "version",
     "why",
@@ -2027,6 +2183,7 @@ const IMPORT_SUBCOMMANDS: &[&str] = &["cass", "eidetic-legacy"];
 const INDEX_SUBCOMMANDS: &[&str] = &["rebuild", "status"];
 const MEMORY_SUBCOMMANDS: &[&str] = &["list", "show", "history"];
 const SCHEMA_SUBCOMMANDS: &[&str] = &["list", "export"];
+const SITUATION_SUBCOMMANDS: &[&str] = &["classify", "show", "explain"];
 
 /// Read-only normalized representation of a CLI invocation.
 #[derive(Clone, Debug, PartialEq)]
@@ -2103,6 +2260,11 @@ impl NormalizedInvocation {
                     SchemaCommand::Export { .. } => "schema export".to_string(),
                 },
                 Command::Search(_) => "search".to_string(),
+                Command::Situation(sit) => match sit {
+                    SituationCommand::Classify(_) => "situation classify".to_string(),
+                    SituationCommand::Show(_) => "situation show".to_string(),
+                    SituationCommand::Explain(_) => "situation explain".to_string(),
+                },
                 Command::Status => "status".to_string(),
                 Command::Version => "version".to_string(),
                 Command::Why(_) => "why".to_string(),
@@ -2162,6 +2324,7 @@ pub fn did_you_mean(input: &str, parent_command: Option<&str>) -> Option<String>
         Some("index") => INDEX_SUBCOMMANDS,
         Some("memory") => MEMORY_SUBCOMMANDS,
         Some("schema") => SCHEMA_SUBCOMMANDS,
+        Some("situation") => SITUATION_SUBCOMMANDS,
         _ => COMMAND_NAMES,
     };
 
@@ -2203,6 +2366,7 @@ fn extract_invalid_subcommand(args: &[OsString]) -> Option<(String, Option<Strin
                         "index" => Some(INDEX_SUBCOMMANDS),
                         "memory" => Some(MEMORY_SUBCOMMANDS),
                         "schema" => Some(SCHEMA_SUBCOMMANDS),
+                        "situation" => Some(SITUATION_SUBCOMMANDS),
                         _ => None,
                     };
                     if let Some(subs) = subcommands {
@@ -3345,12 +3509,12 @@ mod tests {
 
     #[test]
     fn context_command_accepts_profile() -> TestResult {
-        let parsed = Cli::try_parse_from(["ee", "context", "test", "--profile", "thorough"])
+        let parsed = Cli::try_parse_from(["ee", "context", "test", "--profile", "submodular"])
             .map_err(|e| format!("failed to parse context with profile: {:?}", e.kind()))?;
 
         match parsed.command {
             Some(Command::Context(ref args)) => {
-                ensure_equal(&args.profile, &"thorough".to_string(), "context profile")
+                ensure_equal(&args.profile, &"submodular".to_string(), "context profile")
             }
             _ => Err("expected Context command".to_string()),
         }
