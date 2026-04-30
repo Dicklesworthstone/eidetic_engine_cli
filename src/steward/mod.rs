@@ -1524,6 +1524,386 @@ impl ManualRunner {
     }
 }
 
+// ============================================================================
+// EE-244: Job Diagnostic Output
+// ============================================================================
+
+/// Schema identifier for job diagnostic reports.
+pub const JOB_DIAGNOSTIC_SCHEMA_V1: &str = "ee.steward.job_diagnostic.v1";
+
+/// Diagnostic severity level.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum DiagnosticSeverity {
+    /// Informational observation.
+    Info,
+    /// Warning that may need attention.
+    Warning,
+    /// Error requiring action.
+    Error,
+}
+
+impl DiagnosticSeverity {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl fmt::Display for DiagnosticSeverity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A single diagnostic observation about a job.
+#[derive(Clone, Debug)]
+pub struct JobDiagnostic {
+    /// Diagnostic code for machine consumption.
+    pub code: String,
+    /// Severity level.
+    pub severity: DiagnosticSeverity,
+    /// Human-readable message.
+    pub message: String,
+    /// Suggested action to resolve (if applicable).
+    pub suggestion: Option<String>,
+    /// Related job ID (if specific to a job).
+    pub job_id: Option<String>,
+}
+
+impl JobDiagnostic {
+    /// Create a new diagnostic.
+    #[must_use]
+    pub fn new(
+        code: impl Into<String>,
+        severity: DiagnosticSeverity,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            severity,
+            message: message.into(),
+            suggestion: None,
+            job_id: None,
+        }
+    }
+
+    /// Add a suggestion.
+    #[must_use]
+    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
+        self.suggestion = Some(suggestion.into());
+        self
+    }
+
+    /// Associate with a job.
+    #[must_use]
+    pub fn for_job(mut self, job_id: impl Into<String>) -> Self {
+        self.job_id = Some(job_id.into());
+        self
+    }
+
+    /// Render as JSON value.
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        let mut obj = json!({
+            "code": self.code,
+            "severity": self.severity.as_str(),
+            "message": self.message,
+        });
+        if let Some(ref suggestion) = self.suggestion {
+            obj["suggestion"] = json!(suggestion);
+        }
+        if let Some(ref job_id) = self.job_id {
+            obj["jobId"] = json!(job_id);
+        }
+        obj
+    }
+}
+
+/// Diagnostic report for jobs in the ledger.
+#[derive(Clone, Debug)]
+pub struct JobDiagnosticReport {
+    /// Schema identifier.
+    pub schema: &'static str,
+    /// List of diagnostics.
+    pub diagnostics: Vec<JobDiagnostic>,
+    /// Overall health status.
+    pub health: HealthStatus,
+    /// Summary statistics.
+    pub summary: DiagnosticSummary,
+}
+
+/// Health status of the job system.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HealthStatus {
+    /// All good, no issues.
+    Healthy,
+    /// Minor issues, mostly operational.
+    Degraded,
+    /// Significant issues requiring attention.
+    Unhealthy,
+}
+
+impl HealthStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Degraded => "degraded",
+            Self::Unhealthy => "unhealthy",
+        }
+    }
+}
+
+impl fmt::Display for HealthStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Summary of diagnostic findings.
+#[derive(Clone, Debug, Default)]
+pub struct DiagnosticSummary {
+    /// Number of info-level diagnostics.
+    pub info_count: u32,
+    /// Number of warnings.
+    pub warning_count: u32,
+    /// Number of errors.
+    pub error_count: u32,
+    /// Total jobs analyzed.
+    pub jobs_analyzed: u32,
+    /// Jobs with issues.
+    pub jobs_with_issues: u32,
+}
+
+impl JobDiagnosticReport {
+    /// Create a new diagnostic report.
+    #[must_use]
+    pub fn new(diagnostics: Vec<JobDiagnostic>) -> Self {
+        let mut summary = DiagnosticSummary::default();
+        let mut jobs_with_issues = std::collections::HashSet::new();
+
+        for diag in &diagnostics {
+            match diag.severity {
+                DiagnosticSeverity::Info => summary.info_count += 1,
+                DiagnosticSeverity::Warning => summary.warning_count += 1,
+                DiagnosticSeverity::Error => summary.error_count += 1,
+            }
+            if let Some(ref job_id) = diag.job_id {
+                if diag.severity != DiagnosticSeverity::Info {
+                    jobs_with_issues.insert(job_id.clone());
+                }
+            }
+        }
+        summary.jobs_with_issues = jobs_with_issues.len() as u32;
+
+        let health = if summary.error_count > 0 {
+            HealthStatus::Unhealthy
+        } else if summary.warning_count > 0 {
+            HealthStatus::Degraded
+        } else {
+            HealthStatus::Healthy
+        };
+
+        Self {
+            schema: JOB_DIAGNOSTIC_SCHEMA_V1,
+            diagnostics,
+            health,
+            summary,
+        }
+    }
+
+    /// Render as JSON.
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "schema": self.schema,
+            "command": "steward diag",
+            "health": self.health.as_str(),
+            "summary": {
+                "infoCount": self.summary.info_count,
+                "warningCount": self.summary.warning_count,
+                "errorCount": self.summary.error_count,
+                "jobsAnalyzed": self.summary.jobs_analyzed,
+                "jobsWithIssues": self.summary.jobs_with_issues,
+            },
+            "diagnostics": self.diagnostics.iter().map(JobDiagnostic::data_json).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Render as human-readable string.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut out = String::with_capacity(512);
+
+        out.push_str("Job Diagnostics\n");
+        out.push_str("===============\n\n");
+        out.push_str(&format!("Health: {}\n\n", self.health));
+        out.push_str(&format!("Summary:\n"));
+        out.push_str(&format!("  Info:     {}\n", self.summary.info_count));
+        out.push_str(&format!("  Warnings: {}\n", self.summary.warning_count));
+        out.push_str(&format!("  Errors:   {}\n\n", self.summary.error_count));
+
+        if !self.diagnostics.is_empty() {
+            out.push_str("Findings:\n");
+            for diag in &self.diagnostics {
+                let prefix = match diag.severity {
+                    DiagnosticSeverity::Info => "  [INFO]",
+                    DiagnosticSeverity::Warning => "  [WARN]",
+                    DiagnosticSeverity::Error => "  [ERR!]",
+                };
+                out.push_str(&format!("{} {}: {}\n", prefix, diag.code, diag.message));
+                if let Some(ref suggestion) = diag.suggestion {
+                    out.push_str(&format!("         -> {suggestion}\n"));
+                }
+            }
+        }
+
+        out.push_str("\nNext:\n  ee steward diag --json\n");
+        out
+    }
+}
+
+/// Generate diagnostics for a job ledger.
+#[must_use]
+pub fn diagnose_ledger(ledger: &JobLedger) -> JobDiagnosticReport {
+    let mut diagnostics = Vec::new();
+    let stats = ledger.statistics();
+
+    // Check for stuck running jobs
+    for job in ledger.list_by_status(JobStatus::Running) {
+        diagnostics.push(
+            JobDiagnostic::new(
+                "STEWARD_JOB_RUNNING",
+                DiagnosticSeverity::Warning,
+                format!("Job {} is still running", job.id),
+            )
+            .with_suggestion("Check if the job is progressing or needs cancellation")
+            .for_job(&job.id),
+        );
+    }
+
+    // Check for failed jobs
+    for job in ledger.list_by_status(JobStatus::Failed) {
+        let msg = job
+            .error
+            .as_deref()
+            .unwrap_or("Unknown error");
+        diagnostics.push(
+            JobDiagnostic::new(
+                "STEWARD_JOB_FAILED",
+                DiagnosticSeverity::Error,
+                format!("Job {} failed: {}", job.id, msg),
+            )
+            .with_suggestion("Review error and retry with `ee steward run`")
+            .for_job(&job.id),
+        );
+    }
+
+    // Check for high pending count
+    if stats.pending > 10 {
+        diagnostics.push(
+            JobDiagnostic::new(
+                "STEWARD_HIGH_PENDING",
+                DiagnosticSeverity::Warning,
+                format!("{} jobs pending - backlog may need attention", stats.pending),
+            )
+            .with_suggestion("Run `ee steward run --all` to process pending jobs"),
+        );
+    }
+
+    // Check for empty ledger
+    if stats.total == 0 {
+        diagnostics.push(JobDiagnostic::new(
+            "STEWARD_LEDGER_EMPTY",
+            DiagnosticSeverity::Info,
+            "No jobs in ledger",
+        ));
+    }
+
+    // Overall health observation
+    let success_rate = if stats.total > 0 {
+        (stats.completed as f64 / stats.total as f64) * 100.0
+    } else {
+        100.0
+    };
+
+    if success_rate < 80.0 && stats.total >= 5 {
+        diagnostics.push(
+            JobDiagnostic::new(
+                "STEWARD_LOW_SUCCESS_RATE",
+                DiagnosticSeverity::Warning,
+                format!("Job success rate is {:.1}%", success_rate),
+            )
+            .with_suggestion("Investigate failed jobs to improve reliability"),
+        );
+    }
+
+    let mut report = JobDiagnosticReport::new(diagnostics);
+    report.summary.jobs_analyzed = stats.total;
+    report
+}
+
+/// Generate diagnostics for a single job.
+#[must_use]
+pub fn diagnose_job(job: &Job) -> Vec<JobDiagnostic> {
+    let mut diagnostics = Vec::new();
+
+    match job.status {
+        JobStatus::Failed => {
+            let msg = job.error.as_deref().unwrap_or("Unknown error");
+            diagnostics.push(
+                JobDiagnostic::new(
+                    "JOB_FAILED",
+                    DiagnosticSeverity::Error,
+                    format!("Job failed: {msg}"),
+                )
+                .for_job(&job.id),
+            );
+        }
+        JobStatus::Running => {
+            diagnostics.push(
+                JobDiagnostic::new(
+                    "JOB_RUNNING",
+                    DiagnosticSeverity::Info,
+                    "Job is currently running",
+                )
+                .for_job(&job.id),
+            );
+        }
+        JobStatus::Cancelled => {
+            diagnostics.push(
+                JobDiagnostic::new(
+                    "JOB_CANCELLED",
+                    DiagnosticSeverity::Warning,
+                    "Job was cancelled",
+                )
+                .for_job(&job.id),
+            );
+        }
+        _ => {}
+    }
+
+    // Check for long duration
+    if let Some(duration) = job.duration_ms {
+        if duration > 60_000 {
+            diagnostics.push(
+                JobDiagnostic::new(
+                    "JOB_SLOW",
+                    DiagnosticSeverity::Info,
+                    format!("Job took {}ms (over 1 minute)", duration),
+                )
+                .for_job(&job.id),
+            );
+        }
+    }
+
+    diagnostics
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2164,5 +2544,114 @@ mod tests {
         let result = runner.run_job(&job_id, "2026-04-30T12:00:01Z").unwrap();
         assert_eq!(result.outcome, RunOutcome::Skipped);
         assert!(result.error.is_some());
+    }
+
+    // ========================================================================
+    // EE-244: Job Diagnostic Output Tests
+    // ========================================================================
+
+    #[test]
+    fn job_diagnostic_schema_is_stable() -> TestResult {
+        ensure(
+            JOB_DIAGNOSTIC_SCHEMA_V1,
+            "ee.steward.job_diagnostic.v1",
+            "diagnostic schema constant",
+        )
+    }
+
+    #[test]
+    fn diagnostic_severity_as_str() -> TestResult {
+        ensure(DiagnosticSeverity::Info.as_str(), "info", "info")?;
+        ensure(DiagnosticSeverity::Warning.as_str(), "warning", "warning")?;
+        ensure(DiagnosticSeverity::Error.as_str(), "error", "error")
+    }
+
+    #[test]
+    fn health_status_as_str() -> TestResult {
+        ensure(HealthStatus::Healthy.as_str(), "healthy", "healthy")?;
+        ensure(HealthStatus::Degraded.as_str(), "degraded", "degraded")?;
+        ensure(HealthStatus::Unhealthy.as_str(), "unhealthy", "unhealthy")
+    }
+
+    #[test]
+    fn job_diagnostic_data_json() {
+        let diag = JobDiagnostic::new("TEST_CODE", DiagnosticSeverity::Warning, "Test message")
+            .with_suggestion("Do something")
+            .for_job("job-001");
+
+        let json = diag.data_json();
+
+        assert_eq!(json["code"], "TEST_CODE");
+        assert_eq!(json["severity"], "warning");
+        assert_eq!(json["message"], "Test message");
+        assert_eq!(json["suggestion"], "Do something");
+        assert_eq!(json["jobId"], "job-001");
+    }
+
+    #[test]
+    fn diagnose_empty_ledger() {
+        let ledger = JobLedger::new();
+        let report = diagnose_ledger(&ledger);
+
+        assert_eq!(report.health, HealthStatus::Healthy);
+        assert_eq!(report.summary.jobs_analyzed, 0);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "STEWARD_LEDGER_EMPTY"));
+    }
+
+    #[test]
+    fn diagnose_ledger_with_failed_job() {
+        let mut ledger = JobLedger::new();
+        let mut job = Job::new("job-001", JobType::HealthCheck, "2026-04-30T12:00:00Z");
+        job.fail("2026-04-30T12:00:01Z", "Test failure");
+        ledger.add_job(job);
+
+        let report = diagnose_ledger(&ledger);
+
+        assert_eq!(report.health, HealthStatus::Unhealthy);
+        assert_eq!(report.summary.error_count, 1);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "STEWARD_JOB_FAILED"));
+    }
+
+    #[test]
+    fn diagnose_ledger_with_running_job() {
+        let mut ledger = JobLedger::new();
+        let mut job = Job::new("job-001", JobType::HealthCheck, "2026-04-30T12:00:00Z");
+        job.start("2026-04-30T12:00:00Z");
+        ledger.add_job(job);
+
+        let report = diagnose_ledger(&ledger);
+
+        assert_eq!(report.health, HealthStatus::Degraded);
+        assert_eq!(report.summary.warning_count, 1);
+    }
+
+    #[test]
+    fn diagnostic_report_json_has_required_fields() {
+        let ledger = JobLedger::new();
+        let report = diagnose_ledger(&ledger);
+        let json = report.data_json();
+
+        assert_eq!(json["schema"], JOB_DIAGNOSTIC_SCHEMA_V1);
+        assert_eq!(json["command"], "steward diag");
+        assert!(json["health"].is_string());
+        assert!(json["summary"].is_object());
+        assert!(json["diagnostics"].is_array());
+    }
+
+    #[test]
+    fn diagnostic_report_human_summary() {
+        let ledger = JobLedger::new();
+        let report = diagnose_ledger(&ledger);
+        let human = report.human_summary();
+
+        assert!(human.contains("Job Diagnostics"));
+        assert!(human.contains("Health:"));
+        assert!(human.contains("Summary:"));
     }
 }
