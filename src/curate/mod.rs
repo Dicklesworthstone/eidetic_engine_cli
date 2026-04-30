@@ -4,10 +4,76 @@
 //! consolidation, promotion, deprecation, supersession, tombstoning, etc.
 //! No silent durable mutation — every change goes through this queue.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
 pub const SUBSYSTEM: &str = "curate";
+pub const DEFAULT_SPECIFICITY_MIN: f32 = 0.45;
+pub const CANDIDATE_TOO_GENERIC_CODE: &str = "candidate_too_generic";
+
+const SCORE_SCALE: f32 = 10_000.0;
+const KNOWN_COMMANDS: &[&str] = &[
+    "br", "bv", "cargo", "cass", "ee", "gh", "git", "rch", "rustfmt", "ubs",
+];
+const TECHNOLOGY_TOKENS: &[&str] = &[
+    "adr",
+    "agent",
+    "asupersync",
+    "beads",
+    "blake3",
+    "cargo",
+    "cass",
+    "clippy",
+    "frankensearch",
+    "frankensqlite",
+    "fts5",
+    "json",
+    "jsonl",
+    "labruntime",
+    "mcp",
+    "rust",
+    "rustfmt",
+    "sqlmodel",
+    "sqlite",
+    "toml",
+    "toon",
+    "yaml",
+];
+const GENERIC_TOKENS: &[&str] = &[
+    "always",
+    "better",
+    "careful",
+    "clean",
+    "code",
+    "correct",
+    "function",
+    "good",
+    "handle",
+    "helpful",
+    "improve",
+    "logic",
+    "nice",
+    "properly",
+    "quality",
+    "review",
+    "safe",
+    "stuff",
+    "system",
+    "thing",
+    "things",
+    "useful",
+    "work",
+];
+const METRIC_UNITS: &[&str] = &[
+    "%", "b", "bytes", "gb", "kb", "mb", "ms", "s", "sec", "secs", "seconds", "tokens",
+];
+const FILE_EXTENSIONS: &[&str] = &[
+    ".md", ".rs", ".toml", ".json", ".jsonl", ".yaml", ".yml", ".sql", ".db", ".sqlite", ".txt",
+];
+const FILE_PREFIXES: &[&str] = &[
+    "/", "./", "../", ".beads/", ".github/", "crates/", "docs/", "src/", "target/", "tests/",
+];
 
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
@@ -320,6 +386,7 @@ pub struct ValidatedCandidate {
     pub candidate_type: CandidateType,
     pub target_memory_id: String,
     pub proposed_content: Option<String>,
+    pub specificity_report: Option<SpecificityReport>,
     pub proposed_confidence: Option<f32>,
     pub proposed_trust_class: Option<String>,
     pub source_type: CandidateSource,
@@ -330,7 +397,7 @@ pub struct ValidatedCandidate {
 }
 
 /// Errors during candidate validation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CandidateValidationError {
     EmptyWorkspaceId,
     EmptyTargetMemoryId,
@@ -349,6 +416,11 @@ pub enum CandidateValidationError {
     },
     ContentForbiddenForType {
         candidate_type: CandidateType,
+    },
+    CandidateTooGeneric {
+        score: String,
+        threshold: String,
+        rejected_reasons: Vec<&'static str>,
     },
     InvalidStatusTransition {
         from: CandidateStatus,
@@ -390,6 +462,17 @@ impl fmt::Display for CandidateValidationError {
                     "proposed content is not allowed for {candidate_type} candidates"
                 )
             }
+            Self::CandidateTooGeneric {
+                score,
+                threshold,
+                rejected_reasons,
+            } => {
+                write!(
+                    f,
+                    "candidate proposed content is too generic ({score} < {threshold}): {}",
+                    rejected_reasons.join(", ")
+                )
+            }
             Self::InvalidStatusTransition { from, to } => {
                 write!(f, "cannot transition from {from} to {to}")
             }
@@ -402,6 +485,26 @@ impl fmt::Display for CandidateValidationError {
 }
 
 impl std::error::Error for CandidateValidationError {}
+
+impl CandidateValidationError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::EmptyWorkspaceId => "empty_workspace_id",
+            Self::EmptyTargetMemoryId => "empty_target_memory_id",
+            Self::EmptyReason => "empty_reason",
+            Self::ConfidenceOutOfRange { .. } => "confidence_out_of_range",
+            Self::ProposedConfidenceOutOfRange { .. } => "proposed_confidence_out_of_range",
+            Self::InvalidProposedTrustClass { .. } => "invalid_proposed_trust_class",
+            Self::ContentRequiredForType { .. } => "content_required_for_type",
+            Self::ContentForbiddenForType { .. } => "content_forbidden_for_type",
+            Self::CandidateTooGeneric { .. } => CANDIDATE_TOO_GENERIC_CODE,
+            Self::InvalidStatusTransition { .. } => "invalid_status_transition",
+            Self::CandidateExpired => "candidate_expired",
+            Self::CandidateAlreadyTerminal { .. } => "candidate_already_terminal",
+        }
+    }
+}
 
 impl CandidateType {
     /// Whether this candidate type requires proposed content.
@@ -436,6 +539,605 @@ impl CandidateStatus {
             _ => false,
         }
     }
+}
+
+/// Weights used by the deterministic curation specificity scorer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpecificityWeights {
+    pub command_block: f32,
+    pub inline_command: f32,
+    pub file_path: f32,
+    pub error_code: f32,
+    pub metric_threshold: f32,
+    pub branch_or_tag: f32,
+    pub provenance_uri: f32,
+    pub technology_name: f32,
+    pub concrete_token_density: f32,
+}
+
+impl Default for SpecificityWeights {
+    fn default() -> Self {
+        Self {
+            command_block: 0.18,
+            inline_command: 0.30,
+            file_path: 0.26,
+            error_code: 0.14,
+            metric_threshold: 0.14,
+            branch_or_tag: 0.08,
+            provenance_uri: 0.08,
+            technology_name: 0.12,
+            concrete_token_density: 0.18,
+        }
+    }
+}
+
+/// Configuration for curation specificity validation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpecificityConfig {
+    pub minimum_score: f32,
+    pub weights: SpecificityWeights,
+}
+
+impl Default for SpecificityConfig {
+    fn default() -> Self {
+        Self {
+            minimum_score: DEFAULT_SPECIFICITY_MIN,
+            weights: SpecificityWeights::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum SpecificityTokenKind {
+    BranchOrTag,
+    Command,
+    ErrorCode,
+    FilePath,
+    MetricThreshold,
+    ProvenanceUri,
+    RedactedConcrete,
+    TechnologyName,
+}
+
+impl SpecificityTokenKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BranchOrTag => "branch_or_tag",
+            Self::Command => "command",
+            Self::ErrorCode => "error_code",
+            Self::FilePath => "file_path",
+            Self::MetricThreshold => "metric_threshold",
+            Self::ProvenanceUri => "provenance_uri",
+            Self::RedactedConcrete => "redacted_concrete",
+            Self::TechnologyName => "technology_name",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SpecificityPlatform {
+    Linux,
+    MacOs,
+    Windows,
+}
+
+impl SpecificityPlatform {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Linux => "linux",
+            Self::MacOs => "macos",
+            Self::Windows => "windows",
+        }
+    }
+}
+
+/// A concrete token found in proposed curation content.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SpecificityToken {
+    pub kind: SpecificityTokenKind,
+    pub value: String,
+    pub redacted: bool,
+}
+
+/// Structural evidence used to score proposed curation content.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SpecificityStructuralSignals {
+    pub has_command_block: bool,
+    pub has_inline_command: bool,
+    pub has_file_path: bool,
+    pub has_error_code: bool,
+    pub has_metric_threshold: bool,
+    pub has_branch_or_tag: bool,
+    pub has_provenance_uri: bool,
+    pub has_technology_name: bool,
+    pub has_instruction_like_content: bool,
+}
+
+impl SpecificityStructuralSignals {
+    #[must_use]
+    pub const fn has_specificity_signal(&self) -> bool {
+        self.has_command_block
+            || self.has_inline_command
+            || self.has_file_path
+            || self.has_error_code
+            || self.has_metric_threshold
+            || self.has_branch_or_tag
+            || self.has_provenance_uri
+            || self.has_technology_name
+    }
+}
+
+/// Deterministic specificity report for a proposed curation rule.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpecificityReport {
+    pub score: f32,
+    pub threshold: f32,
+    pub passes_threshold: bool,
+    pub concrete_tokens: Vec<SpecificityToken>,
+    pub redacted_concrete_tokens: Vec<SpecificityToken>,
+    pub generic_tokens: Vec<String>,
+    pub structural_signals: SpecificityStructuralSignals,
+    pub platform: Option<SpecificityPlatform>,
+    pub rejected_reasons: Vec<&'static str>,
+}
+
+/// Score proposed curation content using the default specificity contract.
+#[must_use]
+pub fn specificity_score(rule_text: &str) -> SpecificityReport {
+    specificity_score_with_config(rule_text, &SpecificityConfig::default())
+}
+
+/// Score proposed curation content using an explicit specificity config.
+#[must_use]
+pub fn specificity_score_with_config(
+    rule_text: &str,
+    config: &SpecificityConfig,
+) -> SpecificityReport {
+    let mut tokens = collect_specificity_tokens(rule_text);
+    sort_specificity_tokens(&mut tokens);
+    let redacted_tokens = tokens
+        .iter()
+        .filter(|token| token.redacted)
+        .cloned()
+        .collect::<Vec<_>>();
+    let generic_tokens = collect_generic_tokens(rule_text);
+    let instruction_report = crate::policy::detect_instruction_like_content(rule_text);
+    let structural_signals = structural_signals(
+        rule_text,
+        &tokens,
+        instruction_report.is_instruction_like,
+    );
+    let scoring_token_count = tokens.iter().filter(|token| !token.redacted).count();
+    let score = specificity_weighted_sum(scoring_token_count, &structural_signals, config);
+    let passes_threshold = score >= config.minimum_score
+        && scoring_token_count > 0
+        && structural_signals.has_specificity_signal()
+        && !instruction_report.is_instruction_like;
+    let mut rejected_reasons = specificity_rejected_reasons(
+        rule_text,
+        score,
+        scoring_token_count,
+        &generic_tokens,
+        &structural_signals,
+        &instruction_report.rejected_reasons,
+        config,
+    );
+    if !passes_threshold {
+        push_reason(&mut rejected_reasons, CANDIDATE_TOO_GENERIC_CODE);
+    }
+    rejected_reasons.sort_unstable();
+    rejected_reasons.dedup();
+
+    SpecificityReport {
+        score,
+        threshold: config.minimum_score,
+        passes_threshold,
+        concrete_tokens: tokens,
+        redacted_concrete_tokens: redacted_tokens,
+        generic_tokens,
+        structural_signals,
+        platform: detect_platform(rule_text),
+        rejected_reasons,
+    }
+}
+
+fn specificity_weighted_sum(
+    scoring_token_count: usize,
+    signals: &SpecificityStructuralSignals,
+    config: &SpecificityConfig,
+) -> f32 {
+    let weights = config.weights;
+    let mut score = 0.0_f32;
+    if signals.has_command_block {
+        score += weights.command_block;
+    }
+    if signals.has_inline_command {
+        score += weights.inline_command;
+    }
+    if signals.has_file_path {
+        score += weights.file_path;
+    }
+    if signals.has_error_code {
+        score += weights.error_code;
+    }
+    if signals.has_metric_threshold {
+        score += weights.metric_threshold;
+    }
+    if signals.has_branch_or_tag {
+        score += weights.branch_or_tag;
+    }
+    if signals.has_provenance_uri {
+        score += weights.provenance_uri;
+    }
+    if signals.has_technology_name {
+        score += weights.technology_name;
+    }
+
+    let density = (scoring_token_count as f32 / 4.0).min(1.0);
+    score += weights.concrete_token_density * density;
+    round_score(score.clamp(0.0, 1.0))
+}
+
+fn specificity_rejected_reasons(
+    rule_text: &str,
+    score: f32,
+    scoring_token_count: usize,
+    generic_tokens: &[String],
+    signals: &SpecificityStructuralSignals,
+    instruction_reasons: &[&'static str],
+    config: &SpecificityConfig,
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if rule_text.trim().is_empty() {
+        push_reason(&mut reasons, "empty_input");
+    }
+    if scoring_token_count == 0 {
+        push_reason(&mut reasons, "no_concrete_tokens_found");
+    }
+    if scoring_token_count == 0 && !generic_tokens.is_empty() {
+        push_reason(&mut reasons, "all_tokens_generic");
+    }
+    if !signals.has_specificity_signal() {
+        push_reason(&mut reasons, "no_structural_signal");
+    }
+    if score < config.minimum_score {
+        push_reason(&mut reasons, "below_specificity_threshold");
+    }
+    for reason in instruction_reasons {
+        push_reason(&mut reasons, reason);
+    }
+    reasons
+}
+
+fn push_reason(reasons: &mut Vec<&'static str>, reason: &'static str) {
+    if !reasons.contains(&reason) {
+        reasons.push(reason);
+    }
+}
+
+fn collect_specificity_tokens(input: &str) -> Vec<SpecificityToken> {
+    let lexical_tokens = lexical_tokens(input);
+    let mut tokens = Vec::new();
+    collect_inline_code_tokens(input, &mut tokens);
+    collect_fenced_command_tokens(input, &mut tokens);
+    collect_lexical_concrete_tokens(&lexical_tokens, &mut tokens);
+    tokens
+}
+
+fn collect_inline_code_tokens(input: &str, tokens: &mut Vec<SpecificityToken>) {
+    for (index, segment) in input.split('`').enumerate() {
+        if index % 2 == 1 && !segment.trim().is_empty() {
+            let trimmed = segment.trim();
+            if looks_like_command(trimmed) {
+                push_specificity_token(tokens, SpecificityTokenKind::Command, trimmed);
+            }
+        }
+    }
+}
+
+fn collect_fenced_command_tokens(input: &str, tokens: &mut Vec<SpecificityToken>) {
+    let mut in_fence = false;
+    for line in input.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence && looks_like_command(trimmed) {
+            push_specificity_token(tokens, SpecificityTokenKind::Command, trimmed);
+        }
+    }
+}
+
+fn collect_lexical_concrete_tokens(lexical_tokens: &[String], tokens: &mut Vec<SpecificityToken>) {
+    for (index, token) in lexical_tokens.iter().enumerate() {
+        let lower = token.to_ascii_lowercase();
+        if let Some(class) = redaction_class(token) {
+            push_redacted_specificity_token(tokens, class);
+        }
+        if KNOWN_COMMANDS.contains(&lower.as_str()) {
+            push_specificity_token(
+                tokens,
+                SpecificityTokenKind::Command,
+                &command_phrase(lexical_tokens, index),
+            );
+        }
+        if looks_like_file_path(token) {
+            push_specificity_token(tokens, SpecificityTokenKind::FilePath, token);
+        }
+        if looks_like_error_code(token)
+            || (lower == "code"
+                && index > 0
+                && lexical_tokens[index - 1].eq_ignore_ascii_case("exit")
+                && lexical_tokens
+                    .get(index + 1)
+                    .is_some_and(|next| next.chars().all(|ch| ch.is_ascii_digit())))
+        {
+            push_specificity_token(
+                tokens,
+                SpecificityTokenKind::ErrorCode,
+                &error_phrase(lexical_tokens, index),
+            );
+        }
+        if looks_like_metric_threshold(token)
+            || lexical_tokens
+                .get(index + 1)
+                .is_some_and(|next| token_has_digit(token) && is_metric_unit(next))
+        {
+            push_specificity_token(
+                tokens,
+                SpecificityTokenKind::MetricThreshold,
+                &metric_phrase(lexical_tokens, index),
+            );
+        }
+        if looks_like_branch_or_tag(token) {
+            push_specificity_token(tokens, SpecificityTokenKind::BranchOrTag, token);
+        }
+        if looks_like_provenance_uri(token) {
+            push_specificity_token(tokens, SpecificityTokenKind::ProvenanceUri, token);
+        }
+        if TECHNOLOGY_TOKENS.contains(&lower.as_str()) {
+            push_specificity_token(tokens, SpecificityTokenKind::TechnologyName, &lower);
+        }
+    }
+}
+
+fn structural_signals(
+    input: &str,
+    tokens: &[SpecificityToken],
+    has_instruction_like_content: bool,
+) -> SpecificityStructuralSignals {
+    SpecificityStructuralSignals {
+        has_command_block: input.contains("```"),
+        has_inline_command: tokens
+            .iter()
+            .any(|token| token.kind == SpecificityTokenKind::Command),
+        has_file_path: tokens
+            .iter()
+            .any(|token| token.kind == SpecificityTokenKind::FilePath),
+        has_error_code: tokens
+            .iter()
+            .any(|token| token.kind == SpecificityTokenKind::ErrorCode),
+        has_metric_threshold: tokens
+            .iter()
+            .any(|token| token.kind == SpecificityTokenKind::MetricThreshold),
+        has_branch_or_tag: tokens
+            .iter()
+            .any(|token| token.kind == SpecificityTokenKind::BranchOrTag),
+        has_provenance_uri: tokens
+            .iter()
+            .any(|token| token.kind == SpecificityTokenKind::ProvenanceUri),
+        has_technology_name: tokens
+            .iter()
+            .any(|token| token.kind == SpecificityTokenKind::TechnologyName),
+        has_instruction_like_content,
+    }
+}
+
+fn lexical_tokens(input: &str) -> Vec<String> {
+    input
+        .split_whitespace()
+        .map(trim_token)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn trim_token(token: &str) -> &str {
+    token.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            ',' | ';' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}'
+        )
+    })
+}
+
+fn push_specificity_token(
+    tokens: &mut Vec<SpecificityToken>,
+    kind: SpecificityTokenKind,
+    value: &str,
+) {
+    let trimmed = trim_token(value).trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    tokens.push(SpecificityToken {
+        kind,
+        value: trimmed.to_string(),
+        redacted: false,
+    });
+}
+
+fn push_redacted_specificity_token(tokens: &mut Vec<SpecificityToken>, class: &'static str) {
+    tokens.push(SpecificityToken {
+        kind: SpecificityTokenKind::RedactedConcrete,
+        value: format!("REDACTED:{class}"),
+        redacted: true,
+    });
+}
+
+fn sort_specificity_tokens(tokens: &mut Vec<SpecificityToken>) {
+    tokens.sort();
+    tokens.dedup();
+}
+
+fn collect_generic_tokens(input: &str) -> Vec<String> {
+    let mut tokens = BTreeSet::new();
+    for token in lexical_tokens(input) {
+        let lower = token.to_ascii_lowercase();
+        if GENERIC_TOKENS.contains(&lower.as_str()) {
+            tokens.insert(lower);
+        }
+    }
+    tokens.into_iter().collect()
+}
+
+fn command_phrase(tokens: &[String], start: usize) -> String {
+    let mut out = Vec::new();
+    for token in tokens.iter().skip(start).take(4) {
+        let lower = token.to_ascii_lowercase();
+        if out.is_empty()
+            || token.starts_with('-')
+            || lower
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        {
+            out.push(token.as_str());
+        } else {
+            break;
+        }
+    }
+    out.join(" ")
+}
+
+fn error_phrase(tokens: &[String], index: usize) -> String {
+    if index > 0
+        && tokens[index - 1].eq_ignore_ascii_case("exit")
+        && tokens[index].eq_ignore_ascii_case("code")
+        && tokens
+            .get(index + 1)
+            .is_some_and(|next| next.chars().all(|ch| ch.is_ascii_digit()))
+    {
+        format!("exit code {}", tokens[index + 1])
+    } else {
+        tokens[index].clone()
+    }
+}
+
+fn metric_phrase(tokens: &[String], index: usize) -> String {
+    match tokens.get(index + 1) {
+        Some(next) if token_has_digit(&tokens[index]) && is_metric_unit(next) => {
+            format!("{} {}", tokens[index], next)
+        }
+        _ => tokens[index].clone(),
+    }
+}
+
+fn looks_like_command(input: &str) -> bool {
+    let tokens = lexical_tokens(input);
+    tokens
+        .first()
+        .is_some_and(|token| KNOWN_COMMANDS.contains(&token.to_ascii_lowercase().as_str()))
+}
+
+fn looks_like_file_path(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    let has_prefix = FILE_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix));
+    let has_extension = FILE_EXTENSIONS
+        .iter()
+        .any(|extension| lower.ends_with(extension));
+    (has_prefix && (token.contains('/') || has_extension))
+        || (has_extension && token.chars().any(|ch| ch == '/' || ch == '.'))
+}
+
+fn looks_like_error_code(token: &str) -> bool {
+    let trimmed = trim_token(token).trim_end_matches(':');
+    let upper = trimmed.to_ascii_uppercase();
+    if upper.len() >= 5
+        && upper.starts_with('E')
+        && upper[1..].chars().all(|ch| ch.is_ascii_digit())
+    {
+        return true;
+    }
+    upper.split_once('-').is_some_and(|(prefix, suffix)| {
+        (2..=8).contains(&prefix.len())
+            && prefix.chars().all(|ch| ch.is_ascii_uppercase())
+            && suffix.chars().any(|ch| ch.is_ascii_digit())
+    })
+}
+
+fn looks_like_metric_threshold(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    token_has_digit(&lower)
+        && METRIC_UNITS
+            .iter()
+            .any(|unit| lower.ends_with(unit) || lower.contains(&format!("/{unit}")))
+}
+
+fn token_has_digit(token: &str) -> bool {
+    token.chars().any(|ch| ch.is_ascii_digit())
+}
+
+fn is_metric_unit(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    METRIC_UNITS.contains(&lower.as_str())
+}
+
+fn looks_like_branch_or_tag(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    lower == "main"
+        || lower.starts_with("release/")
+        || (lower.starts_with('v')
+            && lower[1..].split('.').count() >= 2
+            && lower[1..].split('.').all(|segment| {
+                !segment.is_empty() && segment.chars().all(|ch| ch.is_ascii_digit())
+            }))
+}
+
+fn looks_like_provenance_uri(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    lower.starts_with("cass:")
+        || lower.starts_with("file:")
+        || lower.starts_with("session:")
+        || lower.starts_with("mem_")
+}
+
+fn redaction_class(token: &str) -> Option<&'static str> {
+    let lower = token.to_ascii_lowercase();
+    if lower.contains(concat!("api", "_", "key")) || lower.contains(concat!("api", "-", "key")) {
+        Some(concat!("api", "_", "key"))
+    } else if lower.contains(concat!("private", "_", "key"))
+        || lower.contains(concat!("private", "-", "key"))
+    {
+        Some(concat!("private", "_", "key"))
+    } else if lower.contains(concat!("pass", "word")) {
+        Some(concat!("pass", "word"))
+    } else if lower.contains(concat!("to", "ken")) || lower.contains("bearer") {
+        Some(concat!("to", "ken"))
+    } else {
+        None
+    }
+}
+
+fn detect_platform(input: &str) -> Option<SpecificityPlatform> {
+    let lower = input.to_ascii_lowercase();
+    if lower.contains("linux") || lower.contains("/proc/") {
+        Some(SpecificityPlatform::Linux)
+    } else if lower.contains("macos") || lower.contains("darwin") {
+        Some(SpecificityPlatform::MacOs)
+    } else if lower.contains("windows") || lower.contains("powershell") || lower.contains(".ps1") {
+        Some(SpecificityPlatform::Windows)
+    } else {
+        None
+    }
+}
+
+fn round_score(score: f32) -> f32 {
+    (score * SCORE_SCALE).round() / SCORE_SCALE
 }
 
 /// Validate a candidate input and produce a validated candidate.
@@ -500,6 +1202,23 @@ pub fn validate_candidate(
         });
     }
 
+    let proposed_content = input
+        .proposed_content
+        .map(|content| content.trim().to_string())
+        .filter(|content| !content.is_empty());
+    let specificity_report = proposed_content
+        .as_ref()
+        .map(|content| specificity_score(content));
+    if let Some(report) = &specificity_report
+        && !report.passes_threshold
+    {
+        return Err(CandidateValidationError::CandidateTooGeneric {
+            score: format!("{:.4}", report.score),
+            threshold: format!("{:.4}", report.threshold),
+            rejected_reasons: report.rejected_reasons.clone(),
+        });
+    }
+
     // Calculate TTL expiry
     let ttl_expires_at = input.ttl_seconds.map(|secs| {
         // Simple: just store as "now + N seconds" string
@@ -511,10 +1230,8 @@ pub fn validate_candidate(
         workspace_id: input.workspace_id.trim().to_string(),
         candidate_type: input.candidate_type,
         target_memory_id: input.target_memory_id.trim().to_string(),
-        proposed_content: input
-            .proposed_content
-            .map(|c| c.trim().to_string())
-            .filter(|c| !c.is_empty()),
+        proposed_content,
+        specificity_report,
         proposed_confidence: input.proposed_confidence,
         proposed_trust_class: input.proposed_trust_class,
         source_type: input.source_type,
@@ -550,9 +1267,11 @@ mod tests {
     use std::str::FromStr;
 
     use super::{
-        CandidateInput, CandidateSource, CandidateStatus, CandidateType, CandidateValidationError,
-        ParseCandidateSourceError, ParseCandidateStatusError, ParseCandidateTypeError,
-        subsystem_name, validate_candidate, validate_status_transition,
+        CANDIDATE_TOO_GENERIC_CODE, CandidateInput, CandidateSource, CandidateStatus,
+        CandidateType, CandidateValidationError, ParseCandidateSourceError,
+        ParseCandidateStatusError, ParseCandidateTypeError, SpecificityPlatform,
+        SpecificityTokenKind, subsystem_name, specificity_score, validate_candidate,
+        validate_status_transition,
     };
 
     #[test]
