@@ -359,21 +359,38 @@ where
                 }
             }
         }
-        Some(Command::Doctor(ref _args)) => {
-            // TODO(EE-XXX): --fix-plan support is stubbed pending render impl
+        Some(Command::Doctor(ref args)) => {
             let report = DoctorReport::gather();
-            match cli.renderer() {
-                output::Renderer::Human => {
-                    write_stdout(stdout, &output::render_doctor_human(&report))
+            if args.fix_plan {
+                let plan = report.to_fix_plan();
+                match cli.renderer() {
+                    output::Renderer::Human => {
+                        write_stdout(stdout, &output::render_fix_plan_human(&plan))
+                    }
+                    output::Renderer::Toon => {
+                        write_stdout(stdout, &(output::render_fix_plan_toon(&plan) + "\n"))
+                    }
+                    output::Renderer::Json
+                    | output::Renderer::Jsonl
+                    | output::Renderer::Compact
+                    | output::Renderer::Hook => {
+                        write_stdout(stdout, &(output::render_fix_plan_json(&plan) + "\n"))
+                    }
                 }
-                output::Renderer::Toon => {
-                    write_stdout(stdout, &(output::render_doctor_toon(&report) + "\n"))
-                }
-                output::Renderer::Json
-                | output::Renderer::Jsonl
-                | output::Renderer::Compact
-                | output::Renderer::Hook => {
-                    write_stdout(stdout, &(output::render_doctor_json(&report) + "\n"))
+            } else {
+                match cli.renderer() {
+                    output::Renderer::Human => {
+                        write_stdout(stdout, &output::render_doctor_human(&report))
+                    }
+                    output::Renderer::Toon => {
+                        write_stdout(stdout, &(output::render_doctor_toon(&report) + "\n"))
+                    }
+                    output::Renderer::Json
+                    | output::Renderer::Jsonl
+                    | output::Renderer::Compact
+                    | output::Renderer::Hook => {
+                        write_stdout(stdout, &(output::render_doctor_json(&report) + "\n"))
+                    }
                 }
             }
         }
@@ -1355,5 +1372,64 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Usage, "doc: human error exit")?;
         ensure(stdout.is_empty(), "doc: human error stdout empty")?;
         ensure(!stderr.is_empty(), "doc: human error stderr has diagnostic")
+    }
+
+    // ========================================================================
+    // Doctor Fix-Plan Tests (EE-241)
+    // ========================================================================
+
+    #[test]
+    fn doctor_accepts_fix_plan_flag() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "doctor", "--fix-plan"])
+            .map_err(|e| format!("failed to parse doctor --fix-plan: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Doctor(ref args)) => {
+                ensure_equal(&args.fix_plan, &true, "fix_plan flag set")
+            }
+            _ => Err("expected Doctor command".to_string()),
+        }
+    }
+
+    #[test]
+    fn doctor_fix_plan_json_output_has_mode_field() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "doctor", "--fix-plan", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "fix-plan json exit")?;
+        ensure_contains(&stdout, "\"mode\":\"fix-plan\"", "fix-plan mode field")?;
+        ensure_contains(&stdout, "\"totalIssues\":", "fix-plan total issues")?;
+        ensure_contains(&stdout, "\"fixableIssues\":", "fix-plan fixable issues")?;
+        ensure_contains(&stdout, "\"steps\":", "fix-plan steps array")?;
+        ensure(stderr.is_empty(), "fix-plan json stderr empty")
+    }
+
+    #[test]
+    fn doctor_fix_plan_human_output_differs_from_normal() -> TestResult {
+        let (_, fix_plan_out, _) = invoke(&["ee", "doctor", "--fix-plan"]);
+        let (_, normal_out, _) = invoke(&["ee", "doctor"]);
+
+        ensure_contains(
+            &fix_plan_out,
+            "ee doctor --fix-plan",
+            "fix-plan header present",
+        )?;
+        ensure_contains(&normal_out, "ee doctor\n", "normal header present")?;
+
+        ensure(
+            fix_plan_out != normal_out,
+            "fix-plan output differs from normal",
+        )
+    }
+
+    #[test]
+    fn doctor_without_fix_plan_flag_uses_normal_output() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "doctor"])
+            .map_err(|e| format!("failed to parse bare doctor: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Doctor(ref args)) => {
+                ensure_equal(&args.fix_plan, &false, "fix_plan flag not set by default")
+            }
+            _ => Err("expected Doctor command".to_string()),
+        }
     }
 }
