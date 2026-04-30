@@ -155,7 +155,11 @@ pub fn ensure_equal<T: std::fmt::Debug + PartialEq>(
 /// }
 /// ```
 pub fn ensure(condition: bool, context: impl Into<String>) -> TestResult {
-    if condition { Ok(()) } else { Err(context.into()) }
+    if condition {
+        Ok(())
+    } else {
+        Err(context.into())
+    }
 }
 
 /// Assert that a string contains a substring.

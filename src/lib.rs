@@ -27,4 +27,6 @@ pub mod serve;
 pub mod science;
 
 #[cfg(test)]
+pub mod fuzz;
+#[cfg(test)]
 pub mod testing;
