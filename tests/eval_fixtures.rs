@@ -1012,7 +1012,7 @@ fn data_size_tiers_scenario_contract_is_complete() -> TestResult {
         )?;
     }
 
-    let expected_tiers: [(&str, &str, u64, u64, &str, &[&str]); 3] = [
+    let expected_tiers = [
         (
             "small",
             "usr_context_small_workspace",

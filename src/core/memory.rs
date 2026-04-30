@@ -1338,12 +1338,36 @@ mod tests {
 
     #[test]
     fn dedupe_severity_from_score_thresholds() -> TestResult {
-        ensure(DedupeSeverity::from_score(1.0), DedupeSeverity::Exact, "1.0")?;
-        ensure(DedupeSeverity::from_score(0.95), DedupeSeverity::High, "0.95")?;
-        ensure(DedupeSeverity::from_score(0.90), DedupeSeverity::High, "0.90")?;
-        ensure(DedupeSeverity::from_score(0.89), DedupeSeverity::Medium, "0.89")?;
-        ensure(DedupeSeverity::from_score(0.70), DedupeSeverity::Medium, "0.70")?;
-        ensure(DedupeSeverity::from_score(0.69), DedupeSeverity::Low, "0.69")?;
+        ensure(
+            DedupeSeverity::from_score(1.0),
+            DedupeSeverity::Exact,
+            "1.0",
+        )?;
+        ensure(
+            DedupeSeverity::from_score(0.95),
+            DedupeSeverity::High,
+            "0.95",
+        )?;
+        ensure(
+            DedupeSeverity::from_score(0.90),
+            DedupeSeverity::High,
+            "0.90",
+        )?;
+        ensure(
+            DedupeSeverity::from_score(0.89),
+            DedupeSeverity::Medium,
+            "0.89",
+        )?;
+        ensure(
+            DedupeSeverity::from_score(0.70),
+            DedupeSeverity::Medium,
+            "0.70",
+        )?;
+        ensure(
+            DedupeSeverity::from_score(0.69),
+            DedupeSeverity::Low,
+            "0.69",
+        )?;
         ensure(DedupeSeverity::from_score(0.5), DedupeSeverity::Low, "0.5")?;
         ensure(DedupeSeverity::from_score(0.0), DedupeSeverity::Low, "0.0")
     }
@@ -1420,7 +1444,11 @@ mod tests {
         ensure(opts.content, "test content", "content")?;
         ensure(opts.level.is_none(), true, "level none")?;
         ensure(opts.kind.is_none(), true, "kind none")?;
-        ensure((opts.min_similarity - 0.5).abs() < f32::EPSILON, true, "min_similarity")?;
+        ensure(
+            (opts.min_similarity - 0.5).abs() < f32::EPSILON,
+            true,
+            "min_similarity",
+        )?;
         ensure(opts.max_warnings, 5, "max_warnings")
     }
 

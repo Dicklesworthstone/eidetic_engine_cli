@@ -98,107 +98,113 @@ fn json_rpc_result(id: Value, result: Value) -> Value {
 
 fn handle_initialize(id: Value) -> Value {
     let info = McpServerInfo::new();
-    json_rpc_result(id, json!({
-        "protocolVersion": info.protocol_version,
-        "serverInfo": {
-            "name": info.name,
-            "version": info.version
-        },
-        "capabilities": {
-            "tools": {}
-        }
-    }))
+    json_rpc_result(
+        id,
+        json!({
+            "protocolVersion": info.protocol_version,
+            "serverInfo": {
+                "name": info.name,
+                "version": info.version
+            },
+            "capabilities": {
+                "tools": {}
+            }
+        }),
+    )
 }
 
 fn handle_tools_list(id: Value) -> Value {
-    json_rpc_result(id, json!({
-        "tools": [
-            {
-                "name": "ee_search",
-                "description": "Search indexed memories and sessions",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query"
+    json_rpc_result(
+        id,
+        json!({
+            "tools": [
+                {
+                    "name": "ee_search",
+                    "description": "Search indexed memories and sessions",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Search query"
+                            },
+                            "workspace": {
+                                "type": "string",
+                                "description": "Workspace path (defaults to current directory)"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum results (default 10)"
+                            }
                         },
-                        "workspace": {
-                            "type": "string",
-                            "description": "Workspace path (defaults to current directory)"
+                        "required": ["query"]
+                    }
+                },
+                {
+                    "name": "ee_context",
+                    "description": "Assemble task-specific context pack from relevant memories",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Task description"
+                            },
+                            "workspace": {
+                                "type": "string",
+                                "description": "Workspace path"
+                            },
+                            "max_tokens": {
+                                "type": "integer",
+                                "description": "Token budget (default 4000)"
+                            }
                         },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum results (default 10)"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            },
-            {
-                "name": "ee_context",
-                "description": "Assemble task-specific context pack from relevant memories",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Task description"
-                        },
-                        "workspace": {
-                            "type": "string",
-                            "description": "Workspace path"
-                        },
-                        "max_tokens": {
-                            "type": "integer",
-                            "description": "Token budget (default 4000)"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            },
-            {
-                "name": "ee_status",
-                "description": "Report workspace and subsystem readiness",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "workspace": {
-                            "type": "string",
-                            "description": "Workspace path"
+                        "required": ["query"]
+                    }
+                },
+                {
+                    "name": "ee_status",
+                    "description": "Report workspace and subsystem readiness",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "workspace": {
+                                "type": "string",
+                                "description": "Workspace path"
+                            }
                         }
                     }
+                },
+                {
+                    "name": "ee_remember",
+                    "description": "Store a new memory",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "description": "Memory content"
+                            },
+                            "workspace": {
+                                "type": "string",
+                                "description": "Workspace path"
+                            },
+                            "level": {
+                                "type": "string",
+                                "description": "Memory level: episodic, semantic, procedural",
+                                "enum": ["episodic", "semantic", "procedural"]
+                            },
+                            "kind": {
+                                "type": "string",
+                                "description": "Memory kind: fact, decision, outcome, lesson, rule, task, artifact, session"
+                            }
+                        },
+                        "required": ["content"]
+                    }
                 }
-            },
-            {
-                "name": "ee_remember",
-                "description": "Store a new memory",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "content": {
-                            "type": "string",
-                            "description": "Memory content"
-                        },
-                        "workspace": {
-                            "type": "string",
-                            "description": "Workspace path"
-                        },
-                        "level": {
-                            "type": "string",
-                            "description": "Memory level: episodic, semantic, procedural",
-                            "enum": ["episodic", "semantic", "procedural"]
-                        },
-                        "kind": {
-                            "type": "string",
-                            "description": "Memory kind: fact, decision, outcome, lesson, rule, task, artifact, session"
-                        }
-                    },
-                    "required": ["content"]
-                }
-            }
-        ]
-    }))
+            ]
+        }),
+    )
 }
 
 fn handle_tools_call(id: Value, params: Option<&Value>) -> Value {
@@ -210,20 +216,17 @@ fn handle_tools_call(id: Value, params: Option<&Value>) -> Value {
     let _arguments = params.get("arguments");
 
     match tool_name {
-        "ee_search" | "ee_context" | "ee_status" | "ee_remember" => {
-            json_rpc_result(id, json!({
+        "ee_search" | "ee_context" | "ee_status" | "ee_remember" => json_rpc_result(
+            id,
+            json!({
                 "content": [{
                     "type": "text",
                     "text": format!("Tool '{}' is registered but core services are not wired yet. See EE-211.", tool_name)
                 }],
                 "isError": false
-            }))
-        }
-        _ => json_rpc_error(
-            Some(id),
-            -32601,
-            &format!("Unknown tool: {tool_name}"),
+            }),
         ),
+        _ => json_rpc_error(Some(id), -32601, &format!("Unknown tool: {tool_name}")),
     }
 }
 
@@ -233,10 +236,7 @@ fn handle_shutdown(id: Value) -> Value {
 
 fn handle_request(request: &Value) -> Value {
     let id = request.get("id").cloned();
-    let method = request
-        .get("method")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     let params = request.get("params");
 
     match McpMethod::parse(method) {
@@ -295,14 +295,18 @@ pub fn run_stdio_server() -> Result<(), String> {
             Err(e) => {
                 let error = json_rpc_error(None, -32700, &format!("Parse error: {e}"));
                 writeln!(stdout, "{error}").map_err(|e| format!("stdout write error: {e}"))?;
-                stdout.flush().map_err(|e| format!("stdout flush error: {e}"))?;
+                stdout
+                    .flush()
+                    .map_err(|e| format!("stdout flush error: {e}"))?;
                 continue;
             }
         };
 
         let response = handle_request(&request);
         writeln!(stdout, "{response}").map_err(|e| format!("stdout write error: {e}"))?;
-        stdout.flush().map_err(|e| format!("stdout flush error: {e}"))?;
+        stdout
+            .flush()
+            .map_err(|e| format!("stdout flush error: {e}"))?;
 
         let method = request.get("method").and_then(Value::as_str).unwrap_or("");
         if method == "shutdown" {
@@ -333,10 +337,7 @@ mod tests {
         assert_eq!(McpMethod::parse("tools/list"), McpMethod::ToolsList);
         assert_eq!(McpMethod::parse("tools/call"), McpMethod::ToolsCall);
         assert_eq!(McpMethod::parse("shutdown"), McpMethod::Shutdown);
-        assert!(matches!(
-            McpMethod::parse("unknown"),
-            McpMethod::Unknown(_)
-        ));
+        assert!(matches!(McpMethod::parse("unknown"), McpMethod::Unknown(_)));
     }
 
     #[test]
@@ -361,7 +362,10 @@ mod tests {
     fn handle_tools_list_returns_tool_definitions() {
         let response = handle_tools_list(json!(1));
         let result = response.get("result").expect("result");
-        let tools = result.get("tools").and_then(Value::as_array).expect("tools array");
+        let tools = result
+            .get("tools")
+            .and_then(Value::as_array)
+            .expect("tools array");
 
         assert!(!tools.is_empty());
 
@@ -377,10 +381,7 @@ mod tests {
 
     #[test]
     fn handle_tools_call_unknown_returns_error() {
-        let response = handle_tools_call(
-            json!(1),
-            Some(&json!({ "name": "nonexistent_tool" })),
-        );
+        let response = handle_tools_call(json!(1), Some(&json!({ "name": "nonexistent_tool" })));
         let error = response.get("error").expect("error");
         assert_eq!(error.get("code").and_then(Value::as_i64), Some(-32601));
     }

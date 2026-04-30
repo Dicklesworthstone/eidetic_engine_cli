@@ -223,7 +223,11 @@ impl ReplayMetadata {
     /// Format as JSON.
     pub fn to_json(&self) -> String {
         let args_json: Vec<String> = self.args.iter().map(|a| format!("\"{}\"", a)).collect();
-        let env_json: Vec<String> = self.env_names.iter().map(|e| format!("\"{}\"", e)).collect();
+        let env_json: Vec<String> = self
+            .env_names
+            .iter()
+            .map(|e| format!("\"{}\"", e))
+            .collect();
         let flags_json: Vec<String> = self
             .feature_flags
             .iter()
@@ -239,8 +243,14 @@ impl ReplayMetadata {
             self.binary_version,
             self.schema_version,
             flags_json.join(","),
-            self.fixture_hash.as_ref().map(|h| format!("\"{}\"", h)).unwrap_or_else(|| "null".to_string()),
-            self.db_migration_version.as_ref().map(|v| format!("\"{}\"", v)).unwrap_or_else(|| "null".to_string())
+            self.fixture_hash
+                .as_ref()
+                .map(|h| format!("\"{}\"", h))
+                .unwrap_or_else(|| "null".to_string()),
+            self.db_migration_version
+                .as_ref()
+                .map(|v| format!("\"{}\"", v))
+                .unwrap_or_else(|| "null".to_string())
         )
     }
 }
@@ -372,13 +382,23 @@ impl FailureArtifact {
             "{{\"schema\":\"ee.test_failure.v1\",\"testName\":\"{}\",\"category\":\"{}\",\"firstFailure\":\"{}\",\"exitCode\":{},\"elapsedMs\":{},\"replay\":{},\"redaction\":{},\"stdoutPath\":{},\"stderrPath\":{}}}",
             self.test_name,
             self.category.as_str(),
-            self.first_failure.replace('\"', "\\\"").replace('\n', "\\n"),
-            self.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "null".to_string()),
+            self.first_failure
+                .replace('\"', "\\\"")
+                .replace('\n', "\\n"),
+            self.exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "null".to_string()),
             self.elapsed.as_millis(),
             self.replay.to_json(),
             self.redaction.to_json(),
-            self.stdout_path.as_ref().map(|p| format!("\"{}\"", p.display())).unwrap_or_else(|| "null".to_string()),
-            self.stderr_path.as_ref().map(|p| format!("\"{}\"", p.display())).unwrap_or_else(|| "null".to_string())
+            self.stdout_path
+                .as_ref()
+                .map(|p| format!("\"{}\"", p.display()))
+                .unwrap_or_else(|| "null".to_string()),
+            self.stderr_path
+                .as_ref()
+                .map(|p| format!("\"{}\"", p.display()))
+                .unwrap_or_else(|| "null".to_string())
         )
     }
 
@@ -513,12 +533,12 @@ mod tests {
             false,
             "secret key removed",
         )?;
+        ensure(output.contains("mytoken123"), false, "token value removed")?;
         ensure(
-            output.contains("mytoken123"),
-            false,
-            "token value removed",
+            output.contains("[REDACTED:"),
+            true,
+            "redaction marker present",
         )?;
-        ensure(output.contains("[REDACTED:"), true, "redaction marker present")?;
         ensure(log.total_count() > 0, true, "redactions logged")
     }
 

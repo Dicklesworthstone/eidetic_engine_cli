@@ -839,7 +839,7 @@ mod tests {
     #[test]
     fn claim_entry_default_values() -> TestResult {
         let id = ClaimId::now();
-        let entry = ClaimEntry::new(id.clone(), "Test".to_owned(), "Description".to_owned());
+        let entry = ClaimEntry::new(id, "Test".to_owned(), "Description".to_owned());
         ensure_equal(&entry.id, &id, "id")?;
         ensure_equal(&entry.status, &ClaimStatus::Draft, "default status")?;
         ensure_equal(
@@ -855,7 +855,7 @@ mod tests {
     #[test]
     fn claim_manifest_new_has_correct_defaults() -> TestResult {
         let id = ClaimId::now();
-        let manifest = ClaimManifest::new(id.clone());
+        let manifest = ClaimManifest::new(id);
         ensure_equal(&manifest.schema, &CLAIM_MANIFEST_SCHEMA_V1, "schema")?;
         ensure_equal(&manifest.claim_id, &id, "claim_id")?;
         ensure(manifest.artifacts.is_empty(), "artifacts empty")?;

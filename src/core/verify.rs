@@ -678,7 +678,9 @@ mod tests {
 
         ensure(json.get("rules").is_some(), "has rules")?;
         let rules = json.get("rules").and_then(|v| v.as_array());
-        ensure(rules.is_some(), "rules is array")?;
-        ensure(rules.unwrap().len() >= 4, "at least 4 rules")
+        let Some(rules) = rules else {
+            return Err("rules is array".to_string());
+        };
+        ensure(rules.len() >= 4, "at least 4 rules")
     }
 }

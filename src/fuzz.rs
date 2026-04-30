@@ -279,7 +279,11 @@ mod tests {
         for _ in 0..100 {
             let picked = rng.pick(&items);
             ensure(picked.is_some(), "should pick something")?;
-            ensure(items.contains(picked.unwrap()), "should be from items")?;
+            let picked = match picked {
+                Some(value) => value,
+                None => return Err("should pick something".to_string()),
+            };
+            ensure(items.contains(picked), "should be from items")?;
         }
         Ok(())
     }
@@ -361,7 +365,10 @@ mod tests {
             }
         });
         ensure(result.is_err(), "should fail")?;
-        let err = result.unwrap_err();
+        let err = match result {
+            Ok(()) => return Err("should fail".to_string()),
+            Err(error) => error,
+        };
         ensure(
             err.contains("iteration 10"),
             "should mention iteration number",

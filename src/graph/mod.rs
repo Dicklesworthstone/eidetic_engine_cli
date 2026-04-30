@@ -464,16 +464,12 @@ impl CentralityRefreshReport {
     #[must_use]
     pub fn human_summary(&self) -> String {
         let mut output = match self.status {
-            CentralityRefreshStatus::Refreshed => {
-                "Centrality refresh completed\n\n".to_string()
-            }
+            CentralityRefreshStatus::Refreshed => "Centrality refresh completed\n\n".to_string(),
             CentralityRefreshStatus::EmptyGraph => {
                 return "Centrality refresh skipped: graph is empty (no memory links)\n"
                     .to_string();
             }
-            CentralityRefreshStatus::DryRun => {
-                "DRY RUN: Would refresh centrality\n\n".to_string()
-            }
+            CentralityRefreshStatus::DryRun => "DRY RUN: Would refresh centrality\n\n".to_string(),
             CentralityRefreshStatus::GraphFeatureDisabled => {
                 return "Centrality refresh skipped: graph feature is not enabled\n\
                         Next: Rebuild with `--features graph`\n"
