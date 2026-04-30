@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 
+use crate::cass::{CassClient, CassImportOptions, import_cass_sessions};
 use crate::core::check::CheckReport;
 use crate::core::doctor::DoctorReport;
 use crate::core::status::StatusReport;
@@ -106,6 +107,9 @@ pub enum Command {
     Eval(EvalCommand),
     /// Print command help.
     Help,
+    /// Import memories and evidence from external sources.
+    #[command(subcommand)]
+    Import(ImportCommand),
     /// Store a new memory.
     Remember(RememberArgs),
     /// List or export public response schemas.
@@ -147,6 +151,32 @@ pub struct RememberArgs {
     /// Perform a dry run without storing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum ImportCommand {
+    /// Import sessions and evidence from coding_agent_session_search.
+    Cass(CassImportArgs),
+}
+
+/// Arguments for `ee import cass`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct CassImportArgs {
+    /// Maximum sessions to import from CASS.
+    #[arg(long, default_value_t = 10)]
+    pub limit: u32,
+
+    /// Database path to write. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Query CASS and render the import plan without writing storage.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Skip first-window evidence span capture through `cass view`.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub no_spans: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -322,6 +352,9 @@ where
                 }
             },
         },
+        Some(Command::Import(ImportCommand::Cass(ref args))) => {
+            handle_import_cass(&cli, args, stdout, stderr)
+        }
         Some(Command::Schema(ref schema_cmd)) => match schema_cmd {
             SchemaCommand::List => match cli.renderer() {
                 output::Renderer::Human => {
@@ -480,6 +513,82 @@ fn clap_error_message(error: &clap::Error) -> String {
         .find(|line| line.starts_with("error:"))
         .map(|line| line.trim_start_matches("error:").trim().to_string())
         .unwrap_or_else(|| full.lines().next().unwrap_or("Unknown error").to_string())
+}
+
+fn handle_import_cass<W, E>(
+    cli: &Cli,
+    args: &CassImportArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = CassImportOptions {
+        workspace_path,
+        database_path: args.database.clone(),
+        limit: args.limit,
+        dry_run: args.dry_run,
+        include_spans: !args.no_spans,
+    };
+
+    match import_cass_sessions(&CassClient::new_default(), &options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human => write_stdout(stdout, &report.human_summary()),
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &format!(
+                    "IMPORT_CASS|{}|{}|{}|{}\n",
+                    report.status,
+                    report.sessions_discovered,
+                    report.sessions_imported,
+                    report.spans_imported
+                ),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json(),
+                });
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        Err(error) => {
+            let domain_error = DomainError::Import {
+                message: error.to_string(),
+                repair: error.repair_hint().map(str::to_string),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn write_domain_error<W, E>(
+    error: &DomainError,
+    wants_json: bool,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if wants_json {
+        let _ = stdout.write_all(output::error_response_json(error).as_bytes());
+        let _ = stdout.write_all(b"\n");
+    } else {
+        let _ = writeln!(stderr, "error: {}", error.message());
+        if let Some(repair) = error.repair() {
+            let _ = writeln!(stderr, "\nNext:\n  {repair}");
+        }
+    }
+    error.exit_code()
 }
 
 #[derive(Clone, Debug, PartialEq)]

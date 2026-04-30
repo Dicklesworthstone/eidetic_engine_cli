@@ -34,7 +34,8 @@ pub enum CassAgent {
 }
 
 impl CassAgent {
-    /// Parse an agent string from CASS output.
+    /// Parse an agent string from CASS output, mapping unknown values to
+    /// [`Self::Unknown`].
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
         match s.to_lowercase().as_str() {
@@ -154,7 +155,8 @@ pub enum CassSpanKind {
 }
 
 impl CassSpanKind {
-    /// Parse a span kind from CASS output.
+    /// Parse a span kind from CASS output, mapping unknown values to
+    /// [`Self::Message`].
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
         match s.to_lowercase().as_str() {
@@ -209,7 +211,8 @@ pub enum CassRole {
 }
 
 impl CassRole {
-    /// Parse a role from CASS output.
+    /// Parse a role from CASS output, mapping unknown values to
+    /// [`Self::User`].
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
         match s.to_lowercase().as_str() {

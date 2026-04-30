@@ -34,6 +34,7 @@ pub mod client;
 pub mod contract;
 pub mod error;
 pub mod health;
+pub mod import;
 pub mod process;
 pub mod session;
 
@@ -46,6 +47,10 @@ pub use contract::{
 };
 pub use error::CassError;
 pub use health::{CassDbHealth, CassHealth, CassIndexHealth};
+pub use import::{
+    CassImportError, CassImportOptions, CassImportReport, ImportSessionStatus, ImportedCassSession,
+    import_cass_sessions,
+};
 pub use process::{CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassExitClass, CassInvocation, CassOutcome};
 pub use session::{
     CassAgent, CassRole, CassSessionInfo, CassSpanKind, CassViewSpan, ImportCursor,

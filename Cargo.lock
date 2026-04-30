@@ -934,6 +934,7 @@ name = "ee"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "blake3",
  "chrono",
  "clap",
  "clap_complete",
