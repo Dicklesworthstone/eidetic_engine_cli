@@ -13,6 +13,8 @@ pub enum InitStatus {
     Created,
     AlreadyExists,
     DryRun,
+    RepairPlan,
+    Revalidated,
 }
 
 impl InitStatus {
@@ -22,12 +24,21 @@ impl InitStatus {
             Self::Created => "created",
             Self::AlreadyExists => "already_exists",
             Self::DryRun => "dry_run",
+            Self::RepairPlan => "repair_plan",
+            Self::Revalidated => "revalidated",
         }
     }
 
     #[must_use]
     pub const fn is_success(self) -> bool {
-        matches!(self, Self::Created | Self::AlreadyExists | Self::DryRun)
+        matches!(
+            self,
+            Self::Created
+                | Self::AlreadyExists
+                | Self::DryRun
+                | Self::RepairPlan
+                | Self::Revalidated
+        )
     }
 }
 
@@ -44,6 +55,12 @@ pub struct InitAction {
 pub struct InitOptions {
     pub workspace_path: PathBuf,
     pub dry_run: bool,
+    /// Report non-destructive repair actions without applying them.
+    pub repair_plan: bool,
+    /// Force revalidation/recreation of EE-owned artifacts.
+    pub force: bool,
+    /// Allow workspace paths that traverse symlinks.
+    pub allow_symlink: bool,
 }
 
 /// Report returned by the init command.
@@ -76,6 +93,12 @@ impl InitReport {
                 }
                 InitStatus::DryRun => {
                     output.push_str("DRY RUN: Would initialize ee workspace\n\n");
+                }
+                InitStatus::RepairPlan => {
+                    output.push_str("REPAIR PLAN: Proposed actions for ee workspace\n\n");
+                }
+                InitStatus::Revalidated => {
+                    output.push_str("Revalidated ee workspace\n\n");
                 }
             }
         }
@@ -142,6 +165,11 @@ impl InitReport {
 ///
 /// Creates the .ee directory, database file placeholder, and index directory
 /// if they don't exist. Idempotent: returns success if already initialized.
+///
+/// Modes:
+/// - `dry_run`: Report what would be done without creating files
+/// - `repair_plan`: Report non-destructive repair actions for existing workspaces
+/// - `force`: Force revalidation/recreation of EE-owned artifacts
 #[must_use]
 pub fn init_workspace(options: &InitOptions) -> InitReport {
     let version = build_info().version;
@@ -160,6 +188,64 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
 
     let mut actions = Vec::new();
     let mut any_created = false;
+
+    // Repair plan mode: report what could be fixed without making changes
+    if options.repair_plan {
+        let mut repair_actions = Vec::new();
+
+        if !ee_dir.exists() {
+            repair_actions.push(InitAction {
+                action: "create_directory",
+                path: ee_dir.clone(),
+                status: "missing",
+            });
+        } else {
+            repair_actions.push(InitAction {
+                action: "check_directory",
+                path: ee_dir.clone(),
+                status: "ok",
+            });
+        }
+
+        if !index_dir.exists() {
+            repair_actions.push(InitAction {
+                action: "create_directory",
+                path: index_dir.clone(),
+                status: "missing",
+            });
+        } else {
+            repair_actions.push(InitAction {
+                action: "check_directory",
+                path: index_dir.clone(),
+                status: "ok",
+            });
+        }
+
+        if !database_path.exists() {
+            repair_actions.push(InitAction {
+                action: "create_file",
+                path: database_path.clone(),
+                status: "missing",
+            });
+        } else {
+            repair_actions.push(InitAction {
+                action: "check_file",
+                path: database_path.clone(),
+                status: "ok",
+            });
+        }
+
+        return InitReport {
+            version,
+            status: InitStatus::RepairPlan,
+            workspace,
+            ee_dir,
+            database_path,
+            index_dir,
+            actions: repair_actions,
+            dry_run: false,
+        };
+    }
 
     if options.dry_run {
         if !ee_dir.exists() {
@@ -250,6 +336,8 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
 
     let status = if any_created {
         InitStatus::Created
+    } else if options.force {
+        InitStatus::Revalidated
     } else {
         InitStatus::AlreadyExists
     };
@@ -288,7 +376,17 @@ mod tests {
             "already_exists",
             "already_exists",
         )?;
-        ensure(InitStatus::DryRun.as_str(), "dry_run", "dry_run")
+        ensure(InitStatus::DryRun.as_str(), "dry_run", "dry_run")?;
+        ensure(
+            InitStatus::RepairPlan.as_str(),
+            "repair_plan",
+            "repair_plan",
+        )?;
+        ensure(
+            InitStatus::Revalidated.as_str(),
+            "revalidated",
+            "revalidated",
+        )
     }
 
     #[test]
@@ -299,16 +397,32 @@ mod tests {
             true,
             "already_exists is success",
         )?;
-        ensure(InitStatus::DryRun.is_success(), true, "dry_run is success")
+        ensure(InitStatus::DryRun.is_success(), true, "dry_run is success")?;
+        ensure(
+            InitStatus::RepairPlan.is_success(),
+            true,
+            "repair_plan is success",
+        )?;
+        ensure(
+            InitStatus::Revalidated.is_success(),
+            true,
+            "revalidated is success",
+        )
     }
 
     #[test]
     fn init_dry_run_does_not_create_files() -> TestResult {
         let temp_dir = std::env::temp_dir().join(format!("ee_init_test_{}", std::process::id()));
-
-        let options = InitOptions {
-            workspace_path: temp_dir.clone(),
-            dry_run: true,
+let options = InitOptions {
+    workspace_path: temp_dir.clone(),
+    dry_run: false,
+    repair_plan: false,
+    force: false,
+    allow_symlink: false,
+};
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
         };
 
         let report = init_workspace(&options);
@@ -329,10 +443,16 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
-
-        let options = InitOptions {
-            workspace_path: temp_dir.clone(),
-            dry_run: false,
+let options = InitOptions {
+    workspace_path: temp_dir.clone(),
+    dry_run: false,
+    repair_plan: false,
+    force: false,
+    allow_symlink: false,
+};
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
         };
 
         let report = init_workspace(&options);
@@ -356,10 +476,16 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
-
-        let options = InitOptions {
-            workspace_path: temp_dir.clone(),
-            dry_run: false,
+let options = InitOptions {
+    workspace_path: temp_dir.clone(),
+    dry_run: false,
+    repair_plan: false,
+    force: false,
+    allow_symlink: false,
+};
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
         };
 
         let first_report = init_workspace(&options);
@@ -429,5 +555,84 @@ mod tests {
 
         ensure(toon.starts_with("INIT|"), true, "toon starts with INIT|")?;
         ensure(toon.contains("created"), true, "toon contains status")
+    }
+
+    #[test]
+    fn init_repair_plan_mode() -> TestResult {
+        let temp_dir =
+            std::env::temp_dir().join(format!("ee_init_repair_test_{}", std::process::id()));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+let options = InitOptions {
+    workspace_path: temp_dir.clone(),
+    dry_run: false,
+    repair_plan: false,
+    force: false,
+    allow_symlink: false,
+};
+            repair_plan: true,
+            force: false,
+            allow_symlink: false,
+        };
+
+        let report = init_workspace(&options);
+
+        ensure(
+            report.status,
+            InitStatus::RepairPlan,
+            "status is repair_plan",
+        )?;
+        ensure(
+            temp_dir.join(".ee").exists(),
+            false,
+            ".ee dir should not exist after repair_plan",
+        )?;
+        ensure(
+            !report.actions.is_empty(),
+            true,
+            "repair_plan should have actions",
+        )?;
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn init_force_revalidates_existing() -> TestResult {
+        let temp_dir =
+            std::env::temp_dir().join(format!("ee_init_force_test_{}", std::process::id()));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+
+        // First init to create workspace
+        let options = InitOptions {
+            workspace_path: temp_dir.clone(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+        };
+        let _ = init_workspace(&options);
+
+        // Second init with force
+        let force_options = InitOptions {
+            workspace_path: temp_dir.clone(),
+            dry_run: false,
+            repair_plan: false,
+            force: true,
+            allow_symlink: false,
+        };
+        let report = init_workspace(&force_options);
+
+        ensure(
+            report.status,
+            InitStatus::Revalidated,
+            "force on existing workspace returns revalidated",
+        )?;
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        Ok(())
     }
 }

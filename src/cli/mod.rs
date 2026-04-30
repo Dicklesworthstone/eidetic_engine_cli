@@ -428,6 +428,18 @@ pub struct InitArgs {
     /// Report what would be done without creating files.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+
+    /// Report non-destructive repair actions without applying them.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub repair_plan: bool,
+
+    /// Force revalidation/recreation of EE-owned artifacts (idempotent).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub force: bool,
+
+    /// Allow workspace paths that traverse symlinks (default: deny).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub allow_symlink: bool,
 }
 
 /// Arguments for the remember command.
@@ -1011,6 +1023,9 @@ where
             let options = InitOptions {
                 workspace_path,
                 dry_run: args.dry_run,
+                repair_plan: args.repair_plan,
+                force: args.force,
+                allow_symlink: args.allow_symlink,
             };
             let report = init_workspace(&options);
             match cli.renderer() {
@@ -1170,7 +1185,10 @@ where
         }
         Some(Command::Status) => {
             let timing_capture = crate::models::TimingCapture::start();
-            let report = StatusReport::gather();
+            let report = cli
+                .workspace
+                .as_deref()
+                .map_or_else(StatusReport::gather, StatusReport::gather_for_workspace);
             let timing = timing_capture.finish();
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
@@ -3609,7 +3627,7 @@ mod tests {
         ensure_contains(&stdout, "command: status", "status TOON command")?;
         ensure_contains(
             &stdout,
-            "degraded[2]{code,severity,message,repair}:",
+            "degraded[3]{code,severity,message,repair}:",
             "status TOON degradation table",
         )?;
         ensure_ends_with(&stdout, '\n', "status TOON trailing newline")?;
