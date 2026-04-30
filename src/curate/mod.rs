@@ -1246,6 +1246,551 @@ pub fn validate_status_transition(
     Ok(())
 }
 
+// ============================================================================
+// EE-346: Calibrated Curation Risk Certificates
+// ============================================================================
+
+/// Schema identifier for curation risk certificates.
+pub const RISK_CERTIFICATE_SCHEMA_V1: &str = "ee.curate.risk_certificate.v1";
+
+/// Calibrated risk level for a curation action.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub enum RiskLevel {
+    /// Low risk: action is safe, reversible, and well-understood.
+    Low,
+    /// Medium risk: action has some uncertainty or moderate impact.
+    Medium,
+    /// High risk: action has significant uncertainty or major impact.
+    High,
+    /// Critical risk: action is irreversible or has cascading effects.
+    Critical,
+}
+
+impl RiskLevel {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 4] {
+        [Self::Low, Self::Medium, Self::High, Self::Critical]
+    }
+
+    #[must_use]
+    pub const fn requires_human_review(self) -> bool {
+        matches!(self, Self::High | Self::Critical)
+    }
+
+    #[must_use]
+    pub const fn numeric_level(self) -> u8 {
+        match self {
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+            Self::Critical => 4,
+        }
+    }
+}
+
+impl fmt::Display for RiskLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Error when parsing an invalid risk level string.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseRiskLevelError {
+    input: String,
+}
+
+impl ParseRiskLevelError {
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+}
+
+impl fmt::Display for ParseRiskLevelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unknown risk level `{}`; expected one of low, medium, high, critical",
+            self.input
+        )
+    }
+}
+
+impl std::error::Error for ParseRiskLevelError {}
+
+impl FromStr for RiskLevel {
+    type Err = ParseRiskLevelError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "critical" => Ok(Self::Critical),
+            _ => Err(ParseRiskLevelError {
+                input: input.to_owned(),
+            }),
+        }
+    }
+}
+
+/// A factor that contributes to the risk assessment.
+#[derive(Clone, Debug)]
+pub struct RiskFactor {
+    /// Factor name (e.g., "irreversibility", "cascade_potential").
+    pub name: String,
+    /// Weight of this factor in the overall risk score (0.0 to 1.0).
+    pub weight: f32,
+    /// Contribution to risk (0.0 = no risk, 1.0 = maximum risk).
+    pub contribution: f32,
+    /// Human-readable description of why this factor applies.
+    pub reason: String,
+}
+
+impl RiskFactor {
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        weight: f32,
+        contribution: f32,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            weight: weight.clamp(0.0, 1.0),
+            contribution: contribution.clamp(0.0, 1.0),
+            reason: reason.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn weighted_contribution(&self) -> f32 {
+        self.weight * self.contribution
+    }
+}
+
+/// Calibrated probability estimates for curation outcomes.
+#[derive(Clone, Debug, Default)]
+pub struct OutcomeProbabilities {
+    /// Probability that the action will succeed as intended.
+    pub success: f32,
+    /// Probability of partial success (some goals achieved).
+    pub partial_success: f32,
+    /// Probability that the action has no effect.
+    pub no_effect: f32,
+    /// Probability of negative consequences.
+    pub negative_outcome: f32,
+    /// Probability of cascading failures.
+    pub cascade_failure: f32,
+}
+
+impl OutcomeProbabilities {
+    #[must_use]
+    pub fn new(
+        success: f32,
+        partial_success: f32,
+        no_effect: f32,
+        negative_outcome: f32,
+        cascade_failure: f32,
+    ) -> Self {
+        Self {
+            success: success.clamp(0.0, 1.0),
+            partial_success: partial_success.clamp(0.0, 1.0),
+            no_effect: no_effect.clamp(0.0, 1.0),
+            negative_outcome: negative_outcome.clamp(0.0, 1.0),
+            cascade_failure: cascade_failure.clamp(0.0, 1.0),
+        }
+    }
+
+    #[must_use]
+    pub fn total(&self) -> f32 {
+        self.success
+            + self.partial_success
+            + self.no_effect
+            + self.negative_outcome
+            + self.cascade_failure
+    }
+
+    #[must_use]
+    pub fn is_calibrated(&self) -> bool {
+        let total = self.total();
+        (total - 1.0).abs() < 0.01
+    }
+
+    #[must_use]
+    pub fn expected_positive(&self) -> f32 {
+        self.success + self.partial_success
+    }
+
+    #[must_use]
+    pub fn expected_negative(&self) -> f32 {
+        self.negative_outcome + self.cascade_failure
+    }
+}
+
+/// A recommendation based on the risk assessment.
+#[derive(Clone, Debug)]
+pub struct RiskRecommendation {
+    /// Action to take (e.g., "proceed", "review", "defer", "reject").
+    pub action: String,
+    /// Confidence in this recommendation (0.0 to 1.0).
+    pub confidence: f32,
+    /// Human-readable explanation.
+    pub explanation: String,
+}
+
+impl RiskRecommendation {
+    #[must_use]
+    pub fn proceed(confidence: f32, explanation: impl Into<String>) -> Self {
+        Self {
+            action: "proceed".to_owned(),
+            confidence: confidence.clamp(0.0, 1.0),
+            explanation: explanation.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn review(confidence: f32, explanation: impl Into<String>) -> Self {
+        Self {
+            action: "review".to_owned(),
+            confidence: confidence.clamp(0.0, 1.0),
+            explanation: explanation.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn defer(confidence: f32, explanation: impl Into<String>) -> Self {
+        Self {
+            action: "defer".to_owned(),
+            confidence: confidence.clamp(0.0, 1.0),
+            explanation: explanation.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn reject(confidence: f32, explanation: impl Into<String>) -> Self {
+        Self {
+            action: "reject".to_owned(),
+            confidence: confidence.clamp(0.0, 1.0),
+            explanation: explanation.into(),
+        }
+    }
+}
+
+/// A calibrated risk certificate for a curation action.
+#[derive(Clone, Debug)]
+pub struct RiskCertificate {
+    /// Schema identifier.
+    pub schema: String,
+    /// Candidate type being assessed.
+    pub candidate_type: CandidateType,
+    /// Target memory ID.
+    pub target_memory_id: String,
+    /// Overall risk level.
+    pub risk_level: RiskLevel,
+    /// Aggregate risk score (0.0 to 1.0).
+    pub risk_score: f32,
+    /// Individual risk factors.
+    pub factors: Vec<RiskFactor>,
+    /// Calibrated outcome probabilities.
+    pub probabilities: OutcomeProbabilities,
+    /// Primary recommendation.
+    pub recommendation: RiskRecommendation,
+    /// Whether this certificate is in report-only mode.
+    pub report_only: bool,
+    /// Timestamp when the certificate was generated.
+    pub generated_at: String,
+}
+
+impl RiskCertificate {
+    #[must_use]
+    pub fn builder() -> RiskCertificateBuilder {
+        RiskCertificateBuilder::default()
+    }
+
+    #[must_use]
+    pub fn requires_human_review(&self) -> bool {
+        self.risk_level.requires_human_review()
+    }
+
+    #[must_use]
+    pub fn is_actionable(&self) -> bool {
+        !self.report_only && !self.requires_human_review()
+    }
+}
+
+/// Builder for constructing risk certificates.
+#[derive(Clone, Debug, Default)]
+pub struct RiskCertificateBuilder {
+    candidate_type: Option<CandidateType>,
+    target_memory_id: Option<String>,
+    factors: Vec<RiskFactor>,
+    probabilities: OutcomeProbabilities,
+    report_only: bool,
+    generated_at: Option<String>,
+}
+
+impl RiskCertificateBuilder {
+    #[must_use]
+    pub fn candidate_type(mut self, candidate_type: CandidateType) -> Self {
+        self.candidate_type = Some(candidate_type);
+        self
+    }
+
+    #[must_use]
+    pub fn target_memory_id(mut self, id: impl Into<String>) -> Self {
+        self.target_memory_id = Some(id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn add_factor(mut self, factor: RiskFactor) -> Self {
+        self.factors.push(factor);
+        self
+    }
+
+    #[must_use]
+    pub fn probabilities(mut self, probabilities: OutcomeProbabilities) -> Self {
+        self.probabilities = probabilities;
+        self
+    }
+
+    #[must_use]
+    pub fn report_only(mut self, report_only: bool) -> Self {
+        self.report_only = report_only;
+        self
+    }
+
+    #[must_use]
+    pub fn generated_at(mut self, timestamp: impl Into<String>) -> Self {
+        self.generated_at = Some(timestamp.into());
+        self
+    }
+
+    #[must_use]
+    pub fn build(self) -> RiskCertificate {
+        let risk_score = calculate_risk_score(&self.factors);
+        let risk_level = risk_level_from_score(risk_score);
+        let recommendation = generate_recommendation(risk_level, risk_score, &self.probabilities);
+
+        RiskCertificate {
+            schema: RISK_CERTIFICATE_SCHEMA_V1.to_owned(),
+            candidate_type: self.candidate_type.unwrap_or(CandidateType::Promote),
+            target_memory_id: self.target_memory_id.unwrap_or_default(),
+            risk_level,
+            risk_score,
+            factors: self.factors,
+            probabilities: self.probabilities,
+            recommendation,
+            report_only: self.report_only,
+            generated_at: self.generated_at.unwrap_or_default(),
+        }
+    }
+}
+
+fn calculate_risk_score(factors: &[RiskFactor]) -> f32 {
+    if factors.is_empty() {
+        return 0.0;
+    }
+    let total_weight: f32 = factors.iter().map(|f| f.weight).sum();
+    if total_weight == 0.0 {
+        return 0.0;
+    }
+    let weighted_sum: f32 = factors.iter().map(|f| f.weighted_contribution()).sum();
+    (weighted_sum / total_weight).clamp(0.0, 1.0)
+}
+
+fn risk_level_from_score(score: f32) -> RiskLevel {
+    if score < 0.25 {
+        RiskLevel::Low
+    } else if score < 0.50 {
+        RiskLevel::Medium
+    } else if score < 0.75 {
+        RiskLevel::High
+    } else {
+        RiskLevel::Critical
+    }
+}
+
+fn generate_recommendation(
+    level: RiskLevel,
+    score: f32,
+    probabilities: &OutcomeProbabilities,
+) -> RiskRecommendation {
+    let confidence = 1.0 - score;
+    match level {
+        RiskLevel::Low => RiskRecommendation::proceed(
+            confidence,
+            format!(
+                "Low risk (score {:.2}). Expected success rate: {:.0}%.",
+                score,
+                probabilities.expected_positive() * 100.0
+            ),
+        ),
+        RiskLevel::Medium => {
+            if probabilities.expected_positive() > 0.7 {
+                RiskRecommendation::proceed(
+                    confidence * 0.8,
+                    format!(
+                        "Medium risk but high success likelihood ({:.0}%). Proceed with monitoring.",
+                        probabilities.expected_positive() * 100.0
+                    ),
+                )
+            } else {
+                RiskRecommendation::review(
+                    confidence,
+                    format!(
+                        "Medium risk (score {:.2}). Review recommended before proceeding.",
+                        score
+                    ),
+                )
+            }
+        }
+        RiskLevel::High => RiskRecommendation::review(
+            confidence,
+            format!(
+                "High risk (score {:.2}). Human review required. Negative outcome probability: {:.0}%.",
+                score,
+                probabilities.expected_negative() * 100.0
+            ),
+        ),
+        RiskLevel::Critical => {
+            if probabilities.cascade_failure > 0.1 {
+                RiskRecommendation::reject(
+                    confidence,
+                    format!(
+                        "Critical risk with cascade potential ({:.0}%). Action not recommended.",
+                        probabilities.cascade_failure * 100.0
+                    ),
+                )
+            } else {
+                RiskRecommendation::defer(
+                    confidence,
+                    format!(
+                        "Critical risk (score {:.2}). Defer until additional validation available.",
+                        score
+                    ),
+                )
+            }
+        }
+    }
+}
+
+/// Assess the risk of a curation candidate.
+#[must_use]
+pub fn assess_risk(candidate: &ValidatedCandidate, report_only: bool) -> RiskCertificate {
+    let mut builder = RiskCertificate::builder()
+        .candidate_type(candidate.candidate_type)
+        .target_memory_id(&candidate.target_memory_id)
+        .report_only(report_only);
+
+    builder = builder.add_factor(RiskFactor::new(
+        "irreversibility",
+        0.3,
+        candidate.candidate_type.irreversibility_score(),
+        format!(
+            "{} actions have {} reversibility",
+            candidate.candidate_type,
+            if candidate.candidate_type.irreversibility_score() > 0.5 {
+                "low"
+            } else {
+                "high"
+            }
+        ),
+    ));
+
+    builder = builder.add_factor(RiskFactor::new(
+        "confidence",
+        0.25,
+        1.0 - candidate.confidence,
+        format!(
+            "Candidate confidence is {:.0}%",
+            candidate.confidence * 100.0
+        ),
+    ));
+
+    let source_risk = match candidate.source_type {
+        CandidateSource::HumanRequest => 0.1,
+        CandidateSource::RuleEngine => 0.2,
+        CandidateSource::FeedbackEvent => 0.3,
+        CandidateSource::AgentInference => 0.5,
+        CandidateSource::ContradictionDetected => 0.6,
+        CandidateSource::DecayTrigger => 0.4,
+    };
+    builder = builder.add_factor(RiskFactor::new(
+        "source_reliability",
+        0.2,
+        source_risk,
+        format!(
+            "Source type {} has {} reliability",
+            candidate.source_type,
+            if source_risk < 0.3 {
+                "high"
+            } else {
+                "moderate"
+            }
+        ),
+    ));
+
+    let cascade_potential = if candidate.candidate_type == CandidateType::Tombstone
+        || candidate.candidate_type == CandidateType::Retract
+    {
+        0.7
+    } else if candidate.candidate_type == CandidateType::Supersede {
+        0.5
+    } else {
+        0.2
+    };
+    builder = builder.add_factor(RiskFactor::new(
+        "cascade_potential",
+        0.25,
+        cascade_potential,
+        format!(
+            "{} may affect {} downstream memories",
+            candidate.candidate_type,
+            if cascade_potential > 0.5 {
+                "many"
+            } else {
+                "few"
+            }
+        ),
+    ));
+
+    let base_success = candidate.confidence * 0.7 + 0.2;
+    builder = builder.probabilities(OutcomeProbabilities::new(
+        base_success * 0.7,
+        base_success * 0.2,
+        0.1 * (1.0 - candidate.confidence),
+        (1.0 - base_success) * 0.7,
+        (1.0 - base_success) * 0.3 * cascade_potential,
+    ));
+
+    builder.build()
+}
+
+impl CandidateType {
+    #[must_use]
+    pub const fn irreversibility_score(self) -> f32 {
+        match self {
+            Self::Promote | Self::Deprecate => 0.2,
+            Self::Consolidate | Self::Merge => 0.4,
+            Self::Supersede | Self::Split => 0.5,
+            Self::Retract => 0.7,
+            Self::Tombstone => 0.9,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -1711,5 +2256,262 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
         assert!(CandidateType::Tombstone.forbids_content());
         assert!(CandidateType::Retract.forbids_content());
         assert!(!CandidateType::Promote.forbids_content());
+    }
+
+    // ========================================================================
+    // EE-346: Risk Certificate Tests
+    // ========================================================================
+
+    use super::{
+        CandidateSource, CandidateType, OutcomeProbabilities, ParseRiskLevelError,
+        RISK_CERTIFICATE_SCHEMA_V1, RiskCertificate, RiskFactor, RiskLevel, RiskRecommendation,
+        ValidatedCandidate, assess_risk,
+    };
+
+    type TestResult = Result<(), String>;
+
+    fn ensure<T: std::fmt::Debug + PartialEq>(actual: T, expected: T, ctx: &str) -> TestResult {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
+        }
+    }
+
+    #[test]
+    fn risk_level_as_str() -> TestResult {
+        ensure(RiskLevel::Low.as_str(), "low", "low")?;
+        ensure(RiskLevel::Medium.as_str(), "medium", "medium")?;
+        ensure(RiskLevel::High.as_str(), "high", "high")?;
+        ensure(RiskLevel::Critical.as_str(), "critical", "critical")
+    }
+
+    #[test]
+    fn risk_level_parse_roundtrip() -> TestResult {
+        for level in RiskLevel::all() {
+            let s = level.as_str();
+            let parsed: RiskLevel = s.parse().map_err(|e: ParseRiskLevelError| e.to_string())?;
+            ensure(parsed, level, &format!("roundtrip {s}"))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn risk_level_requires_human_review() -> TestResult {
+        ensure(RiskLevel::Low.requires_human_review(), false, "low")?;
+        ensure(RiskLevel::Medium.requires_human_review(), false, "medium")?;
+        ensure(RiskLevel::High.requires_human_review(), true, "high")?;
+        ensure(
+            RiskLevel::Critical.requires_human_review(),
+            true,
+            "critical",
+        )
+    }
+
+    #[test]
+    fn risk_level_numeric() -> TestResult {
+        ensure(RiskLevel::Low.numeric_level(), 1, "low")?;
+        ensure(RiskLevel::Medium.numeric_level(), 2, "medium")?;
+        ensure(RiskLevel::High.numeric_level(), 3, "high")?;
+        ensure(RiskLevel::Critical.numeric_level(), 4, "critical")
+    }
+
+    #[test]
+    fn risk_factor_weighted_contribution() {
+        let factor = RiskFactor::new("test", 0.5, 0.8, "test reason");
+        let expected = 0.4;
+        let actual = factor.weighted_contribution();
+        assert!((actual - expected).abs() < 0.001);
+    }
+
+    #[test]
+    fn risk_factor_clamps_values() {
+        let factor = RiskFactor::new("test", 1.5, -0.2, "test");
+        assert!(factor.weight <= 1.0);
+        assert!(factor.contribution >= 0.0);
+    }
+
+    #[test]
+    fn outcome_probabilities_total() {
+        let probs = OutcomeProbabilities::new(0.5, 0.2, 0.1, 0.15, 0.05);
+        let total = probs.total();
+        assert!((total - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn outcome_probabilities_is_calibrated() {
+        let calibrated = OutcomeProbabilities::new(0.5, 0.2, 0.1, 0.15, 0.05);
+        assert!(calibrated.is_calibrated());
+
+        let uncalibrated = OutcomeProbabilities::new(0.9, 0.9, 0.9, 0.9, 0.9);
+        assert!(!uncalibrated.is_calibrated());
+    }
+
+    #[test]
+    fn outcome_probabilities_expected_values() {
+        let probs = OutcomeProbabilities::new(0.5, 0.2, 0.1, 0.15, 0.05);
+        assert!((probs.expected_positive() - 0.7).abs() < 0.001);
+        assert!((probs.expected_negative() - 0.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn risk_recommendation_constructors() {
+        let proceed = RiskRecommendation::proceed(0.9, "safe");
+        assert_eq!(proceed.action, "proceed");
+        assert!((proceed.confidence - 0.9).abs() < 0.001);
+
+        let review = RiskRecommendation::review(0.8, "needs review");
+        assert_eq!(review.action, "review");
+
+        let defer = RiskRecommendation::defer(0.7, "wait");
+        assert_eq!(defer.action, "defer");
+
+        let reject = RiskRecommendation::reject(0.6, "too risky");
+        assert_eq!(reject.action, "reject");
+    }
+
+    #[test]
+    fn risk_certificate_builder_defaults() {
+        let cert = RiskCertificate::builder()
+            .target_memory_id("mem-001")
+            .build();
+
+        assert_eq!(cert.schema, RISK_CERTIFICATE_SCHEMA_V1);
+        assert_eq!(cert.target_memory_id, "mem-001");
+        assert!(!cert.report_only);
+    }
+
+    #[test]
+    fn risk_certificate_builder_with_factors() {
+        let cert = RiskCertificate::builder()
+            .candidate_type(CandidateType::Tombstone)
+            .target_memory_id("mem-002")
+            .add_factor(RiskFactor::new(
+                "irreversibility",
+                0.5,
+                0.9,
+                "tombstone is permanent",
+            ))
+            .add_factor(RiskFactor::new(
+                "cascade",
+                0.3,
+                0.7,
+                "may affect downstream",
+            ))
+            .report_only(true)
+            .build();
+
+        assert_eq!(cert.candidate_type, CandidateType::Tombstone);
+        assert_eq!(cert.factors.len(), 2);
+        assert!(cert.report_only);
+        assert!(cert.risk_score > 0.0);
+    }
+
+    #[test]
+    fn risk_certificate_requires_human_review() {
+        let low_risk = RiskCertificate::builder()
+            .add_factor(RiskFactor::new("test", 1.0, 0.1, "low"))
+            .build();
+        assert!(!low_risk.requires_human_review());
+
+        let high_risk = RiskCertificate::builder()
+            .add_factor(RiskFactor::new("test", 1.0, 0.8, "high"))
+            .build();
+        assert!(high_risk.requires_human_review());
+    }
+
+    #[test]
+    fn risk_certificate_is_actionable() {
+        let actionable = RiskCertificate::builder()
+            .add_factor(RiskFactor::new("test", 1.0, 0.1, "low"))
+            .report_only(false)
+            .build();
+        assert!(actionable.is_actionable());
+
+        let report_only = RiskCertificate::builder()
+            .add_factor(RiskFactor::new("test", 1.0, 0.1, "low"))
+            .report_only(true)
+            .build();
+        assert!(!report_only.is_actionable());
+
+        let high_risk = RiskCertificate::builder()
+            .add_factor(RiskFactor::new("test", 1.0, 0.8, "high"))
+            .report_only(false)
+            .build();
+        assert!(!high_risk.is_actionable());
+    }
+
+    #[test]
+    fn assess_risk_low_confidence_candidate() {
+        let candidate = ValidatedCandidate {
+            workspace_id: "ws-001".to_owned(),
+            candidate_type: CandidateType::Promote,
+            target_memory_id: "mem-001".to_owned(),
+            proposed_content: None,
+            specificity_report: None,
+            proposed_confidence: Some(0.9),
+            proposed_trust_class: None,
+            source_type: CandidateSource::HumanRequest,
+            source_id: None,
+            reason: "test".to_owned(),
+            confidence: 0.3,
+            ttl_expires_at: None,
+        };
+
+        let cert = assess_risk(&candidate, true);
+        assert!(cert.report_only);
+        assert!(cert.risk_score > 0.3);
+    }
+
+    #[test]
+    fn assess_risk_tombstone_high_risk() {
+        let candidate = ValidatedCandidate {
+            workspace_id: "ws-001".to_owned(),
+            candidate_type: CandidateType::Tombstone,
+            target_memory_id: "mem-001".to_owned(),
+            proposed_content: None,
+            specificity_report: None,
+            proposed_confidence: None,
+            proposed_trust_class: None,
+            source_type: CandidateSource::AgentInference,
+            source_id: None,
+            reason: "no longer relevant".to_owned(),
+            confidence: 0.5,
+            ttl_expires_at: None,
+        };
+
+        let cert = assess_risk(&candidate, false);
+        assert!(cert.risk_level >= RiskLevel::Medium);
+        assert!(cert.factors.len() >= 4);
+    }
+
+    #[test]
+    fn assess_risk_human_request_lower_risk() {
+        let candidate = ValidatedCandidate {
+            workspace_id: "ws-001".to_owned(),
+            candidate_type: CandidateType::Promote,
+            target_memory_id: "mem-001".to_owned(),
+            proposed_content: None,
+            specificity_report: None,
+            proposed_confidence: Some(0.95),
+            proposed_trust_class: None,
+            source_type: CandidateSource::HumanRequest,
+            source_id: None,
+            reason: "verified correct".to_owned(),
+            confidence: 0.95,
+            ttl_expires_at: None,
+        };
+
+        let cert = assess_risk(&candidate, false);
+        assert_eq!(cert.risk_level, RiskLevel::Low);
+        assert_eq!(cert.recommendation.action, "proceed");
+    }
+
+    #[test]
+    fn candidate_type_irreversibility_scores() {
+        assert!(CandidateType::Tombstone.irreversibility_score() > 0.8);
+        assert!(CandidateType::Retract.irreversibility_score() > 0.6);
+        assert!(CandidateType::Promote.irreversibility_score() < 0.3);
+        assert!(CandidateType::Deprecate.irreversibility_score() < 0.3);
     }
 }
