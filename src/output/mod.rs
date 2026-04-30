@@ -5,7 +5,7 @@ use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
 use crate::core::doctor::{DoctorReport, FixPlan};
 use crate::core::health::HealthReport;
-use crate::core::memory::{MemoryDetails, MemoryShowReport};
+use crate::core::memory::{MemoryDetails, MemoryListReport, MemoryShowReport};
 use crate::core::quarantine::{QuarantineEntry, QuarantineReport};
 use crate::core::status::StatusReport;
 use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
@@ -558,6 +558,54 @@ pub fn render_status_json(report: &StatusReport) -> String {
     b.finish()
 }
 
+/// Render a status report as JSON with optional timing metadata.
+///
+/// When `timing` is provided, adds a `meta` object with timing fields.
+#[must_use]
+pub fn render_status_json_with_meta(
+    report: &StatusReport,
+    timing: Option<&crate::models::DiagnosticTiming>,
+) -> String {
+    let mut b = JsonBuilder::with_capacity(1024);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "status");
+        d.field_str("version", report.version);
+        d.field_object("capabilities", |c| {
+            c.field_str("runtime", report.capabilities.runtime.as_str());
+            c.field_str("storage", report.capabilities.storage.as_str());
+            c.field_str("search", report.capabilities.search.as_str());
+        });
+        d.field_object("runtime", |r| {
+            r.field_str("engine", report.runtime.engine);
+            r.field_str("profile", report.runtime.profile);
+            r.field_raw("workerThreads", &report.runtime.worker_threads.to_string());
+            r.field_str("asyncBoundary", report.runtime.async_boundary);
+        });
+        d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
+            obj.field_str("code", deg.code);
+            obj.field_str("severity", deg.severity);
+            obj.field_str("message", deg.message);
+            obj.field_str("repair", deg.repair);
+        });
+    });
+    if let Some(t) = timing {
+        b.field_object("meta", |m| {
+            m.field_object("timing", |tm| {
+                tm.field_raw("elapsedMs", &format!("{:.3}", t.elapsed_ms));
+                if !t.phases.is_empty() {
+                    tm.field_array_of_objects("phases", &t.phases, |obj, phase| {
+                        obj.field_str("name", phase.name);
+                        obj.field_raw("durationMs", &format!("{:.3}", phase.duration_ms));
+                    });
+                }
+            });
+        });
+    }
+    b.finish()
+}
+
 /// Render a status report as human-readable text.
 #[must_use]
 pub fn render_status_human(report: &StatusReport) -> String {
@@ -1107,6 +1155,89 @@ pub fn render_memory_show_human(report: &MemoryShowReport) -> String {
 #[must_use]
 pub fn render_memory_show_toon(report: &MemoryShowReport) -> String {
     render_toon_from_json(&render_memory_show_json(report))
+}
+
+/// Render a memory list report as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_memory_list_json(report: &MemoryListReport) -> String {
+    let mut b = JsonBuilder::with_capacity(2048);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", report.error.is_none());
+    b.field_object("data", |d| {
+        d.field_str("command", "memory list");
+        d.field_str("version", report.version);
+        d.field_u32("total_count", report.total_count);
+        d.field_bool("truncated", report.truncated);
+
+        d.field_object("filter", |f| {
+            if let Some(ref level) = report.filter.level {
+                f.field_str("level", level);
+            }
+            if let Some(ref tag) = report.filter.tag {
+                f.field_str("tag", tag);
+            }
+            f.field_bool("include_tombstoned", report.filter.include_tombstoned);
+        });
+
+        d.field_array_of_objects("memories", &report.memories, |obj, m| {
+            obj.field_str("id", &m.id);
+            obj.field_str("level", &m.level);
+            obj.field_str("kind", &m.kind);
+            obj.field_str("content_preview", &m.content_preview);
+            obj.field_raw("confidence", &format!("{:.4}", m.confidence));
+            if let Some(ref uri) = m.provenance_uri {
+                obj.field_str("provenance_uri", uri);
+            }
+            obj.field_bool("is_tombstoned", m.is_tombstoned);
+            obj.field_str("created_at", &m.created_at);
+        });
+
+        if let Some(ref err) = report.error {
+            d.field_str("error", err);
+        }
+    });
+    b.finish()
+}
+
+/// Render a memory list report as human-readable text.
+#[must_use]
+pub fn render_memory_list_human(report: &MemoryListReport) -> String {
+    if let Some(ref err) = report.error {
+        return format!("error: {err}\n");
+    }
+
+    let mut output = format!("Memories ({} total", report.total_count);
+    if report.truncated {
+        output.push_str(", showing first batch");
+    }
+    output.push_str(")\n\n");
+
+    if report.memories.is_empty() {
+        output.push_str("  No memories found.\n");
+        return output;
+    }
+
+    for m in &report.memories {
+        output.push_str(&format!("  {} [{}] {}\n", m.id, m.level, m.kind));
+        output.push_str(&format!("    {}\n", m.content_preview));
+        output.push_str(&format!(
+            "    confidence={:.2}, created={}\n",
+            m.confidence, m.created_at
+        ));
+        if m.is_tombstoned {
+            output.push_str("    [TOMBSTONED]\n");
+        }
+        output.push('\n');
+    }
+
+    output.push_str("Next:\n  ee memory show <ID>\n");
+    output
+}
+
+/// Render a memory list report as TOON.
+#[must_use]
+pub fn render_memory_list_toon(report: &MemoryListReport) -> String {
+    render_toon_from_json(&render_memory_list_json(report))
 }
 
 /// Render a capabilities report as JSON (ee.response.v1 envelope).
@@ -1990,6 +2121,294 @@ pub fn agent_docs() -> String {
         "{{\"schema\":\"{}\",\"success\":true,\"data\":{{\"command\":\"agent-docs\",\"description\":\"Durable, local-first, explainable memory for coding agents.\",\"primaryWorkflow\":\"ee context \\\"<task>\\\" --workspace . --max-tokens 4000 --json\",\"coreCommands\":[\"init\",\"remember\",\"search\",\"context\",\"why\",\"status\"]}}}}",
         RESPONSE_SCHEMA_V1
     )
+}
+
+use crate::core::agent_docs::{
+    AgentDocsReport, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, ENV_VARS, EXAMPLES, EXIT_CODES,
+    FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS,
+};
+
+#[must_use]
+pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
+    let mut b = JsonBuilder::with_capacity(4096);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "agent-docs");
+        d.field_str("version", report.version);
+
+        if let Some(topic) = report.topic {
+            d.field_str("topic", topic.as_str());
+            render_agent_docs_topic_json(d, topic);
+        } else {
+            d.field_str("topic", "overview");
+            d.field_str(
+                "description",
+                "Durable, local-first, explainable memory for coding agents.",
+            );
+            d.field_str(
+                "primaryWorkflow",
+                "ee context \"<task>\" --workspace . --max-tokens 4000 --json",
+            );
+            d.field_array_of_objects("topics", AgentDocsTopic::all(), |obj, topic| {
+                obj.field_str("name", topic.as_str());
+                obj.field_str("description", topic.description());
+            });
+        }
+    });
+    b.finish()
+}
+
+fn render_agent_docs_topic_json(d: &mut JsonBuilder, topic: AgentDocsTopic) {
+    match topic {
+        AgentDocsTopic::Guide => {
+            d.field_array_of_objects("sections", GUIDE_SECTIONS, |obj, section| {
+                obj.field_str("title", section.title);
+                obj.field_str("content", section.content);
+            });
+        }
+        AgentDocsTopic::Commands => {
+            d.field_array_of_objects("commands", COMMAND_MANIFEST, |obj, cmd| {
+                obj.field_str("name", cmd.name);
+                obj.field_str("description", cmd.description);
+                obj.field_bool("available", cmd.available);
+                if !cmd.subcommands.is_empty() {
+                    obj.field_array_of_objects("subcommands", cmd.subcommands, |sub, sc| {
+                        sub.field_str("name", sc.name);
+                        sub.field_str("description", sc.description);
+                    });
+                }
+                if !cmd.args.is_empty() {
+                    obj.field_array_of_objects("args", cmd.args, |arg, a| {
+                        arg.field_str("name", a.name);
+                        arg.field_str("description", a.description);
+                        arg.field_bool("required", a.required);
+                        if let Some(def) = a.default {
+                            arg.field_str("default", def);
+                        }
+                    });
+                }
+            });
+        }
+        AgentDocsTopic::Contracts => {
+            d.field_array_of_objects("contracts", CONTRACTS, |obj, contract| {
+                obj.field_str("name", contract.name);
+                obj.field_str("schema", contract.schema);
+                obj.field_str("description", contract.description);
+                obj.field_str("stability", contract.stability);
+            });
+        }
+        AgentDocsTopic::Schemas => {
+            d.field_array_of_objects("schemas", &public_schemas(), |obj, schema| {
+                obj.field_str("id", schema.id);
+                obj.field_str("version", schema.version);
+                obj.field_str("description", schema.description);
+                obj.field_str("category", schema.category);
+            });
+        }
+        AgentDocsTopic::Paths => {
+            d.field_array_of_objects("paths", DEFAULT_PATHS, |obj, path| {
+                obj.field_str("name", path.name);
+                obj.field_str("default", path.default);
+                obj.field_str("description", path.description);
+                if let Some(env) = path.env_override {
+                    obj.field_str("envOverride", env);
+                }
+            });
+        }
+        AgentDocsTopic::Env => {
+            d.field_array_of_objects("envVars", ENV_VARS, |obj, var| {
+                obj.field_str("name", var.name);
+                obj.field_str("description", var.description);
+                obj.field_str("category", var.category);
+                if let Some(def) = var.default {
+                    obj.field_str("default", def);
+                }
+            });
+        }
+        AgentDocsTopic::ExitCodes => {
+            d.field_array_of_objects("exitCodes", EXIT_CODES, |obj, code| {
+                obj.field_raw("code", &code.code.to_string());
+                obj.field_str("name", code.name);
+                obj.field_str("description", code.description);
+            });
+        }
+        AgentDocsTopic::Fields => {
+            d.field_array_of_objects("fieldLevels", FIELD_LEVELS, |obj, level| {
+                obj.field_str("name", level.name);
+                obj.field_str("flag", level.flag);
+                obj.field_str("includes", level.includes);
+                obj.field_str("useCase", level.use_case);
+            });
+        }
+        AgentDocsTopic::Errors => {
+            d.field_array_of_objects("errorCodes", ERROR_CODES, |obj, code| {
+                obj.field_str("code", code.code);
+                obj.field_str("message", code.message);
+                obj.field_str("repair", code.repair);
+                obj.field_str("category", code.category);
+            });
+        }
+        AgentDocsTopic::Formats => {
+            d.field_array_of_objects("formats", OUTPUT_FORMATS, |obj, fmt| {
+                obj.field_str("name", fmt.name);
+                obj.field_str("flag", fmt.flag);
+                obj.field_str("description", fmt.description);
+                obj.field_bool("machineReadable", fmt.machine_readable);
+            });
+        }
+        AgentDocsTopic::Examples => {
+            d.field_array_of_objects("examples", EXAMPLES, |obj, example| {
+                obj.field_str("title", example.title);
+                obj.field_str("description", example.description);
+                obj.field_str("command", example.command);
+                obj.field_str("category", example.category);
+            });
+        }
+    }
+}
+
+#[must_use]
+pub fn render_agent_docs_human(report: &AgentDocsReport) -> String {
+    let mut output = String::with_capacity(2048);
+    output.push_str("ee agent-docs");
+    if let Some(topic) = report.topic {
+        output.push(' ');
+        output.push_str(topic.as_str());
+    }
+    output.push('\n');
+    output.push_str(&"-".repeat(40));
+    output.push('\n');
+
+    if let Some(topic) = report.topic {
+        render_agent_docs_topic_human(&mut output, topic);
+    } else {
+        output.push_str("\nDurable, local-first, explainable memory for coding agents.\n\n");
+        output.push_str(
+            "Primary workflow:\n  ee context \"<task>\" --workspace . --max-tokens 4000 --json\n\n",
+        );
+        output.push_str("Available topics:\n");
+        for t in AgentDocsTopic::all() {
+            output.push_str(&format!("  {:12} {}\n", t.as_str(), t.description()));
+        }
+        output.push_str("\nRun `ee agent-docs <topic>` for details.\n");
+    }
+
+    output
+}
+
+fn render_agent_docs_topic_human(output: &mut String, topic: AgentDocsTopic) {
+    match topic {
+        AgentDocsTopic::Guide => {
+            for section in GUIDE_SECTIONS {
+                output.push_str(&format!("\n{}:\n  {}\n", section.title, section.content));
+            }
+        }
+        AgentDocsTopic::Commands => {
+            output.push_str("\nAvailable commands:\n");
+            for cmd in COMMAND_MANIFEST {
+                let status = if cmd.available { "" } else { " (unavailable)" };
+                output.push_str(&format!(
+                    "  {:16} {}{}\n",
+                    cmd.name, cmd.description, status
+                ));
+                for sub in cmd.subcommands {
+                    output.push_str(&format!("    {:14} {}\n", sub.name, sub.description));
+                }
+            }
+        }
+        AgentDocsTopic::Contracts => {
+            output.push_str("\nStable output contracts:\n");
+            for contract in CONTRACTS {
+                output.push_str(&format!(
+                    "  {:12} {} ({})\n    {}\n",
+                    contract.name, contract.schema, contract.stability, contract.description
+                ));
+            }
+        }
+        AgentDocsTopic::Schemas => {
+            output.push_str("\nPublic schemas:\n");
+            for schema in public_schemas() {
+                output.push_str(&format!(
+                    "  {:30} v{} [{}]\n    {}\n",
+                    schema.id, schema.version, schema.category, schema.description
+                ));
+            }
+        }
+        AgentDocsTopic::Paths => {
+            output.push_str("\nDefault paths:\n");
+            for path in DEFAULT_PATHS {
+                output.push_str(&format!("  {:14} {}\n", path.name, path.default));
+                output.push_str(&format!("    {}\n", path.description));
+                if let Some(env) = path.env_override {
+                    output.push_str(&format!("    Override: {}\n", env));
+                }
+            }
+        }
+        AgentDocsTopic::Env => {
+            output.push_str("\nEnvironment variables:\n");
+            for var in ENV_VARS {
+                let def = var
+                    .default
+                    .map_or(String::new(), |d| format!(" (default: {})", d));
+                output.push_str(&format!(
+                    "  {:20}{}\n    {}\n",
+                    var.name, def, var.description
+                ));
+            }
+        }
+        AgentDocsTopic::ExitCodes => {
+            output.push_str("\nExit codes:\n");
+            for code in EXIT_CODES {
+                output.push_str(&format!(
+                    "  {:3} {:16} {}\n",
+                    code.code, code.name, code.description
+                ));
+            }
+        }
+        AgentDocsTopic::Fields => {
+            output.push_str("\nField profile levels:\n");
+            for level in FIELD_LEVELS {
+                output.push_str(&format!("  {:10} {}\n", level.name, level.flag));
+                output.push_str(&format!("    Includes: {}\n", level.includes));
+                output.push_str(&format!("    Use case: {}\n", level.use_case));
+            }
+        }
+        AgentDocsTopic::Errors => {
+            output.push_str("\nError codes:\n");
+            for code in ERROR_CODES {
+                output.push_str(&format!("  {:16} [{}]\n", code.code, code.category));
+                output.push_str(&format!("    {}\n", code.message));
+                output.push_str(&format!("    Repair: {}\n", code.repair));
+            }
+        }
+        AgentDocsTopic::Formats => {
+            output.push_str("\nOutput formats:\n");
+            for fmt in OUTPUT_FORMATS {
+                let machine = if fmt.machine_readable {
+                    " [machine]"
+                } else {
+                    ""
+                };
+                output.push_str(&format!("  {:10}{}\n", fmt.name, machine));
+                output.push_str(&format!("    Flag: {}\n", fmt.flag));
+                output.push_str(&format!("    {}\n", fmt.description));
+            }
+        }
+        AgentDocsTopic::Examples => {
+            output.push_str("\nCommon examples:\n");
+            for example in EXAMPLES {
+                output.push_str(&format!("\n  {} [{}]\n", example.title, example.category));
+                output.push_str(&format!("    {}\n", example.description));
+                output.push_str(&format!("    $ {}\n", example.command));
+            }
+        }
+    }
+}
+
+#[must_use]
+pub fn render_agent_docs_toon(report: &AgentDocsReport) -> String {
+    render_toon_from_json(&render_agent_docs_json(report))
 }
 
 #[must_use]

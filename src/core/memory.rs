@@ -155,6 +155,8 @@ pub struct MemorySummary {
     pub content_preview: String,
     /// Confidence score.
     pub confidence: f32,
+    /// Provenance URI (EE-072: preserve provenance through JSON output).
+    pub provenance_uri: Option<String>,
     /// Whether tombstoned.
     pub is_tombstoned: bool,
     /// Creation timestamp.
@@ -266,6 +268,7 @@ pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
             kind: m.kind,
             content_preview: truncate_content(&m.content),
             confidence: m.confidence,
+            provenance_uri: m.provenance_uri,
             is_tombstoned: m.tombstoned_at.is_some(),
             created_at: m.created_at,
         })

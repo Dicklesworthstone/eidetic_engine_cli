@@ -6,6 +6,7 @@ use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use crate::cass::{CassClient, CassImportOptions, import_cass_sessions};
+use crate::core::agent_docs::{AgentDocsReport, AgentDocsTopic};
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
 use crate::core::doctor::DoctorReport;
@@ -109,6 +110,8 @@ impl Cli {
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum Command {
+    /// Agent-oriented documentation for ee commands, contracts, and usage.
+    AgentDocs(AgentDocsArgs),
     /// Report feature availability, commands, and subsystem status.
     Capabilities,
     /// Quick posture summary: ready, degraded, or needs attention.
@@ -147,6 +150,15 @@ pub enum Command {
     Status,
     /// Print the ee version.
     Version,
+}
+
+/// Arguments for `ee agent-docs`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct AgentDocsArgs {
+    /// Documentation topic to display. Omit for overview.
+    /// Topics: guide, commands, contracts, schemas, paths, env, exit-codes, fields, errors, formats, examples
+    #[arg(value_name = "TOPIC")]
+    pub topic: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -445,6 +457,7 @@ where
 
     match cli.command {
         None | Some(Command::Help) => write_help(stdout),
+        Some(Command::AgentDocs(ref args)) => handle_agent_docs(&cli, args, stdout, stderr),
         Some(Command::Capabilities) => {
             let report = CapabilitiesReport::gather();
             let profile = cli.fields_level().to_field_profile();
@@ -623,6 +636,9 @@ where
                 write_stdout(stdout, &(output::render_introspect_json() + "\n"))
             }
         },
+        Some(Command::Memory(MemoryCommand::List(ref args))) => {
+            handle_memory_list(&cli, args, stdout, stderr)
+        }
         Some(Command::Memory(MemoryCommand::Show(ref args))) => {
             handle_memory_show(&cli, args, stdout, stderr)
         }
@@ -684,7 +700,9 @@ where
         },
         Some(Command::Search(ref args)) => handle_search(&cli, args, stdout, stderr),
         Some(Command::Status) => {
+            let timing_capture = crate::models::TimingCapture::start();
             let report = StatusReport::gather();
+            let timing = timing_capture.finish();
             let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
                 output::Renderer::Human => {
@@ -696,10 +714,17 @@ where
                 output::Renderer::Json
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
-                | output::Renderer::Hook => write_stdout(
-                    stdout,
-                    &(output::render_status_json_filtered(&report, profile) + "\n"),
-                ),
+                | output::Renderer::Hook => {
+                    let timing_ref = if cli.wants_meta() {
+                        Some(&timing)
+                    } else {
+                        None
+                    };
+                    write_stdout(
+                        stdout,
+                        &(output::render_status_json_with_meta(&report, timing_ref) + "\n"),
+                    )
+                }
             }
         }
         Some(Command::Version) => {
@@ -799,6 +824,52 @@ fn clap_error_message(error: &clap::Error) -> String {
         .find(|line| line.starts_with("error:"))
         .map(|line| line.trim_start_matches("error:").trim().to_string())
         .unwrap_or_else(|| full.lines().next().unwrap_or("Unknown error").to_string())
+}
+
+fn handle_agent_docs<W, E>(
+    cli: &Cli,
+    args: &AgentDocsArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let topic = args
+        .topic
+        .as_ref()
+        .and_then(|t| AgentDocsTopic::from_str(t));
+
+    if args.topic.is_some() && topic.is_none() {
+        let domain_error = DomainError::Usage {
+            message: format!(
+                "Unknown topic '{}'. Valid topics: {}",
+                args.topic.as_ref().unwrap(),
+                AgentDocsTopic::all()
+                    .iter()
+                    .map(|t| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            repair: Some("ee agent-docs".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let report = AgentDocsReport::gather(topic);
+    match cli.renderer() {
+        output::Renderer::Human => write_stdout(stdout, &output::render_agent_docs_human(&report)),
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_agent_docs_toon(&report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_agent_docs_json(&report) + "\n"))
+        }
+    }
 }
 
 fn handle_import_cass<W, E>(
@@ -956,6 +1027,66 @@ where
                 repair: error.repair_hint().map(str::to_string),
             };
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_memory_list<W, E>(
+    cli: &Cli,
+    args: &MemoryListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let options = ListMemoriesOptions {
+        database_path: &database_path,
+        level: args.level.as_deref(),
+        tag: args.tag.as_deref(),
+        limit: args.limit,
+        include_tombstoned: args.include_tombstoned,
+    };
+
+    let report = list_memories(&options);
+
+    if report.error.is_some() {
+        let domain_error = DomainError::Storage {
+            message: report.error.clone().unwrap_or_default(),
+            repair: Some("ee doctor".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human => write_stdout(stdout, &output::render_memory_list_human(&report)),
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_memory_list_toon(&report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_memory_list_json(&report) + "\n"))
         }
     }
 }
@@ -1172,6 +1303,9 @@ impl RememberResult {
         let source_json = self.source.as_ref().map_or("null".to_string(), |s| {
             format!("\"{}\"", escape_json_string(s))
         });
+        let provenance_uri_json = self.source.as_ref().map_or(String::new(), |s| {
+            format!(",\"provenance_uri\":\"{}\"", escape_json_string(s))
+        });
 
         let degraded = if self.storage_degraded {
             r#","degraded":[{"code":"storage_not_implemented","severity":"medium","message":"Storage is not wired yet. Memory was not persisted.","repair":"Implement EE-044."}]"#
@@ -1180,7 +1314,7 @@ impl RememberResult {
         };
 
         let mut json = format!(
-            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","memory_id":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{},"dry_run":{}}}"#,
+            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","memory_id":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"dry_run":{}}}"#,
             self.memory_id,
             escape_json_string(&self.content),
             self.level.as_str(),
@@ -1188,6 +1322,7 @@ impl RememberResult {
             self.confidence,
             tags_json,
             source_json,
+            provenance_uri_json,
             self.dry_run
         );
         json.push_str(degraded);
@@ -1397,6 +1532,27 @@ mod tests {
         )?;
         ensure_ends_with(&stdout, '\n', "status TOON trailing newline")?;
         ensure(stderr.is_empty(), "status format TOON stderr must be empty")
+    }
+
+    #[test]
+    fn status_meta_includes_timing_fields() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--meta", "--json", "status"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "status meta exit")?;
+        ensure_contains(&stdout, "\"meta\":", "status has meta object")?;
+        ensure_contains(&stdout, "\"timing\":", "meta has timing object")?;
+        ensure_contains(&stdout, "\"elapsedMs\":", "timing has elapsedMs")?;
+        ensure(stderr.is_empty(), "status meta stderr must be empty")
+    }
+
+    #[test]
+    fn status_without_meta_omits_timing() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--json", "status"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "status no meta exit")?;
+        ensure(
+            !stdout.contains("\"meta\":"),
+            "status omits meta without flag",
+        )?;
+        ensure(stderr.is_empty(), "status no meta stderr empty")
     }
 
     #[test]
