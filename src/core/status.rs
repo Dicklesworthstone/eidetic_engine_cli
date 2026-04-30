@@ -7,6 +7,80 @@ use crate::models::CapabilityStatus;
 
 use super::{build_info, runtime_status};
 
+/// Memory subsystem health status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MemoryHealthStatus {
+    /// Memory subsystem is healthy with active memories.
+    Healthy,
+    /// Memory subsystem is operational but has warnings.
+    Degraded,
+    /// No memories stored yet.
+    Empty,
+    /// Memory subsystem is unavailable.
+    Unavailable,
+}
+
+impl MemoryHealthStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Degraded => "degraded",
+            Self::Empty => "empty",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Memory subsystem health report (EE-309).
+#[derive(Clone, Debug)]
+pub struct MemoryHealthReport {
+    /// Overall health status.
+    pub status: MemoryHealthStatus,
+    /// Total memory count (including tombstoned).
+    pub total_count: u32,
+    /// Active (non-tombstoned) memory count.
+    pub active_count: u32,
+    /// Tombstoned memory count.
+    pub tombstoned_count: u32,
+    /// Memories not accessed in the last 30 days.
+    pub stale_count: u32,
+    /// Average confidence score (0.0-1.0), None if no memories.
+    pub average_confidence: Option<f32>,
+    /// Percentage of memories with provenance attached.
+    pub provenance_coverage: Option<f32>,
+}
+
+impl MemoryHealthReport {
+    /// Gather memory health (stub until storage is wired).
+    #[must_use]
+    pub fn gather() -> Self {
+        Self {
+            status: MemoryHealthStatus::Unavailable,
+            total_count: 0,
+            active_count: 0,
+            tombstoned_count: 0,
+            stale_count: 0,
+            average_confidence: None,
+            provenance_coverage: None,
+        }
+    }
+
+    /// Create a healthy report for testing.
+    #[cfg(test)]
+    pub fn healthy_fixture() -> Self {
+        Self {
+            status: MemoryHealthStatus::Healthy,
+            total_count: 100,
+            active_count: 95,
+            tombstoned_count: 5,
+            stale_count: 10,
+            average_confidence: Some(0.85),
+            provenance_coverage: Some(0.92),
+        }
+    }
+}
+
 /// Describes the readiness of each ee subsystem.
 #[derive(Clone, Debug)]
 pub struct CapabilityReport {
@@ -63,6 +137,7 @@ pub struct StatusReport {
     pub version: &'static str,
     pub capabilities: CapabilityReport,
     pub runtime: RuntimeReport,
+    pub memory_health: MemoryHealthReport,
     pub degradations: Vec<DegradationReport>,
 }
 
@@ -72,6 +147,7 @@ impl StatusReport {
     pub fn gather() -> Self {
         let capabilities = CapabilityReport::gather();
         let runtime = RuntimeReport::gather();
+        let memory_health = MemoryHealthReport::gather();
 
         let mut degradations = Vec::new();
 
@@ -93,10 +169,20 @@ impl StatusReport {
             });
         }
 
+        if memory_health.status == MemoryHealthStatus::Unavailable {
+            degradations.push(DegradationReport {
+                code: "memory_health_unavailable",
+                severity: "low",
+                message: "Memory health metrics unavailable until storage is wired.",
+                repair: "Implement storage subsystem.",
+            });
+        }
+
         Self {
             version: build_info().version,
             capabilities,
             runtime,
+            memory_health,
             degradations,
         }
     }

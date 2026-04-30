@@ -8,6 +8,7 @@ use crate::core::health::HealthReport;
 use crate::core::memory::{MemoryDetails, MemoryHistoryReport, MemoryListReport, MemoryShowReport};
 use crate::core::quarantine::{QuarantineEntry, QuarantineReport};
 use crate::core::status::StatusReport;
+use crate::eval::{EvaluationReport, EvaluationStatus, ScenarioValidationResult, ValidationFailureKind};
 use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
 use crate::pack::{
     ContextResponse, PackDraftItem, PackItemProvenance, PackOmissionMetrics, PackQualityMetrics,
@@ -708,6 +709,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
             r.field_raw("workerThreads", &report.runtime.worker_threads.to_string());
             r.field_str("asyncBoundary", report.runtime.async_boundary);
         });
+        render_memory_health_json(d, &report.memory_health);
         d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
             obj.field_str("code", deg.code);
             obj.field_str("severity", deg.severity);
@@ -716,6 +718,27 @@ pub fn render_status_json(report: &StatusReport) -> String {
         });
     });
     b.finish()
+}
+
+fn render_memory_health_json(
+    parent: &mut JsonBuilder,
+    health: &crate::core::status::MemoryHealthReport,
+) {
+    parent.field_object("memoryHealth", |h| {
+        h.field_str("status", health.status.as_str());
+        h.field_u32("totalCount", health.total_count);
+        h.field_u32("activeCount", health.active_count);
+        h.field_u32("tombstonedCount", health.tombstoned_count);
+        h.field_u32("staleCount", health.stale_count);
+        match health.average_confidence {
+            Some(c) => h.field_raw("averageConfidence", &format!("{c:.2}")),
+            None => h.field_raw("averageConfidence", "null"),
+        };
+        match health.provenance_coverage {
+            Some(c) => h.field_raw("provenanceCoverage", &format!("{c:.2}")),
+            None => h.field_raw("provenanceCoverage", "null"),
+        };
+    });
 }
 
 /// Render a status report as JSON with optional timing metadata.
@@ -743,6 +766,7 @@ pub fn render_status_json_with_meta(
             r.field_raw("workerThreads", &report.runtime.worker_threads.to_string());
             r.field_str("asyncBoundary", report.runtime.async_boundary);
         });
+        render_memory_health_json(d, &report.memory_health);
         d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
             obj.field_str("code", deg.code);
             obj.field_str("severity", deg.severity);
@@ -1581,46 +1605,126 @@ pub fn render_capabilities_toon(report: &CapabilitiesReport) -> String {
 }
 
 /// Render evaluation run result as JSON (ee.response.v1 envelope).
+///
+/// This stub version is used when no report is available.
 #[must_use]
 pub fn render_eval_run_json(scenario_id: Option<&str>) -> String {
-    let mut b = JsonBuilder::with_capacity(512);
+    render_eval_report_json(&EvaluationReport::new(), scenario_id)
+}
+
+/// Render evaluation report as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_eval_report_json(report: &EvaluationReport, scenario_id: Option<&str>) -> String {
+    let mut b = JsonBuilder::with_capacity(1024);
     b.field_str("schema", RESPONSE_SCHEMA_V1);
-    b.field_bool("success", true);
+    b.field_bool("success", report.status.is_success());
     b.field_object("data", |d| {
         d.field_str("command", "eval run");
         if let Some(id) = scenario_id {
             d.field_str("scenarioId", id);
         }
-        d.field_str("status", "no_scenarios_available");
-        d.field_raw("scenariosRun", "0");
-        d.field_raw("scenariosPassed", "0");
-        d.field_raw("scenariosFailed", "0");
-        d.field_str(
-            "message",
-            "No evaluation scenarios configured. Add fixtures to tests/fixtures/eval/.",
-        );
+        d.field_str("status", report.status.as_str());
+        d.field_raw("scenariosRun", &report.scenarios_run.to_string());
+        d.field_raw("scenariosPassed", &report.scenarios_passed.to_string());
+        d.field_raw("scenariosFailed", &report.scenarios_failed.to_string());
+        d.field_raw("elapsedMs", &format!("{:.2}", report.elapsed_ms));
+        if let Some(ref dir) = report.fixture_dir {
+            d.field_str("fixtureDir", dir);
+        }
+        if report.status == EvaluationStatus::NoScenarios {
+            d.field_str(
+                "message",
+                "No evaluation scenarios configured. Add fixtures to tests/fixtures/eval/.",
+            );
+        }
+        d.field_array_of_objects("results", &report.results, render_scenario_result_json);
     });
     b.finish()
 }
 
+fn render_scenario_result_json(obj: &mut JsonObjectBuilder<'_>, result: &ScenarioValidationResult) {
+    obj.field_str("scenarioId", &result.scenario_id);
+    obj.field_bool("passed", result.passed);
+    obj.field_raw("stepsPassed", &result.steps_passed.to_string());
+    obj.field_raw("stepsTotal", &result.steps_total.to_string());
+    obj.field_array_of_objects("failures", &result.failures, |f, failure| {
+        f.field_raw("step", &failure.step.to_string());
+        f.field_str("kind", failure.kind.as_str());
+        f.field_str("message", &failure.message);
+    });
+}
+
 /// Render evaluation run result as human-readable text.
+///
+/// This stub version is used when no report is available.
 #[must_use]
 pub fn render_eval_run_human(scenario_id: Option<&str>) -> String {
+    render_eval_report_human(&EvaluationReport::new(), scenario_id)
+}
+
+/// Render evaluation report as human-readable text.
+#[must_use]
+pub fn render_eval_report_human(report: &EvaluationReport, scenario_id: Option<&str>) -> String {
     let mut output = String::from("ee eval run\n\n");
+
     if let Some(id) = scenario_id {
-        output.push_str(&format!("Scenario: {}\n\n", id));
+        output.push_str(&format!("Scenario: {id}\n\n"));
     }
-    output.push_str("Status: no scenarios available\n");
-    output.push_str("Results: 0 run, 0 passed, 0 failed\n\n");
-    output.push_str("No evaluation scenarios configured.\n");
-    output.push_str("Add fixtures to tests/fixtures/eval/ to define scenarios.\n");
+
+    let status_display = match report.status {
+        EvaluationStatus::NoScenarios => "no scenarios available",
+        EvaluationStatus::AllPassed => "all passed",
+        EvaluationStatus::SomeFailed => "some failed",
+        EvaluationStatus::AllFailed => "all failed",
+    };
+    output.push_str(&format!("Status: {status_display}\n"));
+    output.push_str(&format!(
+        "Results: {} run, {} passed, {} failed\n",
+        report.scenarios_run, report.scenarios_passed, report.scenarios_failed
+    ));
+    output.push_str(&format!("Elapsed: {:.1}ms\n", report.elapsed_ms));
+
+    if let Some(ref dir) = report.fixture_dir {
+        output.push_str(&format!("Fixtures: {dir}\n"));
+    }
+
+    if report.status == EvaluationStatus::NoScenarios {
+        output.push_str("\nNo evaluation scenarios configured.\n");
+        output.push_str("Add fixtures to tests/fixtures/eval/ to define scenarios.\n");
+    } else {
+        output.push('\n');
+        for result in &report.results {
+            let icon = if result.passed { "[PASS]" } else { "[FAIL]" };
+            output.push_str(&format!(
+                "{icon} {}: {}/{} steps\n",
+                result.scenario_id, result.steps_passed, result.steps_total
+            ));
+            for failure in &result.failures {
+                output.push_str(&format!(
+                    "  - Step {}: {} - {}\n",
+                    failure.step,
+                    failure.kind.as_str(),
+                    failure.message
+                ));
+            }
+        }
+    }
+
     output
 }
 
 /// Render evaluation run result as TOON.
+///
+/// This stub version is used when no report is available.
 #[must_use]
 pub fn render_eval_run_toon(scenario_id: Option<&str>) -> String {
-    render_toon_from_json(&render_eval_run_json(scenario_id))
+    render_eval_report_toon(&EvaluationReport::new(), scenario_id)
+}
+
+/// Render evaluation report as TOON.
+#[must_use]
+pub fn render_eval_report_toon(report: &EvaluationReport, scenario_id: Option<&str>) -> String {
+    render_toon_from_json(&render_eval_report_json(report, scenario_id))
 }
 
 /// Render evaluation scenario list as JSON (ee.response.v1 envelope).
@@ -2744,6 +2848,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
                 r.field_raw("workerThreads", &report.runtime.worker_threads.to_string());
                 r.field_str("asyncBoundary", report.runtime.async_boundary);
             });
+            render_memory_health_json(d, &report.memory_health);
             d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
                 obj.field_str("code", deg.code);
                 obj.field_str("severity", deg.severity);
