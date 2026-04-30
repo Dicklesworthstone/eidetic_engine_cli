@@ -97,6 +97,7 @@ impl Cli {
             OutputFormat::Jsonl => output::Renderer::Jsonl,
             OutputFormat::Compact => output::Renderer::Compact,
             OutputFormat::Hook => output::Renderer::Hook,
+            OutputFormat::Markdown => output::Renderer::Markdown,
         }
     }
 
@@ -448,6 +449,7 @@ pub enum OutputFormat {
     Jsonl,
     Compact,
     Hook,
+    Markdown,
 }
 
 impl OutputFormat {
@@ -465,6 +467,7 @@ impl OutputFormat {
             Self::Jsonl => output::Renderer::Jsonl,
             Self::Compact => output::Renderer::Compact,
             Self::Hook => output::Renderer::Hook,
+            Self::Markdown => output::Renderer::Markdown,
         }
     }
 }
@@ -535,7 +538,7 @@ where
             let report = CapabilitiesReport::gather();
             let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
-                output::Renderer::Human => {
+                output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &output::render_capabilities_human(&report))
                 }
                 output::Renderer::Toon => {
@@ -554,7 +557,7 @@ where
             let report = CheckReport::gather();
             let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
-                output::Renderer::Human => {
+                output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &output::render_check_human(&report))
                 }
                 output::Renderer::Toon => {
@@ -575,7 +578,7 @@ where
                 let report = QuarantineReport::gather();
                 let profile = cli.fields_level().to_field_profile();
                 match cli.renderer() {
-                    output::Renderer::Human => {
+                    output::Renderer::Human | output::Renderer::Markdown => {
                         write_stdout(stdout, &output::render_quarantine_human(&report))
                     }
                     output::Renderer::Toon => {
@@ -593,7 +596,7 @@ where
             DiagCommand::Streams => {
                 let report = crate::core::streams::StreamsReport::gather(stderr);
                 match cli.renderer() {
-                    output::Renderer::Human => {
+                    output::Renderer::Human | output::Renderer::Markdown => {
                         write_stdout(stdout, &output::render_streams_human(&report))
                     }
                     output::Renderer::Toon => {
@@ -614,7 +617,7 @@ where
             if args.fix_plan {
                 let plan = report.to_fix_plan();
                 match cli.renderer() {
-                    output::Renderer::Human => {
+                    output::Renderer::Human | output::Renderer::Markdown => {
                         write_stdout(stdout, &output::render_fix_plan_human(&plan))
                     }
                     output::Renderer::Toon => {
@@ -629,7 +632,7 @@ where
                 }
             } else {
                 match cli.renderer() {
-                    output::Renderer::Human => {
+                    output::Renderer::Human | output::Renderer::Markdown => {
                         write_stdout(stdout, &output::render_doctor_human(&report))
                     }
                     output::Renderer::Toon => {
@@ -649,7 +652,7 @@ where
             let report = HealthReport::gather();
             let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
-                output::Renderer::Human => {
+                output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &output::render_health_human(&report))
                 }
                 output::Renderer::Toon => {
@@ -666,7 +669,7 @@ where
         }
         Some(Command::Eval(ref eval_cmd)) => match eval_cmd {
             EvalCommand::Run { scenario_id, .. } => match cli.renderer() {
-                output::Renderer::Human => write_stdout(
+                output::Renderer::Human | output::Renderer::Markdown => write_stdout(
                     stdout,
                     &output::render_eval_run_human(scenario_id.as_deref()),
                 ),
@@ -683,7 +686,9 @@ where
                 ),
             },
             EvalCommand::List => match cli.renderer() {
-                output::Renderer::Human => write_stdout(stdout, &output::render_eval_list_human()),
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &output::render_eval_list_human())
+                }
                 output::Renderer::Toon => {
                     write_stdout(stdout, &(output::render_eval_list_toon() + "\n"))
                 }
@@ -699,7 +704,9 @@ where
             handle_import_cass(&cli, args, stdout, stderr)
         }
         Some(Command::Introspect) => match cli.renderer() {
-            output::Renderer::Human => write_stdout(stdout, &output::render_introspect_human()),
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_introspect_human())
+            }
             output::Renderer::Toon => {
                 write_stdout(stdout, &(output::render_introspect_toon() + "\n"))
             }
@@ -727,7 +734,7 @@ where
         }
         Some(Command::Schema(ref schema_cmd)) => match schema_cmd {
             SchemaCommand::List => match cli.renderer() {
-                output::Renderer::Human => {
+                output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &output::render_schema_list_human())
                 }
                 output::Renderer::Toon => {
@@ -741,7 +748,7 @@ where
                 }
             },
             SchemaCommand::Export { schema_id } => match cli.renderer() {
-                output::Renderer::Human => write_stdout(
+                output::Renderer::Human | output::Renderer::Markdown => write_stdout(
                     stdout,
                     &output::render_schema_export_human(schema_id.as_deref()),
                 ),
@@ -760,7 +767,9 @@ where
         },
         Some(Command::Remember(ref args)) => match handle_remember(args, cli.wants_json()) {
             Ok(result) => match cli.renderer() {
-                output::Renderer::Human => write_stdout(stdout, &result.human_output()),
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &result.human_output())
+                }
                 output::Renderer::Toon => write_stdout(stdout, &(result.toon_output() + "\n")),
                 output::Renderer::Json
                 | output::Renderer::Jsonl
@@ -781,7 +790,7 @@ where
             let report = StatusReport::gather();
             let timing = timing_capture.finish();
             match cli.renderer() {
-                output::Renderer::Human => {
+                output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &output::render_status_human(&report))
                 }
                 output::Renderer::Toon => {
@@ -961,7 +970,9 @@ where
 
     let report = AgentDocsReport::gather(topic);
     match cli.renderer() {
-        output::Renderer::Human => write_stdout(stdout, &output::render_agent_docs_human(&report)),
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_agent_docs_human(&report))
+        }
         output::Renderer::Toon => {
             write_stdout(stdout, &(output::render_agent_docs_toon(&report) + "\n"))
         }
@@ -995,7 +1006,9 @@ where
 
     match import_cass_sessions(&CassClient::new_default(), &options) {
         Ok(report) => match cli.renderer() {
-            output::Renderer::Human => write_stdout(stdout, &report.human_summary()),
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
             output::Renderer::Toon => write_stdout(
                 stdout,
                 &format!(
@@ -1048,7 +1061,9 @@ where
 
     match rebuild_index(&options) {
         Ok(report) => match cli.renderer() {
-            output::Renderer::Human => write_stdout(stdout, &report.human_summary()),
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
             output::Renderer::Toon => write_stdout(
                 stdout,
                 &format!(
@@ -1100,7 +1115,9 @@ where
 
     match get_index_status(&options) {
         Ok(report) => match cli.renderer() {
-            output::Renderer::Human => write_stdout(stdout, &report.human_summary()),
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
             output::Renderer::Toon => write_stdout(
                 stdout,
                 &format!(
@@ -1180,7 +1197,9 @@ where
     }
 
     match cli.renderer() {
-        output::Renderer::Human => write_stdout(stdout, &output::render_memory_list_human(&report)),
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_memory_list_human(&report))
+        }
         output::Renderer::Toon => {
             write_stdout(stdout, &(output::render_memory_list_toon(&report) + "\n"))
         }
@@ -1247,7 +1266,9 @@ where
     }
 
     match cli.renderer() {
-        output::Renderer::Human => write_stdout(stdout, &output::render_memory_show_human(&report)),
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_memory_show_human(&report))
+        }
         output::Renderer::Toon => {
             write_stdout(stdout, &(output::render_memory_show_toon(&report) + "\n"))
         }
@@ -1316,7 +1337,7 @@ where
     }
 
     match cli.renderer() {
-        output::Renderer::Human => {
+        output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &output::render_memory_history_human(&report))
         }
         output::Renderer::Toon => write_stdout(
@@ -1386,6 +1407,9 @@ where
                 stdout,
                 &(output::render_context_response_json(&response) + "\n"),
             ),
+            output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_context_response_markdown(&response))
+            }
         },
         Err(error) => {
             let domain_error = match &error {
@@ -1429,7 +1453,9 @@ where
 
     match run_search(&options) {
         Ok(report) => match cli.renderer() {
-            output::Renderer::Human => write_stdout(stdout, &report.human_summary()),
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
             output::Renderer::Toon => write_stdout(
                 stdout,
                 &format!(
@@ -1514,7 +1540,7 @@ where
     }
 
     match cli.renderer() {
-        output::Renderer::Human => {
+        output::Renderer::Human | output::Renderer::Markdown => {
             let output = format_why_human(&report);
             write_stdout(stdout, &output)
         }
