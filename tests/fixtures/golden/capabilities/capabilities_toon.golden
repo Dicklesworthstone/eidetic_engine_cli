@@ -1,0 +1,43 @@
+schema: ee.response.v1
+success: true
+data:
+  command: capabilities
+  version: 0.1.0
+  subsystems[5]{name,status,description}:
+    runtime,ready,Asupersync async runtime
+    storage,unimplemented,FrankenSQLite/SQLModel persistence
+    search,unimplemented,Frankensearch hybrid retrieval
+    graph,unimplemented,FrankenNetworkX graph analytics
+    cass,degraded,CASS session import adapter
+  features[7]{name,enabled,description}:
+    fts5,true,FTS5 full-text search
+    json,true,JSON extension support
+    embed-fast,true,Fast embedding via model2vec
+    embed-quality,false,Quality embedding via fastembed
+    lexical-bm25,true,BM25 lexical scoring
+    mcp,false,MCP server adapter
+    serve,false,HTTP serve adapter
+  commands[16]{name,available,description}:
+    capabilities,true,Report feature availability
+    check,true,Quick posture summary
+    doctor,true,Health checks
+    eval,true,Evaluation scenarios
+    help,true,Command help
+    import,true,Import from external sources
+    remember,true,Store memories
+    schema,true,Schema registry
+    status,true,Subsystem readiness
+    version,true,Version info
+    context,false,Context packing
+    search,false,Memory search
+    why,false,Explainability
+    init,false,Workspace initialization
+    index,false,Search index management
+    curate,false,Rule curation
+  summary:
+    readySubsystems: 1
+    totalSubsystems: 5
+    enabledFeatures: 4
+    totalFeatures: 7
+    availableCommands: 10
+    totalCommands: 16

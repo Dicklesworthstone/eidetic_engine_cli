@@ -1,0 +1,14 @@
+schema: ee.response.v1
+success: false
+data:
+  command: check
+  version: 0.1.0
+  posture: needs_attention
+  workspaceInitialized: false
+  databaseReady: false
+  searchReady: false
+  runtimeReady: true
+  suggestedActions[3]{priority,command,reason}:
+    1,ee init --workspace .,Initialize workspace to enable memory storage.
+    2,ee doctor --json,Run diagnostics to identify database issues.
+    3,ee index rebuild,Rebuild search index when available.

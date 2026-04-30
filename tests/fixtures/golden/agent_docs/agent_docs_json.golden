@@ -1,0 +1,1 @@
+{"schema":"ee.response.v1","success":true,"data":{"command":"agent-docs","description":"Durable, local-first, explainable memory for coding agents.","primaryWorkflow":"ee context \"<task>\" --workspace . --max-tokens 4000 --json","coreCommands":["init","remember","search","context","why","status"]}}

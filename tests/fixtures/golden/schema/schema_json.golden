@@ -1,0 +1,1 @@
+{"schema":"ee.response.v1","success":true,"data":{"command":"schema","schemas":{"response":"ee.response.v1","error":"ee.error.v1"}}}
