@@ -16,6 +16,7 @@ pub mod effect;
 pub mod health;
 pub mod index;
 pub mod init;
+pub mod lab;
 pub mod legacy_import;
 pub mod memory;
 pub mod outcome;

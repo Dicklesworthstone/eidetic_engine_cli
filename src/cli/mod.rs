@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 
 use crate::cass::{CassClient, CassImportOptions, import_cass_sessions};
 use crate::core::VersionReport;
@@ -18,6 +19,12 @@ use crate::core::index::{
     IndexRebuildOptions, IndexStatusOptions, get_index_status, rebuild_index,
 };
 use crate::core::init::{InitOptions, init_workspace};
+use crate::core::lab::{
+    CaptureOptions as LabCaptureOptions, CaptureReport as LabCaptureReport,
+    CounterfactualOptions as LabCounterfactualOptions,
+    CounterfactualReport as LabCounterfactualReport, ReplayOptions as LabReplayOptions,
+    ReplayReport as LabReplayReport, capture_episode, replay_episode, run_counterfactual,
+};
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
     GetMemoryOptions, ListMemoriesOptions, get_memory_details, list_memories,
@@ -162,6 +169,9 @@ pub enum Command {
     /// Manage search indexes.
     #[command(subcommand)]
     Index(IndexCommand),
+    /// Counterfactual memory lab: capture, replay, and counterfactual task episodes.
+    #[command(subcommand)]
+    Lab(LabCommand),
     /// Manage stored memories (show, list, history).
     #[command(subcommand)]
     Memory(MemoryCommand),
@@ -390,6 +400,81 @@ pub struct IndexStatusArgs {
     /// Index output directory. Defaults to <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
+}
+
+/// Subcommands for `ee lab`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum LabCommand {
+    /// Capture a task episode from session history.
+    Capture(LabCaptureArgs),
+    /// Replay a captured episode with the same memory state.
+    Replay(LabReplayArgs),
+    /// Run a counterfactual replay with memory interventions.
+    Counterfactual(LabCounterfactualArgs),
+}
+
+/// Arguments for `ee lab capture`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct LabCaptureArgs {
+    /// Session ID to capture from.
+    #[arg(long, value_name = "SESSION_ID")]
+    pub session_id: Option<String>,
+
+    /// Task input/prompt to capture.
+    #[arg(long, value_name = "TEXT")]
+    pub task_input: Option<String>,
+
+    /// Include retrieved memories in the capture.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_memories: bool,
+
+    /// Include action trace in the capture.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_actions: bool,
+
+    /// Report the capture plan without writing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee lab replay`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct LabReplayArgs {
+    /// Episode ID to replay.
+    #[arg(value_name = "EPISODE_ID")]
+    pub episode_id: String,
+
+    /// Report the replay plan without executing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee lab counterfactual`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct LabCounterfactualArgs {
+    /// Episode ID to run counterfactual on.
+    #[arg(value_name = "EPISODE_ID")]
+    pub episode_id: String,
+
+    /// Add a memory to the context (can be specified multiple times).
+    #[arg(long, value_name = "MEMORY_ID", action = ArgAction::Append)]
+    pub add_memory: Vec<String>,
+
+    /// Remove a memory from the context (can be specified multiple times).
+    #[arg(long, value_name = "MEMORY_ID", action = ArgAction::Append)]
+    pub remove_memory: Vec<String>,
+
+    /// Strengthen a memory's influence (can be specified multiple times).
+    #[arg(long, value_name = "MEMORY_ID", action = ArgAction::Append)]
+    pub strengthen_memory: Vec<String>,
+
+    /// Weaken a memory's influence (can be specified multiple times).
+    #[arg(long, value_name = "MEMORY_ID", action = ArgAction::Append)]
+    pub weaken_memory: Vec<String>,
+
+    /// Report the counterfactual plan without executing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `ee search`.
@@ -1220,6 +1305,15 @@ where
         Some(Command::Index(IndexCommand::Status(ref args))) => {
             handle_index_status(&cli, args, stdout, stderr)
         }
+        Some(Command::Lab(LabCommand::Capture(ref args))) => {
+            handle_lab_capture(&cli, args, stdout, stderr)
+        }
+        Some(Command::Lab(LabCommand::Replay(ref args))) => {
+            handle_lab_replay(&cli, args, stdout, stderr)
+        }
+        Some(Command::Lab(LabCommand::Counterfactual(ref args))) => {
+            handle_lab_counterfactual(&cli, args, stdout, stderr)
+        }
         Some(Command::Graph(GraphCommand::CentralityRefresh(ref args))) => {
             handle_graph_centrality_refresh(&cli, args, stdout, stderr)
         }
@@ -1729,6 +1823,180 @@ where
                 repair: error.repair_hint().map(str::to_string),
             };
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+// ============================================================================
+// EE-382: Lab Command Handlers
+// ============================================================================
+
+fn handle_lab_capture<W, E>(
+    cli: &Cli,
+    args: &LabCaptureArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = LabCaptureOptions {
+        workspace: workspace_path,
+        session_id: args.session_id.clone(),
+        task_input: args.task_input.clone(),
+        include_memories: args.include_memories,
+        include_actions: args.include_actions,
+        dry_run: args.dry_run,
+    };
+
+    match capture_episode(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_lab_capture_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_lab_capture_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_lab_capture_json(&report) + "\n"))
+            }
+        },
+        Err(error) => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V1,
+                "success": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.message(),
+                    "repair": error.repair(),
+                }
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn handle_lab_replay<W, E>(
+    cli: &Cli,
+    args: &LabReplayArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = LabReplayOptions {
+        workspace: workspace_path,
+        episode_id: args.episode_id.clone(),
+        verify_hash: true,
+        record_trace: true,
+        dry_run: args.dry_run,
+    };
+
+    match replay_episode(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_lab_replay_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_lab_replay_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_lab_replay_json(&report) + "\n"))
+            }
+        },
+        Err(error) => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V1,
+                "success": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.message(),
+                    "repair": error.repair(),
+                }
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn handle_lab_counterfactual<W, E>(
+    cli: &Cli,
+    args: &LabCounterfactualArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+
+    let interventions: Vec<crate::core::lab::InterventionSpec> = args
+        .add_memory
+        .iter()
+        .map(|id| crate::core::lab::InterventionSpec::add_memory(id.clone()))
+        .chain(
+            args.remove_memory
+                .iter()
+                .map(|id| crate::core::lab::InterventionSpec::remove_memory(id.clone())),
+        )
+        .chain(
+            args.strengthen_memory
+                .iter()
+                .map(|id| crate::core::lab::InterventionSpec::strengthen_memory(id.clone(), 0.5)),
+        )
+        .chain(
+            args.weaken_memory
+                .iter()
+                .map(|id| crate::core::lab::InterventionSpec::weaken_memory(id.clone(), 0.5)),
+        )
+        .collect();
+
+    let options = LabCounterfactualOptions {
+        workspace: workspace_path,
+        episode_id: args.episode_id.clone(),
+        interventions,
+        generate_regret: true,
+        dry_run: args.dry_run,
+    };
+
+    match run_counterfactual(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_lab_counterfactual_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_lab_counterfactual_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_lab_counterfactual_json(&report) + "\n"))
+            }
+        },
+        Err(error) => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V1,
+                "success": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.message(),
+                    "repair": error.repair(),
+                }
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
         }
     }
 }
@@ -3444,6 +3712,11 @@ impl NormalizedInvocation {
                     IndexCommand::Status(_) => "index status".to_string(),
                 },
                 Command::Introspect => "introspect".to_string(),
+                Command::Lab(lab) => match lab {
+                    LabCommand::Capture(_) => "lab capture".to_string(),
+                    LabCommand::Replay(_) => "lab replay".to_string(),
+                    LabCommand::Counterfactual(_) => "lab counterfactual".to_string(),
+                },
                 Command::Memory(mem) => match mem {
                     MemoryCommand::List(_) => "memory list".to_string(),
                     MemoryCommand::Show(_) => "memory show".to_string(),

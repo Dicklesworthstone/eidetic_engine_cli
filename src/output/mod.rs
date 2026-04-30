@@ -4354,6 +4354,164 @@ pub fn render_shadow_run_toon(report: &ShadowRunReport) -> String {
     render_toon_from_json(&render_shadow_run_json(report))
 }
 
+// ============================================================================
+// EE-382: Lab (Counterfactual Memory) Rendering
+// ============================================================================
+
+use crate::core::lab::{CaptureReport, CounterfactualReport, ReplayReport};
+
+/// Render a lab capture report as JSON.
+#[must_use]
+pub fn render_lab_capture_json(report: &CaptureReport) -> String {
+    let json = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "episode_id": report.episode_id,
+            "task_input": report.task_input,
+            "memories_captured": report.memories_captured,
+            "actions_captured": report.actions_captured,
+            "dry_run": report.dry_run,
+            "captured_at": report.captured_at,
+        }
+    });
+    json.to_string()
+}
+
+/// Render a lab capture report as human-readable text.
+#[must_use]
+pub fn render_lab_capture_human(report: &CaptureReport) -> String {
+    let mut lines = Vec::new();
+    if report.dry_run {
+        lines.push("Lab capture (dry run):".to_string());
+    } else {
+        lines.push("Lab capture:".to_string());
+    }
+    lines.push(format!("  Episode ID: {}", report.episode_id));
+    if !report.task_input.is_empty() {
+        lines.push(format!("  Task input: {}", report.task_input));
+    }
+    lines.push(format!("  Memories: {}", report.memories_captured));
+    lines.push(format!("  Actions: {}", report.actions_captured));
+    lines.push(format!("  Captured at: {}", report.captured_at));
+    lines.join("\n")
+}
+
+/// Render a lab capture report as TOON.
+#[must_use]
+pub fn render_lab_capture_toon(report: &CaptureReport) -> String {
+    format!(
+        "LAB_CAPTURE|{}|{}|{}|{}",
+        report.episode_id,
+        report.memories_captured,
+        report.actions_captured,
+        if report.dry_run { "dry_run" } else { "captured" }
+    )
+}
+
+/// Render a lab replay report as JSON.
+#[must_use]
+pub fn render_lab_replay_json(report: &ReplayReport) -> String {
+    let json = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "episode_id": report.episode_id,
+            "replay_id": report.replay_id,
+            "status": report.status.as_str(),
+            "outcome_matches": report.outcome_matches,
+            "dry_run": report.dry_run,
+            "replayed_at": report.replayed_at,
+        }
+    });
+    json.to_string()
+}
+
+/// Render a lab replay report as human-readable text.
+#[must_use]
+pub fn render_lab_replay_human(report: &ReplayReport) -> String {
+    let mut lines = Vec::new();
+    if report.dry_run {
+        lines.push("Lab replay (dry run):".to_string());
+    } else {
+        lines.push("Lab replay:".to_string());
+    }
+    lines.push(format!("  Episode ID: {}", report.episode_id));
+    lines.push(format!("  Replay ID: {}", report.replay_id));
+    lines.push(format!("  Status: {}", report.status.as_str()));
+    lines.push(format!("  Outcome matches: {}", report.outcome_matches));
+    lines.push(format!("  Replayed at: {}", report.replayed_at));
+    lines.join("\n")
+}
+
+/// Render a lab replay report as TOON.
+#[must_use]
+pub fn render_lab_replay_toon(report: &ReplayReport) -> String {
+    format!(
+        "LAB_REPLAY|{}|{}|{}",
+        report.episode_id,
+        report.status.as_str(),
+        if report.dry_run { "dry_run" } else { "replayed" }
+    )
+}
+
+/// Render a lab counterfactual report as JSON.
+#[must_use]
+pub fn render_lab_counterfactual_json(report: &CounterfactualReport) -> String {
+    let json = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "run_id": report.run_id,
+            "episode_id": report.episode_id,
+            "status": report.status.as_str(),
+            "interventions_applied": report.interventions_applied,
+            "regret_entries": report.regret_entries.len(),
+            "outcome_changed": report.outcome_changed,
+            "dry_run": report.dry_run,
+            "analyzed_at": report.analyzed_at,
+        }
+    });
+    json.to_string()
+}
+
+/// Render a lab counterfactual report as human-readable text.
+#[must_use]
+pub fn render_lab_counterfactual_human(report: &CounterfactualReport) -> String {
+    let mut lines = Vec::new();
+    if report.dry_run {
+        lines.push("Lab counterfactual (dry run):".to_string());
+    } else {
+        lines.push("Lab counterfactual:".to_string());
+    }
+    lines.push(format!("  Run ID: {}", report.run_id));
+    lines.push(format!("  Episode ID: {}", report.episode_id));
+    lines.push(format!("  Status: {}", report.status.as_str()));
+    lines.push(format!("  Interventions: {}", report.interventions_applied));
+    lines.push(format!("  Outcome changed: {}", report.outcome_changed));
+    if !report.regret_entries.is_empty() {
+        lines.push(format!("  Regret entries: {}", report.regret_entries.len()));
+        for entry in &report.regret_entries {
+            lines.push(format!("    - {}: {}", entry.id, entry.explanation));
+        }
+    }
+    lines.push(format!("  Analyzed at: {}", report.analyzed_at));
+    lines.join("\n")
+}
+
+/// Render a lab counterfactual report as TOON.
+#[must_use]
+pub fn render_lab_counterfactual_toon(report: &CounterfactualReport) -> String {
+    format!(
+        "LAB_COUNTERFACTUAL|{}|{}|{}|{}|{}",
+        report.run_id,
+        report.episode_id,
+        report.status.as_str(),
+        report.interventions_applied,
+        if report.dry_run { "dry_run" } else { "executed" }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
