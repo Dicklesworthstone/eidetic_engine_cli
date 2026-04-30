@@ -207,10 +207,8 @@ impl SectionQuota {
     pub const fn remaining(self, used: u32) -> u32 {
         if self.max_tokens == 0 {
             u32::MAX
-        } else if used >= self.max_tokens {
-            0
         } else {
-            self.max_tokens - used
+            self.max_tokens.saturating_sub(used)
         }
     }
 }
@@ -1084,10 +1082,7 @@ mod tests {
             "hello world this is a much longer string",
             TokenEstimationStrategy::CharacterHeuristic,
         );
-        ensure(
-            long > short,
-            "longer content should estimate more tokens",
-        )
+        ensure(long > short, "longer content should estimate more tokens")
     }
 
     #[test]
@@ -1112,22 +1107,34 @@ mod tests {
         let content = "test content";
         let default_result = estimate_tokens_default(content);
         let explicit_result = estimate_tokens(content, TokenEstimationStrategy::CharacterHeuristic);
-        ensure_equal(&default_result, &explicit_result, "default matches character heuristic")
+        ensure_equal(
+            &default_result,
+            &explicit_result,
+            "default matches character heuristic",
+        )
     }
 
     #[test]
     fn estimate_tokens_trims_input_before_counting() -> TestResult {
         let clean = estimate_tokens("hello world", TokenEstimationStrategy::CharacterHeuristic);
-        let padded =
-            estimate_tokens("  hello world  ", TokenEstimationStrategy::CharacterHeuristic);
+        let padded = estimate_tokens(
+            "  hello world  ",
+            TokenEstimationStrategy::CharacterHeuristic,
+        );
         ensure_equal(&clean, &padded, "trimmed content should match")
     }
 
     #[test]
     fn section_quota_unlimited_has_no_constraints() -> TestResult {
         let unlimited = SectionQuota::unlimited();
-        ensure(unlimited.is_unlimited(), "unlimited should report as unlimited")?;
-        ensure(!unlimited.exceeds_max(1_000_000), "unlimited should not exceed max")?;
+        ensure(
+            unlimited.is_unlimited(),
+            "unlimited should report as unlimited",
+        )?;
+        ensure(
+            !unlimited.exceeds_max(1_000_000),
+            "unlimited should not exceed max",
+        )?;
         ensure_equal(
             &unlimited.remaining(1000),
             &u32::MAX,
@@ -1141,7 +1148,11 @@ mod tests {
         ensure(!capped.is_unlimited(), "capped should not be unlimited")?;
         ensure(!capped.exceeds_max(100), "100 should not exceed max of 100")?;
         ensure(capped.exceeds_max(101), "101 should exceed max of 100")?;
-        ensure_equal(&capped.remaining(50), &50, "remaining after using 50 of 100")?;
+        ensure_equal(
+            &capped.remaining(50),
+            &50,
+            "remaining after using 50 of 100",
+        )?;
         ensure_equal(&capped.remaining(100), &0, "remaining after using all")?;
         ensure_equal(&capped.remaining(150), &0, "remaining when over quota")
     }
@@ -1176,7 +1187,10 @@ mod tests {
         let procedural = quotas.get(PackSection::ProceduralRules);
         ensure(
             procedural.max_tokens >= 290 && procedural.max_tokens <= 310,
-            format!("procedural_rules should be ~30% (got {})", procedural.max_tokens),
+            format!(
+                "procedural_rules should be ~30% (got {})",
+                procedural.max_tokens
+            ),
         )?;
 
         let decisions = quotas.get(PackSection::Decisions);
@@ -1199,7 +1213,10 @@ mod tests {
         let procedural = quotas.get(PackSection::ProceduralRules);
         ensure(
             procedural.max_tokens >= 490 && procedural.max_tokens <= 510,
-            format!("procedural_rules should be ~50% in compact (got {})", procedural.max_tokens),
+            format!(
+                "procedural_rules should be ~50% in compact (got {})",
+                procedural.max_tokens
+            ),
         )
     }
 
@@ -1212,11 +1229,17 @@ mod tests {
 
         ensure(
             procedural.max_tokens >= 190 && procedural.max_tokens <= 210,
-            format!("procedural_rules should be ~20% in thorough (got {})", procedural.max_tokens),
+            format!(
+                "procedural_rules should be ~20% in thorough (got {})",
+                procedural.max_tokens
+            ),
         )?;
         ensure(
             evidence.max_tokens >= 240 && evidence.max_tokens <= 260,
-            format!("evidence should be ~25% in thorough (got {})", evidence.max_tokens),
+            format!(
+                "evidence should be ~25% in thorough (got {})",
+                evidence.max_tokens
+            ),
         )
     }
 

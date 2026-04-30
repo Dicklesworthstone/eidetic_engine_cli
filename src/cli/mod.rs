@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 
+use crate::core::status::StatusReport;
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
 
@@ -170,10 +171,14 @@ where
 
     match cli.command {
         None | Some(Command::Help) => write_help(stdout),
-        Some(Command::Status) if cli.wants_json() => {
-            write_stdout(stdout, &(output::status_response_json() + "\n"))
+        Some(Command::Status) => {
+            let report = StatusReport::gather();
+            if cli.wants_json() {
+                write_stdout(stdout, &(output::render_status_json(&report) + "\n"))
+            } else {
+                write_stdout(stdout, &output::render_status_human(&report))
+            }
         }
-        Some(Command::Status) => write_stdout(stdout, output::human_status()),
         Some(Command::Version) => {
             write_stdout(stdout, concat!("ee ", env!("CARGO_PKG_VERSION"), "\n"))
         }

@@ -1,8 +1,8 @@
 use std::env;
 use std::io::IsTerminal;
 
-use crate::core;
-use crate::models::{CapabilityStatus, DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
+use crate::core::status::StatusReport;
+use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Renderer {
@@ -304,30 +304,59 @@ impl ResponseEnvelope {
     }
 }
 
+/// Render a status report as JSON (ee.response.v1 envelope).
 #[must_use]
-pub fn status_response_json() -> String {
-    let storage = CapabilityStatus::Unimplemented.as_str();
-    let search = CapabilityStatus::Unimplemented.as_str();
-    let runtime = CapabilityStatus::Ready.as_str();
-    let runtime_status = core::runtime_status();
+pub fn render_status_json(report: &StatusReport) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "status");
+        d.field_str("version", report.version);
+        d.field_object("capabilities", |c| {
+            c.field_str("runtime", report.capabilities.runtime.as_str());
+            c.field_str("storage", report.capabilities.storage.as_str());
+            c.field_str("search", report.capabilities.search.as_str());
+        });
+        d.field_object("runtime", |r| {
+            r.field_str("engine", report.runtime.engine);
+            r.field_str("profile", report.runtime.profile);
+            r.field_raw("workerThreads", &report.runtime.worker_threads.to_string());
+            r.field_str("asyncBoundary", report.runtime.async_boundary);
+        });
+        d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
+            obj.field_str("code", deg.code);
+            obj.field_str("severity", deg.severity);
+            obj.field_str("message", deg.message);
+            obj.field_str("repair", deg.repair);
+        });
+    });
+    b.finish()
+}
 
+/// Render a status report as human-readable text.
+#[must_use]
+pub fn render_status_human(report: &StatusReport) -> String {
     format!(
-        "{{\"schema\":\"{schema}\",\"success\":true,\"data\":{{\"command\":\"status\",\"version\":\"{version}\",\"capabilities\":{{\"runtime\":\"{runtime}\",\"storage\":\"{storage}\",\"search\":\"{search}\"}},\"runtime\":{{\"engine\":\"{engine}\",\"profile\":\"{profile}\",\"workerThreads\":{worker_threads},\"asyncBoundary\":\"{async_boundary}\"}},\"degraded\":[{{\"code\":\"storage_not_implemented\",\"severity\":\"medium\",\"message\":\"Storage subsystem is not wired yet.\",\"repair\":\"Implement EE-040 through EE-044.\"}},{{\"code\":\"search_not_implemented\",\"severity\":\"medium\",\"message\":\"Search subsystem is not wired yet.\",\"repair\":\"Implement EE-120 and dependent search beads.\"}}]}}}}",
-        schema = RESPONSE_SCHEMA_V1,
-        version = env!("CARGO_PKG_VERSION"),
-        runtime = runtime,
-        storage = storage,
-        search = search,
-        engine = runtime_status.engine,
-        profile = runtime_status.profile.as_str(),
-        worker_threads = runtime_status.worker_threads(),
-        async_boundary = runtime_status.async_boundary
+        "ee status\n\nstorage: {}\nsearch: {}\nruntime: {} ({} {})\n\nNext:\n  ee status --json\n",
+        report.capabilities.storage.as_str(),
+        report.capabilities.search.as_str(),
+        report.capabilities.runtime.as_str(),
+        report.runtime.engine,
+        report.runtime.profile
     )
 }
 
+/// Legacy placeholder for backwards compatibility during transition.
 #[must_use]
-pub fn human_status() -> &'static str {
-    "ee status\n\nstorage: unimplemented\nsearch: unimplemented\nruntime: ready (asupersync current_thread)\n\nNext:\n  ee status --json\n"
+pub fn status_response_json() -> String {
+    render_status_json(&StatusReport::gather())
+}
+
+/// Legacy placeholder for backwards compatibility during transition.
+#[must_use]
+pub fn human_status() -> String {
+    render_status_human(&StatusReport::gather())
 }
 
 #[must_use]
@@ -457,7 +486,7 @@ mod tests {
     #[test]
     fn human_status_is_not_json() -> TestResult {
         let status = human_status();
-        ensure_starts_with(status, "ee status", "human status heading")?;
+        ensure_starts_with(&status, "ee status", "human status heading")?;
         ensure(!status.starts_with('{'), "human status must not be JSON")
     }
 

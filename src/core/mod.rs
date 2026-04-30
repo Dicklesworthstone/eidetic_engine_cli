@@ -2,6 +2,7 @@ use std::future::Future;
 
 pub mod budget;
 pub mod context;
+pub mod status;
 
 pub use budget::{BudgetDimension, BudgetExceeded, BudgetSnapshot, RequestBudget};
 pub use context::{AccessLevel, CapabilitySet, CommandContext};

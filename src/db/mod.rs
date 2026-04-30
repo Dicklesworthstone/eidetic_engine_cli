@@ -1482,7 +1482,7 @@ impl SearchIndexJobType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "full_rebuild" => Some(Self::FullRebuild),
             "incremental" => Some(Self::Incremental),
@@ -1514,7 +1514,7 @@ impl SearchIndexJobStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "pending" => Some(Self::Pending),
             "running" => Some(Self::Running),
@@ -1561,12 +1561,12 @@ pub struct StoredSearchIndexJob {
 impl StoredSearchIndexJob {
     #[must_use]
     pub fn job_type_enum(&self) -> Option<SearchIndexJobType> {
-        SearchIndexJobType::from_str(&self.job_type)
+        SearchIndexJobType::parse(&self.job_type)
     }
 
     #[must_use]
     pub fn status_enum(&self) -> Option<SearchIndexJobStatus> {
-        SearchIndexJobStatus::from_str(&self.status)
+        SearchIndexJobStatus::parse(&self.status)
     }
 }
 
@@ -3153,12 +3153,12 @@ mod tests {
         )?;
 
         ensure_equal(
-            &super::SearchIndexJobType::from_str("full_rebuild"),
+            &super::SearchIndexJobType::parse("full_rebuild"),
             &Some(super::SearchIndexJobType::FullRebuild),
             "parse full_rebuild",
         )?;
         ensure_equal(
-            &super::SearchIndexJobType::from_str("invalid"),
+            &super::SearchIndexJobType::parse("invalid"),
             &None,
             "invalid returns None",
         )?;

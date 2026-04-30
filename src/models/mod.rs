@@ -1,5 +1,6 @@
 use std::process::ExitCode;
 
+pub mod certificate;
 pub mod error_codes;
 pub mod id;
 pub mod memory;
@@ -7,6 +8,12 @@ pub mod provenance;
 pub mod rule;
 pub mod trust;
 
+pub use certificate::{
+    CERTIFICATE_SCHEMA_V1, Certificate, CertificateKind, CertificateStatus,
+    CurationCertificate, LifecycleCertificate, LifecycleEvent, PackCertificate,
+    ParseCertificateKindError, ParseCertificateStatusError, ParseLifecycleEventError,
+    PrivacyBudgetCertificate, TailRiskCertificate,
+};
 pub use id::{
     AuditId, BackupId, CandidateId, EvidenceId, Id, IdKind, MemoryId, PackId, ParseIdError, RuleId,
     SessionId, WorkspaceId,
