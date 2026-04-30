@@ -1691,6 +1691,229 @@ fn stored_evidence_span_from_row(row: &Row) -> Result<StoredEvidenceSpan> {
     })
 }
 
+/// Input for recording a resumable import ledger row.
+#[derive(Debug, Clone)]
+pub struct CreateImportLedgerInput {
+    pub workspace_id: String,
+    pub source_kind: String,
+    pub source_id: String,
+    pub status: String,
+    pub cursor_json: Option<String>,
+    pub imported_session_count: u32,
+    pub imported_span_count: u32,
+    pub attempt_count: u32,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub metadata_json: Option<String>,
+}
+
+/// Input for updating resumable import progress.
+#[derive(Debug, Clone)]
+pub struct UpdateImportLedgerInput {
+    pub status: String,
+    pub cursor_json: Option<String>,
+    pub imported_session_count: u32,
+    pub imported_span_count: u32,
+    pub attempt_count: u32,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+/// A stored import_ledger row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredImportLedger {
+    pub id: String,
+    pub workspace_id: String,
+    pub source_kind: String,
+    pub source_id: String,
+    pub status: String,
+    pub cursor_json: Option<String>,
+    pub imported_session_count: u32,
+    pub imported_span_count: u32,
+    pub attempt_count: u32,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub metadata_json: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl DbConnection {
+    /// Insert a resumable import ledger row.
+    pub fn insert_import_ledger(&self, id: &str, input: &CreateImportLedgerInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO import_ledger (id, workspace_id, source_kind, source_id, status, cursor_json, imported_session_count, imported_span_count, attempt_count, error_code, error_message, started_at, completed_at, metadata_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.source_kind.clone()),
+                Value::Text(input.source_id.clone()),
+                Value::Text(input.status.clone()),
+                input
+                    .cursor_json
+                    .as_ref()
+                    .map_or(Value::Null, |cursor| Value::Text(cursor.clone())),
+                Value::BigInt(i64::from(input.imported_session_count)),
+                Value::BigInt(i64::from(input.imported_span_count)),
+                Value::BigInt(i64::from(input.attempt_count)),
+                input
+                    .error_code
+                    .as_ref()
+                    .map_or(Value::Null, |code| Value::Text(code.clone())),
+                input
+                    .error_message
+                    .as_ref()
+                    .map_or(Value::Null, |message| Value::Text(message.clone())),
+                input
+                    .started_at
+                    .as_ref()
+                    .map_or(Value::Null, |started| Value::Text(started.clone())),
+                input
+                    .completed_at
+                    .as_ref()
+                    .map_or(Value::Null, |completed| Value::Text(completed.clone())),
+                input
+                    .metadata_json
+                    .as_ref()
+                    .map_or(Value::Null, |metadata| Value::Text(metadata.clone())),
+                Value::Text(now.clone()),
+                Value::Text(now),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get an import ledger row by its ee import ID.
+    pub fn get_import_ledger(&self, id: &str) -> Result<Option<StoredImportLedger>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, source_kind, source_id, status, cursor_json, imported_session_count, imported_span_count, attempt_count, error_code, error_message, started_at, completed_at, metadata_json, created_at, updated_at FROM import_ledger WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first().map(stored_import_ledger_from_row).transpose()
+    }
+
+    /// Get an import ledger row by its stable upstream source key.
+    pub fn get_import_ledger_by_source(
+        &self,
+        workspace_id: &str,
+        source_kind: &str,
+        source_id: &str,
+    ) -> Result<Option<StoredImportLedger>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, source_kind, source_id, status, cursor_json, imported_session_count, imported_span_count, attempt_count, error_code, error_message, started_at, completed_at, metadata_json, created_at, updated_at FROM import_ledger WHERE workspace_id = ?1 AND source_kind = ?2 AND source_id = ?3",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(source_kind.to_string()),
+                Value::Text(source_id.to_string()),
+            ],
+        )?;
+
+        rows.first().map(stored_import_ledger_from_row).transpose()
+    }
+
+    /// List import ledger rows for a workspace in stable resume order.
+    pub fn list_import_ledgers(&self, workspace_id: &str) -> Result<Vec<StoredImportLedger>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, source_kind, source_id, status, cursor_json, imported_session_count, imported_span_count, attempt_count, error_code, error_message, started_at, completed_at, metadata_json, created_at, updated_at FROM import_ledger WHERE workspace_id = ?1 ORDER BY source_kind ASC, source_id ASC, id ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+
+        rows.iter().map(stored_import_ledger_from_row).collect()
+    }
+
+    /// List import ledger rows by status in deterministic order.
+    pub fn list_import_ledgers_by_status(
+        &self,
+        workspace_id: &str,
+        status: &str,
+    ) -> Result<Vec<StoredImportLedger>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, source_kind, source_id, status, cursor_json, imported_session_count, imported_span_count, attempt_count, error_code, error_message, started_at, completed_at, metadata_json, created_at, updated_at FROM import_ledger WHERE workspace_id = ?1 AND status = ?2 ORDER BY source_kind ASC, source_id ASC, id ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(status.to_string()),
+            ],
+        )?;
+
+        rows.iter().map(stored_import_ledger_from_row).collect()
+    }
+
+    /// Update resumable import progress for an existing ledger row.
+    pub fn update_import_ledger(&self, id: &str, input: &UpdateImportLedgerInput) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE import_ledger SET status = ?1, cursor_json = ?2, imported_session_count = ?3, imported_span_count = ?4, attempt_count = ?5, error_code = ?6, error_message = ?7, started_at = ?8, completed_at = ?9, updated_at = ?10 WHERE id = ?11",
+            &[
+                Value::Text(input.status.clone()),
+                input
+                    .cursor_json
+                    .as_ref()
+                    .map_or(Value::Null, |cursor| Value::Text(cursor.clone())),
+                Value::BigInt(i64::from(input.imported_session_count)),
+                Value::BigInt(i64::from(input.imported_span_count)),
+                Value::BigInt(i64::from(input.attempt_count)),
+                input
+                    .error_code
+                    .as_ref()
+                    .map_or(Value::Null, |code| Value::Text(code.clone())),
+                input
+                    .error_message
+                    .as_ref()
+                    .map_or(Value::Null, |message| Value::Text(message.clone())),
+                input
+                    .started_at
+                    .as_ref()
+                    .map_or(Value::Null, |started| Value::Text(started.clone())),
+                input
+                    .completed_at
+                    .as_ref()
+                    .map_or(Value::Null, |completed| Value::Text(completed.clone())),
+                Value::Text(now),
+                Value::Text(id.to_string()),
+            ],
+        )?;
+
+        Ok(affected > 0)
+    }
+}
+
+fn stored_import_ledger_from_row(row: &Row) -> Result<StoredImportLedger> {
+    Ok(StoredImportLedger {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        source_kind: required_text(row, 2, DbOperation::Query, "source_kind")?.to_string(),
+        source_id: required_text(row, 3, DbOperation::Query, "source_id")?.to_string(),
+        status: required_text(row, 4, DbOperation::Query, "status")?.to_string(),
+        cursor_json: optional_text(row, 5)?.map(str::to_string),
+        imported_session_count: required_u32(row, 6, DbOperation::Query, "imported_session_count")?,
+        imported_span_count: required_u32(row, 7, DbOperation::Query, "imported_span_count")?,
+        attempt_count: required_u32(row, 8, DbOperation::Query, "attempt_count")?,
+        error_code: optional_text(row, 9)?.map(str::to_string),
+        error_message: optional_text(row, 10)?.map(str::to_string),
+        started_at: optional_text(row, 11)?.map(str::to_string),
+        completed_at: optional_text(row, 12)?.map(str::to_string),
+        metadata_json: optional_text(row, 13)?.map(str::to_string),
+        created_at: required_text(row, 14, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 15, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
 /// Input for creating a new memory.
 #[derive(Debug, Clone)]
 pub struct CreateMemoryInput {
@@ -2997,8 +3220,8 @@ mod tests {
 
         ensure_equal(
             &result.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9],
-            "V001-V009 must be applied",
+            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "V001-V010 must be applied",
         )?;
         ensure_equal(&result.skipped().len(), &0, "no migrations skipped")?;
 
@@ -3060,6 +3283,10 @@ mod tests {
             table_names.contains(&"evidence_spans"),
             "evidence_spans table must exist",
         )?;
+        ensure(
+            table_names.contains(&"import_ledger"),
+            "import_ledger table must exist",
+        )?;
 
         connection.close()?;
         Ok(())
@@ -3072,16 +3299,16 @@ mod tests {
         let first = connection.migrate()?;
         ensure_equal(
             &first.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9],
-            "first run applies V001-V009",
+            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "first run applies V001-V010",
         )?;
 
         let second = connection.migrate()?;
         ensure_equal(&second.applied().len(), &0, "second run applies nothing")?;
         ensure_equal(
             &second.skipped().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9],
-            "second run skips V001-V009",
+            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "second run skips V001-V010",
         )?;
 
         connection.close()?;
@@ -3122,8 +3349,8 @@ mod tests {
 
         ensure_equal(
             &connection.schema_version()?,
-            &Some(9),
-            "after migrations, schema version is 9",
+            &Some(10),
+            "after migrations, schema version is 10",
         )?;
 
         connection.close()?;
@@ -3295,6 +3522,24 @@ mod tests {
             metadata_json: Some(
                 r#"{"source":"cass","schema":"cass.evidence_span.v1"}"#.to_string(),
             ),
+        }
+    }
+
+    fn import_ledger_input(source_id: &str, status: &str) -> super::CreateImportLedgerInput {
+        super::CreateImportLedgerInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            source_kind: "cass".to_string(),
+            source_id: source_id.to_string(),
+            status: status.to_string(),
+            cursor_json: Some(r#"{"after":"cass-session-a","batch":2}"#.to_string()),
+            imported_session_count: 2,
+            imported_span_count: 18,
+            attempt_count: 1,
+            error_code: None,
+            error_message: None,
+            started_at: Some("2026-04-29T20:00:00Z".to_string()),
+            completed_at: (status == "completed").then(|| "2026-04-29T20:05:00Z".to_string()),
+            metadata_json: Some(r#"{"source":"cass","schema":"ee.import_ledger.v1"}"#.to_string()),
         }
     }
 
@@ -3618,6 +3863,241 @@ mod tests {
                 })
             ),
             "metadata_json must be valid JSON when present",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_get_and_update_import_ledger() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = import_ledger_input("cass://sessions?workspace=test", "running");
+        connection.insert_import_ledger("imp_01234567890123456789012345", &input)?;
+
+        let ledger = connection.get_import_ledger("imp_01234567890123456789012345")?;
+        ensure(ledger.is_some(), "import ledger must be found by ee id")?;
+        let ledger = ledger.ok_or_else(|| TestFailure::new("import ledger not found"))?;
+        ensure_equal(&ledger.id.as_str(), &"imp_01234567890123456789012345", "id")?;
+        ensure_equal(
+            &ledger.workspace_id.as_str(),
+            &"wsp_01234567890123456789012345",
+            "workspace_id",
+        )?;
+        ensure_equal(&ledger.source_kind.as_str(), &"cass", "source_kind")?;
+        ensure_equal(
+            &ledger.source_id.as_str(),
+            &"cass://sessions?workspace=test",
+            "source_id",
+        )?;
+        ensure_equal(&ledger.status.as_str(), &"running", "status")?;
+        ensure_equal(
+            &ledger.cursor_json,
+            &Some(r#"{"after":"cass-session-a","batch":2}"#.to_string()),
+            "cursor_json",
+        )?;
+        ensure_equal(&ledger.imported_session_count, &2, "imported_session_count")?;
+        ensure_equal(&ledger.imported_span_count, &18, "imported_span_count")?;
+        ensure_equal(&ledger.attempt_count, &1, "attempt_count")?;
+        ensure_equal(&ledger.error_code, &None, "error_code")?;
+        ensure_equal(&ledger.error_message, &None, "error_message")?;
+        ensure(!ledger.created_at.is_empty(), "created_at is populated")?;
+        ensure(!ledger.updated_at.is_empty(), "updated_at is populated")?;
+
+        let by_source = connection.get_import_ledger_by_source(
+            "wsp_01234567890123456789012345",
+            "cass",
+            "cass://sessions?workspace=test",
+        )?;
+        ensure_equal(
+            &by_source,
+            &Some(ledger.clone()),
+            "lookup by source matches",
+        )?;
+
+        let updated = connection.update_import_ledger(
+            "imp_01234567890123456789012345",
+            &super::UpdateImportLedgerInput {
+                status: "completed".to_string(),
+                cursor_json: Some(r#"{"after":"cass-session-z","batch":9}"#.to_string()),
+                imported_session_count: 9,
+                imported_span_count: 81,
+                attempt_count: 2,
+                error_code: None,
+                error_message: None,
+                started_at: Some("2026-04-29T20:00:00Z".to_string()),
+                completed_at: Some("2026-04-29T20:10:00Z".to_string()),
+            },
+        )?;
+        ensure(updated, "existing import ledger row must update")?;
+
+        let updated_ledger = connection
+            .get_import_ledger("imp_01234567890123456789012345")?
+            .ok_or_else(|| TestFailure::new("updated import ledger not found"))?;
+        ensure_equal(
+            &updated_ledger.status.as_str(),
+            &"completed",
+            "updated status",
+        )?;
+        ensure_equal(
+            &updated_ledger.cursor_json,
+            &Some(r#"{"after":"cass-session-z","batch":9}"#.to_string()),
+            "updated cursor",
+        )?;
+        ensure_equal(
+            &updated_ledger.imported_session_count,
+            &9,
+            "updated session count",
+        )?;
+        ensure_equal(
+            &updated_ledger.imported_span_count,
+            &81,
+            "updated span count",
+        )?;
+        ensure_equal(&updated_ledger.attempt_count, &2, "updated attempt count")?;
+        ensure_equal(
+            &updated_ledger.completed_at,
+            &Some("2026-04-29T20:10:00Z".to_string()),
+            "completed_at",
+        )?;
+
+        let missing = connection.update_import_ledger(
+            "imp_91234567890123456789012345",
+            &super::UpdateImportLedgerInput {
+                status: "failed".to_string(),
+                cursor_json: None,
+                imported_session_count: 0,
+                imported_span_count: 0,
+                attempt_count: 1,
+                error_code: Some("not_found".to_string()),
+                error_message: Some("missing ledger".to_string()),
+                started_at: None,
+                completed_at: None,
+            },
+        )?;
+        ensure(!missing, "missing import ledger update reports false")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_import_ledgers_filters_workspace_status_and_sorts() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_11234567890123456789012345', '/tmp/other', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+
+        connection.insert_import_ledger(
+            "imp_21234567890123456789012345",
+            &import_ledger_input("cass://session-b", "running"),
+        )?;
+        connection.insert_import_ledger(
+            "imp_11234567890123456789012345",
+            &import_ledger_input("cass://session-a", "completed"),
+        )?;
+        let mut other_workspace = import_ledger_input("cass://session-c", "running");
+        other_workspace.workspace_id = "wsp_11234567890123456789012345".to_string();
+        connection.insert_import_ledger("imp_31234567890123456789012345", &other_workspace)?;
+
+        let ledgers = connection.list_import_ledgers("wsp_01234567890123456789012345")?;
+        let source_ids: Vec<&str> = ledgers
+            .iter()
+            .map(|ledger| ledger.source_id.as_str())
+            .collect();
+        ensure_equal(
+            &source_ids,
+            &vec!["cass://session-a", "cass://session-b"],
+            "import ledgers sorted by source key inside requested workspace",
+        )?;
+
+        let running = connection
+            .list_import_ledgers_by_status("wsp_01234567890123456789012345", "running")?;
+        ensure_equal(&running.len(), &1, "one running import ledger in workspace")?;
+        let running_ledger = running
+            .first()
+            .ok_or_else(|| TestFailure::new("running import ledger not found"))?;
+        ensure_equal(
+            &running_ledger.source_id.as_str(),
+            &"cass://session-b",
+            "running ledger source",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn import_ledger_enforces_unique_source_status_completion_and_json() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = import_ledger_input("cass://session-unique", "running");
+        connection.insert_import_ledger("imp_41234567890123456789012345", &input)?;
+
+        let duplicate = connection.insert_import_ledger("imp_51234567890123456789012345", &input);
+        ensure(
+            matches!(
+                duplicate,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "duplicate workspace source key must be rejected",
+        )?;
+
+        let invalid_status = import_ledger_input("cass://bad-status", "paused");
+        let invalid_status_result =
+            connection.insert_import_ledger("imp_61234567890123456789012345", &invalid_status);
+        ensure(
+            matches!(
+                invalid_status_result,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "unknown import status must be rejected",
+        )?;
+
+        let mut completed_without_timestamp =
+            import_ledger_input("cass://complete-without-timestamp", "completed");
+        completed_without_timestamp.completed_at = None;
+        let completed_result = connection.insert_import_ledger(
+            "imp_71234567890123456789012345",
+            &completed_without_timestamp,
+        );
+        ensure(
+            matches!(
+                completed_result,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "completed ledger rows must record completed_at",
+        )?;
+
+        let mut invalid_json = import_ledger_input("cass://bad-json", "running");
+        invalid_json.cursor_json = Some("{not-json}".to_string());
+        let invalid_json_result =
+            connection.insert_import_ledger("imp_81234567890123456789012345", &invalid_json);
+        ensure(
+            matches!(
+                invalid_json_result,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "cursor_json must be valid JSON when present",
         )?;
 
         connection.close()?;
@@ -4976,7 +5456,7 @@ mod tests {
         ensure(report.integrity_check.passed, "integrity passed")?;
         ensure(report.foreign_key_check.passed, "foreign keys passed")?;
         ensure(!report.needs_migration, "no migration needed")?;
-        ensure_equal(&report.schema_version, &Some(9), "schema version is 9")?;
+        ensure_equal(&report.schema_version, &Some(10), "schema version is 10")?;
 
         connection.close()?;
         Ok(())

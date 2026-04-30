@@ -1733,6 +1733,76 @@ mod tests {
     }
 
     #[test]
+    fn pack_provenance_rendering_labels_sources() -> TestResult {
+        let source = provenance("file://src/lib.rs#L42")?;
+        let rendered = source.rendered();
+        let locator = rendered.locator.as_deref();
+
+        ensure_equal(
+            &rendered.uri.as_str(),
+            &"file://src/lib.rs#L42",
+            "rendered URI",
+        )?;
+        ensure_equal(&rendered.scheme, &"file", "rendered scheme")?;
+        ensure_equal(
+            &rendered.label.as_str(),
+            &"src/lib.rs:L42",
+            "rendered label",
+        )?;
+        ensure_equal(&locator, &Some("L42"), "rendered locator")?;
+        ensure_equal(&rendered.note.as_str(), &"source evidence", "rendered note")
+    }
+
+    #[test]
+    fn pack_provenance_footer_is_deterministic() -> TestResult {
+        let id = memory_id(8);
+        let candidate = PackCandidate::new(candidate_input(
+            id,
+            PackSection::Evidence,
+            "Use the AGENTS.md release rule before shipping.",
+            12,
+            vec![
+                provenance("file://AGENTS.md#L10")?,
+                provenance("cass-session://session-a#L20-22")?,
+            ],
+            "selected because release rules match the query",
+        )?)
+        .map_err(|error| format!("candidate rejected: {error:?}"))?;
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let draft = assemble_draft("prepare release", budget, vec![candidate])
+            .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        let footer = draft.provenance_footer();
+
+        ensure_equal(&footer.memory_count, &1, "footer memory count")?;
+        ensure_equal(&footer.source_count, &2, "footer source count")?;
+        ensure_equal(
+            &footer.schemes,
+            &vec!["cass-session", "file"],
+            "footer schemes",
+        )?;
+        ensure_equal(
+            &footer.entries.first().map(|entry| entry.rank),
+            &Some(1),
+            "first footer rank",
+        )?;
+        ensure_equal(
+            &footer.entries.first().map(|entry| entry.source_index),
+            &Some(1),
+            "first source index",
+        )?;
+        ensure_equal(
+            &footer
+                .entries
+                .get(1)
+                .map(|entry| entry.source.label.as_str()),
+            &Some("cass-session session-a#L20-22"),
+            "second source label",
+        )
+    }
+
+    #[test]
     fn assemble_draft_orders_candidates_deterministically() -> TestResult {
         let budget = match TokenBudget::new(100) {
             Ok(budget) => budget,

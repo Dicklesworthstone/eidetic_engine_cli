@@ -362,7 +362,10 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
             pack.field_object("provenanceFooter", |obj| {
                 obj.field_raw("memoryCount", &footer.memory_count.to_string());
                 obj.field_raw("sourceCount", &footer.source_count.to_string());
-                obj.field_raw("schemes", &string_array_json(footer.schemes.iter().copied()));
+                obj.field_raw(
+                    "schemes",
+                    &string_array_json(footer.schemes.iter().copied()),
+                );
                 obj.field_array_of_objects("entries", &footer.entries, build_item_provenance);
             });
         });
@@ -859,13 +862,21 @@ fn escape_json_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
+    use uuid::Uuid;
+
     use super::{
         Degradation, DegradationSeverity, JsonBuilder, OutputContext, Renderer, ResponseEnvelope,
-        error_response_json, escape_json_string, help_text, human_status, render_status_json,
-        render_status_toon, status_response_json,
+        error_response_json, escape_json_string, help_text, human_status,
+        render_context_response_json, render_status_json, render_status_toon, status_response_json,
     };
     use crate::core::status::StatusReport;
-    use crate::models::DomainError;
+    use crate::models::{DomainError, MemoryId, ProvenanceUri, UnitScore};
+    use crate::pack::{
+        ContextRequest, ContextResponse, PackCandidate, PackCandidateInput, PackProvenance,
+        PackSection, TokenBudget, assemble_draft,
+    };
 
     type TestResult = Result<(), String>;
 
@@ -889,6 +900,43 @@ mod tests {
             haystack.starts_with(prefix),
             format!("{context}: expected output to start with {prefix:?}, got {haystack:?}"),
         )
+    }
+
+    fn memory_id(seed: u128) -> MemoryId {
+        MemoryId::from_uuid(Uuid::from_u128(seed))
+    }
+
+    fn score(value: f32) -> Result<UnitScore, String> {
+        UnitScore::parse(value).map_err(|error| format!("test score rejected: {error:?}"))
+    }
+
+    fn pack_provenance(uri: &str) -> Result<PackProvenance, String> {
+        let uri = ProvenanceUri::from_str(uri)
+            .map_err(|error| format!("test provenance URI rejected: {error:?}"))?;
+        PackProvenance::new(uri, "source evidence")
+            .map_err(|error| format!("test provenance rejected: {error:?}"))
+    }
+
+    fn context_response_fixture() -> Result<ContextResponse, String> {
+        let request = ContextRequest::from_query("prepare release")
+            .map_err(|error| format!("request rejected: {error:?}"))?;
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let candidate = PackCandidate::new(PackCandidateInput {
+            memory_id: memory_id(42),
+            section: PackSection::ProceduralRules,
+            content: "Run cargo fmt --check before release.".to_string(),
+            estimated_tokens: 10,
+            relevance: score(0.8)?,
+            utility: score(0.6)?,
+            provenance: vec![pack_provenance("file://AGENTS.md#L42")?],
+            why: "selected because release checks match the task".to_string(),
+        })
+        .map_err(|error| format!("candidate rejected: {error:?}"))?;
+        let draft = assemble_draft(&request.query, budget, vec![candidate])
+            .map_err(|error| format!("draft rejected: {error:?}"))?;
+        ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| format!("response rejected: {error:?}"))
     }
 
     #[test]
@@ -1116,6 +1164,26 @@ mod tests {
             .finish();
         ensure_contains(&json, "\"degraded\":[{", "degraded array start")?;
         ensure_contains(&json, "\"code\":\"code1\"", "degradation code")
+    }
+
+    #[test]
+    fn context_response_json_renders_provenance() -> TestResult {
+        let response = context_response_fixture()?;
+        let json = render_context_response_json(&response);
+
+        ensure_starts_with(&json, "{\"schema\":\"ee.response.v1\"", "schema")?;
+        ensure_contains(&json, "\"command\":\"context\"", "command")?;
+        ensure_contains(
+            &json,
+            "\"provenance\":[{\"uri\":\"file://AGENTS.md#L42\",\"scheme\":\"file\",\"label\":\"AGENTS.md:L42\",\"locator\":\"L42\",\"note\":\"source evidence\"}]",
+            "item provenance",
+        )?;
+        ensure_contains(
+            &json,
+            "\"provenanceFooter\":{\"memoryCount\":1,\"sourceCount\":1,\"schemes\":[\"file\"],\"entries\":[",
+            "provenance footer",
+        )?;
+        ensure_contains(&json, "\"relevance\":0.800000", "stable relevance")
     }
 
     #[test]
