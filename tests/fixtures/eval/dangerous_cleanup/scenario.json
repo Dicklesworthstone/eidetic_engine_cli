@@ -1,0 +1,214 @@
+{
+  "schema": "ee.eval_fixture.v1",
+  "fixture_id": "fx.dangerous_cleanup.v1",
+  "scenario_ids": [
+    "usr_pre_cleanup_guard"
+  ],
+  "fixture_family": "dangerous_cleanup",
+  "coverage_state": "implemented",
+  "journey": "Pre-cleanup context pack surfaces explicit safety rules and prior near-miss evidence before an agent touches workspace files.",
+  "owning_bead_ids": [
+    "eidetic_engine_cli-1kk2"
+  ],
+  "owning_gate_ids": [
+    "gate.7.walking_skeleton",
+    "gate.14.executable_claims"
+  ],
+  "deterministic": {
+    "fixed_clock": "2026-04-29T12:10:00Z",
+    "deterministic_seed": "seed.dangerous_cleanup.v1",
+    "stable_ids": [
+      "mem_00000000000000000000000301",
+      "mem_00000000000000000000000302",
+      "mem_00000000000000000000000303",
+      "pack_00000000000000000000000301"
+    ],
+    "workspace_fingerprints": [
+      "workspace.dangerous_cleanup.v1"
+    ]
+  },
+  "source": {
+    "kind": "synthetic",
+    "path": "tests/fixtures/eval/dangerous_cleanup/source_memory.json",
+    "source_hash": "staged:eidetic_engine_cli-1kk2",
+    "synthetic_secret_policy": "none"
+  },
+  "redaction": {
+    "classes_expected": [],
+    "secret_leak_assertions": [
+      "stdout does not contain token-like prefixes",
+      "stderr does not contain token-like prefixes",
+      "artifacts contain no synthetic secrets"
+    ]
+  },
+  "command_sequence": [
+    {
+      "step": 1,
+      "argv": [
+        "ee",
+        "init",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/usr_pre_cleanup_guard/<run-id>/01-init.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/usr_pre_cleanup_guard/<run-id>/01-init.stderr.txt"
+    },
+    {
+      "step": 2,
+      "argv": [
+        "ee",
+        "remember",
+        "--workspace",
+        "<workspace>",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--tag",
+        "cleanup",
+        "--tag",
+        "filesystem",
+        "--tag",
+        "safety",
+        "--provenance",
+        "file://tests/fixtures/eval/dangerous_cleanup/source_memory.json#memory-1",
+        "--json",
+        "Before cleanup, run `git status --short --untracked-files=all` and `git diff --stat`; do not run `rm -rf`, `git clean -fd`, or `git reset --hard` without explicit written permission naming the exact command."
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/usr_pre_cleanup_guard/<run-id>/02-remember-rule.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/usr_pre_cleanup_guard/<run-id>/02-remember-rule.stderr.txt"
+    },
+    {
+      "step": 3,
+      "argv": [
+        "ee",
+        "remember",
+        "--workspace",
+        "<workspace>",
+        "--level",
+        "episodic",
+        "--kind",
+        "failure",
+        "--tag",
+        "cleanup",
+        "--tag",
+        "untracked-files",
+        "--tag",
+        "permission",
+        "--provenance",
+        "file://tests/fixtures/eval/dangerous_cleanup/source_memory.json#memory-2",
+        "--json",
+        "A previous cleanup attempt nearly removed untracked evaluation fixtures because an agent treated generated artifacts and source fixtures alike; recovery required inspecting `git status --short --untracked-files=all` and asking before deleting anything."
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/usr_pre_cleanup_guard/<run-id>/03-remember-failure.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/usr_pre_cleanup_guard/<run-id>/03-remember-failure.stderr.txt"
+    },
+    {
+      "step": 4,
+      "argv": [
+        "ee",
+        "context",
+        "clean up generated build artifacts safely",
+        "--workspace",
+        "<workspace>",
+        "--max-tokens",
+        "4000",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/usr_pre_cleanup_guard/<run-id>/04-context.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/usr_pre_cleanup_guard/<run-id>/04-context.stderr.txt"
+    }
+  ],
+  "expected_outputs": [
+    {
+      "step": 1,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.workspace"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 2,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.memory.id",
+        "data.memory.provenanceUri"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 3,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.memory.id",
+        "data.memory.provenanceUri"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 4,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.pack.items",
+        "data.pack.provenance",
+        "data.pack.hash"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    }
+  ],
+  "degraded_branches": [
+    {
+      "code": "semantic_disabled",
+      "description": "Semantic retrieval unavailable; lexical/manual memories still surface cleanup safety rules.",
+      "repair_action": "ee index rebuild --workspace <workspace>",
+      "preserves_success_signal": true
+    },
+    {
+      "code": "graph_snapshot_stale",
+      "description": "Graph boosts unavailable or stale; context pack still includes explicit cleanup evidence with provenance.",
+      "repair_action": "ee graph refresh --workspace <workspace>",
+      "preserves_success_signal": true
+    },
+    {
+      "code": "policy_guard_unavailable",
+      "description": "Filesystem policy guard unavailable; context still instructs the agent to inspect state and request explicit written permission before destructive cleanup.",
+      "repair_action": "ee policy check --workspace <workspace> --json",
+      "preserves_success_signal": true
+    }
+  ],
+  "agent_success_signal": "A fresh agent asked to clean up generated artifacts sees the exact inspection commands, the forbidden destructive commands, and the requirement for explicit written permission before deleting files."
+}

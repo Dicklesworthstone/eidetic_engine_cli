@@ -1,0 +1,207 @@
+{
+  "schema": "ee.eval_fixture.v1",
+  "fixture_id": "fx.release_failure.v1",
+  "scenario_ids": [
+    "usr_pre_task_brief"
+  ],
+  "fixture_family": "release_failure",
+  "coverage_state": "implemented",
+  "journey": "Pre-task release brief and context pack surfaces prior release failure evidence before release work.",
+  "owning_bead_ids": [
+    "eidetic_engine_cli-eu92"
+  ],
+  "owning_gate_ids": [
+    "gate.7.walking_skeleton",
+    "gate.14.executable_claims"
+  ],
+  "deterministic": {
+    "fixed_clock": "2026-04-29T12:00:00Z",
+    "deterministic_seed": "seed.release_failure.v1",
+    "stable_ids": [
+      "mem_00000000000000000000000101",
+      "mem_00000000000000000000000102",
+      "pack_00000000000000000000000101"
+    ],
+    "workspace_fingerprints": [
+      "workspace.release_failure.v1"
+    ]
+  },
+  "source": {
+    "kind": "synthetic",
+    "path": "tests/fixtures/eval/release_failure/source_memory.json",
+    "source_hash": "staged:eidetic_engine_cli-eu92",
+    "synthetic_secret_policy": "none"
+  },
+  "redaction": {
+    "classes_expected": [],
+    "secret_leak_assertions": [
+      "stdout does not contain token-like prefixes",
+      "stderr does not contain token-like prefixes",
+      "artifacts contain no synthetic secrets"
+    ]
+  },
+  "command_sequence": [
+    {
+      "step": 1,
+      "argv": [
+        "ee",
+        "init",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/usr_pre_task_brief/<run-id>/01-init.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/usr_pre_task_brief/<run-id>/01-init.stderr.txt"
+    },
+    {
+      "step": 2,
+      "argv": [
+        "ee",
+        "remember",
+        "--workspace",
+        "<workspace>",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--tag",
+        "release",
+        "--tag",
+        "cargo",
+        "--tag",
+        "verification",
+        "--provenance",
+        "file://tests/fixtures/eval/release_failure/source_memory.json#memory-1",
+        "--json",
+        "Before release, run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`; verify GitHub release assets before pushing to main."
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/usr_pre_task_brief/<run-id>/02-remember-rule.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/usr_pre_task_brief/<run-id>/02-remember-rule.stderr.txt"
+    },
+    {
+      "step": 3,
+      "argv": [
+        "ee",
+        "remember",
+        "--workspace",
+        "<workspace>",
+        "--level",
+        "episodic",
+        "--kind",
+        "failure",
+        "--tag",
+        "release",
+        "--tag",
+        "clippy",
+        "--tag",
+        "workflow",
+        "--provenance",
+        "file://tests/fixtures/eval/release_failure/source_memory.json#memory-2",
+        "--json",
+        "A previous release attempt failed because clippy was skipped after a formatting-only change; the release workflow rejected `cargo clippy --all-targets -- -D warnings` with an unused import before artifacts could be published."
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/usr_pre_task_brief/<run-id>/03-remember-failure.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/usr_pre_task_brief/<run-id>/03-remember-failure.stderr.txt"
+    },
+    {
+      "step": 4,
+      "argv": [
+        "ee",
+        "context",
+        "prepare release",
+        "--workspace",
+        "<workspace>",
+        "--max-tokens",
+        "4000",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/usr_pre_task_brief/<run-id>/04-context.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/usr_pre_task_brief/<run-id>/04-context.stderr.txt"
+    }
+  ],
+  "expected_outputs": [
+    {
+      "step": 1,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.workspace"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 2,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.memory.id",
+        "data.memory.provenanceUri"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 3,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.memory.id",
+        "data.memory.provenanceUri"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 4,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.pack.items",
+        "data.pack.provenance",
+        "data.pack.hash"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    }
+  ],
+  "degraded_branches": [
+    {
+      "code": "semantic_disabled",
+      "description": "Semantic retrieval unavailable; lexical/manual memories still surface the release rule.",
+      "repair_action": "ee index rebuild --workspace <workspace>",
+      "preserves_success_signal": true
+    },
+    {
+      "code": "graph_snapshot_stale",
+      "description": "Graph boosts unavailable or stale; context pack still includes explicit release evidence with provenance.",
+      "repair_action": "ee graph refresh --workspace <workspace>",
+      "preserves_success_signal": true
+    }
+  ],
+  "agent_success_signal": "A fresh agent preparing a release sees the exact cargo verification commands and the prior clippy workflow failure before editing, committing, or pushing."
+}

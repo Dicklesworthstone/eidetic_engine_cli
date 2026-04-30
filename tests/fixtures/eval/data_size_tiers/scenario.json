@@ -1,0 +1,286 @@
+{
+  "schema": "ee.eval_fixture.v1",
+  "fixture_id": "fx.data_size_tiers.v1",
+  "scenario_ids": [
+    "usr_context_small_workspace",
+    "usr_context_medium_workspace",
+    "usr_context_large_workspace"
+  ],
+  "fixture_family": "data_size_tiers",
+  "coverage_state": "implemented",
+  "journey": "Context packing behavior is exercised against deterministic small, medium, and large memory sets so agents can compare recall, budget pressure, provenance, and degraded retrieval behavior across data sizes.",
+  "owning_bead_ids": [
+    "eidetic_engine_cli-cgqc"
+  ],
+  "owning_gate_ids": [
+    "gate.7.walking_skeleton",
+    "gate.14.executable_claims"
+  ],
+  "deterministic": {
+    "fixed_clock": "2026-04-29T12:30:00Z",
+    "deterministic_seed": "seed.data_size_tiers.v1",
+    "stable_ids": [
+      "mem_00000000000000000000000501",
+      "mem_00000000000000000000000560",
+      "mem_00000000000000000000000600",
+      "pack_00000000000000000000000501",
+      "pack_00000000000000000000000502",
+      "pack_00000000000000000000000503"
+    ],
+    "workspace_fingerprints": [
+      "workspace.data_size_tiers.small.v1",
+      "workspace.data_size_tiers.medium.v1",
+      "workspace.data_size_tiers.large.v1"
+    ]
+  },
+  "source": {
+    "kind": "synthetic",
+    "path": "tests/fixtures/eval/data_size_tiers/source_memory.json",
+    "source_hash": "staged:eidetic_engine_cli-cgqc",
+    "synthetic_secret_policy": "none"
+  },
+  "redaction": {
+    "classes_expected": [],
+    "secret_leak_assertions": [
+      "stdout does not contain token-like prefixes",
+      "stderr does not contain token-like prefixes",
+      "generated tier memories contain no synthetic secrets"
+    ]
+  },
+  "data_size_tiers": [
+    {
+      "name": "small",
+      "scenario_id": "usr_context_small_workspace",
+      "expected_memory_count": 6,
+      "max_tokens": 800,
+      "generation_profile": "profile.data_size_tiers.small.v1",
+      "expected_pack_behavior": [
+        "all_task_relevant_memories_selected",
+        "no_budget_truncation",
+        "full_provenance_chain_present"
+      ]
+    },
+    {
+      "name": "medium",
+      "scenario_id": "usr_context_medium_workspace",
+      "expected_memory_count": 60,
+      "max_tokens": 2400,
+      "generation_profile": "profile.data_size_tiers.medium.v1",
+      "expected_pack_behavior": [
+        "section_quotas_applied",
+        "redundant_memories_suppressed",
+        "selection_explanations_present"
+      ]
+    },
+    {
+      "name": "large",
+      "scenario_id": "usr_context_large_workspace",
+      "expected_memory_count": 600,
+      "max_tokens": 4000,
+      "generation_profile": "profile.data_size_tiers.large.v1",
+      "expected_pack_behavior": [
+        "top_ranked_memories_selected",
+        "budget_truncation_explained",
+        "degraded_lexical_path_preserves_core_signal"
+      ]
+    }
+  ],
+  "command_sequence": [
+    {
+      "step": 1,
+      "argv": [
+        "ee",
+        "init",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/01-init.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/01-init.stderr.txt"
+    },
+    {
+      "step": 2,
+      "argv": [
+        "ee",
+        "remember",
+        "--workspace",
+        "<workspace>",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--tag",
+        "data-size-tier",
+        "--tag",
+        "packing",
+        "--provenance",
+        "file://tests/fixtures/eval/data_size_tiers/source_memory.json#seed-rule",
+        "--json",
+        "When evaluating context packing at different data sizes, compare selected memory IDs, token budget usage, provenance coverage, and truncation explanations for small, medium, and large tier workspaces."
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/02-remember-seed-rule.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/02-remember-seed-rule.stderr.txt"
+    },
+    {
+      "step": 3,
+      "argv": [
+        "ee",
+        "context",
+        "prepare release from small workspace history",
+        "--workspace",
+        "<workspace>",
+        "--max-tokens",
+        "800",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "tier": "small",
+      "stdout_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/03-context-small.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/03-context-small.stderr.txt"
+    },
+    {
+      "step": 4,
+      "argv": [
+        "ee",
+        "context",
+        "prepare release from medium workspace history",
+        "--workspace",
+        "<workspace>",
+        "--max-tokens",
+        "2400",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "tier": "medium",
+      "stdout_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/04-context-medium.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/04-context-medium.stderr.txt"
+    },
+    {
+      "step": 5,
+      "argv": [
+        "ee",
+        "context",
+        "prepare release from large workspace history",
+        "--workspace",
+        "<workspace>",
+        "--max-tokens",
+        "4000",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "tier": "large",
+      "stdout_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/05-context-large.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/05-context-large.stderr.txt"
+    }
+  ],
+  "expected_outputs": [
+    {
+      "step": 1,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.workspace"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 2,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.memory.id",
+        "data.memory.provenanceUri"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 3,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.pack.items",
+        "data.pack.provenance",
+        "data.pack.hash",
+        "data.pack.tokenBudget.maxTokens"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 4,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.pack.items",
+        "data.pack.provenance",
+        "data.pack.hash",
+        "data.pack.selection.explanations"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 5,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.pack.items",
+        "data.pack.provenance",
+        "data.pack.hash",
+        "data.pack.truncation.reason"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    }
+  ],
+  "degraded_branches": [
+    {
+      "code": "semantic_disabled",
+      "description": "Semantic retrieval unavailable; lexical retrieval still exercises each data-size tier with deterministic ranking and provenance.",
+      "repair_action": "ee index rebuild --workspace <workspace>",
+      "preserves_success_signal": true
+    },
+    {
+      "code": "pack_budget_exceeded",
+      "description": "Large tier exceeds the requested context budget; output preserves top-ranked evidence and explains truncation rather than silently dropping provenance.",
+      "repair_action": "ee context <task> --workspace <workspace> --max-tokens 8000 --json",
+      "preserves_success_signal": true
+    },
+    {
+      "code": "graph_snapshot_stale",
+      "description": "Graph boosts unavailable or stale; tier evaluation still validates lexical/search selection and reports graph capability degradation.",
+      "repair_action": "ee graph refresh --workspace <workspace>",
+      "preserves_success_signal": true
+    }
+  ],
+  "agent_success_signal": "A fresh agent can compare small, medium, and large workspace context packs and see deterministic token-budget behavior, provenance coverage, and truncation explanations."
+}

@@ -1,0 +1,81 @@
+{
+  "schema": "ee.eval_source_memory.v1",
+  "fixture_id": "fx.dangerous_cleanup.v1",
+  "source_kind": "synthetic",
+  "fixed_clock": "2026-04-29T12:10:00Z",
+  "memories": [
+    {
+      "id": "mem_00000000000000000000000301",
+      "level": "procedural",
+      "kind": "rule",
+      "trust_class": "human_explicit",
+      "confidence": 0.96,
+      "utility": 0.92,
+      "importance": 0.9,
+      "tags": [
+        "cleanup",
+        "filesystem",
+        "safety"
+      ],
+      "content": "Before cleanup, run `git status --short --untracked-files=all` and `git diff --stat`; do not run `rm -rf`, `git clean -fd`, or `git reset --hard` without explicit written permission naming the exact command.",
+      "provenance_uri": "file://tests/fixtures/eval/dangerous_cleanup/source_memory.json#memory-1",
+      "expected_query_match": [
+        "clean up generated build artifacts safely",
+        "dangerous cleanup",
+        "explicit written permission"
+      ]
+    },
+    {
+      "id": "mem_00000000000000000000000302",
+      "level": "episodic",
+      "kind": "failure",
+      "trust_class": "human_explicit",
+      "confidence": 0.9,
+      "utility": 0.88,
+      "importance": 0.86,
+      "tags": [
+        "cleanup",
+        "untracked-files",
+        "permission"
+      ],
+      "content": "A previous cleanup attempt nearly removed untracked evaluation fixtures because an agent treated generated artifacts and source fixtures alike; recovery required inspecting `git status --short --untracked-files=all` and asking before deleting anything.",
+      "provenance_uri": "file://tests/fixtures/eval/dangerous_cleanup/source_memory.json#memory-2",
+      "expected_query_match": [
+        "untracked fixtures",
+        "before deleting",
+        "cleanup failure"
+      ]
+    },
+    {
+      "id": "mem_00000000000000000000000303",
+      "level": "procedural",
+      "kind": "checklist",
+      "trust_class": "human_explicit",
+      "confidence": 0.88,
+      "utility": 0.84,
+      "importance": 0.8,
+      "tags": [
+        "cleanup",
+        "audit",
+        "dry-run"
+      ],
+      "content": "Safe cleanup plan: classify paths as generated or source, prefer dry-run or listing commands, preserve unknown files, and record the user's exact cleanup approval in the final status if any destructive command is later authorized.",
+      "provenance_uri": "file://tests/fixtures/eval/dangerous_cleanup/source_memory.json#memory-3",
+      "expected_query_match": [
+        "safe cleanup plan",
+        "dry-run",
+        "preserve unknown files"
+      ]
+    }
+  ],
+  "secret_policy": {
+    "synthetic_secret_policy": "none",
+    "secret_like_values_present": false,
+    "blocked_classes": [
+      "api_token",
+      "github_token",
+      "cloud_access_key",
+      "private_key"
+    ]
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "schema": "ee.eval_source_memory.v1",
+  "fixture_id": "fx.release_failure.v1",
+  "source_kind": "synthetic",
+  "fixed_clock": "2026-04-29T12:00:00Z",
+  "memories": [
+    {
+      "id": "mem_00000000000000000000000101",
+      "level": "procedural",
+      "kind": "rule",
+      "trust_class": "human_explicit",
+      "confidence": 0.95,
+      "utility": 0.9,
+      "importance": 0.85,
+      "tags": [
+        "release",
+        "cargo",
+        "verification"
+      ],
+      "content": "Before release, run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`; verify GitHub release assets before pushing to main.",
+      "provenance_uri": "file://tests/fixtures/eval/release_failure/source_memory.json#memory-1",
+      "expected_query_match": [
+        "prepare release",
+        "failing release workflow",
+        "clippy before release"
+      ]
+    },
+    {
+      "id": "mem_00000000000000000000000102",
+      "level": "episodic",
+      "kind": "failure",
+      "trust_class": "human_explicit",
+      "confidence": 0.9,
+      "utility": 0.85,
+      "importance": 0.8,
+      "tags": [
+        "release",
+        "clippy",
+        "workflow"
+      ],
+      "content": "A previous release attempt failed because clippy was skipped after a formatting-only change; the release workflow rejected `cargo clippy --all-targets -- -D warnings` with an unused import before artifacts could be published.",
+      "provenance_uri": "file://tests/fixtures/eval/release_failure/source_memory.json#memory-2",
+      "expected_query_match": [
+        "prepare release",
+        "release failure",
+        "unused import"
+      ]
+    }
+  ],
+  "secret_policy": {
+    "synthetic_secret_policy": "none",
+    "secret_like_values_present": false,
+    "blocked_classes": [
+      "api_token",
+      "github_token",
+      "cloud_access_key",
+      "private_key"
+    ]
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "schema": "ee.eval_source_memory.v1",
+  "fixture_id": "fx.data_size_tiers.v1",
+  "source_kind": "synthetic",
+  "fixed_clock": "2026-04-29T12:30:00Z",
+  "seed_memory": {
+    "id": "mem_00000000000000000000000501",
+    "level": "procedural",
+    "kind": "rule",
+    "trust_class": "human_explicit",
+    "confidence": 0.94,
+    "utility": 0.9,
+    "importance": 0.88,
+    "tags": [
+      "data-size-tier",
+      "packing",
+      "evaluation"
+    ],
+    "content": "When evaluating context packing at different data sizes, compare selected memory IDs, token budget usage, provenance coverage, and truncation explanations for small, medium, and large tier workspaces.",
+    "provenance_uri": "file://tests/fixtures/eval/data_size_tiers/source_memory.json#seed-rule"
+  },
+  "tiers": [
+    {
+      "name": "small",
+      "expected_memory_count": 6,
+      "id_range": {
+        "start": "mem_00000000000000000000000501",
+        "end": "mem_00000000000000000000000506"
+      },
+      "generator": {
+        "profile": "profile.data_size_tiers.small.v1",
+        "template": "Small tier release memory {n}: cargo fmt, cargo clippy, cargo test, provenance check, and release note verification.",
+        "relevant_every": 1,
+        "distractor_every": 0
+      },
+      "expected_query_match": [
+        "small workspace history",
+        "release memory",
+        "all task relevant memories"
+      ]
+    },
+    {
+      "name": "medium",
+      "expected_memory_count": 60,
+      "id_range": {
+        "start": "mem_00000000000000000000000501",
+        "end": "mem_00000000000000000000000560"
+      },
+      "generator": {
+        "profile": "profile.data_size_tiers.medium.v1",
+        "template": "Medium tier memory {n}: release workflow evidence with module tag {module}, repeated checks, and occasional redundant status notes.",
+        "relevant_every": 2,
+        "distractor_every": 5
+      },
+      "expected_query_match": [
+        "medium workspace history",
+        "section quotas",
+        "redundant memories suppressed"
+      ]
+    },
+    {
+      "name": "large",
+      "expected_memory_count": 600,
+      "id_range": {
+        "start": "mem_00000000000000000000000501",
+        "end": "mem_00000000000000000000000600"
+      },
+      "generator": {
+        "profile": "profile.data_size_tiers.large.v1",
+        "template": "Large tier memory {n}: release, migration, search, graph, and policy evidence with deterministic priority bucket {bucket}.",
+        "relevant_every": 3,
+        "distractor_every": 7
+      },
+      "expected_query_match": [
+        "large workspace history",
+        "budget truncation",
+        "top ranked memories"
+      ]
+    }
+  ],
+  "secret_policy": {
+    "synthetic_secret_policy": "none",
+    "secret_like_values_present": false,
+    "blocked_classes": [
+      "api_token",
+      "github_token",
+      "cloud_access_key",
+      "private_key"
+    ]
+  }
+}
