@@ -1,6 +1,7 @@
 use std::future::Future;
 
 pub mod budget;
+pub mod capabilities;
 pub mod check;
 pub mod context;
 pub mod doctor;

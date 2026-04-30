@@ -1,6 +1,7 @@
 use std::env;
 use std::io::IsTerminal;
 
+use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
 use crate::core::doctor::DoctorReport;
 use crate::core::status::StatusReport;
@@ -645,6 +646,102 @@ pub fn render_check_human(report: &CheckReport) -> String {
 #[must_use]
 pub fn render_check_toon(report: &CheckReport) -> String {
     render_toon_from_json(&render_check_json(report))
+}
+
+/// Render a capabilities report as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
+    let mut b = JsonBuilder::with_capacity(1024);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "capabilities");
+        d.field_str("version", report.version);
+        d.field_array_of_objects("subsystems", &report.subsystems, |obj, sub| {
+            obj.field_str("name", sub.name);
+            obj.field_str("status", sub.status.as_str());
+            obj.field_str("description", sub.description);
+        });
+        d.field_array_of_objects("features", &report.features, |obj, feat| {
+            obj.field_str("name", feat.name);
+            obj.field_bool("enabled", feat.enabled);
+            obj.field_str("description", feat.description);
+        });
+        d.field_array_of_objects("commands", &report.commands, |obj, cmd| {
+            obj.field_str("name", cmd.name);
+            obj.field_bool("available", cmd.available);
+            obj.field_str("description", cmd.description);
+        });
+        d.field_object("summary", |s| {
+            s.field_raw(
+                "readySubsystems",
+                &report.ready_subsystem_count().to_string(),
+            );
+            s.field_raw("totalSubsystems", &report.subsystems.len().to_string());
+            s.field_raw(
+                "enabledFeatures",
+                &report.enabled_feature_count().to_string(),
+            );
+            s.field_raw("totalFeatures", &report.features.len().to_string());
+            s.field_raw(
+                "availableCommands",
+                &report.available_command_count().to_string(),
+            );
+            s.field_raw("totalCommands", &report.commands.len().to_string());
+        });
+    });
+    b.finish()
+}
+
+/// Render a capabilities report as human-readable text.
+#[must_use]
+pub fn render_capabilities_human(report: &CapabilitiesReport) -> String {
+    let mut output = format!("ee capabilities (v{})\n\n", report.version);
+
+    output.push_str("Subsystems:\n");
+    for sub in &report.subsystems {
+        let icon = match sub.status {
+            crate::models::CapabilityStatus::Ready => "✓",
+            crate::models::CapabilityStatus::Pending => "◐",
+            crate::models::CapabilityStatus::Degraded => "⚠",
+            crate::models::CapabilityStatus::Unimplemented => "○",
+        };
+        output.push_str(&format!("  {} {} — {}\n", icon, sub.name, sub.description));
+    }
+
+    output.push_str("\nFeatures:\n");
+    for feat in &report.features {
+        let icon = if feat.enabled { "✓" } else { "○" };
+        output.push_str(&format!(
+            "  {} {} — {}\n",
+            icon, feat.name, feat.description
+        ));
+    }
+
+    output.push_str("\nCommands:\n");
+    for cmd in &report.commands {
+        let icon = if cmd.available { "✓" } else { "○" };
+        output.push_str(&format!("  {} {} — {}\n", icon, cmd.name, cmd.description));
+    }
+
+    output.push_str(&format!(
+        "\nSummary: {}/{} subsystems ready, {}/{} features enabled, {}/{} commands available\n",
+        report.ready_subsystem_count(),
+        report.subsystems.len(),
+        report.enabled_feature_count(),
+        report.features.len(),
+        report.available_command_count(),
+        report.commands.len()
+    ));
+
+    output.push_str("\nNext:\n  ee capabilities --json\n");
+    output
+}
+
+/// Render a capabilities report as TOON.
+#[must_use]
+pub fn render_capabilities_toon(report: &CapabilitiesReport) -> String {
+    render_toon_from_json(&render_capabilities_json(report))
 }
 
 /// Render evaluation run result as JSON (ee.response.v1 envelope).

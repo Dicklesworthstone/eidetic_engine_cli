@@ -6,6 +6,7 @@ use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use crate::cass::{CassClient, CassImportOptions, import_cass_sessions};
+use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
 use crate::core::doctor::DoctorReport;
 use crate::core::status::StatusReport;
@@ -98,6 +99,8 @@ impl Cli {
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum Command {
+    /// Report feature availability, commands, and subsystem status.
+    Capabilities,
     /// Quick posture summary: ready, degraded, or needs attention.
     Check,
     /// Run health checks on workspace and subsystems.
@@ -287,6 +290,23 @@ where
 
     match cli.command {
         None | Some(Command::Help) => write_help(stdout),
+        Some(Command::Capabilities) => {
+            let report = CapabilitiesReport::gather();
+            match cli.renderer() {
+                output::Renderer::Human => {
+                    write_stdout(stdout, &output::render_capabilities_human(&report))
+                }
+                output::Renderer::Toon => {
+                    write_stdout(stdout, &(output::render_capabilities_toon(&report) + "\n"))
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    write_stdout(stdout, &(output::render_capabilities_json(&report) + "\n"))
+                }
+            }
+        }
         Some(Command::Check) => {
             let report = CheckReport::gather();
             match cli.renderer() {
