@@ -1988,9 +1988,19 @@ mod tests {
 
     #[test]
     fn memory_show_command_accepts_include_tombstoned() -> TestResult {
-        let parsed =
-            Cli::try_parse_from(["ee", "memory", "show", "mem_test123", "--include-tombstoned"])
-                .map_err(|e| format!("failed to parse memory show with tombstoned: {:?}", e.kind()))?;
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "memory",
+            "show",
+            "mem_test123",
+            "--include-tombstoned",
+        ])
+        .map_err(|e| {
+            format!(
+                "failed to parse memory show with tombstoned: {:?}",
+                e.kind()
+            )
+        })?;
 
         match parsed.command {
             Some(Command::Memory(MemoryCommand::Show(ref args))) => {
@@ -2002,18 +2012,22 @@ mod tests {
 
     #[test]
     fn memory_show_command_accepts_database_path() -> TestResult {
-        let parsed =
-            Cli::try_parse_from(["ee", "memory", "show", "mem_test123", "--database", "/tmp/ee.db"])
-                .map_err(|e| format!("failed to parse memory show with database: {:?}", e.kind()))?;
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "memory",
+            "show",
+            "mem_test123",
+            "--database",
+            "/tmp/ee.db",
+        ])
+        .map_err(|e| format!("failed to parse memory show with database: {:?}", e.kind()))?;
 
         match parsed.command {
-            Some(Command::Memory(MemoryCommand::Show(ref args))) => {
-                ensure_equal(
-                    &args.database,
-                    &Some(std::path::PathBuf::from("/tmp/ee.db")),
-                    "database path",
-                )
-            }
+            Some(Command::Memory(MemoryCommand::Show(ref args))) => ensure_equal(
+                &args.database,
+                &Some(std::path::PathBuf::from("/tmp/ee.db")),
+                "database path",
+            ),
             _ => Err("expected Memory Show command".to_string()),
         }
     }
