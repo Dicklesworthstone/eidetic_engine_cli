@@ -192,6 +192,73 @@ impl DbConnection {
             .map_err(|source| DbError::sqlmodel(DbOperation::Execute, source))
     }
 
+    /// Run SQLite PRAGMA integrity_check and return results.
+    pub fn check_integrity(&self) -> Result<IntegrityCheckResult> {
+        let rows = self.query_for(
+            DbOperation::IntegrityCheck,
+            "PRAGMA integrity_check",
+            &[],
+        )?;
+
+        let mut issues = Vec::new();
+        for row in &rows {
+            if let Some(msg) = row.get(0).and_then(|v| v.as_str()) {
+                if msg != "ok" {
+                    issues.push(msg.to_string());
+                }
+            }
+        }
+
+        Ok(IntegrityCheckResult {
+            passed: issues.is_empty(),
+            issues,
+        })
+    }
+
+    /// Run SQLite PRAGMA foreign_key_check and return violations.
+    pub fn check_foreign_keys(&self) -> Result<ForeignKeyCheckResult> {
+        let rows = self.query_for(
+            DbOperation::ForeignKeyCheck,
+            "PRAGMA foreign_key_check",
+            &[],
+        )?;
+
+        let mut violations = Vec::new();
+        for row in &rows {
+            let table = row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let rowid = row.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+            let parent = row.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let fkid = row.get(3).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+
+            violations.push(ForeignKeyViolation {
+                table,
+                rowid,
+                parent,
+                fkid,
+            });
+        }
+
+        Ok(ForeignKeyCheckResult {
+            passed: violations.is_empty(),
+            violations,
+        })
+    }
+
+    /// Run a full database integrity report.
+    pub fn integrity_report(&self) -> Result<IntegrityReport> {
+        let integrity = self.check_integrity()?;
+        let foreign_keys = self.check_foreign_keys()?;
+        let schema_version = self.schema_version()?;
+        let needs_migration = self.needs_migration()?;
+
+        Ok(IntegrityReport {
+            integrity_check: integrity,
+            foreign_key_check: foreign_keys,
+            schema_version,
+            needs_migration,
+        })
+    }
+
     pub fn ensure_migration_table(&self) -> Result<()> {
         self.execute_raw_for(DbOperation::EnsureMigrationTable, MIGRATION_TABLE_DDL)?;
         self.execute_raw_for(
@@ -487,6 +554,47 @@ impl Error for DbError {
     }
 }
 
+/// Result of PRAGMA integrity_check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrityCheckResult {
+    pub passed: bool,
+    pub issues: Vec<String>,
+}
+
+/// A foreign key violation found by PRAGMA foreign_key_check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKeyViolation {
+    pub table: String,
+    pub rowid: i64,
+    pub parent: String,
+    pub fkid: u32,
+}
+
+/// Result of PRAGMA foreign_key_check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKeyCheckResult {
+    pub passed: bool,
+    pub violations: Vec<ForeignKeyViolation>,
+}
+
+/// Full database integrity report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrityReport {
+    pub integrity_check: IntegrityCheckResult,
+    pub foreign_key_check: ForeignKeyCheckResult,
+    pub schema_version: Option<u32>,
+    pub needs_migration: bool,
+}
+
+impl IntegrityReport {
+    /// Returns true if the database passes all integrity checks.
+    pub fn is_healthy(&self) -> bool {
+        self.integrity_check.passed
+            && self.foreign_key_check.passed
+            && !self.needs_migration
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DbOperation {
     OpenMemory,
@@ -498,6 +606,8 @@ pub enum DbOperation {
     BeginTransaction,
     CommitTransaction,
     RollbackTransaction,
+    IntegrityCheck,
+    ForeignKeyCheck,
     EnsureMigrationTable,
     InspectMigrationTable,
     RecordMigration,
@@ -517,6 +627,8 @@ impl fmt::Display for DbOperation {
             Self::BeginTransaction => f.write_str("transaction begin"),
             Self::CommitTransaction => f.write_str("transaction commit"),
             Self::RollbackTransaction => f.write_str("transaction rollback"),
+            Self::IntegrityCheck => f.write_str("integrity check"),
+            Self::ForeignKeyCheck => f.write_str("foreign key check"),
             Self::EnsureMigrationTable => f.write_str("migration table ensure"),
             Self::InspectMigrationTable => f.write_str("migration table inspect"),
             Self::RecordMigration => f.write_str("migration record insert"),
@@ -3482,6 +3594,62 @@ mod tests {
 
         let job = connection.get_search_index_job("sidx_nonexistent000000000000000")?;
         ensure(job.is_none(), "nonexistent job must be None")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn check_integrity_passes_on_healthy_database() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let result = connection.check_integrity()?;
+        ensure(result.passed, "integrity check must pass")?;
+        ensure(result.issues.is_empty(), "no integrity issues")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn check_foreign_keys_passes_on_healthy_database() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let result = connection.check_foreign_keys()?;
+        ensure(result.passed, "foreign key check must pass")?;
+        ensure(result.violations.is_empty(), "no foreign key violations")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn integrity_report_on_healthy_database() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let report = connection.integrity_report()?;
+        ensure(report.is_healthy(), "database is healthy")?;
+        ensure(report.integrity_check.passed, "integrity passed")?;
+        ensure(report.foreign_key_check.passed, "foreign keys passed")?;
+        ensure(!report.needs_migration, "no migration needed")?;
+        ensure_equal(&report.schema_version, &Some(6), "schema version is 6")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn integrity_report_detects_pending_migration() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_migration_table()?;
+
+        let report = connection.integrity_report()?;
+        ensure(!report.is_healthy(), "database needs migration")?;
+        ensure(report.needs_migration, "migration needed")?;
 
         connection.close()?;
         Ok(())
