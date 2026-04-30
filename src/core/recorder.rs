@@ -756,4 +756,67 @@ mod tests {
         assert!(report.events.is_empty());
         assert_eq!(report.total_events, 0);
     }
+
+    #[test]
+    fn links_schema_is_stable() -> TestResult {
+        ensure(RECORDER_LINKS_SCHEMA_V1, "ee.recorder.links.v1", "links schema")
+    }
+
+    #[test]
+    fn link_type_as_str() {
+        assert_eq!(RecorderLinkType::ContextPack.as_str(), "context_pack");
+        assert_eq!(RecorderLinkType::PreflightRun.as_str(), "preflight_run");
+        assert_eq!(RecorderLinkType::Outcome.as_str(), "outcome");
+        assert_eq!(RecorderLinkType::Tripwire.as_str(), "tripwire");
+        assert_eq!(RecorderLinkType::TaskEpisode.as_str(), "task_episode");
+    }
+
+    #[test]
+    fn add_link_creates_link_id() {
+        let options = RecorderLinkAddOptions {
+            run_id: "run_test".to_string(),
+            link_type: RecorderLinkType::ContextPack,
+            artifact_id: "pack_abc".to_string(),
+            metadata: None,
+            dry_run: false,
+        };
+
+        let report = add_link(&options);
+
+        assert!(report.link.link_id.starts_with("link_"));
+        assert_eq!(report.link.run_id, "run_test");
+        assert_eq!(report.link.link_type, RecorderLinkType::ContextPack);
+        assert_eq!(report.link.artifact_id, "pack_abc");
+    }
+
+    #[test]
+    fn list_links_filters_by_run_id() {
+        let options = RecorderLinksListOptions {
+            run_id: Some("run_sample".to_string()),
+            link_type: None,
+            artifact_id: None,
+            limit: 10,
+        };
+
+        let report = list_links(&options);
+
+        assert!(report.links.iter().all(|l| l.run_id == "run_sample"));
+    }
+
+    #[test]
+    fn list_links_filters_by_type() {
+        let options = RecorderLinksListOptions {
+            run_id: None,
+            link_type: Some(RecorderLinkType::ContextPack),
+            artifact_id: None,
+            limit: 10,
+        };
+
+        let report = list_links(&options);
+
+        assert!(report
+            .links
+            .iter()
+            .all(|l| l.link_type == RecorderLinkType::ContextPack));
+    }
 }
