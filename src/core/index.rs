@@ -753,4 +753,228 @@ mod tests {
         );
         assert_eq!(options.resolve_index_dir(), PathBuf::from("/custom/index"));
     }
+
+    // ========================================================================
+    // Cache Invalidation Tests (EE-259)
+    // ========================================================================
+
+    #[test]
+    fn cache_invalidation_missing_index_detected() {
+        let health = determine_health(false, 0, Some(10), Some(10));
+        assert_eq!(health, IndexHealth::Missing);
+        assert_eq!(health.degradation_code(), Some("index_missing"));
+    }
+
+    #[test]
+    fn cache_invalidation_empty_index_detected() {
+        let health = determine_health(true, 0, Some(10), Some(10));
+        assert_eq!(health, IndexHealth::Missing);
+    }
+
+    #[test]
+    fn cache_invalidation_stale_when_db_ahead() {
+        let health = determine_health(true, 5, Some(12), Some(9));
+        assert_eq!(health, IndexHealth::Stale);
+        assert_eq!(health.degradation_code(), Some("index_stale"));
+    }
+
+    #[test]
+    fn cache_invalidation_stale_when_index_has_no_generation() {
+        let health = determine_health(true, 5, Some(12), None);
+        assert_eq!(health, IndexHealth::Stale);
+    }
+
+    #[test]
+    fn cache_invalidation_ready_when_generations_match() {
+        let health = determine_health(true, 5, Some(10), Some(10));
+        assert_eq!(health, IndexHealth::Ready);
+        assert_eq!(health.degradation_code(), None);
+    }
+
+    #[test]
+    fn cache_invalidation_ready_when_index_ahead() {
+        let health = determine_health(true, 5, Some(8), Some(10));
+        assert_eq!(health, IndexHealth::Ready);
+    }
+
+    #[test]
+    fn cache_invalidation_ready_when_no_generations_tracked() {
+        let health = determine_health(true, 5, None, None);
+        assert_eq!(health, IndexHealth::Ready);
+    }
+
+    #[test]
+    fn cache_invalidation_ready_when_db_has_no_generation() {
+        let health = determine_health(true, 5, None, Some(10));
+        assert_eq!(health, IndexHealth::Ready);
+    }
+
+    #[test]
+    fn index_health_strings_are_stable() {
+        assert_eq!(IndexHealth::Ready.as_str(), "ready");
+        assert_eq!(IndexHealth::Stale.as_str(), "stale");
+        assert_eq!(IndexHealth::Missing.as_str(), "missing");
+        assert_eq!(IndexHealth::Corrupt.as_str(), "corrupt");
+    }
+
+    #[test]
+    fn index_health_degradation_codes_are_stable() {
+        assert_eq!(IndexHealth::Ready.degradation_code(), None);
+        assert_eq!(IndexHealth::Stale.degradation_code(), Some("index_stale"));
+        assert_eq!(
+            IndexHealth::Missing.degradation_code(),
+            Some("index_missing")
+        );
+        assert_eq!(
+            IndexHealth::Corrupt.degradation_code(),
+            Some("index_corrupt")
+        );
+    }
+
+    #[test]
+    fn index_status_report_json_includes_generation_fields() {
+        let report = IndexStatusReport {
+            health: IndexHealth::Stale,
+            index_dir: PathBuf::from("/tmp/index"),
+            database_path: PathBuf::from("/tmp/ee.db"),
+            index_exists: true,
+            index_file_count: 3,
+            index_size_bytes: 1024,
+            db_memory_count: 10,
+            db_session_count: 5,
+            db_generation: Some(12),
+            index_generation: Some(9),
+            last_rebuild_at: Some("2026-04-30T12:00:00Z".to_string()),
+            repair_hint: Some("ee index rebuild --workspace ."),
+            elapsed_ms: 5.2,
+        };
+
+        let json = report.data_json();
+        assert_eq!(json["health"], "stale");
+        assert_eq!(json["degradationCode"], "index_stale");
+        assert_eq!(json["dbGeneration"], 12);
+        assert_eq!(json["indexGeneration"], 9);
+        assert_eq!(json["dbMemoryCount"], 10);
+        assert_eq!(json["dbSessionCount"], 5);
+        assert_eq!(json["repairHint"], "ee index rebuild --workspace .");
+    }
+
+    #[test]
+    fn index_status_report_human_summary_shows_stale_warning() {
+        let report = IndexStatusReport {
+            health: IndexHealth::Stale,
+            index_dir: PathBuf::from("/tmp/index"),
+            database_path: PathBuf::from("/tmp/ee.db"),
+            index_exists: true,
+            index_file_count: 3,
+            index_size_bytes: 1024,
+            db_memory_count: 10,
+            db_session_count: 5,
+            db_generation: Some(12),
+            index_generation: Some(9),
+            last_rebuild_at: None,
+            repair_hint: Some("ee index rebuild --workspace ."),
+            elapsed_ms: 5.2,
+        };
+
+        let summary = report.human_summary();
+        assert!(summary.contains("STALE"));
+        assert!(summary.contains("rebuild recommended"));
+        assert!(summary.contains("DB generation: 12"));
+        assert!(summary.contains("Index generation: 9"));
+    }
+
+    #[test]
+    fn cache_invalidation_boundary_condition_equal_generations() {
+        for generation in [0_u64, 1, 100, u64::MAX] {
+            let health = determine_health(true, 1, Some(generation), Some(generation));
+            assert_eq!(
+                health,
+                IndexHealth::Ready,
+                "generation {generation} should be ready"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_invalidation_boundary_condition_db_one_ahead() {
+        let health = determine_health(true, 1, Some(1), Some(0));
+        assert_eq!(health, IndexHealth::Stale);
+    }
+
+    #[test]
+    fn format_bytes_produces_human_readable_sizes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
+    }
+
+    #[test]
+    fn index_status_options_resolve_defaults() {
+        let options = IndexStatusOptions {
+            workspace_path: PathBuf::from("/home/user/project"),
+            database_path: None,
+            index_dir: None,
+        };
+
+        assert_eq!(
+            options.resolve_database_path(),
+            PathBuf::from("/home/user/project/.ee/ee.db")
+        );
+        assert_eq!(
+            options.resolve_index_dir(),
+            PathBuf::from("/home/user/project/.ee/index")
+        );
+    }
+
+    #[test]
+    fn index_status_options_respect_overrides() {
+        let options = IndexStatusOptions {
+            workspace_path: PathBuf::from("/home/user/project"),
+            database_path: Some(PathBuf::from("/custom/db.sqlite")),
+            index_dir: Some(PathBuf::from("/custom/index")),
+        };
+
+        assert_eq!(
+            options.resolve_database_path(),
+            PathBuf::from("/custom/db.sqlite")
+        );
+        assert_eq!(options.resolve_index_dir(), PathBuf::from("/custom/index"));
+    }
+
+    #[test]
+    fn index_rebuild_error_has_repair_hints() {
+        let db_err = IndexRebuildError::Database(crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Query,
+            message: "test".to_string(),
+        });
+        assert!(db_err.repair_hint().is_some());
+
+        let idx_err = IndexRebuildError::Index("failed".to_string());
+        assert!(idx_err.repair_hint().is_some());
+
+        let ws_err = IndexRebuildError::NoWorkspace;
+        assert_eq!(ws_err.repair_hint(), Some("ee init --workspace ."));
+    }
+
+    #[test]
+    fn index_status_error_has_repair_hints() {
+        let db_err = IndexStatusError::Database(crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Query,
+            message: "test".to_string(),
+        });
+        assert_eq!(db_err.repair_hint(), Some("ee doctor --json"));
+
+        let io_err = IndexStatusError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "test",
+        ));
+        assert_eq!(
+            io_err.repair_hint(),
+            Some("Check workspace path permissions")
+        );
+    }
 }
