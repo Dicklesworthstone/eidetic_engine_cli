@@ -1342,7 +1342,10 @@ pub fn help_json() -> String {
         d.field_str("binary", "ee");
         d.field_str("version", env!("CARGO_PKG_VERSION"));
         d.field_str("usage", "ee [OPTIONS] [COMMAND]");
-        d.field_str("description", "Durable, local-first, explainable memory for coding agents.");
+        d.field_str(
+            "description",
+            "Durable, local-first, explainable memory for coding agents.",
+        );
 
         d.field_array_of_objects("globalOptions", GLOBAL_OPTIONS, |obj, opt| {
             obj.field_str("name", opt.name);
@@ -1384,16 +1387,66 @@ struct GlobalOption {
 }
 
 const GLOBAL_OPTIONS: &[GlobalOption] = &[
-    GlobalOption { name: "--json", short: "-j", description: "Emit JSON output", opt_type: "flag" },
-    GlobalOption { name: "--workspace", short: "", description: "Workspace root to operate on", opt_type: "path" },
-    GlobalOption { name: "--no-color", short: "", description: "Disable colored diagnostics", opt_type: "flag" },
-    GlobalOption { name: "--robot", short: "", description: "Use agent-oriented output defaults", opt_type: "flag" },
-    GlobalOption { name: "--format", short: "", description: "Select output renderer (human|json|toon|jsonl|compact|hook)", opt_type: "enum" },
-    GlobalOption { name: "--fields", short: "", description: "Control output verbosity (minimal|summary|standard|full)", opt_type: "enum" },
-    GlobalOption { name: "--schema", short: "", description: "Print JSON schema for response envelope", opt_type: "flag" },
-    GlobalOption { name: "--help-json", short: "", description: "Print JSON-formatted help", opt_type: "flag" },
-    GlobalOption { name: "--agent-docs", short: "", description: "Print agent-oriented documentation", opt_type: "flag" },
-    GlobalOption { name: "--meta", short: "", description: "Include additional metadata in response", opt_type: "flag" },
+    GlobalOption {
+        name: "--json",
+        short: "-j",
+        description: "Emit JSON output",
+        opt_type: "flag",
+    },
+    GlobalOption {
+        name: "--workspace",
+        short: "",
+        description: "Workspace root to operate on",
+        opt_type: "path",
+    },
+    GlobalOption {
+        name: "--no-color",
+        short: "",
+        description: "Disable colored diagnostics",
+        opt_type: "flag",
+    },
+    GlobalOption {
+        name: "--robot",
+        short: "",
+        description: "Use agent-oriented output defaults",
+        opt_type: "flag",
+    },
+    GlobalOption {
+        name: "--format",
+        short: "",
+        description: "Select output renderer (human|json|toon|jsonl|compact|hook)",
+        opt_type: "enum",
+    },
+    GlobalOption {
+        name: "--fields",
+        short: "",
+        description: "Control output verbosity (minimal|summary|standard|full)",
+        opt_type: "enum",
+    },
+    GlobalOption {
+        name: "--schema",
+        short: "",
+        description: "Print JSON schema for response envelope",
+        opt_type: "flag",
+    },
+    GlobalOption {
+        name: "--help-json",
+        short: "",
+        description: "Print JSON-formatted help",
+        opt_type: "flag",
+    },
+    GlobalOption {
+        name: "--agent-docs",
+        short: "",
+        description: "Print agent-oriented documentation",
+        opt_type: "flag",
+    },
+    GlobalOption {
+        name: "--meta",
+        short: "",
+        description: "Include additional metadata in response",
+        opt_type: "flag",
+    },
 ];
 
 struct CommandArg {
@@ -1435,9 +1488,10 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         name: "diag",
         description: "Run diagnostic commands for trust, quarantine, and streams",
         available: true,
-        subcommands: &[
-            SubcommandEntry { name: "quarantine", description: "Report quarantine status for import sources" },
-        ],
+        subcommands: &[SubcommandEntry {
+            name: "quarantine",
+            description: "Report quarantine status for import sources",
+        }],
         args: &[],
     },
     CommandEntry {
@@ -1445,17 +1499,26 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         description: "Run health checks on workspace and subsystems",
         available: true,
         subcommands: &[],
-        args: &[
-            CommandArg { name: "--fix-plan", description: "Output structured repair plan", required: false, default: None },
-        ],
+        args: &[CommandArg {
+            name: "--fix-plan",
+            description: "Output structured repair plan",
+            required: false,
+            default: None,
+        }],
     },
     CommandEntry {
         name: "eval",
         description: "Run evaluation scenarios against fixtures",
         available: true,
         subcommands: &[
-            SubcommandEntry { name: "run", description: "Run one or more evaluation scenarios" },
-            SubcommandEntry { name: "list", description: "List available evaluation scenarios" },
+            SubcommandEntry {
+                name: "run",
+                description: "Run one or more evaluation scenarios",
+            },
+            SubcommandEntry {
+                name: "list",
+                description: "List available evaluation scenarios",
+            },
         ],
         args: &[],
     },
@@ -1477,9 +1540,10 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         name: "import",
         description: "Import memories and evidence from external sources",
         available: true,
-        subcommands: &[
-            SubcommandEntry { name: "cass", description: "Import from coding_agent_session_search" },
-        ],
+        subcommands: &[SubcommandEntry {
+            name: "cass",
+            description: "Import from coding_agent_session_search",
+        }],
         args: &[],
     },
     CommandEntry {
@@ -1487,8 +1551,14 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         description: "Manage search indexes",
         available: true,
         subcommands: &[
-            SubcommandEntry { name: "rebuild", description: "Rebuild the search index" },
-            SubcommandEntry { name: "status", description: "Inspect index health and generation" },
+            SubcommandEntry {
+                name: "rebuild",
+                description: "Rebuild the search index",
+            },
+            SubcommandEntry {
+                name: "status",
+                description: "Inspect index health and generation",
+            },
         ],
         args: &[],
     },
@@ -1498,13 +1568,48 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         available: true,
         subcommands: &[],
         args: &[
-            CommandArg { name: "CONTENT", description: "Memory content to store", required: true, default: None },
-            CommandArg { name: "--level", description: "Memory level", required: false, default: Some("episodic") },
-            CommandArg { name: "--kind", description: "Memory kind", required: false, default: Some("fact") },
-            CommandArg { name: "--tags", description: "Tags (comma-separated)", required: false, default: None },
-            CommandArg { name: "--confidence", description: "Confidence score (0.0-1.0)", required: false, default: Some("0.8") },
-            CommandArg { name: "--source", description: "Source provenance URI", required: false, default: None },
-            CommandArg { name: "--dry-run", description: "Perform dry run without storing", required: false, default: None },
+            CommandArg {
+                name: "CONTENT",
+                description: "Memory content to store",
+                required: true,
+                default: None,
+            },
+            CommandArg {
+                name: "--level",
+                description: "Memory level",
+                required: false,
+                default: Some("episodic"),
+            },
+            CommandArg {
+                name: "--kind",
+                description: "Memory kind",
+                required: false,
+                default: Some("fact"),
+            },
+            CommandArg {
+                name: "--tags",
+                description: "Tags (comma-separated)",
+                required: false,
+                default: None,
+            },
+            CommandArg {
+                name: "--confidence",
+                description: "Confidence score (0.0-1.0)",
+                required: false,
+                default: Some("0.8"),
+            },
+            CommandArg {
+                name: "--source",
+                description: "Source provenance URI",
+                required: false,
+                default: None,
+            },
+            CommandArg {
+                name: "--dry-run",
+                description: "Perform dry run without storing",
+                required: false,
+                default: None,
+            },
         ],
     },
     CommandEntry {
@@ -1512,8 +1617,14 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         description: "List or export public response schemas",
         available: true,
         subcommands: &[
-            SubcommandEntry { name: "list", description: "List all available public schemas" },
-            SubcommandEntry { name: "export", description: "Export schema JSON definition" },
+            SubcommandEntry {
+                name: "list",
+                description: "List all available public schemas",
+            },
+            SubcommandEntry {
+                name: "export",
+                description: "Export schema JSON definition",
+            },
         ],
         args: &[],
     },
@@ -1523,10 +1634,30 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         available: true,
         subcommands: &[],
         args: &[
-            CommandArg { name: "QUERY", description: "Query string to search for", required: true, default: None },
-            CommandArg { name: "--limit", description: "Maximum results", required: false, default: Some("10") },
-            CommandArg { name: "--database", description: "Database path", required: false, default: None },
-            CommandArg { name: "--index-dir", description: "Index directory path", required: false, default: None },
+            CommandArg {
+                name: "QUERY",
+                description: "Query string to search for",
+                required: true,
+                default: None,
+            },
+            CommandArg {
+                name: "--limit",
+                description: "Maximum results",
+                required: false,
+                default: Some("10"),
+            },
+            CommandArg {
+                name: "--database",
+                description: "Database path",
+                required: false,
+                default: None,
+            },
+            CommandArg {
+                name: "--index-dir",
+                description: "Index directory path",
+                required: false,
+                default: None,
+            },
         ],
     },
     CommandEntry {
@@ -2662,7 +2793,10 @@ mod tests {
         )?;
 
         // Standard: has arrays, has summary metrics, no verbose
-        ensure(FieldProfile::Standard.include_arrays(), "standard has arrays")?;
+        ensure(
+            FieldProfile::Standard.include_arrays(),
+            "standard has arrays",
+        )?;
         ensure(
             FieldProfile::Standard.include_summary_metrics(),
             "standard has summary",
