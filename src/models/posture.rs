@@ -307,9 +307,10 @@ mod tests {
             "Run doctor",
         ));
 
-        let urgent = summary.most_urgent_action();
-        ensure(urgent.is_some(), true, "has urgent action")?;
-        ensure(urgent.unwrap().priority, 1, "most urgent is priority 1")
+        let urgent = summary
+            .most_urgent_action()
+            .ok_or_else(|| "expected an urgent action".to_string())?;
+        ensure(urgent.priority, 1, "most urgent is priority 1")
     }
 
     #[test]
