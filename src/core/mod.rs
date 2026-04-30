@@ -28,6 +28,7 @@ pub mod preflight;
 pub mod procedure;
 pub mod quarantine;
 pub mod recorder;
+pub mod rehearse;
 pub mod repro;
 pub mod search;
 pub mod situation;

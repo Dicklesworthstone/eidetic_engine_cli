@@ -208,6 +208,9 @@ pub enum Command {
     /// Record agent activity for outcomes and replay.
     #[command(subcommand)]
     Recorder(RecorderCommand),
+    /// Rehearse EE command sequences in an isolated sandbox.
+    #[command(subcommand)]
+    Rehearse(RehearseCommand),
     /// Store a new memory.
     Remember(RememberArgs),
     /// Review sessions and propose curation candidates.
@@ -1071,6 +1074,71 @@ pub struct RecorderTailArgs {
     /// Starting sequence number.
     #[arg(long)]
     pub from_sequence: Option<u64>,
+}
+
+/// Subcommands for `ee rehearse`.
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum RehearseCommand {
+    /// Validate a command-sequence spec and estimate rehearsal requirements.
+    Plan(RehearsePlanArgs),
+    /// Execute commands in an isolated sandbox and return effect manifest.
+    Run(RehearseRunArgs),
+    /// Inspect a prior rehearsal artifact for integrity and effects.
+    Inspect(RehearseInspectArgs),
+    /// Generate a read-only promote plan for real execution.
+    PromotePlan(RehearsePromotePlanArgs),
+}
+
+/// Arguments for `ee rehearse plan`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct RehearsePlanArgs {
+    /// Path to command spec file (JSON).
+    #[arg(long, value_name = "PATH")]
+    pub commands: Option<PathBuf>,
+
+    /// Inline command spec (JSON array).
+    #[arg(long, value_name = "JSON")]
+    pub commands_json: Option<String>,
+
+    /// Rehearsal profile: quick, full, privacy.
+    #[arg(long, default_value = "full")]
+    pub profile: String,
+}
+
+/// Arguments for `ee rehearse run`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct RehearseRunArgs {
+    /// Path to command spec file (JSON).
+    #[arg(long, value_name = "PATH")]
+    pub commands: Option<PathBuf>,
+
+    /// Inline command spec (JSON array).
+    #[arg(long, value_name = "JSON")]
+    pub commands_json: Option<String>,
+
+    /// Output directory for artifacts.
+    #[arg(long, short = 'o', value_name = "PATH")]
+    pub out: Option<PathBuf>,
+
+    /// Rehearsal profile: quick, full, privacy.
+    #[arg(long, default_value = "full")]
+    pub profile: String,
+}
+
+/// Arguments for `ee rehearse inspect`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct RehearseInspectArgs {
+    /// Rehearsal artifact ID or path to inspect.
+    #[arg(value_name = "ARTIFACT")]
+    pub artifact: String,
+}
+
+/// Arguments for `ee rehearse promote-plan`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct RehearsePromotePlanArgs {
+    /// Rehearsal artifact ID or path.
+    #[arg(value_name = "ARTIFACT")]
+    pub artifact: String,
 }
 
 /// Arguments for `ee search`.
@@ -2114,6 +2182,18 @@ where
         }
         Some(Command::Recorder(RecorderCommand::Tail(ref args))) => {
             handle_recorder_tail(&cli, args, stdout)
+        }
+        Some(Command::Rehearse(RehearseCommand::Plan(ref args))) => {
+            handle_rehearse_plan(&cli, args, stdout, stderr)
+        }
+        Some(Command::Rehearse(RehearseCommand::Run(ref args))) => {
+            handle_rehearse_run(&cli, args, stdout, stderr)
+        }
+        Some(Command::Rehearse(RehearseCommand::Inspect(ref args))) => {
+            handle_rehearse_inspect(&cli, args, stdout, stderr)
+        }
+        Some(Command::Rehearse(RehearseCommand::PromotePlan(ref args))) => {
+            handle_rehearse_promote_plan(&cli, args, stdout, stderr)
         }
         Some(Command::Schema(ref schema_cmd)) => match schema_cmd {
             SchemaCommand::List => match cli.renderer() {
@@ -3939,6 +4019,218 @@ where
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => write_stdout(stdout, &(report.data_json().to_string() + "\n")),
+    }
+}
+
+// ============================================================================
+// EE-REHEARSE-001: Rehearsal Handlers
+// ============================================================================
+
+fn handle_rehearse_plan<W, E>(
+    cli: &Cli,
+    args: &RehearsePlanArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let profile = crate::core::rehearse::RehearsalProfile::from_str(&args.profile)
+        .unwrap_or_default();
+
+    let commands = parse_command_specs(args.commands.as_ref(), args.commands_json.as_ref());
+
+    let options = crate::core::rehearse::RehearsePlanOptions {
+        workspace: workspace_path,
+        commands,
+        profile,
+    };
+
+    match crate::core::rehearse::plan_rehearsal(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(report.to_json() + "\n")),
+        },
+        Err(error) => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V1,
+                "success": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.message(),
+                    "repair": error.repair(),
+                }
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn handle_rehearse_run<W, E>(
+    cli: &Cli,
+    args: &RehearseRunArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let profile = crate::core::rehearse::RehearsalProfile::from_str(&args.profile)
+        .unwrap_or_default();
+
+    let commands = parse_command_specs(args.commands.as_ref(), args.commands_json.as_ref());
+
+    let options = crate::core::rehearse::RehearseRunOptions {
+        workspace: workspace_path,
+        commands,
+        output_dir: args.out.clone(),
+        profile,
+    };
+
+    match crate::core::rehearse::run_rehearsal(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(report.to_json() + "\n")),
+        },
+        Err(error) => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V1,
+                "success": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.message(),
+                    "repair": error.repair(),
+                }
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn handle_rehearse_inspect<W, E>(
+    cli: &Cli,
+    args: &RehearseInspectArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+
+    let options = crate::core::rehearse::RehearseInspectOptions {
+        artifact_id: args.artifact.clone(),
+        workspace: workspace_path,
+    };
+
+    match crate::core::rehearse::inspect_rehearsal(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(report.to_json() + "\n")),
+        },
+        Err(error) => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V1,
+                "success": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.message(),
+                    "repair": error.repair(),
+                }
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn handle_rehearse_promote_plan<W, E>(
+    cli: &Cli,
+    args: &RehearsePromotePlanArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+
+    let options = crate::core::rehearse::RehearsePromotePlanOptions {
+        artifact_id: args.artifact.clone(),
+        workspace: workspace_path,
+    };
+
+    match crate::core::rehearse::promote_plan_rehearsal(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(report.to_json() + "\n")),
+        },
+        Err(error) => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V1,
+                "success": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.message(),
+                    "repair": error.repair(),
+                }
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn parse_command_specs(
+    file_path: Option<&PathBuf>,
+    json_str: Option<&String>,
+) -> Vec<crate::core::rehearse::CommandSpec> {
+    if let Some(json) = json_str {
+        serde_json::from_str(json).unwrap_or_default()
+    } else if let Some(path) = file_path {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok())
+            .unwrap_or_default()
+    } else {
+        vec![
+            crate::core::rehearse::CommandSpec {
+                id: "cmd_1".to_string(),
+                command: "status".to_string(),
+                args: vec!["--json".to_string()],
+                expected_effect: "read_only".to_string(),
+                stop_on_failure: false,
+                idempotency_key: None,
+            },
+        ]
     }
 }
 
@@ -5942,6 +6234,12 @@ impl NormalizedInvocation {
                     RecorderCommand::Tail(_) => "recorder tail".to_string(),
                 },
                 Command::Remember(_) => "remember".to_string(),
+                Command::Rehearse(rehearse) => match rehearse {
+                    RehearseCommand::Plan(_) => "rehearse plan".to_string(),
+                    RehearseCommand::Run(_) => "rehearse run".to_string(),
+                    RehearseCommand::Inspect(_) => "rehearse inspect".to_string(),
+                    RehearseCommand::PromotePlan(_) => "rehearse promote-plan".to_string(),
+                },
                 Command::Review(review) => match review {
                     ReviewCommand::Session(_) => "review session".to_string(),
                 },
