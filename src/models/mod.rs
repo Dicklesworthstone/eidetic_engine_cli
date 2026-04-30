@@ -66,8 +66,9 @@ pub use jsonl::{
     ExportAuditRecord, ExportAuditRecordBuilder, ExportFooter, ExportFooterBuilder, ExportHeader,
     ExportHeaderBuilder, ExportLinkRecord, ExportLinkRecordBuilder, ExportMemoryRecord,
     ExportMemoryRecordBuilder, ExportRecord, ExportRecordType, ExportScope, ExportTagRecord,
-    ExportWorkspaceRecord, ExportWorkspaceRecordBuilder, ParseExportRecordTypeError,
-    ParseExportScopeError, ParseRedactionLevelError, RedactionLevel,
+    ExportWorkspaceRecord, ExportWorkspaceRecordBuilder, ImportSource, ParseExportRecordTypeError,
+    ParseExportScopeError, ParseImportSourceError, ParseRedactionLevelError, ParseTrustLevelError,
+    RedactionLevel, TrustLevel,
 };
 pub use memory::{
     Confidence, Importance, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES, MemoryContent,
@@ -347,7 +348,7 @@ mod tests {
     fn exit_codes_match_project_contract() {
         assert_eq!(ProcessExitCode::Success as u8, 0);
         assert_eq!(ProcessExitCode::Usage as u8, 1);
-        assert_eq!(ProcessExitCode::MigrationRequired as u8, 8);
+        assert_eq!(ProcessExitCode::MigrationRequired as u8, 9);
     }
 
     #[test]

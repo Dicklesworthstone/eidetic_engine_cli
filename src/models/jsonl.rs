@@ -1,4 +1,4 @@
-//! JSONL export schema types (EE-220).
+//! JSONL export schema types (EE-220, EE-266).
 //!
 //! Defines the schema for JSONL export/import operations. Each JSONL file
 //! contains a header record followed by data records, one per line.
@@ -12,6 +12,15 @@
 //! ...
 //! {"schema": "ee.export.footer.v1", ...}  // Footer (optional, last line)
 //! ```
+//!
+//! # Trust and Import Metadata (EE-266)
+//!
+//! The header includes metadata to defend against poisoning, stale schemas,
+//! and untrusted imported content:
+//! - `import_source`: Where the data originated (native, CASS import, legacy)
+//! - `trust_level`: Trust classification (untrusted, validated, verified)
+//! - `checksum`: BLAKE3 hash for content integrity verification
+//! - `signature`: Optional cryptographic signature for audit trails
 
 use std::fmt;
 use std::str::FromStr;
@@ -56,6 +65,157 @@ pub const ALL_EXPORT_SCHEMAS: &[&str] = &[
 
 /// Export format version.
 pub const EXPORT_FORMAT_VERSION: u32 = 1;
+
+/// Source of imported data for trust tracking.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportSource {
+    /// Data created natively within ee.
+    #[default]
+    Native,
+    /// Imported from CASS (coding agent session search).
+    CassImport,
+    /// Imported from legacy Eidetic Engine format.
+    LegacyScan,
+    /// Imported from external tool/format.
+    ExternalImport,
+    /// Source unknown or cannot be determined.
+    Unknown,
+}
+
+impl ImportSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::CassImport => "cass_import",
+            Self::LegacyScan => "legacy_scan",
+            Self::ExternalImport => "external_import",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_external(self) -> bool {
+        !matches!(self, Self::Native)
+    }
+}
+
+impl fmt::Display for ImportSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseImportSourceError {
+    pub invalid: String,
+}
+
+impl fmt::Display for ParseImportSourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid import source '{}'; expected one of: native, cass_import, legacy_scan, external_import, unknown",
+            self.invalid
+        )
+    }
+}
+
+impl std::error::Error for ParseImportSourceError {}
+
+impl FromStr for ImportSource {
+    type Err = ParseImportSourceError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "native" => Ok(Self::Native),
+            "cass_import" => Ok(Self::CassImport),
+            "legacy_scan" => Ok(Self::LegacyScan),
+            "external_import" => Ok(Self::ExternalImport),
+            "unknown" => Ok(Self::Unknown),
+            _ => Err(ParseImportSourceError {
+                invalid: s.to_owned(),
+            }),
+        }
+    }
+}
+
+/// Trust level for exported/imported data.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustLevel {
+    /// Data has not been validated; treat with caution.
+    #[default]
+    Untrusted,
+    /// Data has passed basic validation checks.
+    Validated,
+    /// Data has been cryptographically verified.
+    Verified,
+    /// Data is quarantined due to policy violation or detected issue.
+    Quarantined,
+}
+
+impl TrustLevel {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Untrusted => "untrusted",
+            Self::Validated => "validated",
+            Self::Verified => "verified",
+            Self::Quarantined => "quarantined",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_trusted(self) -> bool {
+        matches!(self, Self::Validated | Self::Verified)
+    }
+
+    #[must_use]
+    pub const fn is_quarantined(self) -> bool {
+        matches!(self, Self::Quarantined)
+    }
+}
+
+impl fmt::Display for TrustLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseTrustLevelError {
+    pub invalid: String,
+}
+
+impl fmt::Display for ParseTrustLevelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid trust level '{}'; expected one of: untrusted, validated, verified, quarantined",
+            self.invalid
+        )
+    }
+}
+
+impl std::error::Error for ParseTrustLevelError {}
+
+impl FromStr for TrustLevel {
+    type Err = ParseTrustLevelError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "untrusted" => Ok(Self::Untrusted),
+            "validated" => Ok(Self::Validated),
+            "verified" => Ok(Self::Verified),
+            "quarantined" => Ok(Self::Quarantined),
+            _ => Err(ParseTrustLevelError {
+                invalid: s.to_owned(),
+            }),
+        }
+    }
+}
 
 /// Export record type discriminator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -350,7 +510,7 @@ impl FromStr for ExportScope {
     }
 }
 
-/// Export header record.
+/// Export header record with trust and import metadata (EE-266).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExportHeader {
     pub schema: String,
@@ -364,6 +524,18 @@ pub struct ExportHeader {
     pub ee_version: String,
     pub hostname: Option<String>,
     pub export_id: String,
+    /// Source of the data for trust tracking (EE-266).
+    #[serde(default)]
+    pub import_source: ImportSource,
+    /// Trust classification of the data (EE-266).
+    #[serde(default)]
+    pub trust_level: TrustLevel,
+    /// BLAKE3 checksum of the content records for integrity verification (EE-266).
+    pub checksum: Option<String>,
+    /// Optional cryptographic signature for audit trails (EE-266).
+    pub signature: Option<String>,
+    /// Schema version of the source data if imported (EE-266).
+    pub source_schema_version: Option<String>,
 }
 
 impl ExportHeader {
@@ -384,6 +556,11 @@ pub struct ExportHeaderBuilder {
     ee_version: Option<String>,
     hostname: Option<String>,
     export_id: Option<String>,
+    import_source: ImportSource,
+    trust_level: TrustLevel,
+    checksum: Option<String>,
+    signature: Option<String>,
+    source_schema_version: Option<String>,
 }
 
 impl ExportHeaderBuilder {
@@ -442,6 +619,36 @@ impl ExportHeaderBuilder {
     }
 
     #[must_use]
+    pub fn import_source(mut self, import_source: ImportSource) -> Self {
+        self.import_source = import_source;
+        self
+    }
+
+    #[must_use]
+    pub fn trust_level(mut self, trust_level: TrustLevel) -> Self {
+        self.trust_level = trust_level;
+        self
+    }
+
+    #[must_use]
+    pub fn checksum(mut self, checksum: impl Into<String>) -> Self {
+        self.checksum = Some(checksum.into());
+        self
+    }
+
+    #[must_use]
+    pub fn signature(mut self, signature: impl Into<String>) -> Self {
+        self.signature = Some(signature.into());
+        self
+    }
+
+    #[must_use]
+    pub fn source_schema_version(mut self, version: impl Into<String>) -> Self {
+        self.source_schema_version = Some(version.into());
+        self
+    }
+
+    #[must_use]
     pub fn build(self) -> ExportHeader {
         ExportHeader {
             schema: EXPORT_HEADER_SCHEMA_V1.to_owned(),
@@ -455,6 +662,11 @@ impl ExportHeaderBuilder {
             ee_version: self.ee_version.unwrap_or_default(),
             hostname: self.hostname,
             export_id: self.export_id.unwrap_or_default(),
+            import_source: self.import_source,
+            trust_level: self.trust_level,
+            checksum: self.checksum,
+            signature: self.signature,
+            source_schema_version: self.source_schema_version,
         }
     }
 }
@@ -1480,5 +1692,143 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("invalid export scope"));
+    }
+
+    // --- ImportSource tests (EE-266) ---
+
+    #[test]
+    fn import_source_roundtrip() -> TestResult {
+        for source in [
+            ImportSource::Native,
+            ImportSource::CassImport,
+            ImportSource::LegacyScan,
+            ImportSource::ExternalImport,
+            ImportSource::Unknown,
+        ] {
+            let s = source.as_str();
+            let parsed: ImportSource = s
+                .parse()
+                .map_err(|e: ParseImportSourceError| e.to_string())?;
+            ensure(parsed, source, &format!("roundtrip {s}"))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn import_source_display() {
+        assert_eq!(ImportSource::Native.to_string(), "native");
+        assert_eq!(ImportSource::CassImport.to_string(), "cass_import");
+        assert_eq!(ImportSource::LegacyScan.to_string(), "legacy_scan");
+        assert_eq!(ImportSource::ExternalImport.to_string(), "external_import");
+        assert_eq!(ImportSource::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn import_source_is_external() {
+        assert!(!ImportSource::Native.is_external());
+        assert!(ImportSource::CassImport.is_external());
+        assert!(ImportSource::LegacyScan.is_external());
+        assert!(ImportSource::ExternalImport.is_external());
+        assert!(ImportSource::Unknown.is_external());
+    }
+
+    #[test]
+    fn parse_invalid_import_source_error() {
+        let result: Result<ImportSource, _> = "invalid".parse();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("invalid import source"));
+    }
+
+    // --- TrustLevel tests (EE-266) ---
+
+    #[test]
+    fn trust_level_roundtrip() -> TestResult {
+        for level in [
+            TrustLevel::Untrusted,
+            TrustLevel::Validated,
+            TrustLevel::Verified,
+            TrustLevel::Quarantined,
+        ] {
+            let s = level.as_str();
+            let parsed: TrustLevel = s.parse().map_err(|e: ParseTrustLevelError| e.to_string())?;
+            ensure(parsed, level, &format!("roundtrip {s}"))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn trust_level_display() {
+        assert_eq!(TrustLevel::Untrusted.to_string(), "untrusted");
+        assert_eq!(TrustLevel::Validated.to_string(), "validated");
+        assert_eq!(TrustLevel::Verified.to_string(), "verified");
+        assert_eq!(TrustLevel::Quarantined.to_string(), "quarantined");
+    }
+
+    #[test]
+    fn trust_level_is_trusted() {
+        assert!(!TrustLevel::Untrusted.is_trusted());
+        assert!(TrustLevel::Validated.is_trusted());
+        assert!(TrustLevel::Verified.is_trusted());
+        assert!(!TrustLevel::Quarantined.is_trusted());
+    }
+
+    #[test]
+    fn trust_level_is_quarantined() {
+        assert!(!TrustLevel::Untrusted.is_quarantined());
+        assert!(!TrustLevel::Validated.is_quarantined());
+        assert!(!TrustLevel::Verified.is_quarantined());
+        assert!(TrustLevel::Quarantined.is_quarantined());
+    }
+
+    #[test]
+    fn parse_invalid_trust_level_error() {
+        let result: Result<TrustLevel, _> = "invalid".parse();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("invalid trust level"));
+    }
+
+    // --- Header metadata tests (EE-266) ---
+
+    #[test]
+    fn export_header_with_trust_metadata() {
+        let header = ExportHeader::builder()
+            .created_at("2026-04-30T12:00:00Z")
+            .import_source(ImportSource::CassImport)
+            .trust_level(TrustLevel::Validated)
+            .checksum("abc123")
+            .source_schema_version("cass.session.v1")
+            .build();
+
+        assert_eq!(header.import_source, ImportSource::CassImport);
+        assert_eq!(header.trust_level, TrustLevel::Validated);
+        assert_eq!(header.checksum, Some("abc123".to_owned()));
+        assert_eq!(
+            header.source_schema_version,
+            Some("cass.session.v1".to_owned())
+        );
+    }
+
+    #[test]
+    fn export_header_defaults_to_native_untrusted() {
+        let header = ExportHeader::builder().build();
+
+        assert_eq!(header.import_source, ImportSource::Native);
+        assert_eq!(header.trust_level, TrustLevel::Untrusted);
+        assert!(header.checksum.is_none());
+        assert!(header.signature.is_none());
+    }
+
+    #[test]
+    fn export_header_serializes_trust_metadata() {
+        let header = ExportHeader::builder()
+            .import_source(ImportSource::LegacyScan)
+            .trust_level(TrustLevel::Quarantined)
+            .build();
+
+        let json = serde_json::to_string(&header).expect("serialize");
+        assert!(json.contains(r#""import_source":"legacy_scan""#));
+        assert!(json.contains(r#""trust_level":"quarantined""#));
     }
 }
