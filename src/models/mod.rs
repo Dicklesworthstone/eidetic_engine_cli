@@ -5,6 +5,7 @@ pub mod error_codes;
 pub mod id;
 pub mod memory;
 pub mod provenance;
+pub mod revision;
 pub mod rule;
 pub mod trust;
 
@@ -25,6 +26,11 @@ pub use memory::{
     MemoryKind, MemoryLevel, MemoryValidationError, Tag, UnitScore, Utility,
 };
 pub use provenance::{LineSpan, ProvenanceUri, ProvenanceUriError};
+pub use revision::{
+    IdempotencyKey, IdempotencyKeyError, LegalHold, LegalHoldId, RevisionGroupId, RevisionIdError,
+    RevisionMeta, SupersessionLink, SupersessionReason, LEGAL_HOLD_ID_LEN, LEGAL_HOLD_PREFIX,
+    REVISION_GROUP_ID_LEN, REVISION_GROUP_PREFIX,
+};
 pub use rule::{ParseRuleMaturityError, ParseRuleScopeError, RuleMaturity, RuleScope};
 pub use trust::{ParseTrustClassError, TrustClass};
 
