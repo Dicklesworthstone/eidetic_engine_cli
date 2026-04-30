@@ -863,10 +863,7 @@ fn line_span_locator(span: crate::models::LineSpan) -> String {
 }
 
 fn source_index(index: usize) -> u32 {
-    match u32::try_from(index.saturating_add(1)) {
-        Ok(value) => value,
-        Err(_) => u32::MAX,
-    }
+    u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX)
 }
 
 /// Assemble a deterministic context-pack draft from validated candidates.
