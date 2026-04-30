@@ -181,6 +181,12 @@ pub enum Command {
     /// Run, show, or close preflight risk assessments.
     #[command(subcommand)]
     Preflight(PreflightCommand),
+    /// Manage distilled procedures and skill capsules.
+    #[command(subcommand)]
+    Procedure(ProcedureCommand),
+    /// Record agent activity for outcomes and replay.
+    #[command(subcommand)]
+    Recorder(RecorderCommand),
     /// Store a new memory.
     Remember(RememberArgs),
     /// Review sessions and propose curation candidates.
@@ -578,6 +584,180 @@ pub struct PreflightCloseArgs {
     /// Report the close action without executing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+/// Subcommands for `ee procedure`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum ProcedureCommand {
+    /// Propose a new procedure from recorder runs or evidence.
+    Propose(ProcedureProposeArgs),
+    /// Show details of a procedure.
+    Show(ProcedureShowArgs),
+    /// List procedures with optional filters.
+    List(ProcedureListArgs),
+    /// Export a procedure as a skill capsule.
+    Export(ProcedureExportArgs),
+}
+
+/// Arguments for `ee procedure propose`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ProcedureProposeArgs {
+    /// Title for the proposed procedure.
+    #[arg(long, value_name = "TEXT")]
+    pub title: String,
+
+    /// Summary description of what the procedure accomplishes.
+    #[arg(long, value_name = "TEXT")]
+    pub summary: Option<String>,
+
+    /// Source recorder run IDs to derive the procedure from.
+    #[arg(long = "source-run", value_name = "RUN_ID")]
+    pub source_runs: Vec<String>,
+
+    /// Evidence IDs supporting this procedure.
+    #[arg(long = "evidence", value_name = "ID")]
+    pub evidence_ids: Vec<String>,
+
+    /// Report the proposal without creating.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee procedure show`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ProcedureShowArgs {
+    /// Procedure ID to show.
+    #[arg(value_name = "PROCEDURE_ID")]
+    pub procedure_id: String,
+
+    /// Include step details.
+    #[arg(long, action = ArgAction::SetTrue, default_value_t = true)]
+    pub include_steps: bool,
+
+    /// Include verification history.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_verification: bool,
+}
+
+/// Arguments for `ee procedure list`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct ProcedureListArgs {
+    /// Filter by status: candidate, verified, retired.
+    #[arg(long, value_name = "STATUS")]
+    pub status: Option<String>,
+
+    /// Maximum number of results.
+    #[arg(long, short = 'n', default_value_t = 20)]
+    pub limit: u32,
+
+    /// Include step counts in output.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_steps: bool,
+}
+
+/// Arguments for `ee procedure export`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ProcedureExportArgs {
+    /// Procedure ID to export.
+    #[arg(value_name = "PROCEDURE_ID")]
+    pub procedure_id: String,
+
+    /// Export format: markdown, json, yaml.
+    #[arg(long, default_value = "markdown")]
+    pub format: String,
+
+    /// Output file path (defaults to stdout).
+    #[arg(long, short = 'o', value_name = "PATH")]
+    pub output: Option<PathBuf>,
+}
+
+/// Subcommands for `ee recorder`.
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum RecorderCommand {
+    /// Start a new recording session.
+    Start(RecorderStartArgs),
+    /// Record an event to an active session.
+    Event(RecorderEventArgs),
+    /// Finish a recording session.
+    Finish(RecorderFinishArgs),
+    /// Tail recent events from a recording session.
+    Tail(RecorderTailArgs),
+}
+
+/// Arguments for `ee recorder start`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct RecorderStartArgs {
+    /// Agent identifier.
+    #[arg(long, value_name = "AGENT_ID")]
+    pub agent_id: String,
+
+    /// Optional session identifier for correlation.
+    #[arg(long, value_name = "SESSION_ID")]
+    pub session_id: Option<String>,
+
+    /// Optional workspace identifier.
+    #[arg(long, value_name = "WORKSPACE_ID")]
+    pub workspace_id: Option<String>,
+
+    /// Report what would be done without creating the session.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee recorder event`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct RecorderEventArgs {
+    /// Run ID to add event to.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+
+    /// Type of event: tool_call, tool_result, user_message, assistant_message, error, state_change.
+    #[arg(long, value_name = "TYPE")]
+    pub event_type: String,
+
+    /// Optional payload content (or read from stdin).
+    #[arg(long, value_name = "PAYLOAD")]
+    pub payload: Option<String>,
+
+    /// Redact the payload content.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub redact: bool,
+
+    /// Report what would be done without recording.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee recorder finish`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct RecorderFinishArgs {
+    /// Run ID to finish.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+
+    /// Final status: completed, abandoned.
+    #[arg(long, default_value = "completed")]
+    pub status: String,
+
+    /// Report what would be done without finishing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee recorder tail`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct RecorderTailArgs {
+    /// Run ID to tail.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+
+    /// Number of events to return.
+    #[arg(long, short = 'n', default_value_t = 10)]
+    pub limit: u32,
+
+    /// Starting sequence number.
+    #[arg(long)]
+    pub from_sequence: Option<u64>,
 }
 
 /// Arguments for `ee search`.
@@ -1436,6 +1616,30 @@ where
         Some(Command::Preflight(PreflightCommand::Close(ref args))) => {
             handle_preflight_close(&cli, args, stdout, stderr)
         }
+        Some(Command::Procedure(ProcedureCommand::Propose(ref args))) => {
+            handle_procedure_propose(&cli, args, stdout, stderr)
+        }
+        Some(Command::Procedure(ProcedureCommand::Show(ref args))) => {
+            handle_procedure_show(&cli, args, stdout, stderr)
+        }
+        Some(Command::Procedure(ProcedureCommand::List(ref args))) => {
+            handle_procedure_list(&cli, args, stdout, stderr)
+        }
+        Some(Command::Procedure(ProcedureCommand::Export(ref args))) => {
+            handle_procedure_export(&cli, args, stdout, stderr)
+        }
+        Some(Command::Recorder(RecorderCommand::Start(ref args))) => {
+            handle_recorder_start(&cli, args, stdout)
+        }
+        Some(Command::Recorder(RecorderCommand::Event(ref args))) => {
+            handle_recorder_event(&cli, args, stdout, stderr)
+        }
+        Some(Command::Recorder(RecorderCommand::Finish(ref args))) => {
+            handle_recorder_finish(&cli, args, stdout, stderr)
+        }
+        Some(Command::Recorder(RecorderCommand::Tail(ref args))) => {
+            handle_recorder_tail(&cli, args, stdout)
+        }
         Some(Command::Schema(ref schema_cmd)) => match schema_cmd {
             SchemaCommand::List => match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
@@ -2226,6 +2430,204 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => {
                 write_stdout(stdout, &(output::render_preflight_close_json(&report) + "\n"))
+            }
+        },
+        Err(error) => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V1,
+                "success": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.message(),
+                    "repair": error.repair(),
+                }
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+// ============================================================================
+// EE-411: Procedure Command Handlers
+// ============================================================================
+
+fn handle_procedure_propose<W, E>(
+    cli: &Cli,
+    args: &ProcedureProposeArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = crate::core::procedure::ProcedureProposeOptions {
+        workspace: workspace_path,
+        title: args.title.clone(),
+        summary: args.summary.clone(),
+        source_run_ids: args.source_runs.clone(),
+        evidence_ids: args.evidence_ids.clone(),
+        dry_run: args.dry_run,
+    };
+
+    match crate::core::procedure::propose_procedure(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_procedure_propose_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_procedure_propose_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_procedure_propose_json(&report) + "\n"))
+            }
+        },
+        Err(error) => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V1,
+                "success": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.message(),
+                    "repair": error.repair(),
+                }
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn handle_procedure_show<W, E>(
+    cli: &Cli,
+    args: &ProcedureShowArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = crate::core::procedure::ProcedureShowOptions {
+        workspace: workspace_path,
+        procedure_id: args.procedure_id.clone(),
+        include_steps: args.include_steps,
+        include_verification: args.include_verification,
+    };
+
+    match crate::core::procedure::show_procedure(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_procedure_show_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_procedure_show_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_procedure_show_json(&report) + "\n"))
+            }
+        },
+        Err(error) => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V1,
+                "success": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.message(),
+                    "repair": error.repair(),
+                }
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn handle_procedure_list<W, E>(
+    cli: &Cli,
+    args: &ProcedureListArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = crate::core::procedure::ProcedureListOptions {
+        workspace: workspace_path,
+        status_filter: args.status.clone(),
+        limit: args.limit,
+        include_steps: args.include_steps,
+    };
+
+    match crate::core::procedure::list_procedures(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_procedure_list_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_procedure_list_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_procedure_list_json(&report) + "\n"))
+            }
+        },
+        Err(error) => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V1,
+                "success": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.message(),
+                    "repair": error.repair(),
+                }
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn handle_procedure_export<W, E>(
+    cli: &Cli,
+    args: &ProcedureExportArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = crate::core::procedure::ProcedureExportOptions {
+        workspace: workspace_path,
+        procedure_id: args.procedure_id.clone(),
+        format: args.format.clone(),
+        output_path: args.output.clone(),
+    };
+
+    match crate::core::procedure::export_procedure(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_procedure_export_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_procedure_export_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_procedure_export_json(&report) + "\n"))
             }
         },
         Err(error) => {
@@ -4190,6 +4592,12 @@ impl NormalizedInvocation {
                     PreflightCommand::Run(_) => "preflight run".to_string(),
                     PreflightCommand::Show(_) => "preflight show".to_string(),
                     PreflightCommand::Close(_) => "preflight close".to_string(),
+                },
+                Command::Procedure(proc) => match proc {
+                    ProcedureCommand::Propose(_) => "procedure propose".to_string(),
+                    ProcedureCommand::Show(_) => "procedure show".to_string(),
+                    ProcedureCommand::List(_) => "procedure list".to_string(),
+                    ProcedureCommand::Export(_) => "procedure export".to_string(),
                 },
                 Command::Remember(_) => "remember".to_string(),
                 Command::Review(review) => match review {
