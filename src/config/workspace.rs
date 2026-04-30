@@ -1197,7 +1197,7 @@ mod tests {
     // --- Canonicalization tests (EE-PRIV-WS-001) ---
 
     use super::{
-        canonicalize_workspace_path, CanonicalizationError, PlatformCaseHandling, SymlinkPolicy,
+        CanonicalizationError, PlatformCaseHandling, SymlinkPolicy, canonicalize_workspace_path,
     };
 
     #[test]
@@ -1285,9 +1285,8 @@ mod tests {
         let first = canonicalize_workspace_path(&project, salt, SymlinkPolicy::Allow)
             .map_err(|e| e.to_string())?;
 
-        let second =
-            canonicalize_workspace_path(&first.canonical_path, salt, SymlinkPolicy::Allow)
-                .map_err(|e| e.to_string())?;
+        let second = canonicalize_workspace_path(&first.canonical_path, salt, SymlinkPolicy::Allow)
+            .map_err(|e| e.to_string())?;
 
         assert_eq!(first.canonical_path, second.canonical_path);
         assert_eq!(first.salted_hash, second.salted_hash);
