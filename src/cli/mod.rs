@@ -145,6 +145,9 @@ pub enum Command {
     Health,
     /// Print command help.
     Help,
+    /// Graph analytics and centrality metrics.
+    #[command(subcommand)]
+    Graph(GraphCommand),
     /// Initialize an ee workspace.
     Init(InitArgs),
     /// Import memories and evidence from external sources.
@@ -307,6 +310,36 @@ pub enum DiagCommand {
     Quarantine,
     /// Verify stdout/stderr stream separation is correct.
     Streams,
+}
+
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum GraphCommand {
+    /// Refresh centrality metrics (PageRank, betweenness) for memory graph.
+    CentralityRefresh(GraphCentralityRefreshArgs),
+}
+
+/// Arguments for `ee graph centrality-refresh`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct GraphCentralityRefreshArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Report the refresh plan without computing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Minimum link weight to include (0.0 - 1.0).
+    #[arg(long, value_name = "WEIGHT")]
+    pub min_weight: Option<f32>,
+
+    /// Minimum link confidence to include (0.0 - 1.0).
+    #[arg(long, value_name = "CONFIDENCE")]
+    pub min_confidence: Option<f32>,
+
+    /// Maximum number of links to process.
+    #[arg(long, value_name = "COUNT")]
+    pub link_limit: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -989,6 +1022,9 @@ where
         Some(Command::Index(IndexCommand::Status(ref args))) => {
             handle_index_status(&cli, args, stdout, stderr)
         }
+        Some(Command::Graph(GraphCommand::CentralityRefresh(ref args))) => {
+            handle_graph_centrality_refresh(&cli, args, stdout, stderr)
+        }
         Some(Command::Outcome(ref args)) => handle_outcome(&cli, args, stdout, stderr),
         Some(Command::Schema(ref schema_cmd)) => match schema_cmd {
             SchemaCommand::List => match cli.renderer() {
@@ -1467,6 +1503,80 @@ where
             let domain_error = DomainError::SearchIndex {
                 message: error.to_string(),
                 repair: error.repair_hint().map(str::to_string),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_graph_centrality_refresh<W, E>(
+    cli: &Cli,
+    args: &GraphCentralityRefreshArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let options = crate::graph::CentralityRefreshOptions {
+        dry_run: args.dry_run,
+        min_weight: args.min_weight,
+        min_confidence: args.min_confidence,
+        link_limit: args.link_limit,
+    };
+
+    match crate::graph::refresh_centrality(&conn, &options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = serde_json::json!({
+                    "schema": crate::graph::CENTRALITY_REFRESH_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json(),
+                });
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        Err(error) => {
+            let domain_error = DomainError::Graph {
+                message: error,
+                repair: Some("ee graph centrality-refresh --dry-run".to_string()),
             };
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
@@ -2757,6 +2867,9 @@ impl NormalizedInvocation {
                     ImportCommand::Cass(_) => "import cass".to_string(),
                     ImportCommand::EideticLegacy(_) => "import eidetic-legacy".to_string(),
                 },
+                Command::Graph(graph) => match graph {
+                    GraphCommand::CentralityRefresh(_) => "graph centrality-refresh".to_string(),
+                },
                 Command::Index(index) => match index {
                     IndexCommand::Rebuild(_) => "index rebuild".to_string(),
                     IndexCommand::Status(_) => "index status".to_string(),
@@ -2833,6 +2946,7 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
 pub fn did_you_mean(input: &str, parent_command: Option<&str>) -> Option<String> {
     let candidates: &[&str] = match parent_command {
         Some("agent") => AGENT_SUBCOMMANDS,
+        Some("claim") => CLAIM_SUBCOMMANDS,
         Some("diag") => DIAG_SUBCOMMANDS,
         Some("eval") => EVAL_SUBCOMMANDS,
         Some("import") => IMPORT_SUBCOMMANDS,
@@ -2876,6 +2990,7 @@ fn extract_invalid_subcommand(args: &[OsString]) -> Option<(String, Option<Strin
                 if !next.starts_with('-') {
                     let subcommands = match *arg {
                         "agent" => Some(AGENT_SUBCOMMANDS),
+                        "claim" => Some(CLAIM_SUBCOMMANDS),
                         "diag" => Some(DIAG_SUBCOMMANDS),
                         "eval" => Some(EVAL_SUBCOMMANDS),
                         "import" => Some(IMPORT_SUBCOMMANDS),
@@ -4564,6 +4679,12 @@ mod tests {
             &Some("rebuild".to_string()),
             "rebild -> rebuild",
         )
+    }
+
+    #[test]
+    fn did_you_mean_subcommand_claim_verify() -> TestResult {
+        let suggestion = super::did_you_mean("verfy", Some("claim"));
+        ensure_equal(&suggestion, &Some("verify".to_string()), "verfy -> verify")
     }
 
     #[test]

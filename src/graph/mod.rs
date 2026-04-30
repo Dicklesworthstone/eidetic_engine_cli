@@ -390,6 +390,350 @@ pub fn compute_betweenness(projection: &MemoryGraphProjection) -> BetweennessCen
     betweenness_centrality_directed(&projection.graph)
 }
 
+// ---------------------------------------------------------------------------
+// Centrality Refresh Job (EE-165)
+// ---------------------------------------------------------------------------
+
+/// Schema for centrality refresh response envelope.
+pub const CENTRALITY_REFRESH_SCHEMA_V1: &str = "ee.graph.centrality_refresh.v1";
+
+/// Status of a centrality refresh operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CentralityRefreshStatus {
+    /// Centrality metrics were successfully computed.
+    Refreshed,
+    /// Operation completed but the graph was empty.
+    EmptyGraph,
+    /// Operation would refresh but dry_run was enabled.
+    DryRun,
+    /// Graph feature is not enabled.
+    GraphFeatureDisabled,
+}
+
+impl CentralityRefreshStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Refreshed => "refreshed",
+            Self::EmptyGraph => "empty_graph",
+            Self::DryRun => "dry_run",
+            Self::GraphFeatureDisabled => "graph_feature_disabled",
+        }
+    }
+}
+
+/// Options for centrality refresh operation.
+#[derive(Clone, Debug, Default)]
+pub struct CentralityRefreshOptions {
+    /// Report what would be done without computing.
+    pub dry_run: bool,
+    /// Minimum link weight to include.
+    pub min_weight: Option<f32>,
+    /// Minimum link confidence to include.
+    pub min_confidence: Option<f32>,
+    /// Maximum links to process.
+    pub link_limit: Option<u32>,
+}
+
+/// Individual memory centrality scores.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemoryCentralityScore {
+    pub memory_id: String,
+    pub pagerank: f64,
+    pub betweenness: f64,
+}
+
+/// Report from a centrality refresh operation.
+#[derive(Clone, Debug)]
+pub struct CentralityRefreshReport {
+    pub version: &'static str,
+    pub status: CentralityRefreshStatus,
+    pub dry_run: bool,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub projection_ms: f64,
+    pub pagerank_ms: f64,
+    pub betweenness_ms: f64,
+    pub total_ms: f64,
+    pub scores: Vec<MemoryCentralityScore>,
+    pub top_pagerank: Vec<MemoryCentralityScore>,
+    pub top_betweenness: Vec<MemoryCentralityScore>,
+}
+
+impl CentralityRefreshReport {
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut output = match self.status {
+            CentralityRefreshStatus::Refreshed => {
+                "Centrality refresh completed\n\n".to_string()
+            }
+            CentralityRefreshStatus::EmptyGraph => {
+                return "Centrality refresh skipped: graph is empty (no memory links)\n"
+                    .to_string();
+            }
+            CentralityRefreshStatus::DryRun => {
+                "DRY RUN: Would refresh centrality\n\n".to_string()
+            }
+            CentralityRefreshStatus::GraphFeatureDisabled => {
+                return "Centrality refresh skipped: graph feature is not enabled\n\
+                        Next: Rebuild with `--features graph`\n"
+                    .to_string();
+            }
+        };
+
+        output.push_str(&format!("  Nodes: {}\n", self.node_count));
+        output.push_str(&format!("  Edges: {}\n", self.edge_count));
+        output.push_str(&format!(
+            "  Time: {:.1}ms (projection: {:.1}ms, pagerank: {:.1}ms, betweenness: {:.1}ms)\n",
+            self.total_ms, self.projection_ms, self.pagerank_ms, self.betweenness_ms
+        ));
+
+        if !self.top_pagerank.is_empty() {
+            output.push_str("\n  Top PageRank:\n");
+            for (i, score) in self.top_pagerank.iter().take(5).enumerate() {
+                output.push_str(&format!(
+                    "    {}. {} (pr={:.4})\n",
+                    i + 1,
+                    score.memory_id,
+                    score.pagerank
+                ));
+            }
+        }
+
+        if !self.top_betweenness.is_empty() {
+            output.push_str("\n  Top Betweenness:\n");
+            for (i, score) in self.top_betweenness.iter().take(5).enumerate() {
+                output.push_str(&format!(
+                    "    {}. {} (bc={:.4})\n",
+                    i + 1,
+                    score.memory_id,
+                    score.betweenness
+                ));
+            }
+        }
+
+        output
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        format!(
+            "CENTRALITY_REFRESH|{}|{}|{}|{:.1}",
+            self.status.as_str(),
+            self.node_count,
+            self.edge_count,
+            self.total_ms
+        )
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        let scores: Vec<serde_json::Value> = self
+            .scores
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "memoryId": s.memory_id,
+                    "pagerank": score_json(s.pagerank),
+                    "betweenness": score_json(s.betweenness),
+                })
+            })
+            .collect();
+
+        let top_pagerank: Vec<serde_json::Value> = self
+            .top_pagerank
+            .iter()
+            .take(10)
+            .map(|s| {
+                serde_json::json!({
+                    "memoryId": s.memory_id,
+                    "pagerank": score_json(s.pagerank),
+                })
+            })
+            .collect();
+
+        let top_betweenness: Vec<serde_json::Value> = self
+            .top_betweenness
+            .iter()
+            .take(10)
+            .map(|s| {
+                serde_json::json!({
+                    "memoryId": s.memory_id,
+                    "betweenness": score_json(s.betweenness),
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "command": "graph centrality refresh",
+            "version": self.version,
+            "status": self.status.as_str(),
+            "dryRun": self.dry_run,
+            "graph": {
+                "nodeCount": self.node_count,
+                "edgeCount": self.edge_count,
+            },
+            "timing": {
+                "projectionMs": score_json(self.projection_ms),
+                "pagerankMs": score_json(self.pagerank_ms),
+                "betweennessMs": score_json(self.betweenness_ms),
+                "totalMs": score_json(self.total_ms),
+            },
+            "scores": scores,
+            "topPagerank": top_pagerank,
+            "topBetweenness": top_betweenness,
+        })
+    }
+}
+
+fn score_json(value: f64) -> serde_json::Value {
+    let rounded = (value * 10_000.0).round() / 10_000.0;
+    serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
+}
+
+/// Refresh centrality metrics for all memories in the graph.
+///
+/// This builds a fresh projection from memory_links, computes PageRank and
+/// betweenness centrality, and returns a report with all scores.
+#[cfg(feature = "graph")]
+pub fn refresh_centrality(
+    conn: &DbConnection,
+    options: &CentralityRefreshOptions,
+) -> Result<CentralityRefreshReport, String> {
+    use std::time::Instant;
+
+    let total_start = Instant::now();
+
+    if options.dry_run {
+        let projection_opts = ProjectionOptions {
+            link_limit: options.link_limit,
+            min_weight: options.min_weight,
+            min_confidence: options.min_confidence,
+        };
+        let projection = build_memory_graph(conn, &projection_opts)?;
+        return Ok(CentralityRefreshReport {
+            version: env!("CARGO_PKG_VERSION"),
+            status: CentralityRefreshStatus::DryRun,
+            dry_run: true,
+            node_count: projection.node_count,
+            edge_count: projection.edge_count,
+            projection_ms: projection.build_ms,
+            pagerank_ms: 0.0,
+            betweenness_ms: 0.0,
+            total_ms: total_start.elapsed().as_secs_f64() * 1000.0,
+            scores: vec![],
+            top_pagerank: vec![],
+            top_betweenness: vec![],
+        });
+    }
+
+    let projection_opts = ProjectionOptions {
+        link_limit: options.link_limit,
+        min_weight: options.min_weight,
+        min_confidence: options.min_confidence,
+    };
+    let projection = build_memory_graph(conn, &projection_opts)?;
+
+    if projection.node_count == 0 {
+        return Ok(CentralityRefreshReport {
+            version: env!("CARGO_PKG_VERSION"),
+            status: CentralityRefreshStatus::EmptyGraph,
+            dry_run: false,
+            node_count: 0,
+            edge_count: 0,
+            projection_ms: projection.build_ms,
+            pagerank_ms: 0.0,
+            betweenness_ms: 0.0,
+            total_ms: total_start.elapsed().as_secs_f64() * 1000.0,
+            scores: vec![],
+            top_pagerank: vec![],
+            top_betweenness: vec![],
+        });
+    }
+
+    let pagerank_start = Instant::now();
+    let pagerank = compute_pagerank(&projection);
+    let pagerank_ms = pagerank_start.elapsed().as_secs_f64() * 1000.0;
+
+    let betweenness_start = Instant::now();
+    let betweenness = compute_betweenness(&projection);
+    let betweenness_ms = betweenness_start.elapsed().as_secs_f64() * 1000.0;
+
+    let mut scores: Vec<MemoryCentralityScore> = pagerank
+        .scores
+        .iter()
+        .map(|pr| {
+            let bc = betweenness
+                .scores
+                .iter()
+                .find(|b| b.node == pr.node)
+                .map(|b| b.score)
+                .unwrap_or(0.0);
+            MemoryCentralityScore {
+                memory_id: pr.node.clone(),
+                pagerank: pr.score,
+                betweenness: bc,
+            }
+        })
+        .collect();
+
+    scores.sort_by(|a, b| {
+        b.pagerank
+            .partial_cmp(&a.pagerank)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut top_pagerank = scores.clone();
+    top_pagerank.truncate(10);
+
+    let mut top_betweenness = scores.clone();
+    top_betweenness.sort_by(|a, b| {
+        b.betweenness
+            .partial_cmp(&a.betweenness)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    top_betweenness.truncate(10);
+
+    let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+    Ok(CentralityRefreshReport {
+        version: env!("CARGO_PKG_VERSION"),
+        status: CentralityRefreshStatus::Refreshed,
+        dry_run: false,
+        node_count: projection.node_count,
+        edge_count: projection.edge_count,
+        projection_ms: projection.build_ms,
+        pagerank_ms,
+        betweenness_ms,
+        total_ms,
+        scores,
+        top_pagerank,
+        top_betweenness,
+    })
+}
+
+/// Refresh centrality metrics (stub when graph feature is disabled).
+#[cfg(not(feature = "graph"))]
+pub fn refresh_centrality(
+    _conn: &crate::db::DbConnection,
+    options: &CentralityRefreshOptions,
+) -> Result<CentralityRefreshReport, String> {
+    Ok(CentralityRefreshReport {
+        version: env!("CARGO_PKG_VERSION"),
+        status: CentralityRefreshStatus::GraphFeatureDisabled,
+        dry_run: options.dry_run,
+        node_count: 0,
+        edge_count: 0,
+        projection_ms: 0.0,
+        pagerank_ms: 0.0,
+        betweenness_ms: 0.0,
+        total_ms: 0.0,
+        scores: vec![],
+        top_pagerank: vec![],
+        top_betweenness: vec![],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "graph")]
@@ -755,6 +1099,256 @@ mod tests {
                 .iter()
                 .any(|score| score.node == MEMORY_B)
         );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    // -------------------------------------------------------------------------
+    // Centrality Refresh Tests (EE-165)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn centrality_refresh_status_strings_are_stable() {
+        use super::CentralityRefreshStatus;
+        assert_eq!(CentralityRefreshStatus::Refreshed.as_str(), "refreshed");
+        assert_eq!(CentralityRefreshStatus::EmptyGraph.as_str(), "empty_graph");
+        assert_eq!(CentralityRefreshStatus::DryRun.as_str(), "dry_run");
+        assert_eq!(
+            CentralityRefreshStatus::GraphFeatureDisabled.as_str(),
+            "graph_feature_disabled"
+        );
+    }
+
+    #[test]
+    fn centrality_refresh_schema_is_versioned() {
+        assert_eq!(
+            super::CENTRALITY_REFRESH_SCHEMA_V1,
+            "ee.graph.centrality_refresh.v1"
+        );
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn refresh_centrality_with_empty_graph_returns_empty_status() -> TestResult {
+        let connection = open_projection_db()?;
+
+        let report =
+            super::refresh_centrality(&connection, &super::CentralityRefreshOptions::default())?;
+
+        assert_eq!(report.status, super::CentralityRefreshStatus::EmptyGraph);
+        assert_eq!(report.node_count, 0);
+        assert_eq!(report.edge_count, 0);
+        assert!(report.scores.is_empty());
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn refresh_centrality_computes_scores_for_linked_memories() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000041",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000042",
+            MEMORY_B,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+        )?;
+
+        let report =
+            super::refresh_centrality(&connection, &super::CentralityRefreshOptions::default())?;
+
+        assert_eq!(report.status, super::CentralityRefreshStatus::Refreshed);
+        assert_eq!(report.node_count, 3);
+        assert_eq!(report.edge_count, 2);
+        assert_eq!(report.scores.len(), 3);
+        assert!(report.scores.iter().any(|s| s.memory_id == MEMORY_A));
+        assert!(report.scores.iter().any(|s| s.memory_id == MEMORY_B));
+        assert!(report.scores.iter().any(|s| s.memory_id == MEMORY_C));
+        assert!(report.total_ms > 0.0);
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn refresh_centrality_dry_run_skips_computation() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000051",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+
+        let report = super::refresh_centrality(
+            &connection,
+            &super::CentralityRefreshOptions {
+                dry_run: true,
+                ..Default::default()
+            },
+        )?;
+
+        assert_eq!(report.status, super::CentralityRefreshStatus::DryRun);
+        assert!(report.dry_run);
+        assert_eq!(report.node_count, 2);
+        assert_eq!(report.edge_count, 1);
+        assert!(report.scores.is_empty());
+        assert_eq!(report.pagerank_ms, 0.0);
+        assert_eq!(report.betweenness_ms, 0.0);
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn refresh_centrality_top_lists_are_sorted() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000061",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000062",
+            MEMORY_A,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000063",
+            MEMORY_B,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+        )?;
+
+        let report =
+            super::refresh_centrality(&connection, &super::CentralityRefreshOptions::default())?;
+
+        assert!(!report.top_pagerank.is_empty());
+        assert!(!report.top_betweenness.is_empty());
+
+        let pr_scores: Vec<f64> = report.top_pagerank.iter().map(|s| s.pagerank).collect();
+        let bc_scores: Vec<f64> = report
+            .top_betweenness
+            .iter()
+            .map(|s| s.betweenness)
+            .collect();
+
+        for window in pr_scores.windows(2) {
+            assert!(
+                window[0] >= window[1],
+                "pagerank should be sorted descending"
+            );
+        }
+        for window in bc_scores.windows(2) {
+            assert!(
+                window[0] >= window[1],
+                "betweenness should be sorted descending"
+            );
+        }
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn refresh_centrality_report_human_summary_is_not_empty() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000071",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+
+        let report =
+            super::refresh_centrality(&connection, &super::CentralityRefreshOptions::default())?;
+
+        let summary = report.human_summary();
+        assert!(summary.contains("Centrality refresh completed"));
+        assert!(summary.contains("Nodes: 2"));
+        assert!(summary.contains("Edges: 1"));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn refresh_centrality_report_toon_output_is_parseable() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000081",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+
+        let report =
+            super::refresh_centrality(&connection, &super::CentralityRefreshOptions::default())?;
+
+        let toon = report.toon_output();
+        assert!(toon.starts_with("CENTRALITY_REFRESH|refreshed|2|1|"));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn refresh_centrality_report_json_has_required_fields() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000091",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+
+        let report =
+            super::refresh_centrality(&connection, &super::CentralityRefreshOptions::default())?;
+
+        let json = report.data_json();
+        assert_eq!(json["command"], "graph centrality refresh");
+        assert_eq!(json["status"], "refreshed");
+        assert_eq!(json["graph"]["nodeCount"], 2);
+        assert_eq!(json["graph"]["edgeCount"], 1);
+        assert!(json["timing"]["totalMs"].as_f64().is_some());
+        assert!(json["scores"].as_array().is_some());
+        assert!(json["topPagerank"].as_array().is_some());
+        assert!(json["topBetweenness"].as_array().is_some());
 
         connection.close().map_err(|error| error.to_string())
     }
