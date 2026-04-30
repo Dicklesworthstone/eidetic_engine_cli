@@ -2890,7 +2890,11 @@ fn render_agent_docs_topic_human(output: &mut String, topic: AgentDocsTopic) {
         AgentDocsTopic::Commands => {
             output.push_str("\nAvailable commands:\n");
             for cmd in COMMAND_MANIFEST {
-                let status = if cmd.available { "" } else { " (unimplemented)" };
+                let status = if cmd.available {
+                    ""
+                } else {
+                    " (unimplemented)"
+                };
                 output.push_str(&format!(
                     "  {:16} {}{}\n",
                     cmd.name, cmd.description, status
