@@ -24,5 +24,7 @@ pub mod mcp;
 #[cfg(feature = "serve")]
 pub mod serve;
 
+pub mod science;
+
 #[cfg(test)]
 pub mod testing;

@@ -27,6 +27,9 @@ lexical-bm25 = ["frankensearch/lexical"]
 graph = ["dep:fnx-runtime", "dep:fnx-classes", "dep:fnx-algorithms"]
 mcp = []
 serve = []
+# Optional science analytics for evaluation and diagnostics (EE-171).
+# Enables offline statistical metrics, clustering, and diagram exports.
+science-analytics = []
 
 [dependencies]
 asupersync = { version = "0.3.1", default-features = false, features = ["tracing-integration"] }
