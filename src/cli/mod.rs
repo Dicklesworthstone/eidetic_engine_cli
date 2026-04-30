@@ -13,6 +13,11 @@ use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
 use crate::core::context::{ContextPackError, ContextPackOptions, run_context_pack};
 use crate::core::doctor::{DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport};
+use crate::core::handoff::{
+    CapsuleProfile, CreateOptions as HandoffCreateOptions, InspectOptions as HandoffInspectOptions,
+    PreviewOptions as HandoffPreviewOptions, ResumeOptions as HandoffResumeOptions,
+    create_handoff, inspect_handoff, preview_handoff, resume_handoff,
+};
 use crate::core::health::HealthReport;
 use crate::core::index::{
     IndexRebuildOptions, IndexStatusOptions, get_index_status, rebuild_index,
@@ -160,6 +165,9 @@ pub enum Command {
     /// Run evaluation scenarios against fixtures.
     #[command(subcommand)]
     Eval(EvalCommand),
+    /// Session handoff and resume capsules for agent continuity.
+    #[command(subcommand)]
+    Handoff(HandoffCommand),
     /// Quick health check with overall verdict.
     Health,
     /// Print command help.
@@ -455,6 +463,95 @@ pub struct IndexStatusArgs {
     /// Index output directory. Defaults to <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
+}
+
+/// Subcommands for `ee handoff`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum HandoffCommand {
+    /// Preview capsule contents without writing.
+    Preview(HandoffPreviewArgs),
+    /// Create a redacted continuity capsule.
+    Create(HandoffCreateArgs),
+    /// Validate an existing capsule.
+    Inspect(HandoffInspectArgs),
+    /// Render next-agent payload from a capsule.
+    Resume(HandoffResumeArgs),
+}
+
+/// Arguments for `ee handoff preview`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct HandoffPreviewArgs {
+    /// Filter evidence since this time or run ID.
+    #[arg(long, value_name = "REF")]
+    pub since: Option<String>,
+
+    /// Capsule profile: compact, resume, or handoff.
+    #[arg(long, value_enum, default_value_t = HandoffProfile::Resume)]
+    pub profile: HandoffProfile,
+
+    /// Include token and byte estimates.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub estimates: bool,
+}
+
+/// Arguments for `ee handoff create`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct HandoffCreateArgs {
+    /// Output path for the capsule.
+    #[arg(long, short = 'o', value_name = "PATH")]
+    pub out: PathBuf,
+
+    /// Filter evidence since this time or run ID.
+    #[arg(long, value_name = "REF")]
+    pub since: Option<String>,
+
+    /// Capsule profile: compact, resume, or handoff.
+    #[arg(long, value_enum, default_value_t = HandoffProfile::Resume)]
+    pub profile: HandoffProfile,
+
+    /// Preview the capsule without writing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee handoff inspect`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct HandoffInspectArgs {
+    /// Path to the capsule file.
+    #[arg(value_name = "PATH")]
+    pub path: PathBuf,
+
+    /// Verify content hash.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub verify_hash: bool,
+
+    /// Check evidence references.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub check_evidence: bool,
+}
+
+/// Arguments for `ee handoff resume`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct HandoffResumeArgs {
+    /// Path to the capsule file, or "latest".
+    #[arg(value_name = "PATH")]
+    pub path: String,
+
+    /// Maximum sections to include in resume.
+    #[arg(long, value_name = "N")]
+    pub max_sections: Option<usize>,
+}
+
+/// Handoff capsule profile.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum HandoffProfile {
+    /// Small next prompt (minimal content).
+    Compact,
+    /// Immediate continuation by same agent.
+    #[default]
+    Resume,
+    /// Complete transfer to different agent.
+    Handoff,
 }
 
 /// Subcommands for `ee lab`.
@@ -787,6 +884,8 @@ pub enum ProcedureCommand {
     List(ProcedureListArgs),
     /// Export a procedure as a skill capsule.
     Export(ProcedureExportArgs),
+    /// Verify a procedure against eval fixtures, repro packs, or claim evidence.
+    Verify(ProcedureVerifyArgs),
 }
 
 /// Arguments for `ee procedure propose`.
@@ -859,6 +958,30 @@ pub struct ProcedureExportArgs {
     /// Output file path (defaults to stdout).
     #[arg(long, short = 'o', value_name = "PATH")]
     pub output: Option<PathBuf>,
+}
+
+/// Arguments for `ee procedure verify`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ProcedureVerifyArgs {
+    /// Procedure ID to verify.
+    #[arg(value_name = "PROCEDURE_ID")]
+    pub procedure_id: String,
+
+    /// Source kind: eval_fixture, repro_pack, claim_evidence, recorder_run.
+    #[arg(long, value_name = "KIND", default_value = "eval_fixture")]
+    pub source_kind: String,
+
+    /// Specific source IDs to verify against.
+    #[arg(long = "source", value_name = "ID")]
+    pub source_ids: Vec<String>,
+
+    /// Report verification without recording.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Allow verification failures without returning error exit code.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub allow_failure: bool,
 }
 
 /// Subcommands for `ee recorder`.
@@ -1675,6 +1798,120 @@ where
                 }
             }
         }
+        Some(Command::Handoff(ref cmd)) => match cmd {
+            HandoffCommand::Preview(ref args) => {
+                let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+                let options = HandoffPreviewOptions {
+                    workspace: workspace_path,
+                    profile: match args.profile {
+                        HandoffProfile::Compact => CapsuleProfile::Compact,
+                        HandoffProfile::Resume => CapsuleProfile::Resume,
+                        HandoffProfile::Handoff => CapsuleProfile::Handoff,
+                    },
+                    since: args.since.clone(),
+                    include_estimates: args.estimates,
+                };
+                match preview_handoff(&options) {
+                    Ok(report) => match cli.renderer() {
+                        output::Renderer::Human | output::Renderer::Markdown => {
+                            write_stdout(stdout, &output::render_handoff_preview_human(&report))
+                        }
+                        output::Renderer::Toon => {
+                            write_stdout(stdout, &(output::render_handoff_preview_toon(&report) + "\n"))
+                        }
+                        output::Renderer::Json
+                        | output::Renderer::Jsonl
+                        | output::Renderer::Compact
+                        | output::Renderer::Hook => {
+                            write_stdout(stdout, &(output::render_handoff_preview_json(&report) + "\n"))
+                        }
+                    },
+                    Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
+                }
+            }
+            HandoffCommand::Create(ref args) => {
+                let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+                let options = HandoffCreateOptions {
+                    workspace: workspace_path,
+                    output: args.out.clone(),
+                    profile: match args.profile {
+                        HandoffProfile::Compact => CapsuleProfile::Compact,
+                        HandoffProfile::Resume => CapsuleProfile::Resume,
+                        HandoffProfile::Handoff => CapsuleProfile::Handoff,
+                    },
+                    since: args.since.clone(),
+                    dry_run: args.dry_run,
+                };
+                match create_handoff(&options) {
+                    Ok(report) => match cli.renderer() {
+                        output::Renderer::Human | output::Renderer::Markdown => {
+                            write_stdout(stdout, &output::render_handoff_create_human(&report))
+                        }
+                        output::Renderer::Toon => {
+                            write_stdout(stdout, &(output::render_handoff_create_toon(&report) + "\n"))
+                        }
+                        output::Renderer::Json
+                        | output::Renderer::Jsonl
+                        | output::Renderer::Compact
+                        | output::Renderer::Hook => {
+                            write_stdout(stdout, &(output::render_handoff_create_json(&report) + "\n"))
+                        }
+                    },
+                    Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
+                }
+            }
+            HandoffCommand::Inspect(ref args) => {
+                let options = HandoffInspectOptions {
+                    path: args.path.clone(),
+                    verify_hash: args.verify_hash,
+                    check_evidence: args.check_evidence,
+                };
+                match inspect_handoff(&options) {
+                    Ok(report) => match cli.renderer() {
+                        output::Renderer::Human | output::Renderer::Markdown => {
+                            write_stdout(stdout, &output::render_handoff_inspect_human(&report))
+                        }
+                        output::Renderer::Toon => {
+                            write_stdout(stdout, &(output::render_handoff_inspect_toon(&report) + "\n"))
+                        }
+                        output::Renderer::Json
+                        | output::Renderer::Jsonl
+                        | output::Renderer::Compact
+                        | output::Renderer::Hook => {
+                            write_stdout(stdout, &(output::render_handoff_inspect_json(&report) + "\n"))
+                        }
+                    },
+                    Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
+                }
+            }
+            HandoffCommand::Resume(ref args) => {
+                let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+                let use_latest = args.path == "latest";
+                let options = HandoffResumeOptions {
+                    path: if use_latest { PathBuf::new() } else { PathBuf::from(&args.path) },
+                    use_latest,
+                    workspace: workspace_path,
+                    max_sections: args.max_sections,
+                };
+                match resume_handoff(&options) {
+                    Ok(report) => match cli.renderer() {
+                        output::Renderer::Human | output::Renderer::Markdown => {
+                            write_stdout(stdout, &output::render_handoff_resume_human(&report))
+                        }
+                        output::Renderer::Toon => {
+                            write_stdout(stdout, &(output::render_handoff_resume_toon(&report) + "\n"))
+                        }
+                        output::Renderer::Json
+                        | output::Renderer::Jsonl
+                        | output::Renderer::Compact
+                        | output::Renderer::Hook => {
+                            write_stdout(stdout, &(output::render_handoff_resume_json(&report) + "\n"))
+                        }
+                    },
+                    Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
+                }
+            }
+        },
         Some(Command::Health) => {
             let report = HealthReport::gather();
             let profile = cli.fields_level().to_field_profile();
@@ -1850,6 +2087,9 @@ where
         }
         Some(Command::Procedure(ProcedureCommand::Export(ref args))) => {
             handle_procedure_export(&cli, args, stdout, stderr)
+        }
+        Some(Command::Procedure(ProcedureCommand::Verify(ref args))) => {
+            handle_procedure_verify(&cli, args, stdout, stderr)
         }
         Some(Command::Recorder(RecorderCommand::Start(ref args))) => {
             handle_recorder_start(&cli, args, stdout)
@@ -3471,6 +3711,69 @@ where
                 &(output::render_procedure_export_json(&report) + "\n"),
             ),
         },
+        Err(error) => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V1,
+                "success": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.message(),
+                    "repair": error.repair(),
+                }
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+// ============================================================================
+// EE-412: Procedure Verify Handler
+// ============================================================================
+
+fn handle_procedure_verify<W, E>(
+    cli: &Cli,
+    args: &ProcedureVerifyArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = crate::core::procedure::ProcedureVerifyOptions {
+        workspace: workspace_path,
+        procedure_id: args.procedure_id.clone(),
+        source_kind: Some(args.source_kind.clone()),
+        source_ids: args.source_ids.clone(),
+        dry_run: args.dry_run,
+        allow_failure: args.allow_failure,
+    };
+
+    match crate::core::procedure::verify_procedure(&options) {
+        Ok(report) => {
+            let exit_code = if report.fail_count > 0 && !args.allow_failure {
+                ProcessExitCode::Usage
+            } else {
+                ProcessExitCode::Success
+            };
+
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &report.human_summary());
+                }
+                output::Renderer::Toon => {
+                    write_stdout(stdout, &(report.human_summary() + "\n"));
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    write_stdout(stdout, &(report.to_json() + "\n"));
+                }
+            }
+            exit_code
+        }
         Err(error) => {
             let json = serde_json::json!({
                 "schema": crate::models::ERROR_SCHEMA_V1,
@@ -5559,6 +5862,12 @@ impl NormalizedInvocation {
                     EvalCommand::Run { .. } => "eval run".to_string(),
                     EvalCommand::List => "eval list".to_string(),
                 },
+                Command::Handoff(handoff) => match handoff {
+                    HandoffCommand::Preview(_) => "handoff preview".to_string(),
+                    HandoffCommand::Create(_) => "handoff create".to_string(),
+                    HandoffCommand::Inspect(_) => "handoff inspect".to_string(),
+                    HandoffCommand::Resume(_) => "handoff resume".to_string(),
+                },
                 Command::Health => "health".to_string(),
                 Command::Help => "help".to_string(),
                 Command::Init(_) => "init".to_string(),
@@ -5610,6 +5919,7 @@ impl NormalizedInvocation {
                     ProcedureCommand::Show(_) => "procedure show".to_string(),
                     ProcedureCommand::List(_) => "procedure list".to_string(),
                     ProcedureCommand::Export(_) => "procedure export".to_string(),
+                    ProcedureCommand::Verify(_) => "procedure verify".to_string(),
                 },
                 Command::Recorder(rec) => match rec {
                     RecorderCommand::Start(_) => "recorder start".to_string(),
