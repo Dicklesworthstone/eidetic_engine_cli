@@ -1118,11 +1118,8 @@ mod tests {
         ];
 
         for (i, fixture) in fixtures.iter().enumerate() {
-            let parsed: Result<serde_json::Value, _> = serde_json::from_str(fixture);
-            if let Err(e) = parsed {
-                return Err(format!("error fixture {} is not valid JSON: {e}", i));
-            }
-            let value = parsed.unwrap();
+            let value: serde_json::Value = serde_json::from_str(fixture)
+                .map_err(|e| format!("error fixture {} is not valid JSON: {e}", i))?;
             if value.get("schema") != Some(&serde_json::Value::String("ee.error.v1".to_string())) {
                 return Err(format!("error fixture {} missing schema", i));
             }
@@ -1138,11 +1135,8 @@ mod tests {
         ];
 
         for (i, fixture) in fixtures.iter().enumerate() {
-            let parsed: Result<serde_json::Value, _> = serde_json::from_str(fixture);
-            if let Err(e) = parsed {
-                return Err(format!("status fixture {} is not valid JSON: {e}", i));
-            }
-            let value = parsed.unwrap();
+            let value: serde_json::Value = serde_json::from_str(fixture)
+                .map_err(|e| format!("status fixture {} is not valid JSON: {e}", i))?;
             if value.get("schema") != Some(&serde_json::Value::String("ee.response.v1".to_string()))
             {
                 return Err(format!("status fixture {} missing schema", i));
@@ -1154,11 +1148,8 @@ mod tests {
     #[test]
     fn golden_version_fixture_is_valid_json() -> TestResult {
         let fixture = include_str!("../../tests/fixtures/golden/version/version.golden");
-        let parsed: Result<serde_json::Value, _> = serde_json::from_str(fixture);
-        if let Err(e) = parsed {
-            return Err(format!("version fixture is not valid JSON: {e}"));
-        }
-        let value = parsed.unwrap();
+        let value: serde_json::Value = serde_json::from_str(fixture)
+            .map_err(|e| format!("version fixture is not valid JSON: {e}"))?;
         if value.get("schema") != Some(&serde_json::Value::String("ee.response.v1".to_string())) {
             return Err("version fixture missing schema".to_string());
         }
@@ -1175,6 +1166,9 @@ mod tests {
         let success_fixture =
             include_str!("../../tests/fixtures/golden/human/success_with_summary.golden");
         ensure_contains(success_fixture, "Next:", "human success has Next section")?;
-        ensure(!success_fixture.starts_with('{'), "human output is not JSON")
+        ensure(
+            !success_fixture.starts_with('{'),
+            "human output is not JSON",
+        )
     }
 }
