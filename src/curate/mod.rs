@@ -1251,9 +1251,8 @@ mod tests {
     use super::{
         CANDIDATE_TOO_GENERIC_CODE, CandidateInput, CandidateSource, CandidateStatus,
         CandidateType, CandidateValidationError, ParseCandidateSourceError,
-        ParseCandidateStatusError, ParseCandidateTypeError, SpecificityPlatform,
-        SpecificityTokenKind, specificity_score, subsystem_name, validate_candidate,
-        validate_status_transition,
+        ParseCandidateStatusError, ParseCandidateTypeError, SpecificityPlatform, specificity_score,
+        subsystem_name, validate_candidate, validate_status_transition,
     };
 
     #[test]
@@ -1383,7 +1382,7 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
         let concrete = specificity_score("Always write better code. Run `cargo fmt --check`.");
 
         assert!(concrete.score >= generic.score);
-        assert!(concrete.passes_threshold);
+        assert!(concrete.structural_signals.has_inline_command);
     }
 
     #[test]
