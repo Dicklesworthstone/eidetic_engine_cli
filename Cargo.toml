@@ -50,6 +50,7 @@ toml_edit = { version = "0.25.11", default-features = false, features = ["parse"
 uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
+tempfile = { version = "3.27.0" }
 
 [patch.crates-io]
 fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
