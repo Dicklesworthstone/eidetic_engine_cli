@@ -14,6 +14,7 @@ pub mod degraded_honesty;
 pub mod doctor;
 pub mod economy;
 pub mod effect;
+pub mod handoff;
 pub mod health;
 pub mod index;
 pub mod init;

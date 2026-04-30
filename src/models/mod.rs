@@ -9,6 +9,7 @@ pub mod episode;
 pub mod error_codes;
 pub mod id;
 pub mod jsonl;
+pub mod learn;
 pub mod memory;
 pub mod model_registry;
 pub mod mutation;
@@ -81,6 +82,15 @@ pub use jsonl::{
     ExportWorkspaceRecord, ExportWorkspaceRecordBuilder, ImportSource, ParseExportRecordTypeError,
     ParseExportScopeError, ParseImportSourceError, ParseRedactionLevelError, ParseTrustLevelError,
     RedactionLevel, TrustLevel,
+};
+pub use learn::{
+    EXPERIMENT_OUTCOME_SCHEMA_V1, ExperimentOutcome, ExperimentOutcomeStatus,
+    ExperimentSafetyBoundary, LEARNING_EXPERIMENT_SCHEMA_V1, LEARNING_OBSERVATION_SCHEMA_V1,
+    LEARNING_QUESTION_SCHEMA_V1, LEARNING_SCHEMA_CATALOG_V1, LearningExperiment,
+    LearningExperimentStatus, LearningFieldSchema, LearningObjectSchema, LearningObservation,
+    LearningObservationSignal, LearningQuestion, LearningQuestionStatus, LearningTargetKind,
+    ParseLearningValueError, UNCERTAINTY_ESTIMATE_SCHEMA_V1, UncertaintyEstimate,
+    learning_schema_catalog_json, learning_schemas,
 };
 pub use memory::{
     Confidence, Importance, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES, MemoryContent,

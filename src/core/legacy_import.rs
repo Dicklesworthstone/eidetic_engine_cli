@@ -1004,14 +1004,38 @@ impl LegacyMappingReport {
         out.push_str(&format!("Source: {}\n\n", self.source_path));
 
         out.push_str("Statistics:\n");
-        out.push_str(&format!("  Total artifacts:      {}\n", self.statistics.total_artifacts));
-        out.push_str(&format!("  Importable memories:  {}\n", self.statistics.importable_memories));
-        out.push_str(&format!("  Importable sessions:  {}\n", self.statistics.importable_sessions));
-        out.push_str(&format!("  Skipped (derived):    {}\n", self.statistics.skipped));
-        out.push_str(&format!("  Manual review:        {}\n", self.statistics.manual_review));
-        out.push_str(&format!("  Reference only:       {}\n", self.statistics.reference_only));
-        out.push_str(&format!("  Trust downgrades:     {}\n", self.statistics.trust_downgrades));
-        out.push_str(&format!("  Quarantined:          {}\n\n", self.statistics.quarantined));
+        out.push_str(&format!(
+            "  Total artifacts:      {}\n",
+            self.statistics.total_artifacts
+        ));
+        out.push_str(&format!(
+            "  Importable memories:  {}\n",
+            self.statistics.importable_memories
+        ));
+        out.push_str(&format!(
+            "  Importable sessions:  {}\n",
+            self.statistics.importable_sessions
+        ));
+        out.push_str(&format!(
+            "  Skipped (derived):    {}\n",
+            self.statistics.skipped
+        ));
+        out.push_str(&format!(
+            "  Manual review:        {}\n",
+            self.statistics.manual_review
+        ));
+        out.push_str(&format!(
+            "  Reference only:       {}\n",
+            self.statistics.reference_only
+        ));
+        out.push_str(&format!(
+            "  Trust downgrades:     {}\n",
+            self.statistics.trust_downgrades
+        ));
+        out.push_str(&format!(
+            "  Quarantined:          {}\n\n",
+            self.statistics.quarantined
+        ));
 
         out.push_str("Type Mappings:\n");
         for summary in &self.type_summaries {
@@ -1045,11 +1069,16 @@ fn map_artifact(artifact: &LegacyArtifact) -> ArtifactMapping {
         LegacyMappingTarget::SessionEvidence => ("session", MappingAction::ImportAsSession),
         LegacyMappingTarget::DerivedIndexSkip => ("index", MappingAction::Skip),
         LegacyMappingTarget::ConfigReview => ("config", MappingAction::ManualReview),
-        LegacyMappingTarget::ArchitectureReferenceOnly => ("architecture", MappingAction::ReferenceOnly),
+        LegacyMappingTarget::ArchitectureReferenceOnly => {
+            ("architecture", MappingAction::ReferenceOnly)
+        }
         LegacyMappingTarget::ManualReview => ("unknown", MappingAction::ManualReview),
     };
 
-    let trust_adjustment = if artifact.risk_flags.contains(&LegacyRiskFlag::SensitiveContent) {
+    let trust_adjustment = if artifact
+        .risk_flags
+        .contains(&LegacyRiskFlag::SensitiveContent)
+    {
         TrustAdjustment::Quarantine
     } else if artifact.instruction_like.detected {
         TrustAdjustment::Quarantine
@@ -1061,7 +1090,9 @@ fn map_artifact(artifact: &LegacyArtifact) -> ArtifactMapping {
 
     let requires_review = matches!(action, MappingAction::ManualReview)
         || artifact.instruction_like.detected
-        || artifact.risk_flags.contains(&LegacyRiskFlag::SensitiveContent);
+        || artifact
+            .risk_flags
+            .contains(&LegacyRiskFlag::SensitiveContent);
 
     ArtifactMapping {
         path: artifact.path.clone(),
@@ -1308,11 +1339,11 @@ mod tests {
     // EE-271: Mapping Report Tests
     // ========================================================================
 
-    use crate::models::IMPORT_EIDETIC_LEGACY_SCAN_SCHEMA_V1;
     use super::{
-        ArtifactMapping, FieldTransform, LegacyMappingReport, MappingAction, MappingStatistics,
-        TransformType, TrustAdjustment, LEGACY_MAPPING_REPORT_SCHEMA_V1, generate_type_summaries,
+        LEGACY_MAPPING_REPORT_SCHEMA_V1, LegacyMappingReport, MappingAction, TransformType,
+        TrustAdjustment, generate_type_summaries,
     };
+    use crate::models::IMPORT_EIDETIC_LEGACY_SCAN_SCHEMA_V1;
 
     #[test]
     fn mapping_report_schema_is_stable() -> TestResult {
@@ -1328,7 +1359,11 @@ mod tests {
         ensure_equal(&TransformType::Direct.as_str(), &"direct", "direct")?;
         ensure_equal(&TransformType::Rename.as_str(), &"rename", "rename")?;
         ensure_equal(&TransformType::Parse.as_str(), &"parse", "parse")?;
-        ensure_equal(&TransformType::Normalize.as_str(), &"normalize", "normalize")?;
+        ensure_equal(
+            &TransformType::Normalize.as_str(),
+            &"normalize",
+            "normalize",
+        )?;
         ensure_equal(&TransformType::Generate.as_str(), &"generate", "generate")?;
         ensure_equal(&TransformType::Extract.as_str(), &"extract", "extract")?;
         ensure_equal(&TransformType::Combine.as_str(), &"combine", "combine")?;
@@ -1338,18 +1373,46 @@ mod tests {
     #[test]
     fn trust_adjustment_as_str() -> TestResult {
         ensure_equal(&TrustAdjustment::Preserve.as_str(), &"preserve", "preserve")?;
-        ensure_equal(&TrustAdjustment::Downgrade.as_str(), &"downgrade", "downgrade")?;
-        ensure_equal(&TrustAdjustment::Quarantine.as_str(), &"quarantine", "quarantine")?;
-        ensure_equal(&TrustAdjustment::Untrusted.as_str(), &"untrusted", "untrusted")
+        ensure_equal(
+            &TrustAdjustment::Downgrade.as_str(),
+            &"downgrade",
+            "downgrade",
+        )?;
+        ensure_equal(
+            &TrustAdjustment::Quarantine.as_str(),
+            &"quarantine",
+            "quarantine",
+        )?;
+        ensure_equal(
+            &TrustAdjustment::Untrusted.as_str(),
+            &"untrusted",
+            "untrusted",
+        )
     }
 
     #[test]
     fn mapping_action_as_str() -> TestResult {
-        ensure_equal(&MappingAction::ImportAsMemory.as_str(), &"import_as_memory", "import_as_memory")?;
-        ensure_equal(&MappingAction::ImportAsSession.as_str(), &"import_as_session", "import_as_session")?;
+        ensure_equal(
+            &MappingAction::ImportAsMemory.as_str(),
+            &"import_as_memory",
+            "import_as_memory",
+        )?;
+        ensure_equal(
+            &MappingAction::ImportAsSession.as_str(),
+            &"import_as_session",
+            "import_as_session",
+        )?;
         ensure_equal(&MappingAction::Skip.as_str(), &"skip", "skip")?;
-        ensure_equal(&MappingAction::ManualReview.as_str(), &"manual_review", "manual_review")?;
-        ensure_equal(&MappingAction::ReferenceOnly.as_str(), &"reference_only", "reference_only")
+        ensure_equal(
+            &MappingAction::ManualReview.as_str(),
+            &"manual_review",
+            "manual_review",
+        )?;
+        ensure_equal(
+            &MappingAction::ReferenceOnly.as_str(),
+            &"reference_only",
+            "reference_only",
+        )
     }
 
     #[test]
@@ -1580,7 +1643,11 @@ mod tests {
         let json1 = mapping1.data_json();
         let json2 = mapping2.data_json();
 
-        ensure_equal(&json1["schema"], &json2["schema"], "mapping schema idempotent")?;
+        ensure_equal(
+            &json1["schema"],
+            &json2["schema"],
+            "mapping schema idempotent",
+        )?;
         ensure_equal(
             &json1["statistics"],
             &json2["statistics"],

@@ -2374,6 +2374,12 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             description: "Utility, attention-cost, reserve, debt, recommendation, and report schemas",
             category: "domain",
         },
+        SchemaEntry {
+            id: "ee.learning.schemas.v1",
+            version: "1",
+            description: "Learning question, uncertainty, experiment, observation, and outcome schemas",
+            category: "domain",
+        },
     ]
 }
 
@@ -2434,6 +2440,7 @@ fn render_single_schema_export(schema_id: &str) -> String {
         "ee.executable_id_schemas.v1" => crate::models::executable_id_schema_catalog_json(),
         "ee.procedure.schemas.v1" => crate::models::procedure_schema_catalog_json(),
         "ee.economy.schemas.v1" => crate::models::economy_schema_catalog_json(),
+        "ee.learning.schemas.v1" => crate::models::learning_schema_catalog_json(),
         _ => {
             let mut b = JsonBuilder::with_capacity(256);
             b.field_str("schema", ERROR_SCHEMA_V1);
@@ -2448,7 +2455,7 @@ fn render_single_schema_export(schema_id: &str) -> String {
 }
 
 fn render_all_schemas_export() -> String {
-    let mut b = JsonBuilder::with_capacity(2048);
+    let mut b = JsonBuilder::with_capacity(3072);
     b.field_str("schema", RESPONSE_SCHEMA_V1);
     b.field_bool("success", true);
     b.field_object("data", |d| {
@@ -2456,13 +2463,14 @@ fn render_all_schemas_export() -> String {
         d.field_raw(
             "schemas",
             &format!(
-                "[{},{},{},{},{},{}]",
+                "[{},{},{},{},{},{},{}]",
                 response_schema_definition(),
                 error_schema_definition(),
                 certificate_schema_definition(),
                 crate::models::executable_id_schema_catalog_json(),
                 crate::models::procedure_schema_catalog_json(),
-                crate::models::economy_schema_catalog_json()
+                crate::models::economy_schema_catalog_json(),
+                crate::models::learning_schema_catalog_json()
             ),
         );
     });
@@ -5072,6 +5080,10 @@ pub fn render_learn_summary_toon(report: &LearnSummaryReport) -> String {
 use crate::core::audit::{
     AuditDiffReport, AuditShowReport, AuditTimelineReport, AuditVerifyReport,
 };
+use crate::core::handoff::{
+    CreateReport as HandoffCreateReport, InspectReport as HandoffInspectReport,
+    PreviewReport as HandoffPreviewReport, ResumeReport as HandoffResumeReport,
+};
 
 /// Render an audit timeline report as JSON.
 #[must_use]
@@ -5106,7 +5118,10 @@ pub fn render_audit_timeline_human(report: &AuditTimelineReport) -> String {
             entry.effect_class, entry.dry_run
         ));
         if !entry.changed_surfaces.is_empty() {
-            out.push_str(&format!("    Changed: {}\n", entry.changed_surfaces.join(", ")));
+            out.push_str(&format!(
+                "    Changed: {}\n",
+                entry.changed_surfaces.join(", ")
+            ));
         }
         out.push('\n');
     }
@@ -5120,9 +5135,7 @@ pub fn render_audit_timeline_human(report: &AuditTimelineReport) -> String {
 pub fn render_audit_timeline_toon(report: &AuditTimelineReport) -> String {
     format!(
         "AUDIT_TIMELINE|count={}|total={}|has_more={}",
-        report.pagination.returned_count,
-        report.pagination.total_count,
-        report.pagination.has_more
+        report.pagination.returned_count, report.pagination.total_count, report.pagination.has_more
     )
 }
 
@@ -5147,8 +5160,14 @@ pub fn render_audit_show_human(report: &AuditShowReport) -> String {
     out.push_str(&format!("Operation: {}\n\n", op.operation_id));
     out.push_str(&format!("Command: {}\n", op.command_path));
     out.push_str(&format!("Outcome: {}\n", op.outcome));
-    out.push_str(&format!("Effect: {} (expected: {})\n", op.observed_effect, op.expected_effect));
-    out.push_str(&format!("Match: {}\n", if op.effect_match { "yes" } else { "MISMATCH" }));
+    out.push_str(&format!(
+        "Effect: {} (expected: {})\n",
+        op.observed_effect, op.expected_effect
+    ));
+    out.push_str(&format!(
+        "Match: {}\n",
+        if op.effect_match { "yes" } else { "MISMATCH" }
+    ));
     out.push_str(&format!("Dry-run: {}\n", op.dry_run));
     out.push_str(&format!("Transaction: {}\n", op.transaction_status));
     out.push_str(&format!("Hash chain valid: {}\n\n", op.hash_chain_valid));
@@ -5208,7 +5227,10 @@ pub fn render_audit_diff_json(report: &AuditDiffReport) -> String {
 pub fn render_audit_diff_human(report: &AuditDiffReport) -> String {
     let mut out = String::with_capacity(1024);
     out.push_str(&format!("Operation Diff: {}\n\n", report.operation_id));
-    out.push_str(&format!("All match: {}\n\n", if report.all_match { "yes" } else { "NO" }));
+    out.push_str(&format!(
+        "All match: {}\n\n",
+        if report.all_match { "yes" } else { "NO" }
+    ));
 
     for delta in &report.deltas {
         out.push_str(&format!(
@@ -5259,15 +5281,37 @@ pub fn render_audit_verify_human(report: &AuditVerifyReport) -> String {
     out.push_str("Audit Verification\n\n");
     out.push_str(&format!(
         "Overall: {}\n\n",
-        if report.overall_valid { "VALID" } else { "ISSUES FOUND" }
+        if report.overall_valid {
+            "VALID"
+        } else {
+            "ISSUES FOUND"
+        }
     ));
 
-    out.push_str(&format!("Operations checked: {}\n", report.summary.operations_checked));
-    out.push_str(&format!("Hash chain valid: {}\n", report.summary.hash_chain_valid));
-    out.push_str(&format!("Missing records: {}\n", report.summary.missing_records));
-    out.push_str(&format!("Malformed entries: {}\n", report.summary.malformed_entries));
-    out.push_str(&format!("Effect mismatches: {}\n", report.summary.effect_mismatches));
-    out.push_str(&format!("Redaction failures: {}\n", report.summary.redaction_failures));
+    out.push_str(&format!(
+        "Operations checked: {}\n",
+        report.summary.operations_checked
+    ));
+    out.push_str(&format!(
+        "Hash chain valid: {}\n",
+        report.summary.hash_chain_valid
+    ));
+    out.push_str(&format!(
+        "Missing records: {}\n",
+        report.summary.missing_records
+    ));
+    out.push_str(&format!(
+        "Malformed entries: {}\n",
+        report.summary.malformed_entries
+    ));
+    out.push_str(&format!(
+        "Effect mismatches: {}\n",
+        report.summary.effect_mismatches
+    ));
+    out.push_str(&format!(
+        "Redaction failures: {}\n",
+        report.summary.redaction_failures
+    ));
 
     if !report.issues.is_empty() {
         out.push_str("\nIssues:\n");
@@ -5295,6 +5339,309 @@ pub fn render_audit_verify_toon(report: &AuditVerifyReport) -> String {
         report.summary.operations_checked,
         report.overall_valid,
         report.issues.len()
+    )
+}
+
+// ============================================================================
+// Handoff Rendering
+// ============================================================================
+
+/// Render a handoff preview report as JSON.
+#[must_use]
+pub fn render_handoff_preview_json(report: &HandoffPreviewReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "workspace": report.workspace,
+        "profile": report.profile,
+        "planned_sections": report.planned_sections,
+        "omitted_sections": report.omitted_sections,
+        "evidence_ids": report.evidence_ids,
+        "token_estimate": report.token_estimate,
+        "byte_estimate": report.byte_estimate,
+        "redaction_posture": report.redaction_posture,
+        "degradations": report.degradations,
+        "sufficient_for_resume": report.sufficient_for_resume,
+        "generated_at": report.generated_at
+    })
+    .to_string()
+}
+
+/// Render a handoff preview report as human-readable text.
+#[must_use]
+pub fn render_handoff_preview_human(report: &HandoffPreviewReport) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("Handoff Preview ({})", report.profile));
+    lines.push(format!("Workspace: {}", report.workspace.display()));
+    lines.push(String::new());
+
+    lines.push("Planned Sections:".to_owned());
+    for section in &report.planned_sections {
+        lines.push(format!(
+            "  - {} ({}, ~{} tokens)",
+            section.title, section.confidence, section.token_estimate
+        ));
+    }
+
+    if !report.omitted_sections.is_empty() {
+        lines.push(String::new());
+        lines.push("Omitted Sections:".to_owned());
+        for omission in &report.omitted_sections {
+            lines.push(format!("  - {}: {}", omission.id, omission.reason));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push(format!(
+        "Estimates: ~{} tokens, ~{} bytes",
+        report.token_estimate, report.byte_estimate
+    ));
+    lines.push(format!(
+        "Sufficient for resume: {}",
+        if report.sufficient_for_resume {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
+
+    if !report.degradations.is_empty() {
+        lines.push(String::new());
+        lines.push("Degradations:".to_owned());
+        for deg in &report.degradations {
+            lines.push(format!("  - [{}] {}", deg.code, deg.message));
+        }
+    }
+
+    lines.join("\n") + "\n"
+}
+
+/// Render a handoff preview report as TOON.
+#[must_use]
+pub fn render_handoff_preview_toon(report: &HandoffPreviewReport) -> String {
+    format!(
+        "HANDOFF_PREVIEW|profile={}|sections={}|tokens={}|sufficient={}",
+        report.profile,
+        report.planned_sections.len(),
+        report.token_estimate,
+        report.sufficient_for_resume
+    )
+}
+
+/// Render a handoff create report as JSON.
+#[must_use]
+pub fn render_handoff_create_json(report: &HandoffCreateReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "capsule_id": report.capsule_id,
+        "workspace": report.workspace,
+        "output_path": report.output_path,
+        "profile": report.profile,
+        "sections_included": report.sections_included,
+        "evidence_count": report.evidence_count,
+        "token_count": report.token_count,
+        "byte_count": report.byte_count,
+        "content_hash": report.content_hash,
+        "redaction_summary": report.redaction_summary,
+        "dry_run": report.dry_run,
+        "created_at": report.created_at
+    })
+    .to_string()
+}
+
+/// Render a handoff create report as human-readable text.
+#[must_use]
+pub fn render_handoff_create_human(report: &HandoffCreateReport) -> String {
+    let mut lines = Vec::new();
+
+    if report.dry_run {
+        lines.push("Handoff Capsule (dry run)".to_owned());
+    } else {
+        lines.push("Handoff Capsule Created".to_owned());
+    }
+
+    lines.push(format!("ID: {}", report.capsule_id));
+    lines.push(format!("Output: {}", report.output_path.display()));
+    lines.push(format!("Profile: {}", report.profile));
+    lines.push(String::new());
+    lines.push(format!("Sections: {}", report.sections_included));
+    lines.push(format!("Evidence items: {}", report.evidence_count));
+    lines.push(format!("Tokens: {}", report.token_count));
+    lines.push(format!("Bytes: {}", report.byte_count));
+    lines.push(format!("Content hash: {}", report.content_hash));
+
+    lines.join("\n") + "\n"
+}
+
+/// Render a handoff create report as TOON.
+#[must_use]
+pub fn render_handoff_create_toon(report: &HandoffCreateReport) -> String {
+    format!(
+        "HANDOFF_CREATE|id={}|profile={}|sections={}|tokens={}|dry_run={}",
+        report.capsule_id,
+        report.profile,
+        report.sections_included,
+        report.token_count,
+        report.dry_run
+    )
+}
+
+/// Render a handoff inspect report as JSON.
+#[must_use]
+pub fn render_handoff_inspect_json(report: &HandoffInspectReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "path": report.path,
+        "capsule_id": report.capsule_id,
+        "capsule_schema": report.capsule_schema,
+        "validation_status": report.validation_status,
+        "workspace_id": report.workspace_id,
+        "repository_fingerprint": report.repository_fingerprint,
+        "profile": report.profile,
+        "section_count": report.section_count,
+        "evidence_count": report.evidence_count,
+        "hash_valid": report.hash_valid,
+        "hash_expected": report.hash_expected,
+        "hash_actual": report.hash_actual,
+        "stale_evidence": report.stale_evidence,
+        "missing_evidence": report.missing_evidence,
+        "redaction_status": report.redaction_status,
+        "compatible_versions": report.compatible_versions,
+        "warnings": report.warnings,
+        "inspected_at": report.inspected_at
+    })
+    .to_string()
+}
+
+/// Render a handoff inspect report as human-readable text.
+#[must_use]
+pub fn render_handoff_inspect_human(report: &HandoffInspectReport) -> String {
+    let mut lines = Vec::new();
+
+    lines.push(format!("Capsule Inspection: {}", report.path.display()));
+    lines.push(format!("Status: {}", report.validation_status));
+    lines.push(String::new());
+
+    lines.push(format!("Capsule ID: {}", report.capsule_id));
+    lines.push(format!("Schema: {}", report.capsule_schema));
+    lines.push(format!("Profile: {}", report.profile));
+
+    if let Some(ref ws) = report.workspace_id {
+        lines.push(format!("Workspace: {ws}"));
+    }
+
+    lines.push(String::new());
+    lines.push(format!("Sections: {}", report.section_count));
+    lines.push(format!("Evidence items: {}", report.evidence_count));
+    lines.push(format!(
+        "Hash valid: {}",
+        if report.hash_valid { "yes" } else { "no" }
+    ));
+
+    if !report.warnings.is_empty() {
+        lines.push(String::new());
+        lines.push("Warnings:".to_owned());
+        for warning in &report.warnings {
+            lines.push(format!("  - {warning}"));
+        }
+    }
+
+    lines.join("\n") + "\n"
+}
+
+/// Render a handoff inspect report as TOON.
+#[must_use]
+pub fn render_handoff_inspect_toon(report: &HandoffInspectReport) -> String {
+    format!(
+        "HANDOFF_INSPECT|id={}|status={}|sections={}|hash_valid={}",
+        report.capsule_id, report.validation_status, report.section_count, report.hash_valid
+    )
+}
+
+/// Render a handoff resume report as JSON.
+#[must_use]
+pub fn render_handoff_resume_json(report: &HandoffResumeReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "capsule_id": report.capsule_id,
+        "capsule_path": report.capsule_path,
+        "workspace": report.workspace,
+        "current_objective": report.current_objective,
+        "status_summary": report.status_summary,
+        "next_actions": report.next_actions,
+        "blockers": report.blockers,
+        "do_not_repeat": report.do_not_repeat,
+        "recent_decisions": report.recent_decisions,
+        "recent_outcomes": report.recent_outcomes,
+        "selected_memories": report.selected_memories,
+        "artifact_pointers": report.artifact_pointers,
+        "degradations": report.degradations,
+        "resumed_at": report.resumed_at
+    })
+    .to_string()
+}
+
+/// Render a handoff resume report as human-readable text.
+#[must_use]
+pub fn render_handoff_resume_human(report: &HandoffResumeReport) -> String {
+    let mut lines = Vec::new();
+
+    lines.push("Session Resume".to_owned());
+    lines.push(format!("From capsule: {}", report.capsule_id));
+    lines.push(String::new());
+
+    if let Some(ref obj) = report.current_objective {
+        lines.push("Current Objective:".to_owned());
+        lines.push(format!("  {obj}"));
+        lines.push(String::new());
+    }
+
+    if !report.next_actions.is_empty() {
+        lines.push("Next Actions:".to_owned());
+        for action in &report.next_actions {
+            lines.push(format!("  {}. {}", action.priority, action.description));
+            if let Some(ref cmd) = action.suggested_command {
+                lines.push(format!("     Command: {cmd}"));
+            }
+        }
+        lines.push(String::new());
+    }
+
+    if !report.blockers.is_empty() {
+        lines.push("Blockers:".to_owned());
+        for blocker in &report.blockers {
+            let hard = if blocker.hard { " [HARD]" } else { "" };
+            lines.push(format!("  - {}{hard}", blocker.description));
+        }
+        lines.push(String::new());
+    }
+
+    if !report.do_not_repeat.is_empty() {
+        lines.push("Do Not Repeat:".to_owned());
+        for dnr in &report.do_not_repeat {
+            lines.push(format!("  - {}: {}", dnr.pattern, dnr.reason));
+        }
+        lines.push(String::new());
+    }
+
+    if !report.degradations.is_empty() {
+        lines.push("Degradations:".to_owned());
+        for deg in &report.degradations {
+            lines.push(format!("  - [{}] {}", deg.code, deg.message));
+        }
+    }
+
+    lines.join("\n") + "\n"
+}
+
+/// Render a handoff resume report as TOON.
+#[must_use]
+pub fn render_handoff_resume_toon(report: &HandoffResumeReport) -> String {
+    format!(
+        "HANDOFF_RESUME|id={}|actions={}|blockers={}|dnr={}",
+        report.capsule_id,
+        report.next_actions.len(),
+        report.blockers.len(),
+        report.do_not_repeat.len()
     )
 }
 

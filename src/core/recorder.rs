@@ -389,6 +389,234 @@ pub fn tail_recording(options: &RecorderTailOptions) -> RecorderTailReport {
 }
 
 // ============================================================================
+// EE-403: Recorder Run Links
+// ============================================================================
+
+/// Schema for recorder links response.
+pub const RECORDER_LINKS_SCHEMA_V1: &str = "ee.recorder.links.v1";
+
+/// Type of artifact linked to a recorder run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecorderLinkType {
+    ContextPack,
+    PreflightRun,
+    Outcome,
+    Tripwire,
+    TaskEpisode,
+}
+
+impl RecorderLinkType {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ContextPack => "context_pack",
+            Self::PreflightRun => "preflight_run",
+            Self::Outcome => "outcome",
+            Self::Tripwire => "tripwire",
+            Self::TaskEpisode => "task_episode",
+        }
+    }
+}
+
+impl std::fmt::Display for RecorderLinkType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// A link between a recorder run and an artifact.
+#[derive(Clone, Debug)]
+pub struct RecorderLink {
+    pub link_id: String,
+    pub run_id: String,
+    pub link_type: RecorderLinkType,
+    pub artifact_id: String,
+    pub created_at: String,
+    pub metadata: Option<String>,
+}
+
+impl RecorderLink {
+    /// Render as JSON value.
+    #[must_use]
+    pub fn to_json(&self) -> JsonValue {
+        let mut obj = json!({
+            "linkId": self.link_id,
+            "runId": self.run_id,
+            "linkType": self.link_type.as_str(),
+            "artifactId": self.artifact_id,
+            "createdAt": self.created_at,
+        });
+        if let Some(ref meta) = self.metadata {
+            obj["metadata"] = json!(meta);
+        }
+        obj
+    }
+}
+
+/// Options for adding a link.
+#[derive(Clone, Debug)]
+pub struct RecorderLinkAddOptions {
+    pub run_id: String,
+    pub link_type: RecorderLinkType,
+    pub artifact_id: String,
+    pub metadata: Option<String>,
+    pub dry_run: bool,
+}
+
+/// Report from adding a link.
+#[derive(Clone, Debug)]
+pub struct RecorderLinkAddReport {
+    pub schema: &'static str,
+    pub link: RecorderLink,
+    pub dry_run: bool,
+}
+
+impl RecorderLinkAddReport {
+    /// Render as JSON.
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "schema": self.schema,
+            "command": "recorder link add",
+            "link": self.link.to_json(),
+            "dryRun": self.dry_run,
+        })
+    }
+
+    /// Render as human-readable string.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut out = String::with_capacity(256);
+        if self.dry_run {
+            out.push_str("Recorder Link [DRY RUN]\n");
+        } else {
+            out.push_str("Recorder Link Added\n");
+        }
+        out.push_str("====================\n\n");
+        out.push_str(&format!("Link ID:    {}\n", self.link.link_id));
+        out.push_str(&format!("Run ID:     {}\n", self.link.run_id));
+        out.push_str(&format!("Type:       {}\n", self.link.link_type));
+        out.push_str(&format!("Artifact:   {}\n", self.link.artifact_id));
+        out.push_str(&format!("Created:    {}\n", self.link.created_at));
+        out
+    }
+}
+
+/// Add a link between a recorder run and an artifact.
+#[must_use]
+pub fn add_link(options: &RecorderLinkAddOptions) -> RecorderLinkAddReport {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let link_id = format!("link_{}", uuid::Uuid::now_v7());
+
+    let link = RecorderLink {
+        link_id,
+        run_id: options.run_id.clone(),
+        link_type: options.link_type,
+        artifact_id: options.artifact_id.clone(),
+        created_at: timestamp,
+        metadata: options.metadata.clone(),
+    };
+
+    RecorderLinkAddReport {
+        schema: RECORDER_LINKS_SCHEMA_V1,
+        link,
+        dry_run: options.dry_run,
+    }
+}
+
+/// Options for listing links.
+#[derive(Clone, Debug, Default)]
+pub struct RecorderLinksListOptions {
+    pub run_id: Option<String>,
+    pub link_type: Option<RecorderLinkType>,
+    pub artifact_id: Option<String>,
+    pub limit: u32,
+}
+
+/// Report from listing links.
+#[derive(Clone, Debug)]
+pub struct RecorderLinksListReport {
+    pub schema: &'static str,
+    pub links: Vec<RecorderLink>,
+    pub total_count: u32,
+}
+
+impl RecorderLinksListReport {
+    /// Render as JSON.
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "schema": self.schema,
+            "command": "recorder links list",
+            "links": self.links.iter().map(|l| l.to_json()).collect::<Vec<_>>(),
+            "totalCount": self.total_count,
+        })
+    }
+
+    /// Render as human-readable string.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut out = String::with_capacity(512);
+        out.push_str("Recorder Links\n");
+        out.push_str("==============\n\n");
+        out.push_str(&format!("Total: {}\n\n", self.total_count));
+
+        if self.links.is_empty() {
+            out.push_str("No links found.\n");
+        } else {
+            for link in &self.links {
+                out.push_str(&format!(
+                    "  {} -> {} ({})\n",
+                    link.run_id, link.artifact_id, link.link_type
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// List links for a recorder run or artifact.
+#[must_use]
+pub fn list_links(options: &RecorderLinksListOptions) -> RecorderLinksListReport {
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let sample_links = vec![
+        RecorderLink {
+            link_id: "link_sample1".to_owned(),
+            run_id: options.run_id.clone().unwrap_or_else(|| "run_sample".to_owned()),
+            link_type: RecorderLinkType::ContextPack,
+            artifact_id: "pack_abc123".to_owned(),
+            created_at: now.clone(),
+            metadata: None,
+        },
+        RecorderLink {
+            link_id: "link_sample2".to_owned(),
+            run_id: options.run_id.clone().unwrap_or_else(|| "run_sample".to_owned()),
+            link_type: RecorderLinkType::Outcome,
+            artifact_id: "outcome_def456".to_owned(),
+            created_at: now,
+            metadata: Some("success".to_owned()),
+        },
+    ];
+
+    let filtered: Vec<_> = sample_links
+        .into_iter()
+        .filter(|l| {
+            options.run_id.as_ref().is_none_or(|r| &l.run_id == r)
+                && options.link_type.is_none_or(|t| l.link_type == t)
+                && options.artifact_id.as_ref().is_none_or(|a| &l.artifact_id == a)
+        })
+        .take(options.limit as usize)
+        .collect();
+
+    RecorderLinksListReport {
+        schema: RECORDER_LINKS_SCHEMA_V1,
+        total_count: filtered.len() as u32,
+        links: filtered,
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

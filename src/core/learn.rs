@@ -7,7 +7,6 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::models::DomainError;
 
@@ -171,7 +170,9 @@ impl LearnUncertaintyReport {
 }
 
 /// Show uncertainty estimates and sampling priorities.
-pub fn show_uncertainty(options: &LearnUncertaintyOptions) -> Result<LearnUncertaintyReport, DomainError> {
+pub fn show_uncertainty(
+    options: &LearnUncertaintyOptions,
+) -> Result<LearnUncertaintyReport, DomainError> {
     let now = Utc::now().to_rfc3339();
 
     let all_items = vec![

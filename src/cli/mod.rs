@@ -15,8 +15,8 @@ use crate::core::context::{ContextPackError, ContextPackOptions, run_context_pac
 use crate::core::doctor::{DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport};
 use crate::core::handoff::{
     CapsuleProfile, CreateOptions as HandoffCreateOptions, InspectOptions as HandoffInspectOptions,
-    PreviewOptions as HandoffPreviewOptions, ResumeOptions as HandoffResumeOptions,
-    create_handoff, inspect_handoff, preview_handoff, resume_handoff,
+    PreviewOptions as HandoffPreviewOptions, ResumeOptions as HandoffResumeOptions, create_handoff,
+    inspect_handoff, preview_handoff, resume_handoff,
 };
 use crate::core::health::HealthReport;
 use crate::core::index::{
@@ -1799,7 +1799,7 @@ where
             }
         }
         Some(Command::Handoff(ref cmd)) => match cmd {
-            HandoffCommand::Preview(ref args) => {
+            HandoffCommand::Preview(args) => {
                 let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
                 let options = HandoffPreviewOptions {
                     workspace: workspace_path,
@@ -1816,20 +1816,22 @@ where
                         output::Renderer::Human | output::Renderer::Markdown => {
                             write_stdout(stdout, &output::render_handoff_preview_human(&report))
                         }
-                        output::Renderer::Toon => {
-                            write_stdout(stdout, &(output::render_handoff_preview_toon(&report) + "\n"))
-                        }
+                        output::Renderer::Toon => write_stdout(
+                            stdout,
+                            &(output::render_handoff_preview_toon(&report) + "\n"),
+                        ),
                         output::Renderer::Json
                         | output::Renderer::Jsonl
                         | output::Renderer::Compact
-                        | output::Renderer::Hook => {
-                            write_stdout(stdout, &(output::render_handoff_preview_json(&report) + "\n"))
-                        }
+                        | output::Renderer::Hook => write_stdout(
+                            stdout,
+                            &(output::render_handoff_preview_json(&report) + "\n"),
+                        ),
                     },
                     Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
                 }
             }
-            HandoffCommand::Create(ref args) => {
+            HandoffCommand::Create(args) => {
                 let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
                 let options = HandoffCreateOptions {
                     workspace: workspace_path,
@@ -1847,20 +1849,22 @@ where
                         output::Renderer::Human | output::Renderer::Markdown => {
                             write_stdout(stdout, &output::render_handoff_create_human(&report))
                         }
-                        output::Renderer::Toon => {
-                            write_stdout(stdout, &(output::render_handoff_create_toon(&report) + "\n"))
-                        }
+                        output::Renderer::Toon => write_stdout(
+                            stdout,
+                            &(output::render_handoff_create_toon(&report) + "\n"),
+                        ),
                         output::Renderer::Json
                         | output::Renderer::Jsonl
                         | output::Renderer::Compact
-                        | output::Renderer::Hook => {
-                            write_stdout(stdout, &(output::render_handoff_create_json(&report) + "\n"))
-                        }
+                        | output::Renderer::Hook => write_stdout(
+                            stdout,
+                            &(output::render_handoff_create_json(&report) + "\n"),
+                        ),
                     },
                     Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
                 }
             }
-            HandoffCommand::Inspect(ref args) => {
+            HandoffCommand::Inspect(args) => {
                 let options = HandoffInspectOptions {
                     path: args.path.clone(),
                     verify_hash: args.verify_hash,
@@ -1871,24 +1875,30 @@ where
                         output::Renderer::Human | output::Renderer::Markdown => {
                             write_stdout(stdout, &output::render_handoff_inspect_human(&report))
                         }
-                        output::Renderer::Toon => {
-                            write_stdout(stdout, &(output::render_handoff_inspect_toon(&report) + "\n"))
-                        }
+                        output::Renderer::Toon => write_stdout(
+                            stdout,
+                            &(output::render_handoff_inspect_toon(&report) + "\n"),
+                        ),
                         output::Renderer::Json
                         | output::Renderer::Jsonl
                         | output::Renderer::Compact
-                        | output::Renderer::Hook => {
-                            write_stdout(stdout, &(output::render_handoff_inspect_json(&report) + "\n"))
-                        }
+                        | output::Renderer::Hook => write_stdout(
+                            stdout,
+                            &(output::render_handoff_inspect_json(&report) + "\n"),
+                        ),
                     },
                     Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
                 }
             }
-            HandoffCommand::Resume(ref args) => {
+            HandoffCommand::Resume(args) => {
                 let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
                 let use_latest = args.path == "latest";
                 let options = HandoffResumeOptions {
-                    path: if use_latest { PathBuf::new() } else { PathBuf::from(&args.path) },
+                    path: if use_latest {
+                        PathBuf::new()
+                    } else {
+                        PathBuf::from(&args.path)
+                    },
                     use_latest,
                     workspace: workspace_path,
                     max_sections: args.max_sections,
@@ -1898,15 +1908,17 @@ where
                         output::Renderer::Human | output::Renderer::Markdown => {
                             write_stdout(stdout, &output::render_handoff_resume_human(&report))
                         }
-                        output::Renderer::Toon => {
-                            write_stdout(stdout, &(output::render_handoff_resume_toon(&report) + "\n"))
-                        }
+                        output::Renderer::Toon => write_stdout(
+                            stdout,
+                            &(output::render_handoff_resume_toon(&report) + "\n"),
+                        ),
                         output::Renderer::Json
                         | output::Renderer::Jsonl
                         | output::Renderer::Compact
-                        | output::Renderer::Hook => {
-                            write_stdout(stdout, &(output::render_handoff_resume_json(&report) + "\n"))
-                        }
+                        | output::Renderer::Hook => write_stdout(
+                            stdout,
+                            &(output::render_handoff_resume_json(&report) + "\n"),
+                        ),
                     },
                     Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
                 }
@@ -2889,8 +2901,8 @@ where
 // ============================================================================
 
 use crate::core::audit::{
-    AuditDiffOptions, AuditShowOptions, AuditTimelineOptions, AuditVerifyOptions,
-    list_timeline, show_diff, show_operation, verify_audit,
+    AuditDiffOptions, AuditShowOptions, AuditTimelineOptions, AuditVerifyOptions, list_timeline,
+    show_diff, show_operation, verify_audit,
 };
 
 fn handle_audit_timeline<W, E>(
@@ -2915,15 +2927,17 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_audit_timeline_human(&report))
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_audit_timeline_toon(&report) + "\n"))
-            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_audit_timeline_toon(&report) + "\n"),
+            ),
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_audit_timeline_json(&report) + "\n"))
-            }
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_audit_timeline_json(&report) + "\n"),
+            ),
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }

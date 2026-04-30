@@ -196,10 +196,7 @@ pub fn list_timeline(options: &AuditTimelineOptions) -> Result<AuditTimelineRepo
         },
     ];
 
-    let limited: Vec<_> = entries
-        .into_iter()
-        .take(options.limit as usize)
-        .collect();
+    let limited: Vec<_> = entries.into_iter().take(options.limit as usize).collect();
 
     Ok(AuditTimelineReport {
         schema: AUDIT_TIMELINE_SCHEMA_V1.to_owned(),
@@ -473,7 +470,7 @@ impl AuditVerifyReport {
 }
 
 /// Verify audit integrity for a window.
-pub fn verify_audit(options: &AuditVerifyOptions) -> Result<AuditVerifyReport, DomainError> {
+pub fn verify_audit(_options: &AuditVerifyOptions) -> Result<AuditVerifyReport, DomainError> {
     let now = Utc::now().to_rfc3339();
 
     let summary = VerificationSummary {
@@ -492,9 +489,7 @@ pub fn verify_audit(options: &AuditVerifyOptions) -> Result<AuditVerifyReport, D
         summary,
         issues: vec![],
         overall_valid: true,
-        next_actions: vec![
-            "ee audit timeline --json".to_owned(),
-        ],
+        next_actions: vec!["ee audit timeline --json".to_owned()],
         generated_at: now,
     })
 }
@@ -512,7 +507,10 @@ mod tests {
 
         let report = list_timeline(&options).unwrap();
         assert!(report.entries.len() <= 2);
-        assert_eq!(report.pagination.returned_count, report.entries.len() as u32);
+        assert_eq!(
+            report.pagination.returned_count,
+            report.entries.len() as u32
+        );
     }
 
     #[test]
@@ -552,7 +550,10 @@ mod tests {
     #[test]
     fn effect_class_as_str() {
         assert_eq!(AuditEffectClass::ReadOnly.as_str(), "read_only");
-        assert_eq!(AuditEffectClass::DurableMemoryWrite.as_str(), "durable_memory_write");
+        assert_eq!(
+            AuditEffectClass::DurableMemoryWrite.as_str(),
+            "durable_memory_write"
+        );
     }
 
     #[test]
