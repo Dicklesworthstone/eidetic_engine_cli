@@ -2081,6 +2081,16 @@ fn extract_invalid_subcommand(args: &[OsString]) -> Option<(String, Option<Strin
 
 /// Enhance a clap error message with did-you-mean suggestions.
 fn enhance_error_with_suggestion(error: &clap::Error, args: &[OsString]) -> Option<String> {
+    if let Some(hint) = detect_single_dash_long_flag(args) {
+        return Some(hint);
+    }
+    if let Some(hint) = detect_case_mistyped_flag(args) {
+        return Some(hint);
+    }
+    if let Some(hint) = detect_flag_as_subcommand(args) {
+        return Some(hint);
+    }
+
     if !matches!(
         error.kind(),
         ErrorKind::InvalidSubcommand | ErrorKind::UnknownArgument
@@ -2092,6 +2102,168 @@ fn enhance_error_with_suggestion(error: &clap::Error, args: &[OsString]) -> Opti
     let suggestion = did_you_mean(&invalid, parent.as_deref())?;
 
     Some(format!("did you mean `{suggestion}`?"))
+}
+
+// ============================================================================
+// EE-317: Extended Invocation Normalization
+// ============================================================================
+
+/// Known global flags (long form without dashes).
+const GLOBAL_FLAGS: &[&str] = &[
+    "json",
+    "robot",
+    "format",
+    "fields",
+    "schema",
+    "help-json",
+    "agent-docs",
+    "meta",
+    "workspace",
+    "no-color",
+    "help",
+    "version",
+];
+
+/// Detect single-dash long flags like `-json` and suggest `--json`.
+fn detect_single_dash_long_flag(args: &[OsString]) -> Option<String> {
+    for arg in args {
+        let s = arg.to_string_lossy();
+        if s.starts_with('-') && !s.starts_with("--") && s.len() > 2 {
+            let flag_name = s.trim_start_matches('-');
+            if GLOBAL_FLAGS.contains(&flag_name) {
+                return Some(format!(
+                    "did you mean `--{flag_name}`? (use double dash for long flags)"
+                ));
+            }
+            let lower = flag_name.to_lowercase();
+            if GLOBAL_FLAGS.contains(&lower.as_str()) {
+                return Some(format!(
+                    "did you mean `--{lower}`? (use double dash for long flags)"
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Detect case-mistyped flags like `--JSON` and suggest `--json`.
+fn detect_case_mistyped_flag(args: &[OsString]) -> Option<String> {
+    for arg in args {
+        let s = arg.to_string_lossy();
+        if s.starts_with("--") {
+            let flag_part = s.trim_start_matches("--");
+            let (flag_name, _) = flag_part.split_once('=').unwrap_or((flag_part, ""));
+            let lower = flag_name.to_lowercase();
+            if flag_name != lower && GLOBAL_FLAGS.contains(&lower.as_str()) {
+                return Some(format!(
+                    "did you mean `--{lower}`? (flags are case-sensitive)"
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Detect flag used as subcommand like `ee --json status` and suggest correct order.
+fn detect_flag_as_subcommand(args: &[OsString]) -> Option<String> {
+    let args_str: Vec<&str> = args.iter().filter_map(|s| s.to_str()).collect();
+
+    let mut flag_before_command: Option<&str> = None;
+    let mut command_found: Option<&str> = None;
+
+    for arg in &args_str {
+        if *arg == "ee" {
+            continue;
+        }
+        if arg.starts_with("--") {
+            let flag_part = arg.trim_start_matches("--");
+            let (flag_name, _) = flag_part.split_once('=').unwrap_or((flag_part, ""));
+            if GLOBAL_FLAGS.contains(&flag_name) && command_found.is_none() {
+                flag_before_command = Some(*arg);
+            }
+        } else if !arg.starts_with('-') && COMMAND_NAMES.contains(arg) {
+            command_found = Some(*arg);
+            if flag_before_command.is_some() {
+                break;
+            }
+        }
+    }
+
+    match (flag_before_command, command_found) {
+        (Some(flag), Some(cmd)) => Some(format!(
+            "try `ee {cmd} {flag}` (global flags work after the subcommand)"
+        )),
+        _ => None,
+    }
+}
+
+/// Analyze args and return normalization hints for the invocation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InvocationHints {
+    /// Suggested single-dash to double-dash corrections.
+    pub single_dash_fixes: Vec<(String, String)>,
+    /// Suggested case corrections.
+    pub case_fixes: Vec<(String, String)>,
+    /// Whether a global flag appeared before the command.
+    pub flag_before_command: bool,
+    /// The detected command, if any.
+    pub detected_command: Option<String>,
+}
+
+impl InvocationHints {
+    /// Analyze arguments and gather all normalization hints.
+    #[must_use]
+    pub fn analyze(args: &[OsString]) -> Self {
+        let mut hints = Self::default();
+        let args_str: Vec<&str> = args.iter().filter_map(|s| s.to_str()).collect();
+
+        let mut seen_command = false;
+
+        for arg in &args_str {
+            if *arg == "ee" {
+                continue;
+            }
+
+            if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 2 {
+                let flag_name = arg.trim_start_matches('-');
+                let lower = flag_name.to_lowercase();
+                if GLOBAL_FLAGS.contains(&lower.as_str()) {
+                    hints
+                        .single_dash_fixes
+                        .push(((*arg).to_string(), format!("--{lower}")));
+                }
+            }
+
+            if arg.starts_with("--") {
+                let flag_part = arg.trim_start_matches("--");
+                let (flag_name, _) = flag_part.split_once('=').unwrap_or((flag_part, ""));
+                let lower = flag_name.to_lowercase();
+                if flag_name != lower && GLOBAL_FLAGS.contains(&lower.as_str()) {
+                    hints
+                        .case_fixes
+                        .push(((*arg).to_string(), format!("--{lower}")));
+                }
+                if !seen_command && GLOBAL_FLAGS.contains(&lower.as_str()) {
+                    hints.flag_before_command = true;
+                }
+            }
+
+            if !arg.starts_with('-') && COMMAND_NAMES.contains(arg) {
+                seen_command = true;
+                hints.detected_command = Some((*arg).to_string());
+            }
+        }
+
+        hints
+    }
+
+    /// Returns true if any normalization hints are present.
+    #[must_use]
+    pub fn has_hints(&self) -> bool {
+        !self.single_dash_fixes.is_empty()
+            || !self.case_fixes.is_empty()
+            || self.flag_before_command
+    }
 }
 
 #[cfg(test)]
@@ -3478,5 +3650,126 @@ mod tests {
         let (exit, _stdout, stderr) = invoke(&["ee", "serch"]);
         ensure_equal(&exit, &ProcessExitCode::Usage, "unknown command exit")?;
         ensure_contains(&stderr, "did you mean", "suggestion in stderr")
+    }
+
+    // ========================================================================
+    // EE-317: Extended Invocation Normalization Tests
+    // ========================================================================
+
+    #[test]
+    fn detect_single_dash_long_flag_suggests_double_dash() -> TestResult {
+        let args: Vec<OsString> = ["ee", "-json", "status"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let hint = super::detect_single_dash_long_flag(&args);
+        ensure(hint.is_some(), "should detect single-dash flag")?;
+        ensure_contains(&hint.unwrap(), "--json", "should suggest --json")
+    }
+
+    #[test]
+    fn detect_single_dash_ignores_short_flags() -> TestResult {
+        let args: Vec<OsString> = ["ee", "-j", "status"].iter().map(OsString::from).collect();
+        let hint = super::detect_single_dash_long_flag(&args);
+        ensure(hint.is_none(), "-j is a valid short flag, no hint needed")
+    }
+
+    #[test]
+    fn detect_case_mistyped_flag_suggests_lowercase() -> TestResult {
+        let args: Vec<OsString> = ["ee", "--JSON", "status"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let hint = super::detect_case_mistyped_flag(&args);
+        ensure(hint.is_some(), "should detect case mismatch")?;
+        ensure_contains(&hint.unwrap(), "--json", "should suggest --json")
+    }
+
+    #[test]
+    fn detect_case_mistyped_flag_ignores_correct_case() -> TestResult {
+        let args: Vec<OsString> = ["ee", "--json", "status"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let hint = super::detect_case_mistyped_flag(&args);
+        ensure(hint.is_none(), "correct case should not trigger hint")
+    }
+
+    #[test]
+    fn detect_flag_as_subcommand_suggests_reorder() -> TestResult {
+        let args: Vec<OsString> = ["ee", "--json", "status"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let hint = super::detect_flag_as_subcommand(&args);
+        ensure(hint.is_some(), "should detect flag before command")?;
+        let hint_str = hint.unwrap();
+        ensure_contains(
+            &hint_str,
+            "ee status --json",
+            "should suggest correct order",
+        )
+    }
+
+    #[test]
+    fn detect_flag_as_subcommand_no_hint_when_flag_after_command() -> TestResult {
+        let args: Vec<OsString> = ["ee", "status", "--json"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let hint = super::detect_flag_as_subcommand(&args);
+        ensure(hint.is_none(), "flag after command needs no hint")
+    }
+
+    #[test]
+    fn invocation_hints_analyze_detects_all_issues() -> TestResult {
+        let args: Vec<OsString> = ["ee", "-json", "--FORMAT=toon", "status"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let hints = super::InvocationHints::analyze(&args);
+        ensure(hints.has_hints(), "should have hints")?;
+        ensure_equal(&hints.single_dash_fixes.len(), &1, "one single-dash fix")?;
+        ensure_equal(&hints.case_fixes.len(), &1, "one case fix")?;
+        ensure_equal(
+            &hints.detected_command,
+            &Some("status".to_string()),
+            "detected command",
+        )
+    }
+
+    #[test]
+    fn invocation_hints_empty_for_correct_invocation() -> TestResult {
+        let args: Vec<OsString> = ["ee", "status", "--json"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let hints = super::InvocationHints::analyze(&args);
+        ensure(
+            !hints.has_hints(),
+            "correct invocation should have no hints",
+        )
+    }
+
+    #[test]
+    fn single_dash_robot_flag_detected() -> TestResult {
+        let args: Vec<OsString> = ["ee", "-robot", "status"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let hint = super::detect_single_dash_long_flag(&args);
+        ensure(hint.is_some(), "should detect -robot")?;
+        ensure_contains(&hint.unwrap(), "--robot", "should suggest --robot")
+    }
+
+    #[test]
+    fn case_mistyped_workspace_detected() -> TestResult {
+        let args: Vec<OsString> = ["ee", "--WORKSPACE=/tmp", "status"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let hint = super::detect_case_mistyped_flag(&args);
+        ensure(hint.is_some(), "should detect --WORKSPACE")?;
+        ensure_contains(&hint.unwrap(), "--workspace", "should suggest --workspace")
     }
 }
