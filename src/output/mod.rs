@@ -1,6 +1,7 @@
 use std::env;
 use std::io::IsTerminal;
 
+use crate::core::check::CheckReport;
 use crate::core::doctor::DoctorReport;
 use crate::core::status::StatusReport;
 use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
@@ -409,6 +410,78 @@ pub fn render_doctor_human(report: &DoctorReport) -> String {
 #[must_use]
 pub fn render_doctor_toon(report: &DoctorReport) -> String {
     render_toon_from_json(&render_doctor_json(report))
+}
+
+/// Render a check report as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_check_json(report: &CheckReport) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", report.posture.is_usable());
+    b.field_object("data", |d| {
+        d.field_str("command", "check");
+        d.field_str("version", report.version);
+        d.field_str("posture", report.posture.as_str());
+        d.field_bool("workspaceInitialized", report.workspace_initialized);
+        d.field_bool("databaseReady", report.database_ready);
+        d.field_bool("searchReady", report.search_ready);
+        d.field_bool("runtimeReady", report.runtime_ready);
+        d.field_array_of_objects(
+            "suggestedActions",
+            &report.suggested_actions,
+            |obj, action| {
+                obj.field_raw("priority", &action.priority.to_string());
+                obj.field_str("command", action.command);
+                obj.field_str("reason", action.reason);
+            },
+        );
+    });
+    b.finish()
+}
+
+/// Render a check report as human-readable text.
+#[must_use]
+pub fn render_check_human(report: &CheckReport) -> String {
+    let mut output = format!("ee check\n\nposture: {}\n\n", report.posture.as_str());
+
+    output.push_str(&format!(
+        "workspace: {}\ndatabase: {}\nsearch: {}\nruntime: {}\n",
+        if report.workspace_initialized {
+            "initialized"
+        } else {
+            "not initialized"
+        },
+        if report.database_ready {
+            "ready"
+        } else {
+            "not ready"
+        },
+        if report.search_ready {
+            "ready"
+        } else {
+            "not ready"
+        },
+        if report.runtime_ready {
+            "ready"
+        } else {
+            "not ready"
+        },
+    ));
+
+    if !report.suggested_actions.is_empty() {
+        output.push_str("\nNext:\n");
+        for action in &report.suggested_actions {
+            output.push_str(&format!("  {} — {}\n", action.command, action.reason));
+        }
+    }
+
+    output
+}
+
+/// Render a check report as TOON.
+#[must_use]
+pub fn render_check_toon(report: &CheckReport) -> String {
+    render_toon_from_json(&render_check_json(report))
 }
 
 fn render_toon_from_json(json: &str) -> String {

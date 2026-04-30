@@ -1,12 +1,18 @@
 use std::future::Future;
 
 pub mod budget;
+pub mod check;
 pub mod context;
 pub mod doctor;
+pub mod outcome;
 pub mod status;
 
 pub use budget::{BudgetDimension, BudgetExceeded, BudgetSnapshot, RequestBudget};
 pub use context::{AccessLevel, CapabilitySet, CommandContext};
+pub use outcome::{
+    CliCancelReason, CliOutcomeClass, CliOutcomeSummary, EXIT_CANCELLED, EXIT_PANICKED,
+    outcome_class, outcome_exit_code,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BuildInfo {

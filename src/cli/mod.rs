@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 
+use crate::core::check::CheckReport;
 use crate::core::doctor::DoctorReport;
 use crate::core::status::StatusReport;
 use crate::models::{DomainError, ProcessExitCode};
@@ -96,6 +97,8 @@ impl Cli {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Subcommand)]
 pub enum Command {
+    /// Quick posture summary: ready, degraded, or needs attention.
+    Check,
     /// Run health checks on workspace and subsystems.
     Doctor,
     /// Print command help.
@@ -187,6 +190,23 @@ where
 
     match cli.command {
         None | Some(Command::Help) => write_help(stdout),
+        Some(Command::Check) => {
+            let report = CheckReport::gather();
+            match cli.renderer() {
+                output::Renderer::Human => {
+                    write_stdout(stdout, &output::render_check_human(&report))
+                }
+                output::Renderer::Toon => {
+                    write_stdout(stdout, &(output::render_check_toon(&report) + "\n"))
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    write_stdout(stdout, &(output::render_check_json(&report) + "\n"))
+                }
+            }
+        }
         Some(Command::Doctor) => {
             let report = DoctorReport::gather();
             match cli.renderer() {
