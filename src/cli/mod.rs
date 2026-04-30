@@ -239,6 +239,39 @@ where
                 }
             }
         }
+        Some(Command::Schema(ref schema_cmd)) => match schema_cmd {
+            SchemaCommand::List => match cli.renderer() {
+                output::Renderer::Human => {
+                    write_stdout(stdout, &output::render_schema_list_human())
+                }
+                output::Renderer::Toon => {
+                    write_stdout(stdout, &(output::render_schema_list_toon() + "\n"))
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    write_stdout(stdout, &(output::render_schema_list_json() + "\n"))
+                }
+            },
+            SchemaCommand::Export { ref schema_id } => match cli.renderer() {
+                output::Renderer::Human => write_stdout(
+                    stdout,
+                    &output::render_schema_export_human(schema_id.as_deref()),
+                ),
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &(output::render_schema_export_toon(schema_id.as_deref()) + "\n"),
+                ),
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => write_stdout(
+                    stdout,
+                    &(output::render_schema_export_json(schema_id.as_deref()) + "\n"),
+                ),
+            },
+        },
         Some(Command::Status) => {
             let report = StatusReport::gather();
             match cli.renderer() {

@@ -484,6 +484,162 @@ pub fn render_check_toon(report: &CheckReport) -> String {
     render_toon_from_json(&render_check_json(report))
 }
 
+/// Public schema entry for the schema registry.
+#[derive(Clone, Debug)]
+pub struct SchemaEntry {
+    pub id: &'static str,
+    pub version: &'static str,
+    pub description: &'static str,
+    pub category: &'static str,
+}
+
+/// All public schemas exposed by ee.
+pub const fn public_schemas() -> &'static [SchemaEntry] {
+    &[
+        SchemaEntry {
+            id: "ee.response.v1",
+            version: "1",
+            description: "Success response envelope for all ee commands",
+            category: "envelope",
+        },
+        SchemaEntry {
+            id: "ee.error.v1",
+            version: "1",
+            description: "Error response envelope with code, message, and repair",
+            category: "envelope",
+        },
+        SchemaEntry {
+            id: "ee.certificate.v1",
+            version: "1",
+            description: "Certificate schemas for pack, curation, tail-risk, privacy-budget, and lifecycle",
+            category: "domain",
+        },
+        SchemaEntry {
+            id: "ee.executable_id_schemas.v1",
+            version: "1",
+            description: "Executable claim/evidence/policy/trace/demo ID schemas",
+            category: "id",
+        },
+    ]
+}
+
+/// Render the schema list as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_schema_list_json() -> String {
+    let schemas = public_schemas();
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "schema list");
+        d.field_array_of_objects("schemas", schemas, |obj, entry| {
+            obj.field_str("id", entry.id);
+            obj.field_str("version", entry.version);
+            obj.field_str("description", entry.description);
+            obj.field_str("category", entry.category);
+        });
+    });
+    b.finish()
+}
+
+/// Render the schema list as human-readable text.
+#[must_use]
+pub fn render_schema_list_human() -> String {
+    let schemas = public_schemas();
+    let mut output = String::from("ee schema list\n\nAvailable schemas:\n\n");
+    for entry in schemas {
+        output.push_str(&format!("  {} (v{})\n", entry.id, entry.version));
+        output.push_str(&format!("    {}\n\n", entry.description));
+    }
+    output.push_str(
+        "Use `ee schema export <SCHEMA_ID>` to export a schema's JSON Schema definition.\n",
+    );
+    output
+}
+
+/// Render the schema list as TOON.
+#[must_use]
+pub fn render_schema_list_toon() -> String {
+    render_toon_from_json(&render_schema_list_json())
+}
+
+/// Render a schema export as JSON (full JSON Schema definition).
+#[must_use]
+pub fn render_schema_export_json(schema_id: Option<&str>) -> String {
+    match schema_id {
+        Some(id) => render_single_schema_export(id),
+        None => render_all_schemas_export(),
+    }
+}
+
+fn render_single_schema_export(schema_id: &str) -> String {
+    match schema_id {
+        "ee.response.v1" => response_schema_definition(),
+        "ee.error.v1" => error_schema_definition(),
+        "ee.certificate.v1" => certificate_schema_definition(),
+        "ee.executable_id_schemas.v1" => crate::models::executable_id_schema_catalog_json(),
+        _ => {
+            let mut b = JsonBuilder::with_capacity(256);
+            b.field_str("schema", ERROR_SCHEMA_V1);
+            b.field_object("error", |e| {
+                e.field_str("code", "schema_not_found");
+                e.field_str("message", &format!("Schema '{}' not found", schema_id));
+                e.field_str("repair", "ee schema list");
+            });
+            b.finish()
+        }
+    }
+}
+
+fn render_all_schemas_export() -> String {
+    let mut b = JsonBuilder::with_capacity(2048);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "schema export");
+        d.field_raw(
+            "schemas",
+            &format!(
+                "[{},{},{},{}]",
+                response_schema_definition(),
+                error_schema_definition(),
+                certificate_schema_definition(),
+                crate::models::executable_id_schema_catalog_json()
+            ),
+        );
+    });
+    b.finish()
+}
+
+fn response_schema_definition() -> String {
+    r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"ee.response.v1","type":"object","required":["schema","success","data"],"properties":{"schema":{"const":"ee.response.v1"},"success":{"type":"boolean"},"data":{"type":"object"},"degraded":{"type":"array","items":{"type":"object","required":["code","severity","message","repair"],"properties":{"code":{"type":"string"},"severity":{"type":"string","enum":["low","medium","high"]},"message":{"type":"string"},"repair":{"type":"string"}}}}}}"#.to_string()
+}
+
+fn error_schema_definition() -> String {
+    r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"ee.error.v1","type":"object","required":["schema","error"],"properties":{"schema":{"const":"ee.error.v1"},"error":{"type":"object","required":["code","message"],"properties":{"code":{"type":"string"},"message":{"type":"string"},"repair":{"type":"string"}}}}}"#.to_string()
+}
+
+fn certificate_schema_definition() -> String {
+    r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"ee.certificate.v1","type":"object","required":["kind","status"],"properties":{"kind":{"type":"string","enum":["pack","curation","tail_risk","privacy_budget","lifecycle"]},"status":{"type":"string","enum":["pending","active","revoked","expired"]}}}"#.to_string()
+}
+
+/// Render a schema export as human-readable text.
+#[must_use]
+pub fn render_schema_export_human(schema_id: Option<&str>) -> String {
+    let json = render_schema_export_json(schema_id);
+    if json.contains("\"error\"") {
+        String::from("error: Schema not found\n\nRun `ee schema list` to see available schemas.\n")
+    } else {
+        format!("ee schema export\n\n{}\n", json)
+    }
+}
+
+/// Render a schema export as TOON.
+#[must_use]
+pub fn render_schema_export_toon(schema_id: Option<&str>) -> String {
+    render_toon_from_json(&render_schema_export_json(schema_id))
+}
+
 fn render_toon_from_json(json: &str) -> String {
     toon::json_to_toon(json).unwrap_or_else(|error| {
         let message = escape_toon_quoted_string(&format!("TOON encoding failed: {error}"));
