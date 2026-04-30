@@ -1193,4 +1193,158 @@ mod tests {
         }
         Ok(())
     }
+
+    // --- Canonicalization tests (EE-PRIV-WS-001) ---
+
+    use super::{
+        canonicalize_workspace_path, CanonicalizationError, PlatformCaseHandling, SymlinkPolicy,
+    };
+
+    #[test]
+    fn canonicalize_simple_path_succeeds() -> TestResult {
+        let scratch = ScratchDir::new("canon-simple")?;
+        let project = scratch.make_dir("project")?;
+        let salt = b"test-salt-12345678901234567890123";
+
+        let result = canonicalize_workspace_path(&project, salt, SymlinkPolicy::Allow)
+            .map_err(|e| e.to_string())?;
+
+        assert_eq!(result.input_path, project);
+        assert_eq!(result.canonical_path, project.canonicalize().unwrap());
+        assert!(!result.has_symlinks());
+        assert_eq!(result.salted_hash.len(), 24);
+        Ok(())
+    }
+
+    #[test]
+    fn canonicalize_path_through_symlink_detects_it() -> TestResult {
+        let scratch = ScratchDir::new("canon-symlink")?;
+        let target = scratch.make_dir("real-project")?;
+        let link = scratch.path().join("linked-project");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link)
+            .map_err(|e| format!("symlink creation failed: {e}"))?;
+
+        #[cfg(not(unix))]
+        return Ok(()); // Skip on non-Unix
+
+        let salt = b"test-salt-12345678901234567890123";
+        let result = canonicalize_workspace_path(&link, salt, SymlinkPolicy::Allow)
+            .map_err(|e| e.to_string())?;
+
+        assert!(result.input_differs_from_canonical());
+        Ok(())
+    }
+
+    #[test]
+    fn canonicalize_symlink_denied_by_default_policy() -> TestResult {
+        let scratch = ScratchDir::new("canon-symlink-deny")?;
+        let target = scratch.make_dir("real-project")?;
+        let link = scratch.path().join("linked-project");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link)
+            .map_err(|e| format!("symlink creation failed: {e}"))?;
+
+        #[cfg(not(unix))]
+        return Ok(()); // Skip on non-Unix
+
+        let salt = b"test-salt-12345678901234567890123";
+        let result = canonicalize_workspace_path(&link, salt, SymlinkPolicy::Deny);
+
+        match result {
+            Err(CanonicalizationError::SymlinkBlocked { input_path, .. }) => {
+                assert_eq!(input_path, link);
+                Ok(())
+            }
+            Ok(_) => Err("expected SymlinkBlocked error".to_string()),
+            Err(e) => Err(format!("unexpected error: {e}")),
+        }
+    }
+
+    #[test]
+    fn canonicalize_nonexistent_path_fails() {
+        let nonexistent = PathBuf::from("/nonexistent/path/that/does/not/exist");
+        let salt = b"test-salt-12345678901234567890123";
+
+        let result = canonicalize_workspace_path(&nonexistent, salt, SymlinkPolicy::Allow);
+
+        assert!(matches!(
+            result,
+            Err(CanonicalizationError::CanonicalizeFailure { .. })
+        ));
+    }
+
+    #[test]
+    fn canonicalize_is_idempotent() -> TestResult {
+        let scratch = ScratchDir::new("canon-idempotent")?;
+        let project = scratch.make_dir("project")?;
+        let salt = b"test-salt-12345678901234567890123";
+
+        let first = canonicalize_workspace_path(&project, salt, SymlinkPolicy::Allow)
+            .map_err(|e| e.to_string())?;
+
+        let second =
+            canonicalize_workspace_path(&first.canonical_path, salt, SymlinkPolicy::Allow)
+                .map_err(|e| e.to_string())?;
+
+        assert_eq!(first.canonical_path, second.canonical_path);
+        assert_eq!(first.salted_hash, second.salted_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn different_salts_produce_different_hashes() -> TestResult {
+        let scratch = ScratchDir::new("canon-salt-diff")?;
+        let project = scratch.make_dir("project")?;
+
+        let salt1 = b"salt-one-123456789012345678901234";
+        let salt2 = b"salt-two-123456789012345678901234";
+
+        let result1 = canonicalize_workspace_path(&project, salt1, SymlinkPolicy::Allow)
+            .map_err(|e| e.to_string())?;
+        let result2 = canonicalize_workspace_path(&project, salt2, SymlinkPolicy::Allow)
+            .map_err(|e| e.to_string())?;
+
+        assert_ne!(result1.salted_hash, result2.salted_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn platform_case_handling_is_consistent() {
+        let handling = PlatformCaseHandling::current_platform();
+        assert!(matches!(
+            handling,
+            PlatformCaseHandling::Preserve | PlatformCaseHandling::Lower
+        ));
+        assert!(!handling.as_str().is_empty());
+    }
+
+    #[test]
+    fn canonicalization_error_codes_are_stable() {
+        let err1 = CanonicalizationError::CanonicalizeFailure {
+            path: PathBuf::from("/test"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+        };
+        assert_eq!(err1.code(), "workspace_canonicalize_failed");
+
+        let err2 = CanonicalizationError::SymlinkBlocked {
+            input_path: PathBuf::from("/link"),
+            canonical_path: PathBuf::from("/real"),
+            symlink_chain: vec![],
+        };
+        assert_eq!(err2.code(), "workspace_symlink_blocked");
+    }
+
+    #[test]
+    fn canonicalization_error_has_repair_suggestions() {
+        let err = CanonicalizationError::SymlinkBlocked {
+            input_path: PathBuf::from("/link"),
+            canonical_path: PathBuf::from("/real"),
+            symlink_chain: vec![],
+        };
+        let repair = err.repair();
+        assert!(repair.contains("--allow-symlink"));
+    }
 }
