@@ -7,6 +7,7 @@ pub const SUBSYSTEM: &str = "pack";
 pub const CONTEXT_COMMAND: &str = "context";
 pub const DEFAULT_CONTEXT_MAX_TOKENS: u32 = 4_000;
 pub const DEFAULT_CANDIDATE_POOL: u32 = 64;
+pub const DEFAULT_MMR_RELEVANCE_WEIGHT: f32 = 0.75;
 
 /// Conservative characters-per-token ratio for heuristic estimation.
 /// Uses 3.5 instead of 4.0 to bias toward overestimation.
@@ -719,6 +720,7 @@ pub struct PackOmission {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PackOmissionReason {
     TokenBudgetExceeded,
+    RedundantCandidate,
 }
 
 impl PackOmissionReason {
@@ -726,6 +728,7 @@ impl PackOmissionReason {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::TokenBudgetExceeded => "token_budget_exceeded",
+            Self::RedundantCandidate => "redundant_candidate",
         }
     }
 }
@@ -738,10 +741,11 @@ impl fmt::Display for PackOmissionReason {
 
 /// Assemble a deterministic context-pack draft from validated candidates.
 ///
-/// Selection is intentionally simple in EE-140: candidates are ordered by
-/// relevance, utility, section, and memory id, then admitted while they
-/// fit the token budget. Later beads can replace the scoring objective
-/// with MMR while preserving this stable input/output contract.
+/// Selection uses deterministic MMR-style redundancy control: the first
+/// item follows the stable relevance/utility order, then later candidates
+/// are penalized when they overlap selected memories by memory id, explicit
+/// diversity key, or exact normalized content. Redundant candidates are
+/// omitted even when the token budget has room.
 ///
 /// # Errors
 ///
@@ -758,10 +762,22 @@ pub fn assemble_draft(
 
     let mut used_tokens = 0_u32;
     let mut next_rank = 1_u32;
+    let mut selected_signatures = Vec::new();
     let mut items = Vec::new();
     let mut omitted = Vec::new();
 
-    for candidate in candidates {
+    while !candidates.is_empty() {
+        let candidate_index = select_next_candidate_index(&candidates, &selected_signatures);
+        let candidate = candidates.remove(candidate_index);
+        if is_redundant(&candidate, &selected_signatures) {
+            omitted.push(PackOmission {
+                memory_id: candidate.memory_id,
+                estimated_tokens: candidate.estimated_tokens,
+                reason: PackOmissionReason::RedundantCandidate,
+            });
+            continue;
+        }
+
         match used_tokens.checked_add(candidate.estimated_tokens) {
             Some(total) if total <= budget.max_tokens() => {
                 let rank = next_rank;
@@ -769,6 +785,7 @@ pub fn assemble_draft(
                     .checked_add(1)
                     .ok_or(PackValidationError::CandidateRankOverflow)?;
                 used_tokens = total;
+                selected_signatures.push(CandidateSignature::from(&candidate));
                 items.push(PackDraftItem {
                     rank,
                     memory_id: candidate.memory_id,
@@ -797,6 +814,89 @@ pub fn assemble_draft(
         items,
         omitted,
     })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CandidateSignature {
+    memory_id: MemoryId,
+    diversity_key: Option<String>,
+    normalized_content: String,
+}
+
+impl From<&PackCandidate> for CandidateSignature {
+    fn from(candidate: &PackCandidate) -> Self {
+        Self {
+            memory_id: candidate.memory_id,
+            diversity_key: candidate.diversity_key.clone(),
+            normalized_content: normalize_redundancy_content(&candidate.content),
+        }
+    }
+}
+
+fn select_next_candidate_index(
+    candidates: &[PackCandidate],
+    selected: &[CandidateSignature],
+) -> usize {
+    let mut best_index = 0_usize;
+    for (candidate_index, candidate) in candidates.iter().enumerate().skip(1) {
+        let best = &candidates[best_index];
+        if compare_candidates_with_redundancy(candidate, best, selected) == Ordering::Less {
+            best_index = candidate_index;
+        }
+    }
+    best_index
+}
+
+fn compare_candidates_with_redundancy(
+    left: &PackCandidate,
+    right: &PackCandidate,
+    selected: &[CandidateSignature],
+) -> Ordering {
+    let left_score = redundancy_adjusted_score(left, selected);
+    let right_score = redundancy_adjusted_score(right, selected);
+    right_score
+        .total_cmp(&left_score)
+        .then_with(|| compare_candidates(left, right))
+}
+
+fn redundancy_adjusted_score(candidate: &PackCandidate, selected: &[CandidateSignature]) -> f32 {
+    let relevance_score = candidate.relevance.into_inner();
+    let max_similarity = max_selected_similarity(candidate, selected);
+    (DEFAULT_MMR_RELEVANCE_WEIGHT * relevance_score)
+        - ((1.0 - DEFAULT_MMR_RELEVANCE_WEIGHT) * max_similarity)
+}
+
+fn is_redundant(candidate: &PackCandidate, selected: &[CandidateSignature]) -> bool {
+    max_selected_similarity(candidate, selected) >= 1.0
+}
+
+fn max_selected_similarity(candidate: &PackCandidate, selected: &[CandidateSignature]) -> f32 {
+    selected
+        .iter()
+        .map(|signature| candidate_similarity(candidate, signature))
+        .fold(0.0_f32, f32::max)
+}
+
+fn candidate_similarity(candidate: &PackCandidate, selected: &CandidateSignature) -> f32 {
+    if candidate.memory_id == selected.memory_id {
+        return 1.0;
+    }
+
+    if let Some(diversity_key) = &candidate.diversity_key
+        && selected.diversity_key.as_ref() == Some(diversity_key)
+    {
+        return 1.0;
+    }
+
+    if normalize_redundancy_content(&candidate.content) == selected.normalized_content {
+        return 1.0;
+    }
+
+    0.0
+}
+
+fn normalize_redundancy_content(content: &str) -> String {
+    content.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn compare_candidates(left: &PackCandidate, right: &PackCandidate) -> Ordering {
@@ -982,10 +1082,20 @@ mod tests {
         utility: f32,
         tokens: u32,
     ) -> Result<PackCandidate, String> {
+        candidate_with_content(seed, relevance, utility, tokens, format!("memory {seed}"))
+    }
+
+    fn candidate_with_content(
+        seed: u128,
+        relevance: f32,
+        utility: f32,
+        tokens: u32,
+        content: impl Into<String>,
+    ) -> Result<PackCandidate, String> {
         PackCandidate::new(PackCandidateInput {
             memory_id: memory_id(seed),
             section: PackSection::ProceduralRules,
-            content: format!("memory {seed}"),
+            content: content.into(),
             estimated_tokens: tokens,
             relevance: score(relevance)?,
             utility: score(utility)?,
@@ -1556,6 +1666,80 @@ mod tests {
                 .map(|omission| omission.reason.as_str()),
             &Some("token_budget_exceeded"),
             "omission reason wire name",
+        )
+    }
+
+    #[test]
+    fn assemble_draft_applies_mmr_redundancy_control() -> TestResult {
+        let budget = match TokenBudget::new(100) {
+            Ok(budget) => budget,
+            Err(error) => return Err(format!("budget rejected: {error:?}")),
+        };
+        let first = candidate(1, 1.0, 0.5, 10)?.with_diversity_key("release-formatting");
+        let duplicate = candidate(2, 0.99, 0.5, 10)?.with_diversity_key("release-formatting");
+        let diverse = candidate(3, 0.8, 0.5, 10)?.with_diversity_key("release-checks");
+
+        let draft = assemble_draft("prepare release", budget, vec![duplicate, diverse, first])
+            .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        let ids: Vec<MemoryId> = draft.items.iter().map(|item| item.memory_id).collect();
+        ensure_equal(
+            &ids,
+            &vec![memory_id(1), memory_id(3)],
+            "MMR should select the best candidate, then the diverse candidate",
+        )?;
+        ensure_equal(&draft.used_tokens, &20, "used tokens after redundancy")?;
+        ensure_equal(&draft.omitted.len(), &1, "one redundant candidate omitted")?;
+        ensure_equal(
+            &draft.omitted.first().map(|omission| omission.memory_id),
+            &Some(memory_id(2)),
+            "redundant candidate id",
+        )?;
+        ensure_equal(
+            &draft.omitted.first().map(|omission| omission.reason),
+            &Some(PackOmissionReason::RedundantCandidate),
+            "redundant omission reason",
+        )?;
+        ensure_equal(
+            &draft
+                .omitted
+                .first()
+                .map(|omission| omission.reason.as_str()),
+            &Some("redundant_candidate"),
+            "redundant omission reason wire name",
+        )
+    }
+
+    #[test]
+    fn assemble_draft_deduplicates_exact_normalized_content_without_key() -> TestResult {
+        let budget = match TokenBudget::new(100) {
+            Ok(budget) => budget,
+            Err(error) => return Err(format!("budget rejected: {error:?}")),
+        };
+        let first =
+            candidate_with_content(1, 0.9, 0.5, 10, "Run cargo fmt --check before release.")?;
+        let duplicate = candidate_with_content(
+            2,
+            0.8,
+            0.5,
+            10,
+            "  Run   cargo fmt --check before release.  ",
+        )?;
+
+        let draft = assemble_draft("prepare release", budget, vec![duplicate, first])
+            .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        ensure_equal(&draft.items.len(), &1, "only one exact duplicate selected")?;
+        ensure_equal(
+            &draft.items.first().map(|item| item.memory_id),
+            &Some(memory_id(1)),
+            "highest relevance duplicate selected",
+        )?;
+        ensure_equal(&draft.omitted.len(), &1, "one exact duplicate omitted")?;
+        ensure_equal(
+            &draft.omitted.first().map(|omission| omission.reason),
+            &Some(PackOmissionReason::RedundantCandidate),
+            "exact duplicate omission reason",
         )
     }
 
