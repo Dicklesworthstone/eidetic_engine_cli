@@ -114,6 +114,9 @@ pub enum Command {
     /// Import memories and evidence from external sources.
     #[command(subcommand)]
     Import(ImportCommand),
+    /// Manage search indexes.
+    #[command(subcommand)]
+    Index(IndexCommand),
     /// Store a new memory.
     Remember(RememberArgs),
     /// List or export public response schemas.
@@ -123,6 +126,28 @@ pub enum Command {
     Status,
     /// Print the ee version.
     Version,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum IndexCommand {
+    /// Rebuild the search index from all memories and sessions.
+    Rebuild(IndexRebuildArgs),
+}
+
+/// Arguments for `ee index rebuild`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct IndexRebuildArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    #[arg(long, value_name = "PATH")]
+    pub index_dir: Option<PathBuf>,
+
+    /// Report the rebuild plan without writing the index.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// Arguments for the remember command.
@@ -376,6 +401,9 @@ where
         Some(Command::Import(ImportCommand::Cass(ref args))) => {
             handle_import_cass(&cli, args, stdout, stderr)
         }
+        Some(Command::Index(IndexCommand::Rebuild(ref args))) => {
+            handle_index_rebuild(&cli, args, stdout, stderr)
+        }
         Some(Command::Schema(ref schema_cmd)) => match schema_cmd {
             SchemaCommand::List => match cli.renderer() {
                 output::Renderer::Human => {
@@ -409,27 +437,23 @@ where
                 ),
             },
         },
-        Some(Command::Remember(ref args)) => {
-            match handle_remember(args, cli.wants_json()) {
-                Ok(result) => match cli.renderer() {
-                    output::Renderer::Human => write_stdout(stdout, &result.human_output()),
-                    output::Renderer::Toon => write_stdout(stdout, &(result.toon_output() + "\n")),
-                    output::Renderer::Json
-                    | output::Renderer::Jsonl
-                    | output::Renderer::Compact
-                    | output::Renderer::Hook => {
-                        write_stdout(stdout, &(result.json_output() + "\n"))
-                    }
-                },
-                Err(error) => {
-                    let domain_error = DomainError::Usage {
-                        message: error.to_string(),
-                        repair: Some("ee remember --help".to_string()),
-                    };
-                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
-                }
+        Some(Command::Remember(ref args)) => match handle_remember(args, cli.wants_json()) {
+            Ok(result) => match cli.renderer() {
+                output::Renderer::Human => write_stdout(stdout, &result.human_output()),
+                output::Renderer::Toon => write_stdout(stdout, &(result.toon_output() + "\n")),
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => write_stdout(stdout, &(result.json_output() + "\n")),
+            },
+            Err(error) => {
+                let domain_error = DomainError::Usage {
+                    message: error.to_string(),
+                    repair: Some("ee remember --help".to_string()),
+                };
+                write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
             }
-        }
+        },
         Some(Command::Status) => {
             let report = StatusReport::gather();
             match cli.renderer() {
@@ -689,12 +713,9 @@ impl RememberResult {
             .map(|t| format!("\"{}\"", escape_json_string(t)))
             .collect::<Vec<_>>()
             .join(",");
-        let source_json = self
-            .source
-            .as_ref()
-            .map_or("null".to_string(), |s| {
-                format!("\"{}\"", escape_json_string(s))
-            });
+        let source_json = self.source.as_ref().map_or("null".to_string(), |s| {
+            format!("\"{}\"", escape_json_string(s))
+        });
 
         let degraded = if self.storage_degraded {
             r#","degraded":[{"code":"storage_not_implemented","severity":"medium","message":"Storage is not wired yet. Memory was not persisted.","repair":"Implement EE-044."}]"#
