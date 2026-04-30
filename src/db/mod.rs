@@ -3526,6 +3526,242 @@ fn stored_memory_link_from_row(row: &Row) -> Result<StoredMemoryLink> {
     })
 }
 
+// ============================================================================
+// Pack Records (EE-151)
+// ============================================================================
+
+/// Input for creating a pack record.
+#[derive(Debug, Clone)]
+pub struct CreatePackRecordInput {
+    pub workspace_id: String,
+    pub query: String,
+    pub profile: String,
+    pub max_tokens: u32,
+    pub used_tokens: u32,
+    pub item_count: u32,
+    pub omitted_count: u32,
+    pub pack_hash: String,
+    pub degraded_json: Option<String>,
+    pub created_by: Option<String>,
+}
+
+/// A stored pack_records row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredPackRecord {
+    pub id: String,
+    pub workspace_id: String,
+    pub query: String,
+    pub profile: String,
+    pub max_tokens: u32,
+    pub used_tokens: u32,
+    pub item_count: u32,
+    pub omitted_count: u32,
+    pub pack_hash: String,
+    pub degraded_json: Option<String>,
+    pub created_at: String,
+    pub created_by: Option<String>,
+}
+
+/// Input for creating a pack item (junction with memory).
+#[derive(Debug, Clone)]
+pub struct CreatePackItemInput {
+    pub pack_id: String,
+    pub memory_id: String,
+    pub rank: u32,
+    pub section: String,
+    pub estimated_tokens: u32,
+    pub relevance: f32,
+    pub utility: f32,
+    pub why: String,
+    pub diversity_key: Option<String>,
+}
+
+/// A stored pack_items row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredPackItem {
+    pub pack_id: String,
+    pub memory_id: String,
+    pub rank: u32,
+    pub section: String,
+    pub estimated_tokens: u32,
+    pub relevance: f32,
+    pub utility: f32,
+    pub why: String,
+    pub diversity_key: Option<String>,
+}
+
+/// Input for creating a pack omission.
+#[derive(Debug, Clone)]
+pub struct CreatePackOmissionInput {
+    pub pack_id: String,
+    pub memory_id: String,
+    pub estimated_tokens: u32,
+    pub reason: String,
+}
+
+/// A stored pack_omissions row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredPackOmission {
+    pub pack_id: String,
+    pub memory_id: String,
+    pub estimated_tokens: u32,
+    pub reason: String,
+}
+
+impl DbConnection {
+    /// Insert a pack record with its items and omissions.
+    pub fn insert_pack_record(
+        &self,
+        id: &str,
+        input: &CreatePackRecordInput,
+        items: &[CreatePackItemInput],
+        omissions: &[CreatePackOmissionInput],
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO pack_records (id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, created_at, created_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.query.clone()),
+                Value::Text(input.profile.clone()),
+                Value::BigInt(i64::from(input.max_tokens)),
+                Value::BigInt(i64::from(input.used_tokens)),
+                Value::BigInt(i64::from(input.item_count)),
+                Value::BigInt(i64::from(input.omitted_count)),
+                Value::Text(input.pack_hash.clone()),
+                input.degraded_json.as_ref().map_or(Value::Null, |json| Value::Text(json.clone())),
+                Value::Text(now),
+                input.created_by.as_ref().map_or(Value::Null, |by| Value::Text(by.clone())),
+            ],
+        )?;
+
+        for item in items {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO pack_items (pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                &[
+                    Value::Text(item.pack_id.clone()),
+                    Value::Text(item.memory_id.clone()),
+                    Value::BigInt(i64::from(item.rank)),
+                    Value::Text(item.section.clone()),
+                    Value::BigInt(i64::from(item.estimated_tokens)),
+                    Value::Float(item.relevance),
+                    Value::Float(item.utility),
+                    Value::Text(item.why.clone()),
+                    item.diversity_key.as_ref().map_or(Value::Null, |key| Value::Text(key.clone())),
+                ],
+            )?;
+        }
+
+        for omission in omissions {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO pack_omissions (pack_id, memory_id, estimated_tokens, reason) VALUES (?1, ?2, ?3, ?4)",
+                &[
+                    Value::Text(omission.pack_id.clone()),
+                    Value::Text(omission.memory_id.clone()),
+                    Value::BigInt(i64::from(omission.estimated_tokens)),
+                    Value::Text(omission.reason.clone()),
+                ],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Get a pack record by ID.
+    pub fn get_pack_record(&self, id: &str) -> Result<Option<StoredPackRecord>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, created_at, created_by FROM pack_records WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first().map(stored_pack_record_from_row).transpose()
+    }
+
+    /// Get pack items for a pack.
+    pub fn get_pack_items(&self, pack_id: &str) -> Result<Vec<StoredPackItem>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key FROM pack_items WHERE pack_id = ?1 ORDER BY rank ASC",
+            &[Value::Text(pack_id.to_string())],
+        )?;
+
+        rows.iter().map(stored_pack_item_from_row).collect()
+    }
+
+    /// List pack records that include a specific memory (for `ee why`).
+    pub fn list_pack_records_for_memory(
+        &self,
+        memory_id: &str,
+        limit: u32,
+    ) -> Result<Vec<(StoredPackRecord, StoredPackItem)>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT pr.id, pr.workspace_id, pr.query, pr.profile, pr.max_tokens, pr.used_tokens, pr.item_count, pr.omitted_count, pr.pack_hash, pr.degraded_json, pr.created_at, pr.created_by, pi.pack_id, pi.memory_id, pi.rank, pi.section, pi.estimated_tokens, pi.relevance, pi.utility, pi.why, pi.diversity_key FROM pack_items pi JOIN pack_records pr ON pi.pack_id = pr.id WHERE pi.memory_id = ?1 ORDER BY pr.created_at DESC LIMIT ?2",
+            &[Value::Text(memory_id.to_string()), Value::BigInt(i64::from(limit))],
+        )?;
+
+        rows.iter()
+            .map(|row| {
+                let record = stored_pack_record_from_row(row)?;
+                let item = stored_pack_item_from_joined_row(row, 12)?;
+                Ok((record, item))
+            })
+            .collect()
+    }
+}
+
+fn stored_pack_record_from_row(row: &Row) -> Result<StoredPackRecord> {
+    Ok(StoredPackRecord {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        query: required_text(row, 2, DbOperation::Query, "query")?.to_string(),
+        profile: required_text(row, 3, DbOperation::Query, "profile")?.to_string(),
+        max_tokens: u32::try_from(required_i64(row, 4, DbOperation::Query, "max_tokens")?)
+            .unwrap_or(0),
+        used_tokens: u32::try_from(required_i64(row, 5, DbOperation::Query, "used_tokens")?)
+            .unwrap_or(0),
+        item_count: u32::try_from(required_i64(row, 6, DbOperation::Query, "item_count")?)
+            .unwrap_or(0),
+        omitted_count: u32::try_from(required_i64(row, 7, DbOperation::Query, "omitted_count")?)
+            .unwrap_or(0),
+        pack_hash: required_text(row, 8, DbOperation::Query, "pack_hash")?.to_string(),
+        degraded_json: optional_text(row, 9)?.map(str::to_string),
+        created_at: required_text(row, 10, DbOperation::Query, "created_at")?.to_string(),
+        created_by: optional_text(row, 11)?.map(str::to_string),
+    })
+}
+
+fn stored_pack_item_from_row(row: &Row) -> Result<StoredPackItem> {
+    stored_pack_item_from_joined_row(row, 0)
+}
+
+fn stored_pack_item_from_joined_row(row: &Row, offset: usize) -> Result<StoredPackItem> {
+    Ok(StoredPackItem {
+        pack_id: required_text(row, offset, DbOperation::Query, "pack_id")?.to_string(),
+        memory_id: required_text(row, offset + 1, DbOperation::Query, "memory_id")?.to_string(),
+        rank: u32::try_from(required_i64(row, offset + 2, DbOperation::Query, "rank")?)
+            .unwrap_or(0),
+        section: required_text(row, offset + 3, DbOperation::Query, "section")?.to_string(),
+        estimated_tokens: u32::try_from(required_i64(
+            row,
+            offset + 4,
+            DbOperation::Query,
+            "estimated_tokens",
+        )?)
+        .unwrap_or(0),
+        relevance: required_f64(row, offset + 5, DbOperation::Query, "relevance")? as f32,
+        utility: required_f64(row, offset + 6, DbOperation::Query, "utility")? as f32,
+        why: required_text(row, offset + 7, DbOperation::Query, "why")?.to_string(),
+        diversity_key: optional_text(row, offset + 8)?.map(str::to_string),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error as StdError;
@@ -7188,6 +7424,147 @@ mod tests {
         ensure(CONFIDENCE_FLOOR < CONFIDENCE_CEILING, "floor < ceiling")?;
         ensure(CONFIDENCE_FLOOR > 0.0, "floor above zero")?;
         ensure(CONFIDENCE_CEILING <= 1.0, "ceiling at or below 1.0")?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // Pack Records Tests (EE-151)
+    // ========================================================================
+
+    fn setup_pack_test_memory(connection: &DbConnection) -> TestResult {
+        setup_workspace(connection)?;
+        let input = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "procedural".to_string(),
+            kind: "rule".to_string(),
+            content: "Run cargo fmt before commit".to_string(),
+            confidence: 0.9,
+            utility: 0.8,
+            importance: 0.7,
+            provenance_uri: Some("file://AGENTS.md".to_string()),
+            trust_class: "human_explicit".to_string(),
+            trust_subclass: None,
+            tags: vec!["cargo".to_string()],
+        };
+        connection.insert_memory("mem_00000000000000000000pack01", &input)?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_and_get_pack_record() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_pack_test_memory(&connection)?;
+
+        let input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: "cargo formatting".to_string(),
+            profile: "balanced".to_string(),
+            max_tokens: 4000,
+            used_tokens: 150,
+            item_count: 1,
+            omitted_count: 0,
+            pack_hash: "blake3:abc123".to_string(),
+            degraded_json: None,
+            created_by: Some("test".to_string()),
+        };
+
+        let items = vec![super::CreatePackItemInput {
+            pack_id: "pack_000000000000000000000pack1".to_string(),
+            memory_id: "mem_00000000000000000000pack01".to_string(),
+            rank: 1,
+            section: "procedural_rules".to_string(),
+            estimated_tokens: 50,
+            relevance: 0.95,
+            utility: 0.8,
+            why: "High relevance to cargo formatting query".to_string(),
+            diversity_key: None,
+        }];
+
+        connection.insert_pack_record("pack_000000000000000000000pack1", &input, &items, &[])?;
+
+        let record = connection
+            .get_pack_record("pack_000000000000000000000pack1")?
+            .ok_or_else(|| TestFailure::new("pack record not found"))?;
+
+        ensure_equal(&record.query, &"cargo formatting".to_string(), "query")?;
+        ensure_equal(&record.profile, &"balanced".to_string(), "profile")?;
+        ensure_equal(&record.max_tokens, &4000_u32, "max_tokens")?;
+        ensure_equal(&record.used_tokens, &150_u32, "used_tokens")?;
+        ensure_equal(&record.item_count, &1_u32, "item_count")?;
+
+        let pack_items = connection.get_pack_items("pack_000000000000000000000pack1")?;
+        ensure_equal(&pack_items.len(), &1_usize, "pack items count")?;
+        ensure_equal(
+            &pack_items[0].memory_id,
+            &"mem_00000000000000000000pack01".to_string(),
+            "pack item memory_id",
+        )?;
+        ensure_equal(
+            &pack_items[0].why,
+            &"High relevance to cargo formatting query".to_string(),
+            "pack item why",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_pack_records_for_memory_returns_history() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_pack_test_memory(&connection)?;
+
+        let input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: "cargo formatting".to_string(),
+            profile: "balanced".to_string(),
+            max_tokens: 4000,
+            used_tokens: 150,
+            item_count: 1,
+            omitted_count: 0,
+            pack_hash: "blake3:def456".to_string(),
+            degraded_json: None,
+            created_by: None,
+        };
+
+        let items = vec![super::CreatePackItemInput {
+            pack_id: "pack_000000000000000000000pack2".to_string(),
+            memory_id: "mem_00000000000000000000pack01".to_string(),
+            rank: 1,
+            section: "procedural_rules".to_string(),
+            estimated_tokens: 50,
+            relevance: 0.92,
+            utility: 0.75,
+            why: "Selected for release preparation".to_string(),
+            diversity_key: Some("cargo".to_string()),
+        }];
+
+        connection.insert_pack_record("pack_000000000000000000000pack2", &input, &items, &[])?;
+
+        let history =
+            connection.list_pack_records_for_memory("mem_00000000000000000000pack01", 10)?;
+        ensure_equal(&history.len(), &1_usize, "history count")?;
+        ensure_equal(
+            &history[0].1.why,
+            &"Selected for release preparation".to_string(),
+            "selection reason",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn get_nonexistent_pack_record_returns_none() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let record = connection.get_pack_record("pack_nonexistent0000000000000")?;
+        ensure(record.is_none(), "nonexistent pack must be None")?;
+
+        connection.close()?;
         Ok(())
     }
 }

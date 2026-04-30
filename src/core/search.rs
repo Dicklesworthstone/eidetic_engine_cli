@@ -13,6 +13,7 @@ pub struct SearchOptions {
     pub index_dir: Option<PathBuf>,
     pub query: String,
     pub limit: u32,
+    pub explain: bool,
 }
 
 impl SearchOptions {
@@ -42,6 +43,20 @@ pub struct SearchHit {
     pub lexical_score: Option<f32>,
     pub rerank_score: Option<f32>,
     pub metadata: Option<serde_json::Value>,
+    pub explanation: Option<ScoreExplanation>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScoreExplanation {
+    pub summary: String,
+    pub factors: Vec<ScoreFactor>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScoreFactor {
+    pub name: String,
+    pub value: f32,
+    pub contribution: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,6 +129,15 @@ impl SearchReport {
                 hit.score,
                 hit.source.as_str()
             ));
+            if let Some(ref explanation) = hit.explanation {
+                output.push_str(&format!("     {}\n", explanation.summary));
+                for factor in &explanation.factors {
+                    output.push_str(&format!(
+                        "       - {}: {:.4} ({})\n",
+                        factor.name, factor.value, factor.contribution
+                    ));
+                }
+            }
         }
 
         if self.results.is_empty() && self.status == SearchStatus::Success {
@@ -158,6 +182,23 @@ impl SearchReport {
                 if let Some(ref meta) = hit.metadata {
                     obj["metadata"] = meta.clone();
                 }
+                if let Some(ref explanation) = hit.explanation {
+                    let factors: Vec<serde_json::Value> = explanation
+                        .factors
+                        .iter()
+                        .map(|f| {
+                            serde_json::json!({
+                                "name": f.name,
+                                "value": f.value,
+                                "contribution": f.contribution,
+                            })
+                        })
+                        .collect();
+                    obj["explanation"] = serde_json::json!({
+                        "summary": explanation.summary,
+                        "factors": factors,
+                    });
+                }
                 obj
             })
             .collect();
@@ -201,6 +242,96 @@ impl std::fmt::Display for SearchError {
 
 impl std::error::Error for SearchError {}
 
+impl ScoreExplanation {
+    #[must_use]
+    pub fn generate(hit: &SearchHit) -> Self {
+        let mut factors = Vec::new();
+        let mut summary_parts = Vec::new();
+
+        match hit.source {
+            ScoreSource::Lexical => {
+                if let Some(lex) = hit.lexical_score {
+                    factors.push(ScoreFactor {
+                        name: "lexical".to_string(),
+                        value: lex,
+                        contribution: "BM25 term matching".to_string(),
+                    });
+                    summary_parts.push(format!("lexical match ({:.2})", lex));
+                }
+            }
+            ScoreSource::SemanticFast => {
+                if let Some(fast) = hit.fast_score {
+                    factors.push(ScoreFactor {
+                        name: "semantic_fast".to_string(),
+                        value: fast,
+                        contribution: "hash-based embedding similarity".to_string(),
+                    });
+                    summary_parts.push(format!("fast semantic ({:.2})", fast));
+                }
+            }
+            ScoreSource::SemanticQuality => {
+                if let Some(quality) = hit.quality_score {
+                    factors.push(ScoreFactor {
+                        name: "semantic_quality".to_string(),
+                        value: quality,
+                        contribution: "dense embedding similarity".to_string(),
+                    });
+                    summary_parts.push(format!("quality semantic ({:.2})", quality));
+                }
+            }
+            ScoreSource::Hybrid => {
+                if let Some(fast) = hit.fast_score {
+                    factors.push(ScoreFactor {
+                        name: "semantic_fast".to_string(),
+                        value: fast,
+                        contribution: "hash-based embedding similarity".to_string(),
+                    });
+                }
+                if let Some(quality) = hit.quality_score {
+                    factors.push(ScoreFactor {
+                        name: "semantic_quality".to_string(),
+                        value: quality,
+                        contribution: "dense embedding similarity".to_string(),
+                    });
+                }
+                if let Some(lex) = hit.lexical_score {
+                    factors.push(ScoreFactor {
+                        name: "lexical".to_string(),
+                        value: lex,
+                        contribution: "BM25 term matching".to_string(),
+                    });
+                }
+                summary_parts.push(format!("RRF fusion of {} signals", factors.len()));
+            }
+            ScoreSource::Reranked => {
+                if let Some(rerank) = hit.rerank_score {
+                    factors.push(ScoreFactor {
+                        name: "rerank".to_string(),
+                        value: rerank,
+                        contribution: "cross-encoder reranking".to_string(),
+                    });
+                    summary_parts.push(format!("reranked ({:.2})", rerank));
+                }
+                if let Some(fast) = hit.fast_score {
+                    factors.push(ScoreFactor {
+                        name: "semantic_fast".to_string(),
+                        value: fast,
+                        contribution: "initial hash-based candidate".to_string(),
+                    });
+                }
+            }
+        }
+
+        let summary = if summary_parts.is_empty() {
+            format!("Score {:.4} from {} source", hit.score, hit.source.as_str())
+        } else {
+            format!("Score {:.4} via {}", hit.score, summary_parts.join(", "))
+        };
+
+        Self { summary, factors }
+    }
+}
+
 pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> {
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
@@ -209,7 +340,12 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
         return Err(SearchError::NoIndex);
     }
 
-    let search_result = search_sync(&index_dir, &options.query, options.limit as usize);
+    let search_result = search_sync(
+        &index_dir,
+        &options.query,
+        options.limit as usize,
+        options.explain,
+    );
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
@@ -243,6 +379,7 @@ fn search_sync(
     index_dir: &Path,
     query: &str,
     limit: usize,
+    explain: bool,
 ) -> Result<(Vec<SearchHit>, Vec<String>), String> {
     use std::sync::Mutex;
 
@@ -290,7 +427,7 @@ fn search_sync(
                                 crate::search::ScoreSource::Hybrid => ScoreSource::Hybrid,
                                 crate::search::ScoreSource::Reranked => ScoreSource::Reranked,
                             };
-                            SearchHit {
+                            let mut hit = SearchHit {
                                 doc_id: r.doc_id,
                                 score: r.score,
                                 source,
@@ -299,7 +436,12 @@ fn search_sync(
                                 lexical_score: r.lexical_score,
                                 rerank_score: r.rerank_score,
                                 metadata: r.metadata,
+                                explanation: None,
+                            };
+                            if explain {
+                                hit.explanation = Some(ScoreExplanation::generate(&hit));
                             }
+                            hit
                         })
                         .collect();
                     Ok((hits, Vec::new()))
@@ -355,6 +497,7 @@ mod tests {
                 lexical_score: None,
                 rerank_score: None,
                 metadata: None,
+                explanation: None,
             }],
             elapsed_ms: 12.3,
             errors: Vec::new(),
@@ -376,6 +519,7 @@ mod tests {
             index_dir: None,
             query: "test".to_string(),
             limit: 10,
+            explain: false,
         };
 
         assert_eq!(
@@ -392,6 +536,7 @@ mod tests {
             index_dir: Some(PathBuf::from("/custom/index")),
             query: "test".to_string(),
             limit: 10,
+            explain: false,
         };
 
         assert_eq!(options.resolve_index_dir(), PathBuf::from("/custom/index"));
@@ -432,6 +577,7 @@ mod tests {
                 lexical_score: Some(0.65),
                 rerank_score: None,
                 metadata: Some(serde_json::json!({"level": "procedural", "kind": "rule"})),
+                explanation: None,
             }],
             elapsed_ms: 5.2,
             errors: Vec::new(),
@@ -465,6 +611,7 @@ mod tests {
                 lexical_score: Some(0.5),
                 rerank_score: None,
                 metadata: None,
+                explanation: None,
             }],
             elapsed_ms: 1.0,
             errors: Vec::new(),
@@ -477,6 +624,147 @@ mod tests {
         assert!(result.get("quality_score").is_none());
         assert!(result.get("rerank_score").is_none());
         assert!(result.get("metadata").is_none());
+        assert!(result.get("explanation").is_none());
         assert!((result["lexical_score"].as_f64().unwrap_or(f64::NAN) - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn score_explanation_generates_for_lexical() {
+        let hit = SearchHit {
+            doc_id: "doc-lex".to_string(),
+            score: 0.75,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.75),
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        };
+
+        let explanation = ScoreExplanation::generate(&hit);
+        assert!(explanation.summary.contains("0.75"));
+        assert!(explanation.summary.contains("lexical"));
+        assert_eq!(explanation.factors.len(), 1);
+        assert_eq!(explanation.factors[0].name, "lexical");
+        assert!((explanation.factors[0].value - 0.75).abs() < 0.001);
+        assert!(explanation.factors[0].contribution.contains("BM25"));
+    }
+
+    #[test]
+    fn score_explanation_generates_for_hybrid() {
+        let hit = SearchHit {
+            doc_id: "doc-hyb".to_string(),
+            score: 0.85,
+            source: ScoreSource::Hybrid,
+            fast_score: Some(0.70),
+            quality_score: Some(0.90),
+            lexical_score: Some(0.60),
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        };
+
+        let explanation = ScoreExplanation::generate(&hit);
+        assert!(explanation.summary.contains("0.85"));
+        assert!(explanation.summary.contains("RRF fusion"));
+        assert_eq!(explanation.factors.len(), 3);
+    }
+
+    #[test]
+    fn score_explanation_generates_for_reranked() {
+        let hit = SearchHit {
+            doc_id: "doc-rerank".to_string(),
+            score: 0.92,
+            source: ScoreSource::Reranked,
+            fast_score: Some(0.65),
+            quality_score: None,
+            lexical_score: None,
+            rerank_score: Some(0.92),
+            metadata: None,
+            explanation: None,
+        };
+
+        let explanation = ScoreExplanation::generate(&hit);
+        assert!(explanation.summary.contains("0.92"));
+        assert!(explanation.summary.contains("reranked"));
+        assert_eq!(explanation.factors.len(), 2);
+        assert_eq!(explanation.factors[0].name, "rerank");
+        assert!(
+            explanation.factors[0]
+                .contribution
+                .contains("cross-encoder")
+        );
+    }
+
+    #[test]
+    fn score_explanation_included_in_json_when_present() {
+        let mut hit = SearchHit {
+            doc_id: "doc-explained".to_string(),
+            score: 0.80,
+            source: ScoreSource::SemanticFast,
+            fast_score: Some(0.80),
+            quality_score: None,
+            lexical_score: None,
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        };
+        hit.explanation = Some(ScoreExplanation::generate(&hit));
+
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "explained".to_string(),
+            results: vec![hit],
+            elapsed_ms: 2.0,
+            errors: Vec::new(),
+        };
+
+        let json = report.data_json();
+        let result = &json["results"][0];
+
+        assert!(result.get("explanation").is_some());
+        assert!(
+            result["explanation"]["summary"]
+                .as_str()
+                .unwrap_or("")
+                .contains("0.80")
+        );
+        assert!(result["explanation"]["factors"].is_array());
+        assert_eq!(
+            result["explanation"]["factors"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or(0),
+            1
+        );
+    }
+
+    #[test]
+    fn human_summary_includes_explanation_when_present() {
+        let mut hit = SearchHit {
+            doc_id: "doc-human".to_string(),
+            score: 0.70,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.70),
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        };
+        hit.explanation = Some(ScoreExplanation::generate(&hit));
+
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "human test".to_string(),
+            results: vec![hit],
+            elapsed_ms: 1.5,
+            errors: Vec::new(),
+        };
+
+        let summary = report.human_summary();
+        assert!(summary.contains("lexical: 0.70"));
+        assert!(summary.contains("BM25"));
     }
 }

@@ -329,7 +329,10 @@ mod tests {
 
         let automatable = summary.automatable_actions();
         ensure(automatable.len(), 1, "one automatable action")?;
-        ensure(automatable[0].command, "ee init", "automatable command")
+        let first = automatable
+            .first()
+            .ok_or_else(|| "expected an automatable action".to_string())?;
+        ensure(first.command, "ee init", "automatable command")
     }
 
     #[test]

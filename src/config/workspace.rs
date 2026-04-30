@@ -12,10 +12,10 @@
 //! intentionally points `~/work/foo/.ee` at a sibling repo's `.ee`,
 //! discovery treats the symlinked target as the workspace.
 //!
-//! Discovery is purely lexical: this module does not consult the
-//! database, registered aliases, or any environment overrides. The
-//! higher-level workspace registry (covered by EE-022 / EE-024) layers
-//! environment precedence and alias resolution on top of this output.
+//! `discover` is purely lexical: it does not consult the database,
+//! registered aliases, or environment overrides. `resolve_workspace`
+//! layers deterministic explicit-path and environment precedence on
+//! top of that discovery result without creating directories.
 
 use std::env;
 use std::io;
@@ -304,7 +304,7 @@ fn canonical_or_lexical(path: &Path) -> PathBuf {
 fn workspace_fingerprint(path: &Path) -> String {
     let rendered = path.to_string_lossy();
     let hash = blake3::hash(rendered.as_bytes()).to_hex();
-    hash[..24].to_string()
+    hash.chars().take(24).collect()
 }
 
 fn lexical_absolute(base: &Path, path: &Path) -> PathBuf {
@@ -728,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_from_current_dir_succeeds_or_returns_none() {
+    fn discover_from_current_dir_succeeds_or_returns_none() -> TestResult {
         // Cannot mutate cwd here without affecting other tests, so
         // this test just exercises the API surface: the call must
         // either succeed (with Some/None) or return a structured
@@ -739,7 +739,8 @@ mod tests {
                 let rendered = error.to_string();
                 assert!(!rendered.is_empty());
             }
-            Err(error) => panic!("unexpected workspace error: {error}"),
+            Err(error) => return Err(format!("unexpected workspace error: {error}")),
         }
+        Ok(())
     }
 }
