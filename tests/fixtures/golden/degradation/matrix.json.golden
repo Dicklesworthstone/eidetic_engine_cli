@@ -1,0 +1,177 @@
+{
+  "schema": "ee.degradation_matrix.v1",
+  "count": 19,
+  "codes": [
+    {
+      "id": "D001",
+      "subsystem": "search",
+      "severity": "warning",
+      "description": "Semantic search unavailable",
+      "behavior_change": "Falling back to lexical (BM25) search only",
+      "auto_recoverable": true,
+      "repair": "ee search --lexical-only"
+    },
+    {
+      "id": "D002",
+      "subsystem": "search",
+      "severity": "warning",
+      "description": "Embedding model not loaded",
+      "behavior_change": "Semantic similarity disabled; lexical matching only",
+      "auto_recoverable": false,
+      "repair": "ee index rebuild"
+    },
+    {
+      "id": "D003",
+      "subsystem": "search",
+      "severity": "advisory",
+      "description": "Search index is behind database",
+      "behavior_change": "Recent memories may not appear in search results",
+      "auto_recoverable": true,
+      "repair": "ee index rebuild"
+    },
+    {
+      "id": "D004",
+      "subsystem": "search",
+      "severity": "critical",
+      "description": "FTS5 extension not available",
+      "behavior_change": "Full-text search disabled; only exact matches work",
+      "auto_recoverable": false,
+      "repair": null
+    },
+    {
+      "id": "D100",
+      "subsystem": "storage",
+      "severity": "warning",
+      "description": "Database is in read-only mode",
+      "behavior_change": "Write operations will fail; reads work normally",
+      "auto_recoverable": false,
+      "repair": "ee db unlock"
+    },
+    {
+      "id": "D101",
+      "subsystem": "storage",
+      "severity": "advisory",
+      "description": "WAL mode not enabled",
+      "behavior_change": "Reduced concurrent read performance",
+      "auto_recoverable": false,
+      "repair": "ee db optimize"
+    },
+    {
+      "id": "D102",
+      "subsystem": "storage",
+      "severity": "advisory",
+      "description": "Database size exceeds recommended threshold",
+      "behavior_change": "Some operations may be slower",
+      "auto_recoverable": false,
+      "repair": "ee steward compact"
+    },
+    {
+      "id": "D200",
+      "subsystem": "cass",
+      "severity": "warning",
+      "description": "CASS binary not found",
+      "behavior_change": "Session import disabled; explicit memories work",
+      "auto_recoverable": false,
+      "repair": null
+    },
+    {
+      "id": "D201",
+      "subsystem": "cass",
+      "severity": "warning",
+      "description": "CASS version incompatible",
+      "behavior_change": "Session import may fail or produce unexpected results",
+      "auto_recoverable": false,
+      "repair": null
+    },
+    {
+      "id": "D202",
+      "subsystem": "cass",
+      "severity": "advisory",
+      "description": "CASS index is stale",
+      "behavior_change": "Recent sessions may not be available for import",
+      "auto_recoverable": true,
+      "repair": "cass index --full"
+    },
+    {
+      "id": "D300",
+      "subsystem": "graph",
+      "severity": "advisory",
+      "description": "Graph snapshot is stale",
+      "behavior_change": "Graph metrics may not reflect recent changes",
+      "auto_recoverable": true,
+      "repair": "ee graph rebuild"
+    },
+    {
+      "id": "D301",
+      "subsystem": "graph",
+      "severity": "warning",
+      "description": "Graph metrics not computed",
+      "behavior_change": "Related memories and why explanations limited",
+      "auto_recoverable": true,
+      "repair": "ee graph rebuild"
+    },
+    {
+      "id": "D400",
+      "subsystem": "pack",
+      "severity": "advisory",
+      "description": "Token budget exceeded",
+      "behavior_change": "Context pack truncated; some memories omitted",
+      "auto_recoverable": true,
+      "repair": null
+    },
+    {
+      "id": "D401",
+      "subsystem": "pack",
+      "severity": "advisory",
+      "description": "MMR diversity selection disabled",
+      "behavior_change": "Pack may contain redundant memories",
+      "auto_recoverable": true,
+      "repair": null
+    },
+    {
+      "id": "D500",
+      "subsystem": "curate",
+      "severity": "advisory",
+      "description": "Curation candidate queue is full",
+      "behavior_change": "New candidates will be dropped until reviewed",
+      "auto_recoverable": false,
+      "repair": "ee curate review"
+    },
+    {
+      "id": "D501",
+      "subsystem": "curate",
+      "severity": "advisory",
+      "description": "Automatic curation disabled",
+      "behavior_change": "Rules will not auto-promote; manual review required",
+      "auto_recoverable": false,
+      "repair": "ee config set curate.auto_promote true"
+    },
+    {
+      "id": "D600",
+      "subsystem": "policy",
+      "severity": "warning",
+      "description": "Policy file not loaded",
+      "behavior_change": "Default policies in effect; custom rules ignored",
+      "auto_recoverable": false,
+      "repair": "ee policy validate"
+    },
+    {
+      "id": "D601",
+      "subsystem": "policy",
+      "severity": "advisory",
+      "description": "Redaction patterns may be outdated",
+      "behavior_change": "Some sensitive data may not be caught",
+      "auto_recoverable": false,
+      "repair": "ee policy update"
+    },
+    {
+      "id": "D700",
+      "subsystem": "network",
+      "severity": "warning",
+      "description": "Network access unavailable",
+      "behavior_change": "Remote operations disabled; local-only mode",
+      "auto_recoverable": true,
+      "repair": null
+    }
+  ]
+}
