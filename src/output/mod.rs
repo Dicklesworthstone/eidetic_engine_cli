@@ -3206,6 +3206,196 @@ pub fn render_quarantine_json_filtered(report: &QuarantineReport, profile: Field
     b.finish()
 }
 
+// ============================================================================
+// EE-362: Claim verification output renderers
+// ============================================================================
+
+use crate::core::claims::{ClaimListReport, ClaimShowReport, ClaimVerifyReport};
+
+#[must_use]
+pub fn render_claim_list_json(report: &ClaimListReport) -> String {
+    let mut b = JsonBuilder::with_capacity(1024);
+    b.field_str("schema", report.schema);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "claim list");
+        d.field_str("claimsFile", &report.claims_file);
+        d.field_bool("claimsFileExists", report.claims_file_exists);
+        d.field_u32("totalCount", report.total_count as u32);
+        d.field_u32("filteredCount", report.filtered_count as u32);
+        if let Some(ref s) = report.filter_status {
+            d.field_str("filterStatus", s);
+        }
+        if let Some(ref f) = report.filter_frequency {
+            d.field_str("filterFrequency", f);
+        }
+        if let Some(ref t) = report.filter_tag {
+            d.field_str("filterTag", t);
+        }
+        d.field_array_of_objects("claims", &report.claims, |d, claim| {
+            d.field_str("id", &claim.id);
+            d.field_str("title", &claim.title);
+            d.field_str("status", claim.status.as_str());
+            d.field_str("frequency", claim.frequency.as_str());
+            d.field_u32("evidenceCount", claim.evidence_count as u32);
+            d.field_u32("demoCount", claim.demo_count as u32);
+        });
+    });
+    b.finish()
+}
+
+#[must_use]
+pub fn render_claim_list_human(report: &ClaimListReport) -> String {
+    let mut out = String::new();
+    if !report.claims_file_exists {
+        out.push_str("No claims.yaml found at ");
+        out.push_str(&report.claims_file);
+        out.push_str("\n\nTo create a claims file, add claims.yaml to your workspace root.\n");
+        return out;
+    }
+    out.push_str(&format!(
+        "Claims: {} total, {} after filters\n\n",
+        report.total_count, report.filtered_count
+    ));
+    if report.claims.is_empty() {
+        out.push_str("No claims match the specified filters.\n");
+    } else {
+        for claim in &report.claims {
+            out.push_str(&format!(
+                "  {} [{}] {}\n",
+                claim.id,
+                claim.status.as_str(),
+                claim.title
+            ));
+        }
+    }
+    out
+}
+
+#[must_use]
+pub fn render_claim_list_toon(report: &ClaimListReport) -> String {
+    render_toon_from_json(&render_claim_list_json(report))
+}
+
+#[must_use]
+pub fn render_claim_show_json(report: &ClaimShowReport) -> String {
+    let mut b = JsonBuilder::with_capacity(1024);
+    b.field_str("schema", report.schema);
+    b.field_bool("success", report.found);
+    b.field_object("data", |d| {
+        d.field_str("command", "claim show");
+        d.field_str("claimId", &report.claim_id);
+        d.field_bool("found", report.found);
+        if let Some(ref claim) = report.claim {
+            d.field_object("claim", |d| {
+                d.field_str("id", &claim.id);
+                d.field_str("title", &claim.title);
+                d.field_str("description", &claim.description);
+                d.field_str("status", claim.status.as_str());
+                d.field_str("frequency", claim.frequency.as_str());
+                if let Some(ref pid) = claim.policy_id {
+                    d.field_str("policyId", pid);
+                }
+            });
+        }
+        if report.include_manifest {
+            if let Some(ref manifest) = report.manifest {
+                d.field_object("manifest", |d| {
+                    d.field_str("claimId", &manifest.claim_id);
+                    d.field_u32("artifactCount", manifest.artifact_count as u32);
+                    d.field_str("verificationStatus", manifest.verification_status.as_str());
+                    if let Some(ref t) = manifest.last_verified_at {
+                        d.field_str("lastVerifiedAt", t);
+                    }
+                    if let Some(ref t) = manifest.last_trace_id {
+                        d.field_str("lastTraceId", t);
+                    }
+                });
+            }
+        }
+    });
+    b.finish()
+}
+
+#[must_use]
+pub fn render_claim_show_human(report: &ClaimShowReport) -> String {
+    let mut out = String::new();
+    if !report.found {
+        out.push_str(&format!("Claim not found: {}\n", report.claim_id));
+        return out;
+    }
+    if let Some(ref claim) = report.claim {
+        out.push_str(&format!("Claim: {}\n", claim.id));
+        out.push_str(&format!("  Title: {}\n", claim.title));
+        out.push_str(&format!("  Status: {}\n", claim.status.as_str()));
+        out.push_str(&format!("  Frequency: {}\n", claim.frequency.as_str()));
+        out.push_str(&format!("  Description: {}\n", claim.description));
+    }
+    out
+}
+
+#[must_use]
+pub fn render_claim_show_toon(report: &ClaimShowReport) -> String {
+    render_toon_from_json(&render_claim_show_json(report))
+}
+
+#[must_use]
+pub fn render_claim_verify_json(report: &ClaimVerifyReport) -> String {
+    let mut b = JsonBuilder::with_capacity(2048);
+    b.field_str("schema", report.schema);
+    b.field_bool("success", report.failed_count == 0);
+    b.field_object("data", |d| {
+        d.field_str("command", "claim verify");
+        d.field_str("claimId", &report.claim_id);
+        d.field_bool("verifyAll", report.verify_all);
+        d.field_str("claimsFile", &report.claims_file);
+        d.field_str("artifactsDir", &report.artifacts_dir);
+        d.field_u32("totalClaims", report.total_claims as u32);
+        d.field_u32("verifiedCount", report.verified_count as u32);
+        d.field_u32("failedCount", report.failed_count as u32);
+        d.field_u32("skippedCount", report.skipped_count as u32);
+        d.field_bool("failFast", report.fail_fast);
+        d.field_array_of_objects("results", &report.results, |d, result| {
+            d.field_str("claimId", &result.claim_id);
+            d.field_str("status", result.status.as_str());
+            d.field_u32("artifactsChecked", result.artifacts_checked as u32);
+            d.field_u32("artifactsPassed", result.artifacts_passed as u32);
+            d.field_u32("artifactsFailed", result.artifacts_failed as u32);
+        });
+    });
+    b.finish()
+}
+
+#[must_use]
+pub fn render_claim_verify_human(report: &ClaimVerifyReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Verification: {} verified, {} failed, {} skipped\n\n",
+        report.verified_count, report.failed_count, report.skipped_count
+    ));
+    if report.results.is_empty() {
+        out.push_str("No claims to verify.\n");
+    } else {
+        for result in &report.results {
+            let icon = match result.status {
+                crate::models::ManifestVerificationStatus::Passing => "[PASS]",
+                crate::models::ManifestVerificationStatus::Failing => "[FAIL]",
+                _ => "[----]",
+            };
+            out.push_str(&format!(
+                "  {} {} ({}/{} artifacts)\n",
+                icon, result.claim_id, result.artifacts_passed, result.artifacts_checked
+            ));
+        }
+    }
+    out
+}
+
+#[must_use]
+pub fn render_claim_verify_toon(report: &ClaimVerifyReport) -> String {
+    render_toon_from_json(&render_claim_verify_json(report))
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;

@@ -5,6 +5,7 @@ pub mod agent_docs;
 pub mod budget;
 pub mod capabilities;
 pub mod check;
+pub mod claims;
 pub mod context;
 pub mod degraded_honesty;
 pub mod doctor;

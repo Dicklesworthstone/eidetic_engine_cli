@@ -128,6 +128,9 @@ pub enum Command {
     Capabilities,
     /// Quick posture summary: ready, degraded, or needs attention.
     Check,
+    /// Manage and verify executable claims.
+    #[command(subcommand)]
+    Claim(ClaimCommand),
     /// Assemble a task-specific context pack from relevant memories.
     Context(ContextArgs),
     /// Run diagnostic commands for trust, quarantine, and streams.
@@ -201,6 +204,73 @@ pub struct AgentDocsArgs {
     /// Topics: guide, commands, contracts, schemas, paths, env, exit-codes, fields, errors, formats, examples
     #[arg(value_name = "TOPIC")]
     pub topic: Option<String>,
+}
+
+/// Subcommands for `ee claim`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum ClaimCommand {
+    /// List registered executable claims.
+    List(ClaimListArgs),
+    /// Show details for a specific claim.
+    Show(ClaimShowArgs),
+    /// Verify a claim's evidence artifacts.
+    Verify(ClaimVerifyArgs),
+}
+
+/// Arguments for `ee claim list`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct ClaimListArgs {
+    /// Filter by claim status (draft, active, verified, stale, regressed, retired).
+    #[arg(long, value_name = "STATUS")]
+    pub status: Option<String>,
+
+    /// Filter by verification frequency (on_change, daily, weekly, manual).
+    #[arg(long, value_name = "FREQ")]
+    pub frequency: Option<String>,
+
+    /// Filter by tag.
+    #[arg(long, value_name = "TAG")]
+    pub tag: Option<String>,
+
+    /// Path to claims.yaml file. Defaults to <workspace>/claims.yaml.
+    #[arg(long, value_name = "PATH")]
+    pub claims_file: Option<PathBuf>,
+}
+
+/// Arguments for `ee claim show`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ClaimShowArgs {
+    /// Claim ID to show (claim_<26-char>).
+    #[arg(value_name = "CLAIM_ID")]
+    pub claim_id: String,
+
+    /// Path to claims.yaml file. Defaults to <workspace>/claims.yaml.
+    #[arg(long, value_name = "PATH")]
+    pub claims_file: Option<PathBuf>,
+
+    /// Include artifact manifest details.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_manifest: bool,
+}
+
+/// Arguments for `ee claim verify`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ClaimVerifyArgs {
+    /// Claim ID to verify (claim_<26-char>), or "all" to verify all claims.
+    #[arg(value_name = "CLAIM_ID")]
+    pub claim_id: String,
+
+    /// Path to claims.yaml file. Defaults to <workspace>/claims.yaml.
+    #[arg(long, value_name = "PATH")]
+    pub claims_file: Option<PathBuf>,
+
+    /// Artifacts directory. Defaults to <workspace>/artifacts/.
+    #[arg(long, value_name = "PATH")]
+    pub artifacts_dir: Option<PathBuf>,
+
+    /// Fail on first error instead of collecting all errors.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub fail_fast: bool,
 }
 
 /// Arguments for `ee context`.
@@ -726,6 +796,11 @@ where
                 ),
             }
         }
+        Some(Command::Claim(ref claim_cmd)) => match claim_cmd {
+            ClaimCommand::List(args) => handle_claim_list(&cli, args, stdout, stderr),
+            ClaimCommand::Show(args) => handle_claim_show(&cli, args, stdout, stderr),
+            ClaimCommand::Verify(args) => handle_claim_verify(&cli, args, stdout, stderr),
+        },
         Some(Command::Context(ref args)) => handle_context(&cli, args, stdout, stderr),
         Some(Command::Diag(ref diag_cmd)) => match diag_cmd {
             DiagCommand::Quarantine => {
@@ -2403,6 +2478,176 @@ where
 }
 
 // ============================================================================
+// EE-362: Claim verification handlers
+// ============================================================================
+
+fn handle_claim_list<W, E>(
+    cli: &Cli,
+    args: &ClaimListArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let claims_file = args
+        .claims_file
+        .clone()
+        .unwrap_or_else(|| workspace.join("claims.yaml"));
+
+    let report = crate::core::claims::ClaimListReport {
+        schema: crate::models::RESPONSE_SCHEMA_V1,
+        claims_file: claims_file.display().to_string(),
+        claims_file_exists: claims_file.exists(),
+        total_count: 0,
+        filtered_count: 0,
+        claims: Vec::new(),
+        filter_status: args.status.clone(),
+        filter_frequency: args.frequency.clone(),
+        filter_tag: args.tag.clone(),
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_claim_list_human(&report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_claim_list_toon(&report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_claim_list_json(&report) + "\n"))
+        }
+    }
+}
+
+fn handle_claim_show<W, E>(
+    cli: &Cli,
+    args: &ClaimShowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let claims_file = args
+        .claims_file
+        .clone()
+        .unwrap_or_else(|| workspace.join("claims.yaml"));
+
+    if !claims_file.exists() {
+        let domain_error = DomainError::NotFound {
+            resource: "claims.yaml".to_string(),
+            id: claims_file.display().to_string(),
+            repair: Some("Create claims.yaml in workspace root".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let report = crate::core::claims::ClaimShowReport {
+        schema: crate::models::RESPONSE_SCHEMA_V1,
+        claim_id: args.claim_id.clone(),
+        found: false,
+        claim: None,
+        manifest: None,
+        include_manifest: args.include_manifest,
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_claim_show_human(&report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_claim_show_toon(&report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_claim_show_json(&report) + "\n"))
+        }
+    }
+}
+
+fn handle_claim_verify<W, E>(
+    cli: &Cli,
+    args: &ClaimVerifyArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let claims_file = args
+        .claims_file
+        .clone()
+        .unwrap_or_else(|| workspace.join("claims.yaml"));
+
+    let artifacts_dir = args
+        .artifacts_dir
+        .clone()
+        .unwrap_or_else(|| workspace.join("artifacts"));
+
+    if !claims_file.exists() {
+        let domain_error = DomainError::NotFound {
+            resource: "claims.yaml".to_string(),
+            id: claims_file.display().to_string(),
+            repair: Some("Create claims.yaml in workspace root".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let report = crate::core::claims::ClaimVerifyReport {
+        schema: crate::models::RESPONSE_SCHEMA_V1,
+        claim_id: args.claim_id.clone(),
+        verify_all: args.claim_id == "all",
+        claims_file: claims_file.display().to_string(),
+        artifacts_dir: artifacts_dir.display().to_string(),
+        total_claims: 0,
+        verified_count: 0,
+        failed_count: 0,
+        skipped_count: 0,
+        results: Vec::new(),
+        fail_fast: args.fail_fast,
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_claim_verify_human(&report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_claim_verify_toon(&report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_claim_verify_json(&report) + "\n"))
+        }
+    }
+}
+
+// ============================================================================
 // EE-040: Read-only Invocation Normalization and Did-You-Mean Errors
 // ============================================================================
 
@@ -2412,6 +2657,7 @@ const COMMAND_NAMES: &[&str] = &[
     "agent-docs",
     "capabilities",
     "check",
+    "claim",
     "context",
     "diag",
     "doctor",
@@ -2423,6 +2669,7 @@ const COMMAND_NAMES: &[&str] = &[
     "index",
     "introspect",
     "memory",
+    "outcome",
     "remember",
     "schema",
     "search",
@@ -2434,6 +2681,7 @@ const COMMAND_NAMES: &[&str] = &[
 
 /// Subcommand names for nested commands.
 const AGENT_SUBCOMMANDS: &[&str] = &["detect"];
+const CLAIM_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
 const DIAG_SUBCOMMANDS: &[&str] = &["quarantine", "streams"];
 const EVAL_SUBCOMMANDS: &[&str] = &["run", "list"];
 const IMPORT_SUBCOMMANDS: &[&str] = &["cass", "eidetic-legacy"];
@@ -2487,6 +2735,11 @@ impl NormalizedInvocation {
                 Command::AgentDocs(_) => "agent-docs".to_string(),
                 Command::Capabilities => "capabilities".to_string(),
                 Command::Check => "check".to_string(),
+                Command::Claim(claim) => match claim {
+                    ClaimCommand::List(_) => "claim list".to_string(),
+                    ClaimCommand::Show(_) => "claim show".to_string(),
+                    ClaimCommand::Verify(_) => "claim verify".to_string(),
+                },
                 Command::Context(_) => "context".to_string(),
                 Command::Diag(diag) => match diag {
                     DiagCommand::Quarantine => "diag quarantine".to_string(),
