@@ -9,10 +9,10 @@ pub mod rule;
 pub mod trust;
 
 pub use certificate::{
-    CERTIFICATE_SCHEMA_V1, Certificate, CertificateKind, CertificateStatus,
-    CurationCertificate, LifecycleCertificate, LifecycleEvent, PackCertificate,
-    ParseCertificateKindError, ParseCertificateStatusError, ParseLifecycleEventError,
-    PrivacyBudgetCertificate, TailRiskCertificate,
+    CERTIFICATE_SCHEMA_V1, Certificate, CertificateKind, CertificateStatus, CurationCertificate,
+    LifecycleCertificate, LifecycleEvent, PackCertificate, ParseCertificateKindError,
+    ParseCertificateStatusError, ParseLifecycleEventError, PrivacyBudgetCertificate,
+    TailRiskCertificate,
 };
 pub use id::{
     AuditId, BackupId, CandidateId, EvidenceId, Id, IdKind, MemoryId, PackId, ParseIdError, RuleId,
