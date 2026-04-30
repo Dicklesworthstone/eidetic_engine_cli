@@ -1,0 +1,17 @@
+schema: ee.response.v1
+success: true
+data:
+  command: status
+  version: 0.1.0
+  capabilities:
+    runtime: ready
+    storage: unimplemented
+    search: unimplemented
+  runtime:
+    engine: asupersync
+    profile: current_thread
+    workerThreads: 1
+    asyncBoundary: core
+  degraded[2]{code,severity,message,repair}:
+    storage_not_implemented,medium,Storage subsystem is not wired yet.,Implement EE-040 through EE-044.
+    search_not_implemented,medium,Search subsystem is not wired yet.,Implement EE-120 and dependent search beads.
