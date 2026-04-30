@@ -194,7 +194,11 @@ mod tests {
         let default = default_lab_runtime();
         let explicit = lab_runtime(TEST_SEED);
 
-        ensure_equal(&default.now(), &explicit.now(), "default runtime matches explicit")
+        ensure_equal(
+            &default.now(),
+            &explicit.now(),
+            "default runtime matches explicit",
+        )
     }
 
     #[test]
