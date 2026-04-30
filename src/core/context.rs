@@ -33,7 +33,7 @@ use crate::models::{MemoryId, ProvenanceUri, UnitScore};
 use crate::pack::{
     ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
     ContextResponseDegradation, ContextResponseSeverity, PackCandidate, PackCandidateInput,
-    PackProvenance, PackSection, TokenBudget, assemble_draft, estimate_tokens_default,
+    PackProvenance, PackSection, TokenBudget, assemble_draft_with_profile, estimate_tokens_default,
 };
 
 /// Per-subsystem permission level. `None < Read < Write` under the
@@ -351,8 +351,9 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
             .map_err(|error| ContextPackError::Pack(error.to_string()))?,
         None => TokenBudget::default_context(),
     };
-    let draft = assemble_draft(request.query.clone(), budget, candidates)
-        .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    let draft =
+        assemble_draft_with_profile(request.profile, request.query.clone(), budget, candidates)
+            .map_err(|error| ContextPackError::Pack(error.to_string()))?;
 
     ContextResponse::new(request, draft, degraded)
         .map_err(|error| ContextPackError::Pack(error.to_string()))

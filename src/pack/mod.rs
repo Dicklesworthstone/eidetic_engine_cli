@@ -9,6 +9,9 @@ pub const CONTEXT_COMMAND: &str = "context";
 pub const DEFAULT_CONTEXT_MAX_TOKENS: u32 = 4_000;
 pub const DEFAULT_CANDIDATE_POOL: u32 = 64;
 pub const DEFAULT_MMR_RELEVANCE_WEIGHT: f32 = 0.75;
+pub const FACILITY_LOCATION_RELEVANCE_WEIGHT: f32 = 0.70;
+pub const FACILITY_LOCATION_UTILITY_WEIGHT: f32 = 0.30;
+pub const FACILITY_LOCATION_EPSILON: f32 = 0.000_001;
 
 /// Conservative characters-per-token ratio for heuristic estimation.
 /// Uses 3.5 instead of 4.0 to bias toward overestimation.
@@ -93,6 +96,7 @@ pub enum ContextPackProfile {
     Compact,
     Balanced,
     Thorough,
+    Submodular,
 }
 
 impl ContextPackProfile {
@@ -102,6 +106,7 @@ impl ContextPackProfile {
             Self::Compact => "compact",
             Self::Balanced => "balanced",
             Self::Thorough => "thorough",
+            Self::Submodular => "submodular",
         }
     }
 }
@@ -335,6 +340,7 @@ impl SectionQuotas {
             ContextPackProfile::Compact => Self::compact(total_budget),
             ContextPackProfile::Balanced => Self::balanced(total_budget),
             ContextPackProfile::Thorough => Self::thorough(total_budget),
+            ContextPackProfile::Submodular => Self::thorough(total_budget),
         }
     }
 
@@ -619,12 +625,55 @@ impl PackCandidate {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct PackSelectionCertificate {
+    pub profile: ContextPackProfile,
+    pub objective: PackSelectionObjective,
+    pub algorithm: &'static str,
+    pub guarantee: &'static str,
+    pub candidate_count: usize,
+    pub selected_count: usize,
+    pub omitted_count: usize,
+    pub budget_limit: u32,
+    pub budget_used: u32,
+    pub total_objective_value: f32,
+    pub monotone: bool,
+    pub submodular: bool,
+    pub steps: Vec<PackSelectionStep>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackSelectionObjective {
+    MmrRedundancy,
+    FacilityLocation,
+}
+
+impl PackSelectionObjective {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MmrRedundancy => "mmr_redundancy",
+            Self::FacilityLocation => "facility_location",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackSelectionStep {
+    pub rank: u32,
+    pub memory_id: MemoryId,
+    pub marginal_gain: f32,
+    pub objective_value: f32,
+    pub covered_features: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct PackDraft {
     pub query: String,
     pub budget: TokenBudget,
     pub used_tokens: u32,
     pub items: Vec<PackDraftItem>,
     pub omitted: Vec<PackOmission>,
+    pub selection_certificate: PackSelectionCertificate,
 }
 
 impl PackDraft {
@@ -1001,8 +1050,45 @@ pub fn assemble_draft(
     budget: TokenBudget,
     candidates: impl IntoIterator<Item = PackCandidate>,
 ) -> Result<PackDraft, PackValidationError> {
+    assemble_draft_with_profile(ContextPackProfile::Balanced, query, budget, candidates)
+}
+
+/// Assemble a deterministic context-pack draft using the objective implied
+/// by the request profile.
+///
+/// The default profiles keep the existing MMR-style redundancy objective.
+/// The `submodular` profile switches to a deterministic facility-location
+/// greedy objective and records the same certificate shape for inspection.
+///
+/// # Errors
+///
+/// Returns [`PackValidationError::EmptyQuery`] if `query` is empty after
+/// trimming.
+pub fn assemble_draft_with_profile(
+    profile: ContextPackProfile,
+    query: impl Into<String>,
+    budget: TokenBudget,
+    candidates: impl IntoIterator<Item = PackCandidate>,
+) -> Result<PackDraft, PackValidationError> {
+    match profile {
+        ContextPackProfile::Submodular => {
+            assemble_facility_location_draft(profile, query, budget, candidates)
+        }
+        ContextPackProfile::Compact
+        | ContextPackProfile::Balanced
+        | ContextPackProfile::Thorough => assemble_mmr_draft(profile, query, budget, candidates),
+    }
+}
+
+fn assemble_mmr_draft(
+    profile: ContextPackProfile,
+    query: impl Into<String>,
+    budget: TokenBudget,
+    candidates: impl IntoIterator<Item = PackCandidate>,
+) -> Result<PackDraft, PackValidationError> {
     let query = trim_required(query.into(), PackValidationError::EmptyQuery)?;
     let mut candidates: Vec<PackCandidate> = candidates.into_iter().collect();
+    let candidate_count = candidates.len();
     candidates.sort_by(compare_candidates);
 
     let mut used_tokens = 0_u32;
@@ -1010,6 +1096,8 @@ pub fn assemble_draft(
     let mut selected_signatures = Vec::new();
     let mut items = Vec::new();
     let mut omitted = Vec::new();
+    let mut steps = Vec::new();
+    let mut objective_value = 0.0_f32;
 
     while !candidates.is_empty() {
         let candidate_index = select_next_candidate_index(&candidates, &selected_signatures);
@@ -1029,6 +1117,15 @@ pub fn assemble_draft(
                 next_rank = next_rank
                     .checked_add(1)
                     .ok_or(PackValidationError::CandidateRankOverflow)?;
+                let marginal_gain = redundancy_adjusted_score(&candidate, &selected_signatures);
+                objective_value += marginal_gain.max(0.0);
+                steps.push(PackSelectionStep {
+                    rank,
+                    memory_id: candidate.memory_id,
+                    marginal_gain,
+                    objective_value,
+                    covered_features: certificate_features(&candidate),
+                });
                 used_tokens = total;
                 selected_signatures.push(CandidateSignature::from(&candidate));
                 items.push(PackDraftItem {
@@ -1056,6 +1153,119 @@ pub fn assemble_draft(
         query,
         budget,
         used_tokens,
+        selection_certificate: PackSelectionCertificate {
+            profile,
+            objective: PackSelectionObjective::MmrRedundancy,
+            algorithm: "deterministic_greedy_mmr",
+            guarantee: "deterministic redundancy-controlled greedy ranking; no submodular guarantee claimed",
+            candidate_count,
+            selected_count: items.len(),
+            omitted_count: omitted.len(),
+            budget_limit: budget.max_tokens(),
+            budget_used: used_tokens,
+            total_objective_value: objective_value,
+            monotone: false,
+            submodular: false,
+            steps,
+        },
+        items,
+        omitted,
+    })
+}
+
+fn assemble_facility_location_draft(
+    profile: ContextPackProfile,
+    query: impl Into<String>,
+    budget: TokenBudget,
+    candidates: impl IntoIterator<Item = PackCandidate>,
+) -> Result<PackDraft, PackValidationError> {
+    let query = trim_required(query.into(), PackValidationError::EmptyQuery)?;
+    let mut candidates: Vec<PackCandidate> = candidates.into_iter().collect();
+    candidates.sort_by(compare_candidates);
+    let universe = candidates.clone();
+    let candidate_count = candidates.len();
+
+    let mut used_tokens = 0_u32;
+    let mut next_rank = 1_u32;
+    let mut selected_signatures = Vec::new();
+    let mut items = Vec::new();
+    let mut omitted = Vec::new();
+    let mut steps = Vec::new();
+    let mut objective_value = 0.0_f32;
+
+    while !candidates.is_empty() {
+        let Some((candidate_index, marginal_gain)) = select_facility_candidate_index(
+            &candidates,
+            &selected_signatures,
+            &universe,
+            used_tokens,
+            budget,
+        ) else {
+            omitted.extend(candidates.drain(..).map(|candidate| PackOmission {
+                memory_id: candidate.memory_id,
+                estimated_tokens: candidate.estimated_tokens,
+                reason: PackOmissionReason::TokenBudgetExceeded,
+            }));
+            break;
+        };
+
+        if marginal_gain <= FACILITY_LOCATION_EPSILON {
+            omitted.extend(candidates.drain(..).map(|candidate| PackOmission {
+                memory_id: candidate.memory_id,
+                estimated_tokens: candidate.estimated_tokens,
+                reason: PackOmissionReason::RedundantCandidate,
+            }));
+            break;
+        }
+
+        let candidate = candidates.remove(candidate_index);
+        let rank = next_rank;
+        next_rank = next_rank
+            .checked_add(1)
+            .ok_or(PackValidationError::CandidateRankOverflow)?;
+        used_tokens = used_tokens.saturating_add(candidate.estimated_tokens);
+        selected_signatures.push(CandidateSignature::from(&candidate));
+        objective_value = facility_location_value(&selected_signatures, &universe);
+        steps.push(PackSelectionStep {
+            rank,
+            memory_id: candidate.memory_id,
+            marginal_gain,
+            objective_value,
+            covered_features: certificate_features(&candidate),
+        });
+        items.push(PackDraftItem {
+            rank,
+            memory_id: candidate.memory_id,
+            section: candidate.section,
+            content: candidate.content,
+            estimated_tokens: candidate.estimated_tokens,
+            relevance: candidate.relevance,
+            utility: candidate.utility,
+            provenance: candidate.provenance,
+            why: candidate.why,
+            diversity_key: candidate.diversity_key,
+        });
+    }
+
+    Ok(PackDraft {
+        query,
+        budget,
+        used_tokens,
+        selection_certificate: PackSelectionCertificate {
+            profile,
+            objective: PackSelectionObjective::FacilityLocation,
+            algorithm: "deterministic_greedy_facility_location_gain_per_token",
+            guarantee: "monotone submodular facility-location objective; deterministic budgeted greedy certificate, exact optimum not claimed",
+            candidate_count,
+            selected_count: items.len(),
+            omitted_count: omitted.len(),
+            budget_limit: budget.max_tokens(),
+            budget_used: used_tokens,
+            total_objective_value: objective_value,
+            monotone: true,
+            submodular: true,
+            steps,
+        },
         items,
         omitted,
     })
@@ -1120,6 +1330,128 @@ fn max_selected_similarity(candidate: &PackCandidate, selected: &[CandidateSigna
         .iter()
         .map(|signature| candidate_similarity(candidate, signature))
         .fold(0.0_f32, f32::max)
+}
+
+fn select_facility_candidate_index(
+    candidates: &[PackCandidate],
+    selected: &[CandidateSignature],
+    universe: &[PackCandidate],
+    used_tokens: u32,
+    budget: TokenBudget,
+) -> Option<(usize, f32)> {
+    let remaining_budget = budget.max_tokens().saturating_sub(used_tokens);
+    let mut best: Option<(usize, f32, f32)> = None;
+
+    for (candidate_index, candidate) in candidates.iter().enumerate() {
+        if candidate.estimated_tokens > remaining_budget {
+            continue;
+        }
+        let marginal_gain = facility_location_marginal_gain(candidate, selected, universe);
+        let gain_per_token = marginal_gain / candidate.estimated_tokens as f32;
+        match best {
+            None => best = Some((candidate_index, marginal_gain, gain_per_token)),
+            Some((best_index, best_gain, best_ratio)) => {
+                let best_candidate = &candidates[best_index];
+                if gain_per_token
+                    .total_cmp(&best_ratio)
+                    .then_with(|| marginal_gain.total_cmp(&best_gain))
+                    .then_with(|| compare_candidates(best_candidate, candidate))
+                    == Ordering::Greater
+                {
+                    best = Some((candidate_index, marginal_gain, gain_per_token));
+                }
+            }
+        }
+    }
+
+    best.map(|(candidate_index, marginal_gain, _)| (candidate_index, marginal_gain))
+}
+
+fn facility_location_marginal_gain(
+    candidate: &PackCandidate,
+    selected: &[CandidateSignature],
+    universe: &[PackCandidate],
+) -> f32 {
+    let current = facility_location_value(selected, universe);
+    let mut with_candidate = selected.to_vec();
+    with_candidate.push(CandidateSignature::from(candidate));
+    facility_location_value(&with_candidate, universe) - current
+}
+
+fn facility_location_value(selected: &[CandidateSignature], universe: &[PackCandidate]) -> f32 {
+    if selected.is_empty() {
+        return 0.0;
+    }
+    universe
+        .iter()
+        .map(|candidate| {
+            let coverage = selected
+                .iter()
+                .map(|signature| facility_similarity(candidate, signature))
+                .fold(0.0_f32, f32::max);
+            facility_candidate_weight(candidate) * coverage
+        })
+        .sum()
+}
+
+fn facility_candidate_weight(candidate: &PackCandidate) -> f32 {
+    (FACILITY_LOCATION_RELEVANCE_WEIGHT * candidate.relevance.into_inner())
+        + (FACILITY_LOCATION_UTILITY_WEIGHT * candidate.utility.into_inner())
+}
+
+fn facility_similarity(candidate: &PackCandidate, selected: &CandidateSignature) -> f32 {
+    if candidate.memory_id == selected.memory_id {
+        return 1.0;
+    }
+    if normalize_redundancy_content(&candidate.content) == selected.normalized_content {
+        return 1.0;
+    }
+
+    let mut similarity = 0.0_f32;
+    if let Some(diversity_key) = &candidate.diversity_key
+        && selected.diversity_key.as_ref() == Some(diversity_key)
+    {
+        similarity = similarity.max(0.85);
+    }
+    similarity.max(content_overlap_similarity(
+        &candidate.content,
+        &selected.normalized_content,
+    ))
+}
+
+fn content_overlap_similarity(left: &str, right_normalized: &str) -> f32 {
+    let left_terms = normalized_terms(left);
+    let right_terms = normalized_terms(right_normalized);
+    if left_terms.is_empty() || right_terms.is_empty() {
+        return 0.0;
+    }
+    let intersection = left_terms.intersection(&right_terms).count();
+    let union = left_terms.union(&right_terms).count();
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f32 / union as f32
+    }
+}
+
+fn normalized_terms(content: &str) -> BTreeSet<String> {
+    content
+        .split_whitespace()
+        .map(|term| {
+            term.trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+                .to_ascii_lowercase()
+        })
+        .filter(|term| !term.is_empty())
+        .collect()
+}
+
+fn certificate_features(candidate: &PackCandidate) -> Vec<String> {
+    let mut features = vec![format!("section:{}", candidate.section.as_str())];
+    if let Some(diversity_key) = &candidate.diversity_key {
+        features.push(format!("diversity:{diversity_key}"));
+    }
+    features.push(format!("memory:{}", candidate.memory_id));
+    features
 }
 
 fn candidate_similarity(candidate: &PackCandidate, selected: &CandidateSignature) -> f32 {
@@ -1260,8 +1592,9 @@ mod tests {
         CONTEXT_COMMAND, ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
         ContextResponseDegradation, ContextResponseSeverity, DEFAULT_CHARS_PER_TOKEN,
         PackCandidate, PackCandidateInput, PackOmissionReason, PackProvenance, PackSection,
-        PackValidationError, SectionQuota, SectionQuotas, TokenBudget, TokenEstimationStrategy,
-        assemble_draft, estimate_tokens, estimate_tokens_default, subsystem_name,
+        PackSelectionObjective, PackValidationError, SectionQuota, SectionQuotas, TokenBudget,
+        TokenEstimationStrategy, assemble_draft, assemble_draft_with_profile, estimate_tokens,
+        estimate_tokens_default, subsystem_name,
     };
     use crate::models::{MemoryId, ProvenanceUri, UnitScore};
 
@@ -1703,6 +2036,11 @@ mod tests {
             &ContextPackProfile::Balanced.to_string().as_str(),
             &"balanced",
             "balanced profile display",
+        )?;
+        ensure_equal(
+            &ContextPackProfile::Submodular.as_str(),
+            &"submodular",
+            "submodular profile",
         )?;
         ensure_equal(
             &PackSection::all().map(PackSection::as_str),
@@ -2201,6 +2539,79 @@ mod tests {
                 .map(|omission| omission.reason.as_str()),
             &Some("redundant_candidate"),
             "redundant omission reason wire name",
+        )
+    }
+
+    #[test]
+    fn submodular_profile_emits_facility_location_certificate() -> TestResult {
+        let budget = TokenBudget::new(40).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let first =
+            candidate_with_content(1, 1.0, 0.6, 10, "Run cargo fmt --check before release.")?
+                .with_diversity_key("release-formatting");
+        let near_duplicate = candidate_with_content(
+            2,
+            0.95,
+            0.6,
+            10,
+            "Always run cargo fmt --check before release.",
+        )?
+        .with_diversity_key("release-formatting");
+        let diverse = candidate_with_content(
+            3,
+            0.65,
+            0.8,
+            10,
+            "Verify signed release assets and checksums after packaging.",
+        )?
+        .with_diversity_key("release-artifacts");
+
+        let draft = assemble_draft_with_profile(
+            ContextPackProfile::Submodular,
+            "prepare release",
+            budget,
+            vec![near_duplicate, diverse, first],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        ensure_equal(
+            &draft.selection_certificate.profile,
+            &ContextPackProfile::Submodular,
+            "certificate profile",
+        )?;
+        ensure_equal(
+            &draft.selection_certificate.objective,
+            &PackSelectionObjective::FacilityLocation,
+            "certificate objective",
+        )?;
+        ensure(
+            draft.selection_certificate.monotone,
+            "facility-location certificate should mark monotone",
+        )?;
+        ensure(
+            draft.selection_certificate.submodular,
+            "facility-location certificate should mark submodular",
+        )?;
+        ensure_equal(
+            &draft.selection_certificate.candidate_count,
+            &3,
+            "candidate count",
+        )?;
+        ensure_equal(
+            &draft.selection_certificate.steps.len(),
+            &3,
+            "all fitting candidates receive certificate steps",
+        )?;
+        ensure(
+            draft.selection_certificate.total_objective_value > 0.0,
+            "objective value should be positive",
+        )?;
+        ensure(
+            draft.selection_certificate.steps.iter().any(|step| {
+                step.covered_features
+                    .iter()
+                    .any(|feature| feature == "diversity:release-artifacts")
+            }),
+            "certificate should name the diverse feature",
         )
     }
 

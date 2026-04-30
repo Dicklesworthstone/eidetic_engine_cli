@@ -65,6 +65,33 @@
           "redundantCandidates": 0
         }
       },
+      "selectionCertificate": {
+        "profile": "compact",
+        "objective": "mmr_redundancy",
+        "algorithm": "deterministic_greedy_mmr",
+        "guarantee": "deterministic redundancy-controlled greedy ranking; no submodular guarantee claimed",
+        "candidateCount": 1,
+        "selectedCount": 1,
+        "omittedCount": 0,
+        "budgetLimit": 4000,
+        "budgetUsed": 11,
+        "totalObjectiveValue": 0.306154,
+        "monotone": false,
+        "submodular": false,
+        "steps": [
+          {
+            "rank": 1,
+            "memoryId": "mem_00000000000000000000000001",
+            "marginalGain": 0.306154,
+            "objectiveValue": 0.306154,
+            "coveredFeatures": [
+              "section:procedural_rules",
+              "diversity:procedural:rule:cargo",
+              "memory:mem_00000000000000000000000001"
+            ]
+          }
+        ]
+      },
       "items": [
         {
           "rank": 1,
