@@ -502,6 +502,412 @@ impl Certificate {
     }
 }
 
+// ============================================================================
+// Lifecycle Automaton Models (EE-350)
+// ============================================================================
+
+/// Schema version for lifecycle automaton certificates.
+pub const LIFECYCLE_AUTOMATON_SCHEMA_V1: &str = "ee.lifecycle.automaton.v1";
+
+/// State of a lifecycle automaton.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum AutomatonState {
+    /// Initial state before the process starts.
+    Idle,
+    /// Process is initializing.
+    Initializing,
+    /// Process is running.
+    Running,
+    /// Process is waiting for external input.
+    Waiting,
+    /// Process completed successfully.
+    Completed,
+    /// Process failed.
+    Failed,
+    /// Process was cancelled.
+    Cancelled,
+    /// Process is in cleanup/rollback.
+    Rollback,
+}
+
+impl AutomatonState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Initializing => "initializing",
+            Self::Running => "running",
+            Self::Waiting => "waiting",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Rollback => "rollback",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+
+    #[must_use]
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::Initializing | Self::Running | Self::Waiting | Self::Rollback)
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 8] {
+        [
+            Self::Idle,
+            Self::Initializing,
+            Self::Running,
+            Self::Waiting,
+            Self::Completed,
+            Self::Failed,
+            Self::Cancelled,
+            Self::Rollback,
+        ]
+    }
+}
+
+impl fmt::Display for AutomatonState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A transition in the lifecycle automaton.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutomatonTransition {
+    /// Source state.
+    pub from: AutomatonState,
+    /// Target state.
+    pub to: AutomatonState,
+    /// Transition trigger/event name.
+    pub trigger: String,
+    /// Timestamp of transition.
+    pub timestamp: String,
+    /// Optional transition metadata.
+    pub metadata: Option<String>,
+}
+
+impl AutomatonTransition {
+    #[must_use]
+    pub fn new(from: AutomatonState, to: AutomatonState, trigger: impl Into<String>) -> Self {
+        Self {
+            from,
+            to,
+            trigger: trigger.into(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: impl Into<String>) -> Self {
+        self.metadata = Some(metadata.into());
+        self
+    }
+}
+
+/// Import lifecycle automaton certificate (EE-350).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportAutomatonCertificate {
+    /// Source type (cass, legacy, manual).
+    pub source_type: String,
+    /// Source path or identifier.
+    pub source_id: String,
+    /// Current automaton state.
+    pub state: AutomatonState,
+    /// State transition history.
+    pub transitions: Vec<AutomatonTransition>,
+    /// Sessions imported.
+    pub sessions_imported: u32,
+    /// Memories extracted.
+    pub memories_extracted: u32,
+    /// Items skipped.
+    pub items_skipped: u32,
+    /// Validation passed.
+    pub validation_passed: bool,
+    /// Idempotency fingerprint.
+    pub idempotency_fingerprint: Option<String>,
+}
+
+impl ImportAutomatonCertificate {
+    #[must_use]
+    pub fn new(source_type: impl Into<String>, source_id: impl Into<String>) -> Self {
+        Self {
+            source_type: source_type.into(),
+            source_id: source_id.into(),
+            state: AutomatonState::Idle,
+            transitions: Vec::new(),
+            sessions_imported: 0,
+            memories_extracted: 0,
+            items_skipped: 0,
+            validation_passed: false,
+            idempotency_fingerprint: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        matches!(self.state, AutomatonState::Completed)
+    }
+
+    #[must_use]
+    pub const fn is_successful(&self) -> bool {
+        self.is_complete() && self.validation_passed
+    }
+
+    pub fn record_transition(&mut self, to: AutomatonState, trigger: impl Into<String>) {
+        let transition = AutomatonTransition::new(self.state, to, trigger);
+        self.transitions.push(transition);
+        self.state = to;
+    }
+}
+
+/// Index publish lifecycle automaton certificate (EE-350).
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndexPublishAutomatonCertificate {
+    /// Index type (fts5, vector, hybrid).
+    pub index_type: String,
+    /// Database generation before publish.
+    pub db_generation_before: u64,
+    /// Database generation after publish.
+    pub db_generation_after: u64,
+    /// Current automaton state.
+    pub state: AutomatonState,
+    /// State transition history.
+    pub transitions: Vec<AutomatonTransition>,
+    /// Documents indexed.
+    pub documents_indexed: u32,
+    /// Documents removed.
+    pub documents_removed: u32,
+    /// Index size in bytes.
+    pub index_size_bytes: u64,
+    /// Consistency check passed.
+    pub consistency_check: bool,
+    /// Publish timestamp.
+    pub published_at: Option<String>,
+}
+
+impl IndexPublishAutomatonCertificate {
+    #[must_use]
+    pub fn new(index_type: impl Into<String>) -> Self {
+        Self {
+            index_type: index_type.into(),
+            db_generation_before: 0,
+            db_generation_after: 0,
+            state: AutomatonState::Idle,
+            transitions: Vec::new(),
+            documents_indexed: 0,
+            documents_removed: 0,
+            index_size_bytes: 0,
+            consistency_check: false,
+            published_at: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        matches!(self.state, AutomatonState::Completed)
+    }
+
+    #[must_use]
+    pub const fn generations_match(&self) -> bool {
+        self.db_generation_after >= self.db_generation_before
+    }
+
+    pub fn record_transition(&mut self, to: AutomatonState, trigger: impl Into<String>) {
+        let transition = AutomatonTransition::new(self.state, to, trigger);
+        self.transitions.push(transition);
+        self.state = to;
+    }
+}
+
+/// Hook execution lifecycle automaton certificate (EE-350).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HookAutomatonCertificate {
+    /// Hook name/identifier.
+    pub hook_name: String,
+    /// Hook type (pre, post, on_error).
+    pub hook_type: String,
+    /// Triggering event.
+    pub trigger_event: String,
+    /// Current automaton state.
+    pub state: AutomatonState,
+    /// State transition history.
+    pub transitions: Vec<AutomatonTransition>,
+    /// Exit code if executed.
+    pub exit_code: Option<i32>,
+    /// Execution duration in milliseconds.
+    pub duration_ms: u64,
+    /// Output captured (truncated).
+    pub output_summary: Option<String>,
+    /// Hook was skipped.
+    pub skipped: bool,
+    /// Skip reason if skipped.
+    pub skip_reason: Option<String>,
+}
+
+impl HookAutomatonCertificate {
+    #[must_use]
+    pub fn new(hook_name: impl Into<String>, hook_type: impl Into<String>) -> Self {
+        Self {
+            hook_name: hook_name.into(),
+            hook_type: hook_type.into(),
+            trigger_event: String::new(),
+            state: AutomatonState::Idle,
+            transitions: Vec::new(),
+            exit_code: None,
+            duration_ms: 0,
+            output_summary: None,
+            skipped: false,
+            skip_reason: None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_successful(&self) -> bool {
+        matches!(self.state, AutomatonState::Completed)
+            && self.exit_code.is_some_and(|code| code == 0)
+    }
+
+    #[must_use]
+    pub const fn was_skipped(&self) -> bool {
+        self.skipped
+    }
+
+    pub fn record_transition(&mut self, to: AutomatonState, trigger: impl Into<String>) {
+        let transition = AutomatonTransition::new(self.state, to, trigger);
+        self.transitions.push(transition);
+        self.state = to;
+    }
+}
+
+/// Backup lifecycle automaton certificate (EE-350).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackupAutomatonCertificate {
+    /// Backup type (full, incremental, snapshot).
+    pub backup_type: String,
+    /// Backup destination path.
+    pub destination: String,
+    /// Current automaton state.
+    pub state: AutomatonState,
+    /// State transition history.
+    pub transitions: Vec<AutomatonTransition>,
+    /// Files backed up.
+    pub files_count: u32,
+    /// Total size in bytes.
+    pub total_bytes: u64,
+    /// Checksum of backup archive.
+    pub checksum: Option<String>,
+    /// Verification passed.
+    pub verified: bool,
+    /// Retention policy applied.
+    pub retention_applied: bool,
+    /// Old backups pruned.
+    pub pruned_count: u32,
+}
+
+impl BackupAutomatonCertificate {
+    #[must_use]
+    pub fn new(backup_type: impl Into<String>, destination: impl Into<String>) -> Self {
+        Self {
+            backup_type: backup_type.into(),
+            destination: destination.into(),
+            state: AutomatonState::Idle,
+            transitions: Vec::new(),
+            files_count: 0,
+            total_bytes: 0,
+            checksum: None,
+            verified: false,
+            retention_applied: false,
+            pruned_count: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        matches!(self.state, AutomatonState::Completed)
+    }
+
+    #[must_use]
+    pub const fn is_verified(&self) -> bool {
+        self.is_complete() && self.verified
+    }
+
+    pub fn record_transition(&mut self, to: AutomatonState, trigger: impl Into<String>) {
+        let transition = AutomatonTransition::new(self.state, to, trigger);
+        self.transitions.push(transition);
+        self.state = to;
+    }
+}
+
+/// Shutdown lifecycle automaton certificate (EE-350).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShutdownAutomatonCertificate {
+    /// Shutdown type (graceful, immediate, restart).
+    pub shutdown_type: String,
+    /// Shutdown reason.
+    pub reason: String,
+    /// Current automaton state.
+    pub state: AutomatonState,
+    /// State transition history.
+    pub transitions: Vec<AutomatonTransition>,
+    /// Pending operations at shutdown start.
+    pub pending_operations: u32,
+    /// Operations completed before shutdown.
+    pub operations_completed: u32,
+    /// Operations cancelled.
+    pub operations_cancelled: u32,
+    /// Cleanup tasks run.
+    pub cleanup_tasks_run: u32,
+    /// Final state persisted.
+    pub state_persisted: bool,
+    /// Connections closed cleanly.
+    pub connections_closed: bool,
+}
+
+impl ShutdownAutomatonCertificate {
+    #[must_use]
+    pub fn new(shutdown_type: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            shutdown_type: shutdown_type.into(),
+            reason: reason.into(),
+            state: AutomatonState::Idle,
+            transitions: Vec::new(),
+            pending_operations: 0,
+            operations_completed: 0,
+            operations_cancelled: 0,
+            cleanup_tasks_run: 0,
+            state_persisted: false,
+            connections_closed: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        matches!(self.state, AutomatonState::Completed)
+    }
+
+    #[must_use]
+    pub const fn is_clean(&self) -> bool {
+        self.is_complete() && self.state_persisted && self.connections_closed
+    }
+
+    #[must_use]
+    pub const fn had_data_loss(&self) -> bool {
+        self.operations_cancelled > 0 && !self.state_persisted
+    }
+
+    pub fn record_transition(&mut self, to: AutomatonState, trigger: impl Into<String>) {
+        let transition = AutomatonTransition::new(self.state, to, trigger);
+        self.transitions.push(transition);
+        self.state = to;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -816,5 +1222,127 @@ mod tests {
             expired.is_expired(),
             "expired cert should report as expired",
         )
+    }
+
+    // ========================================================================
+    // Lifecycle Automaton Tests (EE-350)
+    // ========================================================================
+
+    #[test]
+    fn automaton_state_terminal_and_active() -> TestResult {
+        use super::AutomatonState;
+
+        ensure(!AutomatonState::Idle.is_terminal(), "idle is not terminal")?;
+        ensure(!AutomatonState::Idle.is_active(), "idle is not active")?;
+
+        ensure(AutomatonState::Running.is_active(), "running is active")?;
+        ensure(!AutomatonState::Running.is_terminal(), "running is not terminal")?;
+
+        ensure(AutomatonState::Completed.is_terminal(), "completed is terminal")?;
+        ensure(AutomatonState::Failed.is_terminal(), "failed is terminal")?;
+        ensure(AutomatonState::Cancelled.is_terminal(), "cancelled is terminal")?;
+
+        ensure(!AutomatonState::Completed.is_active(), "completed is not active")?;
+        Ok(())
+    }
+
+    #[test]
+    fn automaton_state_round_trip() -> TestResult {
+        use super::AutomatonState;
+
+        for state in AutomatonState::all() {
+            let rendered = state.to_string();
+            ensure(!rendered.is_empty(), &format!("state {:?} should have string", state))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn import_automaton_certificate_transitions() -> TestResult {
+        use super::{AutomatonState, ImportAutomatonCertificate};
+
+        let mut cert = ImportAutomatonCertificate::new("cass", "/path/to/sessions");
+        ensure_equal(&cert.state, &AutomatonState::Idle, "initial state")?;
+        ensure(!cert.is_complete(), "should not be complete initially")?;
+
+        cert.record_transition(AutomatonState::Initializing, "start_import");
+        ensure_equal(&cert.state, &AutomatonState::Initializing, "after init")?;
+        ensure_equal(&cert.transitions.len(), &1, "one transition")?;
+
+        cert.record_transition(AutomatonState::Running, "begin_scan");
+        cert.sessions_imported = 10;
+        cert.memories_extracted = 50;
+
+        cert.validation_passed = true;
+        cert.record_transition(AutomatonState::Completed, "finish");
+        ensure(cert.is_complete(), "should be complete")?;
+        ensure(cert.is_successful(), "should be successful")
+    }
+
+    #[test]
+    fn index_publish_automaton_certificate_generations() -> TestResult {
+        use super::{AutomatonState, IndexPublishAutomatonCertificate};
+
+        let mut cert = IndexPublishAutomatonCertificate::new("fts5");
+        cert.db_generation_before = 10;
+        cert.db_generation_after = 12;
+        ensure(cert.generations_match(), "generations should match when after >= before")?;
+
+        cert.db_generation_after = 8;
+        ensure(!cert.generations_match(), "should not match when after < before")
+    }
+
+    #[test]
+    fn hook_automaton_certificate_success_check() -> TestResult {
+        use super::{AutomatonState, HookAutomatonCertificate};
+
+        let mut cert = HookAutomatonCertificate::new("pre_commit", "pre");
+        cert.trigger_event = "commit".to_owned();
+        cert.record_transition(AutomatonState::Running, "execute");
+        cert.exit_code = Some(0);
+        cert.record_transition(AutomatonState::Completed, "finish");
+        ensure(cert.is_successful(), "exit 0 + completed = successful")?;
+
+        let mut failed_cert = HookAutomatonCertificate::new("pre_commit", "pre");
+        failed_cert.record_transition(AutomatonState::Completed, "finish");
+        failed_cert.exit_code = Some(1);
+        ensure(!failed_cert.is_successful(), "exit 1 = not successful")
+    }
+
+    #[test]
+    fn backup_automaton_certificate_verification() -> TestResult {
+        use super::{AutomatonState, BackupAutomatonCertificate};
+
+        let mut cert = BackupAutomatonCertificate::new("full", "/backups/daily");
+        cert.files_count = 100;
+        cert.total_bytes = 1024 * 1024;
+        cert.checksum = Some("abc123".to_owned());
+        cert.verified = true;
+        cert.record_transition(AutomatonState::Completed, "finish");
+
+        ensure(cert.is_complete(), "should be complete")?;
+        ensure(cert.is_verified(), "should be verified")
+    }
+
+    #[test]
+    fn shutdown_automaton_certificate_clean_check() -> TestResult {
+        use super::{AutomatonState, ShutdownAutomatonCertificate};
+
+        let mut cert = ShutdownAutomatonCertificate::new("graceful", "user_request");
+        cert.pending_operations = 5;
+        cert.operations_completed = 5;
+        cert.cleanup_tasks_run = 3;
+        cert.state_persisted = true;
+        cert.connections_closed = true;
+        cert.record_transition(AutomatonState::Completed, "shutdown_complete");
+
+        ensure(cert.is_complete(), "should be complete")?;
+        ensure(cert.is_clean(), "should be clean")?;
+        ensure(!cert.had_data_loss(), "should not have data loss")?;
+
+        let mut dirty = ShutdownAutomatonCertificate::new("immediate", "crash");
+        dirty.operations_cancelled = 3;
+        dirty.state_persisted = false;
+        ensure(dirty.had_data_loss(), "should have data loss")
     }
 }
