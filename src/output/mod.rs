@@ -1830,6 +1830,161 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
 ];
 
 #[must_use]
+pub fn render_introspect_json() -> String {
+    let mut b = JsonBuilder::with_capacity(8192);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "introspect");
+        d.field_str("version", env!("CARGO_PKG_VERSION"));
+
+        d.field_object("commands", |c| {
+            for cmd in COMMAND_MANIFEST {
+                c.field_object(cmd.name, |obj| {
+                    obj.field_str("description", cmd.description);
+                    obj.field_bool("available", cmd.available);
+                    if !cmd.subcommands.is_empty() {
+                        obj.field_array_of_objects("subcommands", cmd.subcommands, |sub, sc| {
+                            sub.field_str("name", sc.name);
+                            sub.field_str("description", sc.description);
+                        });
+                    }
+                    if !cmd.args.is_empty() {
+                        obj.field_raw("argCount", &cmd.args.len().to_string());
+                    }
+                });
+            }
+        });
+
+        d.field_object("schemas", |s| {
+            for schema in public_schemas() {
+                s.field_object(schema.id, |obj| {
+                    obj.field_str("version", schema.version);
+                    obj.field_str("description", schema.description);
+                    obj.field_str("category", schema.category);
+                });
+            }
+        });
+
+        d.field_object("errorCodes", |e| {
+            for code in ERROR_CODES {
+                e.field_object(code.code, |obj| {
+                    obj.field_str("message", code.message);
+                    obj.field_str("repair", code.repair);
+                    obj.field_str("category", code.category);
+                });
+            }
+        });
+
+        d.field_object("globalOptions", |g| {
+            for opt in GLOBAL_OPTIONS {
+                g.field_object(opt.name, |obj| {
+                    if !opt.short.is_empty() {
+                        obj.field_str("short", opt.short);
+                    }
+                    obj.field_str("description", opt.description);
+                    obj.field_str("type", opt.opt_type);
+                });
+            }
+        });
+    });
+    b.finish()
+}
+
+#[must_use]
+pub fn render_introspect_human() -> String {
+    let mut output = format!("ee introspect (v{})\n\n", env!("CARGO_PKG_VERSION"));
+
+    output.push_str("Commands:\n");
+    for cmd in COMMAND_MANIFEST {
+        let status = if cmd.available { "✓" } else { "○" };
+        output.push_str(&format!(
+            "  {} {} — {}\n",
+            status, cmd.name, cmd.description
+        ));
+    }
+
+    output.push_str("\nSchemas:\n");
+    for schema in public_schemas() {
+        output.push_str(&format!(
+            "  {} (v{}) — {}\n",
+            schema.id, schema.version, schema.description
+        ));
+    }
+
+    output.push_str("\nError Codes:\n");
+    for code in ERROR_CODES {
+        output.push_str(&format!("  {} — {}\n", code.code, code.message));
+    }
+
+    output.push_str("\nNext:\n  ee introspect --json\n");
+    output
+}
+
+#[must_use]
+pub fn render_introspect_toon() -> String {
+    render_toon_from_json(&render_introspect_json())
+}
+
+struct ErrorCodeEntry {
+    code: &'static str,
+    message: &'static str,
+    repair: &'static str,
+    category: &'static str,
+}
+
+const ERROR_CODES: &[ErrorCodeEntry] = &[
+    ErrorCodeEntry {
+        code: "usage",
+        message: "Invalid command usage",
+        repair: "ee --help",
+        category: "cli",
+    },
+    ErrorCodeEntry {
+        code: "config",
+        message: "Configuration error",
+        repair: "ee doctor",
+        category: "config",
+    },
+    ErrorCodeEntry {
+        code: "storage",
+        message: "Storage operation failed",
+        repair: "ee doctor --fix-plan",
+        category: "storage",
+    },
+    ErrorCodeEntry {
+        code: "search_index",
+        message: "Search index error",
+        repair: "ee index rebuild",
+        category: "search",
+    },
+    ErrorCodeEntry {
+        code: "import",
+        message: "Import operation failed",
+        repair: "ee import cass --dry-run",
+        category: "import",
+    },
+    ErrorCodeEntry {
+        code: "degraded",
+        message: "Required capability is degraded",
+        repair: "ee status --json",
+        category: "degraded",
+    },
+    ErrorCodeEntry {
+        code: "policy",
+        message: "Operation denied by policy",
+        repair: "ee capabilities --json",
+        category: "policy",
+    },
+    ErrorCodeEntry {
+        code: "migration",
+        message: "Migration required",
+        repair: "ee doctor --fix-plan",
+        category: "storage",
+    },
+];
+
+#[must_use]
 pub fn agent_docs() -> String {
     format!(
         "{{\"schema\":\"{}\",\"success\":true,\"data\":{{\"command\":\"agent-docs\",\"description\":\"Durable, local-first, explainable memory for coding agents.\",\"primaryWorkflow\":\"ee context \\\"<task>\\\" --workspace . --max-tokens 4000 --json\",\"coreCommands\":[\"init\",\"remember\",\"search\",\"context\",\"why\",\"status\"]}}}}",
@@ -1840,7 +1995,7 @@ pub fn agent_docs() -> String {
 #[must_use]
 pub fn error_response_json(error: &DomainError) -> String {
     let code = error.code();
-    let message = escape_json_string(error.message());
+    let message = escape_json_string(&error.message());
     match error.repair() {
         Some(repair) => {
             let repair = escape_json_string(repair);

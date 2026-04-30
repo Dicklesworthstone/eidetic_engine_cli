@@ -126,6 +126,8 @@ pub enum Command {
     /// Import memories and evidence from external sources.
     #[command(subcommand)]
     Import(ImportCommand),
+    /// Introspect ee's command, schema, and error maps.
+    Introspect,
     /// Manage search indexes.
     #[command(subcommand)]
     Index(IndexCommand),
@@ -581,6 +583,18 @@ where
         Some(Command::Import(ImportCommand::Cass(ref args))) => {
             handle_import_cass(&cli, args, stdout, stderr)
         }
+        Some(Command::Introspect) => match cli.renderer() {
+            output::Renderer::Human => write_stdout(stdout, &output::render_introspect_human()),
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_introspect_toon() + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_introspect_json() + "\n"))
+            }
+        },
         Some(Command::Memory(MemoryCommand::Show(ref args))) => {
             handle_memory_show(&cli, args, stdout, stderr)
         }
