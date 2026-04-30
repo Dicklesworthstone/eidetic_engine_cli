@@ -6,6 +6,7 @@ use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use crate::cass::{CassClient, CassImportOptions, import_cass_sessions};
+use crate::core::agent_detect::{AgentDetectOptions, detect_installed_agents};
 use crate::core::agent_docs::{AgentDocsReport, AgentDocsTopic};
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
@@ -117,6 +118,9 @@ impl Cli {
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum Command {
+    /// Detect and manage coding agent installations.
+    #[command(subcommand)]
+    Agent(AgentCommand),
     /// Agent-oriented documentation for ee commands, contracts, and usage.
     AgentDocs(AgentDocsArgs),
     /// Report feature availability, commands, and subsystem status.
@@ -166,6 +170,25 @@ pub enum Command {
     Version,
     /// Explain why a memory was stored, retrieved, or selected.
     Why(WhyArgs),
+}
+
+/// Subcommands for `ee agent`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum AgentCommand {
+    /// Detect installed coding agents on this system.
+    Detect(AgentDetectArgs),
+}
+
+/// Arguments for `ee agent detect`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct AgentDetectArgs {
+    /// Only check specific agent connectors (comma-separated slugs).
+    #[arg(long, value_name = "SLUGS")]
+    pub only: Option<String>,
+
+    /// Include agents that were not detected.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_undetected: bool,
 }
 
 /// Arguments for `ee agent-docs`.
@@ -598,6 +621,9 @@ where
 
     match cli.command {
         None | Some(Command::Help) => write_help(stdout),
+        Some(Command::Agent(AgentCommand::Detect(ref args))) => {
+            handle_agent_detect(&cli, args, stdout, stderr)
+        }
         Some(Command::AgentDocs(ref args)) => handle_agent_docs(&cli, args, stdout, stderr),
         Some(Command::Capabilities) => {
             let report = CapabilitiesReport::gather();
@@ -2040,6 +2066,114 @@ fn handle_remember(
     })
 }
 
+fn handle_agent_detect<W, E>(
+    cli: &Cli,
+    args: &AgentDetectArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let only_connectors = args.only.as_ref().map(|s| {
+        s.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect()
+    });
+
+    let options = AgentDetectOptions {
+        only_connectors,
+        include_undetected: args.include_undetected,
+        root_overrides: vec![],
+    };
+
+    match detect_installed_agents(&options) {
+        Ok(report) => {
+            let human_output = || {
+                let mut out = format!(
+                    "Agent Detection Report (v{})\n\n",
+                    report.format_version
+                );
+                out.push_str(&format!(
+                    "Summary: {} detected of {} checked\n\n",
+                    report.summary.detected_count, report.summary.total_count
+                ));
+                for entry in &report.installed_agents {
+                    let status = if entry.detected { "✓" } else { "✗" };
+                    out.push_str(&format!(
+                        "{} {}\n",
+                        status, entry.slug
+                    ));
+                    if entry.detected && !entry.root_paths.is_empty() {
+                        for path in &entry.root_paths {
+                            out.push_str(&format!("    {}\n", path));
+                        }
+                    }
+                }
+                out
+            };
+
+            let toon_output = || {
+                format!(
+                    "AGENT_DETECT|{}|{}\n",
+                    report.summary.detected_count, report.summary.total_count
+                )
+            };
+
+            let json_output = || {
+                let agents: Vec<serde_json::Value> = report
+                    .installed_agents
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "slug": e.slug,
+                            "detected": e.detected,
+                            "rootPaths": e.root_paths,
+                        })
+                    })
+                    .collect();
+
+                serde_json::json!({
+                    "schema": "ee.agent.detect.v1",
+                    "success": true,
+                    "data": {
+                        "command": "agent detect",
+                        "formatVersion": report.format_version,
+                        "generatedAt": report.generated_at,
+                        "summary": {
+                            "detectedCount": report.summary.detected_count,
+                            "totalCount": report.summary.total_count,
+                        },
+                        "installedAgents": agents,
+                    }
+                })
+                .to_string()
+            };
+
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &human_output())
+                }
+                output::Renderer::Toon => write_stdout(stdout, &toon_output()),
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => write_stdout(stdout, &(json_output() + "\n")),
+            }
+        }
+        Err(err) => {
+            let domain_error = DomainError::Usage {
+                message: err.to_string(),
+                repair: Some("ee agent detect --help".to_string()),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
 fn handle_situation_classify<W>(
     cli: &Cli,
     args: &SituationClassifyArgs,
@@ -2153,6 +2287,7 @@ where
 
 /// Canonical command names for did-you-mean suggestions.
 const COMMAND_NAMES: &[&str] = &[
+    "agent",
     "agent-docs",
     "capabilities",
     "check",
@@ -2177,6 +2312,7 @@ const COMMAND_NAMES: &[&str] = &[
 ];
 
 /// Subcommand names for nested commands.
+const AGENT_SUBCOMMANDS: &[&str] = &["detect"];
 const DIAG_SUBCOMMANDS: &[&str] = &["quarantine", "streams"];
 const EVAL_SUBCOMMANDS: &[&str] = &["run", "list"];
 const IMPORT_SUBCOMMANDS: &[&str] = &["cass", "eidetic-legacy"];
@@ -2224,6 +2360,9 @@ impl NormalizedInvocation {
         match &cli.command {
             None => "help".to_string(),
             Some(cmd) => match cmd {
+                Command::Agent(agent) => match agent {
+                    AgentCommand::Detect(_) => "agent detect".to_string(),
+                },
                 Command::AgentDocs(_) => "agent-docs".to_string(),
                 Command::Capabilities => "capabilities".to_string(),
                 Command::Check => "check".to_string(),
@@ -2318,6 +2457,7 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
 #[must_use]
 pub fn did_you_mean(input: &str, parent_command: Option<&str>) -> Option<String> {
     let candidates: &[&str] = match parent_command {
+        Some("agent") => AGENT_SUBCOMMANDS,
         Some("diag") => DIAG_SUBCOMMANDS,
         Some("eval") => EVAL_SUBCOMMANDS,
         Some("import") => IMPORT_SUBCOMMANDS,
@@ -2360,6 +2500,7 @@ fn extract_invalid_subcommand(args: &[OsString]) -> Option<(String, Option<Strin
             if let Some(next) = args_str.get(i + 1) {
                 if !next.starts_with('-') {
                     let subcommands = match *arg {
+                        "agent" => Some(AGENT_SUBCOMMANDS),
                         "diag" => Some(DIAG_SUBCOMMANDS),
                         "eval" => Some(EVAL_SUBCOMMANDS),
                         "import" => Some(IMPORT_SUBCOMMANDS),
