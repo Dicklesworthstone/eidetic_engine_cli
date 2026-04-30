@@ -22,6 +22,10 @@ use crate::core::lab::{
     CaptureOptions as LabCaptureOptions, CounterfactualOptions as LabCounterfactualOptions,
     ReplayOptions as LabReplayOptions, capture_episode, replay_episode, run_counterfactual,
 };
+use crate::core::learn::{
+    LearnAgendaOptions, LearnSummaryOptions, LearnUncertaintyOptions, show_agenda, show_summary,
+    show_uncertainty,
+};
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
     GetMemoryOptions, ListMemoriesOptions, get_memory_details, list_memories,
@@ -2427,20 +2431,145 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_lab_counterfactual_human(&report))
             }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_lab_counterfactual_toon(&report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_lab_counterfactual_json(&report) + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+// ============================================================================
+// EE-441: Learn Command Handlers
+// ============================================================================
+
+fn handle_learn_agenda<W, E>(
+    cli: &Cli,
+    args: &LearnAgendaArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = LearnAgendaOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        limit: args.limit,
+        topic: args.topic.clone(),
+        include_resolved: args.include_resolved,
+        sort: args.sort.clone(),
+    };
+
+    match show_agenda(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_learn_agenda_human(&report))
+            }
             output::Renderer::Toon => {
-                write_stdout(
-                    stdout,
-                    &(output::render_lab_counterfactual_toon(&report) + "\n"),
-                )
+                write_stdout(stdout, &(output::render_learn_agenda_toon(&report) + "\n"))
             }
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => {
-                write_stdout(
-                    stdout,
-                    &(output::render_lab_counterfactual_json(&report) + "\n"),
-                )
+                write_stdout(stdout, &(output::render_learn_agenda_json(&report) + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_learn_uncertainty<W, E>(
+    cli: &Cli,
+    args: &LearnUncertaintyArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let min_uncertainty = match args.min_uncertainty.parse::<f64>() {
+        Ok(value) if (0.0..=1.0).contains(&value) => value,
+        _ => {
+            let error = DomainError::Usage {
+                message: format!(
+                    "Invalid minimum uncertainty `{}`: expected a number from 0.0 to 1.0",
+                    args.min_uncertainty
+                ),
+                repair: Some("Use --min-uncertainty 0.3".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let options = LearnUncertaintyOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        limit: args.limit,
+        min_uncertainty,
+        kind: args.kind.clone(),
+        low_confidence: args.low_confidence,
+    };
+
+    match show_uncertainty(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_learn_uncertainty_human(&report))
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_learn_uncertainty_toon(&report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_learn_uncertainty_json(&report) + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_learn_summary<W, E>(
+    cli: &Cli,
+    args: &LearnSummaryArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = LearnSummaryOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        period: args.period.clone(),
+        detailed: args.detailed,
+    };
+
+    match show_summary(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_learn_summary_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_learn_summary_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_learn_summary_json(&report) + "\n"))
             }
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
@@ -2524,15 +2653,17 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_preflight_show_human(&report))
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_preflight_show_toon(&report) + "\n"))
-            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_preflight_show_toon(&report) + "\n"),
+            ),
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_preflight_show_json(&report) + "\n"))
-            }
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_preflight_show_json(&report) + "\n"),
+            ),
         },
         Err(error) => {
             let json = serde_json::json!({
@@ -2573,15 +2704,17 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_preflight_close_human(&report))
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_preflight_close_toon(&report) + "\n"))
-            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_preflight_close_toon(&report) + "\n"),
+            ),
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_preflight_close_json(&report) + "\n"))
-            }
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_preflight_close_json(&report) + "\n"),
+            ),
         },
         Err(error) => {
             let json = serde_json::json!({
@@ -2630,9 +2763,11 @@ where
         let mut out = String::from("Goal Plan\n=========\n\n");
         out.push_str(&format!("Plan ID:    {}\n", plan.plan_id));
         out.push_str(&format!("Goal:       {}\n", plan.goal_input));
-        out.push_str(&format!("Category:   {} (confidence: {:.0}%)\n",
+        out.push_str(&format!(
+            "Category:   {} (confidence: {:.0}%)\n",
             plan.classification.primary.as_str(),
-            plan.classification.confidence * 100.0));
+            plan.classification.confidence * 100.0
+        ));
         out.push_str(&format!("Recipe:     {}\n", plan.recipe_id));
         out.push_str(&format!("Profile:    {}\n\n", plan.profile.as_str()));
 
@@ -2642,8 +2777,15 @@ where
 
         out.push_str("Steps:\n");
         for step in &plan.steps {
-            let dry_run_marker = if step.dry_run_available { " [dry-run available]" } else { "" };
-            out.push_str(&format!("  {}. {}{}\n", step.order, step.command, dry_run_marker));
+            let dry_run_marker = if step.dry_run_available {
+                " [dry-run available]"
+            } else {
+                ""
+            };
+            out.push_str(&format!(
+                "  {}. {}{}\n",
+                step.order, step.command, dry_run_marker
+            ));
             out.push_str(&format!("      {}\n", step.description));
         }
 
@@ -2679,7 +2821,9 @@ where
     };
 
     match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human_output()),
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &human_output())
+        }
         output::Renderer::Toon => write_stdout(stdout, &toon_output()),
         output::Renderer::Json
         | output::Renderer::Jsonl
@@ -2701,7 +2845,10 @@ where
     use crate::core::plan::{GoalCategory, RECIPE_LIST_SCHEMA_V1, recipes_by_category};
 
     let category = args.category.as_ref().and_then(|c| {
-        GoalCategory::all().iter().find(|cat| cat.as_str() == c).copied()
+        GoalCategory::all()
+            .iter()
+            .find(|cat| cat.as_str() == c)
+            .copied()
     });
 
     let recipes = recipes_by_category(category);
@@ -2742,7 +2889,9 @@ where
     };
 
     match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human_output()),
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &human_output())
+        }
         output::Renderer::Toon => write_stdout(stdout, &toon_output()),
         output::Renderer::Json
         | output::Renderer::Jsonl
@@ -2771,13 +2920,23 @@ where
                 out.push_str(&format!("Name:        {}\n", recipe.name));
                 out.push_str(&format!("Category:    {}\n", recipe.category.as_str()));
                 out.push_str(&format!("Description: {}\n", recipe.description));
-                out.push_str(&format!("Effect:      {}\n", recipe.effect_posture.as_str()));
+                out.push_str(&format!(
+                    "Effect:      {}\n",
+                    recipe.effect_posture.as_str()
+                ));
                 out.push_str(&format!("Profiles:    {}\n\n", recipe.profiles.join(", ")));
 
                 out.push_str("Steps:\n");
                 for step in &recipe.steps {
-                    let required = if step.required { "[required]" } else { "[optional]" };
-                    out.push_str(&format!("  {}. {} {}\n", step.order, step.command, required));
+                    let required = if step.required {
+                        "[required]"
+                    } else {
+                        "[optional]"
+                    };
+                    out.push_str(&format!(
+                        "  {}. {} {}\n",
+                        step.order, step.command, required
+                    ));
                     out.push_str(&format!("      {}\n", step.description));
                 }
 
@@ -2790,7 +2949,10 @@ where
                 }
 
                 if !recipe.required_capabilities.is_empty() {
-                    out.push_str(&format!("\nRequired Capabilities: {}\n", recipe.required_capabilities.join(", ")));
+                    out.push_str(&format!(
+                        "\nRequired Capabilities: {}\n",
+                        recipe.required_capabilities.join(", ")
+                    ));
                 }
                 out
             };
@@ -2815,7 +2977,9 @@ where
             };
 
             match cli.renderer() {
-                output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human_output()),
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &human_output())
+                }
                 output::Renderer::Toon => write_stdout(stdout, &toon_output()),
                 output::Renderer::Json
                 | output::Renderer::Jsonl
@@ -2851,8 +3015,14 @@ where
         let human_output = || {
             let mut out = format!("Explanation: {}\n", explanation.recipe_id);
             out.push_str(&format!("{}\n\n", "=".repeat(40)));
-            out.push_str(&format!("Classification: {}\n", explanation.classification_reasoning));
-            out.push_str(&format!("Selection:      {}\n\n", explanation.selection_reasoning));
+            out.push_str(&format!(
+                "Classification: {}\n",
+                explanation.classification_reasoning
+            ));
+            out.push_str(&format!(
+                "Selection:      {}\n\n",
+                explanation.selection_reasoning
+            ));
 
             out.push_str("Posture Inputs:\n");
             for input in &explanation.posture_inputs {
@@ -2866,9 +3036,7 @@ where
             out
         };
 
-        let toon_output = || {
-            format!("EXPLAIN|{}|recipe\n", explanation.recipe_id)
-        };
+        let toon_output = || format!("EXPLAIN|{}|recipe\n", explanation.recipe_id);
 
         let json_output = || {
             serde_json::json!({
@@ -2880,7 +3048,9 @@ where
         };
 
         match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human_output()),
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &human_output())
+            }
             output::Renderer::Toon => write_stdout(stdout, &toon_output()),
             output::Renderer::Json
             | output::Renderer::Jsonl
@@ -2926,15 +3096,17 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_procedure_propose_human(&report))
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_procedure_propose_toon(&report) + "\n"))
-            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_procedure_propose_toon(&report) + "\n"),
+            ),
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_procedure_propose_json(&report) + "\n"))
-            }
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_procedure_propose_json(&report) + "\n"),
+            ),
         },
         Err(error) => {
             let json = serde_json::json!({
@@ -2974,15 +3146,17 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_procedure_show_human(&report))
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_procedure_show_toon(&report) + "\n"))
-            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_procedure_show_toon(&report) + "\n"),
+            ),
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_procedure_show_json(&report) + "\n"))
-            }
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_procedure_show_json(&report) + "\n"),
+            ),
         },
         Err(error) => {
             let json = serde_json::json!({
@@ -3022,15 +3196,17 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_procedure_list_human(&report))
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_procedure_list_toon(&report) + "\n"))
-            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_procedure_list_toon(&report) + "\n"),
+            ),
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_procedure_list_json(&report) + "\n"))
-            }
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_procedure_list_json(&report) + "\n"),
+            ),
         },
         Err(error) => {
             let json = serde_json::json!({
@@ -3070,15 +3246,17 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_procedure_export_human(&report))
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_procedure_export_toon(&report) + "\n"))
-            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_procedure_export_toon(&report) + "\n"),
+            ),
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_procedure_export_json(&report) + "\n"))
-            }
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_procedure_export_json(&report) + "\n"),
+            ),
         },
         Err(error) => {
             let json = serde_json::json!({
@@ -4437,7 +4615,9 @@ where
     };
 
     match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human_output()),
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &human_output())
+        }
         output::Renderer::Toon => write_stdout(stdout, &toon_output()),
         output::Renderer::Json
         | output::Renderer::Jsonl
@@ -4566,7 +4746,9 @@ where
     };
 
     match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human_output()),
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &human_output())
+        }
         output::Renderer::Toon => write_stdout(stdout, &toon_output()),
         output::Renderer::Json
         | output::Renderer::Jsonl
@@ -4907,15 +5089,17 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_support_bundle_human(&report))
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_support_bundle_toon(&report) + "\n"))
-            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_support_bundle_toon(&report) + "\n"),
+            ),
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_support_bundle_json(&report) + "\n"))
-            }
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_support_bundle_json(&report) + "\n"),
+            ),
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
@@ -4944,15 +5128,17 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_support_inspect_human(&report))
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_support_inspect_toon(&report) + "\n"))
-            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_support_inspect_toon(&report) + "\n"),
+            ),
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_support_inspect_json(&report) + "\n"))
-            }
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_support_inspect_json(&report) + "\n"),
+            ),
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
@@ -4987,15 +5173,17 @@ where
         output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &output::render_economy_report_human(&report))
         }
-        output::Renderer::Toon => {
-            write_stdout(stdout, &(output::render_economy_report_toon(&report) + "\n"))
-        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_economy_report_toon(&report) + "\n"),
+        ),
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            write_stdout(stdout, &(output::render_economy_report_json(&report) + "\n"))
-        }
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_economy_report_json(&report) + "\n"),
+        ),
     }
 }
 
@@ -5189,8 +5377,12 @@ impl NormalizedInvocation {
                 },
                 Command::Plan(plan) => match plan {
                     PlanCommand::Goal(_) => "plan goal".to_string(),
-                    PlanCommand::Recipe(PlanRecipeCommand::List(_)) => "plan recipe list".to_string(),
-                    PlanCommand::Recipe(PlanRecipeCommand::Show(_)) => "plan recipe show".to_string(),
+                    PlanCommand::Recipe(PlanRecipeCommand::List(_)) => {
+                        "plan recipe list".to_string()
+                    }
+                    PlanCommand::Recipe(PlanRecipeCommand::Show(_)) => {
+                        "plan recipe show".to_string()
+                    }
                     PlanCommand::Explain(_) => "plan explain".to_string(),
                 },
                 Command::Procedure(proc) => match proc {

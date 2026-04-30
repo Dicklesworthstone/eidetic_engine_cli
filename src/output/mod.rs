@@ -4883,6 +4883,159 @@ pub fn render_procedure_export_toon(report: &ProcedureExportReport) -> String {
     )
 }
 
+// ============================================================================
+// EE-441: Learn Output Rendering
+// ============================================================================
+
+use crate::core::learn::{LearnAgendaReport, LearnSummaryReport, LearnUncertaintyReport};
+
+/// Render a learn agenda report as JSON.
+#[must_use]
+pub fn render_learn_agenda_json(report: &LearnAgendaReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "success": true,
+        "totalGaps": report.total_gaps,
+        "highPriorityCount": report.high_priority_count,
+        "resolvedCount": report.resolved_count,
+        "items": report.items,
+        "generatedAt": report.generated_at,
+    })
+    .to_string()
+}
+
+/// Render a learn agenda report as human-readable text.
+#[must_use]
+pub fn render_learn_agenda_human(report: &LearnAgendaReport) -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str("Learning Agenda\n\n");
+    out.push_str(&format!(
+        "Total gaps: {} ({} high priority, {} resolved)\n\n",
+        report.total_gaps, report.high_priority_count, report.resolved_count
+    ));
+
+    for item in &report.items {
+        out.push_str(&format!(
+            "[{}] {} (priority: {}, uncertainty: {:.2})\n",
+            item.id, item.topic, item.priority, item.uncertainty
+        ));
+        out.push_str(&format!("    {}\n", item.gap_description));
+        out.push_str(&format!("    Status: {} | Source: {}\n\n", item.status, item.source));
+    }
+
+    out.push_str("Next:\n  ee learn uncertainty --json\n");
+    out
+}
+
+/// Render a learn agenda report as TOON.
+#[must_use]
+pub fn render_learn_agenda_toon(report: &LearnAgendaReport) -> String {
+    format!(
+        "LEARN_AGENDA|total={}|high={}|resolved={}",
+        report.total_gaps, report.high_priority_count, report.resolved_count
+    )
+}
+
+/// Render a learn uncertainty report as JSON.
+#[must_use]
+pub fn render_learn_uncertainty_json(report: &LearnUncertaintyReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "success": true,
+        "meanUncertainty": report.mean_uncertainty,
+        "highUncertaintyCount": report.high_uncertainty_count,
+        "samplingCandidates": report.sampling_candidates,
+        "items": report.items,
+        "generatedAt": report.generated_at,
+    })
+    .to_string()
+}
+
+/// Render a learn uncertainty report as human-readable text.
+#[must_use]
+pub fn render_learn_uncertainty_human(report: &LearnUncertaintyReport) -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str("Uncertainty Estimates\n\n");
+    out.push_str(&format!(
+        "Mean uncertainty: {:.2} ({} high, {} candidates)\n\n",
+        report.mean_uncertainty, report.high_uncertainty_count, report.sampling_candidates
+    ));
+
+    for item in &report.items {
+        out.push_str(&format!(
+            "[{}] {} (uncertainty: {:.2}, confidence: {:.2})\n",
+            item.memory_id, item.kind, item.uncertainty, item.confidence
+        ));
+        out.push_str(&format!("    {}\n", item.content_preview));
+        out.push_str(&format!("    Retrieval count: {}\n\n", item.retrieval_count));
+    }
+
+    out.push_str("Next:\n  ee learn summary --json\n");
+    out
+}
+
+/// Render a learn uncertainty report as TOON.
+#[must_use]
+pub fn render_learn_uncertainty_toon(report: &LearnUncertaintyReport) -> String {
+    format!(
+        "LEARN_UNCERTAINTY|mean={:.2}|high={}|candidates={}",
+        report.mean_uncertainty, report.high_uncertainty_count, report.sampling_candidates
+    )
+}
+
+/// Render a learn summary report as JSON.
+#[must_use]
+pub fn render_learn_summary_json(report: &LearnSummaryReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "success": true,
+        "summary": report.summary,
+        "events": report.events,
+        "generatedAt": report.generated_at,
+    })
+    .to_string()
+}
+
+/// Render a learn summary report as human-readable text.
+#[must_use]
+pub fn render_learn_summary_human(report: &LearnSummaryReport) -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str(&format!("Learning Summary ({})\n\n", report.summary.period));
+    out.push_str(&format!("Memories created: {}\n", report.summary.memories_created));
+    out.push_str(&format!("Memories promoted: {}\n", report.summary.memories_promoted));
+    out.push_str(&format!("Memories demoted: {}\n", report.summary.memories_demoted));
+    out.push_str(&format!("Rules learned: {}\n", report.summary.rules_learned));
+    out.push_str(&format!("Rules validated: {}\n", report.summary.rules_validated));
+    out.push_str(&format!("Gaps identified: {}\n", report.summary.gaps_identified));
+    out.push_str(&format!("Gaps resolved: {}\n", report.summary.gaps_resolved));
+    out.push_str(&format!(
+        "Net knowledge delta: {:+}\n\n",
+        report.summary.net_knowledge_delta
+    ));
+
+    if !report.events.is_empty() {
+        out.push_str("Recent Events:\n");
+        for event in &report.events {
+            out.push_str(&format!(
+                "  [{}] {} ({})\n",
+                event.event_type, event.description, event.impact
+            ));
+        }
+    }
+
+    out.push_str("\nNext:\n  ee learn agenda --json\n");
+    out
+}
+
+/// Render a learn summary report as TOON.
+#[must_use]
+pub fn render_learn_summary_toon(report: &LearnSummaryReport) -> String {
+    format!(
+        "LEARN_SUMMARY|{}|delta={:+}|events={}",
+        report.summary.period, report.summary.net_knowledge_delta, report.events.len()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
