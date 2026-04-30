@@ -101,8 +101,13 @@ pub enum Command {
     Check,
     /// Run health checks on workspace and subsystems.
     Doctor,
+    /// Run evaluation scenarios against fixtures.
+    #[command(subcommand)]
+    Eval(EvalCommand),
     /// Print command help.
     Help,
+    /// Store a new memory.
+    Remember(RememberArgs),
     /// List or export public response schemas.
     #[command(subcommand)]
     Schema(SchemaCommand),
@@ -110,6 +115,53 @@ pub enum Command {
     Status,
     /// Print the ee version.
     Version,
+}
+
+/// Arguments for the remember command.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct RememberArgs {
+    /// Memory content to store.
+    #[arg(value_name = "CONTENT")]
+    pub content: String,
+
+    /// Memory level (working, episodic, semantic, procedural).
+    #[arg(long, short = 'l', default_value = "episodic")]
+    pub level: String,
+
+    /// Memory kind (rule, fact, decision, failure, etc.).
+    #[arg(long, short = 'k', default_value = "fact")]
+    pub kind: String,
+
+    /// Tags to apply (comma-separated).
+    #[arg(long, short = 't')]
+    pub tags: Option<String>,
+
+    /// Confidence score (0.0 to 1.0).
+    #[arg(long, default_value = "0.8")]
+    pub confidence: f32,
+
+    /// Source provenance URI (e.g., file://path:line).
+    #[arg(long)]
+    pub source: Option<String>,
+
+    /// Perform a dry run without storing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum EvalCommand {
+    /// Run one or more evaluation scenarios.
+    Run {
+        /// Scenario ID to run (e.g., "usr_pre_task_brief"). Omit for all scenarios.
+        #[arg(value_name = "SCENARIO_ID")]
+        scenario_id: Option<String>,
+        /// Path to fixture directory (defaults to tests/fixtures/eval/).
+        #[arg(long, value_name = "PATH")]
+        fixture_dir: Option<std::path::PathBuf>,
+    },
+    /// List available evaluation scenarios.
+    List,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -239,6 +291,37 @@ where
                 }
             }
         }
+        Some(Command::Eval(ref eval_cmd)) => match eval_cmd {
+            EvalCommand::Run { scenario_id, .. } => match cli.renderer() {
+                output::Renderer::Human => write_stdout(
+                    stdout,
+                    &output::render_eval_run_human(scenario_id.as_deref()),
+                ),
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &(output::render_eval_run_toon(scenario_id.as_deref()) + "\n"),
+                ),
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => write_stdout(
+                    stdout,
+                    &(output::render_eval_run_json(scenario_id.as_deref()) + "\n"),
+                ),
+            },
+            EvalCommand::List => match cli.renderer() {
+                output::Renderer::Human => write_stdout(stdout, &output::render_eval_list_human()),
+                output::Renderer::Toon => {
+                    write_stdout(stdout, &(output::render_eval_list_toon() + "\n"))
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    write_stdout(stdout, &(output::render_eval_list_json() + "\n"))
+                }
+            },
+        },
         Some(Command::Schema(ref schema_cmd)) => match schema_cmd {
             SchemaCommand::List => match cli.renderer() {
                 output::Renderer::Human => {
@@ -272,6 +355,17 @@ where
                 ),
             },
         },
+        Some(Command::Remember(ref args)) => {
+            let result = handle_remember(args, cli.wants_json());
+            match cli.renderer() {
+                output::Renderer::Human => write_stdout(stdout, &result.human_output()),
+                output::Renderer::Toon => write_stdout(stdout, &(result.toon_output() + "\n")),
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => write_stdout(stdout, &(result.json_output() + "\n")),
+            }
+        }
         Some(Command::Status) => {
             let report = StatusReport::gather();
             match cli.renderer() {

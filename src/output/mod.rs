@@ -600,6 +600,81 @@ pub fn render_check_toon(report: &CheckReport) -> String {
     render_toon_from_json(&render_check_json(report))
 }
 
+/// Render evaluation run result as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_eval_run_json(scenario_id: Option<&str>) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "eval run");
+        if let Some(id) = scenario_id {
+            d.field_str("scenarioId", id);
+        }
+        d.field_str("status", "no_scenarios_available");
+        d.field_raw("scenariosRun", "0");
+        d.field_raw("scenariosPassed", "0");
+        d.field_raw("scenariosFailed", "0");
+        d.field_str(
+            "message",
+            "No evaluation scenarios configured. Add fixtures to tests/fixtures/eval/.",
+        );
+    });
+    b.finish()
+}
+
+/// Render evaluation run result as human-readable text.
+#[must_use]
+pub fn render_eval_run_human(scenario_id: Option<&str>) -> String {
+    let mut output = String::from("ee eval run\n\n");
+    if let Some(id) = scenario_id {
+        output.push_str(&format!("Scenario: {}\n\n", id));
+    }
+    output.push_str("Status: no scenarios available\n");
+    output.push_str("Results: 0 run, 0 passed, 0 failed\n\n");
+    output.push_str("No evaluation scenarios configured.\n");
+    output.push_str("Add fixtures to tests/fixtures/eval/ to define scenarios.\n");
+    output
+}
+
+/// Render evaluation run result as TOON.
+#[must_use]
+pub fn render_eval_run_toon(scenario_id: Option<&str>) -> String {
+    render_toon_from_json(&render_eval_run_json(scenario_id))
+}
+
+/// Render evaluation scenario list as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_eval_list_json() -> String {
+    let mut b = JsonBuilder::with_capacity(256);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "eval list");
+        d.field_raw("scenarios", "[]");
+        d.field_str(
+            "message",
+            "No evaluation scenarios configured. Add fixtures to tests/fixtures/eval/.",
+        );
+    });
+    b.finish()
+}
+
+/// Render evaluation scenario list as human-readable text.
+#[must_use]
+pub fn render_eval_list_human() -> String {
+    let mut output = String::from("ee eval list\n\n");
+    output.push_str("No evaluation scenarios configured.\n");
+    output.push_str("Add fixtures to tests/fixtures/eval/ to define scenarios.\n");
+    output
+}
+
+/// Render evaluation scenario list as TOON.
+#[must_use]
+pub fn render_eval_list_toon() -> String {
+    render_toon_from_json(&render_eval_list_json())
+}
+
 /// Public schema entry for the schema registry.
 #[derive(Clone, Debug)]
 pub struct SchemaEntry {
