@@ -258,6 +258,10 @@ pub struct SearchArgs {
     /// Index output directory. Defaults to <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
+
+    /// Include score explanations in output.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub explain: bool,
 }
 
 /// Arguments for `ee doctor`.
@@ -1420,6 +1424,7 @@ where
         index_dir: args.index_dir.clone(),
         query: args.query.clone(),
         limit: args.limit,
+        explain: args.explain,
     };
 
     match run_search(&options) {
@@ -2021,7 +2026,7 @@ pub fn did_you_mean(input: &str, parent_command: Option<&str>) -> Option<String>
     };
 
     let input_lower = input.to_lowercase();
-    let threshold = (input.len() / 2).max(2).min(3);
+    let threshold = (input.len() / 2).clamp(2, 3);
 
     let mut best: Option<(&str, usize)> = None;
     for &candidate in candidates {
@@ -3330,5 +3335,148 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    // ========================================================================
+    // EE-040: Invocation Normalization and Did-You-Mean Tests
+    // ========================================================================
+
+    #[test]
+    fn levenshtein_distance_exact_match_is_zero() -> TestResult {
+        ensure_equal(
+            &super::levenshtein_distance("status", "status"),
+            &0,
+            "exact match",
+        )
+    }
+
+    #[test]
+    fn levenshtein_distance_one_char_diff() -> TestResult {
+        ensure_equal(
+            &super::levenshtein_distance("status", "statis"),
+            &1,
+            "one substitution",
+        )?;
+        ensure_equal(
+            &super::levenshtein_distance("status", "statuss"),
+            &1,
+            "one insertion",
+        )?;
+        ensure_equal(
+            &super::levenshtein_distance("status", "stats"),
+            &1,
+            "one deletion",
+        )
+    }
+
+    #[test]
+    fn levenshtein_distance_empty_strings() -> TestResult {
+        ensure_equal(&super::levenshtein_distance("", ""), &0, "both empty")?;
+        ensure_equal(&super::levenshtein_distance("abc", ""), &3, "one empty")?;
+        ensure_equal(&super::levenshtein_distance("", "xyz"), &3, "other empty")
+    }
+
+    #[test]
+    fn did_you_mean_suggests_status_for_statis() -> TestResult {
+        let suggestion = super::did_you_mean("statis", None);
+        ensure_equal(&suggestion, &Some("status".to_string()), "statis -> status")
+    }
+
+    #[test]
+    fn did_you_mean_suggests_search_for_serch() -> TestResult {
+        let suggestion = super::did_you_mean("serch", None);
+        ensure_equal(&suggestion, &Some("search".to_string()), "serch -> search")
+    }
+
+    #[test]
+    fn did_you_mean_suggests_memory_for_memroy() -> TestResult {
+        let suggestion = super::did_you_mean("memroy", None);
+        ensure_equal(&suggestion, &Some("memory".to_string()), "memroy -> memory")
+    }
+
+    #[test]
+    fn did_you_mean_returns_none_for_unrelated() -> TestResult {
+        let suggestion = super::did_you_mean("xyzabc", None);
+        ensure_equal(&suggestion, &None, "unrelated returns None")
+    }
+
+    #[test]
+    fn did_you_mean_subcommand_memory_list() -> TestResult {
+        let suggestion = super::did_you_mean("lst", Some("memory"));
+        ensure_equal(&suggestion, &Some("list".to_string()), "lst -> list")
+    }
+
+    #[test]
+    fn did_you_mean_subcommand_index_rebuild() -> TestResult {
+        let suggestion = super::did_you_mean("rebild", Some("index"));
+        ensure_equal(
+            &suggestion,
+            &Some("rebuild".to_string()),
+            "rebild -> rebuild",
+        )
+    }
+
+    #[test]
+    fn normalized_invocation_extracts_command_path() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "status", "--json"])
+            .map_err(|e| format!("parse error: {e}"))?;
+        let args: Vec<OsString> = ["ee", "status", "--json"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let invocation = super::NormalizedInvocation::from_cli(&cli, &args);
+        ensure_equal(
+            &invocation.command_path,
+            &"status".to_string(),
+            "command_path",
+        )?;
+        ensure_equal(&invocation.wants_json, &true, "wants_json")
+    }
+
+    #[test]
+    fn normalized_invocation_nested_command() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "memory", "list"])
+            .map_err(|e| format!("parse error: {e}"))?;
+        let args: Vec<OsString> = ["ee", "memory", "list"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let invocation = super::NormalizedInvocation::from_cli(&cli, &args);
+        ensure_equal(
+            &invocation.command_path,
+            &"memory list".to_string(),
+            "nested command_path",
+        )
+    }
+
+    #[test]
+    fn normalized_invocation_diagnostic_key() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "search", "query", "--json"])
+            .map_err(|e| format!("parse error: {e}"))?;
+        let args: Vec<OsString> = ["ee", "search", "query", "--json"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let invocation = super::NormalizedInvocation::from_cli(&cli, &args);
+        ensure_equal(
+            &invocation.diagnostic_key(),
+            &"ee search --json".to_string(),
+            "diagnostic_key",
+        )
+    }
+
+    #[test]
+    fn unknown_command_json_includes_did_you_mean() -> TestResult {
+        let (exit, stdout, _stderr) = invoke(&["ee", "statis", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "unknown command exit")?;
+        ensure_contains(&stdout, "ee.error.v1", "error schema")?;
+        ensure_contains(&stdout, "did you mean", "did_you_mean hint in message")
+    }
+
+    #[test]
+    fn unknown_command_human_shows_suggestion() -> TestResult {
+        let (exit, _stdout, stderr) = invoke(&["ee", "serch"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "unknown command exit")?;
+        ensure_contains(&stderr, "did you mean", "suggestion in stderr")
     }
 }

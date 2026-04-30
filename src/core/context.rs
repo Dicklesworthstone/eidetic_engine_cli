@@ -324,6 +324,7 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
         index_dir: options.index_dir.clone(),
         query: request.query.clone(),
         limit: request.candidate_pool,
+        explain: false,
     })
     .map_err(ContextPackError::Search)?;
 
