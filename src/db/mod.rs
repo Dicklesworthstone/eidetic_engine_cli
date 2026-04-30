@@ -3484,6 +3484,22 @@ impl DbConnection {
         let rows = self.query_for(DbOperation::Query, &sql, &params)?;
         rows.iter().map(stored_memory_link_from_row).collect()
     }
+
+    /// List all memory links for graph projection.
+    ///
+    /// Returns links in deterministic order for reproducible graph builds.
+    pub fn list_all_memory_links(&self, limit: Option<u32>) -> Result<Vec<StoredMemoryLink>> {
+        let mut sql = String::from(
+            "SELECT id, src_memory_id, dst_memory_id, relation, weight, confidence, directed, evidence_count, last_reinforced_at, source, created_at, created_by, metadata_json FROM memory_links ORDER BY relation ASC, src_memory_id ASC, dst_memory_id ASC, id ASC",
+        );
+
+        if let Some(lim) = limit {
+            sql.push_str(&format!(" LIMIT {}", lim));
+        }
+
+        let rows = self.query_for(DbOperation::Query, &sql, &[])?;
+        rows.iter().map(stored_memory_link_from_row).collect()
+    }
 }
 
 fn stored_memory_link_from_row(row: &Row) -> Result<StoredMemoryLink> {
