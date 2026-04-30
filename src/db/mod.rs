@@ -8345,4 +8345,258 @@ mod tests {
         connection.close()?;
         Ok(())
     }
+
+    // ========================================================================
+    // EE-CONC-001: Advisory Lock and Concurrent-Writer Contract Tests
+    // ========================================================================
+
+    #[test]
+    fn advisory_lock_id_canonical_key_format() -> TestResult {
+        let lock_id = super::AdvisoryLockId::new("workspace", "wsp_123");
+        ensure_equal(
+            &lock_id.canonical_key(),
+            &"workspace:wsp_123".to_string(),
+            "canonical key format",
+        )
+    }
+
+    #[test]
+    fn advisory_lock_id_constructors() -> TestResult {
+        let ws = super::AdvisoryLockId::workspace("wsp_abc");
+        ensure_equal(&ws.resource_type(), &"workspace", "workspace type")?;
+        ensure_equal(&ws.resource_id(), &"wsp_abc", "workspace id")?;
+
+        let mem = super::AdvisoryLockId::memory("mem_xyz");
+        ensure_equal(&mem.resource_type(), &"memory", "memory type")?;
+        ensure_equal(&mem.resource_id(), &"mem_xyz", "memory id")?;
+
+        let idx = super::AdvisoryLockId::index("wsp_def");
+        ensure_equal(&idx.resource_type(), &"index", "index type")?;
+        ensure_equal(&idx.resource_id(), &"wsp_def", "index id")
+    }
+
+    #[test]
+    fn acquire_advisory_lock_on_fresh_db() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_advisory_locks_table()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_test_acquire");
+        let result =
+            connection.acquire_advisory_lock(&lock_id, "agent_001", Some(300), Some("testing"))?;
+
+        match result {
+            super::AcquireLockResult::Acquired(lock) => {
+                ensure_equal(&lock.holder_id, &"agent_001".to_string(), "holder_id")?;
+                ensure(lock.reason.as_deref() == Some("testing"), "reason")?;
+                ensure(lock.expires_at.is_some(), "expires_at set")?;
+            }
+            _ => return Err(TestFailure::new("expected Acquired result")),
+        }
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn acquire_lock_twice_same_holder_returns_already_held() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_advisory_locks_table()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_test_twice");
+
+        let first = connection.acquire_advisory_lock(&lock_id, "agent_001", Some(300), None)?;
+        ensure(first.is_acquired(), "first acquire should succeed")?;
+
+        let second = connection.acquire_advisory_lock(&lock_id, "agent_001", Some(300), None)?;
+        match second {
+            super::AcquireLockResult::AlreadyHeld { holder_id, .. } => {
+                ensure_equal(&holder_id, &"agent_001".to_string(), "same holder")?;
+            }
+            _ => return Err(TestFailure::new("expected AlreadyHeld result")),
+        }
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn acquire_lock_different_holder_returns_already_held() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_advisory_locks_table()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_test_conflict");
+
+        let first = connection.acquire_advisory_lock(&lock_id, "agent_001", Some(300), None)?;
+        ensure(first.is_acquired(), "first acquire should succeed")?;
+
+        let second = connection.acquire_advisory_lock(&lock_id, "agent_002", Some(300), None)?;
+        match second {
+            super::AcquireLockResult::AlreadyHeld { holder_id, .. } => {
+                ensure_equal(&holder_id, &"agent_001".to_string(), "original holder")?;
+            }
+            _ => return Err(TestFailure::new("expected AlreadyHeld result")),
+        }
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn release_advisory_lock_by_holder() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_advisory_locks_table()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_test_release");
+
+        let result = connection.acquire_advisory_lock(&lock_id, "agent_001", Some(300), None)?;
+        ensure(result.is_acquired(), "acquire should succeed")?;
+
+        let released = connection.release_advisory_lock(&lock_id, "agent_001")?;
+        ensure(released, "release should return true")?;
+
+        let held = connection.is_lock_held(&lock_id)?;
+        ensure(held.is_none(), "lock should not be held after release")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn release_advisory_lock_wrong_holder_fails() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_advisory_locks_table()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_test_wrong_release");
+
+        let result = connection.acquire_advisory_lock(&lock_id, "agent_001", Some(300), None)?;
+        ensure(result.is_acquired(), "acquire should succeed")?;
+
+        let released = connection.release_advisory_lock(&lock_id, "agent_002")?;
+        ensure(!released, "release by wrong holder should return false")?;
+
+        let held = connection.is_lock_held(&lock_id)?;
+        ensure(held.is_some(), "lock should still be held")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn is_lock_held_returns_lock_info() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_advisory_locks_table()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_test_is_held");
+
+        let not_held = connection.is_lock_held(&lock_id)?;
+        ensure(not_held.is_none(), "lock should not be held initially")?;
+
+        connection.acquire_advisory_lock(&lock_id, "agent_001", Some(300), Some("test reason"))?;
+
+        let held = connection.is_lock_held(&lock_id)?;
+        match held {
+            Some(lock) => {
+                ensure_equal(&lock.holder_id, &"agent_001".to_string(), "holder")?;
+                ensure(lock.reason.as_deref() == Some("test reason"), "reason")?;
+            }
+            None => return Err(TestFailure::new("lock should be held")),
+        }
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_locks_by_holder_returns_all_locks() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_advisory_locks_table()?;
+
+        let lock1 = super::AdvisoryLockId::workspace("wsp_1");
+        let lock2 = super::AdvisoryLockId::memory("mem_1");
+        let lock3 = super::AdvisoryLockId::workspace("wsp_2");
+
+        connection.acquire_advisory_lock(&lock1, "agent_001", Some(300), None)?;
+        connection.acquire_advisory_lock(&lock2, "agent_001", Some(300), None)?;
+        connection.acquire_advisory_lock(&lock3, "agent_002", Some(300), None)?;
+
+        let agent1_locks = connection.list_locks_by_holder("agent_001")?;
+        ensure_equal(
+            &agent1_locks.len(),
+            &2_usize,
+            "agent_001 should hold 2 locks",
+        )?;
+
+        let agent2_locks = connection.list_locks_by_holder("agent_002")?;
+        ensure_equal(
+            &agent2_locks.len(),
+            &1_usize,
+            "agent_002 should hold 1 lock",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_writer_contract_constants_are_stable() -> TestResult {
+        use super::concurrent_writer_contract::*;
+
+        ensure_equal(&LOCK_TABLE, &"ee_advisory_locks", "lock table name")?;
+        ensure_equal(
+            &CONTRACT_VERSION,
+            &"ee.concurrent_writer.v1",
+            "contract version",
+        )?;
+        ensure(MAX_LOCK_TTL_SECS == 3600, "max ttl is 1 hour")?;
+        ensure(DEFAULT_LOCK_TTL_SECS == 300, "default ttl is 5 minutes")
+    }
+
+    #[test]
+    fn concurrent_writer_contract_advisory_locks_prevent_conflict() -> TestResult {
+        let conn1 = DbConnection::open_memory()?;
+        conn1.ensure_advisory_locks_table()?;
+
+        let workspace_lock = super::AdvisoryLockId::workspace("shared_workspace");
+
+        let agent1_result = conn1.acquire_advisory_lock(
+            &workspace_lock,
+            "agent_writer_1",
+            Some(60),
+            Some("writing memories"),
+        )?;
+        ensure(agent1_result.is_acquired(), "agent 1 should acquire lock")?;
+
+        let agent2_result = conn1.acquire_advisory_lock(
+            &workspace_lock,
+            "agent_writer_2",
+            Some(60),
+            Some("also wants to write"),
+        )?;
+        match agent2_result {
+            super::AcquireLockResult::AlreadyHeld { holder_id, .. } => {
+                ensure_equal(
+                    &holder_id,
+                    &"agent_writer_1".to_string(),
+                    "lock held by agent 1",
+                )?;
+            }
+            _ => return Err(TestFailure::new("agent 2 should see AlreadyHeld")),
+        }
+
+        conn1.release_advisory_lock(&workspace_lock, "agent_writer_1")?;
+
+        let agent2_retry = conn1.acquire_advisory_lock(
+            &workspace_lock,
+            "agent_writer_2",
+            Some(60),
+            Some("now can write"),
+        )?;
+        ensure(
+            agent2_retry.is_acquired(),
+            "agent 2 should acquire after release",
+        )?;
+
+        conn1.close()?;
+        Ok(())
+    }
 }
