@@ -4920,7 +4920,10 @@ pub fn render_learn_agenda_human(report: &LearnAgendaReport) -> String {
             item.id, item.topic, item.priority, item.uncertainty
         ));
         out.push_str(&format!("    {}\n", item.gap_description));
-        out.push_str(&format!("    Status: {} | Source: {}\n\n", item.status, item.source));
+        out.push_str(&format!(
+            "    Status: {} | Source: {}\n\n",
+            item.status, item.source
+        ));
     }
 
     out.push_str("Next:\n  ee learn uncertainty --json\n");
@@ -4967,7 +4970,10 @@ pub fn render_learn_uncertainty_human(report: &LearnUncertaintyReport) -> String
             item.memory_id, item.kind, item.uncertainty, item.confidence
         ));
         out.push_str(&format!("    {}\n", item.content_preview));
-        out.push_str(&format!("    Retrieval count: {}\n\n", item.retrieval_count));
+        out.push_str(&format!(
+            "    Retrieval count: {}\n\n",
+            item.retrieval_count
+        ));
     }
 
     out.push_str("Next:\n  ee learn summary --json\n");
@@ -5001,13 +5007,34 @@ pub fn render_learn_summary_json(report: &LearnSummaryReport) -> String {
 pub fn render_learn_summary_human(report: &LearnSummaryReport) -> String {
     let mut out = String::with_capacity(1024);
     out.push_str(&format!("Learning Summary ({})\n\n", report.summary.period));
-    out.push_str(&format!("Memories created: {}\n", report.summary.memories_created));
-    out.push_str(&format!("Memories promoted: {}\n", report.summary.memories_promoted));
-    out.push_str(&format!("Memories demoted: {}\n", report.summary.memories_demoted));
-    out.push_str(&format!("Rules learned: {}\n", report.summary.rules_learned));
-    out.push_str(&format!("Rules validated: {}\n", report.summary.rules_validated));
-    out.push_str(&format!("Gaps identified: {}\n", report.summary.gaps_identified));
-    out.push_str(&format!("Gaps resolved: {}\n", report.summary.gaps_resolved));
+    out.push_str(&format!(
+        "Memories created: {}\n",
+        report.summary.memories_created
+    ));
+    out.push_str(&format!(
+        "Memories promoted: {}\n",
+        report.summary.memories_promoted
+    ));
+    out.push_str(&format!(
+        "Memories demoted: {}\n",
+        report.summary.memories_demoted
+    ));
+    out.push_str(&format!(
+        "Rules learned: {}\n",
+        report.summary.rules_learned
+    ));
+    out.push_str(&format!(
+        "Rules validated: {}\n",
+        report.summary.rules_validated
+    ));
+    out.push_str(&format!(
+        "Gaps identified: {}\n",
+        report.summary.gaps_identified
+    ));
+    out.push_str(&format!(
+        "Gaps resolved: {}\n",
+        report.summary.gaps_resolved
+    ));
     out.push_str(&format!(
         "Net knowledge delta: {:+}\n\n",
         report.summary.net_knowledge_delta
@@ -5032,7 +5059,242 @@ pub fn render_learn_summary_human(report: &LearnSummaryReport) -> String {
 pub fn render_learn_summary_toon(report: &LearnSummaryReport) -> String {
     format!(
         "LEARN_SUMMARY|{}|delta={:+}|events={}",
-        report.summary.period, report.summary.net_knowledge_delta, report.events.len()
+        report.summary.period,
+        report.summary.net_knowledge_delta,
+        report.events.len()
+    )
+}
+
+// ============================================================================
+// EE-AUDIT-001: Audit Output Rendering
+// ============================================================================
+
+use crate::core::audit::{
+    AuditDiffReport, AuditShowReport, AuditTimelineReport, AuditVerifyReport,
+};
+
+/// Render an audit timeline report as JSON.
+#[must_use]
+pub fn render_audit_timeline_json(report: &AuditTimelineReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "success": true,
+        "entries": report.entries,
+        "pagination": report.pagination,
+        "generatedAt": report.generated_at,
+    })
+    .to_string()
+}
+
+/// Render an audit timeline report as human-readable text.
+#[must_use]
+pub fn render_audit_timeline_human(report: &AuditTimelineReport) -> String {
+    let mut out = String::with_capacity(2048);
+    out.push_str("Audit Timeline\n\n");
+    out.push_str(&format!(
+        "Showing {} of {} operations\n\n",
+        report.pagination.returned_count, report.pagination.total_count
+    ));
+
+    for entry in &report.entries {
+        out.push_str(&format!(
+            "[{}] {} ({})\n",
+            entry.operation_id, entry.command_path, entry.outcome
+        ));
+        out.push_str(&format!(
+            "    Effect: {} | Dry-run: {}\n",
+            entry.effect_class, entry.dry_run
+        ));
+        if !entry.changed_surfaces.is_empty() {
+            out.push_str(&format!("    Changed: {}\n", entry.changed_surfaces.join(", ")));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("Next:\n  ee audit show <operation-id> --json\n");
+    out
+}
+
+/// Render an audit timeline report as TOON.
+#[must_use]
+pub fn render_audit_timeline_toon(report: &AuditTimelineReport) -> String {
+    format!(
+        "AUDIT_TIMELINE|count={}|total={}|has_more={}",
+        report.pagination.returned_count,
+        report.pagination.total_count,
+        report.pagination.has_more
+    )
+}
+
+/// Render an audit show report as JSON.
+#[must_use]
+pub fn render_audit_show_json(report: &AuditShowReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "success": true,
+        "operation": report.operation,
+        "nextCommands": report.next_commands,
+        "generatedAt": report.generated_at,
+    })
+    .to_string()
+}
+
+/// Render an audit show report as human-readable text.
+#[must_use]
+pub fn render_audit_show_human(report: &AuditShowReport) -> String {
+    let op = &report.operation;
+    let mut out = String::with_capacity(1024);
+    out.push_str(&format!("Operation: {}\n\n", op.operation_id));
+    out.push_str(&format!("Command: {}\n", op.command_path));
+    out.push_str(&format!("Outcome: {}\n", op.outcome));
+    out.push_str(&format!("Effect: {} (expected: {})\n", op.observed_effect, op.expected_effect));
+    out.push_str(&format!("Match: {}\n", if op.effect_match { "yes" } else { "MISMATCH" }));
+    out.push_str(&format!("Dry-run: {}\n", op.dry_run));
+    out.push_str(&format!("Transaction: {}\n", op.transaction_status));
+    out.push_str(&format!("Hash chain valid: {}\n\n", op.hash_chain_valid));
+
+    if !op.changed_surfaces.is_empty() {
+        out.push_str("Changed Surfaces:\n");
+        for surface in &op.changed_surfaces {
+            out.push_str(&format!(
+                "  {} ({}) - {} rows\n",
+                surface.surface_name,
+                surface.surface_type,
+                surface.rows_affected.unwrap_or(0)
+            ));
+        }
+    }
+
+    out.push_str(&format!(
+        "\nRedaction: {} ({} fields redacted)\n",
+        op.redaction_summary.posture, op.redaction_summary.fields_redacted
+    ));
+
+    out.push_str("\nNext:\n");
+    for cmd in &report.next_commands {
+        out.push_str(&format!("  {}\n", cmd));
+    }
+    out
+}
+
+/// Render an audit show report as TOON.
+#[must_use]
+pub fn render_audit_show_toon(report: &AuditShowReport) -> String {
+    format!(
+        "AUDIT_SHOW|{}|{}|{}|match={}",
+        report.operation.operation_id,
+        report.operation.command_path,
+        report.operation.outcome,
+        report.operation.effect_match
+    )
+}
+
+/// Render an audit diff report as JSON.
+#[must_use]
+pub fn render_audit_diff_json(report: &AuditDiffReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "success": true,
+        "operationId": report.operation_id,
+        "deltas": report.deltas,
+        "allMatch": report.all_match,
+        "generatedAt": report.generated_at,
+    })
+    .to_string()
+}
+
+/// Render an audit diff report as human-readable text.
+#[must_use]
+pub fn render_audit_diff_human(report: &AuditDiffReport) -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str(&format!("Operation Diff: {}\n\n", report.operation_id));
+    out.push_str(&format!("All match: {}\n\n", if report.all_match { "yes" } else { "NO" }));
+
+    for delta in &report.deltas {
+        out.push_str(&format!(
+            "[{}] {} -> {}\n",
+            delta.surface_name, delta.declared_change, delta.observed_change
+        ));
+        out.push_str(&format!("    Status: {}\n", delta.match_status));
+        if let (Some(before), Some(after)) = (delta.row_count_before, delta.row_count_after) {
+            out.push_str(&format!("    Rows: {} -> {}\n", before, after));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("Next:\n  ee audit verify --json\n");
+    out
+}
+
+/// Render an audit diff report as TOON.
+#[must_use]
+pub fn render_audit_diff_toon(report: &AuditDiffReport) -> String {
+    format!(
+        "AUDIT_DIFF|{}|deltas={}|all_match={}",
+        report.operation_id,
+        report.deltas.len(),
+        report.all_match
+    )
+}
+
+/// Render an audit verify report as JSON.
+#[must_use]
+pub fn render_audit_verify_json(report: &AuditVerifyReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "success": report.overall_valid,
+        "summary": report.summary,
+        "issues": report.issues,
+        "overallValid": report.overall_valid,
+        "nextActions": report.next_actions,
+        "generatedAt": report.generated_at,
+    })
+    .to_string()
+}
+
+/// Render an audit verify report as human-readable text.
+#[must_use]
+pub fn render_audit_verify_human(report: &AuditVerifyReport) -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str("Audit Verification\n\n");
+    out.push_str(&format!(
+        "Overall: {}\n\n",
+        if report.overall_valid { "VALID" } else { "ISSUES FOUND" }
+    ));
+
+    out.push_str(&format!("Operations checked: {}\n", report.summary.operations_checked));
+    out.push_str(&format!("Hash chain valid: {}\n", report.summary.hash_chain_valid));
+    out.push_str(&format!("Missing records: {}\n", report.summary.missing_records));
+    out.push_str(&format!("Malformed entries: {}\n", report.summary.malformed_entries));
+    out.push_str(&format!("Effect mismatches: {}\n", report.summary.effect_mismatches));
+    out.push_str(&format!("Redaction failures: {}\n", report.summary.redaction_failures));
+
+    if !report.issues.is_empty() {
+        out.push_str("\nIssues:\n");
+        for issue in &report.issues {
+            out.push_str(&format!(
+                "  [{}] {}: {}\n",
+                issue.severity, issue.code, issue.message
+            ));
+            out.push_str(&format!("    Action: {}\n", issue.next_action));
+        }
+    }
+
+    out.push_str("\nNext:\n");
+    for action in &report.next_actions {
+        out.push_str(&format!("  {}\n", action));
+    }
+    out
+}
+
+/// Render an audit verify report as TOON.
+#[must_use]
+pub fn render_audit_verify_toon(report: &AuditVerifyReport) -> String {
+    format!(
+        "AUDIT_VERIFY|ops={}|valid={}|issues={}",
+        report.summary.operations_checked,
+        report.overall_valid,
+        report.issues.len()
     )
 }
 

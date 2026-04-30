@@ -4,6 +4,7 @@ use crate::models::{ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
 
 pub mod agent_detect;
 pub mod agent_docs;
+pub mod audit;
 pub mod budget;
 pub mod capabilities;
 pub mod check;

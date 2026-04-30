@@ -137,6 +137,9 @@ pub enum Command {
     Agent(AgentCommand),
     /// Agent-oriented documentation for ee commands, contracts, and usage.
     AgentDocs(AgentDocsArgs),
+    /// Operation audit timeline and inspection commands.
+    #[command(subcommand)]
+    Audit(AuditCommand),
     /// Report feature availability, commands, and subsystem status.
     Capabilities,
     /// Quick posture summary: ready, degraded, or needs attention.
@@ -590,6 +593,59 @@ pub struct LearnSummaryArgs {
     /// Include detailed breakdown.
     #[arg(long, action = ArgAction::SetTrue)]
     pub detailed: bool,
+}
+
+/// Subcommands for `ee audit`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum AuditCommand {
+    /// List recent operations in the audit timeline.
+    Timeline(AuditTimelineArgs),
+    /// Show details of an audited operation.
+    Show(AuditShowArgs),
+    /// Show state deltas for an operation.
+    Diff(AuditDiffArgs),
+    /// Verify audit integrity for a window.
+    Verify(AuditVerifyArgs),
+}
+
+/// Arguments for `ee audit timeline`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct AuditTimelineArgs {
+    /// Start from this time or operation ID.
+    #[arg(long, value_name = "TIME_OR_ID")]
+    pub since: Option<String>,
+
+    /// Maximum entries to show.
+    #[arg(long, short = 'n', default_value_t = 20)]
+    pub limit: u32,
+
+    /// Pagination cursor from previous response.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
+}
+
+/// Arguments for `ee audit show`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct AuditShowArgs {
+    /// Operation ID to show.
+    #[arg(value_name = "OPERATION_ID")]
+    pub operation_id: String,
+}
+
+/// Arguments for `ee audit diff`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct AuditDiffArgs {
+    /// Operation ID to show diff for.
+    #[arg(value_name = "OPERATION_ID")]
+    pub operation_id: String,
+}
+
+/// Arguments for `ee audit verify`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct AuditVerifyArgs {
+    /// Start verification from this time or operation ID.
+    #[arg(long, value_name = "TIME_OR_ID")]
+    pub since: Option<String>,
 }
 
 /// Subcommands for `ee preflight`.
@@ -1449,6 +1505,18 @@ where
             handle_agent_scan(&cli, args, stdout, stderr)
         }
         Some(Command::AgentDocs(ref args)) => handle_agent_docs(&cli, args, stdout, stderr),
+        Some(Command::Audit(AuditCommand::Timeline(ref args))) => {
+            handle_audit_timeline(&cli, args, stdout, stderr)
+        }
+        Some(Command::Audit(AuditCommand::Show(ref args))) => {
+            handle_audit_show(&cli, args, stdout, stderr)
+        }
+        Some(Command::Audit(AuditCommand::Diff(ref args))) => {
+            handle_audit_diff(&cli, args, stdout, stderr)
+        }
+        Some(Command::Audit(AuditCommand::Verify(ref args))) => {
+            handle_audit_verify(&cli, args, stdout, stderr)
+        }
         Some(Command::Capabilities) => {
             let report = CapabilitiesReport::gather();
             let profile = cli.fields_level().to_field_profile();
@@ -2570,6 +2638,153 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => {
                 write_stdout(stdout, &(output::render_learn_summary_json(&report) + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+// ============================================================================
+// EE-AUDIT-001: Audit Command Handlers
+// ============================================================================
+
+use crate::core::audit::{
+    AuditDiffOptions, AuditShowOptions, AuditTimelineOptions, AuditVerifyOptions,
+    list_timeline, show_diff, show_operation, verify_audit,
+};
+
+fn handle_audit_timeline<W, E>(
+    cli: &Cli,
+    args: &AuditTimelineArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = AuditTimelineOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        since: args.since.clone(),
+        limit: args.limit,
+        cursor: args.cursor.clone(),
+    };
+
+    match list_timeline(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_audit_timeline_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_audit_timeline_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_audit_timeline_json(&report) + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_audit_show<W, E>(
+    cli: &Cli,
+    args: &AuditShowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = AuditShowOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        operation_id: args.operation_id.clone(),
+    };
+
+    match show_operation(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_audit_show_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_audit_show_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_audit_show_json(&report) + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_audit_diff<W, E>(
+    cli: &Cli,
+    args: &AuditDiffArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = AuditDiffOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        operation_id: args.operation_id.clone(),
+    };
+
+    match show_diff(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_audit_diff_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_audit_diff_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_audit_diff_json(&report) + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_audit_verify<W, E>(
+    cli: &Cli,
+    args: &AuditVerifyArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = AuditVerifyOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        since: args.since.clone(),
+    };
+
+    match verify_audit(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_audit_verify_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_audit_verify_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_audit_verify_json(&report) + "\n"))
             }
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
@@ -5230,6 +5445,7 @@ where
 const COMMAND_NAMES: &[&str] = &[
     "agent",
     "agent-docs",
+    "audit",
     "capabilities",
     "check",
     "claim",
@@ -5314,6 +5530,12 @@ impl NormalizedInvocation {
                     AgentCommand::Scan(_) => "agent scan".to_string(),
                 },
                 Command::AgentDocs(_) => "agent-docs".to_string(),
+                Command::Audit(audit) => match audit {
+                    AuditCommand::Timeline(_) => "audit timeline".to_string(),
+                    AuditCommand::Show(_) => "audit show".to_string(),
+                    AuditCommand::Diff(_) => "audit diff".to_string(),
+                    AuditCommand::Verify(_) => "audit verify".to_string(),
+                },
                 Command::Capabilities => "capabilities".to_string(),
                 Command::Check => "check".to_string(),
                 Command::Claim(claim) => match claim {
