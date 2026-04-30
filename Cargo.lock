@@ -941,8 +941,10 @@ dependencies = [
  "fnx-algorithms",
  "fnx-classes",
  "fnx-runtime",
+ "franken-agent-detection",
  "frankensearch",
  "regex-lite",
+ "serde",
  "serde_json",
  "sqlmodel-core",
  "sqlmodel-frankensqlite",
@@ -1095,6 +1097,16 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
+name = "franken-agent-detection"
+version = "0.1.3"
+dependencies = [
+ "chrono",
+ "dirs",
+ "serde",
+ "thiserror",
+]
 
 [[package]]
 name = "franken-decision"

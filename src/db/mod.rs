@@ -4582,10 +4582,7 @@ impl DbConnection {
                         ended_at, duration_ms, agent, episode_hash, created_at
                  FROM task_episodes WHERE workspace_id = ?1
                  ORDER BY started_at DESC LIMIT ?2",
-                vec![
-                    Value::Text(ws.to_string()),
-                    Value::BigInt(i64::from(limit)),
-                ],
+                vec![Value::Text(ws.to_string()), Value::BigInt(i64::from(limit))],
             ),
             (None, Some(out)) => (
                 "SELECT id, workspace_id, session_id, task_input, retrieved_memory_ids,
