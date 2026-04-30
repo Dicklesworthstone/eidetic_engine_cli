@@ -15,8 +15,8 @@ pub use certificate::{
     TailRiskCertificate,
 };
 pub use id::{
-    AuditId, BackupId, CandidateId, EvidenceId, Id, IdKind, MemoryId, PackId, ParseIdError, RuleId,
-    SessionId, WorkspaceId,
+    AuditId, BackupId, CandidateId, EvidenceId, Id, IdKind, MemoryId, MemoryLinkId, PackId,
+    ParseIdError, RuleId, SessionId, WorkspaceId,
 };
 pub use memory::{
     Confidence, Importance, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES, MemoryContent,

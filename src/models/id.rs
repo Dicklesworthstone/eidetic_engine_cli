@@ -358,6 +358,13 @@ define_id_kind!(
 );
 
 define_id_kind!(
+    /// Marker for [`MemoryLinkId`].
+    pub MemoryLinkKind,
+    pub MemoryLinkId,
+    "link"
+);
+
+define_id_kind!(
     /// Marker for [`WorkspaceId`].
     pub WorkspaceKind,
     pub WorkspaceId,

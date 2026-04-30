@@ -23,10 +23,10 @@ static GRAPH_CAPABILITIES: [GraphCapability; 6] = [
         GraphSurface::Projection,
         "FrankenNetworkX dependency is wired.",
     ),
-    GraphCapability::pending(
+    GraphCapability::ready(
         GraphCapabilityName::MemoryLinkTable,
         GraphSurface::Storage,
-        "Add memory_links table for edge storage.",
+        "memory_links storage migration is available.",
     ),
     GraphCapability::pending(
         GraphCapabilityName::ProjectionBuilder,
@@ -57,10 +57,10 @@ static GRAPH_CAPABILITIES: [GraphCapability; 6] = [
         GraphSurface::Projection,
         "Add the franken_networkx dependency before graph projections.",
     ),
-    GraphCapability::pending(
+    GraphCapability::ready(
         GraphCapabilityName::MemoryLinkTable,
         GraphSurface::Storage,
-        "Add memory_links table for edge storage.",
+        "memory_links storage migration is available.",
     ),
     GraphCapability::pending(
         GraphCapabilityName::ProjectionBuilder,
@@ -278,9 +278,9 @@ mod tests {
             Some(CapabilityStatus::Ready)
         );
         #[cfg(feature = "graph")]
-        assert_eq!(readiness.missing_capabilities().count(), 4);
+        assert_eq!(readiness.missing_capabilities().count(), 3);
         #[cfg(not(feature = "graph"))]
-        assert_eq!(readiness.missing_capabilities().count(), 5);
+        assert_eq!(readiness.missing_capabilities().count(), 4);
     }
 
     #[test]
@@ -353,16 +353,16 @@ mod tests {
 
         assert_eq!(
             missing.first().map(|capability| capability.name()),
-            Some(GraphCapabilityName::MemoryLinkTable)
+            Some(GraphCapabilityName::ProjectionBuilder)
         );
         assert_eq!(
             missing.first().map(|capability| capability.surface()),
-            Some(GraphSurface::Storage)
+            Some(GraphSurface::Projection)
         );
         assert!(
             missing
                 .first()
-                .map(|capability| capability.repair().contains("memory_links"))
+                .map(|capability| capability.repair().contains("projection"))
                 .unwrap_or(false)
         );
     }
