@@ -101,17 +101,13 @@ pub fn discover(start: &Path) -> Option<WorkspaceLocation> {
                 config_dir: candidate,
             });
         }
-        match current.parent() {
-            Some(parent) => {
-                if parent == current {
-                    // `Path::parent` returns `Some(self)` for the
-                    // empty path, which would otherwise loop forever.
-                    return None;
-                }
-                current = parent;
-            }
-            None => return None,
+        let parent = current.parent()?;
+        if parent == current {
+            // `Path::parent` returns `Some(self)` for the
+            // empty path, which would otherwise loop forever.
+            return None;
         }
+        current = parent;
     }
 }
 
@@ -139,6 +135,8 @@ mod tests {
 
     use super::{WorkspaceError, WorkspaceLocation, discover, discover_from_current_dir};
 
+    type TestResult = Result<(), String>;
+
     /// Counter so two tests within the same process never share a
     /// scratch directory even if `Uuid::now_v7` collides at the
     /// millisecond boundary.
@@ -151,43 +149,43 @@ mod tests {
     }
 
     impl ScratchDir {
-        fn new(label: &str) -> Self {
+        fn new(label: &str) -> Result<Self, String> {
             let id = COUNTER.fetch_add(1, Ordering::SeqCst);
             let suffix = format!("ee-ws-{label}-{}-{id}", Uuid::now_v7().simple());
             let root = std::env::temp_dir().join(suffix);
             if let Err(error) = fs::create_dir_all(&root) {
-                panic!("failed to create scratch dir at {root:?}: {error}");
+                return Err(format!("failed to create scratch dir at {root:?}: {error}"));
             }
-            Self { root }
+            Ok(Self { root })
         }
 
         fn path(&self) -> &Path {
             &self.root
         }
 
-        fn make_dir(&self, relative: &str) -> PathBuf {
+        fn make_dir(&self, relative: &str) -> Result<PathBuf, String> {
             let path = self.root.join(relative);
             if let Err(error) = fs::create_dir_all(&path) {
-                panic!("failed to create {path:?}: {error}");
+                return Err(format!("failed to create {path:?}: {error}"));
             }
-            path
+            Ok(path)
         }
 
-        fn make_file(&self, relative: &str, contents: &str) -> PathBuf {
+        fn make_file(&self, relative: &str, contents: &str) -> Result<PathBuf, String> {
             let path = self.root.join(relative);
             if let Some(parent) = path.parent() {
                 if let Err(error) = fs::create_dir_all(parent) {
-                    panic!("failed to create parent of {path:?}: {error}");
+                    return Err(format!("failed to create parent of {path:?}: {error}"));
                 }
             }
             let mut file = match fs::File::create(&path) {
                 Ok(value) => value,
-                Err(error) => panic!("failed to create {path:?}: {error}"),
+                Err(error) => return Err(format!("failed to create {path:?}: {error}")),
             };
             if let Err(error) = file.write_all(contents.as_bytes()) {
-                panic!("failed to write {path:?}: {error}");
+                return Err(format!("failed to write {path:?}: {error}"));
             }
-            path
+            Ok(path)
         }
     }
 
@@ -199,54 +197,57 @@ mod tests {
     }
 
     #[test]
-    fn discover_finds_marker_directly_above() {
-        let scratch = ScratchDir::new("direct");
-        let workspace = scratch.make_dir("project");
-        let _marker = scratch.make_dir("project/.ee");
+    fn discover_finds_marker_directly_above() -> TestResult {
+        let scratch = ScratchDir::new("direct")?;
+        let workspace = scratch.make_dir("project")?;
+        let _marker = scratch.make_dir("project/.ee")?;
 
         let location = match discover(&workspace) {
             Some(value) => value,
-            None => panic!("expected to find workspace at {workspace:?}"),
+            None => return Err(format!("expected to find workspace at {workspace:?}")),
         };
         assert_eq!(location.root, workspace);
         assert_eq!(location.config_dir, workspace.join(".ee"));
+        Ok(())
     }
 
     #[test]
-    fn discover_walks_up_through_nested_directories() {
-        let scratch = ScratchDir::new("nested");
-        let project = scratch.make_dir("project");
-        scratch.make_dir("project/.ee");
-        let nested = scratch.make_dir("project/src/deep/leaf");
+    fn discover_walks_up_through_nested_directories() -> TestResult {
+        let scratch = ScratchDir::new("nested")?;
+        let project = scratch.make_dir("project")?;
+        scratch.make_dir("project/.ee")?;
+        let nested = scratch.make_dir("project/src/deep/leaf")?;
 
         let location = match discover(&nested) {
             Some(value) => value,
-            None => panic!("expected to find workspace by walking up"),
+            None => return Err("expected to find workspace by walking up".to_string()),
         };
         assert_eq!(location.root, project);
         assert_eq!(location.config_dir, project.join(".ee"));
+        Ok(())
     }
 
     #[test]
-    fn discover_picks_closest_marker_when_nested_workspaces_exist() {
-        let scratch = ScratchDir::new("nested-ws");
-        let _outer = scratch.make_dir("outer");
-        scratch.make_dir("outer/.ee");
-        let inner = scratch.make_dir("outer/inner");
-        scratch.make_dir("outer/inner/.ee");
-        let leaf = scratch.make_dir("outer/inner/sub");
+    fn discover_picks_closest_marker_when_nested_workspaces_exist() -> TestResult {
+        let scratch = ScratchDir::new("nested-ws")?;
+        let _outer = scratch.make_dir("outer")?;
+        scratch.make_dir("outer/.ee")?;
+        let inner = scratch.make_dir("outer/inner")?;
+        scratch.make_dir("outer/inner/.ee")?;
+        let leaf = scratch.make_dir("outer/inner/sub")?;
 
         let location = match discover(&leaf) {
             Some(value) => value,
-            None => panic!("expected nested workspace match"),
+            None => return Err("expected nested workspace match".to_string()),
         };
         assert_eq!(location.root, inner);
+        Ok(())
     }
 
     #[test]
-    fn discover_returns_none_when_no_marker_exists() {
-        let scratch = ScratchDir::new("none");
-        let leaf = scratch.make_dir("a/b/c");
+    fn discover_returns_none_when_no_marker_exists() -> TestResult {
+        let scratch = ScratchDir::new("none")?;
+        let leaf = scratch.make_dir("a/b/c")?;
         let result = discover(&leaf);
         // The scratch dir lives inside `std::env::temp_dir()`, which
         // typically does not have a `.ee` ancestor — but we guard
@@ -266,13 +267,14 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn discover_ignores_marker_when_it_is_a_file() {
-        let scratch = ScratchDir::new("marker-file");
-        let dir = scratch.make_dir("project");
-        let _file = scratch.make_file("project/.ee", "this is a file, not a dir");
+    fn discover_ignores_marker_when_it_is_a_file() -> TestResult {
+        let scratch = ScratchDir::new("marker-file")?;
+        let dir = scratch.make_dir("project")?;
+        let _file = scratch.make_file("project/.ee", "this is a file, not a dir")?;
         // Walk above the project, since discover doesn't accept the
         // file-as-marker. The result should not be the project dir.
         let result = discover(&dir);
@@ -282,6 +284,7 @@ mod tests {
                 "discover treated a file named .ee as a workspace"
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -309,19 +312,20 @@ mod tests {
     }
 
     #[test]
-    fn discover_does_not_canonicalise_input_path() {
-        let scratch = ScratchDir::new("canon");
-        scratch.make_dir("project/.ee");
-        let leaf = scratch.make_dir("project/src");
+    fn discover_does_not_canonicalise_input_path() -> TestResult {
+        let scratch = ScratchDir::new("canon")?;
+        scratch.make_dir("project/.ee")?;
+        let leaf = scratch.make_dir("project/src")?;
         // Build a relative-ish path with `.` segments. `discover`
         // should preserve the lexical shape rather than canonicalise.
         let with_dots = leaf.join(".").join(".");
         let location = match discover(&with_dots) {
             Some(value) => value,
-            None => panic!("expected discovery"),
+            None => return Err("expected discovery".to_string()),
         };
         // The reported root contains the upward walk's lexical form.
         assert!(location.root.ends_with("project"));
+        Ok(())
     }
 
     #[test]

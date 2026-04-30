@@ -180,8 +180,13 @@ Workspace edition: 2024. Workspace `rust-version`: 1.95.
 
 **EE feature mapping (from AGENTS.md `[features]`):**
 - `embed-fast` → `frankensearch/model2vec`.
-- `embed-quality` → `frankensearch/fastembed`.
 - `lexical-bm25` → `frankensearch/lexical`.
+
+`embed-quality` is intentionally not exposed in `ee` yet. Enabling
+`frankensearch/fastembed` pulls `fastembed -> hf-hub -> reqwest`, which brings
+`tokio`, `tokio-util`, `hyper`, and `tower` into the `--all-features` tree.
+That violates the forbidden-dependency gate, so high-quality embedding remains
+blocked until upstream has a clean local profile.
 
 **Public API names (in `frankensearch-core`/`frankensearch`):**
 `TwoTierSearcher`, `IndexBuilder`, `TwoTierConfig`, `TwoTierMetrics`,
@@ -190,10 +195,13 @@ Workspace edition: 2024. Workspace `rust-version`: 1.95.
 `FlashRankReranker`, `GraphRanker`, `Cx`, `QueryClass`, `Canonicalizer`.
 
 **Forbidden-dep posture:**
-- `tokio`, `petgraph`, `hyper`, `axum`, `reqwest`, `rusqlite`: not present in
-  the default feature path. Reranking pulls `ort` (ONNX Runtime), tokenizers,
-  and optional fastembed; none are on the forbidden list but EE-001 may want
-  to keep reranking opt-in to avoid a heavy default build.
+- `tokio`, `tokio-util`, `hyper`, `axum`, `tower`, `reqwest`, `rusqlite`,
+  `sqlx`, `diesel`, `sea-orm`, `async-std`, `smol`, and `petgraph` must be
+  absent from the default, no-default, and all-features trees.
+- `frankensearch/fastembed` is blocked because it currently introduces
+  forbidden async/network crates through `reqwest`.
+- Reranking remains opt-in until its resolved tree is audited under the same
+  forbidden-dependency contract.
 
 ### 5. franken_networkx (`/dp/franken_networkx`)
 

@@ -79,9 +79,11 @@ aliases:
 frankensearch = { path = "/data/projects/frankensearch/frankensearch", default-features = false, features = ["hash", "lexical"] }
 ```
 
-If `model2vec` and `fastembed` are added later, they must be opt-in because they
-change first-run behavior, binary size, model cache behavior, and reproducibility
-expectations.
+`model2vec` may be used behind an explicit EE feature after dependency audit.
+`fastembed` remains blocked for now: the current upstream feature pulls
+`reqwest`, which brings Tokio/Hyper/Tower crates into `--all-features` and
+violates the no-forbidden-dependencies gate. Do not expose an EE feature for it
+until that upstream tree is clean.
 
 ### Index Build Path
 
