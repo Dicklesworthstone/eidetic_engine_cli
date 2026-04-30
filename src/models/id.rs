@@ -648,6 +648,13 @@ define_id_kind!(
 );
 
 define_id_kind!(
+    /// Marker for [`ModelId`].
+    pub ModelKind,
+    pub ModelId,
+    "mdl"
+);
+
+define_id_kind!(
     /// Marker for [`SessionId`].
     pub SessionKind,
     pub SessionId,
@@ -719,8 +726,8 @@ mod tests {
 
     use super::{
         BackupId, ClaimId, DemoId, ENCODED_LEN, EXECUTABLE_ID_SCHEMA_V1, EvidenceId,
-        ExecutableIdKind, Id, IdKind, MemoryId, PackId, ParseExecutableIdKindError, ParseIdError,
-        PolicyId, RuleId, SessionId, TraceId, WorkspaceId, encode_crockford,
+        ExecutableIdKind, Id, IdKind, MemoryId, ModelId, PackId, ParseExecutableIdKindError,
+        ParseIdError, PolicyId, RuleId, SessionId, TraceId, WorkspaceId, encode_crockford,
         executable_id_schema_catalog_json, executable_id_schemas,
     };
 
@@ -754,13 +761,14 @@ mod tests {
             WorkspaceId::from_uuid(uuid_with_seed(2)).to_string(),
             RuleId::from_uuid(uuid_with_seed(3)).to_string(),
             PackId::from_uuid(uuid_with_seed(4)).to_string(),
-            SessionId::from_uuid(uuid_with_seed(5)).to_string(),
-            EvidenceId::from_uuid(uuid_with_seed(6)).to_string(),
-            BackupId::from_uuid(uuid_with_seed(7)).to_string(),
-            ClaimId::from_uuid(uuid_with_seed(8)).to_string(),
-            PolicyId::from_uuid(uuid_with_seed(9)).to_string(),
-            TraceId::from_uuid(uuid_with_seed(10)).to_string(),
-            DemoId::from_uuid(uuid_with_seed(11)).to_string(),
+            ModelId::from_uuid(uuid_with_seed(5)).to_string(),
+            SessionId::from_uuid(uuid_with_seed(6)).to_string(),
+            EvidenceId::from_uuid(uuid_with_seed(7)).to_string(),
+            BackupId::from_uuid(uuid_with_seed(8)).to_string(),
+            ClaimId::from_uuid(uuid_with_seed(9)).to_string(),
+            PolicyId::from_uuid(uuid_with_seed(10)).to_string(),
+            TraceId::from_uuid(uuid_with_seed(11)).to_string(),
+            DemoId::from_uuid(uuid_with_seed(12)).to_string(),
         ];
 
         let parsed = (
@@ -768,38 +776,41 @@ mod tests {
             WorkspaceId::from_str(cases[1].as_str()),
             RuleId::from_str(cases[2].as_str()),
             PackId::from_str(cases[3].as_str()),
-            SessionId::from_str(cases[4].as_str()),
-            EvidenceId::from_str(cases[5].as_str()),
-            BackupId::from_str(cases[6].as_str()),
-            ClaimId::from_str(cases[7].as_str()),
-            PolicyId::from_str(cases[8].as_str()),
-            TraceId::from_str(cases[9].as_str()),
-            DemoId::from_str(cases[10].as_str()),
+            ModelId::from_str(cases[4].as_str()),
+            SessionId::from_str(cases[5].as_str()),
+            EvidenceId::from_str(cases[6].as_str()),
+            BackupId::from_str(cases[7].as_str()),
+            ClaimId::from_str(cases[8].as_str()),
+            PolicyId::from_str(cases[9].as_str()),
+            TraceId::from_str(cases[10].as_str()),
+            DemoId::from_str(cases[11].as_str()),
         );
 
         let memory = unwrap_ok(parsed.0)?;
         let workspace = unwrap_ok(parsed.1)?;
         let rule = unwrap_ok(parsed.2)?;
         let pack = unwrap_ok(parsed.3)?;
-        let session = unwrap_ok(parsed.4)?;
-        let evidence = unwrap_ok(parsed.5)?;
-        let backup = unwrap_ok(parsed.6)?;
-        let claim = unwrap_ok(parsed.7)?;
-        let policy = unwrap_ok(parsed.8)?;
-        let trace = unwrap_ok(parsed.9)?;
-        let demo = unwrap_ok(parsed.10)?;
+        let model = unwrap_ok(parsed.4)?;
+        let session = unwrap_ok(parsed.5)?;
+        let evidence = unwrap_ok(parsed.6)?;
+        let backup = unwrap_ok(parsed.7)?;
+        let claim = unwrap_ok(parsed.8)?;
+        let policy = unwrap_ok(parsed.9)?;
+        let trace = unwrap_ok(parsed.10)?;
+        let demo = unwrap_ok(parsed.11)?;
 
         assert_eq!(memory.into_uuid(), uuid_with_seed(1));
         assert_eq!(workspace.into_uuid(), uuid_with_seed(2));
         assert_eq!(rule.into_uuid(), uuid_with_seed(3));
         assert_eq!(pack.into_uuid(), uuid_with_seed(4));
-        assert_eq!(session.into_uuid(), uuid_with_seed(5));
-        assert_eq!(evidence.into_uuid(), uuid_with_seed(6));
-        assert_eq!(backup.into_uuid(), uuid_with_seed(7));
-        assert_eq!(claim.into_uuid(), uuid_with_seed(8));
-        assert_eq!(policy.into_uuid(), uuid_with_seed(9));
-        assert_eq!(trace.into_uuid(), uuid_with_seed(10));
-        assert_eq!(demo.into_uuid(), uuid_with_seed(11));
+        assert_eq!(model.into_uuid(), uuid_with_seed(5));
+        assert_eq!(session.into_uuid(), uuid_with_seed(6));
+        assert_eq!(evidence.into_uuid(), uuid_with_seed(7));
+        assert_eq!(backup.into_uuid(), uuid_with_seed(8));
+        assert_eq!(claim.into_uuid(), uuid_with_seed(9));
+        assert_eq!(policy.into_uuid(), uuid_with_seed(10));
+        assert_eq!(trace.into_uuid(), uuid_with_seed(11));
+        assert_eq!(demo.into_uuid(), uuid_with_seed(12));
         Ok(())
     }
 

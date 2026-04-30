@@ -9,6 +9,7 @@ pub mod error_codes;
 pub mod id;
 pub mod jsonl;
 pub mod memory;
+pub mod model_registry;
 pub mod posture;
 pub mod preflight;
 pub mod provenance;
@@ -54,7 +55,7 @@ pub use episode::{
 };
 pub use id::{
     AuditId, BackupId, CandidateId, ClaimId, DemoId, EXECUTABLE_ID_SCHEMA_V1, EvidenceId,
-    ExecutableIdKind, Id, IdJsonSchema, IdKind, MemoryId, MemoryLinkId, PackId,
+    ExecutableIdKind, Id, IdJsonSchema, IdKind, MemoryId, MemoryLinkId, ModelId, PackId,
     ParseExecutableIdKindError, ParseIdError, PolicyId, RuleId, SessionId, TraceId, WorkspaceId,
     executable_id_schema_catalog_json, executable_id_schemas,
 };
@@ -71,6 +72,13 @@ pub use jsonl::{
 pub use memory::{
     Confidence, Importance, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES, MemoryContent,
     MemoryKind, MemoryLevel, MemoryValidationError, Tag, UnitScore, Utility,
+};
+pub use model_registry::{
+    EMBEDDING_METADATA_SCHEMA_V1, EmbeddingMetadataFieldSchema, EmbeddingMetadataObjectSchema,
+    EmbeddingMetadataRecord, EmbeddingMetadataValidationError, EmbeddingPooling,
+    EmbeddingVectorDtype, MODEL_REGISTRY_SCHEMA_V1, ModelDistanceMetric, ModelProvider,
+    ModelPurpose, ModelRegistryStatus, ParseModelRegistryValueError,
+    embedding_metadata_schema_catalog_json, embedding_metadata_schemas,
 };
 pub use posture::{ActionCategory, Posture, PostureSummary, SuggestedAction};
 pub use preflight::{

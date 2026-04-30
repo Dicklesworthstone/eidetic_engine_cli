@@ -1,3 +1,7 @@
+use crate::models::{
+    EMBEDDING_METADATA_SCHEMA_V1, EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider,
+    ModelPurpose, ModelRegistryStatus,
+};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlmodel_core::{IsolationLevel, Row, Value};
@@ -5,6 +9,7 @@ use sqlmodel_frankensqlite::FrankenConnection;
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 pub const SUBSYSTEM: &str = "db";
 pub const MIGRATION_TABLE_NAME: &str = "ee_schema_migrations";
@@ -1343,6 +1348,49 @@ CREATE INDEX idx_task_episodes_outcome ON task_episodes(outcome);
     "blake3:v013_task_episodes_2026_04_30",
 );
 
+/// V014: Add model registry table for local model capabilities (EE-293).
+pub const V014_MODEL_REGISTRY: Migration = Migration::new(
+    14,
+    "model_registry",
+    r#"
+-- Model registry table (EE-293)
+-- Stable inventory of local model capabilities used by derived indexes and
+-- future model-status commands. FrankenSQLite remains the source of truth.
+CREATE TABLE model_registry (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'mdl_*' AND length(id) = 30),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL CHECK (provider IN (
+        'hash', 'model2vec', 'fastembed', 'external', 'custom'
+    )),
+    model_name TEXT NOT NULL CHECK (length(trim(model_name)) > 0),
+    purpose TEXT NOT NULL CHECK (purpose IN (
+        'embedding', 'reranker', 'classifier', 'other'
+    )),
+    dimension INTEGER CHECK (dimension IS NULL OR dimension > 0),
+    distance_metric TEXT CHECK (distance_metric IS NULL OR distance_metric IN (
+        'cosine', 'dot', 'l2'
+    )),
+    status TEXT NOT NULL DEFAULT 'available' CHECK (status IN (
+        'available', 'unavailable', 'disabled'
+    )),
+    version TEXT CHECK (version IS NULL OR length(trim(version)) > 0),
+    source_uri TEXT CHECK (source_uri IS NULL OR length(trim(source_uri)) > 0),
+    content_hash TEXT CHECK (content_hash IS NULL OR content_hash GLOB 'blake3:*'),
+    metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    last_checked_at TEXT CHECK (last_checked_at IS NULL OR length(trim(last_checked_at)) > 0),
+    UNIQUE (workspace_id, provider, model_name, purpose)
+);
+
+CREATE INDEX idx_model_registry_workspace ON model_registry(workspace_id);
+CREATE INDEX idx_model_registry_provider ON model_registry(provider);
+CREATE INDEX idx_model_registry_purpose ON model_registry(purpose);
+CREATE INDEX idx_model_registry_status ON model_registry(status);
+"#,
+    "blake3:v014_model_registry_2026_04_30",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -1358,6 +1406,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V011_FEEDBACK_EVENTS,
     V012_PROVENANCE_CHAIN_HASH,
     V013_TASK_EPISODES,
+    V014_MODEL_REGISTRY,
 ];
 
 /// Result of applying migrations.
@@ -1526,6 +1575,345 @@ fn stored_workspace_from_row(row: &Row) -> Result<StoredWorkspace> {
         name: optional_text(row, 2)?.map(str::to_string),
         created_at: required_text(row, 3, DbOperation::Query, "created_at")?.to_string(),
         updated_at: required_text(row, 4, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
+/// Input for creating a model registry row.
+#[derive(Debug, Clone)]
+pub struct CreateModelRegistryInput {
+    pub workspace_id: String,
+    pub provider: ModelProvider,
+    pub model_name: String,
+    pub purpose: ModelPurpose,
+    pub dimension: Option<u32>,
+    pub distance_metric: Option<ModelDistanceMetric>,
+    pub status: ModelRegistryStatus,
+    pub version: Option<String>,
+    pub source_uri: Option<String>,
+    pub content_hash: Option<String>,
+    pub metadata_json: Option<String>,
+    pub last_checked_at: Option<String>,
+}
+
+/// A stored model registry row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredModelRegistryEntry {
+    pub id: String,
+    pub workspace_id: String,
+    pub provider: ModelProvider,
+    pub model_name: String,
+    pub purpose: ModelPurpose,
+    pub dimension: Option<u32>,
+    pub distance_metric: Option<ModelDistanceMetric>,
+    pub status: ModelRegistryStatus,
+    pub version: Option<String>,
+    pub source_uri: Option<String>,
+    pub content_hash: Option<String>,
+    pub metadata_json: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_checked_at: Option<String>,
+}
+
+/// Input for creating a registered embedding metadata record.
+#[derive(Debug, Clone)]
+pub struct CreateEmbeddingMetadataInput {
+    pub workspace_id: String,
+    pub provider: ModelProvider,
+    pub model_name: String,
+    pub dimension: u32,
+    pub distance_metric: ModelDistanceMetric,
+    pub status: ModelRegistryStatus,
+    pub version: Option<String>,
+    pub source_uri: Option<String>,
+    pub content_hash: Option<String>,
+    pub metadata: EmbeddingMetadataRecord,
+    pub last_checked_at: Option<String>,
+}
+
+impl CreateEmbeddingMetadataInput {
+    fn to_model_registry_input(&self) -> Result<CreateModelRegistryInput> {
+        if self.dimension != self.metadata.dimension {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!(
+                    "embedding metadata dimension {} does not match registry dimension {}",
+                    self.metadata.dimension, self.dimension
+                ),
+            });
+        }
+
+        if self.distance_metric != self.metadata.distance_metric {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!(
+                    "embedding metadata distance metric {} does not match registry distance metric {}",
+                    self.metadata.distance_metric, self.distance_metric
+                ),
+            });
+        }
+
+        Ok(CreateModelRegistryInput {
+            workspace_id: self.workspace_id.clone(),
+            provider: self.provider,
+            model_name: self.model_name.clone(),
+            purpose: ModelPurpose::Embedding,
+            dimension: Some(self.dimension),
+            distance_metric: Some(self.distance_metric),
+            status: self.status,
+            version: self.version.clone(),
+            source_uri: self.source_uri.clone(),
+            content_hash: self.content_hash.clone(),
+            metadata_json: Some(embedding_metadata_json(&self.metadata)?),
+            last_checked_at: self.last_checked_at.clone(),
+        })
+    }
+}
+
+/// A model registry row paired with parsed embedding metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredEmbeddingMetadataRecord {
+    pub registry: StoredModelRegistryEntry,
+    pub metadata: EmbeddingMetadataRecord,
+}
+
+impl DbConnection {
+    /// Insert a model registry row.
+    pub fn insert_model_registry_entry(
+        &self,
+        id: &str,
+        input: &CreateModelRegistryInput,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO model_registry (id, workspace_id, provider, model_name, purpose, dimension, distance_metric, status, version, source_uri, content_hash, metadata_json, created_at, updated_at, last_checked_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.provider.as_str().to_string()),
+                Value::Text(input.model_name.clone()),
+                Value::Text(input.purpose.as_str().to_string()),
+                input
+                    .dimension
+                    .map_or(Value::Null, |dimension| Value::BigInt(i64::from(dimension))),
+                input
+                    .distance_metric
+                    .map_or(Value::Null, |metric| Value::Text(metric.as_str().to_string())),
+                Value::Text(input.status.as_str().to_string()),
+                input
+                    .version
+                    .as_ref()
+                    .map_or(Value::Null, |version| Value::Text(version.clone())),
+                input
+                    .source_uri
+                    .as_ref()
+                    .map_or(Value::Null, |source| Value::Text(source.clone())),
+                input
+                    .content_hash
+                    .as_ref()
+                    .map_or(Value::Null, |hash| Value::Text(hash.clone())),
+                input
+                    .metadata_json
+                    .as_ref()
+                    .map_or(Value::Null, |metadata| Value::Text(metadata.clone())),
+                Value::Text(now.clone()),
+                Value::Text(now),
+                input
+                    .last_checked_at
+                    .as_ref()
+                    .map_or(Value::Null, |checked| Value::Text(checked.clone())),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get a model registry row by ID.
+    pub fn get_model_registry_entry(&self, id: &str) -> Result<Option<StoredModelRegistryEntry>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, provider, model_name, purpose, dimension, distance_metric, status, version, source_uri, content_hash, metadata_json, created_at, updated_at, last_checked_at FROM model_registry WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first()
+            .map(stored_model_registry_entry_from_row)
+            .transpose()
+    }
+
+    /// Find a model registry row by its workspace-scoped identity.
+    pub fn find_model_registry_entry(
+        &self,
+        workspace_id: &str,
+        provider: ModelProvider,
+        model_name: &str,
+        purpose: ModelPurpose,
+    ) -> Result<Option<StoredModelRegistryEntry>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, provider, model_name, purpose, dimension, distance_metric, status, version, source_uri, content_hash, metadata_json, created_at, updated_at, last_checked_at FROM model_registry WHERE workspace_id = ?1 AND provider = ?2 AND model_name = ?3 AND purpose = ?4",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(provider.as_str().to_string()),
+                Value::Text(model_name.to_string()),
+                Value::Text(purpose.as_str().to_string()),
+            ],
+        )?;
+
+        rows.first()
+            .map(stored_model_registry_entry_from_row)
+            .transpose()
+    }
+
+    /// List model registry rows for a workspace in stable registry order.
+    pub fn list_model_registry_entries(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredModelRegistryEntry>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, provider, model_name, purpose, dimension, distance_metric, status, version, source_uri, content_hash, metadata_json, created_at, updated_at, last_checked_at FROM model_registry WHERE workspace_id = ?1 ORDER BY purpose ASC, provider ASC, model_name ASC, id ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+
+        rows.iter()
+            .map(stored_model_registry_entry_from_row)
+            .collect()
+    }
+
+    /// Insert an embedding metadata record through the model registry table.
+    pub fn insert_embedding_metadata_record(
+        &self,
+        id: &str,
+        input: &CreateEmbeddingMetadataInput,
+    ) -> Result<()> {
+        self.insert_model_registry_entry(id, &input.to_model_registry_input()?)
+    }
+
+    /// Get a parsed embedding metadata record by registry ID.
+    pub fn get_embedding_metadata_record(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredEmbeddingMetadataRecord>> {
+        let Some(entry) = self.get_model_registry_entry(id)? else {
+            return Ok(None);
+        };
+        stored_embedding_metadata_record_from_entry(entry)
+    }
+
+    /// List parsed embedding metadata records for a workspace in stable order.
+    pub fn list_embedding_metadata_records(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredEmbeddingMetadataRecord>> {
+        let entries = self.list_model_registry_entries(workspace_id)?;
+        let mut records = Vec::new();
+        for entry in entries {
+            if let Some(record) = stored_embedding_metadata_record_from_entry(entry)? {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+}
+
+fn embedding_metadata_json(metadata: &EmbeddingMetadataRecord) -> Result<String> {
+    metadata
+        .to_canonical_json()
+        .map_err(|error| DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: error.to_string(),
+        })
+}
+
+fn stored_embedding_metadata_record_from_entry(
+    entry: StoredModelRegistryEntry,
+) -> Result<Option<StoredEmbeddingMetadataRecord>> {
+    if entry.purpose != ModelPurpose::Embedding {
+        return Ok(None);
+    }
+
+    let Some(metadata_json) = entry.metadata_json.as_deref() else {
+        return Ok(None);
+    };
+
+    if !metadata_json.contains(EMBEDDING_METADATA_SCHEMA_V1) {
+        return Ok(None);
+    }
+
+    let metadata = EmbeddingMetadataRecord::from_json(metadata_json).map_err(|error| {
+        DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: error.to_string(),
+        }
+    })?;
+
+    Ok(Some(StoredEmbeddingMetadataRecord {
+        registry: entry,
+        metadata,
+    }))
+}
+
+fn stored_model_registry_entry_from_row(row: &Row) -> Result<StoredModelRegistryEntry> {
+    let provider = required_model_provider(row, 2)?;
+    let purpose = required_model_purpose(row, 4)?;
+    let distance_metric = optional_model_distance_metric(row, 6)?;
+    let status = required_model_registry_status(row, 7)?;
+
+    Ok(StoredModelRegistryEntry {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        provider,
+        model_name: required_text(row, 3, DbOperation::Query, "model_name")?.to_string(),
+        purpose,
+        dimension: optional_u32(row, 5, DbOperation::Query, "dimension")?,
+        distance_metric,
+        status,
+        version: optional_text(row, 8)?.map(str::to_string),
+        source_uri: optional_text(row, 9)?.map(str::to_string),
+        content_hash: optional_text(row, 10)?.map(str::to_string),
+        metadata_json: optional_text(row, 11)?.map(str::to_string),
+        created_at: required_text(row, 12, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 13, DbOperation::Query, "updated_at")?.to_string(),
+        last_checked_at: optional_text(row, 14)?.map(str::to_string),
+    })
+}
+
+fn required_model_provider(row: &Row, index: usize) -> Result<ModelProvider> {
+    let value = required_text(row, index, DbOperation::Query, "provider")?;
+    ModelProvider::from_str(value).map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: error.to_string(),
+    })
+}
+
+fn required_model_purpose(row: &Row, index: usize) -> Result<ModelPurpose> {
+    let value = required_text(row, index, DbOperation::Query, "purpose")?;
+    ModelPurpose::from_str(value).map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: error.to_string(),
+    })
+}
+
+fn optional_model_distance_metric(row: &Row, index: usize) -> Result<Option<ModelDistanceMetric>> {
+    let Some(value) = optional_text(row, index)? else {
+        return Ok(None);
+    };
+    ModelDistanceMetric::from_str(value)
+        .map(Some)
+        .map_err(|error| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: error.to_string(),
+        })
+}
+
+fn required_model_registry_status(row: &Row, index: usize) -> Result<ModelRegistryStatus> {
+    let value = required_text(row, index, DbOperation::Query, "status")?;
+    ModelRegistryStatus::from_str(value).map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: error.to_string(),
     })
 }
 
@@ -4697,6 +5085,10 @@ mod tests {
         DatabaseConfig, DatabaseLocation, DatabaseOpenMode, DbConnection, DbError, DbOperation,
         MIGRATION_TABLE_NAME, MigrationRecord, MigrationTableColumn, subsystem_name,
     };
+    use crate::models::{
+        EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose,
+        ModelRegistryStatus,
+    };
     use sqlmodel_core::Row;
     use sqlmodel_core::Value;
 
@@ -5047,8 +5439,8 @@ mod tests {
 
         ensure_equal(
             &result.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-            "V001-V012 must be applied",
+            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+            "V001-V014 must be applied",
         )?;
         ensure_equal(&result.skipped().len(), &0, "no migrations skipped")?;
 
@@ -5118,6 +5510,14 @@ mod tests {
             table_names.contains(&"feedback_events"),
             "feedback_events table must exist",
         )?;
+        ensure(
+            table_names.contains(&"task_episodes"),
+            "task_episodes table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"model_registry"),
+            "model_registry table must exist",
+        )?;
 
         connection.close()?;
         Ok(())
@@ -5130,16 +5530,16 @@ mod tests {
         let first = connection.migrate()?;
         ensure_equal(
             &first.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-            "first run applies V001-V012",
+            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+            "first run applies V001-V014",
         )?;
 
         let second = connection.migrate()?;
         ensure_equal(&second.applied().len(), &0, "second run applies nothing")?;
         ensure_equal(
             &second.skipped().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-            "second run skips V001-V012",
+            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+            "second run skips V001-V014",
         )?;
 
         connection.close()?;
@@ -5180,8 +5580,8 @@ mod tests {
 
         ensure_equal(
             &connection.schema_version()?,
-            &Some(12),
-            "after migrations, schema version is 12",
+            &Some(14),
+            "after migrations, schema version is 14",
         )?;
 
         connection.close()?;
@@ -5311,6 +5711,342 @@ mod tests {
         connection.execute_raw(
             "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_01234567890123456789012345', '/tmp/test', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
         )?;
+        Ok(())
+    }
+
+    fn model_registry_input(
+        provider: ModelProvider,
+        model_name: &str,
+        purpose: ModelPurpose,
+    ) -> super::CreateModelRegistryInput {
+        super::CreateModelRegistryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            provider,
+            model_name: model_name.to_string(),
+            purpose,
+            dimension: Some(256),
+            distance_metric: Some(ModelDistanceMetric::Cosine),
+            status: ModelRegistryStatus::Available,
+            version: Some("builtin".to_string()),
+            source_uri: Some(format!("urn:ee:model:{model_name}")),
+            content_hash: Some(
+                "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            metadata_json: Some(
+                r#"{"schema":"ee.model_registry.v1","deterministic":true}"#.to_string(),
+            ),
+            last_checked_at: Some("2026-04-30T00:00:00Z".to_string()),
+        }
+    }
+
+    fn embedding_metadata_input(
+        provider: ModelProvider,
+        model_name: &str,
+    ) -> super::CreateEmbeddingMetadataInput {
+        let mut metadata = EmbeddingMetadataRecord::new(384, ModelDistanceMetric::Cosine);
+        metadata.max_input_tokens = Some(512);
+        metadata.tokenizer = Some("bpe:test-tokenizer".to_string());
+        metadata.model_revision = Some("2026-04-30".to_string());
+        metadata.deterministic = true;
+
+        super::CreateEmbeddingMetadataInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            provider,
+            model_name: model_name.to_string(),
+            dimension: 384,
+            distance_metric: ModelDistanceMetric::Cosine,
+            status: ModelRegistryStatus::Available,
+            version: Some("builtin".to_string()),
+            source_uri: Some(format!("urn:ee:embedding:{model_name}")),
+            content_hash: Some(
+                "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_string(),
+            ),
+            metadata,
+            last_checked_at: Some("2026-04-30T00:00:00Z".to_string()),
+        }
+    }
+
+    #[test]
+    fn insert_and_get_model_registry_entry() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = model_registry_input(ModelProvider::Hash, "hash-256", ModelPurpose::Embedding);
+        connection.insert_model_registry_entry("mdl_01234567890123456789012345", &input)?;
+
+        let entry = connection.get_model_registry_entry("mdl_01234567890123456789012345")?;
+        ensure(entry.is_some(), "model registry entry must be found")?;
+        let entry = entry.ok_or_else(|| TestFailure::new("model registry entry not found"))?;
+        ensure_equal(&entry.id.as_str(), &"mdl_01234567890123456789012345", "id")?;
+        ensure_equal(
+            &entry.workspace_id.as_str(),
+            &"wsp_01234567890123456789012345",
+            "workspace_id",
+        )?;
+        ensure_equal(&entry.provider, &ModelProvider::Hash, "provider")?;
+        ensure_equal(&entry.model_name.as_str(), &"hash-256", "model_name")?;
+        ensure_equal(&entry.purpose, &ModelPurpose::Embedding, "purpose")?;
+        ensure_equal(&entry.dimension, &Some(256), "dimension")?;
+        ensure_equal(
+            &entry.distance_metric,
+            &Some(ModelDistanceMetric::Cosine),
+            "distance_metric",
+        )?;
+        ensure_equal(&entry.status, &ModelRegistryStatus::Available, "status")?;
+        ensure_equal(&entry.version, &Some("builtin".to_string()), "version")?;
+        ensure_equal(
+            &entry.source_uri,
+            &Some("urn:ee:model:hash-256".to_string()),
+            "source_uri",
+        )?;
+        ensure_equal(
+            &entry.metadata_json,
+            &Some(r#"{"schema":"ee.model_registry.v1","deterministic":true}"#.to_string()),
+            "metadata_json",
+        )?;
+        ensure(!entry.created_at.is_empty(), "created_at populated")?;
+        ensure(!entry.updated_at.is_empty(), "updated_at populated")?;
+        ensure_equal(
+            &entry.last_checked_at,
+            &Some("2026-04-30T00:00:00Z".to_string()),
+            "last_checked_at",
+        )?;
+
+        let found = connection.find_model_registry_entry(
+            "wsp_01234567890123456789012345",
+            ModelProvider::Hash,
+            "hash-256",
+            ModelPurpose::Embedding,
+        )?;
+        ensure_equal(&found, &Some(entry), "identity lookup returns entry")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_model_registry_entries_filters_workspace_and_sorts() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_11234567890123456789012345', '/tmp/other', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+
+        connection.insert_model_registry_entry(
+            "mdl_21234567890123456789012345",
+            &model_registry_input(
+                ModelProvider::Model2Vec,
+                "model2vec-base",
+                ModelPurpose::Reranker,
+            ),
+        )?;
+        connection.insert_model_registry_entry(
+            "mdl_11234567890123456789012345",
+            &model_registry_input(ModelProvider::Hash, "hash-256", ModelPurpose::Embedding),
+        )?;
+        connection.insert_model_registry_entry(
+            "mdl_31234567890123456789012345",
+            &model_registry_input(
+                ModelProvider::External,
+                "classify-lite",
+                ModelPurpose::Classifier,
+            ),
+        )?;
+
+        let mut other = model_registry_input(
+            ModelProvider::Custom,
+            "custom-other",
+            ModelPurpose::Embedding,
+        );
+        other.workspace_id = "wsp_11234567890123456789012345".to_string();
+        connection.insert_model_registry_entry("mdl_41234567890123456789012345", &other)?;
+
+        let entries = connection.list_model_registry_entries("wsp_01234567890123456789012345")?;
+        let names: Vec<&str> = entries
+            .iter()
+            .map(|entry| entry.model_name.as_str())
+            .collect();
+        ensure_equal(
+            &names,
+            &vec!["classify-lite", "hash-256", "model2vec-base"],
+            "entries sorted within requested workspace",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn model_registry_enforces_unique_identity_and_valid_metadata() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = model_registry_input(ModelProvider::Hash, "hash-256", ModelPurpose::Embedding);
+        connection.insert_model_registry_entry("mdl_51234567890123456789012345", &input)?;
+
+        let duplicate =
+            connection.insert_model_registry_entry("mdl_61234567890123456789012345", &input);
+        ensure(
+            matches!(
+                duplicate,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "duplicate workspace provider/model/purpose must be rejected",
+        )?;
+
+        let mut invalid_json = model_registry_input(
+            ModelProvider::Model2Vec,
+            "model2vec-bad-json",
+            ModelPurpose::Embedding,
+        );
+        invalid_json.metadata_json = Some("{not-json}".to_string());
+        let invalid =
+            connection.insert_model_registry_entry("mdl_71234567890123456789012345", &invalid_json);
+        ensure(
+            matches!(
+                invalid,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "metadata_json must be valid JSON when present",
+        )?;
+
+        let mut zero_dimension = model_registry_input(
+            ModelProvider::Model2Vec,
+            "model2vec-zero-dim",
+            ModelPurpose::Embedding,
+        );
+        zero_dimension.dimension = Some(0);
+        let invalid = connection
+            .insert_model_registry_entry("mdl_81234567890123456789012345", &zero_dimension);
+        ensure(
+            matches!(
+                invalid,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "zero dimension must be rejected",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn embedding_metadata_records_round_trip_through_model_registry() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = embedding_metadata_input(ModelProvider::Model2Vec, "model2vec-base");
+        connection.insert_embedding_metadata_record("mdl_91234567890123456789012345", &input)?;
+
+        let record = connection.get_embedding_metadata_record("mdl_91234567890123456789012345")?;
+        ensure(record.is_some(), "embedding metadata record must be found")?;
+        let record = record.ok_or_else(|| TestFailure::new("embedding metadata record missing"))?;
+        ensure_equal(
+            &record.registry.purpose,
+            &ModelPurpose::Embedding,
+            "registry purpose",
+        )?;
+        ensure_equal(&record.registry.dimension, &Some(384), "registry dimension")?;
+        ensure_equal(
+            &record.registry.distance_metric,
+            &Some(ModelDistanceMetric::Cosine),
+            "registry distance metric",
+        )?;
+        ensure_equal(&record.metadata.dimension, &384, "metadata dimension")?;
+        ensure_equal(
+            &record.metadata.distance_metric,
+            &ModelDistanceMetric::Cosine,
+            "metadata distance metric",
+        )?;
+        ensure_equal(
+            &record.metadata.tokenizer,
+            &Some("bpe:test-tokenizer".to_string()),
+            "metadata tokenizer",
+        )?;
+
+        let canonical_json = record
+            .metadata
+            .to_canonical_json()
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        ensure_equal(
+            &record.registry.metadata_json,
+            &Some(canonical_json),
+            "registry stores canonical metadata JSON",
+        )?;
+
+        connection.insert_model_registry_entry(
+            "mdl_92234567890123456789012345",
+            &model_registry_input(ModelProvider::Hash, "hash-256", ModelPurpose::Embedding),
+        )?;
+
+        let records =
+            connection.list_embedding_metadata_records("wsp_01234567890123456789012345")?;
+        let names: Vec<&str> = records
+            .iter()
+            .map(|record| record.registry.model_name.as_str())
+            .collect();
+        ensure_equal(
+            &names,
+            &vec!["model2vec-base"],
+            "list includes only parsed embedding metadata records",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn embedding_metadata_records_reject_registry_metadata_mismatch() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let mut input = embedding_metadata_input(ModelProvider::Model2Vec, "model2vec-mismatch");
+        input.dimension = 768;
+        let result =
+            connection.insert_embedding_metadata_record("mdl_93234567890123456789012345", &input);
+        ensure(
+            matches!(
+                result,
+                Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "registry/metadata dimension mismatch must be rejected before insert",
+        )?;
+
+        let mut input = embedding_metadata_input(ModelProvider::Model2Vec, "model2vec-mismatch");
+        input.distance_metric = ModelDistanceMetric::Dot;
+        let result =
+            connection.insert_embedding_metadata_record("mdl_94234567890123456789012345", &input);
+        ensure(
+            matches!(
+                result,
+                Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "registry/metadata distance mismatch must be rejected before insert",
+        )?;
+
+        connection.close()?;
         Ok(())
     }
 
@@ -7920,7 +8656,7 @@ mod tests {
         ensure(report.integrity_check.passed, "integrity passed")?;
         ensure(report.foreign_key_check.passed, "foreign keys passed")?;
         ensure(!report.needs_migration, "no migration needed")?;
-        ensure_equal(&report.schema_version, &Some(12), "schema version is 12")?;
+        ensure_equal(&report.schema_version, &Some(14), "schema version is 14")?;
 
         connection.close()?;
         Ok(())

@@ -1,0 +1,36 @@
+{
+  "schema": "ee.embedding.metadata.schemas.v1",
+  "schemas": [
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:embedding-metadata:v1",
+      "eeSchema": "ee.embedding.metadata.v1",
+      "kind": "embedding_metadata",
+      "title": "EmbeddingMetadataRecord",
+      "description": "Compatibility metadata for one registered embedding model.",
+      "type": "object",
+      "required": [
+        "schema",
+        "dimension",
+        "distanceMetric",
+        "vectorDtype",
+        "normalized",
+        "pooling",
+        "deterministic"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "dimension", "type": "integer", "required": true, "description": "Embedding vector dimension."},
+        {"name": "distanceMetric", "type": "string", "required": true, "description": "Distance metric used by the index."},
+        {"name": "vectorDtype", "type": "string", "required": true, "description": "Scalar storage type for embedding vectors."},
+        {"name": "normalized", "type": "boolean", "required": true, "description": "Whether vectors are normalized before indexing."},
+        {"name": "pooling", "type": "string", "required": true, "description": "Pooling strategy used to produce one vector."},
+        {"name": "maxInputTokens", "type": "integer|null", "required": false, "description": "Maximum model input tokens when known."},
+        {"name": "tokenizer", "type": "string|null", "required": false, "description": "Tokenizer identity when compatibility depends on it."},
+        {"name": "modelRevision", "type": "string|null", "required": false, "description": "Model revision or adapter revision when known."},
+        {"name": "deterministic", "type": "boolean", "required": true, "description": "Whether repeated inputs produce byte-identical embeddings."}
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-//! Workspace detection (EE-023).
+//! Workspace detection and canonicalization (EE-023, EE-PRIV-WS-001).
 //!
 //! `ee` resolves the active workspace by walking *upward* from a
 //! starting directory looking for a `.ee/` subdirectory. The walk
@@ -16,10 +16,22 @@
 //! registered aliases, or environment overrides. `resolve_workspace`
 //! layers deterministic explicit-path and environment precedence on
 //! top of that discovery result without creating directories.
+//!
+//! ## Workspace Canonicalization (EE-PRIV-WS-001)
+//!
+//! All workspace paths are canonicalized to prevent identity confusion:
+//! - Symlinks in the path chain are resolved to detect potential leakage
+//! - A per-installation salt ensures the same path produces different
+//!   hashes on different machines (privacy protection)
+//! - By default, workspaces are rejected if the input path differs from
+//!   the canonical path due to symlinks (prevents cross-workspace leaks)
 
 use std::env;
+use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 use super::PathExpander;
 
@@ -31,6 +43,444 @@ pub const WORKSPACE_MARKER: &str = ".ee";
 
 /// Environment variable used as a process-wide workspace override.
 pub const WORKSPACE_ENV_VAR: &str = "EE_WORKSPACE";
+
+/// Schema identifier for workspace identity records.
+pub const WORKSPACE_IDENTITY_SCHEMA_V1: &str = "ee.workspace.identity.v1";
+
+/// How platform case sensitivity is handled for workspace identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformCaseHandling {
+    /// Preserve original case (case-sensitive filesystems).
+    Preserve,
+    /// Convert to lowercase for hashing (case-insensitive filesystems).
+    Lower,
+}
+
+impl PlatformCaseHandling {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Preserve => "preserve",
+            Self::Lower => "lower",
+        }
+    }
+
+    #[must_use]
+    pub fn current_platform() -> Self {
+        if cfg!(target_os = "windows") || cfg!(target_os = "macos") {
+            Self::Lower
+        } else {
+            Self::Preserve
+        }
+    }
+}
+
+/// A symlink traversal record in the path chain.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SymlinkTraversal {
+    /// The path component that was a symlink.
+    pub link_path: PathBuf,
+    /// The target that the symlink points to.
+    pub target_path: PathBuf,
+}
+
+/// Result of canonicalizing a workspace path.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CanonicalWorkspace {
+    /// The original input path before canonicalization.
+    pub input_path: PathBuf,
+    /// The fully resolved canonical path.
+    pub canonical_path: PathBuf,
+    /// Salted hash used as workspace identity (BLAKE3, 24 hex chars).
+    pub salted_hash: String,
+    /// Symlinks traversed during canonicalization.
+    pub symlink_chain: Vec<SymlinkTraversal>,
+    /// How case is handled on this platform.
+    pub platform_case_handling: PlatformCaseHandling,
+    /// Git repository root, if this is inside a git repo.
+    pub git_root: Option<PathBuf>,
+    /// Git worktree name, if this is a worktree.
+    pub worktree: Option<String>,
+    /// Whether this appears to be a fork (origin remote differs).
+    pub fork: Option<bool>,
+}
+
+impl CanonicalWorkspace {
+    /// Check if the path involved any symlink traversal.
+    #[must_use]
+    pub fn has_symlinks(&self) -> bool {
+        !self.symlink_chain.is_empty()
+    }
+
+    /// Check if the input path differs from canonical due to symlinks.
+    #[must_use]
+    pub fn input_differs_from_canonical(&self) -> bool {
+        self.input_path != self.canonical_path
+    }
+}
+
+/// Policy for handling symlinks in workspace paths.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SymlinkPolicy {
+    /// Reject workspaces where input path differs from canonical due to symlinks.
+    #[default]
+    Deny,
+    /// Allow symlinks (user opted in with --allow-symlink).
+    Allow,
+}
+
+/// Error returned when workspace canonicalization fails.
+#[derive(Debug)]
+pub enum CanonicalizationError {
+    /// The path could not be canonicalized (doesn't exist, permissions, etc.).
+    CanonicalizeFailure { path: PathBuf, source: io::Error },
+    /// A symlink was detected and the policy denies it.
+    SymlinkBlocked {
+        input_path: PathBuf,
+        canonical_path: PathBuf,
+        symlink_chain: Vec<SymlinkTraversal>,
+    },
+    /// Failed to read the installation salt.
+    SaltReadFailure { path: PathBuf, source: io::Error },
+    /// Failed to create the installation salt.
+    SaltCreateFailure { path: PathBuf, source: io::Error },
+}
+
+impl std::fmt::Display for CanonicalizationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CanonicalizeFailure { path, source } => {
+                write!(
+                    f,
+                    "failed to canonicalize path {}: {}",
+                    path.display(),
+                    source
+                )
+            }
+            Self::SymlinkBlocked {
+                input_path,
+                canonical_path,
+                symlink_chain,
+            } => {
+                write!(
+                    f,
+                    "workspace path {} resolves to {} through {} symlink(s); \
+                     symlinks are blocked by default policy",
+                    input_path.display(),
+                    canonical_path.display(),
+                    symlink_chain.len()
+                )
+            }
+            Self::SaltReadFailure { path, source } => {
+                write!(
+                    f,
+                    "failed to read installation salt from {}: {}",
+                    path.display(),
+                    source
+                )
+            }
+            Self::SaltCreateFailure { path, source } => {
+                write!(
+                    f,
+                    "failed to create installation salt at {}: {}",
+                    path.display(),
+                    source
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for CanonicalizationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::CanonicalizeFailure { source, .. }
+            | Self::SaltReadFailure { source, .. }
+            | Self::SaltCreateFailure { source, .. } => Some(source),
+            Self::SymlinkBlocked { .. } => None,
+        }
+    }
+}
+
+impl CanonicalizationError {
+    /// Return the error code for JSON output.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::CanonicalizeFailure { .. } => "workspace_canonicalize_failed",
+            Self::SymlinkBlocked { .. } => "workspace_symlink_blocked",
+            Self::SaltReadFailure { .. } => "workspace_salt_read_failed",
+            Self::SaltCreateFailure { .. } => "workspace_salt_create_failed",
+        }
+    }
+
+    /// Return a repair suggestion for this error.
+    #[must_use]
+    pub fn repair(&self) -> String {
+        match self {
+            Self::CanonicalizeFailure { path, .. } => {
+                format!("Verify that {} exists and is accessible.", path.display())
+            }
+            Self::SymlinkBlocked { input_path, .. } => {
+                format!(
+                    "Use `ee init --allow-symlink {}` to permit symlinks, \
+                     or use the canonical path directly.",
+                    input_path.display()
+                )
+            }
+            Self::SaltReadFailure { path, .. } | Self::SaltCreateFailure { path, .. } => {
+                format!(
+                    "Check permissions on {} and run `ee doctor --fix-plan`.",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+/// Canonicalize a workspace path with symlink detection and salted hashing.
+///
+/// This function:
+/// 1. Resolves the input path to its canonical form
+/// 2. Detects any symlinks in the path chain
+/// 3. Generates a salted hash for workspace identity
+/// 4. Optionally detects git repository and worktree info
+///
+/// # Arguments
+///
+/// * `input_path` - The path to canonicalize
+/// * `salt` - The per-installation salt for hashing
+/// * `policy` - How to handle symlinks in the path
+///
+/// # Errors
+///
+/// Returns [`CanonicalizationError::CanonicalizeFailure`] if the path cannot be resolved.
+/// Returns [`CanonicalizationError::SymlinkBlocked`] if symlinks are detected and policy is Deny.
+pub fn canonicalize_workspace_path(
+    input_path: &Path,
+    salt: &[u8],
+    policy: SymlinkPolicy,
+) -> Result<CanonicalWorkspace, CanonicalizationError> {
+    let canonical_path =
+        input_path
+            .canonicalize()
+            .map_err(|source| CanonicalizationError::CanonicalizeFailure {
+                path: input_path.to_path_buf(),
+                source,
+            })?;
+
+    let symlink_chain = detect_symlinks(input_path, &canonical_path);
+
+    if policy == SymlinkPolicy::Deny && !symlink_chain.is_empty() && input_path != canonical_path {
+        return Err(CanonicalizationError::SymlinkBlocked {
+            input_path: input_path.to_path_buf(),
+            canonical_path,
+            symlink_chain,
+        });
+    }
+
+    let platform_case_handling = PlatformCaseHandling::current_platform();
+    let salted_hash = compute_salted_workspace_hash(&canonical_path, salt, platform_case_handling);
+
+    let git_root = detect_git_root(&canonical_path);
+    let worktree = git_root.as_ref().and_then(|root| detect_git_worktree(root));
+    let fork = None; // Future: detect by comparing origin remote
+
+    Ok(CanonicalWorkspace {
+        input_path: input_path.to_path_buf(),
+        canonical_path,
+        salted_hash,
+        symlink_chain,
+        platform_case_handling,
+        git_root,
+        worktree,
+        fork,
+    })
+}
+
+/// Detect symlinks by comparing input path components to canonical path.
+fn detect_symlinks(input_path: &Path, canonical_path: &Path) -> Vec<SymlinkTraversal> {
+    let mut symlinks = Vec::new();
+    let mut current = PathBuf::new();
+
+    for component in input_path.components() {
+        match component {
+            Component::Prefix(p) => current.push(p.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                current.pop();
+            }
+            Component::Normal(segment) => {
+                current.push(segment);
+                if current.is_symlink() {
+                    if let Ok(target) = fs::read_link(&current) {
+                        symlinks.push(SymlinkTraversal {
+                            link_path: current.clone(),
+                            target_path: target,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check if the final paths differ even without explicit symlink detection
+    if symlinks.is_empty() && input_path != canonical_path {
+        // The input and canonical differ but we didn't find individual symlinks.
+        // This can happen with bind mounts or other filesystem features.
+        // We don't add a fake symlink entry here - the paths just differ.
+    }
+
+    symlinks
+}
+
+/// Compute a salted BLAKE3 hash of the workspace path.
+fn compute_salted_workspace_hash(
+    canonical_path: &Path,
+    salt: &[u8],
+    case_handling: PlatformCaseHandling,
+) -> String {
+    let path_str = canonical_path.to_string_lossy();
+    let normalized = match case_handling {
+        PlatformCaseHandling::Preserve => path_str.to_string(),
+        PlatformCaseHandling::Lower => path_str.to_lowercase(),
+    };
+
+    let mut hasher = blake3::Hasher::new_keyed(&derive_key_from_salt(salt));
+    hasher.update(normalized.as_bytes());
+    let hash = hasher.finalize().to_hex();
+    hash.chars().take(24).collect()
+}
+
+/// Derive a 32-byte key from the installation salt.
+fn derive_key_from_salt(salt: &[u8]) -> [u8; 32] {
+    let hash = blake3::hash(salt);
+    *hash.as_bytes()
+}
+
+/// Detect the git repository root containing this path.
+fn detect_git_root(path: &Path) -> Option<PathBuf> {
+    let mut current = path;
+    loop {
+        let git_dir = current.join(".git");
+        if git_dir.exists() {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
+}
+
+/// Detect if the git repository is a worktree.
+fn detect_git_worktree(git_root: &Path) -> Option<String> {
+    let git_file = git_root.join(".git");
+    if git_file.is_file() {
+        // This is a worktree - .git is a file pointing to the main repo
+        if let Ok(content) = fs::read_to_string(&git_file) {
+            if content.starts_with("gitdir:") {
+                // Extract worktree name from path like .git/worktrees/<name>
+                if let Some(worktree_path) = content.strip_prefix("gitdir:") {
+                    let trimmed = worktree_path.trim();
+                    if let Some(idx) = trimmed.rfind("/worktrees/") {
+                        let name = &trimmed[idx + 11..];
+                        return Some(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Get or create the per-installation salt.
+///
+/// The salt is stored at `~/.local/share/ee/.salt` with mode 0600.
+/// It is created on first run and never rotated automatically.
+///
+/// # Errors
+///
+/// Returns an error if the salt cannot be read or created.
+pub fn get_or_create_installation_salt() -> Result<Vec<u8>, CanonicalizationError> {
+    let salt_path = get_salt_path();
+
+    if salt_path.exists() {
+        fs::read(&salt_path).map_err(|source| CanonicalizationError::SaltReadFailure {
+            path: salt_path,
+            source,
+        })
+    } else {
+        create_installation_salt(&salt_path)
+    }
+}
+
+fn get_salt_path() -> PathBuf {
+    // XDG_DATA_HOME or ~/.local/share/ee/.salt
+    if let Ok(xdg_data) = env::var("XDG_DATA_HOME") {
+        return PathBuf::from(xdg_data).join("ee").join(".salt");
+    }
+    if let Ok(home) = env::var("HOME") {
+        return PathBuf::from(home).join(".local/share/ee/.salt");
+    }
+    // Fallback for unusual environments
+    PathBuf::from("/tmp/ee/.salt")
+}
+
+fn create_installation_salt(salt_path: &Path) -> Result<Vec<u8>, CanonicalizationError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if let Some(parent) = salt_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| CanonicalizationError::SaltCreateFailure {
+            path: salt_path.to_path_buf(),
+            source,
+        })?;
+    }
+
+    // Generate 32 bytes of random salt
+    let salt: [u8; 32] = rand_salt();
+
+    // Write with mode 0600 (owner read/write only)
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+
+    let mut file =
+        options
+            .open(salt_path)
+            .map_err(|source| CanonicalizationError::SaltCreateFailure {
+                path: salt_path.to_path_buf(),
+                source,
+            })?;
+
+    io::Write::write_all(&mut file, &salt).map_err(|source| {
+        CanonicalizationError::SaltCreateFailure {
+            path: salt_path.to_path_buf(),
+            source,
+        }
+    })?;
+
+    Ok(salt.to_vec())
+}
+
+fn rand_salt() -> [u8; 32] {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Simple entropy source: combine process ID, time, and a counter
+    let pid = std::process::id();
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    let mut seed = [0u8; 32];
+    let pid_bytes = pid.to_le_bytes();
+    let time_bytes = time.to_le_bytes();
+
+    seed[..4].copy_from_slice(&pid_bytes);
+    seed[4..20].copy_from_slice(&time_bytes);
+
+    // Hash to spread entropy
+    *blake3::hash(&seed).as_bytes()
+}
 
 /// A successfully-discovered workspace.
 #[derive(Clone, Debug, Eq, PartialEq)]
