@@ -13,6 +13,7 @@ use crate::core::health::HealthReport;
 use crate::core::index::{
     IndexRebuildOptions, IndexStatusOptions, get_index_status, rebuild_index,
 };
+use crate::core::memory::{GetMemoryOptions, get_memory_details};
 use crate::core::quarantine::QuarantineReport;
 use crate::core::search::{SearchOptions, run_search};
 use crate::core::status::StatusReport;
@@ -128,6 +129,9 @@ pub enum Command {
     /// Manage search indexes.
     #[command(subcommand)]
     Index(IndexCommand),
+    /// Manage stored memories (show, list, history).
+    #[command(subcommand)]
+    Memory(MemoryCommand),
     /// Store a new memory.
     Remember(RememberArgs),
     /// List or export public response schemas.
@@ -145,6 +149,8 @@ pub enum Command {
 pub enum DiagCommand {
     /// Report quarantine status for import sources.
     Quarantine,
+    /// Verify stdout/stderr stream separation is correct.
+    Streams,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -296,6 +302,28 @@ pub enum SchemaCommand {
     },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum MemoryCommand {
+    /// Show details of a single memory by ID.
+    Show(MemoryShowArgs),
+}
+
+/// Arguments for `ee memory show`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MemoryShowArgs {
+    /// Memory ID to retrieve (e.g., "mem_01JV...").
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Include tombstoned memories in the lookup.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum OutputFormat {
     #[default]
@@ -445,6 +473,23 @@ where
                     ),
                 }
             }
+            DiagCommand::Streams => {
+                let report = crate::core::streams::StreamsReport::gather(stderr);
+                match cli.renderer() {
+                    output::Renderer::Human => {
+                        write_stdout(stdout, &output::render_streams_human(&report))
+                    }
+                    output::Renderer::Toon => {
+                        write_stdout(stdout, &(output::render_streams_toon(&report) + "\n"))
+                    }
+                    output::Renderer::Json
+                    | output::Renderer::Jsonl
+                    | output::Renderer::Compact
+                    | output::Renderer::Hook => {
+                        write_stdout(stdout, &(output::render_streams_json(&report) + "\n"))
+                    }
+                }
+            }
         },
         Some(Command::Doctor(ref args)) => {
             let report = DoctorReport::gather();
@@ -535,6 +580,9 @@ where
         },
         Some(Command::Import(ImportCommand::Cass(ref args))) => {
             handle_import_cass(&cli, args, stdout, stderr)
+        }
+        Some(Command::Memory(MemoryCommand::Show(ref args))) => {
+            handle_memory_show(&cli, args, stdout, stderr)
         }
         Some(Command::Index(IndexCommand::Rebuild(ref args))) => {
             handle_index_rebuild(&cli, args, stdout, stderr)
@@ -866,6 +914,73 @@ where
                 repair: error.repair_hint().map(str::to_string),
             };
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_memory_show<W, E>(
+    cli: &Cli,
+    args: &MemoryShowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let options = GetMemoryOptions {
+        database_path: &database_path,
+        memory_id: &args.memory_id,
+        include_tombstoned: args.include_tombstoned,
+    };
+
+    let report = get_memory_details(&options);
+
+    if report.error.is_some() {
+        let domain_error = DomainError::Storage {
+            message: report.error.clone().unwrap_or_default(),
+            repair: Some("ee doctor".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    if !report.found {
+        let domain_error = DomainError::NotFound {
+            resource: "memory".to_string(),
+            id: args.memory_id.clone(),
+            repair: Some("ee memory list".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human => write_stdout(stdout, &output::render_memory_show_human(&report)),
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_memory_show_toon(&report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_memory_show_json(&report) + "\n"))
         }
     }
 }
@@ -1463,6 +1578,68 @@ mod tests {
         ensure_equal(&FieldsLevel::Summary.as_str(), &"summary", "summary")?;
         ensure_equal(&FieldsLevel::Standard.as_str(), &"standard", "standard")?;
         ensure_equal(&FieldsLevel::Full.as_str(), &"full", "full")
+    }
+
+    // ========================================================================
+    // Fields Filtering Tests (EE-037)
+    //
+    // These tests verify that --fields affects JSON output:
+    // - minimal: command, version, status only
+    // - summary: + top-level metrics and summary counts
+    // - standard: + arrays with items (default)
+    // - full: + verbose details like provenance, why, repair
+    // ========================================================================
+
+    #[test]
+    fn fields_minimal_includes_fields_indicator() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--fields", "minimal", "--json", "status"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "fields minimal exit")?;
+        ensure_contains(&stdout, "\"fields\":\"minimal\"", "fields indicator")?;
+        ensure(stderr.is_empty(), "stderr empty")
+    }
+
+    #[test]
+    fn fields_minimal_excludes_arrays() -> TestResult {
+        let (_, stdout, _) = invoke(&["ee", "--fields", "minimal", "--json", "status"]);
+        ensure(
+            !stdout.contains("\"degraded\":["),
+            "minimal excludes degraded array",
+        )?;
+        ensure(
+            !stdout.contains("\"runtime\":{"),
+            "minimal excludes runtime object",
+        )
+    }
+
+    #[test]
+    fn fields_standard_includes_arrays() -> TestResult {
+        let (_, stdout, _) = invoke(&["ee", "--fields", "standard", "--json", "status"]);
+        ensure_contains(&stdout, "\"fields\":\"standard\"", "standard indicator")?;
+        ensure_contains(
+            &stdout,
+            "\"degraded\":[",
+            "standard includes degraded array",
+        )
+    }
+
+    #[test]
+    fn fields_full_includes_repair_hints() -> TestResult {
+        let (_, stdout, _) = invoke(&["ee", "--fields", "full", "--json", "status"]);
+        ensure_contains(&stdout, "\"fields\":\"full\"", "full indicator")?;
+        ensure_contains(&stdout, "\"repair\":", "full includes repair hints")
+    }
+
+    #[test]
+    fn fields_affects_capabilities_output() -> TestResult {
+        let (_, minimal, _) = invoke(&["ee", "--fields", "minimal", "--json", "capabilities"]);
+        let (_, full, _) = invoke(&["ee", "--fields", "full", "--json", "capabilities"]);
+
+        ensure_contains(&minimal, "\"fields\":\"minimal\"", "capabilities minimal")?;
+        ensure_contains(&full, "\"fields\":\"full\"", "capabilities full")?;
+        ensure(
+            full.len() > minimal.len(),
+            "full output is larger than minimal",
+        )
     }
 
     // ========================================================================

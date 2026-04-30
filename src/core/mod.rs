@@ -7,10 +7,12 @@ pub mod context;
 pub mod doctor;
 pub mod health;
 pub mod index;
+pub mod memory;
 pub mod outcome;
 pub mod quarantine;
 pub mod search;
 pub mod status;
+pub mod streams;
 
 pub use budget::{BudgetDimension, BudgetExceeded, BudgetSnapshot, RequestBudget};
 pub use context::{AccessLevel, CapabilitySet, CommandContext};

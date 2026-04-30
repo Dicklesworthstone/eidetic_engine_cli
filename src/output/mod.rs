@@ -5,6 +5,7 @@ use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
 use crate::core::doctor::{DoctorReport, FixPlan};
 use crate::core::health::HealthReport;
+use crate::core::memory::{MemoryDetails, MemoryShowReport};
 use crate::core::quarantine::{QuarantineEntry, QuarantineReport};
 use crate::core::status::StatusReport;
 use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
@@ -814,6 +815,55 @@ pub fn render_quarantine_toon(report: &QuarantineReport) -> String {
     render_toon_from_json(&render_quarantine_json(report))
 }
 
+/// Render a streams diagnostic report as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_streams_json(report: &crate::core::streams::StreamsReport) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", report.is_healthy());
+    b.field_object("data", |d| {
+        d.field_str("command", "diag streams");
+        d.field_str("version", report.version);
+        d.field_bool("stdoutIsolated", report.stdout_isolated);
+        d.field_bool("stderrReceivedProbe", report.stderr_received_probe);
+        d.field_str("stderrProbeMessage", &report.stderr_probe_message);
+        d.field_bool("healthy", report.is_healthy());
+    });
+    b.finish()
+}
+
+/// Render a streams diagnostic report as human-readable text.
+#[must_use]
+pub fn render_streams_human(report: &crate::core::streams::StreamsReport) -> String {
+    let mut output = format!("ee diag streams (v{})\n\n", report.version);
+
+    if report.is_healthy() {
+        output.push_str("Stream separation: OK\n\n");
+        output.push_str("  stdout: isolated for machine data\n");
+        output.push_str("  stderr: received diagnostic probe\n\n");
+        output.push_str("This confirms that stdout contains only machine-readable data\n");
+        output
+            .push_str("and stderr receives diagnostics, as required for agent-native operation.\n");
+    } else {
+        output.push_str("Stream separation: FAILED\n\n");
+        if !report.stdout_isolated {
+            output.push_str("  ✗ stdout is not isolated\n");
+        }
+        if !report.stderr_received_probe {
+            output.push_str("  ✗ stderr did not receive probe\n");
+        }
+        output.push_str("\nNext:\n  Check for stderr redirection or write failures.\n");
+    }
+
+    output
+}
+
+/// Render a streams diagnostic report as TOON.
+#[must_use]
+pub fn render_streams_toon(report: &crate::core::streams::StreamsReport) -> String {
+    render_toon_from_json(&render_streams_json(report))
+}
+
 /// Render a check report as JSON (ee.response.v1 envelope).
 #[must_use]
 pub fn render_check_json(report: &CheckReport) -> String {
@@ -954,6 +1004,109 @@ pub fn render_health_human(report: &HealthReport) -> String {
 #[must_use]
 pub fn render_health_toon(report: &HealthReport) -> String {
     render_toon_from_json(&render_health_json(report))
+}
+
+/// Render a memory show report as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_memory_show_json(report: &MemoryShowReport) -> String {
+    let mut b = JsonBuilder::with_capacity(1024);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", report.found && report.error.is_none());
+    b.field_object("data", |d| {
+        d.field_str("command", "memory show");
+        d.field_str("version", report.version);
+        d.field_bool("found", report.found);
+        d.field_bool("is_tombstoned", report.is_tombstoned);
+
+        if let Some(ref details) = report.memory {
+            d.field_object("memory", |m| {
+                render_memory_fields(m, details);
+            });
+        }
+
+        if let Some(ref err) = report.error {
+            d.field_str("error", err);
+        }
+    });
+    b.finish()
+}
+
+/// Render memory fields into a JSON builder.
+fn render_memory_fields(b: &mut JsonBuilder, details: &MemoryDetails) {
+    let mem = &details.memory;
+    b.field_str("id", &mem.id);
+    b.field_str("workspace_id", &mem.workspace_id);
+    b.field_str("level", &mem.level);
+    b.field_str("kind", &mem.kind);
+    b.field_str("content", &mem.content);
+    b.field_raw("confidence", &format!("{:.4}", mem.confidence));
+    b.field_raw("utility", &format!("{:.4}", mem.utility));
+    b.field_raw("importance", &format!("{:.4}", mem.importance));
+    if let Some(ref uri) = mem.provenance_uri {
+        b.field_str("provenance_uri", uri);
+    }
+    b.field_str("trust_class", &mem.trust_class);
+    if let Some(ref sub) = mem.trust_subclass {
+        b.field_str("trust_subclass", sub);
+    }
+    b.field_str("created_at", &mem.created_at);
+    b.field_str("updated_at", &mem.updated_at);
+    if let Some(ref ts) = mem.tombstoned_at {
+        b.field_str("tombstoned_at", ts);
+    }
+    b.field_array_of_objects("tags", &details.tags, |obj, tag| {
+        obj.field_str("name", tag);
+    });
+}
+
+/// Render a memory show report as human-readable text.
+#[must_use]
+pub fn render_memory_show_human(report: &MemoryShowReport) -> String {
+    if let Some(ref err) = report.error {
+        return format!("error: {err}\n");
+    }
+
+    if !report.found {
+        return "Memory not found.\n".to_string();
+    }
+
+    let details = match &report.memory {
+        Some(d) => d,
+        None => return "Memory not found.\n".to_string(),
+    };
+
+    let mem = &details.memory;
+    let mut output = format!("Memory: {}\n\n", mem.id);
+    output.push_str(&format!("  Level: {}\n", mem.level));
+    output.push_str(&format!("  Kind: {}\n", mem.kind));
+    output.push_str(&format!("  Content:\n    {}\n", mem.content));
+    output.push_str(&format!(
+        "  Scores: confidence={:.2}, utility={:.2}, importance={:.2}\n",
+        mem.confidence, mem.utility, mem.importance
+    ));
+    output.push_str(&format!("  Trust: {}", mem.trust_class));
+    if let Some(ref sub) = mem.trust_subclass {
+        output.push_str(&format!(" ({})", sub));
+    }
+    output.push('\n');
+    if let Some(ref uri) = mem.provenance_uri {
+        output.push_str(&format!("  Provenance: {}\n", uri));
+    }
+    output.push_str(&format!("  Created: {}\n", mem.created_at));
+    output.push_str(&format!("  Updated: {}\n", mem.updated_at));
+    if let Some(ref ts) = mem.tombstoned_at {
+        output.push_str(&format!("  Tombstoned: {}\n", ts));
+    }
+    if !details.tags.is_empty() {
+        output.push_str(&format!("  Tags: {}\n", details.tags.join(", ")));
+    }
+    output
+}
+
+/// Render a memory show report as TOON.
+#[must_use]
+pub fn render_memory_show_toon(report: &MemoryShowReport) -> String {
+    render_toon_from_json(&render_memory_show_json(report))
 }
 
 /// Render a capabilities report as JSON (ee.response.v1 envelope).

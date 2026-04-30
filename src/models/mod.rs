@@ -64,6 +64,11 @@ pub enum DomainError {
         message: String,
         repair: Option<String>,
     },
+    NotFound {
+        resource: String,
+        id: String,
+        repair: Option<String>,
+    },
     UnsatisfiedDegradedMode {
         message: String,
         repair: Option<String>,
@@ -87,6 +92,7 @@ impl DomainError {
             Self::Storage { .. } => "storage",
             Self::SearchIndex { .. } => "search_index",
             Self::Import { .. } => "import",
+            Self::NotFound { .. } => "not_found",
             Self::UnsatisfiedDegradedMode { .. } => "unsatisfied_degraded_mode",
             Self::PolicyDenied { .. } => "policy_denied",
             Self::MigrationRequired { .. } => "migration_required",
@@ -94,7 +100,7 @@ impl DomainError {
     }
 
     #[must_use]
-    pub fn message(&self) -> &str {
+    pub fn message(&self) -> String {
         match self {
             Self::Usage { message, .. }
             | Self::Configuration { message, .. }
@@ -103,7 +109,10 @@ impl DomainError {
             | Self::Import { message, .. }
             | Self::UnsatisfiedDegradedMode { message, .. }
             | Self::PolicyDenied { message, .. }
-            | Self::MigrationRequired { message, .. } => message,
+            | Self::MigrationRequired { message, .. } => message.clone(),
+            Self::NotFound { resource, id, .. } => {
+                format!("{resource} not found: {id}")
+            }
         }
     }
 
@@ -115,6 +124,7 @@ impl DomainError {
             | Self::Storage { repair, .. }
             | Self::SearchIndex { repair, .. }
             | Self::Import { repair, .. }
+            | Self::NotFound { repair, .. }
             | Self::UnsatisfiedDegradedMode { repair, .. }
             | Self::PolicyDenied { repair, .. }
             | Self::MigrationRequired { repair, .. } => repair.as_deref(),
@@ -129,6 +139,7 @@ impl DomainError {
             Self::Storage { .. } => ProcessExitCode::Storage,
             Self::SearchIndex { .. } => ProcessExitCode::SearchIndex,
             Self::Import { .. } => ProcessExitCode::Import,
+            Self::NotFound { .. } => ProcessExitCode::NotFound,
             Self::UnsatisfiedDegradedMode { .. } => ProcessExitCode::UnsatisfiedDegradedMode,
             Self::PolicyDenied { .. } => ProcessExitCode::PolicyDenied,
             Self::MigrationRequired { .. } => ProcessExitCode::MigrationRequired,
@@ -148,6 +159,7 @@ pub enum ProcessExitCode {
     UnsatisfiedDegradedMode = 6,
     PolicyDenied = 7,
     MigrationRequired = 8,
+    NotFound = 9,
 }
 
 impl From<ProcessExitCode> for ExitCode {
