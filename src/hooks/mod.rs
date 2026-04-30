@@ -1,3 +1,10 @@
+pub mod installer;
+
+pub use installer::{
+    HookInstallOptions, HookInstallReport, HookStatusOptions, HookStatusReport, HookType,
+    check_hook_status, install_hooks,
+};
+
 pub const SUBSYSTEM: &str = "hooks";
 
 #[must_use]
