@@ -254,7 +254,7 @@ where
                     write_stdout(stdout, &(output::render_schema_list_json() + "\n"))
                 }
             },
-            SchemaCommand::Export { ref schema_id } => match cli.renderer() {
+            SchemaCommand::Export { schema_id } => match cli.renderer() {
                 output::Renderer::Human => write_stdout(
                     stdout,
                     &output::render_schema_export_human(schema_id.as_deref()),
