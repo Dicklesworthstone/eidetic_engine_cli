@@ -139,6 +139,9 @@ pub enum Command {
     Diag(DiagCommand),
     /// Run health checks on workspace and subsystems.
     Doctor(DoctorArgs),
+    /// Memory economics: utility scores, attention budgets, maintenance debt.
+    #[command(subcommand)]
+    Economy(EconomyCommand),
     /// Run evaluation scenarios against fixtures.
     #[command(subcommand)]
     Eval(EvalCommand),
@@ -607,6 +610,51 @@ pub enum EvalCommand {
     },
     /// List available evaluation scenarios.
     List,
+}
+
+/// Subcommands for `ee economy`.
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum EconomyCommand {
+    /// Report memory economics: utility, cost, debt, and attention budget status.
+    Report(EconomyReportArgs),
+    /// Score a specific memory or artifact for economic value.
+    Score(EconomyScoreArgs),
+}
+
+/// Arguments for `ee economy report`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct EconomyReportArgs {
+    /// Filter by artifact type: memory, procedure, tripwire, situation.
+    #[arg(long, value_name = "TYPE")]
+    pub artifact_type: Option<String>,
+
+    /// Include only artifacts above this utility score (0.0-1.0).
+    #[arg(long, value_name = "SCORE")]
+    pub min_utility: Option<f64>,
+
+    /// Include maintenance debt analysis.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_debt: bool,
+
+    /// Include tail-risk reserves analysis.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_reserves: bool,
+}
+
+/// Arguments for `ee economy score`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct EconomyScoreArgs {
+    /// ID of the artifact to score (memory ID, procedure ID, etc).
+    #[arg(value_name = "ARTIFACT_ID")]
+    pub artifact_id: String,
+
+    /// Type of artifact: memory, procedure, tripwire, situation.
+    #[arg(long, value_name = "TYPE", default_value = "memory")]
+    pub artifact_type: String,
+
+    /// Include breakdown of score components.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub breakdown: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -1097,6 +1145,12 @@ where
                     write_stdout(stdout, &(json.to_string() + "\n"))
                 }
             }
+        }
+        Some(Command::Economy(EconomyCommand::Report(ref args))) => {
+            handle_economy_report(&cli, args, stdout, stderr)
+        }
+        Some(Command::Economy(EconomyCommand::Score(ref args))) => {
+            handle_economy_score(&cli, args, stdout, stderr)
         }
         Some(Command::Eval(ref eval_cmd)) => match eval_cmd {
             EvalCommand::Run { scenario_id, .. } => match cli.renderer() {
@@ -3185,6 +3239,84 @@ where
 }
 
 // ============================================================================
+// EE-431: Memory Economics and Attention Budgets
+// ============================================================================
+
+fn handle_economy_report<W, E>(
+    cli: &Cli,
+    args: &EconomyReportArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::economy::{EconomyReportOptions, generate_economy_report};
+
+    let options = EconomyReportOptions {
+        artifact_type: args.artifact_type.clone(),
+        min_utility: args.min_utility,
+        include_debt: args.include_debt,
+        include_reserves: args.include_reserves,
+    };
+
+    let report = generate_economy_report(&options);
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_economy_report_human(&report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_economy_report_toon(&report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_economy_report_json(&report) + "\n"))
+        }
+    }
+}
+
+fn handle_economy_score<W, E>(
+    cli: &Cli,
+    args: &EconomyScoreArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::economy::{EconomyScoreOptions, score_artifact};
+
+    let options = EconomyScoreOptions {
+        artifact_id: args.artifact_id.clone(),
+        artifact_type: args.artifact_type.clone(),
+        breakdown: args.breakdown,
+    };
+
+    match score_artifact(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_economy_score_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_economy_score_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_economy_score_json(&report) + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+// ============================================================================
 // EE-040: Read-only Invocation Normalization and Did-You-Mean Errors
 // ============================================================================
 
@@ -3198,6 +3330,7 @@ const COMMAND_NAMES: &[&str] = &[
     "context",
     "diag",
     "doctor",
+    "economy",
     "eval",
     "health",
     "help",
@@ -3288,6 +3421,10 @@ impl NormalizedInvocation {
                     DiagCommand::Streams => "diag streams".to_string(),
                 },
                 Command::Doctor(_) => "doctor".to_string(),
+                Command::Economy(econ) => match econ {
+                    EconomyCommand::Report(_) => "economy report".to_string(),
+                    EconomyCommand::Score(_) => "economy score".to_string(),
+                },
                 Command::Eval(eval) => match eval {
                     EvalCommand::Run { .. } => "eval run".to_string(),
                     EvalCommand::List => "eval list".to_string(),

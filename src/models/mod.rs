@@ -10,8 +10,10 @@ pub mod id;
 pub mod jsonl;
 pub mod memory;
 pub mod model_registry;
+pub mod mutation;
 pub mod posture;
 pub mod preflight;
+pub mod procedure;
 pub mod provenance;
 pub mod recorder;
 pub mod repro;
@@ -82,6 +84,12 @@ pub use model_registry::{
     ModelPurpose, ModelRegistryStatus, ParseModelRegistryValueError,
     embedding_metadata_schema_catalog_json, embedding_metadata_schemas,
 };
+pub use mutation::{
+    DRY_RUN_PREVIEW_SCHEMA_V1, DryRunPreview, DryRunSummary, IdempotencyClass,
+    MUTATION_RESPONSE_SCHEMA_V1, MutationActionStatus, MutationActionType, MutationResponse,
+    MutationSummary, ParseIdempotencyClassError, ParseMutationActionStatusError,
+    ParseMutationActionTypeError, PlannedAction,
+};
 pub use posture::{ActionCategory, Posture, PostureSummary, SuggestedAction};
 pub use progress::{
     PROGRESS_EVENT_SCHEMA_V1, ParseProgressEventTypeError, ProgressEvent, ProgressEventBuilder,
@@ -95,6 +103,14 @@ pub use preflight::{
     RiskLevel, TRIPWIRE_EVENT_ID_PREFIX, TRIPWIRE_EVENT_SCHEMA_V1, TRIPWIRE_ID_PREFIX,
     TRIPWIRE_SCHEMA_V1, Tripwire, TripwireAction, TripwireEvent, TripwireEventType, TripwireState,
     TripwireType,
+};
+pub use procedure::{
+    PROCEDURE_EXPORT_SCHEMA_V1, PROCEDURE_SCHEMA_CATALOG_V1, PROCEDURE_SCHEMA_V1,
+    PROCEDURE_STEP_SCHEMA_V1, PROCEDURE_VERIFICATION_SCHEMA_V1, ParseProcedureValueError,
+    Procedure, ProcedureExport, ProcedureExportFormat, ProcedureFieldSchema,
+    ProcedureObjectSchema, ProcedureStatus, ProcedureStep, ProcedureVerification,
+    ProcedureVerificationStatus, SKILL_CAPSULE_SCHEMA_V1, SkillCapsule,
+    SkillCapsuleInstallMode, procedure_schema_catalog_json, procedure_schemas,
 };
 pub use provenance::{LineSpan, ProvenanceUri, ProvenanceUriError};
 pub use recorder::{
