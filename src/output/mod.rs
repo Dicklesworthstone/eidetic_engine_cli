@@ -1334,11 +1334,216 @@ pub fn schema_json() -> String {
 
 #[must_use]
 pub fn help_json() -> String {
-    format!(
-        "{{\"schema\":\"{}\",\"success\":true,\"data\":{{\"command\":\"help\",\"usage\":\"ee [OPTIONS] [COMMAND]\",\"commands\":[\"status\",\"version\",\"help\"],\"globalOptions\":[\"--json\",\"--robot\",\"--schema\",\"--help-json\",\"--agent-docs\"]}}}}",
-        RESPONSE_SCHEMA_V1
-    )
+    let mut b = JsonBuilder::with_capacity(4096);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "help");
+        d.field_str("binary", "ee");
+        d.field_str("version", env!("CARGO_PKG_VERSION"));
+        d.field_str("usage", "ee [OPTIONS] [COMMAND]");
+        d.field_str("description", "Durable, local-first, explainable memory for coding agents.");
+
+        d.field_array_of_objects("globalOptions", GLOBAL_OPTIONS, |obj, opt| {
+            obj.field_str("name", opt.name);
+            obj.field_str("short", opt.short);
+            obj.field_str("description", opt.description);
+            obj.field_str("type", opt.opt_type);
+        });
+
+        d.field_array_of_objects("commands", COMMAND_MANIFEST, |obj, cmd| {
+            obj.field_str("name", cmd.name);
+            obj.field_str("description", cmd.description);
+            obj.field_bool("available", cmd.available);
+            if !cmd.subcommands.is_empty() {
+                obj.field_array_of_objects("subcommands", cmd.subcommands, |sub, sc| {
+                    sub.field_str("name", sc.name);
+                    sub.field_str("description", sc.description);
+                });
+            }
+            if !cmd.args.is_empty() {
+                obj.field_array_of_objects("args", cmd.args, |arg, a| {
+                    arg.field_str("name", a.name);
+                    arg.field_str("description", a.description);
+                    arg.field_bool("required", a.required);
+                    if let Some(def) = a.default {
+                        arg.field_str("default", def);
+                    }
+                });
+            }
+        });
+    });
+    b.finish()
 }
+
+struct GlobalOption {
+    name: &'static str,
+    short: &'static str,
+    description: &'static str,
+    opt_type: &'static str,
+}
+
+const GLOBAL_OPTIONS: &[GlobalOption] = &[
+    GlobalOption { name: "--json", short: "-j", description: "Emit JSON output", opt_type: "flag" },
+    GlobalOption { name: "--workspace", short: "", description: "Workspace root to operate on", opt_type: "path" },
+    GlobalOption { name: "--no-color", short: "", description: "Disable colored diagnostics", opt_type: "flag" },
+    GlobalOption { name: "--robot", short: "", description: "Use agent-oriented output defaults", opt_type: "flag" },
+    GlobalOption { name: "--format", short: "", description: "Select output renderer (human|json|toon|jsonl|compact|hook)", opt_type: "enum" },
+    GlobalOption { name: "--fields", short: "", description: "Control output verbosity (minimal|summary|standard|full)", opt_type: "enum" },
+    GlobalOption { name: "--schema", short: "", description: "Print JSON schema for response envelope", opt_type: "flag" },
+    GlobalOption { name: "--help-json", short: "", description: "Print JSON-formatted help", opt_type: "flag" },
+    GlobalOption { name: "--agent-docs", short: "", description: "Print agent-oriented documentation", opt_type: "flag" },
+    GlobalOption { name: "--meta", short: "", description: "Include additional metadata in response", opt_type: "flag" },
+];
+
+struct CommandArg {
+    name: &'static str,
+    description: &'static str,
+    required: bool,
+    default: Option<&'static str>,
+}
+
+struct SubcommandEntry {
+    name: &'static str,
+    description: &'static str,
+}
+
+struct CommandEntry {
+    name: &'static str,
+    description: &'static str,
+    available: bool,
+    subcommands: &'static [SubcommandEntry],
+    args: &'static [CommandArg],
+}
+
+const COMMAND_MANIFEST: &[CommandEntry] = &[
+    CommandEntry {
+        name: "capabilities",
+        description: "Report feature availability, commands, and subsystem status",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "check",
+        description: "Quick posture summary: ready, degraded, or needs attention",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "diag",
+        description: "Run diagnostic commands for trust, quarantine, and streams",
+        available: true,
+        subcommands: &[
+            SubcommandEntry { name: "quarantine", description: "Report quarantine status for import sources" },
+        ],
+        args: &[],
+    },
+    CommandEntry {
+        name: "doctor",
+        description: "Run health checks on workspace and subsystems",
+        available: true,
+        subcommands: &[],
+        args: &[
+            CommandArg { name: "--fix-plan", description: "Output structured repair plan", required: false, default: None },
+        ],
+    },
+    CommandEntry {
+        name: "eval",
+        description: "Run evaluation scenarios against fixtures",
+        available: true,
+        subcommands: &[
+            SubcommandEntry { name: "run", description: "Run one or more evaluation scenarios" },
+            SubcommandEntry { name: "list", description: "List available evaluation scenarios" },
+        ],
+        args: &[],
+    },
+    CommandEntry {
+        name: "health",
+        description: "Quick health check with overall verdict",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "help",
+        description: "Print command help",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "import",
+        description: "Import memories and evidence from external sources",
+        available: true,
+        subcommands: &[
+            SubcommandEntry { name: "cass", description: "Import from coding_agent_session_search" },
+        ],
+        args: &[],
+    },
+    CommandEntry {
+        name: "index",
+        description: "Manage search indexes",
+        available: true,
+        subcommands: &[
+            SubcommandEntry { name: "rebuild", description: "Rebuild the search index" },
+            SubcommandEntry { name: "status", description: "Inspect index health and generation" },
+        ],
+        args: &[],
+    },
+    CommandEntry {
+        name: "remember",
+        description: "Store a new memory",
+        available: true,
+        subcommands: &[],
+        args: &[
+            CommandArg { name: "CONTENT", description: "Memory content to store", required: true, default: None },
+            CommandArg { name: "--level", description: "Memory level", required: false, default: Some("episodic") },
+            CommandArg { name: "--kind", description: "Memory kind", required: false, default: Some("fact") },
+            CommandArg { name: "--tags", description: "Tags (comma-separated)", required: false, default: None },
+            CommandArg { name: "--confidence", description: "Confidence score (0.0-1.0)", required: false, default: Some("0.8") },
+            CommandArg { name: "--source", description: "Source provenance URI", required: false, default: None },
+            CommandArg { name: "--dry-run", description: "Perform dry run without storing", required: false, default: None },
+        ],
+    },
+    CommandEntry {
+        name: "schema",
+        description: "List or export public response schemas",
+        available: true,
+        subcommands: &[
+            SubcommandEntry { name: "list", description: "List all available public schemas" },
+            SubcommandEntry { name: "export", description: "Export schema JSON definition" },
+        ],
+        args: &[],
+    },
+    CommandEntry {
+        name: "search",
+        description: "Search indexed memories and sessions",
+        available: true,
+        subcommands: &[],
+        args: &[
+            CommandArg { name: "QUERY", description: "Query string to search for", required: true, default: None },
+            CommandArg { name: "--limit", description: "Maximum results", required: false, default: Some("10") },
+            CommandArg { name: "--database", description: "Database path", required: false, default: None },
+            CommandArg { name: "--index-dir", description: "Index directory path", required: false, default: None },
+        ],
+    },
+    CommandEntry {
+        name: "status",
+        description: "Report workspace and subsystem readiness",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "version",
+        description: "Print the ee version",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+];
 
 #[must_use]
 pub fn agent_docs() -> String {
@@ -2412,5 +2617,156 @@ mod tests {
             !success_fixture.starts_with('{'),
             "human output is not JSON",
         )
+    }
+
+    // ========================================================================
+    // Field Profile Tests (EE-037)
+    //
+    // These tests verify the --fields filtering behavior for JSON output.
+    // Each profile level progressively includes more fields.
+    // ========================================================================
+
+    #[test]
+    fn field_profile_as_str_is_stable() -> TestResult {
+        use super::FieldProfile;
+        ensure_equal(&FieldProfile::Minimal.as_str(), &"minimal", "minimal")?;
+        ensure_equal(&FieldProfile::Summary.as_str(), &"summary", "summary")?;
+        ensure_equal(&FieldProfile::Standard.as_str(), &"standard", "standard")?;
+        ensure_equal(&FieldProfile::Full.as_str(), &"full", "full")
+    }
+
+    #[test]
+    fn field_profile_inclusion_rules() -> TestResult {
+        use super::FieldProfile;
+
+        // Minimal: no arrays, no summary metrics, no verbose
+        ensure(!FieldProfile::Minimal.include_arrays(), "minimal no arrays")?;
+        ensure(
+            !FieldProfile::Minimal.include_summary_metrics(),
+            "minimal no summary",
+        )?;
+        ensure(
+            !FieldProfile::Minimal.include_verbose_details(),
+            "minimal no verbose",
+        )?;
+
+        // Summary: no arrays, has summary metrics, no verbose
+        ensure(!FieldProfile::Summary.include_arrays(), "summary no arrays")?;
+        ensure(
+            FieldProfile::Summary.include_summary_metrics(),
+            "summary has summary",
+        )?;
+        ensure(
+            !FieldProfile::Summary.include_verbose_details(),
+            "summary no verbose",
+        )?;
+
+        // Standard: has arrays, has summary metrics, no verbose
+        ensure(FieldProfile::Standard.include_arrays(), "standard has arrays")?;
+        ensure(
+            FieldProfile::Standard.include_summary_metrics(),
+            "standard has summary",
+        )?;
+        ensure(
+            !FieldProfile::Standard.include_verbose_details(),
+            "standard no verbose",
+        )?;
+
+        // Full: has everything
+        ensure(FieldProfile::Full.include_arrays(), "full has arrays")?;
+        ensure(
+            FieldProfile::Full.include_summary_metrics(),
+            "full has summary",
+        )?;
+        ensure(
+            FieldProfile::Full.include_verbose_details(),
+            "full has verbose",
+        )
+    }
+
+    #[test]
+    fn render_status_json_filtered_minimal_has_only_essentials() -> TestResult {
+        use super::{FieldProfile, render_status_json_filtered};
+        let report = StatusReport::gather();
+        let json = render_status_json_filtered(&report, FieldProfile::Minimal);
+
+        ensure_contains(&json, "\"schema\":\"ee.response.v1\"", "schema")?;
+        ensure_contains(&json, "\"success\":true", "success")?;
+        ensure_contains(&json, "\"fields\":\"minimal\"", "fields indicator")?;
+        ensure_contains(&json, "\"command\":\"status\"", "command")?;
+        ensure_contains(&json, "\"version\":", "version")?;
+        // Minimal should NOT have capabilities, runtime, or degraded
+        ensure(!json.contains("\"capabilities\":"), "no capabilities")?;
+        ensure(!json.contains("\"runtime\":"), "no runtime")?;
+        ensure(!json.contains("\"degraded\":"), "no degraded")
+    }
+
+    #[test]
+    fn render_status_json_filtered_summary_adds_capabilities() -> TestResult {
+        use super::{FieldProfile, render_status_json_filtered};
+        let report = StatusReport::gather();
+        let json = render_status_json_filtered(&report, FieldProfile::Summary);
+
+        ensure_contains(&json, "\"fields\":\"summary\"", "fields indicator")?;
+        ensure_contains(&json, "\"capabilities\":", "has capabilities")?;
+        // Summary should NOT have runtime or degraded arrays
+        ensure(!json.contains("\"runtime\":"), "no runtime")?;
+        ensure(!json.contains("\"degraded\":"), "no degraded")
+    }
+
+    #[test]
+    fn render_status_json_filtered_standard_adds_arrays() -> TestResult {
+        use super::{FieldProfile, render_status_json_filtered};
+        let report = StatusReport::gather();
+        let json = render_status_json_filtered(&report, FieldProfile::Standard);
+
+        ensure_contains(&json, "\"fields\":\"standard\"", "fields indicator")?;
+        ensure_contains(&json, "\"capabilities\":", "has capabilities")?;
+        ensure_contains(&json, "\"runtime\":", "has runtime")?;
+        ensure_contains(&json, "\"degraded\":", "has degraded")?;
+        // Standard should NOT have repair in degraded items
+        ensure(!json.contains("\"repair\":"), "no repair in degraded")
+    }
+
+    #[test]
+    fn render_status_json_filtered_full_includes_verbose() -> TestResult {
+        use super::{FieldProfile, render_status_json_filtered};
+        let report = StatusReport::gather();
+        let json = render_status_json_filtered(&report, FieldProfile::Full);
+
+        ensure_contains(&json, "\"fields\":\"full\"", "fields indicator")?;
+        ensure_contains(&json, "\"capabilities\":", "has capabilities")?;
+        ensure_contains(&json, "\"runtime\":", "has runtime")?;
+        ensure_contains(&json, "\"degraded\":", "has degraded")?;
+        ensure_contains(&json, "\"repair\":", "has repair in degraded")
+    }
+
+    #[test]
+    fn render_capabilities_json_filtered_minimal_only_essentials() -> TestResult {
+        use super::{FieldProfile, render_capabilities_json_filtered};
+        use crate::core::capabilities::CapabilitiesReport;
+        let report = CapabilitiesReport::gather();
+        let json = render_capabilities_json_filtered(&report, FieldProfile::Minimal);
+
+        ensure_contains(&json, "\"command\":\"capabilities\"", "command")?;
+        ensure_contains(&json, "\"version\":", "version")?;
+        ensure_contains(&json, "\"fields\":\"minimal\"", "fields")?;
+        // Minimal: no arrays, no summary
+        ensure(!json.contains("\"subsystems\":"), "no subsystems")?;
+        ensure(!json.contains("\"features\":"), "no features")?;
+        ensure(!json.contains("\"commands\":"), "no commands")?;
+        ensure(!json.contains("\"summary\":"), "no summary")
+    }
+
+    #[test]
+    fn render_capabilities_json_filtered_full_has_descriptions() -> TestResult {
+        use super::{FieldProfile, render_capabilities_json_filtered};
+        use crate::core::capabilities::CapabilitiesReport;
+        let report = CapabilitiesReport::gather();
+        let json = render_capabilities_json_filtered(&report, FieldProfile::Full);
+
+        ensure_contains(&json, "\"subsystems\":", "has subsystems")?;
+        ensure_contains(&json, "\"description\":", "has descriptions")?;
+        ensure_contains(&json, "\"summary\":", "has summary")
     }
 }

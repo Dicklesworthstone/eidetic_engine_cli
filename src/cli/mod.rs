@@ -595,6 +595,7 @@ where
         Some(Command::Search(ref args)) => handle_search(&cli, args, stdout, stderr),
         Some(Command::Status) => {
             let report = StatusReport::gather();
+            let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
                 output::Renderer::Human => {
                     write_stdout(stdout, &output::render_status_human(&report))
@@ -605,9 +606,10 @@ where
                 output::Renderer::Json
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
-                | output::Renderer::Hook => {
-                    write_stdout(stdout, &(output::render_status_json(&report) + "\n"))
-                }
+                | output::Renderer::Hook => write_stdout(
+                    stdout,
+                    &(output::render_status_json_filtered(&report, profile) + "\n"),
+                ),
             }
         }
         Some(Command::Version) => {
