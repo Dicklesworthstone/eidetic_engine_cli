@@ -1,0 +1,70 @@
+{
+  "schema": "ee.executable_id_schemas.v1",
+  "schemas": [
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:claim-id:v1",
+      "eeSchema": "ee.claim_id.v1",
+      "kind": "claim",
+      "title": "ClaimId",
+      "description": "Stable identifier for an executable claim.",
+      "type": "string",
+      "pattern": "^claim_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "examples": [
+        "claim_00000000000000000000000000"
+      ]
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:evidence-id:v1",
+      "eeSchema": "ee.evidence_id.v1",
+      "kind": "evidence",
+      "title": "EvidenceId",
+      "description": "Stable identifier for evidence attached to a claim.",
+      "type": "string",
+      "pattern": "^ev_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "examples": [
+        "ev_00000000000000000000000000"
+      ]
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:policy-id:v1",
+      "eeSchema": "ee.policy_id.v1",
+      "kind": "policy",
+      "title": "PolicyId",
+      "description": "Stable identifier for a policy that affects executable verification.",
+      "type": "string",
+      "pattern": "^pol_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "examples": [
+        "pol_00000000000000000000000000"
+      ]
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:trace-id:v1",
+      "eeSchema": "ee.trace_id.v1",
+      "kind": "trace",
+      "title": "TraceId",
+      "description": "Stable identifier for a verification, replay, or decision trace.",
+      "type": "string",
+      "pattern": "^trace_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "examples": [
+        "trace_00000000000000000000000000"
+      ]
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:demo-id:v1",
+      "eeSchema": "ee.demo_id.v1",
+      "kind": "demo",
+      "title": "DemoId",
+      "description": "Stable identifier for a demo scenario that proves a claim.",
+      "type": "string",
+      "pattern": "^demo_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "examples": [
+        "demo_00000000000000000000000000"
+      ]
+    }
+  ]
+}

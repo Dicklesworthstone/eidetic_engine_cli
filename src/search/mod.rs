@@ -48,6 +48,7 @@ pub struct CanonicalSearchDocument {
     kind: Option<String>,
     created_at: Option<String>,
     tags: Vec<String>,
+    metadata: HashMap<String, String>,
 }
 
 impl CanonicalSearchDocument {
@@ -64,6 +65,7 @@ impl CanonicalSearchDocument {
             kind: None,
             created_at: None,
             tags: Vec::new(),
+            metadata: HashMap::new(),
         }
     }
 
@@ -109,6 +111,17 @@ impl CanonicalSearchDocument {
         self
     }
 
+    /// Add a metadata field for filtering, provenance, or diagnostics.
+    ///
+    /// Canonical fields such as `source`, `schema`, `workspace`, `level`,
+    /// `kind`, `created_at`, and `tags` are reserved and are written by
+    /// [`Self::into_indexable`].
+    #[must_use]
+    pub fn with_metadata_entry(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
+
     /// Return the document ID.
     #[must_use]
     pub fn id(&self) -> &str {
@@ -130,7 +143,7 @@ impl CanonicalSearchDocument {
     /// Convert to frankensearch's [`IndexableDocument`].
     #[must_use]
     pub fn into_indexable(self) -> IndexableDocument {
-        let mut metadata = HashMap::new();
+        let mut metadata = self.metadata;
         metadata.insert("source".to_owned(), self.source.as_str().to_owned());
         metadata.insert("schema".to_owned(), CANONICAL_DOCUMENT_SCHEMA.to_owned());
 
@@ -156,6 +169,18 @@ impl CanonicalSearchDocument {
         }
         doc.metadata = metadata;
         doc
+    }
+}
+
+fn push_labeled_line(lines: &mut Vec<String>, label: &str, value: &str) {
+    if !value.trim().is_empty() {
+        lines.push(format!("{label}: {value}"));
+    }
+}
+
+fn push_optional_labeled_line(lines: &mut Vec<String>, label: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        push_labeled_line(lines, label, value);
     }
 }
 
@@ -255,6 +280,137 @@ pub fn memory_to_document_with_context(
     }
 
     builder.build(memory)
+}
+
+/// Builder for converting imported CASS sessions to canonical search documents.
+///
+/// Sessions currently index their stable CASS metadata rather than raw transcript
+/// content. Evidence span indexing can attach richer excerpts later without
+/// changing the session document identity or metadata contract.
+pub struct SessionDocumentBuilder {
+    workspace_path: Option<String>,
+    tags: Vec<String>,
+}
+
+impl SessionDocumentBuilder {
+    /// Create a new builder with no workspace path or tags.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            workspace_path: None,
+            tags: Vec::new(),
+        }
+    }
+
+    /// Set the workspace path for the document.
+    #[must_use]
+    pub fn with_workspace_path(mut self, path: impl Into<String>) -> Self {
+        self.workspace_path = Some(path.into());
+        self
+    }
+
+    /// Set the tags for the document.
+    #[must_use]
+    pub fn with_tags(mut self, tags: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.tags = tags.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Build a canonical search document from a stored CASS session row.
+    #[must_use]
+    pub fn build(self, session: &crate::db::StoredSession) -> CanonicalSearchDocument {
+        let mut lines = vec![format!("CASS session: {}", session.cass_session_id)];
+        push_optional_labeled_line(&mut lines, "Source path", session.source_path.as_deref());
+        push_optional_labeled_line(&mut lines, "Agent", session.agent_name.as_deref());
+        push_optional_labeled_line(&mut lines, "Model", session.model.as_deref());
+        push_optional_labeled_line(&mut lines, "Started at", session.started_at.as_deref());
+        push_optional_labeled_line(&mut lines, "Ended at", session.ended_at.as_deref());
+        lines.push(format!("Messages: {}", session.message_count));
+        if let Some(token_count) = session.token_count {
+            lines.push(format!("Tokens: {token_count}"));
+        }
+        push_labeled_line(&mut lines, "Content hash", &session.content_hash);
+        push_optional_labeled_line(&mut lines, "Metadata", session.metadata_json.as_deref());
+
+        let created_at = session
+            .started_at
+            .as_deref()
+            .unwrap_or(session.imported_at.as_str());
+
+        let mut doc =
+            CanonicalSearchDocument::new(&session.id, lines.join("\n"), DocumentSource::Session)
+                .with_title(format!("CASS session {}", session.cass_session_id))
+                .with_kind("cass_session")
+                .with_created_at(created_at)
+                .with_metadata_entry("workspace_id", &session.workspace_id)
+                .with_metadata_entry("cass_session_id", &session.cass_session_id)
+                .with_metadata_entry("message_count", session.message_count.to_string())
+                .with_metadata_entry("content_hash", &session.content_hash)
+                .with_metadata_entry("imported_at", &session.imported_at)
+                .with_metadata_entry("updated_at", &session.updated_at);
+
+        if let Some(workspace) = self.workspace_path {
+            doc = doc.with_workspace(workspace);
+        }
+        if let Some(source_path) = &session.source_path {
+            doc = doc.with_metadata_entry("source_path", source_path);
+        }
+        if let Some(agent_name) = &session.agent_name {
+            doc = doc.with_metadata_entry("agent_name", agent_name);
+        }
+        if let Some(model) = &session.model {
+            doc = doc.with_metadata_entry("model", model);
+        }
+        if let Some(started_at) = &session.started_at {
+            doc = doc.with_metadata_entry("started_at", started_at);
+        }
+        if let Some(ended_at) = &session.ended_at {
+            doc = doc.with_metadata_entry("ended_at", ended_at);
+        }
+        if let Some(token_count) = session.token_count {
+            doc = doc.with_metadata_entry("token_count", token_count.to_string());
+        }
+        if let Some(metadata_json) = &session.metadata_json {
+            doc = doc.with_metadata_entry("metadata_json", metadata_json);
+        }
+        if !self.tags.is_empty() {
+            doc = doc.with_tags(self.tags);
+        }
+
+        doc
+    }
+}
+
+impl Default for SessionDocumentBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Convert a stored CASS session directly to a canonical search document.
+#[must_use]
+pub fn session_to_document(session: &crate::db::StoredSession) -> CanonicalSearchDocument {
+    SessionDocumentBuilder::new().build(session)
+}
+
+/// Convert a stored CASS session with workspace and tags to a canonical document.
+#[must_use]
+pub fn session_to_document_with_context(
+    session: &crate::db::StoredSession,
+    workspace_path: Option<&str>,
+    tags: &[String],
+) -> CanonicalSearchDocument {
+    let mut builder = SessionDocumentBuilder::new();
+
+    if let Some(path) = workspace_path {
+        builder = builder.with_workspace_path(path);
+    }
+
+    if !tags.is_empty() {
+        builder = builder.with_tags(tags.iter().cloned());
+    }
+
+    builder.build(session)
 }
 
 pub const MODULE_CONTRACT: &str = "ee.search.module.v1";
@@ -678,6 +834,25 @@ mod tests {
         }
     }
 
+    fn make_test_session() -> crate::db::StoredSession {
+        crate::db::StoredSession {
+            id: "sess_01234567890123456789012345".to_string(),
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            cass_session_id: "cass-session-2026-04-29".to_string(),
+            source_path: Some("/home/user/.cass/sessions/session.jsonl".to_string()),
+            agent_name: Some("codex".to_string()),
+            model: Some("gpt-5".to_string()),
+            started_at: Some("2026-04-29T12:00:00Z".to_string()),
+            ended_at: Some("2026-04-29T12:30:00Z".to_string()),
+            message_count: 42,
+            token_count: Some(12_345),
+            content_hash: "blake3:session-content".to_string(),
+            metadata_json: Some(r#"{"source":"cass","schema":"cass.session.v1"}"#.to_string()),
+            imported_at: "2026-04-29T12:31:00Z".to_string(),
+            updated_at: "2026-04-29T12:31:00Z".to_string(),
+        }
+    }
+
     #[test]
     fn memory_document_builder_minimal() {
         let memory = make_test_memory();
@@ -749,5 +924,147 @@ mod tests {
 
         assert_eq!(doc.id(), memory.id);
         assert_eq!(doc.content(), memory.content);
+    }
+
+    #[test]
+    fn session_document_builder_minimal() {
+        let mut session = make_test_session();
+        session.source_path = None;
+        session.agent_name = None;
+        session.model = None;
+        session.started_at = None;
+        session.ended_at = None;
+        session.token_count = None;
+        session.metadata_json = None;
+
+        let doc = super::session_to_document(&session);
+
+        assert_eq!(doc.id(), "sess_01234567890123456789012345");
+        assert_eq!(doc.source(), DocumentSource::Session);
+        assert!(
+            doc.content()
+                .contains("CASS session: cass-session-2026-04-29")
+        );
+        assert!(doc.content().contains("Messages: 42"));
+        assert!(
+            doc.content()
+                .contains("Content hash: blake3:session-content")
+        );
+
+        let indexable = doc.into_indexable();
+        assert_eq!(
+            indexable.title.as_deref(),
+            Some("CASS session cass-session-2026-04-29")
+        );
+        assert_eq!(
+            indexable.metadata.get("source"),
+            Some(&"session".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("schema"),
+            Some(&super::CANONICAL_DOCUMENT_SCHEMA.to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("kind"),
+            Some(&"cass_session".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("created_at"),
+            Some(&"2026-04-29T12:31:00Z".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("cass_session_id"),
+            Some(&"cass-session-2026-04-29".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("message_count"),
+            Some(&"42".to_owned())
+        );
+        assert!(!indexable.metadata.contains_key("workspace"));
+        assert!(!indexable.metadata.contains_key("token_count"));
+    }
+
+    #[test]
+    fn session_document_builder_with_context() {
+        let session = make_test_session();
+        let tags = vec!["cass".to_string(), "session".to_string()];
+        let doc = super::session_to_document_with_context(
+            &session,
+            Some("/data/projects/eidetic_engine_cli"),
+            &tags,
+        );
+
+        assert_eq!(doc.id(), "sess_01234567890123456789012345");
+        assert_eq!(doc.source(), DocumentSource::Session);
+        assert!(doc.content().contains("Agent: codex"));
+        assert!(doc.content().contains("Model: gpt-5"));
+        assert!(doc.content().contains("Tokens: 12345"));
+        assert!(doc.content().contains("Metadata: {\"source\":\"cass\""));
+
+        let indexable = doc.into_indexable();
+        assert_eq!(
+            indexable.metadata.get("workspace"),
+            Some(&"/data/projects/eidetic_engine_cli".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("workspace_id"),
+            Some(&"wsp_01234567890123456789012345".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("agent_name"),
+            Some(&"codex".to_owned())
+        );
+        assert_eq!(indexable.metadata.get("model"), Some(&"gpt-5".to_owned()));
+        assert_eq!(
+            indexable.metadata.get("started_at"),
+            Some(&"2026-04-29T12:00:00Z".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("ended_at"),
+            Some(&"2026-04-29T12:30:00Z".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("token_count"),
+            Some(&"12345".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("metadata_json"),
+            Some(&r#"{"source":"cass","schema":"cass.session.v1"}"#.to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("tags"),
+            Some(&"cass,session".to_owned())
+        );
+    }
+
+    #[test]
+    fn session_document_builder_fluent_api_and_reserved_metadata() {
+        let session = make_test_session();
+        let doc = super::SessionDocumentBuilder::new()
+            .with_workspace_path("/workspace")
+            .with_tags(["one", "two"])
+            .build(&session)
+            .with_metadata_entry("source", "caller-cannot-override-source");
+
+        let indexable = doc.into_indexable();
+        assert_eq!(
+            indexable.metadata.get("source"),
+            Some(&"session".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("workspace"),
+            Some(&"/workspace".to_owned())
+        );
+        assert_eq!(indexable.metadata.get("tags"), Some(&"one,two".to_owned()));
+    }
+
+    #[test]
+    fn session_document_builder_default() {
+        let builder = super::SessionDocumentBuilder::default();
+        let session = make_test_session();
+        let doc = builder.build(&session);
+
+        assert_eq!(doc.id(), session.id);
+        assert_eq!(doc.source(), DocumentSource::Session);
     }
 }

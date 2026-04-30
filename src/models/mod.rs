@@ -15,8 +15,10 @@ pub use certificate::{
     TailRiskCertificate,
 };
 pub use id::{
-    AuditId, BackupId, CandidateId, EvidenceId, Id, IdKind, MemoryId, MemoryLinkId, PackId,
-    ParseIdError, RuleId, SessionId, WorkspaceId,
+    AuditId, BackupId, CandidateId, ClaimId, DemoId, EXECUTABLE_ID_SCHEMA_V1, EvidenceId,
+    ExecutableIdKind, Id, IdJsonSchema, IdKind, MemoryId, MemoryLinkId, PackId,
+    ParseExecutableIdKindError, ParseIdError, PolicyId, RuleId, SessionId, TraceId, WorkspaceId,
+    executable_id_schema_catalog_json, executable_id_schemas,
 };
 pub use memory::{
     Confidence, Importance, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES, MemoryContent,

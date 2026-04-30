@@ -56,6 +56,268 @@ pub trait IdKind: 'static {
     const PREFIX: &'static str;
 }
 
+/// Schema version for executable claim/demo/policy/evidence/trace ID schemas.
+pub const EXECUTABLE_ID_SCHEMA_V1: &str = "ee.executable_id_schemas.v1";
+
+/// JSON Schema draft used for public ID schema fixtures.
+pub const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
+
+/// Canonical Crockford/ULID payload pattern used in public ID schemas.
+pub const CANONICAL_ID_PAYLOAD_PATTERN: &str = "[0-7][0-9A-HJKMNP-TV-Z]{25}";
+
+const CANONICAL_ID_EXAMPLE_PAYLOAD: &str = "00000000000000000000000000";
+
+/// Executable-claim-plane ID kinds that downstream schemas can reference.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ExecutableIdKind {
+    /// Claim made by the project, docs, or product surface.
+    Claim,
+    /// Evidence artifact used to verify a claim.
+    Evidence,
+    /// Policy rule governing admission, execution, or verification.
+    Policy,
+    /// Trace of a decision, replay, or verification run.
+    Trace,
+    /// Demo scenario that should prove a claim in CI or locally.
+    Demo,
+}
+
+impl ExecutableIdKind {
+    /// Return executable ID kinds in the stable public schema order.
+    #[must_use]
+    pub const fn all() -> [Self; 5] {
+        [
+            Self::Claim,
+            Self::Evidence,
+            Self::Policy,
+            Self::Trace,
+            Self::Demo,
+        ]
+    }
+
+    /// Stable snake-case kind name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Claim => "claim",
+            Self::Evidence => "evidence",
+            Self::Policy => "policy",
+            Self::Trace => "trace",
+            Self::Demo => "demo",
+        }
+    }
+
+    /// Rust type name exposed by this kind.
+    #[must_use]
+    pub const fn type_name(self) -> &'static str {
+        match self {
+            Self::Claim => "ClaimId",
+            Self::Evidence => "EvidenceId",
+            Self::Policy => "PolicyId",
+            Self::Trace => "TraceId",
+            Self::Demo => "DemoId",
+        }
+    }
+
+    /// Stable ID prefix used in public wire forms.
+    #[must_use]
+    pub const fn prefix(self) -> &'static str {
+        match self {
+            Self::Claim => ClaimKind::PREFIX,
+            Self::Evidence => EvidenceKind::PREFIX,
+            Self::Policy => PolicyKind::PREFIX,
+            Self::Trace => TraceKind::PREFIX,
+            Self::Demo => DemoKind::PREFIX,
+        }
+    }
+
+    /// Stable schema name for this ID kind.
+    #[must_use]
+    pub const fn schema_name(self) -> &'static str {
+        match self {
+            Self::Claim => "ee.claim_id.v1",
+            Self::Evidence => "ee.evidence_id.v1",
+            Self::Policy => "ee.policy_id.v1",
+            Self::Trace => "ee.trace_id.v1",
+            Self::Demo => "ee.demo_id.v1",
+        }
+    }
+
+    /// Stable JSON Schema `$id` for this ID kind.
+    #[must_use]
+    pub const fn schema_uri(self) -> &'static str {
+        match self {
+            Self::Claim => "urn:ee:schema:claim-id:v1",
+            Self::Evidence => "urn:ee:schema:evidence-id:v1",
+            Self::Policy => "urn:ee:schema:policy-id:v1",
+            Self::Trace => "urn:ee:schema:trace-id:v1",
+            Self::Demo => "urn:ee:schema:demo-id:v1",
+        }
+    }
+
+    /// Human-readable schema description.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Claim => "Stable identifier for an executable claim.",
+            Self::Evidence => "Stable identifier for evidence attached to a claim.",
+            Self::Policy => "Stable identifier for a policy that affects executable verification.",
+            Self::Trace => "Stable identifier for a verification, replay, or decision trace.",
+            Self::Demo => "Stable identifier for a demo scenario that proves a claim.",
+        }
+    }
+
+    /// Return the JSON schema metadata for this ID kind.
+    #[must_use]
+    pub const fn json_schema(self) -> IdJsonSchema {
+        IdJsonSchema::new(self)
+    }
+}
+
+impl fmt::Display for ExecutableIdKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ExecutableIdKind {
+    type Err = ParseExecutableIdKindError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "claim" => Ok(Self::Claim),
+            "evidence" => Ok(Self::Evidence),
+            "policy" => Ok(Self::Policy),
+            "trace" => Ok(Self::Trace),
+            "demo" => Ok(Self::Demo),
+            _ => Err(ParseExecutableIdKindError {
+                input: input.to_owned(),
+            }),
+        }
+    }
+}
+
+/// Error when parsing an invalid executable ID kind string.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseExecutableIdKindError {
+    input: String,
+}
+
+impl ParseExecutableIdKindError {
+    /// Return the invalid input.
+    #[must_use]
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+}
+
+impl fmt::Display for ParseExecutableIdKindError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "unknown executable id kind `{}`; expected one of claim, evidence, policy, trace, demo",
+            self.input
+        )
+    }
+}
+
+impl std::error::Error for ParseExecutableIdKindError {}
+
+/// JSON Schema metadata for one executable-claim-plane ID type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IdJsonSchema {
+    /// Discriminator for the represented ID kind.
+    pub kind: ExecutableIdKind,
+    /// Rust type name.
+    pub type_name: &'static str,
+    /// Stable schema name.
+    pub schema_name: &'static str,
+    /// Stable JSON Schema `$id`.
+    pub schema_uri: &'static str,
+    /// Public ID prefix.
+    pub prefix: &'static str,
+    /// Human-readable schema description.
+    pub description: &'static str,
+}
+
+impl IdJsonSchema {
+    /// Build metadata from an executable ID kind.
+    #[must_use]
+    pub const fn new(kind: ExecutableIdKind) -> Self {
+        Self {
+            kind,
+            type_name: kind.type_name(),
+            schema_name: kind.schema_name(),
+            schema_uri: kind.schema_uri(),
+            prefix: kind.prefix(),
+            description: kind.description(),
+        }
+    }
+
+    /// Regex pattern for the canonical public ID string.
+    #[must_use]
+    pub fn pattern(&self) -> String {
+        format!("^{}_{CANONICAL_ID_PAYLOAD_PATTERN}$", self.prefix)
+    }
+
+    /// Deterministic example ID that satisfies this schema.
+    #[must_use]
+    pub fn example(&self) -> String {
+        format!("{}_{}", self.prefix, CANONICAL_ID_EXAMPLE_PAYLOAD)
+    }
+}
+
+/// Return executable ID schemas in the stable public order.
+#[must_use]
+pub const fn executable_id_schemas() -> [IdJsonSchema; 5] {
+    [
+        IdJsonSchema::new(ExecutableIdKind::Claim),
+        IdJsonSchema::new(ExecutableIdKind::Evidence),
+        IdJsonSchema::new(ExecutableIdKind::Policy),
+        IdJsonSchema::new(ExecutableIdKind::Trace),
+        IdJsonSchema::new(ExecutableIdKind::Demo),
+    ]
+}
+
+/// Render the executable ID JSON Schema catalog.
+#[must_use]
+pub fn executable_id_schema_catalog_json() -> String {
+    let schemas = executable_id_schemas();
+    let mut output = String::from("{\n");
+    output.push_str(&format!("  \"schema\": \"{EXECUTABLE_ID_SCHEMA_V1}\",\n"));
+    output.push_str("  \"schemas\": [\n");
+    for (index, schema) in schemas.iter().enumerate() {
+        output.push_str("    {\n");
+        output.push_str(&format!(
+            "      \"$schema\": \"{JSON_SCHEMA_DRAFT_2020_12}\",\n"
+        ));
+        output.push_str(&format!("      \"$id\": \"{}\",\n", schema.schema_uri));
+        output.push_str(&format!(
+            "      \"eeSchema\": \"{}\",\n",
+            schema.schema_name
+        ));
+        output.push_str(&format!("      \"kind\": \"{}\",\n", schema.kind));
+        output.push_str(&format!("      \"title\": \"{}\",\n", schema.type_name));
+        output.push_str(&format!(
+            "      \"description\": \"{}\",\n",
+            schema.description
+        ));
+        output.push_str("      \"type\": \"string\",\n");
+        output.push_str(&format!("      \"pattern\": \"{}\",\n", schema.pattern()));
+        output.push_str("      \"examples\": [\n");
+        output.push_str(&format!("        \"{}\"\n", schema.example()));
+        output.push_str("      ]\n");
+        if index + 1 == schemas.len() {
+            output.push_str("    }\n");
+        } else {
+            output.push_str("    },\n");
+        }
+    }
+    output.push_str("  ]\n");
+    output.push_str("}\n");
+    output
+}
+
 /// Time-ordered, type-tagged public identifier.
 ///
 /// The internal representation is a [`Uuid`]. The type parameter `K`
@@ -393,10 +655,38 @@ define_id_kind!(
 );
 
 define_id_kind!(
+    /// Marker for [`ClaimId`].
+    pub ClaimKind,
+    pub ClaimId,
+    "claim"
+);
+
+define_id_kind!(
     /// Marker for [`EvidenceId`].
     pub EvidenceKind,
     pub EvidenceId,
     "ev"
+);
+
+define_id_kind!(
+    /// Marker for [`PolicyId`].
+    pub PolicyKind,
+    pub PolicyId,
+    "pol"
+);
+
+define_id_kind!(
+    /// Marker for [`TraceId`].
+    pub TraceKind,
+    pub TraceId,
+    "trace"
+);
+
+define_id_kind!(
+    /// Marker for [`DemoId`].
+    pub DemoKind,
+    pub DemoId,
+    "demo"
 );
 
 define_id_kind!(
@@ -428,25 +718,37 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        BackupId, ENCODED_LEN, EvidenceId, Id, IdKind, MemoryId, PackId, ParseIdError, RuleId,
-        SessionId, WorkspaceId, encode_crockford,
+        BackupId, ClaimId, DemoId, ENCODED_LEN, EXECUTABLE_ID_SCHEMA_V1, EvidenceId,
+        ExecutableIdKind, Id, IdKind, MemoryId, PackId, ParseExecutableIdKindError, ParseIdError,
+        PolicyId, RuleId, SessionId, TraceId, WorkspaceId, encode_crockford,
+        executable_id_schema_catalog_json, executable_id_schemas,
     };
 
+    const EXECUTABLE_ID_SCHEMA_GOLDEN: &str =
+        include_str!("../../tests/fixtures/golden/models/executable_id_schemas.json.golden");
+
+    type TestResult = Result<(), String>;
+
     #[test]
-    fn display_uses_prefix_and_26_char_payload() {
+    fn display_uses_prefix_and_26_char_payload() -> TestResult {
         let id = MemoryId::from_uuid(Uuid::nil());
         let rendered = id.to_string();
         let (prefix, payload) = match rendered.split_once('_') {
             Some(pair) => pair,
-            None => panic!("display form is missing the `_` separator: {rendered}"),
+            None => {
+                return Err(format!(
+                    "display form is missing the `_` separator: {rendered}"
+                ));
+            }
         };
         assert_eq!(prefix, "mem");
         assert_eq!(payload.len(), ENCODED_LEN);
         assert!(payload.is_ascii());
+        Ok(())
     }
 
     #[test]
-    fn round_trip_through_string_for_every_kind() {
+    fn round_trip_through_string_for_every_kind() -> TestResult {
         let cases: Vec<String> = vec![
             MemoryId::from_uuid(uuid_with_seed(1)).to_string(),
             WorkspaceId::from_uuid(uuid_with_seed(2)).to_string(),
@@ -455,6 +757,10 @@ mod tests {
             SessionId::from_uuid(uuid_with_seed(5)).to_string(),
             EvidenceId::from_uuid(uuid_with_seed(6)).to_string(),
             BackupId::from_uuid(uuid_with_seed(7)).to_string(),
+            ClaimId::from_uuid(uuid_with_seed(8)).to_string(),
+            PolicyId::from_uuid(uuid_with_seed(9)).to_string(),
+            TraceId::from_uuid(uuid_with_seed(10)).to_string(),
+            DemoId::from_uuid(uuid_with_seed(11)).to_string(),
         ];
 
         let parsed = (
@@ -465,15 +771,23 @@ mod tests {
             SessionId::from_str(cases[4].as_str()),
             EvidenceId::from_str(cases[5].as_str()),
             BackupId::from_str(cases[6].as_str()),
+            ClaimId::from_str(cases[7].as_str()),
+            PolicyId::from_str(cases[8].as_str()),
+            TraceId::from_str(cases[9].as_str()),
+            DemoId::from_str(cases[10].as_str()),
         );
 
-        let memory = unwrap_ok(parsed.0);
-        let workspace = unwrap_ok(parsed.1);
-        let rule = unwrap_ok(parsed.2);
-        let pack = unwrap_ok(parsed.3);
-        let session = unwrap_ok(parsed.4);
-        let evidence = unwrap_ok(parsed.5);
-        let backup = unwrap_ok(parsed.6);
+        let memory = unwrap_ok(parsed.0)?;
+        let workspace = unwrap_ok(parsed.1)?;
+        let rule = unwrap_ok(parsed.2)?;
+        let pack = unwrap_ok(parsed.3)?;
+        let session = unwrap_ok(parsed.4)?;
+        let evidence = unwrap_ok(parsed.5)?;
+        let backup = unwrap_ok(parsed.6)?;
+        let claim = unwrap_ok(parsed.7)?;
+        let policy = unwrap_ok(parsed.8)?;
+        let trace = unwrap_ok(parsed.9)?;
+        let demo = unwrap_ok(parsed.10)?;
 
         assert_eq!(memory.into_uuid(), uuid_with_seed(1));
         assert_eq!(workspace.into_uuid(), uuid_with_seed(2));
@@ -482,13 +796,18 @@ mod tests {
         assert_eq!(session.into_uuid(), uuid_with_seed(5));
         assert_eq!(evidence.into_uuid(), uuid_with_seed(6));
         assert_eq!(backup.into_uuid(), uuid_with_seed(7));
+        assert_eq!(claim.into_uuid(), uuid_with_seed(8));
+        assert_eq!(policy.into_uuid(), uuid_with_seed(9));
+        assert_eq!(trace.into_uuid(), uuid_with_seed(10));
+        assert_eq!(demo.into_uuid(), uuid_with_seed(11));
+        Ok(())
     }
 
     #[test]
-    fn parse_rejects_wrong_prefix() {
+    fn parse_rejects_wrong_prefix() -> TestResult {
         let payload = MemoryId::from_uuid(uuid_with_seed(11)).to_string();
         let swapped = payload.replace("mem_", "wsp_");
-        let err = unwrap_err(MemoryId::from_str(&swapped));
+        let err = unwrap_err(MemoryId::from_str(&swapped))?;
         match err {
             ParseIdError::WrongPrefix {
                 expected, found, ..
@@ -496,19 +815,21 @@ mod tests {
                 assert_eq!(expected, "mem");
                 assert_eq!(found, "wsp");
             }
-            other => panic!("expected WrongPrefix, got {other:?}"),
+            other => return Err(format!("expected WrongPrefix, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
-    fn parse_rejects_missing_separator() {
-        let err = unwrap_err(MemoryId::from_str("mem01HQ3K5Z"));
+    fn parse_rejects_missing_separator() -> TestResult {
+        let err = unwrap_err(MemoryId::from_str("mem01HQ3K5Z"))?;
         assert!(matches!(err, ParseIdError::MissingSeparator { .. }));
+        Ok(())
     }
 
     #[test]
-    fn parse_rejects_wrong_payload_length() {
-        let err = unwrap_err(MemoryId::from_str("mem_TOOSHORT"));
+    fn parse_rejects_wrong_payload_length() -> TestResult {
+        let err = unwrap_err(MemoryId::from_str("mem_TOOSHORT"))?;
         match err {
             ParseIdError::WrongPayloadLength {
                 expected, actual, ..
@@ -516,41 +837,45 @@ mod tests {
                 assert_eq!(expected, ENCODED_LEN);
                 assert_eq!(actual, 8);
             }
-            other => panic!("expected WrongPayloadLength, got {other:?}"),
+            other => return Err(format!("expected WrongPayloadLength, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
-    fn parse_rejects_invalid_character() {
+    fn parse_rejects_invalid_character() -> TestResult {
         // `I` is not in the Crockford alphabet.
         let bad = format!("mem_{}", "I".repeat(ENCODED_LEN));
-        let err = unwrap_err(MemoryId::from_str(&bad));
+        let err = unwrap_err(MemoryId::from_str(&bad))?;
         assert!(matches!(err, ParseIdError::InvalidCharacter { .. }));
+        Ok(())
     }
 
     #[test]
-    fn parse_rejects_overflowing_first_digit() {
+    fn parse_rejects_overflowing_first_digit() -> TestResult {
         // Leading character > 7 means the 130-bit packed value would
         // exceed 128 bits of payload space.
         let mut characters = vec![b'8'];
         characters.extend(std::iter::repeat_n(b'0', ENCODED_LEN - 1));
         let payload = match std::str::from_utf8(&characters) {
             Ok(value) => value.to_owned(),
-            Err(_) => panic!("synthetic payload is invalid UTF-8"),
+            Err(error) => return Err(format!("synthetic payload is invalid UTF-8: {error}")),
         };
         let bad = format!("mem_{payload}");
-        let err = unwrap_err(MemoryId::from_str(&bad));
+        let err = unwrap_err(MemoryId::from_str(&bad))?;
         assert!(matches!(err, ParseIdError::PayloadOverflow { .. }));
+        Ok(())
     }
 
     #[test]
-    fn parse_accepts_lowercase_payload() {
+    fn parse_accepts_lowercase_payload() -> TestResult {
         let upper = MemoryId::from_uuid(uuid_with_seed(13)).to_string();
         let lower = upper.to_lowercase();
         // The prefix is already lowercase, so to_lowercase only changes
         // the payload.
-        let parsed = unwrap_ok(MemoryId::from_str(&lower));
+        let parsed = unwrap_ok(MemoryId::from_str(&lower))?;
         assert_eq!(parsed.into_uuid(), uuid_with_seed(13));
+        Ok(())
     }
 
     #[test]
@@ -593,19 +918,20 @@ mod tests {
     }
 
     #[test]
-    fn encode_decode_round_trips_for_full_byte_range() {
+    fn encode_decode_round_trips_for_full_byte_range() -> TestResult {
         for byte in 0u8..=255u8 {
             let bytes = [byte; 16];
             let mut buffer = [0u8; ENCODED_LEN];
             encode_crockford(&bytes, &mut buffer);
             let payload = match std::str::from_utf8(&buffer) {
                 Ok(value) => value.to_owned(),
-                Err(_) => panic!("encoder produced non-UTF-8 output"),
+                Err(error) => return Err(format!("encoder produced non-UTF-8 output: {error}")),
             };
             let formatted = format!("mem_{payload}");
-            let parsed = unwrap_ok(MemoryId::from_str(&formatted));
+            let parsed = unwrap_ok(MemoryId::from_str(&formatted))?;
             assert_eq!(parsed.into_uuid().as_bytes(), &bytes);
         }
+        Ok(())
     }
 
     #[test]
@@ -630,6 +956,103 @@ mod tests {
         assert!(!set.contains(&id_c));
     }
 
+    #[test]
+    fn executable_id_kinds_round_trip_in_schema_order() {
+        let kinds = ExecutableIdKind::all();
+        assert_eq!(
+            kinds.map(|kind| kind.as_str()),
+            ["claim", "evidence", "policy", "trace", "demo"]
+        );
+        for kind in kinds {
+            let parsed = ExecutableIdKind::from_str(kind.as_str());
+            assert_eq!(parsed, Ok(kind));
+        }
+    }
+
+    #[test]
+    fn executable_id_kind_rejects_unknown_input() {
+        let err = ExecutableIdKind::from_str("memory");
+        assert!(matches!(err, Err(ParseExecutableIdKindError { .. })));
+    }
+
+    #[test]
+    fn executable_id_schema_metadata_matches_typed_ids() -> TestResult {
+        let schemas = executable_id_schemas();
+        assert_eq!(schemas.len(), 5);
+
+        assert_eq!(schemas[0].kind, ExecutableIdKind::Claim);
+        assert_eq!(schemas[0].type_name, "ClaimId");
+        assert_eq!(schemas[0].prefix, "claim");
+        assert_eq!(schemas[0].pattern(), "^claim_[0-7][0-9A-HJKMNP-TV-Z]{25}$");
+        assert_eq!(
+            unwrap_ok(ClaimId::from_str(&schemas[0].example()))?.into_uuid(),
+            Uuid::nil()
+        );
+
+        assert_eq!(schemas[1].kind, ExecutableIdKind::Evidence);
+        assert_eq!(schemas[1].type_name, "EvidenceId");
+        assert_eq!(schemas[1].prefix, "ev");
+        assert_eq!(
+            unwrap_ok(EvidenceId::from_str(&schemas[1].example()))?.into_uuid(),
+            Uuid::nil()
+        );
+
+        assert_eq!(schemas[2].kind, ExecutableIdKind::Policy);
+        assert_eq!(schemas[2].type_name, "PolicyId");
+        assert_eq!(schemas[2].prefix, "pol");
+        assert_eq!(
+            unwrap_ok(PolicyId::from_str(&schemas[2].example()))?.into_uuid(),
+            Uuid::nil()
+        );
+
+        assert_eq!(schemas[3].kind, ExecutableIdKind::Trace);
+        assert_eq!(schemas[3].type_name, "TraceId");
+        assert_eq!(schemas[3].prefix, "trace");
+        assert_eq!(
+            unwrap_ok(TraceId::from_str(&schemas[3].example()))?.into_uuid(),
+            Uuid::nil()
+        );
+
+        assert_eq!(schemas[4].kind, ExecutableIdKind::Demo);
+        assert_eq!(schemas[4].type_name, "DemoId");
+        assert_eq!(schemas[4].prefix, "demo");
+        assert_eq!(
+            unwrap_ok(DemoId::from_str(&schemas[4].example()))?.into_uuid(),
+            Uuid::nil()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn executable_id_schema_catalog_matches_golden_fixture() {
+        assert_eq!(
+            executable_id_schema_catalog_json(),
+            EXECUTABLE_ID_SCHEMA_GOLDEN
+        );
+    }
+
+    #[test]
+    fn executable_id_schema_catalog_is_valid_json() -> TestResult {
+        let parsed: serde_json::Value = match serde_json::from_str(EXECUTABLE_ID_SCHEMA_GOLDEN) {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(format!(
+                    "executable ID schema golden is invalid JSON: {error}"
+                ));
+            }
+        };
+        assert_eq!(
+            parsed.get("schema").and_then(serde_json::Value::as_str),
+            Some(EXECUTABLE_ID_SCHEMA_V1)
+        );
+        let schemas = match parsed.get("schemas").and_then(serde_json::Value::as_array) {
+            Some(value) => value,
+            None => return Err("executable ID schema golden is missing schemas array".to_string()),
+        };
+        assert_eq!(schemas.len(), ExecutableIdKind::all().len());
+        Ok(())
+    }
+
     fn uuid_with_seed(seed: u8) -> Uuid {
         let mut bytes = [0u8; 16];
         bytes[0] = seed;
@@ -639,17 +1062,14 @@ mod tests {
         Uuid::from_bytes(bytes)
     }
 
-    fn unwrap_ok<K: IdKind>(result: Result<Id<K>, ParseIdError>) -> Id<K> {
-        match result {
-            Ok(value) => value,
-            Err(error) => panic!("expected Ok, got Err({error:?})"),
-        }
+    fn unwrap_ok<K: IdKind>(result: Result<Id<K>, ParseIdError>) -> Result<Id<K>, String> {
+        result.map_err(|error| format!("expected Ok, got Err({error:?})"))
     }
 
-    fn unwrap_err<K: IdKind>(result: Result<Id<K>, ParseIdError>) -> ParseIdError {
+    fn unwrap_err<K: IdKind>(result: Result<Id<K>, ParseIdError>) -> Result<ParseIdError, String> {
         match result {
-            Ok(value) => panic!("expected Err, got Ok({value:?})"),
-            Err(error) => error,
+            Ok(value) => Err(format!("expected Err, got Ok({value:?})")),
+            Err(error) => Ok(error),
         }
     }
 }
