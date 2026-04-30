@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use crate::models::{CapabilityStatus, SEARCH_DOCUMENT_SCHEMA_V1, SEARCH_MODULE_SCHEMA_V1};
+use crate::models::{
+    CapabilityStatus, INDEX_MANIFEST_SCHEMA_V1, SEARCH_DOCUMENT_SCHEMA_V1, SEARCH_MODULE_SCHEMA_V1,
+};
 
 pub use frankensearch::core::types::IndexableDocument;
 pub use frankensearch::{
@@ -624,6 +626,312 @@ pub const fn module_readiness() -> SearchModuleReadiness {
     }
 }
 
+// ============================================================================
+// Index Manifest (EE-267)
+//
+// The index manifest tracks metadata about the search index state, enabling
+// staleness detection and rebuild decisions without reading the full index.
+// ============================================================================
+
+/// Embedding model configuration stored in the manifest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmbeddingConfig {
+    /// Model identifier (e.g., "hash-256", "model2vec-base").
+    pub model_id: String,
+    /// Embedding dimension.
+    pub dimension: usize,
+    /// Whether this is a deterministic hash-based embedder.
+    pub deterministic: bool,
+}
+
+impl EmbeddingConfig {
+    /// Create a new embedding configuration.
+    #[must_use]
+    pub fn new(model_id: impl Into<String>, dimension: usize, deterministic: bool) -> Self {
+        Self {
+            model_id: model_id.into(),
+            dimension,
+            deterministic,
+        }
+    }
+
+    /// Create config for the default hash embedder.
+    #[must_use]
+    pub const fn hash_256() -> Self {
+        Self {
+            model_id: String::new(), // Will be set below
+            dimension: 256,
+            deterministic: true,
+        }
+    }
+}
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            model_id: "hash-256".to_owned(),
+            dimension: 256,
+            deterministic: true,
+        }
+    }
+}
+
+/// Index staleness status after validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndexStaleness {
+    /// Index is current with the database.
+    Current,
+    /// Index is behind the database (needs rebuild).
+    Stale,
+    /// Index generation is ahead of database (corrupted or from different DB).
+    Ahead,
+    /// Database generation unknown (cannot determine staleness).
+    Unknown,
+}
+
+impl IndexStaleness {
+    /// Return a stable string representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Stale => "stale",
+            Self::Ahead => "ahead",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// True if a rebuild is recommended.
+    #[must_use]
+    pub const fn needs_rebuild(self) -> bool {
+        matches!(self, Self::Stale | Self::Ahead | Self::Unknown)
+    }
+}
+
+/// Error returned when index manifest validation fails.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IndexManifestError {
+    /// Manifest file not found.
+    NotFound { path: String },
+    /// Manifest has invalid JSON format.
+    InvalidFormat { message: String },
+    /// Manifest schema version is not supported.
+    UnsupportedSchema { schema: String, expected: String },
+    /// Manifest is missing required fields.
+    MissingField { field: String },
+    /// Index generation mismatch with database.
+    GenerationMismatch {
+        index_generation: u64,
+        db_generation: u64,
+    },
+    /// Embedding config mismatch (rebuild required).
+    EmbeddingMismatch {
+        expected_model: String,
+        actual_model: String,
+    },
+}
+
+impl std::fmt::Display for IndexManifestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound { path } => {
+                write!(f, "index manifest not found: {path}")
+            }
+            Self::InvalidFormat { message } => {
+                write!(f, "invalid index manifest format: {message}")
+            }
+            Self::UnsupportedSchema { schema, expected } => {
+                write!(
+                    f,
+                    "unsupported index manifest schema: {schema} (expected {expected})"
+                )
+            }
+            Self::MissingField { field } => {
+                write!(f, "index manifest missing required field: {field}")
+            }
+            Self::GenerationMismatch {
+                index_generation,
+                db_generation,
+            } => {
+                write!(
+                    f,
+                    "index generation {index_generation} does not match database generation {db_generation}"
+                )
+            }
+            Self::EmbeddingMismatch {
+                expected_model,
+                actual_model,
+            } => {
+                write!(
+                    f,
+                    "index embedding model '{actual_model}' does not match expected '{expected_model}'"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for IndexManifestError {}
+
+impl IndexManifestError {
+    /// Return a repair suggestion for this error.
+    #[must_use]
+    pub fn repair(&self) -> &'static str {
+        match self {
+            Self::NotFound { .. } => "Run `ee index build` to create the index.",
+            Self::InvalidFormat { .. } => "Delete the corrupted manifest and run `ee index build`.",
+            Self::UnsupportedSchema { .. } => {
+                "Upgrade ee or rebuild the index with `ee index build`."
+            }
+            Self::MissingField { .. } => "Run `ee index build` to regenerate the manifest.",
+            Self::GenerationMismatch { .. } => "Run `ee index rebuild` to sync with the database.",
+            Self::EmbeddingMismatch { .. } => {
+                "Run `ee index rebuild` with the correct embedding model."
+            }
+        }
+    }
+
+    /// Return the error code for JSON output.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound { .. } => "index_manifest_not_found",
+            Self::InvalidFormat { .. } => "index_manifest_invalid",
+            Self::UnsupportedSchema { .. } => "index_manifest_unsupported_schema",
+            Self::MissingField { .. } => "index_manifest_missing_field",
+            Self::GenerationMismatch { .. } => "index_generation_mismatch",
+            Self::EmbeddingMismatch { .. } => "index_embedding_mismatch",
+        }
+    }
+}
+
+/// Index manifest tracking index state and staleness.
+#[derive(Clone, Debug)]
+pub struct IndexManifest {
+    /// Schema version for the manifest.
+    pub schema: String,
+    /// Index generation (incremented on each rebuild).
+    pub generation: u64,
+    /// RFC 3339 timestamp when the index was created.
+    pub created_at: String,
+    /// RFC 3339 timestamp when the index was last updated.
+    pub updated_at: String,
+    /// Number of documents in the index.
+    pub document_count: u64,
+    /// Database generation the index was built from.
+    pub db_generation: u64,
+    /// Embedding configuration used for the index.
+    pub embedding: EmbeddingConfig,
+    /// Path to the lexical index file (relative to manifest).
+    pub lexical_index_path: Option<String>,
+    /// Path to the vector index file (relative to manifest).
+    pub vector_index_path: Option<String>,
+}
+
+impl IndexManifest {
+    /// Create a new manifest with the given generation.
+    #[must_use]
+    pub fn new(
+        generation: u64,
+        created_at: impl Into<String>,
+        document_count: u64,
+        db_generation: u64,
+        embedding: EmbeddingConfig,
+    ) -> Self {
+        let created = created_at.into();
+        Self {
+            schema: INDEX_MANIFEST_SCHEMA_V1.to_owned(),
+            generation,
+            created_at: created.clone(),
+            updated_at: created,
+            document_count,
+            db_generation,
+            embedding,
+            lexical_index_path: None,
+            vector_index_path: None,
+        }
+    }
+
+    /// Set the lexical index path.
+    #[must_use]
+    pub fn with_lexical_path(mut self, path: impl Into<String>) -> Self {
+        self.lexical_index_path = Some(path.into());
+        self
+    }
+
+    /// Set the vector index path.
+    #[must_use]
+    pub fn with_vector_path(mut self, path: impl Into<String>) -> Self {
+        self.vector_index_path = Some(path.into());
+        self
+    }
+
+    /// Check staleness against the current database generation.
+    #[must_use]
+    pub fn check_staleness(&self, current_db_generation: u64) -> IndexStaleness {
+        match self.db_generation.cmp(&current_db_generation) {
+            std::cmp::Ordering::Equal => IndexStaleness::Current,
+            std::cmp::Ordering::Less => IndexStaleness::Stale,
+            std::cmp::Ordering::Greater => IndexStaleness::Ahead,
+        }
+    }
+
+    /// Validate the manifest schema version.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexManifestError::UnsupportedSchema`] if the schema
+    /// doesn't match the expected version.
+    pub fn validate_schema(&self) -> Result<(), IndexManifestError> {
+        if self.schema == INDEX_MANIFEST_SCHEMA_V1 {
+            Ok(())
+        } else {
+            Err(IndexManifestError::UnsupportedSchema {
+                schema: self.schema.clone(),
+                expected: INDEX_MANIFEST_SCHEMA_V1.to_owned(),
+            })
+        }
+    }
+
+    /// Validate the embedding configuration matches expected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexManifestError::EmbeddingMismatch`] if the model IDs
+    /// don't match.
+    pub fn validate_embedding(&self, expected: &EmbeddingConfig) -> Result<(), IndexManifestError> {
+        if self.embedding.model_id == expected.model_id {
+            Ok(())
+        } else {
+            Err(IndexManifestError::EmbeddingMismatch {
+                expected_model: expected.model_id.clone(),
+                actual_model: self.embedding.model_id.clone(),
+            })
+        }
+    }
+
+    /// Full validation including schema, embedding, and staleness check.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first validation error encountered.
+    pub fn validate(
+        &self,
+        expected_embedding: &EmbeddingConfig,
+        current_db_generation: u64,
+    ) -> Result<IndexStaleness, IndexManifestError> {
+        self.validate_schema()?;
+        self.validate_embedding(expected_embedding)?;
+        Ok(self.check_staleness(current_db_generation))
+    }
+}
+
+impl Default for IndexManifest {
+    fn default() -> Self {
+        Self::new(0, "1970-01-01T00:00:00Z", 0, 0, EmbeddingConfig::default())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::models::CapabilityStatus;
@@ -1071,5 +1379,257 @@ mod tests {
 
         assert_eq!(doc.id(), session.id);
         assert_eq!(doc.source(), DocumentSource::Session);
+    }
+
+    // =========================================================================
+    // Index Manifest Tests (EE-267)
+    // =========================================================================
+
+    use super::{
+        EmbeddingConfig, INDEX_MANIFEST_SCHEMA_V1, IndexManifest, IndexManifestError,
+        IndexStaleness,
+    };
+
+    #[test]
+    fn index_manifest_schema_constant_is_stable() {
+        assert_eq!(INDEX_MANIFEST_SCHEMA_V1, "ee.index_manifest.v1");
+    }
+
+    #[test]
+    fn embedding_config_default_is_hash_256() {
+        let config = EmbeddingConfig::default();
+        assert_eq!(config.model_id, "hash-256");
+        assert_eq!(config.dimension, 256);
+        assert!(config.deterministic);
+    }
+
+    #[test]
+    fn index_staleness_as_str_is_stable() {
+        assert_eq!(IndexStaleness::Current.as_str(), "current");
+        assert_eq!(IndexStaleness::Stale.as_str(), "stale");
+        assert_eq!(IndexStaleness::Ahead.as_str(), "ahead");
+        assert_eq!(IndexStaleness::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn index_staleness_needs_rebuild() {
+        assert!(!IndexStaleness::Current.needs_rebuild());
+        assert!(IndexStaleness::Stale.needs_rebuild());
+        assert!(IndexStaleness::Ahead.needs_rebuild());
+        assert!(IndexStaleness::Unknown.needs_rebuild());
+    }
+
+    #[test]
+    fn index_manifest_check_staleness_current() {
+        let manifest = IndexManifest::new(
+            1,
+            "2026-04-30T12:00:00Z",
+            100,
+            5,
+            EmbeddingConfig::default(),
+        );
+        assert_eq!(manifest.check_staleness(5), IndexStaleness::Current);
+    }
+
+    #[test]
+    fn index_manifest_check_staleness_stale() {
+        let manifest = IndexManifest::new(
+            1,
+            "2026-04-30T12:00:00Z",
+            100,
+            5,
+            EmbeddingConfig::default(),
+        );
+        assert_eq!(manifest.check_staleness(10), IndexStaleness::Stale);
+    }
+
+    #[test]
+    fn index_manifest_check_staleness_ahead() {
+        let manifest = IndexManifest::new(
+            1,
+            "2026-04-30T12:00:00Z",
+            100,
+            10,
+            EmbeddingConfig::default(),
+        );
+        assert_eq!(manifest.check_staleness(5), IndexStaleness::Ahead);
+    }
+
+    #[test]
+    fn index_manifest_validate_schema_success() {
+        let manifest = IndexManifest::new(
+            1,
+            "2026-04-30T12:00:00Z",
+            100,
+            5,
+            EmbeddingConfig::default(),
+        );
+        assert!(manifest.validate_schema().is_ok());
+    }
+
+    #[test]
+    fn index_manifest_validate_schema_failure() {
+        let mut manifest = IndexManifest::default();
+        manifest.schema = "ee.index_manifest.v2".to_owned();
+
+        let result = manifest.validate_schema();
+        assert_eq!(
+            result,
+            Err(IndexManifestError::UnsupportedSchema {
+                schema: "ee.index_manifest.v2".to_owned(),
+                expected: INDEX_MANIFEST_SCHEMA_V1.to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn index_manifest_validate_embedding_success() {
+        let manifest = IndexManifest::new(
+            1,
+            "2026-04-30T12:00:00Z",
+            100,
+            5,
+            EmbeddingConfig::default(),
+        );
+        let expected = EmbeddingConfig::default();
+        assert!(manifest.validate_embedding(&expected).is_ok());
+    }
+
+    #[test]
+    fn index_manifest_validate_embedding_failure() {
+        let manifest = IndexManifest::new(
+            1,
+            "2026-04-30T12:00:00Z",
+            100,
+            5,
+            EmbeddingConfig::new("model2vec-base", 384, false),
+        );
+        let expected = EmbeddingConfig::default();
+
+        let result = manifest.validate_embedding(&expected);
+        assert_eq!(
+            result,
+            Err(IndexManifestError::EmbeddingMismatch {
+                expected_model: "hash-256".to_owned(),
+                actual_model: "model2vec-base".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn index_manifest_full_validate_returns_staleness() {
+        let manifest = IndexManifest::new(
+            1,
+            "2026-04-30T12:00:00Z",
+            100,
+            5,
+            EmbeddingConfig::default(),
+        );
+        let expected = EmbeddingConfig::default();
+
+        let result = manifest.validate(&expected, 5);
+        assert_eq!(result, Ok(IndexStaleness::Current));
+
+        let result_stale = manifest.validate(&expected, 10);
+        assert_eq!(result_stale, Ok(IndexStaleness::Stale));
+    }
+
+    #[test]
+    fn index_manifest_error_codes_are_stable() {
+        assert_eq!(
+            IndexManifestError::NotFound {
+                path: "x".to_owned()
+            }
+            .code(),
+            "index_manifest_not_found"
+        );
+        assert_eq!(
+            IndexManifestError::InvalidFormat {
+                message: "x".to_owned()
+            }
+            .code(),
+            "index_manifest_invalid"
+        );
+        assert_eq!(
+            IndexManifestError::UnsupportedSchema {
+                schema: "x".to_owned(),
+                expected: "y".to_owned()
+            }
+            .code(),
+            "index_manifest_unsupported_schema"
+        );
+        assert_eq!(
+            IndexManifestError::MissingField {
+                field: "x".to_owned()
+            }
+            .code(),
+            "index_manifest_missing_field"
+        );
+        assert_eq!(
+            IndexManifestError::GenerationMismatch {
+                index_generation: 1,
+                db_generation: 2
+            }
+            .code(),
+            "index_generation_mismatch"
+        );
+        assert_eq!(
+            IndexManifestError::EmbeddingMismatch {
+                expected_model: "a".to_owned(),
+                actual_model: "b".to_owned()
+            }
+            .code(),
+            "index_embedding_mismatch"
+        );
+    }
+
+    #[test]
+    fn index_manifest_error_repair_suggestions_exist() {
+        let errors = [
+            IndexManifestError::NotFound {
+                path: "x".to_owned(),
+            },
+            IndexManifestError::InvalidFormat {
+                message: "x".to_owned(),
+            },
+            IndexManifestError::UnsupportedSchema {
+                schema: "x".to_owned(),
+                expected: "y".to_owned(),
+            },
+            IndexManifestError::MissingField {
+                field: "x".to_owned(),
+            },
+            IndexManifestError::GenerationMismatch {
+                index_generation: 1,
+                db_generation: 2,
+            },
+            IndexManifestError::EmbeddingMismatch {
+                expected_model: "a".to_owned(),
+                actual_model: "b".to_owned(),
+            },
+        ];
+        for error in errors {
+            assert!(
+                !error.repair().is_empty(),
+                "Repair for {:?} should not be empty",
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn index_manifest_with_paths() {
+        let manifest = IndexManifest::new(
+            1,
+            "2026-04-30T12:00:00Z",
+            100,
+            5,
+            EmbeddingConfig::default(),
+        )
+        .with_lexical_path("lexical.idx")
+        .with_vector_path("vector.idx");
+
+        assert_eq!(manifest.lexical_index_path, Some("lexical.idx".to_owned()));
+        assert_eq!(manifest.vector_index_path, Some("vector.idx".to_owned()));
     }
 }

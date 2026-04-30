@@ -7,6 +7,7 @@ pub mod id;
 pub mod memory;
 pub mod posture;
 pub mod provenance;
+pub mod recorder;
 pub mod repro;
 pub mod revision;
 pub mod rule;
@@ -36,6 +37,13 @@ pub use memory::{
 };
 pub use posture::{ActionCategory, Posture, PostureSummary, SuggestedAction};
 pub use provenance::{LineSpan, ProvenanceUri, ProvenanceUriError};
+pub use recorder::{
+    IMPORT_CURSOR_SCHEMA_V1, ImportCursor, ImportSourceType, ParseImportSourceTypeError,
+    ParsePayloadContentTypeError, ParseRecorderEventTypeError, ParseRecorderRunStatusError,
+    ParseRedactionStatusError, PayloadContentType, RECORDER_EVENT_SCHEMA_V1,
+    RECORDER_PAYLOAD_SCHEMA_V1, RECORDER_RUN_SCHEMA_V1, REDACTION_STATUS_SCHEMA_V1, RecorderEvent,
+    RecorderEventType, RecorderPayload, RecorderRunMeta, RecorderRunStatus, RedactionStatus,
+};
 pub use repro::{
     DependencyCategory, ParseDependencyCategoryError, ParseProvenanceEventTypeError,
     ProvenanceEvent, ProvenanceEventType, ProvenanceSource, ProvenanceVerification,
@@ -99,6 +107,9 @@ pub const GRAPH_MODULE_SCHEMA_V1: &str = "ee.graph.module.v1";
 
 /// Schema for evaluation fixtures.
 pub const EVAL_FIXTURE_SCHEMA_V1: &str = "ee.eval_fixture.v1";
+
+/// Schema for index manifest (tracking index state and staleness).
+pub const INDEX_MANIFEST_SCHEMA_V1: &str = "ee.index_manifest.v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DomainError {
