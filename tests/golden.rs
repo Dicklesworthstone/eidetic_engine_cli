@@ -251,6 +251,26 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(
+                "UPDATE memories SET created_at = '2026-04-29T12:00:00+00:00', updated_at = '2026-04-29T12:00:00+00:00' WHERE id = 'mem_00000000000000000000000001'",
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    fn seed_pack_selection(database: &Path) -> TestResult {
+        let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(
+                "INSERT INTO pack_records (id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, created_at, created_by) VALUES ('pack_00000000000000000000000001', 'wsp_searchjson0000000000000001', 'format before release', 'compact', 4000, 8, 1, 0, 'blake3:test-pack-hash', NULL, '2026-04-29T12:01:00+00:00', 'golden-test')",
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(
+                "INSERT INTO pack_items (pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key) VALUES ('pack_00000000000000000000000001', 'mem_00000000000000000000000001', 1, 'procedural_rules', 8, 0.91, 0.8, 'Selected because the memory matches release-formatting work.', 'procedural:rule:cargo')",
+            )
+            .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())
     }
 
@@ -520,6 +540,86 @@ mod tests {
     }
 
     #[test]
+    fn agent_why_json_explains_pack_selected_memory() -> TestResult {
+        let artifact_dir = unique_artifact_dir("why-json")?;
+        let workspace = artifact_dir.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        fs::create_dir_all(&workspace).map_err(|error| {
+            format!(
+                "failed to create workspace {}: {error}",
+                workspace.display()
+            )
+        })?;
+
+        seed_search_workspace(&workspace, &database)?;
+        seed_pack_selection(&database)?;
+
+        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .arg("--json")
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("why")
+            .arg("mem_00000000000000000000000001")
+            .arg("--database")
+            .arg(&database)
+            .output()
+            .map_err(|error| format!("failed to run ee why --json: {error}"))?;
+
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|error| format!("why stdout was not UTF-8: {error}"))?;
+        let stderr = String::from_utf8(output.stderr)
+            .map_err(|error| format!("why stderr was not UTF-8: {error}"))?;
+
+        ensure(
+            output.status.success(),
+            format!("why --json should succeed; stderr: {stderr}"),
+        )?;
+        ensure(
+            stderr.is_empty(),
+            format!("why --json stderr must be empty, got: {stderr:?}"),
+        )?;
+        ensure(
+            stdout.starts_with('{'),
+            format!("why stdout must start with JSON data, got: {stdout:?}"),
+        )?;
+        ensure(
+            stdout.ends_with('\n'),
+            format!("why stdout must end with a newline, got: {stdout:?}"),
+        )?;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "why schema",
+        )?;
+        ensure_equal(&value["success"], &serde_json::json!(true), "why success")?;
+        ensure_equal(
+            &value["data"]["command"],
+            &serde_json::json!("why"),
+            "why command",
+        )?;
+        ensure_equal(
+            &value["data"]["found"],
+            &serde_json::json!(true),
+            "why found",
+        )?;
+        ensure_equal(
+            &value["data"]["selection"]["latestPackSelection"]["packId"],
+            &serde_json::json!("pack_00000000000000000000000001"),
+            "why latest pack id",
+        )?;
+        ensure_equal(
+            &value["data"]["selection"]["latestPackSelection"]["rank"],
+            &serde_json::json!(1),
+            "why latest pack rank",
+        )?;
+
+        assert_golden("agent", "why_selected.json", &stdout)
+    }
+
+    #[test]
     fn agent_context_unavailable_json_matches_golden() -> TestResult {
         assert_agent_stdout_golden(
             &[
@@ -585,10 +685,7 @@ mod tests {
         use ee::models::degradation::ALL_DEGRADATION_CODES;
 
         for code in ALL_DEGRADATION_CODES {
-            ensure(
-                !code.id.is_empty(),
-                format!("code {:?} has empty id", code),
-            )?;
+            ensure(!code.id.is_empty(), format!("code {:?} has empty id", code))?;
             ensure(
                 code.id.starts_with('D'),
                 format!("code {} id must start with 'D'", code.id),
@@ -690,7 +787,7 @@ mod tests {
 
     #[test]
     fn degradation_matrix_subsystem_coverage() -> TestResult {
-        use ee::models::degradation::{DegradedSubsystem, ALL_DEGRADATION_CODES};
+        use ee::models::degradation::{ALL_DEGRADATION_CODES, DegradedSubsystem};
         use std::collections::HashSet;
 
         let expected_subsystems = [

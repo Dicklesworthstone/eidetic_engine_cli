@@ -15,6 +15,7 @@ pub mod quarantine;
 pub mod search;
 pub mod status;
 pub mod streams;
+pub mod why;
 
 pub use budget::{BudgetDimension, BudgetExceeded, BudgetSnapshot, RequestBudget};
 pub use context::{AccessLevel, CapabilitySet, CommandContext};

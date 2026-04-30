@@ -21,6 +21,7 @@ use crate::core::memory::{
 use crate::core::quarantine::QuarantineReport;
 use crate::core::search::{SearchOptions, run_search};
 use crate::core::status::StatusReport;
+use crate::core::why::{WhyOptions, explain_memory};
 use crate::models::memory::{MemoryKind, MemoryLevel, MemoryValidationError};
 use crate::models::{DomainError, MemoryId, ProcessExitCode};
 use crate::output;
@@ -154,6 +155,8 @@ pub enum Command {
     Status,
     /// Print the ee version.
     Version,
+    /// Explain why a memory was stored, retrieved, or selected.
+    Why(WhyArgs),
 }
 
 /// Arguments for `ee agent-docs`.
@@ -295,6 +298,22 @@ pub struct RememberArgs {
     /// Perform a dry run without storing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+/// Arguments for `ee why`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct WhyArgs {
+    /// Memory ID to explain.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Confidence threshold for selection (default 0.5).
+    #[arg(long, default_value_t = 0.5)]
+    pub confidence_threshold: f32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -783,6 +802,7 @@ where
         Some(Command::Version) => {
             write_stdout(stdout, concat!("ee ", env!("CARGO_PKG_VERSION"), "\n"))
         }
+        Some(Command::Why(ref args)) => handle_why(&cli, args, stdout, stderr),
     }
 }
 
@@ -837,15 +857,17 @@ where
     false
 }
 
-fn write_parse_error<I, W, E>(
+fn args_request_json_slice(args: &[OsString]) -> bool {
+    args_request_json(args.iter())
+}
+
+fn write_parse_error<W, E>(
     error: clap::Error,
-    args: I,
+    args: &[OsString],
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
 where
-    I: IntoIterator,
-    I::Item: AsRef<std::ffi::OsStr>,
     W: Write,
     E: Write,
 {
@@ -855,16 +877,38 @@ where
             ProcessExitCode::Success
         }
         _ => {
-            let domain_error = DomainError::Usage {
-                message: clap_error_message(&error),
-                repair: Some("ee --help".to_string()),
+            let base_message = clap_error_message(&error);
+            let suggestion = enhance_error_with_suggestion(&error, args);
+            let message = match suggestion {
+                Some(ref hint) => format!("{base_message} ({hint})"),
+                None => base_message,
             };
-            if args_request_json(args) {
+            let repair = suggestion
+                .as_ref()
+                .map(|hint| {
+                    hint.strip_prefix("did you mean `")
+                        .and_then(|s| s.strip_suffix("`?"))
+                        .map(|cmd| format!("ee {cmd}"))
+                        .unwrap_or_else(|| "ee --help".to_string())
+                })
+                .unwrap_or_else(|| "ee --help".to_string());
+
+            let domain_error = DomainError::Usage {
+                message,
+                repair: Some(repair),
+            };
+            if args_request_json_slice(args) {
                 let json = output::error_response_json(&domain_error);
                 let _ = stdout.write_all(json.as_bytes());
                 let _ = stdout.write_all(b"\n");
             } else {
-                let _ = stderr.write_all(error.to_string().as_bytes());
+                let error_str = error.to_string();
+                let _ = stderr.write_all(error_str.as_bytes());
+                if let Some(hint) = suggestion {
+                    let _ = stderr.write_all(b"\n\n");
+                    let _ = stderr.write_all(hint.as_bytes());
+                    let _ = stderr.write_all(b"\n");
+                }
             }
             domain_error.exit_code()
         }
@@ -1412,6 +1456,236 @@ where
     }
 }
 
+fn handle_why<W, E>(cli: &Cli, args: &WhyArgs, stdout: &mut W, stderr: &mut E) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !args.confidence_threshold.is_finite() || !(0.0..=1.0).contains(&args.confidence_threshold) {
+        let domain_error = DomainError::Usage {
+            message: "confidence threshold must be a finite number between 0.0 and 1.0".to_string(),
+            repair: Some("ee why <memory-id> --confidence-threshold 0.5".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let options = WhyOptions {
+        database_path: &database_path,
+        memory_id: &args.memory_id,
+        confidence_threshold: args.confidence_threshold,
+    };
+
+    let report = explain_memory(&options);
+
+    if let Some(ref error) = report.error {
+        let domain_error = DomainError::Storage {
+            message: error.clone(),
+            repair: Some("ee db migrate".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    if !report.found {
+        let domain_error = DomainError::NotFound {
+            resource: "memory".to_string(),
+            id: args.memory_id.clone(),
+            repair: Some("ee memory list".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human => {
+            let output = format_why_human(&report);
+            write_stdout(stdout, &output)
+        }
+        output::Renderer::Toon => {
+            let output = format!(
+                "WHY|{}|{}|{:.2}\n",
+                report.memory_id,
+                report.found,
+                report.selection.as_ref().map_or(0.0, |s| s.selection_score)
+            );
+            write_stdout(stdout, &output)
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = format_why_json(&report);
+            write_stdout(stdout, &(json + "\n"))
+        }
+    }
+}
+
+fn format_why_human(report: &crate::core::why::WhyReport) -> String {
+    let mut output = format!("Memory: {}\n\n", report.memory_id);
+
+    if let Some(ref storage) = report.storage {
+        output.push_str("Storage:\n");
+        output.push_str(&format!("  Origin: {}\n", storage.origin));
+        output.push_str(&format!("  Trust class: {}\n", storage.trust_class));
+        if let Some(ref subclass) = storage.trust_subclass {
+            output.push_str(&format!("  Trust subclass: {subclass}\n"));
+        }
+        if let Some(ref uri) = storage.provenance_uri {
+            output.push_str(&format!("  Provenance: {uri}\n"));
+        }
+        output.push_str(&format!("  Created: {}\n", storage.created_at));
+        output.push('\n');
+    }
+
+    if let Some(ref retrieval) = report.retrieval {
+        output.push_str("Retrieval:\n");
+        output.push_str(&format!("  Confidence: {:.2}\n", retrieval.confidence));
+        output.push_str(&format!("  Utility: {:.2}\n", retrieval.utility));
+        output.push_str(&format!("  Importance: {:.2}\n", retrieval.importance));
+        output.push_str(&format!("  Level: {}\n", retrieval.level));
+        output.push_str(&format!("  Kind: {}\n", retrieval.kind));
+        if !retrieval.tags.is_empty() {
+            output.push_str(&format!("  Tags: {}\n", retrieval.tags.join(", ")));
+        }
+        output.push('\n');
+    }
+
+    if let Some(ref selection) = report.selection {
+        output.push_str("Selection:\n");
+        output.push_str(&format!("  Score: {:.2}\n", selection.selection_score));
+        output.push_str(&format!(
+            "  Above threshold: {}\n",
+            if selection.above_confidence_threshold {
+                "yes"
+            } else {
+                "no"
+            }
+        ));
+        output.push_str(&format!(
+            "  Active: {}\n",
+            if selection.is_active { "yes" } else { "no" }
+        ));
+        output.push_str(&format!("  {}\n", selection.score_breakdown));
+        match selection.latest_pack_selection {
+            Some(ref pack) => {
+                output.push_str(&format!("  Latest pack: {}\n", pack.pack_id));
+                output.push_str(&format!("  Query: {}\n", pack.query));
+                output.push_str(&format!("  Rank: {}\n", pack.rank));
+                output.push_str(&format!("  Pack why: {}\n", pack.why));
+            }
+            None => output.push_str("  Latest pack: none recorded\n"),
+        }
+    }
+
+    if !report.degraded.is_empty() {
+        output.push_str("\nDegraded:\n");
+        for degraded in &report.degraded {
+            output.push_str(&format!("  {}: {}\n", degraded.code, degraded.message));
+            if let Some(ref repair) = degraded.repair {
+                output.push_str(&format!("  Next: {repair}\n"));
+            }
+        }
+    }
+
+    output
+}
+
+fn format_why_json(report: &crate::core::why::WhyReport) -> String {
+    let storage = report.storage.as_ref().map(|s| {
+        serde_json::json!({
+            "origin": s.origin,
+            "trust_class": s.trust_class,
+            "trust_subclass": s.trust_subclass,
+            "provenance_uri": s.provenance_uri,
+            "created_at": s.created_at,
+        })
+    });
+
+    let retrieval = report.retrieval.as_ref().map(|r| {
+        serde_json::json!({
+            "confidence": score_json_value(r.confidence),
+            "utility": score_json_value(r.utility),
+            "importance": score_json_value(r.importance),
+            "tags": r.tags,
+            "level": r.level,
+            "kind": r.kind,
+        })
+    });
+
+    let selection = report.selection.as_ref().map(|s| {
+        let pack = s.latest_pack_selection.as_ref().map(|pack| {
+            serde_json::json!({
+                "packId": pack.pack_id,
+                "query": pack.query,
+                "profile": pack.profile,
+                "rank": pack.rank,
+                "section": pack.section,
+                "estimatedTokens": pack.estimated_tokens,
+                "relevance": score_json_value(pack.relevance),
+                "utility": score_json_value(pack.utility),
+                "why": pack.why,
+                "packHash": pack.pack_hash,
+                "selectedAt": pack.selected_at,
+            })
+        });
+
+        serde_json::json!({
+            "selectionScore": score_json_value(s.selection_score),
+            "aboveConfidenceThreshold": s.above_confidence_threshold,
+            "isActive": s.is_active,
+            "scoreBreakdown": s.score_breakdown,
+            "latestPackSelection": pack,
+        })
+    });
+
+    let degraded: Vec<serde_json::Value> = report
+        .degraded
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "code": d.code,
+                "severity": d.severity,
+                "message": d.message,
+                "repair": d.repair,
+            })
+        })
+        .collect();
+
+    let json = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": "why",
+            "version": report.version,
+            "memory_id": report.memory_id,
+            "found": report.found,
+            "storage": storage,
+            "retrieval": retrieval,
+            "selection": selection,
+            "degraded": degraded,
+        }
+    });
+
+    json.to_string()
+}
+
+fn score_json_value(value: f32) -> serde_json::Value {
+    let rounded = (f64::from(value) * 10_000.0).round() / 10_000.0;
+    serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
+}
+
 fn write_domain_error<W, E>(
     error: &DomainError,
     wants_json: bool,
@@ -1574,6 +1848,245 @@ fn handle_remember(
         dry_run: args.dry_run,
         storage_degraded: true,
     })
+}
+
+// ============================================================================
+// EE-040: Read-only Invocation Normalization and Did-You-Mean Errors
+// ============================================================================
+
+/// Canonical command names for did-you-mean suggestions.
+const COMMAND_NAMES: &[&str] = &[
+    "agent-docs",
+    "capabilities",
+    "check",
+    "context",
+    "diag",
+    "doctor",
+    "eval",
+    "health",
+    "help",
+    "import",
+    "index",
+    "introspect",
+    "memory",
+    "remember",
+    "schema",
+    "search",
+    "status",
+    "version",
+    "why",
+];
+
+/// Subcommand names for nested commands.
+const DIAG_SUBCOMMANDS: &[&str] = &["quarantine", "streams"];
+const EVAL_SUBCOMMANDS: &[&str] = &["run", "list"];
+const IMPORT_SUBCOMMANDS: &[&str] = &["cass"];
+const INDEX_SUBCOMMANDS: &[&str] = &["rebuild", "status"];
+const MEMORY_SUBCOMMANDS: &[&str] = &["list", "show", "history"];
+const SCHEMA_SUBCOMMANDS: &[&str] = &["list", "export"];
+
+/// Read-only normalized representation of a CLI invocation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NormalizedInvocation {
+    /// The canonical command path (e.g., "memory show", "index rebuild").
+    pub command_path: String,
+    /// Original arguments as passed (read-only).
+    pub original_args: Vec<String>,
+    /// Whether JSON output was requested.
+    pub wants_json: bool,
+    /// Whether robot mode was requested.
+    pub robot: bool,
+    /// Workspace path if specified.
+    pub workspace: Option<PathBuf>,
+}
+
+impl NormalizedInvocation {
+    /// Create a normalized invocation from CLI args and parsed state.
+    #[must_use]
+    pub fn from_cli(cli: &Cli, args: &[OsString]) -> Self {
+        let command_path = Self::extract_command_path(cli);
+        let original_args = args
+            .iter()
+            .filter_map(|s| s.to_str())
+            .map(String::from)
+            .collect();
+
+        Self {
+            command_path,
+            original_args,
+            wants_json: cli.wants_json(),
+            robot: cli.robot,
+            workspace: cli.workspace.clone(),
+        }
+    }
+
+    fn extract_command_path(cli: &Cli) -> String {
+        match &cli.command {
+            None => "help".to_string(),
+            Some(cmd) => match cmd {
+                Command::AgentDocs(_) => "agent-docs".to_string(),
+                Command::Capabilities => "capabilities".to_string(),
+                Command::Check => "check".to_string(),
+                Command::Context(_) => "context".to_string(),
+                Command::Diag(diag) => match diag {
+                    DiagCommand::Quarantine => "diag quarantine".to_string(),
+                    DiagCommand::Streams => "diag streams".to_string(),
+                },
+                Command::Doctor(_) => "doctor".to_string(),
+                Command::Eval(eval) => match eval {
+                    EvalCommand::Run { .. } => "eval run".to_string(),
+                    EvalCommand::List => "eval list".to_string(),
+                },
+                Command::Health => "health".to_string(),
+                Command::Help => "help".to_string(),
+                Command::Import(import) => match import {
+                    ImportCommand::Cass(_) => "import cass".to_string(),
+                },
+                Command::Index(index) => match index {
+                    IndexCommand::Rebuild(_) => "index rebuild".to_string(),
+                    IndexCommand::Status(_) => "index status".to_string(),
+                },
+                Command::Introspect => "introspect".to_string(),
+                Command::Memory(mem) => match mem {
+                    MemoryCommand::List(_) => "memory list".to_string(),
+                    MemoryCommand::Show(_) => "memory show".to_string(),
+                    MemoryCommand::History(_) => "memory history".to_string(),
+                },
+                Command::Remember(_) => "remember".to_string(),
+                Command::Schema(schema) => match schema {
+                    SchemaCommand::List => "schema list".to_string(),
+                    SchemaCommand::Export { .. } => "schema export".to_string(),
+                },
+                Command::Search(_) => "search".to_string(),
+                Command::Status => "status".to_string(),
+                Command::Version => "version".to_string(),
+                Command::Why(_) => "why".to_string(),
+            },
+        }
+    }
+
+    /// Returns a stable identifier suitable for logging or diagnostics.
+    #[must_use]
+    pub fn diagnostic_key(&self) -> String {
+        format!(
+            "ee {}{}",
+            self.command_path,
+            if self.wants_json { " --json" } else { "" }
+        )
+    }
+}
+
+/// Compute Levenshtein edit distance between two strings.
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let a_len = a_chars.len();
+    let b_len = b_chars.len();
+
+    if a_len == 0 {
+        return b_len;
+    }
+    if b_len == 0 {
+        return a_len;
+    }
+
+    let mut prev_row: Vec<usize> = (0..=b_len).collect();
+    let mut curr_row: Vec<usize> = vec![0; b_len + 1];
+
+    for (i, a_char) in a_chars.iter().enumerate() {
+        curr_row[0] = i + 1;
+        for (j, b_char) in b_chars.iter().enumerate() {
+            let cost = if a_char == b_char { 0 } else { 1 };
+            curr_row[j + 1] = (prev_row[j + 1] + 1)
+                .min(curr_row[j] + 1)
+                .min(prev_row[j] + cost);
+        }
+        std::mem::swap(&mut prev_row, &mut curr_row);
+    }
+
+    prev_row[b_len]
+}
+
+/// Suggest similar commands for a typo.
+#[must_use]
+pub fn did_you_mean(input: &str, parent_command: Option<&str>) -> Option<String> {
+    let candidates: &[&str] = match parent_command {
+        Some("diag") => DIAG_SUBCOMMANDS,
+        Some("eval") => EVAL_SUBCOMMANDS,
+        Some("import") => IMPORT_SUBCOMMANDS,
+        Some("index") => INDEX_SUBCOMMANDS,
+        Some("memory") => MEMORY_SUBCOMMANDS,
+        Some("schema") => SCHEMA_SUBCOMMANDS,
+        _ => COMMAND_NAMES,
+    };
+
+    let input_lower = input.to_lowercase();
+    let threshold = (input.len() / 2).max(2).min(3);
+
+    let mut best: Option<(&str, usize)> = None;
+    for &candidate in candidates {
+        let distance = levenshtein_distance(&input_lower, candidate);
+        if distance <= threshold {
+            match best {
+                None => best = Some((candidate, distance)),
+                Some((_, best_dist)) if distance < best_dist => {
+                    best = Some((candidate, distance));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    best.map(|(name, _)| name.to_string())
+}
+
+/// Extract a likely invalid subcommand from args for suggestion lookup.
+fn extract_invalid_subcommand(args: &[OsString]) -> Option<(String, Option<String>)> {
+    let args_str: Vec<&str> = args.iter().filter_map(|s| s.to_str()).collect();
+
+    for (i, arg) in args_str.iter().enumerate() {
+        if *arg == "ee" || arg.starts_with('-') {
+            continue;
+        }
+        if COMMAND_NAMES.contains(arg) {
+            if let Some(next) = args_str.get(i + 1) {
+                if !next.starts_with('-') {
+                    let subcommands = match *arg {
+                        "diag" => Some(DIAG_SUBCOMMANDS),
+                        "eval" => Some(EVAL_SUBCOMMANDS),
+                        "import" => Some(IMPORT_SUBCOMMANDS),
+                        "index" => Some(INDEX_SUBCOMMANDS),
+                        "memory" => Some(MEMORY_SUBCOMMANDS),
+                        "schema" => Some(SCHEMA_SUBCOMMANDS),
+                        _ => None,
+                    };
+                    if let Some(subs) = subcommands {
+                        if !subs.contains(next) {
+                            return Some(((*next).to_string(), Some((*arg).to_string())));
+                        }
+                    }
+                }
+            }
+        } else {
+            return Some(((*arg).to_string(), None));
+        }
+    }
+    None
+}
+
+/// Enhance a clap error message with did-you-mean suggestions.
+fn enhance_error_with_suggestion(error: &clap::Error, args: &[OsString]) -> Option<String> {
+    if !matches!(
+        error.kind(),
+        ErrorKind::InvalidSubcommand | ErrorKind::UnknownArgument
+    ) {
+        return None;
+    }
+
+    let (invalid, parent) = extract_invalid_subcommand(args)?;
+    let suggestion = did_you_mean(&invalid, parent.as_deref())?;
+
+    Some(format!("did you mean `{suggestion}`?"))
 }
 
 #[cfg(test)]
