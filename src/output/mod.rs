@@ -9,11 +9,14 @@ use crate::core::memory::{MemoryDetails, MemoryHistoryReport, MemoryListReport, 
 use crate::core::quarantine::{QuarantineEntry, QuarantineReport};
 use crate::core::status::StatusReport;
 use crate::eval::{EvaluationReport, EvaluationStatus, ScenarioValidationResult};
+use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
 use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
 use crate::pack::{
     ContextResponse, PackDraftItem, PackItemProvenance, PackOmissionMetrics, PackQualityMetrics,
     PackSectionMetric, PackSelectionCertificate, PackSelectionStep, RenderedPackProvenance,
 };
+
+pub mod jsonl_export;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Renderer {
@@ -1100,6 +1103,104 @@ pub fn render_quarantine_toon(report: &QuarantineReport) -> String {
     render_toon_from_json(&render_quarantine_json(report))
 }
 
+// ============================================================================
+// EE-243: Graph Diagnostic Output
+// ============================================================================
+
+/// Render a graph diagnostic report as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_graph_diag_json(readiness: &crate::graph::GraphModuleReadiness) -> String {
+    use crate::models::CapabilityStatus;
+
+    let capabilities: Vec<serde_json::Value> = readiness
+        .capabilities()
+        .iter()
+        .map(|cap| {
+            serde_json::json!({
+                "name": cap.name().as_str(),
+                "surface": cap.surface().as_str(),
+                "status": match cap.status() {
+                    CapabilityStatus::Ready => "ready",
+                    CapabilityStatus::Pending => "pending",
+                    CapabilityStatus::Degraded => "degraded",
+                    CapabilityStatus::Unimplemented => "unimplemented",
+                },
+                "repair": cap.repair(),
+            })
+        })
+        .collect();
+
+    let status = match readiness.status() {
+        CapabilityStatus::Ready => "ready",
+        CapabilityStatus::Pending => "pending",
+        CapabilityStatus::Degraded => "degraded",
+        CapabilityStatus::Unimplemented => "unimplemented",
+    };
+
+    serde_json::json!({
+        "schema": RESPONSE_SCHEMA_V1,
+        "success": readiness.status() == CapabilityStatus::Ready,
+        "data": {
+            "command": "diag graph",
+            "subsystem": readiness.subsystem(),
+            "contract": readiness.contract(),
+            "graphEngine": readiness.graph_engine(),
+            "status": status,
+            "capabilityCount": capabilities.len(),
+            "readyCount": readiness.capabilities().iter().filter(|c| c.status() == CapabilityStatus::Ready).count(),
+            "pendingCount": readiness.capabilities().iter().filter(|c| c.status() == CapabilityStatus::Pending).count(),
+            "capabilities": capabilities,
+        }
+    })
+    .to_string()
+}
+
+/// Render a graph diagnostic report as human-readable text.
+#[must_use]
+pub fn render_graph_diag_human(readiness: &crate::graph::GraphModuleReadiness) -> String {
+    use crate::models::CapabilityStatus;
+
+    let mut output = String::new();
+    output.push_str("Graph Module Diagnostics\n\n");
+
+    let status_str = match readiness.status() {
+        CapabilityStatus::Ready => "ready",
+        CapabilityStatus::Pending => "pending",
+        CapabilityStatus::Degraded => "degraded",
+        CapabilityStatus::Unimplemented => "unimplemented",
+    };
+    output.push_str(&format!("Status: {status_str}\n"));
+    output.push_str(&format!("Contract: {}\n", readiness.contract()));
+    output.push_str(&format!("Engine: {}\n\n", readiness.graph_engine()));
+
+    output.push_str("Capabilities:\n");
+    for cap in readiness.capabilities() {
+        let status = match cap.status() {
+            CapabilityStatus::Ready => "[ready]",
+            CapabilityStatus::Pending => "[pending]",
+            CapabilityStatus::Degraded => "[degraded]",
+            CapabilityStatus::Unimplemented => "[unimplemented]",
+        };
+        output.push_str(&format!(
+            "  {} {} ({})\n",
+            status,
+            cap.name().as_str(),
+            cap.surface().as_str()
+        ));
+        if cap.status() != CapabilityStatus::Ready {
+            output.push_str(&format!("    Next: {}\n", cap.repair()));
+        }
+    }
+
+    output
+}
+
+/// Render a graph diagnostic report as TOON.
+#[must_use]
+pub fn render_graph_diag_toon(readiness: &crate::graph::GraphModuleReadiness) -> String {
+    render_toon_from_json(&render_graph_diag_json(readiness))
+}
+
 /// Render a streams diagnostic report as JSON (ee.response.v1 envelope).
 #[must_use]
 pub fn render_streams_json(report: &crate::core::streams::StreamsReport) -> String {
@@ -1968,7 +2069,7 @@ pub fn render_schema_export_toon(schema_id: Option<&str>) -> String {
     render_toon_from_json(&render_schema_export_json(schema_id))
 }
 
-fn render_toon_from_json(json: &str) -> String {
+pub(crate) fn render_toon_from_json(json: &str) -> String {
     toon::json_to_toon(json).unwrap_or_else(|error| {
         let message = escape_toon_quoted_string(&format!("TOON encoding failed: {error}"));
         format!(
@@ -2789,7 +2890,7 @@ fn render_agent_docs_topic_human(output: &mut String, topic: AgentDocsTopic) {
         AgentDocsTopic::Commands => {
             output.push_str("\nAvailable commands:\n");
             for cmd in COMMAND_MANIFEST {
-                let status = if cmd.available { "" } else { " (unavailable)" };
+                let status = if cmd.available { "" } else { " (unimplemented)" };
                 output.push_str(&format!(
                     "  {:16} {}{}\n",
                     cmd.name, cmd.description, status
@@ -3396,6 +3497,242 @@ pub fn render_claim_verify_toon(report: &ClaimVerifyReport) -> String {
     render_toon_from_json(&render_claim_verify_json(report))
 }
 
+/// Schema identifier for shadow-run reports.
+pub const SHADOW_RUN_SCHEMA_V1: &str = "ee.shadow_run.v1";
+
+/// A single shadow-vs-incumbent comparison for decision plane tracking.
+#[derive(Clone, Debug)]
+pub struct ShadowRunComparison {
+    /// Which decision plane this comparison belongs to.
+    pub plane: DecisionPlane,
+    /// Tracking metadata (policy, decision, trace IDs).
+    pub metadata: DecisionPlaneMetadata,
+    /// When the decision was made.
+    pub decided_at: String,
+    /// The shadow policy's outcome.
+    pub shadow_outcome: String,
+    /// The incumbent policy's outcome.
+    pub incumbent_outcome: String,
+    /// Whether the outcomes differ.
+    pub diverged: bool,
+    /// Confidence score from the shadow decision.
+    pub confidence: Option<f64>,
+    /// Explanation for the shadow decision.
+    pub reason: Option<String>,
+}
+
+impl ShadowRunComparison {
+    #[must_use]
+    pub fn from_record(record: &DecisionRecord) -> Option<Self> {
+        if !record.shadow {
+            return None;
+        }
+        Some(Self {
+            plane: record.plane,
+            metadata: record.metadata.clone(),
+            decided_at: record.decided_at.clone(),
+            shadow_outcome: record.outcome.clone(),
+            incumbent_outcome: record.incumbent_outcome.clone().unwrap_or_default(),
+            diverged: record.incumbent_outcome.as_deref() != Some(&record.outcome),
+            confidence: record.confidence,
+            reason: record.reason.clone(),
+        })
+    }
+}
+
+/// Summary metrics for a shadow-run report.
+#[derive(Clone, Debug, Default)]
+pub struct ShadowRunSummary {
+    /// Total number of shadow decisions.
+    pub total: u32,
+    /// Number that diverged from incumbent.
+    pub diverged: u32,
+    /// Number that matched incumbent.
+    pub matched: u32,
+    /// Average confidence of shadow decisions (if available).
+    pub avg_confidence: Option<f64>,
+}
+
+/// Report for shadow-run comparisons.
+#[derive(Clone, Debug)]
+pub struct ShadowRunReport {
+    /// Schema identifier.
+    pub schema: String,
+    /// Command that generated this report.
+    pub command: String,
+    /// Policy ID being shadow-tested.
+    pub shadow_policy: String,
+    /// Incumbent policy for comparison.
+    pub incumbent_policy: String,
+    /// Individual comparisons.
+    pub comparisons: Vec<ShadowRunComparison>,
+    /// Summary metrics.
+    pub summary: ShadowRunSummary,
+}
+
+impl ShadowRunReport {
+    #[must_use]
+    pub fn new(shadow_policy: impl Into<String>, incumbent_policy: impl Into<String>) -> Self {
+        Self {
+            schema: SHADOW_RUN_SCHEMA_V1.to_owned(),
+            command: "shadow-run".to_owned(),
+            shadow_policy: shadow_policy.into(),
+            incumbent_policy: incumbent_policy.into(),
+            comparisons: Vec::new(),
+            summary: ShadowRunSummary::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_command(mut self, command: impl Into<String>) -> Self {
+        self.command = command.into();
+        self
+    }
+
+    pub fn add_comparison(&mut self, comparison: ShadowRunComparison) {
+        if comparison.diverged {
+            self.summary.diverged += 1;
+        } else {
+            self.summary.matched += 1;
+        }
+        self.summary.total += 1;
+        self.comparisons.push(comparison);
+    }
+
+    pub fn add_from_record(&mut self, record: &DecisionRecord) {
+        if let Some(comparison) = ShadowRunComparison::from_record(record) {
+            self.add_comparison(comparison);
+        }
+    }
+
+    pub fn compute_avg_confidence(&mut self) {
+        let confidences: Vec<f64> = self
+            .comparisons
+            .iter()
+            .filter_map(|c| c.confidence)
+            .collect();
+        if !confidences.is_empty() {
+            let sum: f64 = confidences.iter().sum();
+            self.summary.avg_confidence = Some(sum / confidences.len() as f64);
+        }
+    }
+
+    #[must_use]
+    pub fn divergence_rate(&self) -> f64 {
+        if self.summary.total == 0 {
+            0.0
+        } else {
+            f64::from(self.summary.diverged) / f64::from(self.summary.total)
+        }
+    }
+}
+
+/// Render a shadow-run report as JSON.
+#[must_use]
+pub fn render_shadow_run_json(report: &ShadowRunReport) -> String {
+    let mut b = JsonBuilder::with_capacity(2048);
+    b.field_str("schema", &report.schema);
+    b.field_str("command", &report.command);
+    b.field_object("policies", |p| {
+        p.field_str("shadow", &report.shadow_policy);
+        p.field_str("incumbent", &report.incumbent_policy);
+    });
+    b.field_object("summary", |s| {
+        s.field_u32("total", report.summary.total);
+        s.field_u32("diverged", report.summary.diverged);
+        s.field_u32("matched", report.summary.matched);
+        let rate = format!("{:.4}", report.divergence_rate());
+        s.field_raw("divergenceRate", &rate);
+        if let Some(avg) = report.summary.avg_confidence {
+            let avg_str = format!("{:.4}", avg);
+            s.field_raw("avgConfidence", &avg_str);
+        }
+    });
+    b.field_array_of_objects("comparisons", &report.comparisons, |obj, c| {
+        obj.field_str("plane", c.plane.as_str());
+        obj.field_str("decidedAt", &c.decided_at);
+        obj.field_str("shadowOutcome", &c.shadow_outcome);
+        obj.field_str("incumbentOutcome", &c.incumbent_outcome);
+        obj.field_bool("diverged", c.diverged);
+        if let Some(conf) = c.confidence {
+            let conf_str = format!("{:.4}", conf);
+            obj.field_raw("confidence", &conf_str);
+        }
+        if let Some(reason) = &c.reason {
+            obj.field_str("reason", reason);
+        }
+        if let Some(policy_id) = &c.metadata.policy_id {
+            obj.field_str("policyId", policy_id);
+        }
+        if let Some(decision_id) = &c.metadata.decision_id {
+            obj.field_str("decisionId", decision_id);
+        }
+        if let Some(trace_id) = &c.metadata.trace_id {
+            obj.field_str("traceId", trace_id);
+        }
+    });
+    b.finish()
+}
+
+/// Render a shadow-run report as human-readable text.
+#[must_use]
+pub fn render_shadow_run_human(report: &ShadowRunReport) -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str("Shadow-Run Comparison Report\n");
+    out.push_str("============================\n\n");
+    out.push_str(&format!("Shadow policy:    {}\n", report.shadow_policy));
+    out.push_str(&format!(
+        "Incumbent policy: {}\n\n",
+        report.incumbent_policy
+    ));
+    out.push_str("Summary:\n");
+    out.push_str(&format!("  Total decisions:  {}\n", report.summary.total));
+    out.push_str(&format!(
+        "  Diverged:         {}\n",
+        report.summary.diverged
+    ));
+    out.push_str(&format!("  Matched:          {}\n", report.summary.matched));
+    out.push_str(&format!(
+        "  Divergence rate:  {:.1}%\n",
+        report.divergence_rate() * 100.0
+    ));
+    if let Some(avg) = report.summary.avg_confidence {
+        out.push_str(&format!("  Avg confidence:   {:.2}\n", avg));
+    }
+
+    if !report.comparisons.is_empty() {
+        out.push_str("\nComparisons:\n");
+        for (i, c) in report.comparisons.iter().enumerate() {
+            let status = if c.diverged { "DIVERGED" } else { "MATCHED" };
+            out.push_str(&format!(
+                "\n  {}. [{}] {} ({})\n",
+                i + 1,
+                status,
+                c.plane,
+                c.decided_at
+            ));
+            out.push_str(&format!("     Shadow:    {}\n", c.shadow_outcome));
+            out.push_str(&format!("     Incumbent: {}\n", c.incumbent_outcome));
+            if let Some(reason) = &c.reason {
+                out.push_str(&format!("     Reason:    {}\n", reason));
+            }
+            if let Some(conf) = c.confidence {
+                out.push_str(&format!("     Confidence: {:.2}\n", conf));
+            }
+        }
+    }
+
+    out.push_str("\nNext:\n");
+    out.push_str("  ee shadow-run --policy <id> --json\n");
+    out
+}
+
+/// Render a shadow-run report as TOON.
+#[must_use]
+pub fn render_shadow_run_toon(report: &ShadowRunReport) -> String {
+    render_toon_from_json(&render_shadow_run_json(report))
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -3404,15 +3741,18 @@ mod tests {
 
     use super::{
         Degradation, DegradationSeverity, JsonBuilder, OutputContext, Renderer, ResponseEnvelope,
-        error_response_json, escape_json_string, help_text, human_status, render_agent_docs_json,
+        SHADOW_RUN_SCHEMA_V1, ShadowRunComparison, ShadowRunReport, error_response_json,
+        escape_json_string, help_text, human_status, render_agent_docs_json,
         render_agent_docs_toon, render_context_response_json, render_context_response_toon,
         render_doctor_json, render_doctor_toon, render_health_json, render_health_toon,
+        render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
         render_status_json, render_status_toon, status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::doctor::DoctorReport;
     use crate::core::health::HealthReport;
     use crate::core::status::StatusReport;
+    use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
     use crate::models::{DomainError, MemoryId, ProvenanceUri, UnitScore};
     use crate::pack::{
         ContextRequest, ContextResponse, PackCandidate, PackCandidateInput, PackProvenance,
@@ -3872,7 +4212,7 @@ mod tests {
     #[test]
     fn error_schema_unsatisfied_degraded_mode_has_stable_structure() -> TestResult {
         let error = DomainError::UnsatisfiedDegradedMode {
-            message: "Semantic search unavailable and --require-semantic was set.".to_string(),
+            message: "Semantic search unimplemented and --require-semantic was set.".to_string(),
             repair: Some("ee search --lexical-only".to_string()),
         };
         let json = error_response_json(&error);
@@ -4613,6 +4953,263 @@ mod tests {
             &json,
             "\"fixtureDir\":\"tests/fixtures/eval/\"",
             "fixtureDir",
+        )
+    }
+
+    #[test]
+    fn shadow_run_report_new_has_correct_schema() -> TestResult {
+        let report = ShadowRunReport::new("exp-policy", "default");
+        ensure_equal(&report.schema, &SHADOW_RUN_SCHEMA_V1.to_owned(), "schema")
+    }
+
+    #[test]
+    fn shadow_run_report_add_comparison_updates_summary() -> TestResult {
+        let mut report = ShadowRunReport::new("exp-policy", "default");
+        report.add_comparison(ShadowRunComparison {
+            plane: DecisionPlane::Ranking,
+            metadata: DecisionPlaneMetadata::empty(),
+            decided_at: "2026-04-30T12:00:00Z".to_owned(),
+            shadow_outcome: "rank-3".to_owned(),
+            incumbent_outcome: "rank-1".to_owned(),
+            diverged: true,
+            confidence: Some(0.85),
+            reason: None,
+        });
+        report.add_comparison(ShadowRunComparison {
+            plane: DecisionPlane::Packing,
+            metadata: DecisionPlaneMetadata::empty(),
+            decided_at: "2026-04-30T12:01:00Z".to_owned(),
+            shadow_outcome: "include".to_owned(),
+            incumbent_outcome: "include".to_owned(),
+            diverged: false,
+            confidence: Some(0.95),
+            reason: None,
+        });
+
+        ensure_equal(&report.summary.total, &2, "total")?;
+        ensure_equal(&report.summary.diverged, &1, "diverged")?;
+        ensure_equal(&report.summary.matched, &1, "matched")
+    }
+
+    #[test]
+    fn shadow_run_divergence_rate_empty_is_zero() -> TestResult {
+        let report = ShadowRunReport::new("exp", "default");
+        let rate = report.divergence_rate();
+        ensure(
+            (rate - 0.0).abs() < 0.0001,
+            format!("expected 0.0, got {rate}"),
+        )
+    }
+
+    #[test]
+    fn shadow_run_divergence_rate_computed_correctly() -> TestResult {
+        let mut report = ShadowRunReport::new("exp", "default");
+        report.add_comparison(ShadowRunComparison {
+            plane: DecisionPlane::Curation,
+            metadata: DecisionPlaneMetadata::empty(),
+            decided_at: "2026-04-30T12:00:00Z".to_owned(),
+            shadow_outcome: "archive".to_owned(),
+            incumbent_outcome: "keep".to_owned(),
+            diverged: true,
+            confidence: None,
+            reason: None,
+        });
+        report.add_comparison(ShadowRunComparison {
+            plane: DecisionPlane::Curation,
+            metadata: DecisionPlaneMetadata::empty(),
+            decided_at: "2026-04-30T12:01:00Z".to_owned(),
+            shadow_outcome: "keep".to_owned(),
+            incumbent_outcome: "keep".to_owned(),
+            diverged: false,
+            confidence: None,
+            reason: None,
+        });
+
+        let rate = report.divergence_rate();
+        ensure(
+            (rate - 0.5).abs() < 0.0001,
+            format!("expected 0.5, got {rate}"),
+        )
+    }
+
+    #[test]
+    fn shadow_run_from_record_only_shadow_records() -> TestResult {
+        let non_shadow = DecisionRecord::builder()
+            .plane(DecisionPlane::Ranking)
+            .shadow(false)
+            .build();
+        ensure(
+            ShadowRunComparison::from_record(&non_shadow).is_none(),
+            "non-shadow record should return None",
+        )?;
+
+        let shadow = DecisionRecord::builder()
+            .plane(DecisionPlane::Ranking)
+            .shadow(true)
+            .outcome("rank-2")
+            .incumbent_outcome("rank-1")
+            .build();
+        let comparison = ShadowRunComparison::from_record(&shadow);
+        ensure(comparison.is_some(), "shadow record should return Some")
+    }
+
+    #[test]
+    fn render_shadow_run_json_contains_schema_and_policies() -> TestResult {
+        let report = ShadowRunReport::new("exp-ranker", "default-ranker");
+        let json = render_shadow_run_json(&report);
+
+        ensure_contains(&json, "\"schema\":\"ee.shadow_run.v1\"", "schema")?;
+        ensure_contains(&json, "\"shadow\":\"exp-ranker\"", "shadow policy")?;
+        ensure_contains(
+            &json,
+            "\"incumbent\":\"default-ranker\"",
+            "incumbent policy",
+        )
+    }
+
+    #[test]
+    fn render_shadow_run_json_contains_summary() -> TestResult {
+        let mut report = ShadowRunReport::new("exp", "default");
+        report.add_comparison(ShadowRunComparison {
+            plane: DecisionPlane::CacheAdmission,
+            metadata: DecisionPlaneMetadata::empty(),
+            decided_at: "2026-04-30T12:00:00Z".to_owned(),
+            shadow_outcome: "admit".to_owned(),
+            incumbent_outcome: "evict".to_owned(),
+            diverged: true,
+            confidence: Some(0.9),
+            reason: Some("high reuse".to_owned()),
+        });
+        let json = render_shadow_run_json(&report);
+
+        ensure_contains(&json, "\"total\":1", "total")?;
+        ensure_contains(&json, "\"diverged\":1", "diverged")?;
+        ensure_contains(&json, "\"matched\":0", "matched")?;
+        ensure_contains(&json, "\"divergenceRate\":1.0", "divergenceRate")
+    }
+
+    #[test]
+    fn render_shadow_run_json_contains_comparison_fields() -> TestResult {
+        let mut report = ShadowRunReport::new("exp", "default");
+        report.add_comparison(ShadowRunComparison {
+            plane: DecisionPlane::RepairOrder,
+            metadata: DecisionPlaneMetadata::full("exp", "dec-001", "trace-abc"),
+            decided_at: "2026-04-30T12:00:00Z".to_owned(),
+            shadow_outcome: "priority-high".to_owned(),
+            incumbent_outcome: "priority-low".to_owned(),
+            diverged: true,
+            confidence: Some(0.75),
+            reason: Some("critical path".to_owned()),
+        });
+        let json = render_shadow_run_json(&report);
+
+        ensure_contains(&json, "\"plane\":\"repair_order\"", "plane")?;
+        ensure_contains(
+            &json,
+            "\"shadowOutcome\":\"priority-high\"",
+            "shadowOutcome",
+        )?;
+        ensure_contains(
+            &json,
+            "\"incumbentOutcome\":\"priority-low\"",
+            "incumbentOutcome",
+        )?;
+        ensure_contains(&json, "\"diverged\":true", "diverged")?;
+        ensure_contains(&json, "\"reason\":\"critical path\"", "reason")?;
+        ensure_contains(&json, "\"decisionId\":\"dec-001\"", "decisionId")?;
+        ensure_contains(&json, "\"traceId\":\"trace-abc\"", "traceId")
+    }
+
+    #[test]
+    fn render_shadow_run_human_contains_header_and_summary() -> TestResult {
+        let mut report = ShadowRunReport::new("exp-policy", "incumbent-policy");
+        report.add_comparison(ShadowRunComparison {
+            plane: DecisionPlane::Packing,
+            metadata: DecisionPlaneMetadata::empty(),
+            decided_at: "2026-04-30T12:00:00Z".to_owned(),
+            shadow_outcome: "include".to_owned(),
+            incumbent_outcome: "exclude".to_owned(),
+            diverged: true,
+            confidence: None,
+            reason: None,
+        });
+        let human = render_shadow_run_human(&report);
+
+        ensure_contains(&human, "Shadow-Run Comparison Report", "header")?;
+        ensure_contains(&human, "Shadow policy:    exp-policy", "shadow policy")?;
+        ensure_contains(
+            &human,
+            "Incumbent policy: incumbent-policy",
+            "incumbent policy",
+        )?;
+        ensure_contains(&human, "Total decisions:  1", "total")?;
+        ensure_contains(&human, "Diverged:         1", "diverged")?;
+        ensure_contains(&human, "Divergence rate:  100.0%", "rate")
+    }
+
+    #[test]
+    fn render_shadow_run_human_contains_comparison_details() -> TestResult {
+        let mut report = ShadowRunReport::new("exp", "default");
+        report.add_comparison(ShadowRunComparison {
+            plane: DecisionPlane::Ranking,
+            metadata: DecisionPlaneMetadata::empty(),
+            decided_at: "2026-04-30T12:00:00Z".to_owned(),
+            shadow_outcome: "rank-5".to_owned(),
+            incumbent_outcome: "rank-2".to_owned(),
+            diverged: true,
+            confidence: Some(0.88),
+            reason: Some("recency boost".to_owned()),
+        });
+        let human = render_shadow_run_human(&report);
+
+        ensure_contains(&human, "[DIVERGED]", "status")?;
+        ensure_contains(&human, "ranking", "plane")?;
+        ensure_contains(&human, "Shadow:    rank-5", "shadow outcome")?;
+        ensure_contains(&human, "Incumbent: rank-2", "incumbent outcome")?;
+        ensure_contains(&human, "Reason:    recency boost", "reason")?;
+        ensure_contains(&human, "Confidence: 0.88", "confidence")
+    }
+
+    #[test]
+    fn render_shadow_run_toon_is_valid_toon() -> TestResult {
+        let report = ShadowRunReport::new("exp", "default");
+        let toon = render_shadow_run_toon(&report);
+
+        ensure_starts_with(&toon, "schema: ee.shadow_run.v1", "toon schema")
+    }
+
+    #[test]
+    fn shadow_run_compute_avg_confidence() -> TestResult {
+        let mut report = ShadowRunReport::new("exp", "default");
+        report.add_comparison(ShadowRunComparison {
+            plane: DecisionPlane::Packing,
+            metadata: DecisionPlaneMetadata::empty(),
+            decided_at: "2026-04-30T12:00:00Z".to_owned(),
+            shadow_outcome: "include".to_owned(),
+            incumbent_outcome: "include".to_owned(),
+            diverged: false,
+            confidence: Some(0.8),
+            reason: None,
+        });
+        report.add_comparison(ShadowRunComparison {
+            plane: DecisionPlane::Packing,
+            metadata: DecisionPlaneMetadata::empty(),
+            decided_at: "2026-04-30T12:01:00Z".to_owned(),
+            shadow_outcome: "exclude".to_owned(),
+            incumbent_outcome: "include".to_owned(),
+            diverged: true,
+            confidence: Some(0.6),
+            reason: None,
+        });
+        report.compute_avg_confidence();
+
+        let avg = report
+            .summary
+            .avg_confidence
+            .ok_or_else(|| "expected avg confidence".to_owned())?;
+        ensure(
+            (avg - 0.7).abs() < 0.0001,
+            format!("expected 0.7, got {avg}"),
         )
     }
 }
