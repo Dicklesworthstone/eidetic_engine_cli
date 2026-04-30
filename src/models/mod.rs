@@ -6,6 +6,7 @@ pub mod degradation;
 pub mod episode;
 pub mod error_codes;
 pub mod id;
+pub mod jsonl;
 pub mod memory;
 pub mod posture;
 pub mod preflight;
@@ -25,8 +26,8 @@ pub use certificate::{
     TailRiskCertificate,
 };
 pub use claims::{
-    ArtifactType, BLAKE3_HEX_LEN, CLAIMS_FILE_SCHEMA_V1, CLAIM_ENTRY_SCHEMA_V1,
-    CLAIM_MANIFEST_SCHEMA_V1, ClaimEntry, ClaimManifest, ClaimStatus, ClaimsFile,
+    ArtifactType, BLAKE3_HEX_LEN, CLAIM_ENTRY_SCHEMA_V1, CLAIM_MANIFEST_SCHEMA_V1,
+    CLAIMS_FILE_SCHEMA_V1, ClaimEntry, ClaimManifest, ClaimStatus, ClaimsFile,
     MANIFEST_ARTIFACT_SCHEMA_V1, ManifestArtifact, ManifestValidationError,
     ManifestValidationErrorKind, ManifestVerificationStatus, ParseArtifactTypeError,
     ParseClaimStatusError, ParseManifestVerificationStatusError, ParseVerificationFrequencyError,
@@ -52,6 +53,16 @@ pub use id::{
     ParseExecutableIdKindError, ParseIdError, PolicyId, RuleId, SessionId, TraceId, WorkspaceId,
     executable_id_schema_catalog_json, executable_id_schemas,
 };
+pub use jsonl::{
+    ALL_EXPORT_SCHEMAS, EXPORT_AGENT_SCHEMA_V1, EXPORT_AUDIT_SCHEMA_V1, EXPORT_FOOTER_SCHEMA_V1,
+    EXPORT_FORMAT_VERSION, EXPORT_HEADER_SCHEMA_V1, EXPORT_LINK_SCHEMA_V1, EXPORT_MEMORY_SCHEMA_V1,
+    EXPORT_TAG_SCHEMA_V1, EXPORT_WORKSPACE_SCHEMA_V1, ExportAgentRecord, ExportAgentRecordBuilder,
+    ExportAuditRecord, ExportAuditRecordBuilder, ExportFooter, ExportFooterBuilder, ExportHeader,
+    ExportHeaderBuilder, ExportLinkRecord, ExportLinkRecordBuilder, ExportMemoryRecord,
+    ExportMemoryRecordBuilder, ExportRecord, ExportRecordType, ExportScope, ExportTagRecord,
+    ExportWorkspaceRecord, ExportWorkspaceRecordBuilder, ParseExportRecordTypeError,
+    ParseExportScopeError, ParseRedactionLevelError, RedactionLevel,
+};
 pub use memory::{
     Confidence, Importance, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES, MemoryContent,
     MemoryKind, MemoryLevel, MemoryValidationError, Tag, UnitScore, Utility,
@@ -71,8 +82,10 @@ pub use recorder::{
     IMPORT_CURSOR_SCHEMA_V1, ImportCursor, ImportSourceType, ParseImportSourceTypeError,
     ParsePayloadContentTypeError, ParseRecorderEventTypeError, ParseRecorderRunStatusError,
     ParseRedactionStatusError, PayloadContentType, RECORDER_EVENT_SCHEMA_V1,
-    RECORDER_PAYLOAD_SCHEMA_V1, RECORDER_RUN_SCHEMA_V1, REDACTION_STATUS_SCHEMA_V1, RecorderEvent,
-    RecorderEventType, RecorderPayload, RecorderRunMeta, RecorderRunStatus, RedactionStatus,
+    RECORDER_PAYLOAD_SCHEMA_V1, RECORDER_RUN_SCHEMA_V1, RECORDER_SCHEMA_CATALOG_V1,
+    REDACTION_STATUS_SCHEMA_V1, RecorderEvent, RecorderEventType, RecorderFieldSchema,
+    RecorderObjectSchema, RecorderPayload, RecorderRunMeta, RecorderRunStatus, RedactionStatus,
+    RedactionStatusSnapshot, recorder_schema_catalog_json, recorder_schemas,
 };
 pub use repro::{
     DependencyCategory, ParseDependencyCategoryError, ParseProvenanceEventTypeError,
