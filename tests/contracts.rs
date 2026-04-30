@@ -3,3 +3,6 @@ mod dependency_contract_matrix;
 
 #[path = "contracts/integration_foundation.rs"]
 mod integration_foundation;
+
+#[path = "contracts/sqlmodel_frankensqlite.rs"]
+mod sqlmodel_frankensqlite;

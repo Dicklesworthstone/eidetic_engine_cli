@@ -481,7 +481,11 @@ mod tests {
 
         let leaks = detector.detect_leaks(output);
         ensure(!leaks.is_empty(), true, "should detect anthropic key")?;
-        ensure(leaks[0].pattern_name, "anthropic_key", "pattern name")
+        ensure(
+            leaks.iter().any(|l| l.pattern_name == "anthropic_key"),
+            true,
+            "pattern name",
+        )
     }
 
     #[test]

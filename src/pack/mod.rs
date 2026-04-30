@@ -1091,10 +1091,12 @@ fn assemble_mmr_draft(
     let candidate_count = candidates.len();
     candidates.sort_by(compare_candidates);
 
+    let quotas = SectionQuotas::for_profile(profile, budget.max_tokens());
+
     let mut used_tokens = 0_u32;
     let mut next_rank = 1_u32;
     let mut selected_signatures = Vec::new();
-    let mut items = Vec::new();
+    let mut items: Vec<PackDraftItem> = Vec::new();
     let mut omitted = Vec::new();
     let mut steps = Vec::new();
     let mut objective_value = 0.0_f32;
@@ -1111,8 +1113,17 @@ fn assemble_mmr_draft(
             continue;
         }
 
+        let section_used: u32 = items
+            .iter()
+            .filter(|i| i.section == candidate.section)
+            .map(|i| i.estimated_tokens)
+            .sum();
+
+        let section_has_room =
+            quotas.has_room(candidate.section, section_used, candidate.estimated_tokens);
+
         match used_tokens.checked_add(candidate.estimated_tokens) {
-            Some(total) if total <= budget.max_tokens() => {
+            Some(total) if total <= budget.max_tokens() && section_has_room => {
                 let rank = next_rank;
                 next_rank = next_rank
                     .checked_add(1)
@@ -1185,10 +1196,12 @@ fn assemble_facility_location_draft(
     let universe = candidates.clone();
     let candidate_count = candidates.len();
 
+    let quotas = SectionQuotas::for_profile(profile, budget.max_tokens());
+
     let mut used_tokens = 0_u32;
     let mut next_rank = 1_u32;
     let mut selected_signatures = Vec::new();
-    let mut items = Vec::new();
+    let mut items: Vec<PackDraftItem> = Vec::new();
     let mut omitted = Vec::new();
     let mut steps = Vec::new();
     let mut objective_value = 0.0_f32;
@@ -1200,6 +1213,8 @@ fn assemble_facility_location_draft(
             &universe,
             used_tokens,
             budget,
+            &quotas,
+            &items,
         ) else {
             omitted.extend(candidates.drain(..).map(|candidate| PackOmission {
                 memory_id: candidate.memory_id,
@@ -1338,6 +1353,8 @@ fn select_facility_candidate_index(
     universe: &[PackCandidate],
     used_tokens: u32,
     budget: TokenBudget,
+    quotas: &SectionQuotas,
+    items: &[PackDraftItem],
 ) -> Option<(usize, f32)> {
     let remaining_budget = budget.max_tokens().saturating_sub(used_tokens);
     let mut best: Option<(usize, f32, f32)> = None;
@@ -1346,6 +1363,16 @@ fn select_facility_candidate_index(
         if candidate.estimated_tokens > remaining_budget {
             continue;
         }
+        let section_used: u32 = items
+            .iter()
+            .filter(|i| i.section == candidate.section)
+            .map(|i| i.estimated_tokens)
+            .sum();
+
+        if !quotas.has_room(candidate.section, section_used, candidate.estimated_tokens) {
+            continue;
+        }
+
         let marginal_gain = facility_location_marginal_gain(candidate, selected, universe);
         let gain_per_token = marginal_gain / candidate.estimated_tokens as f32;
         match best {
@@ -2471,7 +2498,7 @@ mod tests {
 
     #[test]
     fn assemble_draft_omits_items_that_exceed_budget() -> TestResult {
-        let budget = match TokenBudget::new(15) {
+        let budget = match TokenBudget::new(34) {
             Ok(budget) => budget,
             Err(error) => return Err(format!("budget rejected: {error:?}")),
         };
