@@ -1,5 +1,6 @@
 use std::future::Future;
 
+pub mod agent_docs;
 pub mod budget;
 pub mod capabilities;
 pub mod check;

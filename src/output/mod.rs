@@ -5,7 +5,7 @@ use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
 use crate::core::doctor::{DoctorReport, FixPlan};
 use crate::core::health::HealthReport;
-use crate::core::memory::{MemoryDetails, MemoryListReport, MemoryShowReport};
+use crate::core::memory::{MemoryDetails, MemoryHistoryReport, MemoryListReport, MemoryShowReport};
 use crate::core::quarantine::{QuarantineEntry, QuarantineReport};
 use crate::core::status::StatusReport;
 use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
@@ -1290,6 +1290,90 @@ pub fn render_memory_list_toon(report: &MemoryListReport) -> String {
     render_toon_from_json(&render_memory_list_json(report))
 }
 
+/// Render a memory history report as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_memory_history_json(report: &MemoryHistoryReport) -> String {
+    let mut b = JsonBuilder::with_capacity(2048);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", report.error.is_none());
+    b.field_object("data", |d| {
+        d.field_str("command", "memory history");
+        d.field_str("version", report.version);
+        d.field_str("memory_id", &report.memory_id);
+        d.field_bool("memory_exists", report.memory_exists);
+        d.field_bool("is_tombstoned", report.is_tombstoned);
+        d.field_u32("total_count", report.total_count);
+        d.field_bool("truncated", report.truncated);
+
+        d.field_array_of_objects("entries", &report.entries, |obj, e| {
+            obj.field_str("audit_id", &e.audit_id);
+            obj.field_str("timestamp", &e.timestamp);
+            if let Some(ref actor) = e.actor {
+                obj.field_str("actor", actor);
+            }
+            obj.field_str("action", &e.action);
+            if let Some(ref details) = e.details {
+                obj.field_raw("details", details);
+            }
+        });
+
+        if let Some(ref err) = report.error {
+            d.field_str("error", err);
+        }
+    });
+    b.finish()
+}
+
+/// Render a memory history report as human-readable text.
+#[must_use]
+pub fn render_memory_history_human(report: &MemoryHistoryReport) -> String {
+    if let Some(ref err) = report.error {
+        return format!("error: {err}\n");
+    }
+
+    if !report.memory_exists {
+        return format!("Memory not found: {}\n", report.memory_id);
+    }
+
+    let mut output = format!(
+        "History for {} ({} entries",
+        report.memory_id, report.total_count
+    );
+    if report.truncated {
+        output.push_str(", showing first batch");
+    }
+    output.push_str(")\n");
+
+    if report.is_tombstoned {
+        output.push_str("  [TOMBSTONED]\n");
+    }
+    output.push('\n');
+
+    if report.entries.is_empty() {
+        output.push_str("  No history entries found.\n");
+        return output;
+    }
+
+    for e in &report.entries {
+        output.push_str(&format!("  {} [{}]\n", e.timestamp, e.action));
+        if let Some(ref actor) = e.actor {
+            output.push_str(&format!("    actor: {actor}\n"));
+        }
+        if let Some(ref details) = e.details {
+            output.push_str(&format!("    details: {details}\n"));
+        }
+        output.push_str(&format!("    audit_id: {}\n\n", e.audit_id));
+    }
+
+    output
+}
+
+/// Render a memory history report as TOON.
+#[must_use]
+pub fn render_memory_history_toon(report: &MemoryHistoryReport) -> String {
+    render_toon_from_json(&render_memory_history_json(report))
+}
+
 /// Render a capabilities report as JSON (ee.response.v1 envelope).
 #[must_use]
 pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
@@ -1805,6 +1889,18 @@ struct CommandEntry {
 
 const COMMAND_MANIFEST: &[CommandEntry] = &[
     CommandEntry {
+        name: "agent-docs",
+        description: "Agent-oriented documentation for ee commands, contracts, and usage",
+        available: true,
+        subcommands: &[],
+        args: &[CommandArg {
+            name: "TOPIC",
+            description: "Documentation topic (guide, commands, contracts, schemas, paths, env, exit-codes, fields, errors, formats, examples)",
+            required: false,
+            default: None,
+        }],
+    },
+    CommandEntry {
         name: "capabilities",
         description: "Report feature availability, commands, and subsystem status",
         available: true,
@@ -2249,7 +2345,8 @@ fn render_agent_docs_topic_json(d: &mut JsonBuilder, topic: AgentDocsTopic) {
             });
         }
         AgentDocsTopic::Schemas => {
-            d.field_array_of_objects("schemas", &public_schemas(), |obj, schema| {
+            let schemas = public_schemas();
+            d.field_array_of_objects("schemas", schemas, |obj, schema| {
                 obj.field_str("id", schema.id);
                 obj.field_str("version", schema.version);
                 obj.field_str("description", schema.description);

@@ -9,6 +9,7 @@ use crate::cass::{CassClient, CassImportOptions, import_cass_sessions};
 use crate::core::agent_docs::{AgentDocsReport, AgentDocsTopic};
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
+use crate::core::context::{ContextPackError, ContextPackOptions, run_context_pack};
 use crate::core::doctor::DoctorReport;
 use crate::core::health::HealthReport;
 use crate::core::index::{
@@ -23,6 +24,7 @@ use crate::core::status::StatusReport;
 use crate::models::memory::{MemoryKind, MemoryLevel, MemoryValidationError};
 use crate::models::{DomainError, MemoryId, ProcessExitCode};
 use crate::output;
+use crate::pack::ContextPackProfile;
 
 #[derive(Clone, Debug, Parser, PartialEq)]
 #[command(
@@ -173,6 +175,10 @@ pub struct ContextArgs {
     /// Maximum token budget for the context pack.
     #[arg(long, short = 't', default_value_t = 4000)]
     pub max_tokens: u32,
+
+    /// Maximum candidate memories to retrieve before packing.
+    #[arg(long, default_value_t = 100)]
+    pub candidate_pool: u32,
 
     /// Context profile: compact, balanced, thorough.
     #[arg(long, short = 'p', default_value = "balanced")]
@@ -350,6 +356,8 @@ pub enum MemoryCommand {
     List(MemoryListArgs),
     /// Show details of a single memory by ID.
     Show(MemoryShowArgs),
+    /// Show the history of a memory (audit log entries).
+    History(MemoryHistoryArgs),
 }
 
 /// Arguments for `ee memory list`.
@@ -390,6 +398,22 @@ pub struct MemoryShowArgs {
     /// Include tombstoned memories in the lookup.
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_tombstoned: bool,
+}
+
+/// Arguments for `ee memory history`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MemoryHistoryArgs {
+    /// Memory ID to retrieve history for (e.g., "mem_01JV...").
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Maximum number of history entries to return.
+    #[arg(long, short = 'n', default_value_t = 50)]
+    pub limit: u32,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -669,6 +693,9 @@ where
         Some(Command::Memory(MemoryCommand::Show(ref args))) => {
             handle_memory_show(&cli, args, stdout, stderr)
         }
+        Some(Command::Memory(MemoryCommand::History(ref args))) => {
+            handle_memory_history(&cli, args, stdout, stderr)
+        }
         Some(Command::Index(IndexCommand::Rebuild(ref args))) => {
             handle_index_rebuild(&cli, args, stdout, stderr)
         }
@@ -862,26 +889,27 @@ where
     W: Write,
     E: Write,
 {
-    let topic = args
-        .topic
-        .as_ref()
-        .and_then(|t| AgentDocsTopic::from_str(t));
-
-    if args.topic.is_some() && topic.is_none() {
-        let domain_error = DomainError::Usage {
-            message: format!(
-                "Unknown topic '{}'. Valid topics: {}",
-                args.topic.as_ref().unwrap(),
-                AgentDocsTopic::all()
-                    .iter()
-                    .map(|t| t.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            repair: Some("ee agent-docs".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
+    let topic = match args.topic.as_ref() {
+        Some(t) => match AgentDocsTopic::parse(t) {
+            Some(parsed) => Some(parsed),
+            None => {
+                let domain_error = DomainError::Usage {
+                    message: format!(
+                        "Unknown topic '{}'. Valid topics: {}",
+                        t,
+                        AgentDocsTopic::all()
+                            .iter()
+                            .map(|topic| topic.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    repair: Some("ee agent-docs".to_string()),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        },
+        None => None,
+    };
 
     let report = AgentDocsReport::gather(topic);
     match cli.renderer() {
@@ -1184,6 +1212,79 @@ where
     }
 }
 
+fn handle_memory_history<W, E>(
+    cli: &Cli,
+    args: &MemoryHistoryArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::memory::{GetMemoryHistoryOptions, get_memory_history};
+
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let options = GetMemoryHistoryOptions {
+        database_path: &database_path,
+        memory_id: &args.memory_id,
+        limit: args.limit,
+    };
+
+    let report = get_memory_history(&options);
+
+    if report.error.is_some() {
+        let domain_error = DomainError::Storage {
+            message: report.error.clone().unwrap_or_default(),
+            repair: Some("ee doctor".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    if !report.memory_exists {
+        let domain_error = DomainError::NotFound {
+            resource: "memory".to_string(),
+            id: args.memory_id.clone(),
+            repair: Some("ee memory list".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human => {
+            write_stdout(stdout, &output::render_memory_history_human(&report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_memory_history_toon(&report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_memory_history_json(&report) + "\n"),
+        ),
+    }
+}
+
 fn handle_context<W, E>(
     cli: &Cli,
     args: &ContextArgs,
@@ -1194,84 +1295,67 @@ where
     W: Write,
     E: Write,
 {
-    use crate::pack::{
-        ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
-        ContextResponseDegradation, ContextResponseSeverity, PackDraft, TokenBudget,
-    };
-
-    // Parse profile
     let profile = match args.profile.to_lowercase().as_str() {
         "compact" => ContextPackProfile::Compact,
         "balanced" => ContextPackProfile::Balanced,
         "thorough" => ContextPackProfile::Thorough,
-        _ => ContextPackProfile::Balanced,
-    };
-
-    // Build the request
-    let request_input = ContextRequestInput {
-        query: args.query.clone(),
-        profile: Some(profile),
-        max_tokens: Some(args.max_tokens),
-        candidate_pool: None,
-        sections: Vec::new(),
-    };
-
-    let request = match ContextRequest::new(request_input) {
-        Ok(r) => r,
-        Err(e) => {
+        _ => {
             let domain_error = DomainError::Usage {
-                message: format!("Invalid context request: {e}"),
+                message: format!(
+                    "Invalid context profile '{}'. Expected compact, balanced, or thorough.",
+                    args.profile
+                ),
                 repair: Some("ee context --help".to_string()),
             };
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
 
-    // Create degraded pack (search/retrieval not yet wired)
-    let pack = PackDraft {
-        query: request.query.clone(),
-        budget: TokenBudget::new(args.max_tokens).unwrap_or_default(),
-        used_tokens: 0,
-        items: Vec::new(),
-        omitted: Vec::new(),
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = ContextPackOptions {
+        workspace_path,
+        database_path: args.database.clone(),
+        index_dir: args.index_dir.clone(),
+        query: args.query.clone(),
+        profile: Some(profile),
+        max_tokens: Some(args.max_tokens),
+        candidate_pool: Some(args.candidate_pool),
     };
 
-    let degraded =
-        vec![ContextResponseDegradation::new(
-        "context_retrieval_not_wired".to_string(),
-        ContextResponseSeverity::Medium,
-        "Context packing requires search and memory retrieval which are not yet fully wired."
-            .to_string(),
-        Some("ee search <query> --json".to_string()),
-    )
-    .expect("degradation entry is valid")];
-
-    let response = match ContextResponse::new(request, pack, degraded) {
-        Ok(r) => r,
-        Err(e) => {
-            let domain_error = DomainError::Usage {
-                message: format!("Failed to build context response: {e}"),
-                repair: None,
+    match run_context_pack(&options) {
+        Ok(response) => match cli.renderer() {
+            output::Renderer::Human => {
+                write_stdout(stdout, &output::render_context_response_human(&response))
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_context_response_toon(&response) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_context_response_json(&response) + "\n"),
+            ),
+        },
+        Err(error) => {
+            let domain_error = match &error {
+                ContextPackError::Storage(message) => DomainError::Storage {
+                    message: message.clone(),
+                    repair: error.repair_hint().map(str::to_string),
+                },
+                ContextPackError::Search(search_error) => DomainError::SearchIndex {
+                    message: search_error.to_string(),
+                    repair: error.repair_hint().map(str::to_string),
+                },
+                ContextPackError::Pack(message) => DomainError::Usage {
+                    message: message.clone(),
+                    repair: error.repair_hint().map(str::to_string),
+                },
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
-    };
-
-    match cli.renderer() {
-        output::Renderer::Human => {
-            write_stdout(stdout, &output::render_context_response_human(&response))
-        }
-        output::Renderer::Toon => write_stdout(
-            stdout,
-            &(output::render_context_response_toon(&response) + "\n"),
-        ),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(
-            stdout,
-            &(output::render_context_response_json(&response) + "\n"),
-        ),
     }
 }
 
@@ -2281,7 +2365,8 @@ mod tests {
         match parsed.command {
             Some(Command::Context(ref args)) => {
                 ensure_equal(&args.query, &"prepare release".to_string(), "context query")?;
-                ensure_equal(&args.max_tokens, &4000, "context default max_tokens")
+                ensure_equal(&args.max_tokens, &4000, "context default max_tokens")?;
+                ensure_equal(&args.candidate_pool, &100, "context default candidate_pool")
             }
             _ => Err("expected Context command".to_string()),
         }
@@ -2295,6 +2380,24 @@ mod tests {
         match parsed.command {
             Some(Command::Context(ref args)) => {
                 ensure_equal(&args.max_tokens, &8000, "context max_tokens")
+            }
+            _ => Err("expected Context command".to_string()),
+        }
+    }
+
+    #[test]
+    fn context_command_accepts_candidate_pool() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "context", "test", "--candidate-pool", "25"])
+            .map_err(|e| {
+                format!(
+                    "failed to parse context with candidate-pool: {:?}",
+                    e.kind()
+                )
+            })?;
+
+        match parsed.command {
+            Some(Command::Context(ref args)) => {
+                ensure_equal(&args.candidate_pool, &25, "context candidate_pool")
             }
             _ => Err("expected Context command".to_string()),
         }
@@ -2315,38 +2418,69 @@ mod tests {
 
     #[test]
     fn context_json_writes_to_stdout_only() -> TestResult {
-        let (exit, stdout, stderr) = invoke(&["ee", "context", "test query", "--json"]);
-        ensure_equal(&exit, &ProcessExitCode::Success, "context json exit")?;
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            "/tmp/ee-cli-context-missing-workspace",
+            "--json",
+            "context",
+            "test query",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Storage, "context json exit")?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.response.v1\"",
+            "{\"schema\":\"ee.error.v1\"",
             "context json schema",
         )?;
-        ensure_contains(&stdout, "\"command\":\"context\"", "context json command")?;
-        ensure_contains(&stdout, "\"query\":\"test query\"", "context json query")?;
+        ensure_contains(&stdout, "\"code\":\"storage\"", "context storage code")?;
+        ensure_contains(
+            &stdout,
+            "Database not found",
+            "context missing database message",
+        )?;
         ensure_ends_with(&stdout, '\n', "context json trailing newline")?;
         ensure(stderr.is_empty(), "context json stderr must be empty")
     }
 
     #[test]
-    fn context_json_includes_degradation_notice() -> TestResult {
-        let (exit, stdout, _) = invoke(&["ee", "context", "test", "--json"]);
-        ensure_equal(&exit, &ProcessExitCode::Success, "context exit")?;
-        ensure_contains(&stdout, "\"degraded\":", "context has degraded array")?;
+    fn context_json_rejects_invalid_profile() -> TestResult {
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "context", "test", "--profile", "wide", "--json"]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Usage,
+            "context invalid profile exit",
+        )?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.error.v1\"",
+            "context invalid profile schema",
+        )?;
+        ensure_contains(&stdout, "\"code\":\"usage\"", "context usage code")?;
         ensure_contains(
             &stdout,
-            "context_retrieval_not_wired",
-            "degradation code present",
+            "Invalid context profile",
+            "invalid profile message",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "context invalid profile stderr must be empty",
         )
     }
 
     #[test]
-    fn context_human_writes_to_stdout_only() -> TestResult {
-        let (exit, stdout, stderr) = invoke(&["ee", "context", "test query"]);
-        ensure_equal(&exit, &ProcessExitCode::Success, "context human exit")?;
-        ensure_contains(&stdout, "ee context", "context human header")?;
-        ensure_contains(&stdout, "test query", "context human query")?;
-        ensure(stderr.is_empty(), "context human stderr must be empty")
+    fn context_human_missing_database_writes_diagnostic_to_stderr() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            "/tmp/ee-cli-context-missing-workspace",
+            "context",
+            "test query",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Storage, "context human exit")?;
+        ensure(stdout.is_empty(), "context human stdout must be empty")?;
+        ensure_contains(&stderr, "error: Database not found", "context human error")?;
+        ensure_contains(&stderr, "ee init --workspace .", "context human repair")
     }
 
     // ========================================================================
