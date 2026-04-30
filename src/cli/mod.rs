@@ -1219,7 +1219,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Cli, Command, FieldsLevel, OutputFormat, run};
+    use super::{Cli, Command, FieldsLevel, MemoryCommand, OutputFormat, run};
     use crate::models::ProcessExitCode;
 
     type TestResult = Result<(), String>;
@@ -1904,5 +1904,117 @@ mod tests {
         ensure_contains(&stdout, "schema: ee.response.v1", "health toon schema")?;
         ensure_contains(&stdout, "command: health", "health toon command")?;
         ensure(stderr.is_empty(), "health toon stderr must be empty")
+    }
+
+    // ========================================================================
+    // Introspect Command Tests (EE-033)
+    // ========================================================================
+
+    #[test]
+    fn introspect_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "introspect"])
+            .map_err(|e| format!("failed to parse introspect: {:?}", e.kind()))?;
+
+        ensure_equal(
+            &parsed.command,
+            &Some(Command::Introspect),
+            "introspect command",
+        )
+    }
+
+    #[test]
+    fn introspect_json_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "introspect", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "introspect json exit")?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.response.v1\"",
+            "introspect json schema",
+        )?;
+        ensure_contains(&stdout, "\"command\":\"introspect\"", "introspect command")?;
+        ensure_ends_with(&stdout, '\n', "introspect json trailing newline")?;
+        ensure(stderr.is_empty(), "introspect json stderr must be empty")
+    }
+
+    #[test]
+    fn introspect_json_has_required_sections() -> TestResult {
+        let (exit, stdout, _) = invoke(&["ee", "introspect", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "introspect exit")?;
+        ensure_contains(&stdout, "\"commands\":", "introspect has commands")?;
+        ensure_contains(&stdout, "\"schemas\":", "introspect has schemas")?;
+        ensure_contains(&stdout, "\"errorCodes\":", "introspect has errorCodes")?;
+        ensure_contains(
+            &stdout,
+            "\"globalOptions\":",
+            "introspect has globalOptions",
+        )
+    }
+
+    #[test]
+    fn introspect_human_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "introspect"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "introspect human exit")?;
+        ensure_contains(&stdout, "ee introspect", "introspect human header")?;
+        ensure_contains(&stdout, "Commands:", "introspect human commands")?;
+        ensure(stderr.is_empty(), "introspect human stderr must be empty")
+    }
+
+    #[test]
+    fn introspect_toon_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "introspect", "--format", "toon"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "introspect toon exit")?;
+        ensure_contains(&stdout, "schema: ee.response.v1", "introspect toon schema")?;
+        ensure_contains(&stdout, "command: introspect", "introspect toon command")?;
+        ensure(stderr.is_empty(), "introspect toon stderr must be empty")
+    }
+
+    // ========================================================================
+    // Memory Show Command Tests (EE-063)
+    // ========================================================================
+
+    #[test]
+    fn memory_show_command_parses_with_id() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "memory", "show", "mem_test123"])
+            .map_err(|e| format!("failed to parse memory show: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Memory(MemoryCommand::Show(ref args))) => {
+                ensure_equal(&args.memory_id, &"mem_test123".to_string(), "memory id")?;
+                ensure_equal(&args.include_tombstoned, &false, "include_tombstoned")
+            }
+            _ => Err("expected Memory Show command".to_string()),
+        }
+    }
+
+    #[test]
+    fn memory_show_command_accepts_include_tombstoned() -> TestResult {
+        let parsed =
+            Cli::try_parse_from(["ee", "memory", "show", "mem_test123", "--include-tombstoned"])
+                .map_err(|e| format!("failed to parse memory show with tombstoned: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Memory(MemoryCommand::Show(ref args))) => {
+                ensure_equal(&args.include_tombstoned, &true, "include_tombstoned")
+            }
+            _ => Err("expected Memory Show command".to_string()),
+        }
+    }
+
+    #[test]
+    fn memory_show_command_accepts_database_path() -> TestResult {
+        let parsed =
+            Cli::try_parse_from(["ee", "memory", "show", "mem_test123", "--database", "/tmp/ee.db"])
+                .map_err(|e| format!("failed to parse memory show with database: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Memory(MemoryCommand::Show(ref args))) => {
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("/tmp/ee.db")),
+                    "database path",
+                )
+            }
+            _ => Err("expected Memory Show command".to_string()),
+        }
     }
 }
