@@ -5,6 +5,7 @@ pub mod degradation;
 pub mod error_codes;
 pub mod id;
 pub mod memory;
+pub mod posture;
 pub mod provenance;
 pub mod revision;
 pub mod rule;
@@ -31,6 +32,7 @@ pub use memory::{
     Confidence, Importance, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES, MemoryContent,
     MemoryKind, MemoryLevel, MemoryValidationError, Tag, UnitScore, Utility,
 };
+pub use posture::{ActionCategory, Posture, PostureSummary, SuggestedAction};
 pub use provenance::{LineSpan, ProvenanceUri, ProvenanceUriError};
 pub use revision::{
     IdempotencyKey, IdempotencyKeyError, LEGAL_HOLD_ID_LEN, LEGAL_HOLD_PREFIX, LegalHold,
