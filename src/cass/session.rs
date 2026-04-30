@@ -13,7 +13,7 @@
 //! This module defines the *shapes* only. Actual parsing and import
 //! logic lands in follow-on beads (EE-107).
 
-use std::fmt;
+use std::{convert::Infallible, fmt};
 
 /// Agent type from CASS session metadata.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -36,7 +36,7 @@ pub enum CassAgent {
 impl CassAgent {
     /// Parse an agent string from CASS output.
     #[must_use]
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_lossy(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "claude-code" | "claude_code" | "claudecode" => Self::ClaudeCode,
             "codex" => Self::Codex,
@@ -58,6 +58,14 @@ impl CassAgent {
             Self::ChatGpt => "chatgpt",
             Self::Unknown => "unknown",
         }
+    }
+}
+
+impl std::str::FromStr for CassAgent {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::parse_lossy(s))
     }
 }
 
@@ -148,7 +156,7 @@ pub enum CassSpanKind {
 impl CassSpanKind {
     /// Parse a span kind from CASS output.
     #[must_use]
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_lossy(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "message" | "msg" => Self::Message,
             "tool_call" | "toolcall" | "function_call" => Self::ToolCall,
@@ -169,6 +177,14 @@ impl CassSpanKind {
             Self::File => "file",
             Self::Summary => "summary",
         }
+    }
+}
+
+impl std::str::FromStr for CassSpanKind {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::parse_lossy(s))
     }
 }
 
@@ -195,7 +211,7 @@ pub enum CassRole {
 impl CassRole {
     /// Parse a role from CASS output.
     #[must_use]
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_lossy(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "user" | "human" => Self::User,
             "assistant" | "model" | "ai" => Self::Assistant,
@@ -214,6 +230,14 @@ impl CassRole {
             Self::System => "system",
             Self::Tool => "tool",
         }
+    }
+}
+
+impl std::str::FromStr for CassRole {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::parse_lossy(s))
     }
 }
 
@@ -425,24 +449,32 @@ mod tests {
     #[test]
     fn cass_agent_parsing_handles_variants() -> TestResult {
         ensure_equal(
-            &CassAgent::from_str("claude-code"),
+            &CassAgent::parse_lossy("claude-code"),
             &CassAgent::ClaudeCode,
             "claude-code",
         )?;
         ensure_equal(
-            &CassAgent::from_str("CODEX"),
+            &CassAgent::parse_lossy("CODEX"),
             &CassAgent::Codex,
             "CODEX uppercase",
         )?;
-        ensure_equal(&CassAgent::from_str("cursor"), &CassAgent::Cursor, "cursor")?;
-        ensure_equal(&CassAgent::from_str("gemini"), &CassAgent::Gemini, "gemini")?;
         ensure_equal(
-            &CassAgent::from_str("chatgpt"),
+            &CassAgent::parse_lossy("cursor"),
+            &CassAgent::Cursor,
+            "cursor",
+        )?;
+        ensure_equal(
+            &CassAgent::parse_lossy("gemini"),
+            &CassAgent::Gemini,
+            "gemini",
+        )?;
+        ensure_equal(
+            &CassAgent::parse_lossy("chatgpt"),
             &CassAgent::ChatGpt,
             "chatgpt",
         )?;
         ensure_equal(
-            &CassAgent::from_str("unknown-agent"),
+            &CassAgent::parse_lossy("unknown-agent"),
             &CassAgent::Unknown,
             "unknown",
         )
@@ -465,23 +497,27 @@ mod tests {
     #[test]
     fn cass_span_kind_parsing_handles_variants() -> TestResult {
         ensure_equal(
-            &CassSpanKind::from_str("message"),
+            &CassSpanKind::parse_lossy("message"),
             &CassSpanKind::Message,
             "message",
         )?;
         ensure_equal(
-            &CassSpanKind::from_str("tool_call"),
+            &CassSpanKind::parse_lossy("tool_call"),
             &CassSpanKind::ToolCall,
             "tool_call",
         )?;
         ensure_equal(
-            &CassSpanKind::from_str("tool_result"),
+            &CassSpanKind::parse_lossy("tool_result"),
             &CassSpanKind::ToolResult,
             "tool_result",
         )?;
-        ensure_equal(&CassSpanKind::from_str("file"), &CassSpanKind::File, "file")?;
         ensure_equal(
-            &CassSpanKind::from_str("summary"),
+            &CassSpanKind::parse_lossy("file"),
+            &CassSpanKind::File,
+            "file",
+        )?;
+        ensure_equal(
+            &CassSpanKind::parse_lossy("summary"),
             &CassSpanKind::Summary,
             "summary",
         )
@@ -502,15 +538,19 @@ mod tests {
 
     #[test]
     fn cass_role_parsing_handles_variants() -> TestResult {
-        ensure_equal(&CassRole::from_str("user"), &CassRole::User, "user")?;
-        ensure_equal(&CassRole::from_str("human"), &CassRole::User, "human")?;
+        ensure_equal(&CassRole::parse_lossy("user"), &CassRole::User, "user")?;
+        ensure_equal(&CassRole::parse_lossy("human"), &CassRole::User, "human")?;
         ensure_equal(
-            &CassRole::from_str("assistant"),
+            &CassRole::parse_lossy("assistant"),
             &CassRole::Assistant,
             "assistant",
         )?;
-        ensure_equal(&CassRole::from_str("system"), &CassRole::System, "system")?;
-        ensure_equal(&CassRole::from_str("tool"), &CassRole::Tool, "tool")
+        ensure_equal(
+            &CassRole::parse_lossy("system"),
+            &CassRole::System,
+            "system",
+        )?;
+        ensure_equal(&CassRole::parse_lossy("tool"), &CassRole::Tool, "tool")
     }
 
     #[test]

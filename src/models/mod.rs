@@ -17,8 +17,8 @@ pub use certificate::{
     TailRiskCertificate,
 };
 pub use degradation::{
-    ActiveDegradation, DegradationCode, DegradationSeverity, DegradedSubsystem,
-    ALL_DEGRADATION_CODES,
+    ALL_DEGRADATION_CODES, ActiveDegradation, DegradationCode, DegradationSeverity,
+    DegradedSubsystem,
 };
 pub use id::{
     AuditId, BackupId, CandidateId, ClaimId, DemoId, EXECUTABLE_ID_SCHEMA_V1, EvidenceId,
@@ -32,9 +32,9 @@ pub use memory::{
 };
 pub use provenance::{LineSpan, ProvenanceUri, ProvenanceUriError};
 pub use revision::{
-    IdempotencyKey, IdempotencyKeyError, LegalHold, LegalHoldId, RevisionGroupId, RevisionIdError,
-    RevisionMeta, SupersessionLink, SupersessionReason, LEGAL_HOLD_ID_LEN, LEGAL_HOLD_PREFIX,
-    REVISION_GROUP_ID_LEN, REVISION_GROUP_PREFIX,
+    IdempotencyKey, IdempotencyKeyError, LEGAL_HOLD_ID_LEN, LEGAL_HOLD_PREFIX, LegalHold,
+    LegalHoldId, REVISION_GROUP_ID_LEN, REVISION_GROUP_PREFIX, RevisionGroupId, RevisionIdError,
+    RevisionMeta, SupersessionLink, SupersessionReason,
 };
 pub use rule::{ParseRuleMaturityError, ParseRuleScopeError, RuleMaturity, RuleScope};
 pub use trust::{ParseTrustClassError, TrustClass};

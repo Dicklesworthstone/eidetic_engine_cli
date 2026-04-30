@@ -16,7 +16,7 @@
 //! - The `_meta.degraded` field in any response envelope
 //! - Diagnostic output from `ee doctor`
 
-use std::fmt;
+use std::{convert::Infallible, fmt};
 
 /// Degradation severity levels.
 ///
@@ -45,13 +45,21 @@ impl DegradationSeverity {
 
     /// Parse from string.
     #[must_use]
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_lossy(s: &str) -> Self {
         match s {
             "advisory" => Self::Advisory,
             "warning" => Self::Warning,
             "critical" => Self::Critical,
             _ => Self::Advisory,
         }
+    }
+}
+
+impl std::str::FromStr for DegradationSeverity {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::parse_lossy(s))
     }
 }
 
@@ -524,7 +532,11 @@ mod tests {
         let search = by_subsystem(DegradedSubsystem::Search);
         ensure(search.len() >= 3, true, "at least 3 search codes")?;
         for code in &search {
-            ensure(code.subsystem, DegradedSubsystem::Search, "correct subsystem")?;
+            ensure(
+                code.subsystem,
+                DegradedSubsystem::Search,
+                "correct subsystem",
+            )?;
         }
         Ok(())
     }
@@ -534,7 +546,11 @@ mod tests {
         let warnings = by_severity(DegradationSeverity::Warning);
         ensure(warnings.len() >= 3, true, "at least 3 warning codes")?;
         for code in &warnings {
-            ensure(code.severity, DegradationSeverity::Warning, "correct severity")?;
+            ensure(
+                code.severity,
+                DegradationSeverity::Warning,
+                "correct severity",
+            )?;
         }
         Ok(())
     }
@@ -555,9 +571,17 @@ mod tests {
 
     #[test]
     fn severity_strings_are_stable() -> TestResult {
-        ensure(DegradationSeverity::Advisory.as_str(), "advisory", "advisory")?;
+        ensure(
+            DegradationSeverity::Advisory.as_str(),
+            "advisory",
+            "advisory",
+        )?;
         ensure(DegradationSeverity::Warning.as_str(), "warning", "warning")?;
-        ensure(DegradationSeverity::Critical.as_str(), "critical", "critical")
+        ensure(
+            DegradationSeverity::Critical.as_str(),
+            "critical",
+            "critical",
+        )
     }
 
     #[test]

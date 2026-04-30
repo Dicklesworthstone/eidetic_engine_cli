@@ -11,7 +11,7 @@ use crate::core::status::StatusReport;
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
 
-#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+#[derive(Clone, Debug, Parser, PartialEq)]
 #[command(
     name = "ee",
     version,
@@ -95,7 +95,7 @@ impl Cli {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+#[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum Command {
     /// Quick posture summary: ready, degraded, or needs attention.
     Check,
@@ -118,7 +118,7 @@ pub enum Command {
 }
 
 /// Arguments for the remember command.
-#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+#[derive(Clone, Debug, Parser, PartialEq)]
 pub struct RememberArgs {
     /// Memory content to store.
     #[arg(value_name = "CONTENT")]
@@ -480,6 +480,102 @@ fn clap_error_message(error: &clap::Error) -> String {
         .find(|line| line.starts_with("error:"))
         .map(|line| line.trim_start_matches("error:").trim().to_string())
         .unwrap_or_else(|| full.lines().next().unwrap_or("Unknown error").to_string())
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RememberResult {
+    pub memory_id: String,
+    pub content: String,
+    pub level: String,
+    pub kind: String,
+    pub confidence: f32,
+    pub tags: Vec<String>,
+    pub source: Option<String>,
+    pub dry_run: bool,
+}
+
+impl RememberResult {
+    #[must_use]
+    pub fn human_output(&self) -> String {
+        if self.dry_run {
+            format!(
+                "DRY RUN: Would store {} memory ({})\n  Content: {}\n  Confidence: {:.2}\n",
+                self.level, self.kind, self.content, self.confidence
+            )
+        } else {
+            format!(
+                "Stored {} memory ({}): {}\n  ID: {}\n",
+                self.level, self.kind, self.content, self.memory_id
+            )
+        }
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        if self.dry_run {
+            format!("DRY_RUN|{}|{}|{}", self.level, self.kind, self.content)
+        } else {
+            format!("STORED|{}|{}|{}", self.memory_id, self.level, self.kind)
+        }
+    }
+
+    #[must_use]
+    pub fn json_output(&self) -> String {
+        let tags_json = self
+            .tags
+            .iter()
+            .map(|t| format!("\"{t}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source_json = self
+            .source
+            .as_ref()
+            .map_or("null".to_string(), |s| format!("\"{s}\""));
+
+        format!(
+            r#"{{"schema":"ee.response.v1","data":{{"memory_id":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{},"dry_run":{}}}}}"#,
+            self.memory_id,
+            self.content.replace('"', "\\\""),
+            self.level,
+            self.kind,
+            self.confidence,
+            tags_json,
+            source_json,
+            self.dry_run
+        )
+    }
+}
+
+fn handle_remember(args: &RememberArgs, _wants_json: bool) -> RememberResult {
+    let tags: Vec<String> = args
+        .tags
+        .as_ref()
+        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+
+    let memory_id = if args.dry_run {
+        "mem_00000000000000000000".to_string()
+    } else {
+        format!(
+            "mem_{:020}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                % 100_000_000_000_000_000_000u128
+        )
+    };
+
+    RememberResult {
+        memory_id,
+        content: args.content.clone(),
+        level: args.level.clone(),
+        kind: args.kind.clone(),
+        confidence: args.confidence,
+        tags,
+        source: args.source.clone(),
+        dry_run: args.dry_run,
+    }
 }
 
 #[cfg(test)]

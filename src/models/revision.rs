@@ -18,7 +18,7 @@
 //! - At most one memory in a group can be "current" (not superseded).
 //! - Legal holds are append-only; they can only be released, not modified.
 
-use std::fmt;
+use std::{convert::Infallible, fmt};
 
 /// Prefix for revision group IDs.
 pub const REVISION_GROUP_PREFIX: &str = "rev_";
@@ -59,10 +59,7 @@ impl fmt::Display for RevisionIdError {
                 expected,
                 actual,
             } => {
-                write!(
-                    f,
-                    "ID `{input}` has length {actual}, expected {expected}"
-                )
+                write!(f, "ID `{input}` has length {actual}, expected {expected}")
             }
         }
     }
@@ -257,7 +254,7 @@ impl SupersessionReason {
 
     /// Parse from string.
     #[must_use]
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_lossy(s: &str) -> Self {
         match s {
             "user_update" => Self::UserUpdate,
             "curation" => Self::Curation,
@@ -267,6 +264,14 @@ impl SupersessionReason {
             "system_generated" => Self::SystemGenerated,
             _ => Self::UserUpdate,
         }
+    }
+}
+
+impl std::str::FromStr for SupersessionReason {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::parse_lossy(s))
     }
 }
 
@@ -400,7 +405,11 @@ impl LegalHold {
 
     /// Release this hold.
     #[must_use]
-    pub fn release(mut self, released_by: impl Into<String>, released_at: impl Into<String>) -> Self {
+    pub fn release(
+        mut self,
+        released_by: impl Into<String>,
+        released_at: impl Into<String>,
+    ) -> Self {
         self.released_by = Some(released_by.into());
         self.released_at = Some(released_at.into());
         self
@@ -514,14 +523,26 @@ mod tests {
 
     #[test]
     fn supersession_reason_strings_are_stable() -> TestResult {
-        ensure_equal(&SupersessionReason::UserUpdate.as_str(), &"user_update", "user_update")?;
-        ensure_equal(&SupersessionReason::Curation.as_str(), &"curation", "curation")?;
+        ensure_equal(
+            &SupersessionReason::UserUpdate.as_str(),
+            &"user_update",
+            "user_update",
+        )?;
+        ensure_equal(
+            &SupersessionReason::Curation.as_str(),
+            &"curation",
+            "curation",
+        )?;
         ensure_equal(
             &SupersessionReason::Consolidation.as_str(),
             &"consolidation",
             "consolidation",
         )?;
-        ensure_equal(&SupersessionReason::Correction.as_str(), &"correction", "correction")?;
+        ensure_equal(
+            &SupersessionReason::Correction.as_str(),
+            &"correction",
+            "correction",
+        )?;
         ensure_equal(&SupersessionReason::Import.as_str(), &"import", "import")?;
         ensure_equal(
             &SupersessionReason::SystemGenerated.as_str(),
@@ -540,7 +561,7 @@ mod tests {
             SupersessionReason::Import,
             SupersessionReason::SystemGenerated,
         ] {
-            let parsed = SupersessionReason::from_str(reason.as_str());
+            let parsed = SupersessionReason::parse_lossy(reason.as_str());
             assert_eq!(reason, parsed, "round trip failed for {reason:?}");
         }
     }
@@ -603,13 +624,18 @@ mod tests {
     }
 
     #[test]
-    fn revision_meta_with_idempotency_key() {
+    fn revision_meta_with_idempotency_key() -> TestResult {
         let group_id = RevisionGroupId::from_trusted("rev_test000000000000000000000");
-        let key = IdempotencyKey::new("import-xyz").expect("valid key");
+        let key = IdempotencyKey::new("import-xyz")
+            .map_err(|error| format!("valid key should parse: {error}"))?;
 
         let meta = RevisionMeta::first(group_id).with_idempotency_key(key);
         assert!(meta.idempotency_key.is_some());
-        assert_eq!(meta.idempotency_key.unwrap().as_str(), "import-xyz");
+        ensure_equal(
+            &meta.idempotency_key.as_ref().map(IdempotencyKey::as_str),
+            &Some("import-xyz"),
+            "idempotency key",
+        )
     }
 
     #[test]
