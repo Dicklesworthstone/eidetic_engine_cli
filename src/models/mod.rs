@@ -1,6 +1,7 @@
 use std::process::ExitCode;
 
 pub mod certificate;
+pub mod degradation;
 pub mod error_codes;
 pub mod id;
 pub mod memory;
@@ -14,6 +15,10 @@ pub use certificate::{
     LifecycleCertificate, LifecycleEvent, PackCertificate, ParseCertificateKindError,
     ParseCertificateStatusError, ParseLifecycleEventError, PrivacyBudgetCertificate,
     TailRiskCertificate,
+};
+pub use degradation::{
+    ActiveDegradation, DegradationCode, DegradationSeverity, DegradedSubsystem,
+    ALL_DEGRADATION_CODES,
 };
 pub use id::{
     AuditId, BackupId, CandidateId, ClaimId, DemoId, EXECUTABLE_ID_SCHEMA_V1, EvidenceId,
