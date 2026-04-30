@@ -4052,6 +4052,319 @@ fn stored_pack_item_from_joined_row(row: &Row, offset: usize) -> Result<StoredPa
     })
 }
 
+// ============================================================================
+// EE-CONC-001: Advisory Lock and Concurrent-Writer Contract
+// ============================================================================
+
+/// Advisory lock resource identifier.
+///
+/// Advisory locks are cooperative — they are honored by convention,
+/// not enforced by SQLite. Agents must check for existing locks before
+/// acquiring resources, and must release locks when done.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdvisoryLockId {
+    resource_type: String,
+    resource_id: String,
+}
+
+impl AdvisoryLockId {
+    pub fn new(resource_type: impl Into<String>, resource_id: impl Into<String>) -> Self {
+        Self {
+            resource_type: resource_type.into(),
+            resource_id: resource_id.into(),
+        }
+    }
+
+    pub fn workspace(workspace_id: &str) -> Self {
+        Self::new("workspace", workspace_id)
+    }
+
+    pub fn memory(memory_id: &str) -> Self {
+        Self::new("memory", memory_id)
+    }
+
+    pub fn index(workspace_id: &str) -> Self {
+        Self::new("index", workspace_id)
+    }
+
+    pub fn resource_type(&self) -> &str {
+        &self.resource_type
+    }
+
+    pub fn resource_id(&self) -> &str {
+        &self.resource_id
+    }
+
+    pub fn canonical_key(&self) -> String {
+        format!("{}:{}", self.resource_type, self.resource_id)
+    }
+}
+
+/// Advisory lock state stored in the database.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdvisoryLock {
+    pub id: AdvisoryLockId,
+    pub holder_id: String,
+    pub acquired_at: String,
+    pub expires_at: Option<String>,
+    pub reason: Option<String>,
+}
+
+impl AdvisoryLock {
+    pub fn is_expired(&self, now: &str) -> bool {
+        match &self.expires_at {
+            Some(expiry) => expiry.as_str() < now,
+            None => false,
+        }
+    }
+}
+
+/// Result of attempting to acquire an advisory lock.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AcquireLockResult {
+    Acquired(AdvisoryLock),
+    AlreadyHeld { holder_id: String, acquired_at: String },
+    Expired { previous_holder: String },
+}
+
+impl AcquireLockResult {
+    pub const fn is_acquired(&self) -> bool {
+        matches!(self, Self::Acquired(_))
+    }
+}
+
+/// Concurrent-writer contract constants.
+///
+/// These define the contract for multi-agent access to ee storage.
+pub mod concurrent_writer_contract {
+    /// Advisory lock table name.
+    pub const LOCK_TABLE: &str = "ee_advisory_locks";
+
+    /// DDL for creating the advisory locks table.
+    pub const LOCK_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS ee_advisory_locks (
+        resource_key TEXT PRIMARY KEY NOT NULL,
+        resource_type TEXT NOT NULL,
+        resource_id TEXT NOT NULL,
+        holder_id TEXT NOT NULL,
+        acquired_at TEXT NOT NULL,
+        expires_at TEXT,
+        reason TEXT
+    )";
+
+    /// Index for finding locks by holder.
+    pub const LOCK_HOLDER_INDEX_DDL: &str =
+        "CREATE INDEX IF NOT EXISTS idx_ee_advisory_locks_holder ON ee_advisory_locks(holder_id)";
+
+    /// Index for finding expired locks.
+    pub const LOCK_EXPIRY_INDEX_DDL: &str =
+        "CREATE INDEX IF NOT EXISTS idx_ee_advisory_locks_expiry ON ee_advisory_locks(expires_at)";
+
+    /// Maximum lock TTL in seconds (1 hour).
+    pub const MAX_LOCK_TTL_SECS: u64 = 3600;
+
+    /// Default lock TTL in seconds (5 minutes).
+    pub const DEFAULT_LOCK_TTL_SECS: u64 = 300;
+
+    /// Contract version for schema evolution.
+    pub const CONTRACT_VERSION: &str = "ee.concurrent_writer.v1";
+}
+
+impl DbConnection {
+    /// Ensure the advisory locks table exists.
+    pub fn ensure_advisory_locks_table(&self) -> Result<()> {
+        self.execute_raw_for(
+            DbOperation::EnsureMigrationTable,
+            concurrent_writer_contract::LOCK_TABLE_DDL,
+        )?;
+        self.execute_raw_for(
+            DbOperation::EnsureMigrationTable,
+            concurrent_writer_contract::LOCK_HOLDER_INDEX_DDL,
+        )?;
+        self.execute_raw_for(
+            DbOperation::EnsureMigrationTable,
+            concurrent_writer_contract::LOCK_EXPIRY_INDEX_DDL,
+        )
+    }
+
+    /// Attempt to acquire an advisory lock.
+    ///
+    /// Returns `AcquireLockResult::Acquired` if the lock was obtained,
+    /// `AcquireLockResult::AlreadyHeld` if another holder has the lock,
+    /// or `AcquireLockResult::Expired` if the previous lock was expired
+    /// and has been replaced.
+    pub fn acquire_advisory_lock(
+        &self,
+        lock_id: &AdvisoryLockId,
+        holder_id: &str,
+        ttl_secs: Option<u64>,
+        reason: Option<&str>,
+    ) -> Result<AcquireLockResult> {
+        let now = Utc::now().to_rfc3339();
+        let ttl = ttl_secs.unwrap_or(concurrent_writer_contract::DEFAULT_LOCK_TTL_SECS);
+        let expires_at = if ttl > 0 {
+            Some(
+                (Utc::now() + chrono::Duration::seconds(ttl as i64)).to_rfc3339(),
+            )
+        } else {
+            None
+        };
+
+        let resource_key = lock_id.canonical_key();
+
+        let existing = self.query_for(
+            DbOperation::Query,
+            "SELECT holder_id, acquired_at, expires_at FROM ee_advisory_locks WHERE resource_key = ?1",
+            &[Value::Text(resource_key.clone())],
+        )?;
+
+        if let Some(row) = existing.first() {
+            let existing_holder = required_text(row, 0, DbOperation::Query, "holder_id")?;
+            let existing_acquired = required_text(row, 1, DbOperation::Query, "acquired_at")?;
+            let existing_expiry = optional_text(row, 2)?;
+
+            let is_expired = existing_expiry.is_some_and(|exp| exp < now.as_str());
+
+            if !is_expired {
+                return Ok(AcquireLockResult::AlreadyHeld {
+                    holder_id: existing_holder.to_string(),
+                    acquired_at: existing_acquired.to_string(),
+                });
+            }
+
+            self.execute_for(
+                DbOperation::Execute,
+                "DELETE FROM ee_advisory_locks WHERE resource_key = ?1",
+                &[Value::Text(resource_key.clone())],
+            )?;
+
+            let previous_holder = existing_holder.to_string();
+
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO ee_advisory_locks (resource_key, resource_type, resource_id, holder_id, acquired_at, expires_at, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                &[
+                    Value::Text(resource_key),
+                    Value::Text(lock_id.resource_type().to_string()),
+                    Value::Text(lock_id.resource_id().to_string()),
+                    Value::Text(holder_id.to_string()),
+                    Value::Text(now.clone()),
+                    expires_at.clone().map_or(Value::Null, Value::Text),
+                    reason.map_or(Value::Null, |r| Value::Text(r.to_string())),
+                ],
+            )?;
+
+            return Ok(AcquireLockResult::Expired { previous_holder });
+        }
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO ee_advisory_locks (resource_key, resource_type, resource_id, holder_id, acquired_at, expires_at, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            &[
+                Value::Text(resource_key),
+                Value::Text(lock_id.resource_type().to_string()),
+                Value::Text(lock_id.resource_id().to_string()),
+                Value::Text(holder_id.to_string()),
+                Value::Text(now.clone()),
+                expires_at.clone().map_or(Value::Null, Value::Text),
+                reason.map_or(Value::Null, |r| Value::Text(r.to_string())),
+            ],
+        )?;
+
+        Ok(AcquireLockResult::Acquired(AdvisoryLock {
+            id: lock_id.clone(),
+            holder_id: holder_id.to_string(),
+            acquired_at: now,
+            expires_at,
+            reason: reason.map(str::to_string),
+        }))
+    }
+
+    /// Release an advisory lock held by the specified holder.
+    ///
+    /// Returns true if the lock was released, false if it was not held
+    /// by this holder (or did not exist).
+    pub fn release_advisory_lock(&self, lock_id: &AdvisoryLockId, holder_id: &str) -> Result<bool> {
+        let resource_key = lock_id.canonical_key();
+
+        let rows_affected = self.execute_for(
+            DbOperation::Execute,
+            "DELETE FROM ee_advisory_locks WHERE resource_key = ?1 AND holder_id = ?2",
+            &[
+                Value::Text(resource_key),
+                Value::Text(holder_id.to_string()),
+            ],
+        )?;
+
+        Ok(rows_affected > 0)
+    }
+
+    /// Check if a lock is held (by anyone).
+    pub fn is_lock_held(&self, lock_id: &AdvisoryLockId) -> Result<Option<AdvisoryLock>> {
+        let resource_key = lock_id.canonical_key();
+        let now = Utc::now().to_rfc3339();
+
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT resource_type, resource_id, holder_id, acquired_at, expires_at, reason FROM ee_advisory_locks WHERE resource_key = ?1",
+            &[Value::Text(resource_key)],
+        )?;
+
+        if let Some(row) = rows.first() {
+            let expires_at = optional_text(row, 4)?.map(str::to_string);
+
+            if expires_at.as_ref().is_some_and(|exp| exp < &now) {
+                return Ok(None);
+            }
+
+            Ok(Some(AdvisoryLock {
+                id: lock_id.clone(),
+                holder_id: required_text(row, 2, DbOperation::Query, "holder_id")?.to_string(),
+                acquired_at: required_text(row, 3, DbOperation::Query, "acquired_at")?.to_string(),
+                expires_at,
+                reason: optional_text(row, 5)?.map(str::to_string),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// List all locks held by a specific holder.
+    pub fn list_locks_by_holder(&self, holder_id: &str) -> Result<Vec<AdvisoryLock>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT resource_type, resource_id, holder_id, acquired_at, expires_at, reason FROM ee_advisory_locks WHERE holder_id = ?1",
+            &[Value::Text(holder_id.to_string())],
+        )?;
+
+        rows.iter()
+            .map(|row| {
+                Ok(AdvisoryLock {
+                    id: AdvisoryLockId::new(
+                        required_text(row, 0, DbOperation::Query, "resource_type")?,
+                        required_text(row, 1, DbOperation::Query, "resource_id")?,
+                    ),
+                    holder_id: required_text(row, 2, DbOperation::Query, "holder_id")?.to_string(),
+                    acquired_at: required_text(row, 3, DbOperation::Query, "acquired_at")?
+                        .to_string(),
+                    expires_at: optional_text(row, 4)?.map(str::to_string),
+                    reason: optional_text(row, 5)?.map(str::to_string),
+                })
+            })
+            .collect()
+    }
+
+    /// Clean up all expired locks.
+    pub fn cleanup_expired_locks(&self) -> Result<u64> {
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "DELETE FROM ee_advisory_locks WHERE expires_at IS NOT NULL AND expires_at < ?1",
+            &[Value::Text(now)],
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error as StdError;

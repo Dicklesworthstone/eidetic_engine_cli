@@ -8,9 +8,7 @@ use crate::core::health::HealthReport;
 use crate::core::memory::{MemoryDetails, MemoryHistoryReport, MemoryListReport, MemoryShowReport};
 use crate::core::quarantine::{QuarantineEntry, QuarantineReport};
 use crate::core::status::StatusReport;
-use crate::eval::{
-    EvaluationReport, EvaluationStatus, ScenarioValidationResult, ValidationFailureKind,
-};
+use crate::eval::{EvaluationReport, EvaluationStatus, ScenarioValidationResult};
 use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
 use crate::pack::{
     ContextResponse, PackDraftItem, PackItemProvenance, PackOmissionMetrics, PackQualityMetrics,
@@ -4117,7 +4115,7 @@ mod tests {
         });
         report.finalize();
 
-        ensure(report.status, EvaluationStatus::AllPassed, "status")?;
+        ensure_equal(&report.status, &EvaluationStatus::AllPassed, "status")?;
 
         let json = render_eval_report_json(&report, None);
         ensure_contains(&json, "\"success\":true", "success")?;
@@ -4158,7 +4156,7 @@ mod tests {
         });
         report.finalize();
 
-        ensure(report.status, EvaluationStatus::SomeFailed, "status")?;
+        ensure_equal(&report.status, &EvaluationStatus::SomeFailed, "status")?;
 
         let json = render_eval_report_json(&report, None);
         ensure_contains(&json, "\"success\":false", "not success")?;
@@ -4241,24 +4239,24 @@ mod tests {
     fn evaluation_status_strings_are_stable() -> TestResult {
         use crate::eval::EvaluationStatus;
 
-        ensure(
-            EvaluationStatus::NoScenarios.as_str(),
+        ensure_equal(
+            &EvaluationStatus::NoScenarios.as_str(),
+            &"no_scenarios",
             "no_scenarios",
-            "no_scenarios",
         )?;
-        ensure(
-            EvaluationStatus::AllPassed.as_str(),
+        ensure_equal(
+            &EvaluationStatus::AllPassed.as_str(),
+            &"all_passed",
             "all_passed",
-            "all_passed",
         )?;
-        ensure(
-            EvaluationStatus::SomeFailed.as_str(),
-            "some_failed",
+        ensure_equal(
+            &EvaluationStatus::SomeFailed.as_str(),
+            &"some_failed",
             "some_failed",
         )?;
-        ensure(
-            EvaluationStatus::AllFailed.as_str(),
-            "all_failed",
+        ensure_equal(
+            &EvaluationStatus::AllFailed.as_str(),
+            &"all_failed",
             "all_failed",
         )
     }
@@ -4267,24 +4265,24 @@ mod tests {
     fn evaluation_status_is_success() -> TestResult {
         use crate::eval::EvaluationStatus;
 
-        ensure(
-            EvaluationStatus::NoScenarios.is_success(),
-            true,
+        ensure_equal(
+            &EvaluationStatus::NoScenarios.is_success(),
+            &true,
             "no_scenarios is success",
         )?;
-        ensure(
-            EvaluationStatus::AllPassed.is_success(),
-            true,
+        ensure_equal(
+            &EvaluationStatus::AllPassed.is_success(),
+            &true,
             "all_passed is success",
         )?;
-        ensure(
-            EvaluationStatus::SomeFailed.is_success(),
-            false,
+        ensure_equal(
+            &EvaluationStatus::SomeFailed.is_success(),
+            &false,
             "some_failed not success",
         )?;
-        ensure(
-            EvaluationStatus::AllFailed.is_success(),
-            false,
+        ensure_equal(
+            &EvaluationStatus::AllFailed.is_success(),
+            &false,
             "all_failed not success",
         )
     }

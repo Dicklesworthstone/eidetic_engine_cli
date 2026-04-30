@@ -7,8 +7,10 @@ pub mod id;
 pub mod memory;
 pub mod posture;
 pub mod provenance;
+pub mod repro;
 pub mod revision;
 pub mod rule;
+pub mod schema;
 pub mod timing;
 pub mod trust;
 
@@ -34,12 +36,23 @@ pub use memory::{
 };
 pub use posture::{ActionCategory, Posture, PostureSummary, SuggestedAction};
 pub use provenance::{LineSpan, ProvenanceUri, ProvenanceUriError};
+pub use repro::{
+    DependencyCategory, ParseDependencyCategoryError, ParseProvenanceEventTypeError,
+    ProvenanceEvent, ProvenanceEventType, ProvenanceSource, ProvenanceVerification,
+    REPRO_ENV_SCHEMA_V1, REPRO_LOCK_SCHEMA_V1, REPRO_MANIFEST_SCHEMA_V1, REPRO_PACK_SCHEMA_V1,
+    REPRO_PROVENANCE_SCHEMA_V1, ReproArtifact, ReproDependency, ReproEnv, ReproLock, ReproManifest,
+    ReproProvenance,
+};
 pub use revision::{
     IdempotencyKey, IdempotencyKeyError, LEGAL_HOLD_ID_LEN, LEGAL_HOLD_PREFIX, LegalHold,
     LegalHoldId, REVISION_GROUP_ID_LEN, REVISION_GROUP_PREFIX, RevisionGroupId, RevisionIdError,
     RevisionMeta, SupersessionLink, SupersessionReason,
 };
 pub use rule::{ParseRuleMaturityError, ParseRuleScopeError, RuleMaturity, RuleScope};
+pub use schema::{
+    KNOWN_SCHEMAS, SchemaValidationError, is_known_schema, parse_schema_parts, validate_schema,
+    validate_schema_match,
+};
 pub use timing::{DiagnosticTiming, TimingCapture, TimingPhase};
 pub use trust::{ParseTrustClassError, TrustClass};
 
