@@ -12,7 +12,7 @@ use crate::eval::{EvaluationReport, EvaluationStatus, ScenarioValidationResult};
 use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
 use crate::pack::{
     ContextResponse, PackDraftItem, PackItemProvenance, PackOmissionMetrics, PackQualityMetrics,
-    PackSectionMetric, RenderedPackProvenance,
+    PackSectionMetric, PackSelectionCertificate, PackSelectionStep, RenderedPackProvenance,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -302,6 +302,23 @@ impl JsonBuilder {
         self
     }
 
+    pub fn field_array_of_strings(&mut self, key: &str, items: &[String]) -> &mut Self {
+        self.separator();
+        self.buffer.push('"');
+        self.buffer.push_str(key);
+        self.buffer.push_str("\":[");
+        for (i, item) in items.iter().enumerate() {
+            if i > 0 {
+                self.buffer.push(',');
+            }
+            self.buffer.push('"');
+            self.buffer.push_str(&escape_json_string(item));
+            self.buffer.push('"');
+        }
+        self.buffer.push(']');
+        self
+    }
+
     fn separator(&mut self) {
         if self.first {
             self.first = false;
@@ -404,6 +421,12 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
             let quality_metrics = response.data.pack.quality_metrics();
             pack.field_object("quality", |quality| {
                 build_pack_quality_metrics(quality, &quality_metrics);
+            });
+            pack.field_object("selectionCertificate", |certificate| {
+                build_pack_selection_certificate(
+                    certificate,
+                    &response.data.pack.selection_certificate,
+                );
             });
             pack.field_array_of_objects("items", &response.data.pack.items, |obj, item| {
                 obj.field_u32("rank", item.rank);
@@ -645,6 +668,36 @@ fn build_pack_omission_metrics(obj: &mut JsonBuilder, metrics: &PackOmissionMetr
     obj.field_raw(
         "redundantCandidates",
         &metrics.redundant_candidates.to_string(),
+    );
+}
+
+fn build_pack_selection_certificate(obj: &mut JsonBuilder, certificate: &PackSelectionCertificate) {
+    obj.field_str("profile", certificate.profile.as_str());
+    obj.field_str("objective", certificate.objective.as_str());
+    obj.field_str("algorithm", certificate.algorithm);
+    obj.field_str("guarantee", certificate.guarantee);
+    obj.field_raw("candidateCount", &certificate.candidate_count.to_string());
+    obj.field_raw("selectedCount", &certificate.selected_count.to_string());
+    obj.field_raw("omittedCount", &certificate.omitted_count.to_string());
+    obj.field_u32("budgetLimit", certificate.budget_limit);
+    obj.field_u32("budgetUsed", certificate.budget_used);
+    obj.field_raw(
+        "totalObjectiveValue",
+        &score_json(certificate.total_objective_value),
+    );
+    obj.field_bool("monotone", certificate.monotone);
+    obj.field_bool("submodular", certificate.submodular);
+    obj.field_array_of_objects("steps", &certificate.steps, build_pack_selection_step);
+}
+
+fn build_pack_selection_step(obj: &mut JsonBuilder, step: &PackSelectionStep) {
+    obj.field_u32("rank", step.rank);
+    obj.field_str("memoryId", &step.memory_id.to_string());
+    obj.field_raw("marginalGain", &score_json(step.marginal_gain));
+    obj.field_raw("objectiveValue", &score_json(step.objective_value));
+    obj.field_raw(
+        "coveredFeatures",
+        &string_array_json(step.covered_features.iter()),
     );
 }
 
@@ -2482,6 +2535,71 @@ pub fn agent_docs() -> String {
         RESPONSE_SCHEMA_V1
     )
 }
+
+use crate::core::agent_detect::InstalledAgentDetectionReport;
+
+fn strings_to_json_array(strings: &[String]) -> String {
+    let mut arr = String::from("[");
+    for (i, s) in strings.iter().enumerate() {
+        if i > 0 {
+            arr.push(',');
+        }
+        arr.push('"');
+        arr.push_str(&s.replace('\\', "\\\\").replace('"', "\\\""));
+        arr.push('"');
+    }
+    arr.push(']');
+    arr
+}
+
+#[must_use]
+pub fn render_agent_detect_json(report: &InstalledAgentDetectionReport) -> String {
+    let mut b = JsonBuilder::with_capacity(2048);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "agent detect");
+        d.field_u32("formatVersion", report.format_version);
+        d.field_str("generatedAt", &report.generated_at);
+        d.field_object("summary", |s| {
+            s.field_u32("detectedCount", report.summary.detected_count as u32);
+            s.field_u32("totalCount", report.summary.total_count as u32);
+        });
+        d.field_array_of_objects("installedAgents", &report.installed_agents, |obj, agent| {
+            obj.field_str("slug", &agent.slug);
+            obj.field_bool("detected", agent.detected);
+            obj.field_raw("evidence", &strings_to_json_array(&agent.evidence));
+            obj.field_raw("rootPaths", &strings_to_json_array(&agent.root_paths));
+        });
+    });
+    b.finish()
+}
+
+#[must_use]
+pub fn render_agent_detect_human(report: &InstalledAgentDetectionReport) -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str("Agent Detection Report\n");
+    out.push_str("======================\n\n");
+    out.push_str(&format!(
+        "Detected {} of {} known agent(s)\n\n",
+        report.summary.detected_count, report.summary.total_count
+    ));
+
+    for agent in &report.installed_agents {
+        let status = if agent.detected { "[detected]" } else { "[missing]" };
+        out.push_str(&format!("{} {}\n", agent.slug, status));
+        for path in &agent.root_paths {
+            out.push_str(&format!("  - {}\n", path));
+        }
+    }
+    out
+}
+
+#[must_use]
+pub fn render_agent_detect_toon(report: &InstalledAgentDetectionReport) -> String {
+    render_toon_from_json(&render_agent_detect_json(report))
+}
+
 
 use crate::core::agent_docs::{
     AgentDocsReport, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, ENV_VARS, EXAMPLES, EXIT_CODES,

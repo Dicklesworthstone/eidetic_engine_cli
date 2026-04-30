@@ -769,6 +769,310 @@ pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
     )
 }
 
+// =============================================================================
+// Dedupe Detection (EE-069)
+//
+// Detects potential duplicate memories before creation to warn users about
+// existing similar content. Uses both exact matching and similarity scoring.
+// =============================================================================
+
+/// Severity of a dedupe warning.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum DedupeSeverity {
+    /// Exact content match - very likely a duplicate.
+    Exact,
+    /// High similarity (>90%) - probably a duplicate.
+    High,
+    /// Medium similarity (70-90%) - worth reviewing.
+    Medium,
+    /// Low similarity (50-70%) - possibly related.
+    Low,
+}
+
+impl DedupeSeverity {
+    /// Stable wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+        }
+    }
+
+    /// Determine severity from similarity score.
+    #[must_use]
+    pub fn from_score(score: f32) -> Self {
+        if score >= 1.0 - f32::EPSILON {
+            Self::Exact
+        } else if score >= 0.9 {
+            Self::High
+        } else if score >= 0.7 {
+            Self::Medium
+        } else {
+            Self::Low
+        }
+    }
+}
+
+/// A warning about a potential duplicate memory.
+#[derive(Clone, Debug)]
+pub struct DedupeWarning {
+    /// ID of the similar existing memory.
+    pub existing_memory_id: String,
+    /// Similarity score (0.0-1.0).
+    pub similarity_score: f32,
+    /// Severity of the warning.
+    pub severity: DedupeSeverity,
+    /// Content preview of the existing memory.
+    pub existing_preview: String,
+    /// How the match was detected.
+    pub match_type: DedupeMatchType,
+    /// Suggested action.
+    pub suggestion: String,
+}
+
+/// How a duplicate match was detected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DedupeMatchType {
+    /// Exact content match.
+    ExactContent,
+    /// Normalized content match (ignoring whitespace/case).
+    NormalizedContent,
+    /// Semantic similarity (if available).
+    Semantic,
+    /// Lexical similarity (word overlap).
+    Lexical,
+}
+
+impl DedupeMatchType {
+    /// Stable wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactContent => "exact_content",
+            Self::NormalizedContent => "normalized_content",
+            Self::Semantic => "semantic",
+            Self::Lexical => "lexical",
+        }
+    }
+}
+
+/// Options for dedupe detection.
+#[derive(Clone, Debug)]
+pub struct DedupeCheckOptions<'a> {
+    /// Database path.
+    pub database_path: &'a Path,
+    /// Content to check for duplicates.
+    pub content: &'a str,
+    /// Memory level (optional filter).
+    pub level: Option<&'a str>,
+    /// Memory kind (optional filter).
+    pub kind: Option<&'a str>,
+    /// Minimum similarity threshold (0.0-1.0).
+    pub min_similarity: f32,
+    /// Maximum warnings to return.
+    pub max_warnings: usize,
+}
+
+impl<'a> DedupeCheckOptions<'a> {
+    /// Create with defaults.
+    #[must_use]
+    pub fn new(database_path: &'a Path, content: &'a str) -> Self {
+        Self {
+            database_path,
+            content,
+            level: None,
+            kind: None,
+            min_similarity: 0.5,
+            max_warnings: 5,
+        }
+    }
+}
+
+/// Result of a dedupe check.
+#[derive(Clone, Debug)]
+pub struct DedupeCheckReport {
+    /// Package version for stable output.
+    pub version: &'static str,
+    /// Whether any duplicates were found.
+    pub has_warnings: bool,
+    /// Warnings ordered by severity (exact first, then by similarity).
+    pub warnings: Vec<DedupeWarning>,
+    /// Number of memories scanned.
+    pub memories_scanned: u32,
+    /// Error message if check failed.
+    pub error: Option<String>,
+}
+
+impl DedupeCheckReport {
+    /// Create a report with warnings.
+    #[must_use]
+    pub fn with_warnings(warnings: Vec<DedupeWarning>, memories_scanned: u32) -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            has_warnings: !warnings.is_empty(),
+            warnings,
+            memories_scanned,
+            error: None,
+        }
+    }
+
+    /// Create a report with no warnings.
+    #[must_use]
+    pub fn no_duplicates(memories_scanned: u32) -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            has_warnings: false,
+            warnings: Vec::new(),
+            memories_scanned,
+            error: None,
+        }
+    }
+
+    /// Create an error report.
+    #[must_use]
+    pub fn error(message: String) -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            has_warnings: false,
+            warnings: Vec::new(),
+            memories_scanned: 0,
+            error: Some(message),
+        }
+    }
+}
+
+/// Normalize content for comparison (lowercase, collapse whitespace).
+fn normalize_content(content: &str) -> String {
+    content
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Calculate simple word-based Jaccard similarity between two texts.
+fn jaccard_similarity(a: &str, b: &str) -> f32 {
+    let words_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
+    let words_b: std::collections::HashSet<&str> = b.split_whitespace().collect();
+
+    if words_a.is_empty() && words_b.is_empty() {
+        return 1.0;
+    }
+    if words_a.is_empty() || words_b.is_empty() {
+        return 0.0;
+    }
+
+    let intersection = words_a.intersection(&words_b).count();
+    let union = words_a.union(&words_b).count();
+
+    intersection as f32 / union as f32
+}
+
+/// Check for potential duplicate memories.
+///
+/// Scans existing memories and returns warnings for any that are similar
+/// to the provided content. Uses exact matching and lexical similarity.
+pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckReport {
+    let conn = match DbConnection::open_file(options.database_path) {
+        Ok(c) => c,
+        Err(e) => return DedupeCheckReport::error(format!("Failed to open database: {e}")),
+    };
+
+    // Get workspace ID - for now use default
+    let workspace_id = "default";
+
+    // List memories with optional level filter
+    let memories = match conn.list_memories(workspace_id, options.level, false) {
+        Ok(m) => m,
+        Err(e) => return DedupeCheckReport::error(format!("Failed to list memories: {e}")),
+    };
+
+    let memories_scanned = memories.len() as u32;
+    let normalized_input = normalize_content(options.content);
+    let mut warnings: Vec<DedupeWarning> = Vec::new();
+
+    for memory in memories {
+        // Skip if kind filter doesn't match
+        if let Some(kind) = options.kind {
+            if memory.kind != kind {
+                continue;
+            }
+        }
+
+        // Check exact match
+        if memory.content == options.content {
+            warnings.push(DedupeWarning {
+                existing_memory_id: memory.id.clone(),
+                similarity_score: 1.0,
+                severity: DedupeSeverity::Exact,
+                existing_preview: truncate_content(&memory.content),
+                match_type: DedupeMatchType::ExactContent,
+                suggestion: format!(
+                    "Exact duplicate exists. Consider using `ee memory show {}` to review.",
+                    memory.id
+                ),
+            });
+            continue;
+        }
+
+        // Check normalized match
+        let normalized_memory = normalize_content(&memory.content);
+        if normalized_memory == normalized_input {
+            warnings.push(DedupeWarning {
+                existing_memory_id: memory.id.clone(),
+                similarity_score: 0.99,
+                severity: DedupeSeverity::Exact,
+                existing_preview: truncate_content(&memory.content),
+                match_type: DedupeMatchType::NormalizedContent,
+                suggestion: format!(
+                    "Near-exact match (whitespace/case differs). Review `ee memory show {}`.",
+                    memory.id
+                ),
+            });
+            continue;
+        }
+
+        // Check lexical similarity
+        let similarity = jaccard_similarity(&normalized_input, &normalized_memory);
+        if similarity >= options.min_similarity {
+            let severity = DedupeSeverity::from_score(similarity);
+            warnings.push(DedupeWarning {
+                existing_memory_id: memory.id.clone(),
+                similarity_score: similarity,
+                severity,
+                existing_preview: truncate_content(&memory.content),
+                match_type: DedupeMatchType::Lexical,
+                suggestion: format!(
+                    "{:.0}% similar. Consider revising instead: `ee memory revise {}`.",
+                    similarity * 100.0,
+                    memory.id
+                ),
+            });
+        }
+    }
+
+    // Sort by severity (exact first), then by similarity score (descending)
+    warnings.sort_by(|a, b| {
+        a.severity.cmp(&b.severity).then_with(|| {
+            b.similarity_score
+                .partial_cmp(&a.similarity_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    });
+
+    // Limit warnings
+    warnings.truncate(options.max_warnings);
+
+    if warnings.is_empty() {
+        DedupeCheckReport::no_duplicates(memories_scanned)
+    } else {
+        DedupeCheckReport::with_warnings(warnings, memories_scanned)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -870,9 +1174,17 @@ mod tests {
 
     #[test]
     fn revise_reason_as_str_is_stable() -> TestResult {
-        ensure(ReviseReason::Correction.as_str(), "correction", "correction")?;
+        ensure(
+            ReviseReason::Correction.as_str(),
+            "correction",
+            "correction",
+        )?;
         ensure(ReviseReason::Update.as_str(), "update", "update")?;
-        ensure(ReviseReason::Refinement.as_str(), "refinement", "refinement")?;
+        ensure(
+            ReviseReason::Refinement.as_str(),
+            "refinement",
+            "refinement",
+        )?;
         ensure(
             ReviseReason::Consolidation.as_str(),
             "consolidation",
@@ -892,7 +1204,11 @@ mod tests {
             ReviseReason::Correction,
             "correction",
         )?;
-        ensure(ReviseReason::parse("update"), ReviseReason::Update, "update")?;
+        ensure(
+            ReviseReason::parse("update"),
+            ReviseReason::Update,
+            "update",
+        )?;
         ensure(
             ReviseReason::parse("refinement"),
             ReviseReason::Refinement,
@@ -970,11 +1286,7 @@ mod tests {
         ensure(report.success, true, "success")?;
         ensure(report.dry_run, false, "dry_run")?;
         ensure(report.original_id, "mem_old".to_string(), "original_id")?;
-        ensure(
-            report.new_id,
-            Some("mem_new".to_string()),
-            "new_id",
-        )?;
+        ensure(report.new_id, Some("mem_new".to_string()), "new_id")?;
         ensure(
             report.revision_group_id,
             Some("rev_group".to_string()),
@@ -1009,6 +1321,154 @@ mod tests {
     #[test]
     fn memory_revise_report_version_matches_package() -> TestResult {
         let report = MemoryReviseReport::not_found("mem_test".to_string());
+        ensure(report.version, env!("CARGO_PKG_VERSION"), "version")
+    }
+
+    // =========================================================================
+    // Dedupe Warning Tests (EE-069)
+    // =========================================================================
+
+    #[test]
+    fn dedupe_severity_as_str_is_stable() -> TestResult {
+        ensure(DedupeSeverity::Exact.as_str(), "exact", "exact")?;
+        ensure(DedupeSeverity::High.as_str(), "high", "high")?;
+        ensure(DedupeSeverity::Medium.as_str(), "medium", "medium")?;
+        ensure(DedupeSeverity::Low.as_str(), "low", "low")
+    }
+
+    #[test]
+    fn dedupe_severity_from_score_thresholds() -> TestResult {
+        ensure(DedupeSeverity::from_score(1.0), DedupeSeverity::Exact, "1.0")?;
+        ensure(DedupeSeverity::from_score(0.95), DedupeSeverity::High, "0.95")?;
+        ensure(DedupeSeverity::from_score(0.90), DedupeSeverity::High, "0.90")?;
+        ensure(DedupeSeverity::from_score(0.89), DedupeSeverity::Medium, "0.89")?;
+        ensure(DedupeSeverity::from_score(0.70), DedupeSeverity::Medium, "0.70")?;
+        ensure(DedupeSeverity::from_score(0.69), DedupeSeverity::Low, "0.69")?;
+        ensure(DedupeSeverity::from_score(0.5), DedupeSeverity::Low, "0.5")?;
+        ensure(DedupeSeverity::from_score(0.0), DedupeSeverity::Low, "0.0")
+    }
+
+    #[test]
+    fn dedupe_severity_ordering_is_correct() -> TestResult {
+        let exact = DedupeSeverity::Exact;
+        let high = DedupeSeverity::High;
+        let medium = DedupeSeverity::Medium;
+        let low = DedupeSeverity::Low;
+
+        ensure(exact < high, true, "exact < high")?;
+        ensure(high < medium, true, "high < medium")?;
+        ensure(medium < low, true, "medium < low")
+    }
+
+    #[test]
+    fn dedupe_match_type_as_str_is_stable() -> TestResult {
+        ensure(
+            DedupeMatchType::ExactContent.as_str(),
+            "exact_content",
+            "exact_content",
+        )?;
+        ensure(
+            DedupeMatchType::NormalizedContent.as_str(),
+            "normalized_content",
+            "normalized_content",
+        )?;
+        ensure(DedupeMatchType::Semantic.as_str(), "semantic", "semantic")?;
+        ensure(DedupeMatchType::Lexical.as_str(), "lexical", "lexical")
+    }
+
+    #[test]
+    fn jaccard_similarity_identical_strings() -> TestResult {
+        let sim = jaccard_similarity("hello world", "hello world");
+        ensure((sim - 1.0).abs() < f32::EPSILON, true, "identical = 1.0")
+    }
+
+    #[test]
+    fn jaccard_similarity_completely_different() -> TestResult {
+        let sim = jaccard_similarity("alpha beta", "gamma delta");
+        ensure((sim - 0.0).abs() < f32::EPSILON, true, "disjoint = 0.0")
+    }
+
+    #[test]
+    fn jaccard_similarity_partial_overlap() -> TestResult {
+        // "hello world" vs "hello there" -> intersection = {hello}, union = {hello, world, there}
+        // Jaccard = 1/3 ≈ 0.333
+        let sim = jaccard_similarity("hello world", "hello there");
+        ensure(sim > 0.3 && sim < 0.4, true, "partial overlap ~0.33")
+    }
+
+    #[test]
+    fn jaccard_similarity_empty_strings() -> TestResult {
+        let both_empty = jaccard_similarity("", "");
+        let one_empty = jaccard_similarity("hello", "");
+
+        ensure(
+            (both_empty - 1.0).abs() < f32::EPSILON,
+            true,
+            "both empty = 1.0",
+        )?;
+        ensure(
+            (one_empty - 0.0).abs() < f32::EPSILON,
+            true,
+            "one empty = 0.0",
+        )
+    }
+
+    #[test]
+    fn dedupe_check_options_defaults() -> TestResult {
+        let opts = DedupeCheckOptions::new(std::path::Path::new("/tmp/db"), "test content");
+
+        ensure(opts.content, "test content", "content")?;
+        ensure(opts.level.is_none(), true, "level none")?;
+        ensure(opts.kind.is_none(), true, "kind none")?;
+        ensure((opts.min_similarity - 0.5).abs() < f32::EPSILON, true, "min_similarity")?;
+        ensure(opts.max_warnings, 5, "max_warnings")
+    }
+
+    #[test]
+    fn dedupe_check_report_no_duplicates() -> TestResult {
+        let report = DedupeCheckReport::no_duplicates(42);
+
+        ensure(report.has_warnings, false, "has_warnings")?;
+        ensure(report.warnings.is_empty(), true, "warnings empty")?;
+        ensure(report.memories_scanned, 42, "memories_scanned")?;
+        ensure(report.error.is_none(), true, "no error")
+    }
+
+    #[test]
+    fn dedupe_check_report_with_warnings() -> TestResult {
+        let warning = DedupeWarning {
+            existing_memory_id: "mem_123".to_string(),
+            similarity_score: 0.85,
+            severity: DedupeSeverity::Medium,
+            existing_preview: "preview text".to_string(),
+            match_type: DedupeMatchType::Lexical,
+            suggestion: "Consider reviewing".to_string(),
+        };
+        let report = DedupeCheckReport::with_warnings(vec![warning], 100);
+
+        ensure(report.has_warnings, true, "has_warnings")?;
+        ensure(report.warnings.len(), 1, "warnings count")?;
+        ensure(report.memories_scanned, 100, "memories_scanned")?;
+        ensure(report.error.is_none(), true, "no error")
+    }
+
+    #[test]
+    fn dedupe_check_report_error() -> TestResult {
+        let report = DedupeCheckReport::error("Database failure".to_string());
+
+        ensure(report.has_warnings, false, "has_warnings")?;
+        ensure(report.warnings.is_empty(), true, "warnings empty")?;
+        ensure(report.memories_scanned, 0, "memories_scanned")?;
+        ensure(
+            report.error,
+            Some("Database failure".to_string()),
+            "error message",
+        )
+    }
+
+    #[test]
+    fn dedupe_check_report_version_matches_package() -> TestResult {
+        let report = DedupeCheckReport::no_duplicates(0);
         ensure(report.version, env!("CARGO_PKG_VERSION"), "version")
     }
 }
