@@ -149,6 +149,227 @@ impl fmt::Display for PackSection {
     }
 }
 
+/// Token quota for a single section (EE-144).
+///
+/// Quotas define soft limits on how many tokens a section can use.
+/// When a section exceeds its max, remaining candidates are omitted
+/// even if the overall budget has room.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SectionQuota {
+    /// Minimum tokens to reserve for this section (0 = no minimum).
+    pub min_tokens: u32,
+    /// Maximum tokens this section can use (0 = unlimited).
+    pub max_tokens: u32,
+}
+
+impl SectionQuota {
+    /// Create a quota with explicit min and max.
+    #[must_use]
+    pub const fn new(min_tokens: u32, max_tokens: u32) -> Self {
+        Self {
+            min_tokens,
+            max_tokens,
+        }
+    }
+
+    /// Create an unlimited quota (no constraints).
+    #[must_use]
+    pub const fn unlimited() -> Self {
+        Self {
+            min_tokens: 0,
+            max_tokens: 0,
+        }
+    }
+
+    /// Create a quota with only a maximum.
+    #[must_use]
+    pub const fn capped(max_tokens: u32) -> Self {
+        Self {
+            min_tokens: 0,
+            max_tokens,
+        }
+    }
+
+    /// True if this quota has no constraints.
+    #[must_use]
+    pub const fn is_unlimited(self) -> bool {
+        self.min_tokens == 0 && self.max_tokens == 0
+    }
+
+    /// Check if a token count exceeds this quota's maximum.
+    #[must_use]
+    pub const fn exceeds_max(self, tokens: u32) -> bool {
+        self.max_tokens > 0 && tokens > self.max_tokens
+    }
+
+    /// Calculate remaining tokens allowed by this quota.
+    #[must_use]
+    pub const fn remaining(self, used: u32) -> u32 {
+        if self.max_tokens == 0 {
+            u32::MAX
+        } else if used >= self.max_tokens {
+            0
+        } else {
+            self.max_tokens - used
+        }
+    }
+}
+
+impl Default for SectionQuota {
+    fn default() -> Self {
+        Self::unlimited()
+    }
+}
+
+/// Section quotas for context packing (EE-144).
+///
+/// Quotas control token allocation across sections, ensuring diversity
+/// in the final pack. Each section can have independent min/max limits.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SectionQuotas {
+    quotas: [SectionQuota; 5],
+}
+
+impl SectionQuotas {
+    /// Create quotas with explicit values for each section.
+    #[must_use]
+    pub const fn new(
+        procedural_rules: SectionQuota,
+        decisions: SectionQuota,
+        failures: SectionQuota,
+        evidence: SectionQuota,
+        artifacts: SectionQuota,
+    ) -> Self {
+        Self {
+            quotas: [procedural_rules, decisions, failures, evidence, artifacts],
+        }
+    }
+
+    /// Create quotas where all sections are unlimited.
+    #[must_use]
+    pub const fn unlimited() -> Self {
+        Self {
+            quotas: [SectionQuota::unlimited(); 5],
+        }
+    }
+
+    /// Create balanced quotas based on total budget and profile.
+    ///
+    /// Balanced profile allocates roughly:
+    /// - ProceduralRules: 30%
+    /// - Decisions: 20%
+    /// - Failures: 20%
+    /// - Evidence: 20%
+    /// - Artifacts: 10%
+    #[must_use]
+    pub fn balanced(total_budget: u32) -> Self {
+        let procedural = (total_budget as f32 * 0.30).ceil() as u32;
+        let decisions = (total_budget as f32 * 0.20).ceil() as u32;
+        let failures = (total_budget as f32 * 0.20).ceil() as u32;
+        let evidence = (total_budget as f32 * 0.20).ceil() as u32;
+        let artifacts = (total_budget as f32 * 0.10).ceil() as u32;
+
+        Self::new(
+            SectionQuota::capped(procedural),
+            SectionQuota::capped(decisions),
+            SectionQuota::capped(failures),
+            SectionQuota::capped(evidence),
+            SectionQuota::capped(artifacts),
+        )
+    }
+
+    /// Create compact quotas that prioritize procedural rules.
+    ///
+    /// Compact profile allocates:
+    /// - ProceduralRules: 50%
+    /// - Decisions: 15%
+    /// - Failures: 20%
+    /// - Evidence: 10%
+    /// - Artifacts: 5%
+    #[must_use]
+    pub fn compact(total_budget: u32) -> Self {
+        let procedural = (total_budget as f32 * 0.50).ceil() as u32;
+        let decisions = (total_budget as f32 * 0.15).ceil() as u32;
+        let failures = (total_budget as f32 * 0.20).ceil() as u32;
+        let evidence = (total_budget as f32 * 0.10).ceil() as u32;
+        let artifacts = (total_budget as f32 * 0.05).ceil() as u32;
+
+        Self::new(
+            SectionQuota::capped(procedural),
+            SectionQuota::capped(decisions),
+            SectionQuota::capped(failures),
+            SectionQuota::capped(evidence),
+            SectionQuota::capped(artifacts),
+        )
+    }
+
+    /// Create thorough quotas with more even distribution.
+    ///
+    /// Thorough profile allocates:
+    /// - ProceduralRules: 20%
+    /// - Decisions: 20%
+    /// - Failures: 20%
+    /// - Evidence: 25%
+    /// - Artifacts: 15%
+    #[must_use]
+    pub fn thorough(total_budget: u32) -> Self {
+        let procedural = (total_budget as f32 * 0.20).ceil() as u32;
+        let decisions = (total_budget as f32 * 0.20).ceil() as u32;
+        let failures = (total_budget as f32 * 0.20).ceil() as u32;
+        let evidence = (total_budget as f32 * 0.25).ceil() as u32;
+        let artifacts = (total_budget as f32 * 0.15).ceil() as u32;
+
+        Self::new(
+            SectionQuota::capped(procedural),
+            SectionQuota::capped(decisions),
+            SectionQuota::capped(failures),
+            SectionQuota::capped(evidence),
+            SectionQuota::capped(artifacts),
+        )
+    }
+
+    /// Get quotas based on profile and budget.
+    #[must_use]
+    pub fn for_profile(profile: ContextPackProfile, total_budget: u32) -> Self {
+        match profile {
+            ContextPackProfile::Compact => Self::compact(total_budget),
+            ContextPackProfile::Balanced => Self::balanced(total_budget),
+            ContextPackProfile::Thorough => Self::thorough(total_budget),
+        }
+    }
+
+    /// Get the quota for a specific section.
+    #[must_use]
+    pub const fn get(&self, section: PackSection) -> SectionQuota {
+        self.quotas[section as usize]
+    }
+
+    /// Check if a section has room for more tokens.
+    #[must_use]
+    pub const fn has_room(&self, section: PackSection, used: u32, candidate_tokens: u32) -> bool {
+        let quota = self.get(section);
+        if quota.max_tokens == 0 {
+            return true;
+        }
+        match used.checked_add(candidate_tokens) {
+            Some(total) => total <= quota.max_tokens,
+            None => false,
+        }
+    }
+
+    /// Get remaining tokens for a section.
+    #[must_use]
+    pub const fn remaining(&self, section: PackSection, used: u32) -> u32 {
+        self.get(section).remaining(used)
+    }
+}
+
+impl Default for SectionQuotas {
+    fn default() -> Self {
+        Self::unlimited()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContextRequestInput {
     pub query: String,
@@ -696,8 +917,8 @@ mod tests {
         CONTEXT_COMMAND, ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
         ContextResponseDegradation, ContextResponseSeverity, DEFAULT_CHARS_PER_TOKEN,
         PackCandidate, PackCandidateInput, PackOmissionReason, PackProvenance, PackSection,
-        PackValidationError, TokenBudget, TokenEstimationStrategy, assemble_draft,
-        estimate_tokens, estimate_tokens_default, subsystem_name,
+        PackValidationError, SectionQuota, SectionQuotas, TokenBudget, TokenEstimationStrategy,
+        assemble_draft, estimate_tokens, estimate_tokens_default, subsystem_name,
     };
     use crate::models::{MemoryId, ProvenanceUri, UnitScore};
 
@@ -900,6 +1121,168 @@ mod tests {
         let padded =
             estimate_tokens("  hello world  ", TokenEstimationStrategy::CharacterHeuristic);
         ensure_equal(&clean, &padded, "trimmed content should match")
+    }
+
+    #[test]
+    fn section_quota_unlimited_has_no_constraints() -> TestResult {
+        let unlimited = SectionQuota::unlimited();
+        ensure(unlimited.is_unlimited(), "unlimited should report as unlimited")?;
+        ensure(!unlimited.exceeds_max(1_000_000), "unlimited should not exceed max")?;
+        ensure_equal(
+            &unlimited.remaining(1000),
+            &u32::MAX,
+            "unlimited remaining should be u32::MAX",
+        )
+    }
+
+    #[test]
+    fn section_quota_capped_enforces_maximum() -> TestResult {
+        let capped = SectionQuota::capped(100);
+        ensure(!capped.is_unlimited(), "capped should not be unlimited")?;
+        ensure(!capped.exceeds_max(100), "100 should not exceed max of 100")?;
+        ensure(capped.exceeds_max(101), "101 should exceed max of 100")?;
+        ensure_equal(&capped.remaining(50), &50, "remaining after using 50 of 100")?;
+        ensure_equal(&capped.remaining(100), &0, "remaining after using all")?;
+        ensure_equal(&capped.remaining(150), &0, "remaining when over quota")
+    }
+
+    #[test]
+    fn section_quota_new_accepts_min_and_max() -> TestResult {
+        let quota = SectionQuota::new(10, 100);
+        ensure_equal(&quota.min_tokens, &10, "min tokens")?;
+        ensure_equal(&quota.max_tokens, &100, "max tokens")
+    }
+
+    #[test]
+    fn section_quotas_unlimited_allows_everything() -> TestResult {
+        let quotas = SectionQuotas::unlimited();
+        for section in PackSection::all() {
+            ensure(
+                quotas.get(section).is_unlimited(),
+                format!("{section} should be unlimited"),
+            )?;
+            ensure(
+                quotas.has_room(section, 10000, 10000),
+                format!("{section} should have room"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn section_quotas_balanced_allocates_percentages() -> TestResult {
+        let quotas = SectionQuotas::balanced(1000);
+
+        let procedural = quotas.get(PackSection::ProceduralRules);
+        ensure(
+            procedural.max_tokens >= 290 && procedural.max_tokens <= 310,
+            format!("procedural_rules should be ~30% (got {})", procedural.max_tokens),
+        )?;
+
+        let decisions = quotas.get(PackSection::Decisions);
+        ensure(
+            decisions.max_tokens >= 190 && decisions.max_tokens <= 210,
+            format!("decisions should be ~20% (got {})", decisions.max_tokens),
+        )?;
+
+        let artifacts = quotas.get(PackSection::Artifacts);
+        ensure(
+            artifacts.max_tokens >= 90 && artifacts.max_tokens <= 110,
+            format!("artifacts should be ~10% (got {})", artifacts.max_tokens),
+        )
+    }
+
+    #[test]
+    fn section_quotas_compact_prioritizes_procedural_rules() -> TestResult {
+        let quotas = SectionQuotas::compact(1000);
+
+        let procedural = quotas.get(PackSection::ProceduralRules);
+        ensure(
+            procedural.max_tokens >= 490 && procedural.max_tokens <= 510,
+            format!("procedural_rules should be ~50% in compact (got {})", procedural.max_tokens),
+        )
+    }
+
+    #[test]
+    fn section_quotas_thorough_is_more_even() -> TestResult {
+        let quotas = SectionQuotas::thorough(1000);
+
+        let procedural = quotas.get(PackSection::ProceduralRules);
+        let evidence = quotas.get(PackSection::Evidence);
+
+        ensure(
+            procedural.max_tokens >= 190 && procedural.max_tokens <= 210,
+            format!("procedural_rules should be ~20% in thorough (got {})", procedural.max_tokens),
+        )?;
+        ensure(
+            evidence.max_tokens >= 240 && evidence.max_tokens <= 260,
+            format!("evidence should be ~25% in thorough (got {})", evidence.max_tokens),
+        )
+    }
+
+    #[test]
+    fn section_quotas_for_profile_dispatches_correctly() -> TestResult {
+        let compact = SectionQuotas::for_profile(ContextPackProfile::Compact, 1000);
+        let balanced = SectionQuotas::for_profile(ContextPackProfile::Balanced, 1000);
+        let thorough = SectionQuotas::for_profile(ContextPackProfile::Thorough, 1000);
+
+        ensure(
+            compact.get(PackSection::ProceduralRules).max_tokens
+                > balanced.get(PackSection::ProceduralRules).max_tokens,
+            "compact should give more to procedural_rules than balanced",
+        )?;
+        ensure(
+            thorough.get(PackSection::Evidence).max_tokens
+                > balanced.get(PackSection::Evidence).max_tokens,
+            "thorough should give more to evidence than balanced",
+        )
+    }
+
+    #[test]
+    fn section_quotas_has_room_checks_capacity() -> TestResult {
+        let quotas = SectionQuotas::balanced(100);
+        let section = PackSection::ProceduralRules;
+        let max = quotas.get(section).max_tokens;
+
+        ensure(
+            quotas.has_room(section, 0, max),
+            "should have room for max tokens when unused",
+        )?;
+        ensure(
+            !quotas.has_room(section, 0, max + 1),
+            "should not have room for more than max",
+        )?;
+        ensure(
+            quotas.has_room(section, max - 10, 10),
+            "should have room for exactly remaining",
+        )?;
+        ensure(
+            !quotas.has_room(section, max - 10, 11),
+            "should not have room when would exceed",
+        )
+    }
+
+    #[test]
+    fn section_quotas_remaining_tracks_usage() -> TestResult {
+        let quotas = SectionQuotas::balanced(100);
+        let section = PackSection::ProceduralRules;
+        let max = quotas.get(section).max_tokens;
+
+        ensure_equal(
+            &quotas.remaining(section, 0),
+            &max,
+            "remaining when unused equals max",
+        )?;
+        ensure_equal(
+            &quotas.remaining(section, max),
+            &0,
+            "remaining when fully used is 0",
+        )?;
+        ensure_equal(
+            &quotas.remaining(section, max + 10),
+            &0,
+            "remaining when over quota is 0",
+        )
     }
 
     #[test]
