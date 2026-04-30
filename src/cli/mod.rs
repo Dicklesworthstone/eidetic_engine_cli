@@ -9,6 +9,7 @@ use crate::cass::{CassClient, CassImportOptions, import_cass_sessions};
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
 use crate::core::doctor::DoctorReport;
+use crate::core::index::{IndexRebuildOptions, rebuild_index};
 use crate::core::status::StatusReport;
 use crate::models::memory::{MemoryKind, MemoryLevel, MemoryValidationError};
 use crate::models::{DomainError, MemoryId, ProcessExitCode};
@@ -105,7 +106,7 @@ pub enum Command {
     /// Quick posture summary: ready, degraded, or needs attention.
     Check,
     /// Run health checks on workspace and subsystems.
-    Doctor,
+    Doctor(DoctorArgs),
     /// Run evaluation scenarios against fixtures.
     #[command(subcommand)]
     Eval(EvalCommand),
@@ -148,6 +149,14 @@ pub struct IndexRebuildArgs {
     /// Report the rebuild plan without writing the index.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+/// Arguments for `ee doctor`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct DoctorArgs {
+    /// Output a structured fix plan instead of the normal health report.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub fix_plan: bool,
 }
 
 /// Arguments for the remember command.
@@ -350,7 +359,8 @@ where
                 }
             }
         }
-        Some(Command::Doctor) => {
+        Some(Command::Doctor(ref _args)) => {
+            // TODO(EE-XXX): --fix-plan support is stubbed pending render impl
             let report = DoctorReport::gather();
             match cli.renderer() {
                 output::Renderer::Human => {
@@ -624,6 +634,59 @@ where
     }
 }
 
+fn handle_index_rebuild<W, E>(
+    cli: &Cli,
+    args: &IndexRebuildArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = IndexRebuildOptions {
+        workspace_path,
+        database_path: args.database.clone(),
+        index_dir: args.index_dir.clone(),
+        dry_run: args.dry_run,
+    };
+
+    match rebuild_index(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human => write_stdout(stdout, &report.human_summary()),
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &format!(
+                    "INDEX_REBUILD|{}|{}|{}|{}\n",
+                    report.status.as_str(),
+                    report.memories_indexed,
+                    report.sessions_indexed,
+                    report.documents_total
+                ),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json(),
+                });
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        Err(error) => {
+            let domain_error = DomainError::SearchIndex {
+                message: error.to_string(),
+                repair: error.repair_hint().map(str::to_string),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
 fn write_domain_error<W, E>(
     error: &DomainError,
     wants_json: bool,
@@ -723,8 +786,8 @@ impl RememberResult {
             ""
         };
 
-        format!(
-            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","memory_id":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{},"dry_run":{}}}{}}}"#,
+        let mut json = format!(
+            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","memory_id":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{},"dry_run":{}}}"#,
             self.memory_id,
             escape_json_string(&self.content),
             self.level.as_str(),
@@ -732,9 +795,11 @@ impl RememberResult {
             self.confidence,
             tags_json,
             source_json,
-            self.dry_run,
-            degraded
-        )
+            self.dry_run
+        );
+        json.push_str(degraded);
+        json.push('}');
+        json
     }
 }
 

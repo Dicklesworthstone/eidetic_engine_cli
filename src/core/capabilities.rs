@@ -122,7 +122,7 @@ impl CapabilitiesReport {
             ),
             FeatureEntry::new(
                 "embed-quality",
-                cfg!(feature = "embed-quality"),
+                false, // Feature blocked: pulls forbidden deps (reqwest/tokio/hyper)
                 "Quality embedding via fastembed",
             ),
             FeatureEntry::new(
@@ -226,16 +226,16 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::expect_used)]
     fn capabilities_report_has_runtime_ready() -> TestResult {
         let report = CapabilitiesReport::gather();
 
-        let runtime = report.subsystems.iter().find(|s| s.name == "runtime");
-        ensure(runtime.is_some(), true, "runtime subsystem exists")?;
-        ensure(
-            runtime.unwrap().status,
-            CapabilityStatus::Ready,
-            "runtime is ready",
-        )
+        let runtime = report
+            .subsystems
+            .iter()
+            .find(|s| s.name == "runtime")
+            .expect("runtime subsystem must exist");
+        ensure(runtime.status, CapabilityStatus::Ready, "runtime is ready")
     }
 
     #[test]
@@ -251,15 +251,15 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::expect_used)]
     fn capabilities_report_includes_capabilities_command() -> TestResult {
         let report = CapabilitiesReport::gather();
 
-        let cmd = report.commands.iter().find(|c| c.name == "capabilities");
-        ensure(cmd.is_some(), true, "capabilities command exists")?;
-        ensure(
-            cmd.unwrap().available,
-            true,
-            "capabilities command is available",
-        )
+        let cmd = report
+            .commands
+            .iter()
+            .find(|c| c.name == "capabilities")
+            .expect("capabilities command must exist");
+        ensure(cmd.available, true, "capabilities command is available")
     }
 }

@@ -1,7 +1,10 @@
-//! Doctor command handler (EE-025).
+//! Doctor command handler (EE-025, EE-241).
 //!
 //! Performs health checks on workspace subsystems and returns a structured
 //! report with issues and repair suggestions.
+//!
+//! The `--fix-plan` flag (EE-241) outputs a structured repair plan that
+//! agents can execute step-by-step.
 
 use crate::models::error_codes::{self, ErrorCode};
 
@@ -102,6 +105,66 @@ impl DoctorReport {
             checks,
         }
     }
+
+    /// Convert the doctor report into a structured fix plan.
+    #[must_use]
+    pub fn to_fix_plan(&self) -> FixPlan {
+        let steps: Vec<FixStep> = self
+            .checks
+            .iter()
+            .filter(|c| !c.severity.is_healthy() && c.repair.is_some())
+            .enumerate()
+            .map(|(idx, check)| FixStep {
+                order: idx + 1,
+                subsystem: check.name,
+                severity: check.severity,
+                issue: check.message.clone(),
+                error_code: check.error_code,
+                command: check.repair.unwrap_or_default(),
+            })
+            .collect();
+
+        let total_issues = self
+            .checks
+            .iter()
+            .filter(|c| !c.severity.is_healthy())
+            .count();
+        let fixable_issues = steps.len();
+
+        FixPlan {
+            version: self.version,
+            total_issues,
+            fixable_issues,
+            steps,
+        }
+    }
+}
+
+/// A structured repair plan generated from doctor checks.
+#[derive(Clone, Debug)]
+pub struct FixPlan {
+    pub version: &'static str,
+    pub total_issues: usize,
+    pub fixable_issues: usize,
+    pub steps: Vec<FixStep>,
+}
+
+impl FixPlan {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+}
+
+/// A single repair step in a fix plan.
+#[derive(Clone, Debug)]
+pub struct FixStep {
+    pub order: usize,
+    pub subsystem: &'static str,
+    pub severity: CheckSeverity,
+    pub issue: String,
+    pub error_code: Option<ErrorCode>,
+    pub command: &'static str,
 }
 
 fn check_runtime() -> CheckResult {

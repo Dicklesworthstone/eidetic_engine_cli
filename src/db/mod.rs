@@ -1220,6 +1220,48 @@ CREATE INDEX idx_import_ledger_updated ON import_ledger(updated_at);
     "blake3:v010_import_ledger_2026_04_30",
 );
 
+/// V011: Add feedback_events table (EE-080).
+pub const V011_FEEDBACK_EVENTS: Migration = Migration::new(
+    11,
+    "feedback_events",
+    r#"
+-- Feedback events table (EE-080)
+-- Captures positive/negative feedback signals with evidence for scoring memories and rules.
+CREATE TABLE feedback_events (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'fb_*' AND length(id) = 29),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    target_type TEXT NOT NULL CHECK (target_type IN (
+        'memory', 'rule', 'session', 'source', 'pack', 'candidate'
+    )),
+    target_id TEXT NOT NULL CHECK (length(trim(target_id)) > 0),
+    signal TEXT NOT NULL CHECK (signal IN (
+        'positive', 'negative', 'neutral', 'contradiction', 'confirmation',
+        'harmful', 'helpful', 'stale', 'inaccurate', 'outdated'
+    )),
+    weight REAL NOT NULL DEFAULT 1.0 CHECK (weight >= 0.0 AND weight <= 10.0),
+    source_type TEXT NOT NULL CHECK (source_type IN (
+        'human_explicit', 'agent_inference', 'automated_check', 'outcome_observed',
+        'contradiction_detected', 'usage_pattern', 'decay_trigger'
+    )),
+    source_id TEXT CHECK (source_id IS NULL OR length(trim(source_id)) > 0),
+    reason TEXT CHECK (reason IS NULL OR length(trim(reason)) > 0),
+    evidence_json TEXT CHECK (evidence_json IS NULL OR json_valid(evidence_json)),
+    session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+    applied_at TEXT CHECK (applied_at IS NULL OR length(trim(applied_at)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0)
+);
+
+CREATE INDEX idx_feedback_events_workspace ON feedback_events(workspace_id);
+CREATE INDEX idx_feedback_events_target ON feedback_events(target_type, target_id);
+CREATE INDEX idx_feedback_events_signal ON feedback_events(signal);
+CREATE INDEX idx_feedback_events_source ON feedback_events(source_type);
+CREATE INDEX idx_feedback_events_session ON feedback_events(session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX idx_feedback_events_created ON feedback_events(created_at);
+CREATE INDEX idx_feedback_events_applied ON feedback_events(applied_at) WHERE applied_at IS NOT NULL;
+"#,
+    "blake3:v011_feedback_events_2026_04_30",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -1232,6 +1274,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V008_SESSIONS,
     V009_EVIDENCE_SPANS,
     V010_IMPORT_LEDGER,
+    V011_FEEDBACK_EVENTS,
 ];
 
 /// Result of applying migrations.
@@ -1911,6 +1954,238 @@ fn stored_import_ledger_from_row(row: &Row) -> Result<StoredImportLedger> {
         metadata_json: optional_text(row, 13)?.map(str::to_string),
         created_at: required_text(row, 14, DbOperation::Query, "created_at")?.to_string(),
         updated_at: required_text(row, 15, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
+/// Input for creating a new feedback event (EE-080).
+#[derive(Debug, Clone)]
+pub struct CreateFeedbackEventInput {
+    pub workspace_id: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub signal: String,
+    pub weight: f32,
+    pub source_type: String,
+    pub source_id: Option<String>,
+    pub reason: Option<String>,
+    pub evidence_json: Option<String>,
+    pub session_id: Option<String>,
+}
+
+/// A stored feedback_events row (EE-080).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredFeedbackEvent {
+    pub id: String,
+    pub workspace_id: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub signal: String,
+    pub weight: f32,
+    pub source_type: String,
+    pub source_id: Option<String>,
+    pub reason: Option<String>,
+    pub evidence_json: Option<String>,
+    pub session_id: Option<String>,
+    pub applied_at: Option<String>,
+    pub created_at: String,
+}
+
+impl DbConnection {
+    /// Insert a new feedback event.
+    pub fn insert_feedback_event(&self, id: &str, input: &CreateFeedbackEventInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO feedback_events (id, workspace_id, target_type, target_id, signal, weight, source_type, source_id, reason, evidence_json, session_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.target_type.clone()),
+                Value::Text(input.target_id.clone()),
+                Value::Text(input.signal.clone()),
+                Value::Double(f64::from(input.weight)),
+                Value::Text(input.source_type.clone()),
+                input
+                    .source_id
+                    .as_ref()
+                    .map_or(Value::Null, |source| Value::Text(source.clone())),
+                input
+                    .reason
+                    .as_ref()
+                    .map_or(Value::Null, |reason| Value::Text(reason.clone())),
+                input
+                    .evidence_json
+                    .as_ref()
+                    .map_or(Value::Null, |evidence| Value::Text(evidence.clone())),
+                input
+                    .session_id
+                    .as_ref()
+                    .map_or(Value::Null, |session| Value::Text(session.clone())),
+                Value::Text(now),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get a feedback event by its ID.
+    pub fn get_feedback_event(&self, id: &str) -> Result<Option<StoredFeedbackEvent>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, target_type, target_id, signal, weight, source_type, source_id, reason, evidence_json, session_id, applied_at, created_at FROM feedback_events WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first().map(stored_feedback_event_from_row).transpose()
+    }
+
+    /// List feedback events for a target in deterministic order.
+    pub fn list_feedback_events_for_target(
+        &self,
+        target_type: &str,
+        target_id: &str,
+    ) -> Result<Vec<StoredFeedbackEvent>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, target_type, target_id, signal, weight, source_type, source_id, reason, evidence_json, session_id, applied_at, created_at FROM feedback_events WHERE target_type = ?1 AND target_id = ?2 ORDER BY created_at ASC, id ASC",
+            &[
+                Value::Text(target_type.to_string()),
+                Value::Text(target_id.to_string()),
+            ],
+        )?;
+
+        rows.iter().map(stored_feedback_event_from_row).collect()
+    }
+
+    /// List feedback events for a workspace in deterministic order.
+    pub fn list_feedback_events(&self, workspace_id: &str) -> Result<Vec<StoredFeedbackEvent>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, target_type, target_id, signal, weight, source_type, source_id, reason, evidence_json, session_id, applied_at, created_at FROM feedback_events WHERE workspace_id = ?1 ORDER BY created_at ASC, id ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+
+        rows.iter().map(stored_feedback_event_from_row).collect()
+    }
+
+    /// List feedback events by signal type.
+    pub fn list_feedback_events_by_signal(
+        &self,
+        workspace_id: &str,
+        signal: &str,
+    ) -> Result<Vec<StoredFeedbackEvent>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, target_type, target_id, signal, weight, source_type, source_id, reason, evidence_json, session_id, applied_at, created_at FROM feedback_events WHERE workspace_id = ?1 AND signal = ?2 ORDER BY created_at ASC, id ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(signal.to_string()),
+            ],
+        )?;
+
+        rows.iter().map(stored_feedback_event_from_row).collect()
+    }
+
+    /// Mark a feedback event as applied.
+    pub fn apply_feedback_event(&self, id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE feedback_events SET applied_at = ?1 WHERE id = ?2 AND applied_at IS NULL",
+            &[Value::Text(now), Value::Text(id.to_string())],
+        )?;
+
+        Ok(affected > 0)
+    }
+
+    /// Count feedback events by signal for a target (for scoring).
+    pub fn count_feedback_by_signal(
+        &self,
+        target_type: &str,
+        target_id: &str,
+    ) -> Result<FeedbackCounts> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT signal, SUM(weight) as total_weight, COUNT(*) as count FROM feedback_events WHERE target_type = ?1 AND target_id = ?2 GROUP BY signal",
+            &[
+                Value::Text(target_type.to_string()),
+                Value::Text(target_id.to_string()),
+            ],
+        )?;
+
+        let mut counts = FeedbackCounts::default();
+        for row in &rows {
+            let signal = optional_text(row, 0)?.unwrap_or_default();
+            let weight = row.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let count = row.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+
+            match signal {
+                "positive" | "helpful" | "confirmation" => {
+                    counts.positive_weight += weight;
+                    counts.positive_count += count;
+                }
+                "negative" | "harmful" | "contradiction" | "inaccurate" => {
+                    counts.negative_weight += weight;
+                    counts.negative_count += count;
+                }
+                "stale" | "outdated" => {
+                    counts.decay_weight += weight;
+                    counts.decay_count += count;
+                }
+                _ => {
+                    counts.neutral_weight += weight;
+                    counts.neutral_count += count;
+                }
+            }
+        }
+
+        Ok(counts)
+    }
+}
+
+/// Aggregated feedback counts for scoring (EE-080).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FeedbackCounts {
+    pub positive_weight: f32,
+    pub positive_count: u32,
+    pub negative_weight: f32,
+    pub negative_count: u32,
+    pub neutral_weight: f32,
+    pub neutral_count: u32,
+    pub decay_weight: f32,
+    pub decay_count: u32,
+}
+
+impl FeedbackCounts {
+    pub fn total_count(&self) -> u32 {
+        self.positive_count + self.negative_count + self.neutral_count + self.decay_count
+    }
+
+    pub fn net_score(&self) -> f32 {
+        self.positive_weight - self.negative_weight - (self.decay_weight * 0.5)
+    }
+}
+
+fn stored_feedback_event_from_row(row: &Row) -> Result<StoredFeedbackEvent> {
+    Ok(StoredFeedbackEvent {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        target_type: required_text(row, 2, DbOperation::Query, "target_type")?.to_string(),
+        target_id: required_text(row, 3, DbOperation::Query, "target_id")?.to_string(),
+        signal: required_text(row, 4, DbOperation::Query, "signal")?.to_string(),
+        weight: row
+            .get(5)
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32)
+            .unwrap_or(1.0),
+        source_type: required_text(row, 6, DbOperation::Query, "source_type")?.to_string(),
+        source_id: optional_text(row, 7)?.map(str::to_string),
+        reason: optional_text(row, 8)?.map(str::to_string),
+        evidence_json: optional_text(row, 9)?.map(str::to_string),
+        session_id: optional_text(row, 10)?.map(str::to_string),
+        applied_at: optional_text(row, 11)?.map(str::to_string),
+        created_at: required_text(row, 12, DbOperation::Query, "created_at")?.to_string(),
     })
 }
 
@@ -4098,6 +4373,274 @@ mod tests {
                 })
             ),
             "cursor_json must be valid JSON when present",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_and_get_feedback_event() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateFeedbackEventInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            target_type: "memory".to_string(),
+            target_id: "mem_01234567890123456789012345".to_string(),
+            signal: "positive".to_string(),
+            weight: 1.0,
+            source_type: "human_explicit".to_string(),
+            source_id: Some("agent-123".to_string()),
+            reason: Some("rule helped fix build".to_string()),
+            evidence_json: Some(r#"{"outcome":"success"}"#.to_string()),
+            session_id: None,
+        };
+
+        connection.insert_feedback_event("fb_0123456789012345678901234", &input)?;
+
+        let event = connection.get_feedback_event("fb_0123456789012345678901234")?;
+        ensure(event.is_some(), "feedback event must be found")?;
+
+        let event = event.ok_or_else(|| TestFailure::new("feedback event not found"))?;
+        ensure_equal(&event.id.as_str(), &"fb_0123456789012345678901234", "id")?;
+        ensure_equal(
+            &event.workspace_id.as_str(),
+            &"wsp_01234567890123456789012345",
+            "workspace_id",
+        )?;
+        ensure_equal(&event.target_type.as_str(), &"memory", "target_type")?;
+        ensure_equal(
+            &event.target_id.as_str(),
+            &"mem_01234567890123456789012345",
+            "target_id",
+        )?;
+        ensure_equal(&event.signal.as_str(), &"positive", "signal")?;
+        ensure((event.weight - 1.0).abs() < 0.001, "weight must be ~1.0")?;
+        ensure_equal(
+            &event.source_type.as_str(),
+            &"human_explicit",
+            "source_type",
+        )?;
+        ensure_equal(
+            &event.source_id,
+            &Some("agent-123".to_string()),
+            "source_id",
+        )?;
+        ensure_equal(
+            &event.reason,
+            &Some("rule helped fix build".to_string()),
+            "reason",
+        )?;
+        ensure_equal(
+            &event.evidence_json,
+            &Some(r#"{"outcome":"success"}"#.to_string()),
+            "evidence_json",
+        )?;
+        ensure_equal(&event.applied_at, &None, "applied_at is null initially")?;
+        ensure(!event.created_at.is_empty(), "created_at is populated")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_feedback_events_and_apply() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let positive_input = super::CreateFeedbackEventInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            target_type: "memory".to_string(),
+            target_id: "mem_01234567890123456789012345".to_string(),
+            signal: "positive".to_string(),
+            weight: 1.5,
+            source_type: "agent_inference".to_string(),
+            source_id: None,
+            reason: None,
+            evidence_json: None,
+            session_id: None,
+        };
+        connection.insert_feedback_event("fb_1123456789012345678901234", &positive_input)?;
+
+        let negative_input = super::CreateFeedbackEventInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            target_type: "memory".to_string(),
+            target_id: "mem_01234567890123456789012345".to_string(),
+            signal: "negative".to_string(),
+            weight: 0.5,
+            source_type: "outcome_observed".to_string(),
+            source_id: None,
+            reason: Some("build failed after applying rule".to_string()),
+            evidence_json: None,
+            session_id: None,
+        };
+        connection.insert_feedback_event("fb_2123456789012345678901234", &negative_input)?;
+
+        let events = connection
+            .list_feedback_events_for_target("memory", "mem_01234567890123456789012345")?;
+        ensure_equal(&events.len(), &2, "two feedback events for target")?;
+        ensure_equal(
+            &events[0].id.as_str(),
+            &"fb_1123456789012345678901234",
+            "first event by create order",
+        )?;
+
+        let applied = connection.apply_feedback_event("fb_1123456789012345678901234")?;
+        ensure(applied, "apply_feedback_event must succeed")?;
+
+        let applied_event = connection
+            .get_feedback_event("fb_1123456789012345678901234")?
+            .ok_or_else(|| TestFailure::new("applied event not found"))?;
+        ensure(applied_event.applied_at.is_some(), "applied_at is now set")?;
+
+        let re_apply = connection.apply_feedback_event("fb_1123456789012345678901234")?;
+        ensure(!re_apply, "second apply returns false (already applied)")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn count_feedback_by_signal_aggregates_correctly() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let target_type = "rule";
+        let target_id = "rule_01234567890123456789012345";
+
+        let signals = [
+            ("fb_a123456789012345678901234", "positive", 1.0),
+            ("fb_b123456789012345678901234", "helpful", 2.0),
+            ("fb_c123456789012345678901234", "negative", 1.0),
+            ("fb_d123456789012345678901234", "harmful", 0.5),
+            ("fb_e123456789012345678901234", "stale", 1.0),
+            ("fb_f123456789012345678901234", "neutral", 1.0),
+        ];
+
+        for (id, signal, weight) in signals {
+            let input = super::CreateFeedbackEventInput {
+                workspace_id: "wsp_01234567890123456789012345".to_string(),
+                target_type: target_type.to_string(),
+                target_id: target_id.to_string(),
+                signal: signal.to_string(),
+                weight,
+                source_type: "automated_check".to_string(),
+                source_id: None,
+                reason: None,
+                evidence_json: None,
+                session_id: None,
+            };
+            connection.insert_feedback_event(id, &input)?;
+        }
+
+        let counts = connection.count_feedback_by_signal(target_type, target_id)?;
+        ensure(
+            (counts.positive_weight - 3.0).abs() < 0.001,
+            "positive + helpful = 3.0",
+        )?;
+        ensure_equal(&counts.positive_count, &2, "two positive signals")?;
+        ensure(
+            (counts.negative_weight - 1.5).abs() < 0.001,
+            "negative + harmful = 1.5",
+        )?;
+        ensure_equal(&counts.negative_count, &2, "two negative signals")?;
+        ensure((counts.decay_weight - 1.0).abs() < 0.001, "stale = 1.0")?;
+        ensure_equal(&counts.decay_count, &1, "one decay signal")?;
+        ensure_equal(&counts.total_count(), &6, "six total events")?;
+
+        let net = counts.net_score();
+        ensure(
+            (net - 1.0).abs() < 0.001,
+            "net score = 3.0 - 1.5 - 0.5*1.0 = 1.0",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn feedback_events_constraint_validation() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let invalid_target_type = super::CreateFeedbackEventInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            target_type: "unknown_type".to_string(),
+            target_id: "test".to_string(),
+            signal: "positive".to_string(),
+            weight: 1.0,
+            source_type: "human_explicit".to_string(),
+            source_id: None,
+            reason: None,
+            evidence_json: None,
+            session_id: None,
+        };
+        let result =
+            connection.insert_feedback_event("fb_x123456789012345678901234", &invalid_target_type);
+        ensure(
+            matches!(
+                result,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "invalid target_type must be rejected",
+        )?;
+
+        let invalid_signal = super::CreateFeedbackEventInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            target_type: "memory".to_string(),
+            target_id: "test".to_string(),
+            signal: "unknown_signal".to_string(),
+            weight: 1.0,
+            source_type: "human_explicit".to_string(),
+            source_id: None,
+            reason: None,
+            evidence_json: None,
+            session_id: None,
+        };
+        let result =
+            connection.insert_feedback_event("fb_y123456789012345678901234", &invalid_signal);
+        ensure(
+            matches!(
+                result,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "invalid signal must be rejected",
+        )?;
+
+        let invalid_source_type = super::CreateFeedbackEventInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            target_type: "memory".to_string(),
+            target_id: "test".to_string(),
+            signal: "positive".to_string(),
+            weight: 1.0,
+            source_type: "unknown_source".to_string(),
+            source_id: None,
+            reason: None,
+            evidence_json: None,
+            session_id: None,
+        };
+        let result =
+            connection.insert_feedback_event("fb_z123456789012345678901234", &invalid_source_type);
+        ensure(
+            matches!(
+                result,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "invalid source_type must be rejected",
         )?;
 
         connection.close()?;

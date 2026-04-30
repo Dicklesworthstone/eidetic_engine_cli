@@ -5,6 +5,7 @@ pub mod capabilities;
 pub mod check;
 pub mod context;
 pub mod doctor;
+pub mod index;
 pub mod outcome;
 pub mod status;
 

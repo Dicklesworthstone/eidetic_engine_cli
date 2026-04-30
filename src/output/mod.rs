@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
-use crate::core::doctor::DoctorReport;
+use crate::core::doctor::{DoctorReport, FixPlan};
 use crate::core::status::StatusReport;
 use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
 use crate::pack::{
@@ -574,6 +574,71 @@ pub fn render_doctor_human(report: &DoctorReport) -> String {
 #[must_use]
 pub fn render_doctor_toon(report: &DoctorReport) -> String {
     render_toon_from_json(&render_doctor_json(report))
+}
+
+/// Render a fix plan as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_fix_plan_json(plan: &FixPlan) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "doctor");
+        d.field_str("mode", "fix-plan");
+        d.field_str("version", plan.version);
+        d.field_raw("totalIssues", &plan.total_issues.to_string());
+        d.field_raw("fixableIssues", &plan.fixable_issues.to_string());
+        d.field_array_of_objects("steps", &plan.steps, |obj, step| {
+            obj.field_raw("order", &step.order.to_string());
+            obj.field_str("subsystem", step.subsystem);
+            obj.field_str("severity", step.severity.as_str());
+            obj.field_str("issue", &step.issue);
+            if let Some(code) = step.error_code {
+                obj.field_str("errorCode", code.id);
+            }
+            obj.field_str("command", step.command);
+        });
+    });
+    b.finish()
+}
+
+/// Render a fix plan as human-readable text.
+#[must_use]
+pub fn render_fix_plan_human(plan: &FixPlan) -> String {
+    let mut output = String::from("ee doctor --fix-plan\n\n");
+
+    if plan.is_empty() {
+        output.push_str("No issues to fix. All subsystems are healthy.\n");
+        return output;
+    }
+
+    output.push_str(&format!(
+        "Found {} issue(s), {} fixable:\n\n",
+        plan.total_issues, plan.fixable_issues
+    ));
+
+    for step in &plan.steps {
+        output.push_str(&format!(
+            "{}. [{}] {}\n   Issue: {}\n   Fix:   {}\n\n",
+            step.order,
+            step.subsystem,
+            step.severity.as_str().to_uppercase(),
+            step.issue,
+            step.command
+        ));
+    }
+
+    if plan.fixable_issues > 0 {
+        output.push_str("Run commands in order to resolve issues.\n");
+    }
+
+    output
+}
+
+/// Render a fix plan as TOON.
+#[must_use]
+pub fn render_fix_plan_toon(plan: &FixPlan) -> String {
+    render_toon_from_json(&render_fix_plan_json(plan))
 }
 
 /// Render a check report as JSON (ee.response.v1 envelope).
