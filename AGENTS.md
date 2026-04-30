@@ -34,6 +34,38 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ---
 
+## RULE NUMBER 2: NO WORKTREES. EVER. NO EXCEPTIONS.
+
+**`git worktree add` is ABSOLUTELY FORBIDDEN. Period.**
+
+You may **NEVER** create a git worktree for any reason. Not to "verify a build in isolation," not to "stage a push," not to "test a rebase," not to "compare two commits," not to "run a parallel cargo build." **NEVER.**
+
+The user has been burned by agents leaving stray worktrees littering the filesystem with detached HEADs, abandoned rebases, and orphaned commits. This wastes hours of recovery work and risks losing real code.
+
+**HARD CONSTRAINTS:**
+
+- All work happens in the single canonical checkout at `/data/projects/eidetic_engine_cli` on the `main` branch.
+- **Never run `git worktree add ...`.**
+- **Never create or work on a feature branch.** All commits land directly on `main`.
+- **Never run `git rebase` interactively or otherwise.** If you think you need to rebase, you do not.
+- **Never run `git checkout <other-ref>`** to detach the HEAD or move off `main`. The only acceptable reset of HEAD is `git pull --rebase origin main` to sync with the remote, and even that goes onto `main`.
+- **Never run `git stash`** to "park" changes — commit them or discard them properly. Stashing is how work gets lost.
+- If your tooling (codex's `/review`, an agent script, anything) wants to spawn a worktree, **disable it immediately or work around it.** A worktree-using helper is broken; do not use it.
+
+**ENFORCEMENT:**
+
+If you see a stray worktree on this host (anything other than `/data/projects/eidetic_engine_cli` itself in `git worktree list`), the orchestrator will:
+
+1. Cherry-pick any unique commits from the stray worktree onto `main`.
+2. `git worktree remove --force <path>` every stray worktree.
+3. Find which agent created it and dispatch a corrective prompt.
+
+Repeat offenders are killed and replaced.
+
+**NO WORKTREES. NO EXCEPTIONS. THIS IS NOT NEGOTIABLE.**
+
+---
+
 ## Toolchain: Rust & Cargo
 
 We only use **Cargo** in this project, NEVER any other package manager.
