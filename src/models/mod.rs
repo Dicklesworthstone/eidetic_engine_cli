@@ -1,6 +1,7 @@
 use std::process::ExitCode;
 
 pub mod certificate;
+pub mod claims;
 pub mod degradation;
 pub mod episode;
 pub mod error_codes;
@@ -22,6 +23,15 @@ pub use certificate::{
     LifecycleCertificate, LifecycleEvent, PackCertificate, ParseCertificateKindError,
     ParseCertificateStatusError, ParseLifecycleEventError, PrivacyBudgetCertificate,
     TailRiskCertificate,
+};
+pub use claims::{
+    ArtifactType, BLAKE3_HEX_LEN, CLAIMS_FILE_SCHEMA_V1, CLAIM_ENTRY_SCHEMA_V1,
+    CLAIM_MANIFEST_SCHEMA_V1, ClaimEntry, ClaimManifest, ClaimStatus, ClaimsFile,
+    MANIFEST_ARTIFACT_SCHEMA_V1, ManifestArtifact, ManifestValidationError,
+    ManifestValidationErrorKind, ManifestVerificationStatus, ParseArtifactTypeError,
+    ParseClaimStatusError, ParseManifestVerificationStatusError, ParseVerificationFrequencyError,
+    VerificationFrequency, is_valid_artifact_path, is_valid_blake3_hex, validate_artifact_entry,
+    validate_manifest_structure,
 };
 pub use degradation::{
     ALL_DEGRADATION_CODES, ActiveDegradation, DegradationCode, DegradationSeverity,
