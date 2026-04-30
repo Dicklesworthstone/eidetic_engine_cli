@@ -8,6 +8,7 @@ pub mod memory;
 pub mod provenance;
 pub mod revision;
 pub mod rule;
+pub mod timing;
 pub mod trust;
 
 pub use certificate::{
@@ -37,6 +38,7 @@ pub use revision::{
     RevisionMeta, SupersessionLink, SupersessionReason,
 };
 pub use rule::{ParseRuleMaturityError, ParseRuleScopeError, RuleMaturity, RuleScope};
+pub use timing::{DiagnosticTiming, TimingCapture, TimingPhase};
 pub use trust::{ParseTrustClassError, TrustClass};
 
 pub const RESPONSE_SCHEMA_V1: &str = "ee.response.v1";

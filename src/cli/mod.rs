@@ -703,7 +703,6 @@ where
             let timing_capture = crate::models::TimingCapture::start();
             let report = StatusReport::gather();
             let timing = timing_capture.finish();
-            let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
                 output::Renderer::Human => {
                     write_stdout(stdout, &output::render_status_human(&report))
