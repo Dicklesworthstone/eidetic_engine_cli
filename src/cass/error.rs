@@ -92,7 +92,7 @@ impl CassError {
             Self::Io { .. } => "io",
             Self::EmptyStdout => "empty_stdout",
             Self::InvalidStdoutJson { .. } => "invalid_stdout_json",
-            Self::ContractMismatch { .. } => "contract_mismatch",
+            Self::ContractMismatch { .. } => "external_adapter_schema_mismatch",
             Self::Degraded { .. } => "degraded",
             Self::Runtime { kind, .. } | Self::Unknown { kind, .. } => kind.as_str(),
         }
@@ -212,7 +212,7 @@ mod tests {
                     required: "1".into(),
                     observed: "2".into(),
                 },
-                "contract_mismatch",
+                "external_adapter_schema_mismatch",
             ),
             (
                 CassError::Degraded {

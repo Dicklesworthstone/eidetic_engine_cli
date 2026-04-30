@@ -20,12 +20,14 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use super::error::CassError;
 
 const ALLOWLISTED_CASS_EXECUTABLE: &str = "cass";
+const TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Sentinel exit code reserved by `cass` for the "degraded but usable"
 /// state. The spike documents that a stale-index probe can exit `0`
@@ -99,6 +101,7 @@ pub struct CassInvocation {
     args: Vec<OsString>,
     cwd: Option<PathBuf>,
     env_overrides: Vec<(OsString, OsString)>,
+    timeout: Option<Duration>,
 }
 
 impl CassInvocation {
@@ -114,6 +117,7 @@ impl CassInvocation {
             args: args.into_iter().map(Into::into).collect(),
             cwd: None,
             env_overrides: Vec::new(),
+            timeout: None,
         }
     }
 
@@ -133,6 +137,15 @@ impl CassInvocation {
         V: Into<OsString>,
     {
         self.env_overrides.push((key.into(), value.into()));
+        self
+    }
+
+    /// Set the subprocess wall-clock budget. If the child is still
+    /// running when the budget expires, it is killed and reaped before
+    /// returning a timed-out [`CassOutcome`].
+    #[must_use]
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
         self
     }
 
@@ -160,6 +173,12 @@ impl CassInvocation {
         self.env_overrides.as_slice()
     }
 
+    /// Wall-clock budget applied to this subprocess, if configured.
+    #[must_use]
+    pub const fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
     /// Spawn the subprocess and capture stdout / stderr / exit code.
     ///
     /// This is the only function in the cass module that touches the
@@ -183,6 +202,10 @@ impl CassInvocation {
         for (key, value) in &self.env_overrides {
             command.env(key, value);
         }
+        if let Some(timeout) = self.timeout {
+            return self.run_with_timeout(command, started, timeout);
+        }
+
         let output = command.output().map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 CassError::BinaryNotFound {
@@ -204,7 +227,59 @@ impl CassInvocation {
             stderr,
             exit_code,
             elapsed,
+            false,
         ))
+    }
+
+    fn run_with_timeout(
+        &self,
+        mut command: Command,
+        started: Instant,
+        timeout: Duration,
+    ) -> Result<CassOutcome, CassError> {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                CassError::BinaryNotFound {
+                    binary: self.binary.clone(),
+                }
+            } else {
+                CassError::Io {
+                    message: error.to_string(),
+                }
+            }
+        })?;
+
+        loop {
+            if child.try_wait().map_err(CassError::from)?.is_some() {
+                let output = child.wait_with_output().map_err(CassError::from)?;
+                return Ok(CassOutcome::new(
+                    self.clone(),
+                    output.stdout,
+                    output.stderr,
+                    output.status.code(),
+                    started.elapsed(),
+                    false,
+                ));
+            }
+
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                let _ = child.kill();
+                let output = child.wait_with_output().map_err(CassError::from)?;
+                return Ok(CassOutcome::new(
+                    self.clone(),
+                    output.stdout,
+                    output.stderr,
+                    output.status.code(),
+                    started.elapsed(),
+                    true,
+                ));
+            }
+
+            let remaining = timeout.saturating_sub(elapsed);
+            thread::sleep(remaining.min(TIMEOUT_POLL_INTERVAL));
+        }
     }
 
     fn command_for_spawn(&self) -> Result<Command, CassError> {
@@ -266,6 +341,7 @@ pub struct CassOutcome {
     exit_code: Option<i32>,
     elapsed: Duration,
     class: CassExitClass,
+    timed_out: bool,
 }
 
 impl CassOutcome {
@@ -276,6 +352,7 @@ impl CassOutcome {
         stderr: Vec<u8>,
         exit_code: Option<i32>,
         elapsed: Duration,
+        timed_out: bool,
     ) -> Self {
         let class = CassExitClass::classify(exit_code, stdout.len());
         Self {
@@ -285,6 +362,7 @@ impl CassOutcome {
             exit_code,
             elapsed,
             class,
+            timed_out,
         }
     }
 
@@ -299,7 +377,7 @@ impl CassOutcome {
         stderr: Vec<u8>,
         exit_code: Option<i32>,
     ) -> Self {
-        Self::new(invocation, stdout, stderr, exit_code, Duration::ZERO)
+        Self::new(invocation, stdout, stderr, exit_code, Duration::ZERO, false)
     }
 
     /// Construct an outcome for tests with an explicit elapsed time.
@@ -311,7 +389,7 @@ impl CassOutcome {
         exit_code: Option<i32>,
         elapsed: Duration,
     ) -> Self {
-        Self::new(invocation, stdout, stderr, exit_code, elapsed)
+        Self::new(invocation, stdout, stderr, exit_code, elapsed, false)
     }
 
     /// Original invocation that produced this outcome.
@@ -362,6 +440,13 @@ impl CassOutcome {
     #[must_use]
     pub const fn class(&self) -> CassExitClass {
         self.class
+    }
+
+    /// `true` when the subprocess exceeded its wall-clock budget and
+    /// was killed and reaped by [`CassInvocation::run`].
+    #[must_use]
+    pub const fn timed_out(&self) -> bool {
+        self.timed_out
     }
 
     /// `true` iff stdout is empty.
@@ -490,6 +575,30 @@ mod tests {
 
         assert_eq!(outcome.elapsed(), Duration::from_millis(42));
         assert_eq!(outcome.class(), CassExitClass::Success);
+        assert!(!outcome.timed_out());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_kills_and_reaps_child_when_timeout_expires() -> Result<(), String> {
+        let dir = unique_test_dir("timeout-binary")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join("cass");
+        fs::write(&binary, "#!/bin/sh\nexec sleep 5\n").map_err(|error| error.to_string())?;
+        let mut permissions = fs::metadata(&binary)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&binary, permissions).map_err(|error| error.to_string())?;
+
+        let inv = CassInvocation::new(binary, ["health", "--json"])
+            .with_timeout(Duration::from_millis(20));
+        let outcome = inv.run().map_err(|error| error.to_string())?;
+
+        assert!(outcome.timed_out());
+        assert_eq!(outcome.class(), CassExitClass::Failure);
+        assert!(outcome.elapsed() >= Duration::from_millis(20));
+        Ok(())
     }
 
     #[test]

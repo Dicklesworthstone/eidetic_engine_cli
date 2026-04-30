@@ -349,14 +349,7 @@ fn discover_sessions(
     workspace_path: &Path,
     limit: u32,
 ) -> Result<Vec<CassSessionInfo>, CassImportError> {
-    let invocation = client.invocation([
-        "sessions".to_string(),
-        "--workspace".to_string(),
-        workspace_path.to_string_lossy().into_owned(),
-        "--json".to_string(),
-        "--limit".to_string(),
-        limit.to_string(),
-    ]);
+    let invocation = client.sessions_invocation(workspace_path, limit);
     let outcome = client.run(&invocation)?;
     ensure_successful_outcome(&outcome, "cass sessions")?;
     parse_sessions_json(outcome.stdout_bytes())
@@ -366,15 +359,7 @@ fn view_session_spans(
     client: &CassClient,
     source_path: &str,
 ) -> Result<Vec<CassViewSpanForImport>, CassImportError> {
-    let invocation = client.invocation([
-        "view".to_string(),
-        source_path.to_string(),
-        "-n".to_string(),
-        "1".to_string(),
-        "-C".to_string(),
-        DEFAULT_VIEW_CONTEXT.to_string(),
-        "--json".to_string(),
-    ]);
+    let invocation = client.view_invocation(source_path, 1, DEFAULT_VIEW_CONTEXT);
     let outcome = client.run(&invocation)?;
     ensure_successful_outcome(&outcome, "cass view")?;
     parse_view_json(outcome.stdout_bytes(), source_path)

@@ -50,9 +50,11 @@ pub use degradation::{
 };
 pub use economy::{
     ATTENTION_COST_SCHEMA_V1, AggregateUtility, AttentionCost, DebtLevel,
-    ECONOMY_RECOMMENDATION_SCHEMA_V1, ECONOMY_REPORT_SCHEMA_V1, EconomyRecommendation,
-    EconomyReport, EconomyRiskCategory, Effort, Impact, MAINTENANCE_DEBT_SCHEMA_V1,
-    MaintenanceDebt, RecommendationType, RISK_RESERVE_SCHEMA_V1, RiskReserve, UtilityValue,
+    ECONOMY_RECOMMENDATION_SCHEMA_V1, ECONOMY_REPORT_SCHEMA_V1, ECONOMY_SCHEMA_CATALOG_V1,
+    EconomyFieldSchema, EconomyObjectSchema, EconomyRecommendation, EconomyReport,
+    EconomyRiskCategory, Effort, Impact, MAINTENANCE_DEBT_SCHEMA_V1, MaintenanceDebt,
+    RISK_RESERVE_SCHEMA_V1, RecommendationType, RiskReserve, UTILITY_VALUE_SCHEMA_V1, UtilityValue,
+    economy_schema_catalog_json, economy_schemas,
 };
 pub use episode::{
     ActionType, COUNTERFACTUAL_RUN_ID_PREFIX, COUNTERFACTUAL_RUN_SCHEMA_V1, CounterfactualMethod,

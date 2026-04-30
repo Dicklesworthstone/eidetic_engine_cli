@@ -2263,9 +2263,8 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
     // ========================================================================
 
     use super::{
-        CandidateSource, CandidateType, OutcomeProbabilities, ParseRiskLevelError,
-        RISK_CERTIFICATE_SCHEMA_V1, RiskCertificate, RiskFactor, RiskLevel, RiskRecommendation,
-        ValidatedCandidate, assess_risk,
+        OutcomeProbabilities, ParseRiskLevelError, RISK_CERTIFICATE_SCHEMA_V1, RiskCertificate,
+        RiskFactor, RiskLevel, RiskRecommendation, ValidatedCandidate, assess_risk,
     };
 
     type TestResult = Result<(), String>;

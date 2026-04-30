@@ -32,12 +32,14 @@ pub const REQUIRED_API_VERSION: u32 = 1;
 /// deterministic JSON serialisation.
 pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "api_version_command",
+    "expand_command",
     "field_selection",
     "introspect_command",
     "json_output",
     "request_id",
     "robot_meta",
     "status_command",
+    "timeout",
     "view_command",
 ];
 
@@ -127,8 +129,9 @@ impl CassContract {
     ///
     /// # Errors
     ///
-    /// Returns [`CassError::ContractMismatch`] when either
-    /// `api_version` or `contract_version` differs from the pinned
+    /// Returns [`CassError::ContractMismatch`] with the stable
+    /// `external_adapter_schema_mismatch` kind when either `api_version`
+    /// or `contract_version` differs from the pinned
     /// constants. Capability gaps are reported through
     /// [`Self::missing_required_capabilities`] (not as a hard failure)
     /// so degraded modes can surface the reason without aborting.
@@ -241,7 +244,7 @@ mod tests {
             Ok(()) => return Err("api mismatch must fail".to_string()),
             Err(error) => error,
         };
-        assert_eq!(error.kind_str(), "contract_mismatch");
+        assert_eq!(error.kind_str(), "external_adapter_schema_mismatch");
         assert!(error.to_string().contains("api_version=1"));
         assert!(error.to_string().contains("api_version=2"));
         Ok(())
@@ -254,7 +257,7 @@ mod tests {
             Ok(()) => return Err("contract version mismatch must fail".to_string()),
             Err(error) => error,
         };
-        assert_eq!(error.kind_str(), "contract_mismatch");
+        assert_eq!(error.kind_str(), "external_adapter_schema_mismatch");
         assert!(error.to_string().contains("contract_version=1"));
         assert!(error.to_string().contains("contract_version=2"));
         Ok(())
@@ -270,10 +273,12 @@ mod tests {
             missing,
             vec![
                 "api_version_command",
+                "expand_command",
                 "field_selection",
                 "introspect_command",
                 "robot_meta",
                 "status_command",
+                "timeout",
                 "view_command",
             ],
         );

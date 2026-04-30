@@ -558,7 +558,7 @@ impl ProvenanceEvent {
 }
 
 /// Type of provenance event.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum ProvenanceEventType {
     /// Source code was captured.
     Capture,

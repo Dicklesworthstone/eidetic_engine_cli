@@ -11,6 +11,9 @@ use serde_json::{Value as JsonValue, json};
 /// Schema identifier for attention cost records.
 pub const ATTENTION_COST_SCHEMA_V1: &str = "ee.economy.attention_cost.v1";
 
+/// Schema identifier for utility value records.
+pub const UTILITY_VALUE_SCHEMA_V1: &str = "ee.economy.utility_value.v1";
+
 /// Schema identifier for risk reserve records.
 pub const RISK_RESERVE_SCHEMA_V1: &str = "ee.economy.risk_reserve.v1";
 
@@ -22,6 +25,19 @@ pub const ECONOMY_RECOMMENDATION_SCHEMA_V1: &str = "ee.economy.recommendation.v1
 
 /// Schema identifier for economy report.
 pub const ECONOMY_REPORT_SCHEMA_V1: &str = "ee.economy.report.v1";
+
+/// Schema identifier for the economy schema catalog.
+pub const ECONOMY_SCHEMA_CATALOG_V1: &str = "ee.economy.schemas.v1";
+
+const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
+
+fn rounded_metric(value: f64) -> f64 {
+    if value.is_finite() {
+        (value * 1000.0).round() / 1000.0
+    } else {
+        0.0
+    }
+}
 
 // ============================================================================
 // Utility Value
@@ -98,14 +114,15 @@ impl UtilityValue {
     #[must_use]
     pub fn data_json(&self) -> JsonValue {
         json!({
-            "score": format!("{:.3}", self.score),
+            "schema": UTILITY_VALUE_SCHEMA_V1,
+            "score": rounded_metric(self.score),
             "retrievalCount": self.retrieval_count,
             "successCount": self.success_count,
             "falseAlarmCount": self.false_alarm_count,
-            "projectedUtility": format!("{:.3}", self.projected_utility),
-            "confidence": format!("{:.3}", self.confidence),
-            "effective": format!("{:.3}", self.effective()),
-            "falseAlarmRate": format!("{:.3}", self.false_alarm_rate()),
+            "projectedUtility": rounded_metric(self.projected_utility),
+            "confidence": rounded_metric(self.confidence),
+            "effective": rounded_metric(self.effective()),
+            "falseAlarmRate": rounded_metric(self.false_alarm_rate()),
         })
     }
 }
@@ -189,11 +206,11 @@ impl AttentionCost {
         json!({
             "schema": ATTENTION_COST_SCHEMA_V1,
             "tokenCost": self.token_cost,
-            "cognitiveLoad": format!("{:.3}", self.cognitive_load),
-            "relevanceDecay": format!("{:.3}", self.relevance_decay),
-            "contextSwitchCost": format!("{:.3}", self.context_switch_cost),
-            "displacementCost": format!("{:.3}", self.displacement_cost),
-            "totalCost": format!("{:.3}", self.total_cost()),
+            "cognitiveLoad": rounded_metric(self.cognitive_load),
+            "relevanceDecay": rounded_metric(self.relevance_decay),
+            "contextSwitchCost": rounded_metric(self.context_switch_cost),
+            "displacementCost": rounded_metric(self.displacement_cost),
+            "totalCost": rounded_metric(self.total_cost()),
         })
     }
 }
@@ -235,7 +252,10 @@ impl RiskReserve {
             token_budget,
             memory_slots,
             utilization: 0.0,
-            covered_risks: vec![EconomyRiskCategory::SecurityIncident, EconomyRiskCategory::DataLoss],
+            covered_risks: vec![
+                EconomyRiskCategory::SecurityIncident,
+                EconomyRiskCategory::DataLoss,
+            ],
             min_level: 0.2,
             max_level: 0.8,
         }
@@ -293,7 +313,9 @@ impl RiskReserve {
             "schema": RISK_RESERVE_SCHEMA_V1,
             "tokenBudget": self.token_budget,
             "memorySlots": self.memory_slots,
-            "utilization": format!("{:.3}", self.utilization),
+            "utilization": rounded_metric(self.utilization),
+            "minLevel": rounded_metric(self.min_level),
+            "maxLevel": rounded_metric(self.max_level),
             "availableTokens": self.available_tokens(),
             "availableSlots": self.available_slots(),
             "coveredRisks": self.covered_risks.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
@@ -446,7 +468,7 @@ impl MaintenanceDebt {
             "indexDrift": self.index_drift,
             "unvalidatedRules": self.unvalidated_rules,
             "daysSinceSweep": self.days_since_sweep,
-            "debtScore": format!("{:.3}", self.debt_score),
+            "debtScore": rounded_metric(self.debt_score),
             "level": self.level().as_str(),
             "isUrgent": self.is_urgent(),
             "isHealthy": self.is_healthy(),
@@ -778,8 +800,8 @@ impl EconomyReport {
         let debt_health = 1.0 - self.maintenance_debt.debt_score;
         let utility_health = self.aggregate_utility.mean_utility;
 
-        self.health_score = (reserve_health * 0.3 + debt_health * 0.4 + utility_health * 0.3)
-            .clamp(0.0, 1.0);
+        self.health_score =
+            (reserve_health * 0.3 + debt_health * 0.4 + utility_health * 0.3).clamp(0.0, 1.0);
     }
 
     /// Add a recommendation.
@@ -799,7 +821,7 @@ impl EconomyReport {
         json!({
             "schema": ECONOMY_REPORT_SCHEMA_V1,
             "generatedAt": self.generated_at,
-            "healthScore": format!("{:.3}", self.health_score),
+            "healthScore": rounded_metric(self.health_score),
             "riskReserve": self.risk_reserve.data_json(),
             "maintenanceDebt": self.maintenance_debt.data_json(),
             "aggregateUtility": self.aggregate_utility.data_json(),
@@ -896,8 +918,7 @@ impl AggregateUtility {
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median = sorted[sorted.len() / 2];
 
-        let variance: f64 =
-            scores.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / total as f64;
+        let variance: f64 = scores.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / total as f64;
         let std_dev = variance.sqrt();
 
         let low_utility_count = scores.iter().filter(|&&s| s < 0.3).count() as u32;
@@ -918,9 +939,9 @@ impl AggregateUtility {
     pub fn data_json(&self) -> JsonValue {
         json!({
             "totalMemories": self.total_memories,
-            "meanUtility": format!("{:.3}", self.mean_utility),
-            "medianUtility": format!("{:.3}", self.median_utility),
-            "stdDev": format!("{:.3}", self.std_dev),
+            "meanUtility": rounded_metric(self.mean_utility),
+            "medianUtility": rounded_metric(self.median_utility),
+            "stdDev": rounded_metric(self.std_dev),
             "lowUtilityCount": self.low_utility_count,
             "highUtilityCount": self.high_utility_count,
         })
@@ -940,9 +961,543 @@ impl Default for AggregateUtility {
     }
 }
 
+// ============================================================================
+// Schema Catalog
+// ============================================================================
+
+/// Field descriptor used by the economy schema catalog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EconomyFieldSchema {
+    pub name: &'static str,
+    pub type_name: &'static str,
+    pub required: bool,
+    pub description: &'static str,
+}
+
+impl EconomyFieldSchema {
+    #[must_use]
+    pub const fn new(
+        name: &'static str,
+        type_name: &'static str,
+        required: bool,
+        description: &'static str,
+    ) -> Self {
+        Self {
+            name,
+            type_name,
+            required,
+            description,
+        }
+    }
+}
+
+/// Stable JSON-schema-like catalog entry for economy records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EconomyObjectSchema {
+    pub schema_name: &'static str,
+    pub schema_uri: &'static str,
+    pub kind: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub fields: &'static [EconomyFieldSchema],
+}
+
+impl EconomyObjectSchema {
+    #[must_use]
+    pub fn required_count(&self) -> usize {
+        self.fields.iter().filter(|field| field.required).count()
+    }
+}
+
+const UTILITY_VALUE_FIELDS: &[EconomyFieldSchema] = &[
+    EconomyFieldSchema::new("schema", "string", true, "Schema identifier."),
+    EconomyFieldSchema::new(
+        "score",
+        "number",
+        true,
+        "Raw utility score from 0.0 to 1.0.",
+    ),
+    EconomyFieldSchema::new(
+        "retrievalCount",
+        "integer",
+        true,
+        "Times the artifact was retrieved.",
+    ),
+    EconomyFieldSchema::new(
+        "successCount",
+        "integer",
+        true,
+        "Times retrieval contributed to a successful outcome.",
+    ),
+    EconomyFieldSchema::new(
+        "falseAlarmCount",
+        "integer",
+        true,
+        "Times retrieval wasted attention or produced a false alarm.",
+    ),
+    EconomyFieldSchema::new(
+        "projectedUtility",
+        "number",
+        true,
+        "Projected future utility based on trend evidence.",
+    ),
+    EconomyFieldSchema::new(
+        "confidence",
+        "number",
+        true,
+        "Confidence in the utility estimate from 0.0 to 1.0.",
+    ),
+    EconomyFieldSchema::new(
+        "effective",
+        "number",
+        true,
+        "Utility score adjusted by confidence.",
+    ),
+    EconomyFieldSchema::new(
+        "falseAlarmRate",
+        "number",
+        true,
+        "False alarms divided by retrieval count.",
+    ),
+];
+
+const ATTENTION_COST_FIELDS: &[EconomyFieldSchema] = &[
+    EconomyFieldSchema::new("schema", "string", true, "Schema identifier."),
+    EconomyFieldSchema::new(
+        "tokenCost",
+        "integer",
+        true,
+        "Token cost of surfacing the artifact.",
+    ),
+    EconomyFieldSchema::new(
+        "cognitiveLoad",
+        "number",
+        true,
+        "Estimated cognitive load from 0.0 to 1.0.",
+    ),
+    EconomyFieldSchema::new(
+        "relevanceDecay",
+        "number",
+        true,
+        "Relevance decay since last use from 0.0 to 1.0.",
+    ),
+    EconomyFieldSchema::new(
+        "contextSwitchCost",
+        "number",
+        true,
+        "Cost of switching context to use the artifact.",
+    ),
+    EconomyFieldSchema::new(
+        "displacementCost",
+        "number",
+        true,
+        "Opportunity cost of displacing other artifacts.",
+    ),
+    EconomyFieldSchema::new(
+        "totalCost",
+        "number",
+        true,
+        "Weighted aggregate attention cost.",
+    ),
+];
+
+const RISK_RESERVE_FIELDS: &[EconomyFieldSchema] = &[
+    EconomyFieldSchema::new("schema", "string", true, "Schema identifier."),
+    EconomyFieldSchema::new(
+        "tokenBudget",
+        "integer",
+        true,
+        "Token budget reserved for tail-risk coverage.",
+    ),
+    EconomyFieldSchema::new(
+        "memorySlots",
+        "integer",
+        true,
+        "Artifact slots reserved for critical fallback information.",
+    ),
+    EconomyFieldSchema::new(
+        "utilization",
+        "number",
+        true,
+        "Reserve utilization from 0.0 to 1.0.",
+    ),
+    EconomyFieldSchema::new(
+        "coveredRisks",
+        "array<string>",
+        true,
+        "Risk categories covered by the reserve.",
+    ),
+    EconomyFieldSchema::new(
+        "minLevel",
+        "number",
+        true,
+        "Minimum reserve level before depletion warnings.",
+    ),
+    EconomyFieldSchema::new(
+        "maxLevel",
+        "number",
+        true,
+        "Maximum reserve level before excess capacity can be released.",
+    ),
+    EconomyFieldSchema::new(
+        "availableTokens",
+        "integer",
+        true,
+        "Token budget still available in the reserve.",
+    ),
+    EconomyFieldSchema::new(
+        "availableSlots",
+        "integer",
+        true,
+        "Artifact slots still available in the reserve.",
+    ),
+    EconomyFieldSchema::new(
+        "isDepleted",
+        "boolean",
+        true,
+        "Whether reserve capacity is depleted.",
+    ),
+    EconomyFieldSchema::new(
+        "hasExcess",
+        "boolean",
+        true,
+        "Whether reserve capacity is above its target maximum.",
+    ),
+];
+
+const MAINTENANCE_DEBT_FIELDS: &[EconomyFieldSchema] = &[
+    EconomyFieldSchema::new("schema", "string", true, "Schema identifier."),
+    EconomyFieldSchema::new(
+        "staleMemories",
+        "integer",
+        true,
+        "Stale memories needing review.",
+    ),
+    EconomyFieldSchema::new(
+        "orphanedLinks",
+        "integer",
+        true,
+        "Orphaned links needing cleanup.",
+    ),
+    EconomyFieldSchema::new(
+        "pendingConsolidations",
+        "integer",
+        true,
+        "Consolidation candidates waiting for review.",
+    ),
+    EconomyFieldSchema::new("indexDrift", "integer", true, "Index entries out of sync."),
+    EconomyFieldSchema::new(
+        "unvalidatedRules",
+        "integer",
+        true,
+        "Procedural rules that still lack validation evidence.",
+    ),
+    EconomyFieldSchema::new(
+        "daysSinceSweep",
+        "integer",
+        true,
+        "Days since the last full maintenance sweep.",
+    ),
+    EconomyFieldSchema::new(
+        "debtScore",
+        "number",
+        true,
+        "Overall maintenance debt score from 0.0 to 1.0.",
+    ),
+    EconomyFieldSchema::new(
+        "level",
+        "string",
+        true,
+        "Categorical maintenance debt level.",
+    ),
+    EconomyFieldSchema::new(
+        "isUrgent",
+        "boolean",
+        true,
+        "Whether maintenance should be prioritized immediately.",
+    ),
+    EconomyFieldSchema::new(
+        "isHealthy",
+        "boolean",
+        true,
+        "Whether maintenance debt is within the healthy range.",
+    ),
+];
+
+const ECONOMY_RECOMMENDATION_FIELDS: &[EconomyFieldSchema] = &[
+    EconomyFieldSchema::new("schema", "string", true, "Schema identifier."),
+    EconomyFieldSchema::new("id", "string", true, "Stable recommendation identifier."),
+    EconomyFieldSchema::new("type", "string", true, "Recommendation type."),
+    EconomyFieldSchema::new("priority", "integer", true, "Base priority from 0 to 100."),
+    EconomyFieldSchema::new(
+        "adjustedPriority",
+        "integer",
+        true,
+        "Priority adjusted by expected impact and effort.",
+    ),
+    EconomyFieldSchema::new(
+        "title",
+        "string",
+        true,
+        "Human-readable recommendation title.",
+    ),
+    EconomyFieldSchema::new("description", "string", true, "Recommendation details."),
+    EconomyFieldSchema::new("expectedImpact", "string", true, "Expected impact level."),
+    EconomyFieldSchema::new("effort", "string", true, "Estimated implementation effort."),
+    EconomyFieldSchema::new(
+        "automatable",
+        "boolean",
+        true,
+        "Whether action may be automated.",
+    ),
+    EconomyFieldSchema::new(
+        "suggestedCommand",
+        "string|null",
+        false,
+        "Suggested CLI command when automation is safe.",
+    ),
+];
+
+const ECONOMY_REPORT_FIELDS: &[EconomyFieldSchema] = &[
+    EconomyFieldSchema::new("schema", "string", true, "Schema identifier."),
+    EconomyFieldSchema::new("generatedAt", "string", true, "RFC 3339 report timestamp."),
+    EconomyFieldSchema::new(
+        "healthScore",
+        "number",
+        true,
+        "Overall economy health score.",
+    ),
+    EconomyFieldSchema::new(
+        "riskReserve",
+        "object",
+        true,
+        "Current risk reserve status.",
+    ),
+    EconomyFieldSchema::new(
+        "maintenanceDebt",
+        "object",
+        true,
+        "Current maintenance debt status.",
+    ),
+    EconomyFieldSchema::new(
+        "aggregateUtility",
+        "object",
+        true,
+        "Aggregate utility metrics across artifacts.",
+    ),
+    EconomyFieldSchema::new(
+        "recommendationCount",
+        "integer",
+        true,
+        "Number of active recommendations.",
+    ),
+    EconomyFieldSchema::new(
+        "recommendations",
+        "array<object>",
+        true,
+        "Active economy recommendations sorted by priority.",
+    ),
+];
+
+#[must_use]
+pub const fn economy_schemas() -> [EconomyObjectSchema; 6] {
+    [
+        EconomyObjectSchema {
+            schema_name: UTILITY_VALUE_SCHEMA_V1,
+            schema_uri: "urn:ee:schema:economy-utility-value:v1",
+            kind: "utility_value",
+            title: "UtilityValue",
+            description: "Evidence-backed value estimate for surfacing an artifact.",
+            fields: UTILITY_VALUE_FIELDS,
+        },
+        EconomyObjectSchema {
+            schema_name: ATTENTION_COST_SCHEMA_V1,
+            schema_uri: "urn:ee:schema:economy-attention-cost:v1",
+            kind: "attention_cost",
+            title: "AttentionCost",
+            description: "Token and cognitive cost estimate for surfacing an artifact.",
+            fields: ATTENTION_COST_FIELDS,
+        },
+        EconomyObjectSchema {
+            schema_name: RISK_RESERVE_SCHEMA_V1,
+            schema_uri: "urn:ee:schema:economy-risk-reserve:v1",
+            kind: "risk_reserve",
+            title: "RiskReserve",
+            description: "Reserved attention budget for tail-risk coverage and fallback evidence.",
+            fields: RISK_RESERVE_FIELDS,
+        },
+        EconomyObjectSchema {
+            schema_name: MAINTENANCE_DEBT_SCHEMA_V1,
+            schema_uri: "urn:ee:schema:economy-maintenance-debt:v1",
+            kind: "maintenance_debt",
+            title: "MaintenanceDebt",
+            description: "Deferred memory maintenance work that degrades retrieval quality.",
+            fields: MAINTENANCE_DEBT_FIELDS,
+        },
+        EconomyObjectSchema {
+            schema_name: ECONOMY_RECOMMENDATION_SCHEMA_V1,
+            schema_uri: "urn:ee:schema:economy-recommendation:v1",
+            kind: "economy_recommendation",
+            title: "EconomyRecommendation",
+            description: "Recommended action to improve utility, reserves, or maintenance debt.",
+            fields: ECONOMY_RECOMMENDATION_FIELDS,
+        },
+        EconomyObjectSchema {
+            schema_name: ECONOMY_REPORT_SCHEMA_V1,
+            schema_uri: "urn:ee:schema:economy-report:v1",
+            kind: "economy_report",
+            title: "EconomyReport",
+            description: "Snapshot report over utility, attention cost, reserves, debt, and recommendations.",
+            fields: ECONOMY_REPORT_FIELDS,
+        },
+    ]
+}
+
+#[must_use]
+pub fn economy_schema_catalog_json() -> String {
+    let schemas = economy_schemas();
+    let mut output = String::from("{\n");
+    output.push_str(&format!("  \"schema\": \"{ECONOMY_SCHEMA_CATALOG_V1}\",\n"));
+    output.push_str("  \"schemas\": [\n");
+    for (schema_index, schema) in schemas.iter().enumerate() {
+        output.push_str("    {\n");
+        output.push_str(&format!(
+            "      \"$schema\": \"{JSON_SCHEMA_DRAFT_2020_12}\",\n"
+        ));
+        output.push_str("      \"$id\": ");
+        push_json_string(&mut output, schema.schema_uri);
+        output.push_str(",\n");
+        output.push_str("      \"eeSchema\": ");
+        push_json_string(&mut output, schema.schema_name);
+        output.push_str(",\n");
+        output.push_str("      \"kind\": ");
+        push_json_string(&mut output, schema.kind);
+        output.push_str(",\n");
+        output.push_str("      \"title\": ");
+        push_json_string(&mut output, schema.title);
+        output.push_str(",\n");
+        output.push_str("      \"description\": ");
+        push_json_string(&mut output, schema.description);
+        output.push_str(",\n");
+        output.push_str("      \"type\": \"object\",\n");
+        output.push_str("      \"required\": [\n");
+        let mut emitted_required = 0;
+        for field in schema.fields {
+            if field.required {
+                emitted_required += 1;
+                output.push_str("        ");
+                push_json_string(&mut output, field.name);
+                if emitted_required == schema.required_count() {
+                    output.push('\n');
+                } else {
+                    output.push_str(",\n");
+                }
+            }
+        }
+        output.push_str("      ],\n");
+        output.push_str("      \"fields\": [\n");
+        for (field_index, field) in schema.fields.iter().enumerate() {
+            output.push_str("        {\"name\": ");
+            push_json_string(&mut output, field.name);
+            output.push_str(", \"type\": ");
+            push_json_string(&mut output, field.type_name);
+            output.push_str(", \"required\": ");
+            output.push_str(if field.required { "true" } else { "false" });
+            output.push_str(", \"description\": ");
+            push_json_string(&mut output, field.description);
+            if field_index + 1 == schema.fields.len() {
+                output.push_str("}\n");
+            } else {
+                output.push_str("},\n");
+            }
+        }
+        output.push_str("      ],\n");
+        output.push_str("      \"additionalProperties\": false\n");
+        if schema_index + 1 == schemas.len() {
+            output.push_str("    }\n");
+        } else {
+            output.push_str("    },\n");
+        }
+    }
+    output.push_str("  ]\n");
+    output.push_str("}\n");
+    output
+}
+
+fn push_json_string(output: &mut String, value: &str) {
+    output.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            other => output.push(other),
+        }
+    }
+    output.push('"');
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ECONOMY_SCHEMA_GOLDEN: &str =
+        include_str!("../../tests/fixtures/golden/models/economy_schemas.json.golden");
+
+    type TestResult = Result<(), String>;
+
+    fn ensure<T: std::fmt::Debug + PartialEq>(actual: T, expected: T, ctx: &str) -> TestResult {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
+        }
+    }
+
+    fn ensure_json_number(value: &serde_json::Value, ctx: &str) -> TestResult {
+        if value.is_number() {
+            Ok(())
+        } else {
+            Err(format!("{ctx}: expected JSON number, got {value:?}"))
+        }
+    }
+
+    #[test]
+    fn economy_schema_constants_are_stable() -> TestResult {
+        ensure(
+            UTILITY_VALUE_SCHEMA_V1,
+            "ee.economy.utility_value.v1",
+            "utility",
+        )?;
+        ensure(
+            ATTENTION_COST_SCHEMA_V1,
+            "ee.economy.attention_cost.v1",
+            "attention",
+        )?;
+        ensure(
+            RISK_RESERVE_SCHEMA_V1,
+            "ee.economy.risk_reserve.v1",
+            "reserve",
+        )?;
+        ensure(
+            MAINTENANCE_DEBT_SCHEMA_V1,
+            "ee.economy.maintenance_debt.v1",
+            "debt",
+        )?;
+        ensure(
+            ECONOMY_RECOMMENDATION_SCHEMA_V1,
+            "ee.economy.recommendation.v1",
+            "recommendation",
+        )?;
+        ensure(ECONOMY_REPORT_SCHEMA_V1, "ee.economy.report.v1", "report")?;
+        ensure(
+            ECONOMY_SCHEMA_CATALOG_V1,
+            "ee.economy.schemas.v1",
+            "catalog",
+        )
+    }
 
     #[test]
     fn utility_value_from_history() {
@@ -1030,6 +1585,53 @@ mod tests {
     }
 
     #[test]
+    fn utility_json_has_schema() {
+        let json = UtilityValue::new(0.75).data_json();
+        assert_eq!(json["schema"], UTILITY_VALUE_SCHEMA_V1);
+    }
+
+    #[test]
+    fn data_json_numeric_metrics_are_json_numbers() -> TestResult {
+        let utility = UtilityValue::from_history(3, 2, 1).data_json();
+        ensure_json_number(&utility["score"], "utility score")?;
+        ensure_json_number(&utility["projectedUtility"], "utility projected")?;
+        ensure_json_number(&utility["confidence"], "utility confidence")?;
+        ensure_json_number(&utility["effective"], "utility effective")?;
+        ensure_json_number(&utility["falseAlarmRate"], "utility false alarm")?;
+
+        let attention = AttentionCost::new(333)
+            .with_cognitive_load(0.4567)
+            .with_relevance_decay(0.2)
+            .with_context_switch(0.1)
+            .data_json();
+        ensure_json_number(&attention["cognitiveLoad"], "attention cognitive load")?;
+        ensure_json_number(&attention["totalCost"], "attention total cost")?;
+
+        let mut reserve = RiskReserve::new(1000, 10);
+        assert!(reserve.reserve(333, 3));
+        let reserve = reserve.data_json();
+        ensure_json_number(&reserve["utilization"], "reserve utilization")?;
+        ensure_json_number(&reserve["minLevel"], "reserve min level")?;
+        ensure_json_number(&reserve["maxLevel"], "reserve max level")?;
+
+        let mut debt = MaintenanceDebt::new();
+        debt.stale_memories = 3;
+        debt.recalculate_score();
+        let debt = debt.data_json();
+        ensure_json_number(&debt["debtScore"], "debt score")?;
+
+        let aggregate = AggregateUtility::from_scores(&[0.1, 0.2, 0.3]).data_json();
+        ensure_json_number(&aggregate["meanUtility"], "aggregate mean")?;
+        ensure_json_number(&aggregate["medianUtility"], "aggregate median")?;
+        ensure_json_number(&aggregate["stdDev"], "aggregate std dev")?;
+
+        let mut report = EconomyReport::new("2026-04-30T12:00:00Z");
+        report.recalculate_health();
+        let report = report.data_json();
+        ensure_json_number(&report["healthScore"], "report health")
+    }
+
+    #[test]
     fn aggregate_utility_from_scores() {
         let scores = vec![0.2, 0.4, 0.5, 0.6, 0.8, 0.9];
         let agg = AggregateUtility::from_scores(&scores);
@@ -1069,5 +1671,46 @@ mod tests {
         let all = RecommendationType::all();
         assert!(all.len() >= 7);
         assert!(all.contains(&RecommendationType::ReduceDebt));
+    }
+
+    #[test]
+    fn economy_schema_catalog_order_is_stable() -> TestResult {
+        let schemas = economy_schemas();
+        ensure(schemas.len(), 6, "schema count")?;
+        ensure(schemas[0].schema_name, UTILITY_VALUE_SCHEMA_V1, "utility")?;
+        ensure(
+            schemas[1].schema_name,
+            ATTENTION_COST_SCHEMA_V1,
+            "attention cost",
+        )?;
+        ensure(schemas[2].schema_name, RISK_RESERVE_SCHEMA_V1, "reserve")?;
+        ensure(schemas[3].schema_name, MAINTENANCE_DEBT_SCHEMA_V1, "debt")?;
+        ensure(
+            schemas[4].schema_name,
+            ECONOMY_RECOMMENDATION_SCHEMA_V1,
+            "recommendation",
+        )?;
+        ensure(schemas[5].schema_name, ECONOMY_REPORT_SCHEMA_V1, "report")
+    }
+
+    #[test]
+    fn economy_schema_catalog_matches_golden_fixture() {
+        assert_eq!(economy_schema_catalog_json(), ECONOMY_SCHEMA_GOLDEN);
+    }
+
+    #[test]
+    fn economy_schema_catalog_is_valid_json() -> TestResult {
+        let parsed: serde_json::Value = serde_json::from_str(ECONOMY_SCHEMA_GOLDEN)
+            .map_err(|error| format!("economy schema golden must be valid JSON: {error}"))?;
+        ensure(
+            parsed.get("schema").and_then(serde_json::Value::as_str),
+            Some(ECONOMY_SCHEMA_CATALOG_V1),
+            "catalog schema",
+        )?;
+        let schemas = parsed
+            .get("schemas")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "schemas must be an array".to_string())?;
+        ensure(schemas.len(), 6, "catalog length")
     }
 }

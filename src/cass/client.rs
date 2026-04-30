@@ -24,6 +24,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::error::CassError;
 use super::process::CassInvocation;
@@ -31,6 +32,8 @@ use super::process::CassInvocation;
 /// Default binary name `ee` resolves through `$PATH` when the config
 /// does not pin an explicit location.
 pub const DEFAULT_BINARY: &str = "cass";
+/// Default wall-clock budget for one CASS subprocess call.
+pub const DEFAULT_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How the CASS binary was located (EE-101).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -179,6 +182,7 @@ pub const STABLE_ENV_OVERRIDES: &[(&str, &str)] = &[
 pub struct CassClient {
     binary: PathBuf,
     extra_env: Vec<(OsString, OsString)>,
+    subprocess_timeout: Duration,
 }
 
 impl CassClient {
@@ -199,6 +203,7 @@ impl CassClient {
         Self {
             binary: discovered.path,
             extra_env: Vec::new(),
+            subprocess_timeout: DEFAULT_SUBPROCESS_TIMEOUT,
         }
     }
 
@@ -211,6 +216,7 @@ impl CassClient {
         Self {
             binary: binary.into(),
             extra_env: Vec::new(),
+            subprocess_timeout: DEFAULT_SUBPROCESS_TIMEOUT,
         }
     }
 
@@ -228,6 +234,13 @@ impl CassClient {
         self
     }
 
+    /// Override the wall-clock budget applied to every CASS subprocess.
+    #[must_use]
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.subprocess_timeout = timeout;
+        self
+    }
+
     /// Path the client will spawn.
     #[must_use]
     pub fn binary(&self) -> &Path {
@@ -240,6 +253,12 @@ impl CassClient {
         self.extra_env.as_slice()
     }
 
+    /// Wall-clock budget applied to every invocation produced by this client.
+    #[must_use]
+    pub const fn subprocess_timeout(&self) -> Duration {
+        self.subprocess_timeout
+    }
+
     /// Build a single [`CassInvocation`] for `cass <args...>`. The
     /// stable env overrides are always applied; per-call user env adds
     /// to them.
@@ -248,7 +267,8 @@ impl CassClient {
         I: IntoIterator<Item = S>,
         S: Into<OsString>,
     {
-        let mut inv = CassInvocation::new(self.binary.clone(), args);
+        let mut inv =
+            CassInvocation::new(self.binary.clone(), args).with_timeout(self.subprocess_timeout);
         for (key, value) in STABLE_ENV_OVERRIDES {
             inv = inv.with_env(*key, *value);
         }
@@ -290,6 +310,7 @@ impl CassClient {
         limit: u32,
         max_tokens: u32,
     ) -> CassInvocation {
+        let timeout_ms = self.subprocess_timeout.as_millis().to_string();
         self.invocation([
             "search".to_owned(),
             query.to_owned(),
@@ -301,8 +322,48 @@ impl CassClient {
             limit.to_string(),
             "--max-tokens".to_owned(),
             max_tokens.to_string(),
+            "--timeout".to_owned(),
+            timeout_ms,
             "--request-id".to_owned(),
             request_id.to_owned(),
+        ])
+    }
+
+    /// Build a `cass sessions --json` invocation for import discovery.
+    pub fn sessions_invocation(&self, workspace_path: &Path, limit: u32) -> CassInvocation {
+        self.invocation([
+            "sessions".to_owned(),
+            "--workspace".to_owned(),
+            workspace_path.to_string_lossy().into_owned(),
+            "--json".to_owned(),
+            "--limit".to_owned(),
+            limit.to_string(),
+        ])
+    }
+
+    /// Build a `cass view <path> -n <line> -C <context> --json` invocation.
+    pub fn view_invocation(&self, source_path: &str, line: u32, context: u32) -> CassInvocation {
+        self.invocation([
+            "view".to_owned(),
+            source_path.to_owned(),
+            "-n".to_owned(),
+            line.to_string(),
+            "-C".to_owned(),
+            context.to_string(),
+            "--json".to_owned(),
+        ])
+    }
+
+    /// Build a `cass expand <path> -n <line> -C <context> --json` invocation.
+    pub fn expand_invocation(&self, source_path: &str, line: u32, context: u32) -> CassInvocation {
+        self.invocation([
+            "expand".to_owned(),
+            source_path.to_owned(),
+            "-n".to_owned(),
+            line.to_string(),
+            "-C".to_owned(),
+            context.to_string(),
+            "--json".to_owned(),
         ])
     }
 
@@ -360,6 +421,7 @@ mod tests {
         }
         assert_eq!(inv.binary(), Path::new(DEFAULT_BINARY));
         assert_eq!(inv.args(), ["health", "--json"]);
+        assert_eq!(inv.timeout(), Some(super::DEFAULT_SUBPROCESS_TIMEOUT));
     }
 
     #[test]
@@ -414,6 +476,8 @@ mod tests {
                 "5",
                 "--max-tokens",
                 "4000",
+                "--timeout",
+                "30000",
                 "--request-id",
                 "ee-test-001",
             ],
@@ -481,5 +545,45 @@ mod tests {
         );
         let client = CassClient::from_discovered(discovered);
         assert_eq!(client.binary(), Path::new("/usr/bin/cass"));
+    }
+
+    #[test]
+    fn view_expand_and_sessions_invocations_are_machine_readable() -> TestResult {
+        let client = CassClient::new_default();
+
+        let sessions = client.sessions_invocation(Path::new("/work"), 7);
+        assert_eq!(
+            sessions.args(),
+            ["sessions", "--workspace", "/work", "--json", "--limit", "7"]
+        );
+
+        let view = client.view_invocation("/work/session.jsonl", 42, 4);
+        assert_eq!(
+            view.args(),
+            [
+                "view",
+                "/work/session.jsonl",
+                "-n",
+                "42",
+                "-C",
+                "4",
+                "--json"
+            ]
+        );
+
+        let expand = client.expand_invocation("/work/session.jsonl", 42, 3);
+        assert_eq!(
+            expand.args(),
+            [
+                "expand",
+                "/work/session.jsonl",
+                "-n",
+                "42",
+                "-C",
+                "3",
+                "--json"
+            ]
+        );
+        Ok(())
     }
 }
