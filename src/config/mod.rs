@@ -21,7 +21,9 @@ pub use merge::{
 };
 pub use path::{PathExpander, PathExpansionError};
 pub use workspace::{
-    WORKSPACE_MARKER, WorkspaceError, WorkspaceLocation, discover, discover_from_current_dir,
+    WORKSPACE_ENV_VAR, WORKSPACE_MARKER, WorkspaceError, WorkspaceLocation, WorkspaceResolution,
+    WorkspaceResolutionMode, WorkspaceResolutionRequest, WorkspaceResolutionSource, discover,
+    discover_from_current_dir, resolve_workspace,
 };
 
 pub const SUBSYSTEM: &str = "config";
