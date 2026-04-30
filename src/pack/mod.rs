@@ -634,6 +634,58 @@ impl PackDraft {
     }
 
     #[must_use]
+    pub fn quality_metrics(&self) -> PackQualityMetrics {
+        let item_count = self.items.len();
+        let omitted_count = self.omitted.len();
+        let provenance_source_count = self
+            .items
+            .iter()
+            .map(|item| item.provenance.len())
+            .sum::<usize>();
+
+        let mut relevance_sum = 0.0_f32;
+        let mut utility_sum = 0.0_f32;
+        for item in &self.items {
+            relevance_sum += item.relevance.into_inner();
+            utility_sum += item.utility.into_inner();
+        }
+
+        let mut token_budget_exceeded = 0_usize;
+        let mut redundant_candidates = 0_usize;
+        for omission in &self.omitted {
+            match omission.reason {
+                PackOmissionReason::TokenBudgetExceeded => {
+                    token_budget_exceeded = token_budget_exceeded.saturating_add(1);
+                }
+                PackOmissionReason::RedundantCandidate => {
+                    redundant_candidates = redundant_candidates.saturating_add(1);
+                }
+            }
+        }
+
+        PackQualityMetrics {
+            item_count,
+            omitted_count,
+            used_tokens: self.used_tokens,
+            max_tokens: self.budget.max_tokens(),
+            budget_utilization: token_ratio(self.used_tokens, self.budget.max_tokens()),
+            average_relevance: average_metric(relevance_sum, item_count),
+            average_utility: average_metric(utility_sum, item_count),
+            provenance_source_count,
+            provenance_sources_per_item: count_ratio(provenance_source_count, item_count),
+            provenance_complete: self.items.iter().all(|item| !item.provenance.is_empty()),
+            sections: PackSection::all()
+                .into_iter()
+                .map(|section| self.section_quality_metric(section))
+                .collect(),
+            omissions: PackOmissionMetrics {
+                token_budget_exceeded,
+                redundant_candidates,
+            },
+        }
+    }
+
+    #[must_use]
     pub fn provenance_footer(&self) -> PackProvenanceFooter {
         let mut memory_ids = BTreeSet::new();
         let mut schemes = BTreeSet::new();
@@ -660,6 +712,52 @@ impl PackDraft {
             entries,
         }
     }
+
+    fn section_quality_metric(&self, section: PackSection) -> PackSectionMetric {
+        let mut item_count = 0_usize;
+        let mut used_tokens = 0_u32;
+        for item in &self.items {
+            if item.section == section {
+                item_count = item_count.saturating_add(1);
+                used_tokens = used_tokens.saturating_add(item.estimated_tokens);
+            }
+        }
+
+        PackSectionMetric {
+            section,
+            item_count,
+            used_tokens,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackQualityMetrics {
+    pub item_count: usize,
+    pub omitted_count: usize,
+    pub used_tokens: u32,
+    pub max_tokens: u32,
+    pub budget_utilization: f32,
+    pub average_relevance: f32,
+    pub average_utility: f32,
+    pub provenance_source_count: usize,
+    pub provenance_sources_per_item: f32,
+    pub provenance_complete: bool,
+    pub sections: Vec<PackSectionMetric>,
+    pub omissions: PackOmissionMetrics,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackSectionMetric {
+    pub section: PackSection,
+    pub item_count: usize,
+    pub used_tokens: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackOmissionMetrics {
+    pub token_budget_exceeded: usize,
+    pub redundant_candidates: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -864,6 +962,26 @@ fn line_span_locator(span: crate::models::LineSpan) -> String {
 
 fn source_index(index: usize) -> u32 {
     u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX)
+}
+
+fn token_ratio(numerator: u32, denominator: u32) -> f32 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f32 / denominator as f32
+    }
+}
+
+fn count_ratio(numerator: usize, denominator: usize) -> f32 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f32 / denominator as f32
+    }
+}
+
+fn average_metric(sum: f32, count: usize) -> f32 {
+    if count == 0 { 0.0 } else { sum / count as f32 }
 }
 
 /// Assemble a deterministic context-pack draft from validated candidates.
@@ -1168,6 +1286,14 @@ mod tests {
         }
     }
 
+    fn ensure_close(actual: f32, expected: f32, context: &str) -> TestResult {
+        if (actual - expected).abs() <= 0.000_001 {
+            Ok(())
+        } else {
+            Err(format!("{context}: expected {expected:?}, got {actual:?}"))
+        }
+    }
+
     fn memory_id(seed: u128) -> MemoryId {
         MemoryId::from_uuid(Uuid::from_u128(seed))
     }
@@ -1222,6 +1348,27 @@ mod tests {
         PackCandidate::new(PackCandidateInput {
             memory_id: memory_id(seed),
             section: PackSection::ProceduralRules,
+            content: content.into(),
+            estimated_tokens: tokens,
+            relevance: score(relevance)?,
+            utility: score(utility)?,
+            provenance: vec![provenance("file://AGENTS.md#L1")?],
+            why: format!("selected because memory {seed} matches the task"),
+        })
+        .map_err(|error| format!("test candidate rejected: {error:?}"))
+    }
+
+    fn candidate_in_section(
+        seed: u128,
+        section: PackSection,
+        relevance: f32,
+        utility: f32,
+        tokens: u32,
+        content: impl Into<String>,
+    ) -> Result<PackCandidate, String> {
+        PackCandidate::new(PackCandidateInput {
+            memory_id: memory_id(seed),
+            section,
             content: content.into(),
             estimated_tokens: tokens,
             relevance: score(relevance)?,
@@ -1796,6 +1943,156 @@ mod tests {
                 .map(|entry| entry.source.label.as_str()),
             &Some("cass-session session-a#L20-22"),
             "second source label",
+        )
+    }
+
+    #[test]
+    fn pack_quality_metrics_summarize_selected_and_omitted_items() -> TestResult {
+        let budget = TokenBudget::new(25).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let first = candidate_in_section(
+            1,
+            PackSection::ProceduralRules,
+            1.0,
+            0.5,
+            10,
+            "Run cargo fmt --check before release.",
+        )?
+        .with_diversity_key("release-formatting");
+        let redundant = candidate_in_section(
+            2,
+            PackSection::ProceduralRules,
+            0.9,
+            0.6,
+            5,
+            "Repeat the release formatting rule.",
+        )?
+        .with_diversity_key("release-formatting");
+        let evidence = candidate_in_section(
+            3,
+            PackSection::Evidence,
+            0.8,
+            0.7,
+            12,
+            "The release checklist includes formatting evidence.",
+        )?;
+        let over_budget = candidate_in_section(
+            4,
+            PackSection::Failures,
+            0.7,
+            0.4,
+            10,
+            "A prior release failed after skipping formatter checks.",
+        )?;
+
+        let draft = assemble_draft(
+            "prepare release",
+            budget,
+            vec![redundant, over_budget, evidence, first],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let metrics = draft.quality_metrics();
+
+        ensure_equal(&metrics.item_count, &2, "metric item count")?;
+        ensure_equal(&metrics.omitted_count, &2, "metric omitted count")?;
+        ensure_equal(&metrics.used_tokens, &22, "metric used tokens")?;
+        ensure_equal(&metrics.max_tokens, &25, "metric max tokens")?;
+        ensure_close(metrics.budget_utilization, 0.88, "budget utilization")?;
+        ensure_close(metrics.average_relevance, 0.9, "average relevance")?;
+        ensure_close(metrics.average_utility, 0.6, "average utility")?;
+        ensure_equal(
+            &metrics.provenance_source_count,
+            &2,
+            "provenance source count",
+        )?;
+        ensure_close(
+            metrics.provenance_sources_per_item,
+            1.0,
+            "provenance sources per item",
+        )?;
+        ensure(
+            metrics.provenance_complete,
+            "selected items have provenance",
+        )?;
+
+        let procedural = metrics
+            .sections
+            .iter()
+            .find(|metric| metric.section == PackSection::ProceduralRules)
+            .ok_or_else(|| "missing procedural section metric".to_string())?;
+        ensure_equal(&procedural.item_count, &1, "procedural item count")?;
+        ensure_equal(&procedural.used_tokens, &10, "procedural tokens")?;
+
+        let evidence = metrics
+            .sections
+            .iter()
+            .find(|metric| metric.section == PackSection::Evidence)
+            .ok_or_else(|| "missing evidence section metric".to_string())?;
+        ensure_equal(&evidence.item_count, &1, "evidence item count")?;
+        ensure_equal(&evidence.used_tokens, &12, "evidence tokens")?;
+
+        ensure_equal(
+            &metrics.omissions.token_budget_exceeded,
+            &1,
+            "budget omission count",
+        )?;
+        ensure_equal(
+            &metrics.omissions.redundant_candidates,
+            &1,
+            "redundant omission count",
+        )
+    }
+
+    #[test]
+    fn pack_quality_metrics_are_stable_for_empty_draft() -> TestResult {
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let draft = assemble_draft("empty", budget, Vec::<PackCandidate>::new())
+            .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let metrics = draft.quality_metrics();
+
+        ensure_equal(&metrics.item_count, &0, "empty item count")?;
+        ensure_equal(&metrics.omitted_count, &0, "empty omitted count")?;
+        ensure_equal(&metrics.used_tokens, &0, "empty used tokens")?;
+        ensure_equal(&metrics.max_tokens, &100, "empty max tokens")?;
+        ensure_close(metrics.budget_utilization, 0.0, "empty utilization")?;
+        ensure_close(metrics.average_relevance, 0.0, "empty relevance")?;
+        ensure_close(metrics.average_utility, 0.0, "empty utility")?;
+        ensure_equal(
+            &metrics.provenance_source_count,
+            &0,
+            "empty provenance source count",
+        )?;
+        ensure_close(
+            metrics.provenance_sources_per_item,
+            0.0,
+            "empty provenance density",
+        )?;
+        ensure(
+            metrics.provenance_complete,
+            "empty packs have no missing provenance entries",
+        )?;
+        ensure_equal(
+            &metrics
+                .sections
+                .iter()
+                .map(|metric| metric.section)
+                .collect::<Vec<_>>(),
+            &PackSection::all().to_vec(),
+            "empty section order",
+        )?;
+        for metric in &metrics.sections {
+            ensure_equal(&metric.item_count, &0, "empty section item count")?;
+            ensure_equal(&metric.used_tokens, &0, "empty section tokens")?;
+        }
+        ensure_equal(
+            &metrics.omissions.token_budget_exceeded,
+            &0,
+            "empty budget omissions",
+        )?;
+        ensure_equal(
+            &metrics.omissions.redundant_candidates,
+            &0,
+            "empty redundant omissions",
         )
     }
 

@@ -5,7 +5,10 @@ use crate::core::check::CheckReport;
 use crate::core::doctor::DoctorReport;
 use crate::core::status::StatusReport;
 use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
-use crate::pack::{ContextResponse, PackItemProvenance, RenderedPackProvenance};
+use crate::pack::{
+    ContextResponse, PackItemProvenance, PackOmissionMetrics, PackQualityMetrics,
+    PackSectionMetric, RenderedPackProvenance,
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Renderer {
@@ -336,6 +339,10 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
                 budget.field_u32("maxTokens", response.data.pack.budget.max_tokens());
                 budget.field_u32("usedTokens", response.data.pack.used_tokens);
             });
+            let quality_metrics = response.data.pack.quality_metrics();
+            pack.field_object("quality", |quality| {
+                build_pack_quality_metrics(quality, &quality_metrics);
+            });
             pack.field_array_of_objects("items", &response.data.pack.items, |obj, item| {
                 obj.field_u32("rank", item.rank);
                 obj.field_str("memoryId", &item.memory_id.to_string());
@@ -379,6 +386,46 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
         });
     });
     b.finish()
+}
+
+fn build_pack_quality_metrics(obj: &mut JsonBuilder, metrics: &PackQualityMetrics) {
+    obj.field_raw("itemCount", &metrics.item_count.to_string());
+    obj.field_raw("omittedCount", &metrics.omitted_count.to_string());
+    obj.field_u32("usedTokens", metrics.used_tokens);
+    obj.field_u32("maxTokens", metrics.max_tokens);
+    obj.field_raw("budgetUtilization", &score_json(metrics.budget_utilization));
+    obj.field_raw("averageRelevance", &score_json(metrics.average_relevance));
+    obj.field_raw("averageUtility", &score_json(metrics.average_utility));
+    obj.field_raw(
+        "provenanceSourceCount",
+        &metrics.provenance_source_count.to_string(),
+    );
+    obj.field_raw(
+        "provenanceSourcesPerItem",
+        &score_json(metrics.provenance_sources_per_item),
+    );
+    obj.field_bool("provenanceComplete", metrics.provenance_complete);
+    obj.field_array_of_objects("sections", &metrics.sections, build_pack_section_metric);
+    obj.field_object("omissions", |omissions| {
+        build_pack_omission_metrics(omissions, &metrics.omissions);
+    });
+}
+
+fn build_pack_section_metric(obj: &mut JsonBuilder, metric: &PackSectionMetric) {
+    obj.field_str("section", metric.section.as_str());
+    obj.field_raw("itemCount", &metric.item_count.to_string());
+    obj.field_u32("usedTokens", metric.used_tokens);
+}
+
+fn build_pack_omission_metrics(obj: &mut JsonBuilder, metrics: &PackOmissionMetrics) {
+    obj.field_raw(
+        "tokenBudgetExceeded",
+        &metrics.token_budget_exceeded.to_string(),
+    );
+    obj.field_raw(
+        "redundantCandidates",
+        &metrics.redundant_candidates.to_string(),
+    );
 }
 
 fn build_rendered_provenance(obj: &mut JsonBuilder, source: &RenderedPackProvenance) {
@@ -1259,6 +1306,38 @@ mod tests {
             "provenance footer",
         )?;
         ensure_contains(&json, "\"relevance\":0.800000", "stable relevance")
+    }
+
+    #[test]
+    fn context_response_json_renders_pack_quality() -> TestResult {
+        let response = context_response_fixture()?;
+        let json = render_context_response_json(&response);
+
+        ensure_contains(
+            &json,
+            "\"quality\":{\"itemCount\":1,\"omittedCount\":0,\"usedTokens\":10,\"maxTokens\":100,\"budgetUtilization\":0.100000",
+            "quality metric header",
+        )?;
+        ensure_contains(
+            &json,
+            "\"averageRelevance\":0.800000,\"averageUtility\":0.600000",
+            "quality score averages",
+        )?;
+        ensure_contains(
+            &json,
+            "\"provenanceSourceCount\":1,\"provenanceSourcesPerItem\":1.000000,\"provenanceComplete\":true",
+            "quality provenance density",
+        )?;
+        ensure_contains(
+            &json,
+            "\"sections\":[{\"section\":\"procedural_rules\",\"itemCount\":1,\"usedTokens\":10},{\"section\":\"decisions\",\"itemCount\":0,\"usedTokens\":0}",
+            "quality section metrics",
+        )?;
+        ensure_contains(
+            &json,
+            "\"omissions\":{\"tokenBudgetExceeded\":0,\"redundantCandidates\":0}",
+            "quality omission metrics",
+        )
     }
 
     #[test]
