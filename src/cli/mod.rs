@@ -9,7 +9,12 @@ use crate::cass::{CassClient, CassImportOptions, import_cass_sessions};
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
 use crate::core::doctor::DoctorReport;
-use crate::core::index::{IndexRebuildOptions, rebuild_index};
+use crate::core::health::HealthReport;
+use crate::core::index::{
+    IndexRebuildOptions, IndexStatusOptions, get_index_status, rebuild_index,
+};
+use crate::core::quarantine::QuarantineReport;
+use crate::core::search::{SearchOptions, run_search};
 use crate::core::status::StatusReport;
 use crate::models::memory::{MemoryKind, MemoryLevel, MemoryValidationError};
 use crate::models::{DomainError, MemoryId, ProcessExitCode};
@@ -105,11 +110,16 @@ pub enum Command {
     Capabilities,
     /// Quick posture summary: ready, degraded, or needs attention.
     Check,
+    /// Run diagnostic commands for trust, quarantine, and streams.
+    #[command(subcommand)]
+    Diag(DiagCommand),
     /// Run health checks on workspace and subsystems.
     Doctor(DoctorArgs),
     /// Run evaluation scenarios against fixtures.
     #[command(subcommand)]
     Eval(EvalCommand),
+    /// Quick health check with overall verdict.
+    Health,
     /// Print command help.
     Help,
     /// Import memories and evidence from external sources.
@@ -123,6 +133,8 @@ pub enum Command {
     /// List or export public response schemas.
     #[command(subcommand)]
     Schema(SchemaCommand),
+    /// Search indexed memories and sessions.
+    Search(SearchArgs),
     /// Report workspace and subsystem readiness.
     Status,
     /// Print the ee version.
@@ -130,9 +142,17 @@ pub enum Command {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum DiagCommand {
+    /// Report quarantine status for import sources.
+    Quarantine,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum IndexCommand {
     /// Rebuild the search index from all memories and sessions.
     Rebuild(IndexRebuildArgs),
+    /// Inspect search index health and generation state.
+    Status(IndexStatusArgs),
 }
 
 /// Arguments for `ee index rebuild`.
@@ -149,6 +169,38 @@ pub struct IndexRebuildArgs {
     /// Report the rebuild plan without writing the index.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+/// Arguments for `ee index status`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct IndexStatusArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    #[arg(long, value_name = "PATH")]
+    pub index_dir: Option<PathBuf>,
+}
+
+/// Arguments for `ee search`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct SearchArgs {
+    /// Query string to search for.
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+
+    /// Maximum number of results to return.
+    #[arg(long, short = 'n', default_value_t = 10)]
+    pub limit: u32,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    #[arg(long, value_name = "PATH")]
+    pub index_dir: Option<PathBuf>,
 }
 
 /// Arguments for `ee doctor`.
@@ -359,6 +411,25 @@ where
                 }
             }
         }
+        Some(Command::Diag(ref diag_cmd)) => match diag_cmd {
+            DiagCommand::Quarantine => {
+                let report = QuarantineReport::gather();
+                match cli.renderer() {
+                    output::Renderer::Human => {
+                        write_stdout(stdout, &output::render_quarantine_human(&report))
+                    }
+                    output::Renderer::Toon => {
+                        write_stdout(stdout, &(output::render_quarantine_toon(&report) + "\n"))
+                    }
+                    output::Renderer::Json
+                    | output::Renderer::Jsonl
+                    | output::Renderer::Compact
+                    | output::Renderer::Hook => {
+                        write_stdout(stdout, &(output::render_quarantine_json(&report) + "\n"))
+                    }
+                }
+            }
+        },
         Some(Command::Doctor(ref args)) => {
             let report = DoctorReport::gather();
             if args.fix_plan {
@@ -391,6 +462,23 @@ where
                     | output::Renderer::Hook => {
                         write_stdout(stdout, &(output::render_doctor_json(&report) + "\n"))
                     }
+                }
+            }
+        }
+        Some(Command::Health) => {
+            let report = HealthReport::gather();
+            match cli.renderer() {
+                output::Renderer::Human => {
+                    write_stdout(stdout, &output::render_health_human(&report))
+                }
+                output::Renderer::Toon => {
+                    write_stdout(stdout, &(output::render_health_toon(&report) + "\n"))
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    write_stdout(stdout, &(output::render_health_json(&report) + "\n"))
                 }
             }
         }
@@ -430,6 +518,9 @@ where
         }
         Some(Command::Index(IndexCommand::Rebuild(ref args))) => {
             handle_index_rebuild(&cli, args, stdout, stderr)
+        }
+        Some(Command::Index(IndexCommand::Status(ref args))) => {
+            handle_index_status(&cli, args, stdout, stderr)
         }
         Some(Command::Schema(ref schema_cmd)) => match schema_cmd {
             SchemaCommand::List => match cli.renderer() {
@@ -481,6 +572,7 @@ where
                 write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
             }
         },
+        Some(Command::Search(ref args)) => handle_search(&cli, args, stdout, stderr),
         Some(Command::Status) => {
             let report = StatusReport::gather();
             match cli.renderer() {
@@ -680,6 +772,111 @@ where
                     report.memories_indexed,
                     report.sessions_indexed,
                     report.documents_total
+                ),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json(),
+                });
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        Err(error) => {
+            let domain_error = DomainError::SearchIndex {
+                message: error.to_string(),
+                repair: error.repair_hint().map(str::to_string),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_index_status<W, E>(
+    cli: &Cli,
+    args: &IndexStatusArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = IndexStatusOptions {
+        workspace_path,
+        database_path: args.database.clone(),
+        index_dir: args.index_dir.clone(),
+    };
+
+    match get_index_status(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human => write_stdout(stdout, &report.human_summary()),
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &format!(
+                    "INDEX_STATUS|{}|{}|{}|{}\n",
+                    report.health.as_str(),
+                    report.index_exists,
+                    report.db_memory_count,
+                    report.db_session_count
+                ),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json(),
+                });
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        Err(error) => {
+            let domain_error = DomainError::SearchIndex {
+                message: error.to_string(),
+                repair: error.repair_hint().map(str::to_string),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_search<W, E>(
+    cli: &Cli,
+    args: &SearchArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = SearchOptions {
+        workspace_path,
+        database_path: args.database.clone(),
+        index_dir: args.index_dir.clone(),
+        query: args.query.clone(),
+        limit: args.limit,
+    };
+
+    match run_search(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human => write_stdout(stdout, &report.human_summary()),
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &format!(
+                    "SEARCH|{}|{}|{:.1}ms\n",
+                    report.query,
+                    report.results.len(),
+                    report.elapsed_ms
                 ),
             ),
             output::Renderer::Json
@@ -1431,5 +1628,59 @@ mod tests {
             }
             _ => Err("expected Doctor command".to_string()),
         }
+    }
+
+    // ========================================================================
+    // Health Command Tests (EE-026)
+    // ========================================================================
+
+    #[test]
+    fn health_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "health"])
+            .map_err(|e| format!("failed to parse health: {:?}", e.kind()))?;
+
+        ensure_equal(&parsed.command, &Some(Command::Health), "health command")
+    }
+
+    #[test]
+    fn health_json_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "health", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "health json exit")?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.response.v1\"",
+            "health json schema",
+        )?;
+        ensure_contains(&stdout, "\"command\":\"health\"", "health json command")?;
+        ensure_contains(&stdout, "\"verdict\":", "health json verdict")?;
+        ensure_ends_with(&stdout, '\n', "health json trailing newline")?;
+        ensure(stderr.is_empty(), "health json stderr must be empty")
+    }
+
+    #[test]
+    fn health_json_has_subsystems_and_issues() -> TestResult {
+        let (exit, stdout, _) = invoke(&["ee", "health", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "health exit")?;
+        ensure_contains(&stdout, "\"subsystems\":", "health has subsystems")?;
+        ensure_contains(&stdout, "\"issues\":", "health has issues")?;
+        ensure_contains(&stdout, "\"summary\":", "health has summary")
+    }
+
+    #[test]
+    fn health_human_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "health"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "health human exit")?;
+        ensure_contains(&stdout, "ee health", "health human header")?;
+        ensure_contains(&stdout, "Verdict:", "health human verdict")?;
+        ensure(stderr.is_empty(), "health human stderr must be empty")
+    }
+
+    #[test]
+    fn health_toon_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "health", "--format", "toon"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "health toon exit")?;
+        ensure_contains(&stdout, "schema: ee.response.v1", "health toon schema")?;
+        ensure_contains(&stdout, "command: health", "health toon command")?;
+        ensure(stderr.is_empty(), "health toon stderr must be empty")
     }
 }
