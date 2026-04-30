@@ -281,6 +281,11 @@ impl EffectManifest {
                 "Import from CASS sessions",
             ),
             CommandEffect::durable_write(
+                "outcome",
+                vec!["feedback_events", "audit_log"],
+                "Record observed outcome feedback",
+            ),
+            CommandEffect::durable_write(
                 "remember",
                 vec!["memories", "memory_tags", "audit_log"],
                 "Store a new memory",
@@ -500,6 +505,14 @@ mod tests {
             remember.map(|e| e.default_effect),
             Some(EffectClass::DurableMemoryWrite),
             "remember is durable_memory_write",
+        )?;
+
+        let outcome = manifest.get("outcome");
+        ensure(outcome.is_some(), true, "outcome exists")?;
+        ensure(
+            outcome.map(|e| e.write_surfaces.db_tables.clone()),
+            Some(vec!["feedback_events", "audit_log"]),
+            "outcome writes feedback and audit",
         )
     }
 

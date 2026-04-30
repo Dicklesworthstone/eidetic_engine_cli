@@ -86,6 +86,23 @@ pub struct PackSelectionExplanation {
     pub selected_at: String,
 }
 
+/// Contradiction feedback recorded against this memory (EE-263).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContradictionMetadata {
+    /// Feedback event ID.
+    pub event_id: String,
+    /// Weight of the contradiction signal.
+    pub weight: f32,
+    /// Source type (agent_inference, human_request, etc.).
+    pub source_type: String,
+    /// Reason for the contradiction.
+    pub reason: Option<String>,
+    /// When the contradiction was recorded.
+    pub created_at: String,
+    /// Whether the contradiction has been applied to scores.
+    pub applied: bool,
+}
+
 /// Non-fatal limitations in the why explanation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WhyDegradation {
@@ -114,6 +131,8 @@ pub struct WhyReport {
     pub retrieval: Option<RetrievalExplanation>,
     /// Selection explanation.
     pub selection: Option<SelectionExplanation>,
+    /// Contradiction feedback recorded against this memory (EE-263).
+    pub contradictions: Vec<ContradictionMetadata>,
     /// Non-fatal degradation notices.
     pub degraded: Vec<WhyDegradation>,
     /// Error message if query failed.
@@ -136,6 +155,7 @@ impl WhyReport {
             storage: Some(storage),
             retrieval: Some(retrieval),
             selection: Some(selection),
+            contradictions: Vec::new(),
             degraded: Vec::new(),
             error: None,
         }
@@ -151,6 +171,7 @@ impl WhyReport {
             storage: None,
             retrieval: None,
             selection: None,
+            contradictions: Vec::new(),
             degraded: Vec::new(),
             error: None,
         }
@@ -166,6 +187,7 @@ impl WhyReport {
             storage: None,
             retrieval: None,
             selection: None,
+            contradictions: Vec::new(),
             degraded: Vec::new(),
             error: Some(message),
         }
