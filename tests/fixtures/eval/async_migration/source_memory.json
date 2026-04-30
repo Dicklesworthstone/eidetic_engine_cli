@@ -1,0 +1,30 @@
+{
+  "schema": "ee.eval_source_memory.v1",
+  "fixture_id": "fx.async_migration.v1",
+  "memories": [
+    {
+      "id": "memory-1",
+      "level": "procedural",
+      "kind": "rule",
+      "content": "Before running async migrations, verify the background job queue is healthy and has capacity. Check `ee status --json` for migration_queue readiness. If migration_queue shows 'degraded', wait or scale workers before proceeding.",
+      "tags": ["migration", "async", "database", "verification"],
+      "provenance_uri": "file://docs/adr/ADR-012-async-migrations.md#L45"
+    },
+    {
+      "id": "memory-2",
+      "level": "episodic",
+      "kind": "failure",
+      "content": "A production migration failed when the async backfill job was started without checking queue depth. The job queue had 50k pending items and the new migration jobs timed out. Rollback required manual intervention to clear the stuck migration state.",
+      "tags": ["migration", "async", "production", "incident"],
+      "provenance_uri": "file://incidents/2026-03-15-migration-timeout.md#L12"
+    },
+    {
+      "id": "memory-3",
+      "level": "procedural",
+      "kind": "rule",
+      "content": "Async migrations must include a rollback plan. Before starting, record the pre-migration schema version with `ee remember --kind checkpoint`. After migration completes, verify with `ee check --migration-status`.",
+      "tags": ["migration", "async", "rollback", "checkpoint"],
+      "provenance_uri": "file://docs/runbooks/async-migration-checklist.md#L23"
+    }
+  ]
+}

@@ -1,0 +1,256 @@
+{
+  "schema": "ee.eval_fixture.v1",
+  "fixture_id": "fx.async_migration.v1",
+  "scenario_ids": [
+    "usr_pre_migration_context"
+  ],
+  "fixture_family": "async_migration",
+  "coverage_state": "implemented",
+  "journey": "Pre-migration context pack surfaces prior async migration failures and procedural verification rules before database migration work.",
+  "owning_bead_ids": [
+    "eidetic_engine_cli-h7g3"
+  ],
+  "owning_gate_ids": [
+    "gate.7.walking_skeleton",
+    "gate.14.executable_claims"
+  ],
+  "deterministic": {
+    "fixed_clock": "2026-04-30T10:00:00Z",
+    "deterministic_seed": "seed.async_migration.v1",
+    "stable_ids": [
+      "mem_00000000000000000000000201",
+      "mem_00000000000000000000000202",
+      "mem_00000000000000000000000203",
+      "pack_00000000000000000000000201"
+    ],
+    "workspace_fingerprints": [
+      "workspace.async_migration.v1"
+    ]
+  },
+  "source": {
+    "kind": "synthetic",
+    "path": "tests/fixtures/eval/async_migration/source_memory.json",
+    "source_hash": "staged:eidetic_engine_cli-h7g3",
+    "synthetic_secret_policy": "none"
+  },
+  "redaction": {
+    "classes_expected": [],
+    "secret_leak_assertions": [
+      "stdout does not contain token-like prefixes",
+      "stderr does not contain token-like prefixes",
+      "artifacts contain no synthetic secrets"
+    ]
+  },
+  "command_sequence": [
+    {
+      "step": 1,
+      "argv": [
+        "ee",
+        "init",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/usr_pre_migration_context/<run-id>/01-init.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/usr_pre_migration_context/<run-id>/01-init.stderr.txt"
+    },
+    {
+      "step": 2,
+      "argv": [
+        "ee",
+        "remember",
+        "--workspace",
+        "<workspace>",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--tag",
+        "migration",
+        "--tag",
+        "async",
+        "--tag",
+        "verification",
+        "--provenance",
+        "file://tests/fixtures/eval/async_migration/source_memory.json#memory-1",
+        "--json",
+        "Before running async migrations, verify the background job queue is healthy and has capacity. Check `ee status --json` for migration_queue readiness. If migration_queue shows 'degraded', wait or scale workers before proceeding."
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/usr_pre_migration_context/<run-id>/02-remember-queue-rule.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/usr_pre_migration_context/<run-id>/02-remember-queue-rule.stderr.txt"
+    },
+    {
+      "step": 3,
+      "argv": [
+        "ee",
+        "remember",
+        "--workspace",
+        "<workspace>",
+        "--level",
+        "episodic",
+        "--kind",
+        "failure",
+        "--tag",
+        "migration",
+        "--tag",
+        "async",
+        "--tag",
+        "incident",
+        "--provenance",
+        "file://tests/fixtures/eval/async_migration/source_memory.json#memory-2",
+        "--json",
+        "A production migration failed when the async backfill job was started without checking queue depth. The job queue had 50k pending items and the new migration jobs timed out. Rollback required manual intervention to clear the stuck migration state."
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/usr_pre_migration_context/<run-id>/03-remember-failure.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/usr_pre_migration_context/<run-id>/03-remember-failure.stderr.txt"
+    },
+    {
+      "step": 4,
+      "argv": [
+        "ee",
+        "remember",
+        "--workspace",
+        "<workspace>",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--tag",
+        "migration",
+        "--tag",
+        "rollback",
+        "--tag",
+        "checkpoint",
+        "--provenance",
+        "file://tests/fixtures/eval/async_migration/source_memory.json#memory-3",
+        "--json",
+        "Async migrations must include a rollback plan. Before starting, record the pre-migration schema version with `ee remember --kind checkpoint`. After migration completes, verify with `ee check --migration-status`."
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/usr_pre_migration_context/<run-id>/04-remember-rollback-rule.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/usr_pre_migration_context/<run-id>/04-remember-rollback-rule.stderr.txt"
+    },
+    {
+      "step": 5,
+      "argv": [
+        "ee",
+        "context",
+        "run async database migration",
+        "--workspace",
+        "<workspace>",
+        "--max-tokens",
+        "4000",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/usr_pre_migration_context/<run-id>/05-context.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/usr_pre_migration_context/<run-id>/05-context.stderr.txt"
+    }
+  ],
+  "expected_outputs": [
+    {
+      "step": 1,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.workspace"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 2,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.memory.id",
+        "data.memory.provenanceUri"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 3,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.memory.id",
+        "data.memory.provenanceUri"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 4,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.memory.id",
+        "data.memory.provenanceUri"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 5,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.pack.items",
+        "data.pack.provenance",
+        "data.pack.hash"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    }
+  ],
+  "degraded_branches": [
+    {
+      "code": "semantic_disabled",
+      "description": "Semantic retrieval unavailable; lexical/manual memories still surface the migration rules and failure incident.",
+      "repair_action": "ee index rebuild --workspace <workspace>",
+      "preserves_success_signal": true
+    },
+    {
+      "code": "graph_snapshot_stale",
+      "description": "Graph boosts unavailable or stale; context pack still includes explicit migration evidence with provenance.",
+      "repair_action": "ee graph refresh --workspace <workspace>",
+      "preserves_success_signal": true
+    },
+    {
+      "code": "migration_queue_degraded",
+      "description": "Migration queue shows degraded status; agent receives warning to wait or scale workers before proceeding.",
+      "repair_action": "ee steward scale-workers --queue migration",
+      "preserves_success_signal": true
+    }
+  ],
+  "agent_success_signal": "A fresh agent preparing to run an async database migration sees queue verification rules, the prior timeout incident, and rollback checkpoint procedures before executing migration commands."
+}
