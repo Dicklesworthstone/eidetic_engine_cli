@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
-use serde::Serialize;
 
 use crate::cass::{CassClient, CassImportOptions, import_cass_sessions};
 use crate::core::VersionReport;
@@ -20,10 +19,8 @@ use crate::core::index::{
 };
 use crate::core::init::{InitOptions, init_workspace};
 use crate::core::lab::{
-    CaptureOptions as LabCaptureOptions, CaptureReport as LabCaptureReport,
-    CounterfactualOptions as LabCounterfactualOptions,
-    CounterfactualReport as LabCounterfactualReport, ReplayOptions as LabReplayOptions,
-    ReplayReport as LabReplayReport, capture_episode, replay_episode, run_counterfactual,
+    CaptureOptions as LabCaptureOptions, CounterfactualOptions as LabCounterfactualOptions,
+    ReplayOptions as LabReplayOptions, capture_episode, replay_episode, run_counterfactual,
 };
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
@@ -177,6 +174,9 @@ pub enum Command {
     Memory(MemoryCommand),
     /// Record observed feedback about a memory or related target.
     Outcome(OutcomeArgs),
+    /// Run, show, or close preflight risk assessments.
+    #[command(subcommand)]
+    Preflight(PreflightCommand),
     /// Store a new memory.
     Remember(RememberArgs),
     /// Review sessions and propose curation candidates.
@@ -1835,7 +1835,7 @@ fn handle_lab_capture<W, E>(
     cli: &Cli,
     args: &LabCaptureArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
@@ -1866,18 +1866,7 @@ where
                 write_stdout(stdout, &(output::render_lab_capture_json(&report) + "\n"))
             }
         },
-        Err(error) => {
-            let json = serde_json::json!({
-                "schema": crate::models::ERROR_SCHEMA_V1,
-                "success": false,
-                "error": {
-                    "code": error.code(),
-                    "message": error.message(),
-                    "repair": error.repair(),
-                }
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
 
@@ -1885,7 +1874,7 @@ fn handle_lab_replay<W, E>(
     cli: &Cli,
     args: &LabReplayArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
@@ -1915,18 +1904,7 @@ where
                 write_stdout(stdout, &(output::render_lab_replay_json(&report) + "\n"))
             }
         },
-        Err(error) => {
-            let json = serde_json::json!({
-                "schema": crate::models::ERROR_SCHEMA_V1,
-                "success": false,
-                "error": {
-                    "code": error.code(),
-                    "message": error.message(),
-                    "repair": error.repair(),
-                }
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
 
@@ -1934,7 +1912,7 @@ fn handle_lab_counterfactual<W, E>(
     cli: &Cli,
     args: &LabCounterfactualArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
@@ -1977,27 +1955,22 @@ where
                 write_stdout(stdout, &output::render_lab_counterfactual_human(&report))
             }
             output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_lab_counterfactual_toon(&report) + "\n"))
+                write_stdout(
+                    stdout,
+                    &(output::render_lab_counterfactual_toon(&report) + "\n"),
+                )
             }
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_lab_counterfactual_json(&report) + "\n"))
+                write_stdout(
+                    stdout,
+                    &(output::render_lab_counterfactual_json(&report) + "\n"),
+                )
             }
         },
-        Err(error) => {
-            let json = serde_json::json!({
-                "schema": crate::models::ERROR_SCHEMA_V1,
-                "success": false,
-                "error": {
-                    "code": error.code(),
-                    "message": error.message(),
-                    "repair": error.repair(),
-                }
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
 
