@@ -18,6 +18,7 @@ pub mod repro;
 pub mod revision;
 pub mod rule;
 pub mod schema;
+pub mod progress;
 pub mod timing;
 pub mod trust;
 
@@ -82,6 +83,10 @@ pub use model_registry::{
     embedding_metadata_schema_catalog_json, embedding_metadata_schemas,
 };
 pub use posture::{ActionCategory, Posture, PostureSummary, SuggestedAction};
+pub use progress::{
+    PROGRESS_EVENT_SCHEMA_V1, ParseProgressEventTypeError, ProgressEvent, ProgressEventBuilder,
+    ProgressEventType, progress_completed, progress_failed, progress_running, progress_started,
+};
 pub use preflight::{
     PREFLIGHT_RUN_ID_PREFIX, PREFLIGHT_RUN_SCHEMA_V1, ParsePreflightStatusError,
     ParseRiskCategoryError, ParseRiskLevelError, ParseTripwireActionError,
