@@ -1,0 +1,140 @@
+{
+  "schema": "ee.recorder.schemas.v1",
+  "schemas": [
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:recorder-run:v1",
+      "eeSchema": "ee.recorder.run.v1",
+      "kind": "recorder_run",
+      "title": "RecorderRunMeta",
+      "description": "Metadata for one append-only recorder run.",
+      "type": "object",
+      "required": [
+        "schema",
+        "runId",
+        "agentId",
+        "status",
+        "startedAt",
+        "eventCount",
+        "redactedCount"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "runId", "type": "string", "required": true, "description": "Stable recorder run identifier."},
+        {"name": "agentId", "type": "string", "required": true, "description": "Agent identity that owns the run."},
+        {"name": "sessionId", "type": "string|null", "required": false, "description": "Optional upstream harness or CASS session identifier."},
+        {"name": "workspaceId", "type": "string|null", "required": false, "description": "Optional ee workspace identifier."},
+        {"name": "status", "type": "string", "required": true, "description": "Recorder run lifecycle status."},
+        {"name": "startedAt", "type": "string", "required": true, "description": "RFC 3339 start timestamp."},
+        {"name": "endedAt", "type": "string|null", "required": false, "description": "RFC 3339 terminal timestamp."},
+        {"name": "eventCount", "type": "integer", "required": true, "description": "Number of events recorded."},
+        {"name": "redactedCount", "type": "integer", "required": true, "description": "Number of events with redaction."}
+      ],
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:recorder-event:v1",
+      "eeSchema": "ee.recorder.event.v1",
+      "kind": "recorder_event",
+      "title": "RecorderEvent",
+      "description": "A single ordered event in a recorder run.",
+      "type": "object",
+      "required": [
+        "schema",
+        "eventId",
+        "runId",
+        "sequence",
+        "eventType",
+        "timestamp",
+        "redactionStatus"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "eventId", "type": "string", "required": true, "description": "Stable event identifier."},
+        {"name": "runId", "type": "string", "required": true, "description": "Recorder run identifier."},
+        {"name": "sequence", "type": "integer", "required": true, "description": "Monotonic sequence within the run."},
+        {"name": "eventType", "type": "string", "required": true, "description": "Stable event type."},
+        {"name": "timestamp", "type": "string", "required": true, "description": "RFC 3339 event timestamp."},
+        {"name": "payloadHash", "type": "string|null", "required": false, "description": "Hash of the associated payload, when stored."},
+        {"name": "redactionStatus", "type": "string", "required": true, "description": "Privacy state for the event."}
+      ],
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:recorder-payload:v1",
+      "eeSchema": "ee.recorder.payload.v1",
+      "kind": "recorder_payload",
+      "title": "RecorderPayload",
+      "description": "Metadata for stored recorder event payload content.",
+      "type": "object",
+      "required": [
+        "schema",
+        "payloadHash",
+        "contentType",
+        "byteSize",
+        "storedAt"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "payloadHash", "type": "string", "required": true, "description": "Content-addressed payload hash."},
+        {"name": "contentType", "type": "string", "required": true, "description": "Payload content class."},
+        {"name": "byteSize", "type": "integer", "required": true, "description": "Original payload size in bytes."},
+        {"name": "compressedSize", "type": "integer|null", "required": false, "description": "Compressed payload size in bytes."},
+        {"name": "storedAt", "type": "string", "required": true, "description": "RFC 3339 storage timestamp."}
+      ],
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:redaction-status:v1",
+      "eeSchema": "ee.redaction.status.v1",
+      "kind": "redaction_status",
+      "title": "RedactionStatusSnapshot",
+      "description": "Redaction accounting for recorder events and payloads.",
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "redactionClasses",
+        "placeholderCount",
+        "redactedBytes"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "status", "type": "string", "required": true, "description": "Stable redaction status."},
+        {"name": "redactionClasses", "type": "array<string>", "required": true, "description": "Sorted redaction classes present in the payload."},
+        {"name": "placeholderCount", "type": "integer", "required": true, "description": "Number of placeholders inserted."},
+        {"name": "redactedBytes", "type": "integer", "required": true, "description": "Number of bytes redacted."},
+        {"name": "verifiedAt", "type": "string|null", "required": false, "description": "RFC 3339 verification timestamp."}
+      ],
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:import-cursor:v1",
+      "eeSchema": "ee.import.cursor.v1",
+      "kind": "import_cursor",
+      "title": "ImportCursor",
+      "description": "Incremental import cursor for replayable connectors.",
+      "type": "object",
+      "required": [
+        "schema",
+        "sourceType",
+        "sourceId",
+        "itemsImported"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "sourceType", "type": "string", "required": true, "description": "Importer source type."},
+        {"name": "sourceId", "type": "string", "required": true, "description": "Stable external source identity."},
+        {"name": "lastImportedId", "type": "string|null", "required": false, "description": "Last external item imported."},
+        {"name": "lastImportedAt", "type": "string|null", "required": false, "description": "RFC 3339 timestamp of the last imported item."},
+        {"name": "itemsImported", "type": "integer", "required": true, "description": "Total imported item count."},
+        {"name": "cursorState", "type": "string|null", "required": false, "description": "Opaque connector cursor state."}
+      ],
+      "additionalProperties": false
+    }
+  ]
+}
