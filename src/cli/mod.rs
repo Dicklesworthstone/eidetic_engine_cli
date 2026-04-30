@@ -6,12 +6,13 @@ use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use crate::cass::{CassClient, CassImportOptions, import_cass_sessions};
+use crate::core::VersionReport;
 use crate::core::agent_detect::{AgentDetectOptions, detect_installed_agents};
 use crate::core::agent_docs::{AgentDocsReport, AgentDocsTopic};
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
 use crate::core::context::{ContextPackError, ContextPackOptions, run_context_pack};
-use crate::core::doctor::DoctorReport;
+use crate::core::doctor::{DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport};
 use crate::core::health::HealthReport;
 use crate::core::index::{
     IndexRebuildOptions, IndexStatusOptions, get_index_status, rebuild_index,
@@ -309,6 +310,8 @@ pub struct ContextArgs {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum DiagCommand {
+    /// Report accepted dependency contracts and forbidden dependency gates.
+    Dependencies,
     /// Report graph module readiness, capabilities, and metrics.
     Graph,
     /// Report quarantine status for import sources.
@@ -413,6 +416,10 @@ pub struct DoctorArgs {
     /// Output a structured fix plan instead of the normal health report.
     #[arg(long, action = ArgAction::SetTrue)]
     pub fix_plan: bool,
+
+    /// Output Franken stack dependency health diagnostics.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "fix_plan")]
+    pub franken_health: bool,
 }
 
 /// Arguments for `ee init`.
@@ -867,6 +874,26 @@ where
         },
         Some(Command::Context(ref args)) => handle_context(&cli, args, stdout, stderr),
         Some(Command::Diag(ref diag_cmd)) => match diag_cmd {
+            DiagCommand::Dependencies => {
+                let report = DependencyDiagnosticsReport::gather();
+                match cli.renderer() {
+                    output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+                        stdout,
+                        &output::render_dependency_diagnostics_human(&report),
+                    ),
+                    output::Renderer::Toon => write_stdout(
+                        stdout,
+                        &(output::render_dependency_diagnostics_toon(&report) + "\n"),
+                    ),
+                    output::Renderer::Json
+                    | output::Renderer::Jsonl
+                    | output::Renderer::Compact
+                    | output::Renderer::Hook => write_stdout(
+                        stdout,
+                        &(output::render_dependency_diagnostics_json(&report) + "\n"),
+                    ),
+                }
+            }
             DiagCommand::Graph => handle_diag_graph(&cli, stdout),
             DiagCommand::Quarantine => {
                 let report = QuarantineReport::gather();
@@ -908,7 +935,25 @@ where
         Some(Command::Doctor(ref args)) => {
             let report = DoctorReport::gather();
             let profile = cli.fields_level().to_field_profile();
-            if args.fix_plan {
+            if args.franken_health {
+                let report = FrankenHealthReport::gather();
+                match cli.renderer() {
+                    output::Renderer::Human | output::Renderer::Markdown => {
+                        write_stdout(stdout, &output::render_franken_health_human(&report))
+                    }
+                    output::Renderer::Toon => write_stdout(
+                        stdout,
+                        &(output::render_franken_health_toon(&report) + "\n"),
+                    ),
+                    output::Renderer::Json
+                    | output::Renderer::Jsonl
+                    | output::Renderer::Compact
+                    | output::Renderer::Hook => write_stdout(
+                        stdout,
+                        &(output::render_franken_health_json(&report) + "\n"),
+                    ),
+                }
+            } else if args.fix_plan {
                 let plan = report.to_fix_plan();
                 match cli.renderer() {
                     output::Renderer::Human | output::Renderer::Markdown => {
@@ -1151,7 +1196,21 @@ where
             }
         }
         Some(Command::Version) => {
-            write_stdout(stdout, concat!("ee ", env!("CARGO_PKG_VERSION"), "\n"))
+            let report = VersionReport::gather();
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, concat!("ee ", env!("CARGO_PKG_VERSION"), "\n"))
+                }
+                output::Renderer::Toon => {
+                    write_stdout(stdout, &(output::render_version_toon(&report) + "\n"))
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    write_stdout(stdout, &(output::render_version_json(&report) + "\n"))
+                }
+            }
         }
         Some(Command::Why(ref args)) => handle_why(&cli, args, stdout, stderr),
     }
@@ -2979,7 +3038,7 @@ const COMMAND_NAMES: &[&str] = &[
 /// Subcommand names for nested commands.
 const AGENT_SUBCOMMANDS: &[&str] = &["detect"];
 const CLAIM_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
-const DIAG_SUBCOMMANDS: &[&str] = &["graph", "quarantine", "streams"];
+const DIAG_SUBCOMMANDS: &[&str] = &["dependencies", "graph", "quarantine", "streams"];
 const EVAL_SUBCOMMANDS: &[&str] = &["run", "list"];
 const IMPORT_SUBCOMMANDS: &[&str] = &["cass", "eidetic-legacy"];
 const INDEX_SUBCOMMANDS: &[&str] = &["rebuild", "status"];
@@ -3040,6 +3099,7 @@ impl NormalizedInvocation {
                 },
                 Command::Context(_) => "context".to_string(),
                 Command::Diag(diag) => match diag {
+                    DiagCommand::Dependencies => "diag dependencies".to_string(),
                     DiagCommand::Graph => "diag graph".to_string(),
                     DiagCommand::Quarantine => "diag quarantine".to_string(),
                     DiagCommand::Streams => "diag streams".to_string(),
@@ -3402,7 +3462,9 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Cli, Command, FieldsLevel, ImportCommand, MemoryCommand, OutputFormat, run};
+    use super::{
+        Cli, Command, DiagCommand, FieldsLevel, ImportCommand, MemoryCommand, OutputFormat, run,
+    };
     use crate::models::ProcessExitCode;
 
     type TestResult = Result<(), String>;
@@ -4015,6 +4077,41 @@ mod tests {
     }
 
     #[test]
+    fn doctor_accepts_franken_health_flag() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "doctor", "--franken-health"])
+            .map_err(|e| format!("failed to parse doctor --franken-health: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Doctor(ref args)) => {
+                ensure_equal(&args.franken_health, &true, "franken_health flag set")
+            }
+            _ => Err("expected Doctor command".to_string()),
+        }
+    }
+
+    #[test]
+    fn doctor_franken_health_json_output_has_mode_field() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "doctor", "--franken-health", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "franken-health json exit")?;
+        ensure_contains(
+            &stdout,
+            "\"mode\":\"franken-health\"",
+            "franken-health mode field",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"schema\":\"ee.doctor.franken_health.v1\"",
+            "franken-health data schema",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"dependencies\":[",
+            "franken-health dependencies array",
+        )?;
+        ensure(stderr.is_empty(), "franken-health json stderr empty")
+    }
+
+    #[test]
     fn doctor_fix_plan_json_output_has_mode_field() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "doctor", "--fix-plan", "--json"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "fix-plan json exit")?;
@@ -4050,10 +4147,50 @@ mod tests {
 
         match parsed.command {
             Some(Command::Doctor(ref args)) => {
-                ensure_equal(&args.fix_plan, &false, "fix_plan flag not set by default")
+                ensure_equal(&args.fix_plan, &false, "fix_plan flag not set by default")?;
+                ensure_equal(
+                    &args.franken_health,
+                    &false,
+                    "franken_health flag not set by default",
+                )
             }
             _ => Err("expected Doctor command".to_string()),
         }
+    }
+
+    #[test]
+    fn diag_dependencies_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "diag", "dependencies"])
+            .map_err(|e| format!("failed to parse diag dependencies: {:?}", e.kind()))?;
+
+        ensure_equal(
+            &parsed.command,
+            &Some(Command::Diag(DiagCommand::Dependencies)),
+            "diag dependencies command",
+        )
+    }
+
+    #[test]
+    fn diag_dependencies_json_output_has_contract_matrix() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "diag", "dependencies", "--json"]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "diag dependencies json exit",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"command\":\"diag dependencies\"",
+            "dependency diagnostics command",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"schema\":\"ee.diag.dependencies.v1\"",
+            "dependency diagnostics schema",
+        )?;
+        ensure_contains(&stdout, "\"forbiddenCrates\":[", "forbidden crates array")?;
+        ensure_contains(&stdout, "\"entries\":[", "dependency entries array")?;
+        ensure(stderr.is_empty(), "diag dependencies json stderr empty")
     }
 
     // ========================================================================

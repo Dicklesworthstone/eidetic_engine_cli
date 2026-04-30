@@ -3,11 +3,16 @@ use std::io::IsTerminal;
 
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
-use crate::core::doctor::{DoctorReport, FixPlan};
+use crate::core::doctor::{
+    DependencyBlockedFeature, DependencyContractEntry, DependencyDiagnosticsReport,
+    DependencyFeatureProfile, DependencyOptionalFeatureProfile, DependencySource, DoctorReport,
+    FixPlan, FrankenDependencyHealth, FrankenHealthReport,
+};
 use crate::core::health::HealthReport;
 use crate::core::memory::{MemoryDetails, MemoryHistoryReport, MemoryListReport, MemoryShowReport};
 use crate::core::quarantine::{QuarantineEntry, QuarantineReport};
 use crate::core::status::StatusReport;
+use crate::core::{VERSION_PROVENANCE_SCHEMA_V1, VersionReport};
 use crate::eval::{EvaluationReport, EvaluationStatus, ScenarioValidationResult};
 use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
 use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
@@ -306,6 +311,23 @@ impl JsonBuilder {
     }
 
     pub fn field_array_of_strings(&mut self, key: &str, items: &[String]) -> &mut Self {
+        self.separator();
+        self.buffer.push('"');
+        self.buffer.push_str(key);
+        self.buffer.push_str("\":[");
+        for (i, item) in items.iter().enumerate() {
+            if i > 0 {
+                self.buffer.push(',');
+            }
+            self.buffer.push('"');
+            self.buffer.push_str(&escape_json_string(item));
+            self.buffer.push('"');
+        }
+        self.buffer.push(']');
+        self
+    }
+
+    pub fn field_array_of_strs(&mut self, key: &str, items: &[&str]) -> &mut Self {
         self.separator();
         self.buffer.push('"');
         self.buffer.push_str(key);
@@ -987,6 +1009,285 @@ pub fn render_fix_plan_toon(plan: &FixPlan) -> String {
     render_toon_from_json(&render_fix_plan_json(plan))
 }
 
+/// Render dependency diagnostics as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_dependency_diagnostics_json(report: &DependencyDiagnosticsReport) -> String {
+    let mut b = JsonBuilder::with_capacity(4096);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", report.summary.forbidden_default_hit_count == 0);
+    b.field_object("data", |d| {
+        d.field_str("command", "diag dependencies");
+        d.field_str("version", report.version);
+        d.field_str("schema", report.schema);
+        d.field_raw("matrixRevision", &report.matrix_revision.to_string());
+        d.field_object("source", |source| {
+            source.field_str("bead", report.source_bead);
+            source.field_str("planItem", report.source_plan_item);
+        });
+        d.field_str("defaultFeatureProfile", report.default_feature_profile);
+        render_dependency_diagnostics_summary(d, report);
+        d.field_array_of_strs("forbiddenCrates", report.forbidden_crates);
+        d.field_array_of_objects("entries", report.entries, render_dependency_contract_entry);
+        d.field_object("driftPolicy", |policy| {
+            policy.field_str(
+                "cargoUpdateDryRun",
+                report.drift_policy.cargo_update_dry_run,
+            );
+            policy.field_array_of_strs("failConditions", report.drift_policy.fail_conditions);
+            policy.field_str(
+                "runtimeDiagnosticOwner",
+                report.drift_policy.runtime_diagnostic_owner,
+            );
+        });
+    });
+    b.finish()
+}
+
+/// Render dependency diagnostics as human-readable text.
+#[must_use]
+pub fn render_dependency_diagnostics_human(report: &DependencyDiagnosticsReport) -> String {
+    let mut output = String::from("ee diag dependencies\n\n");
+    output.push_str(&format!(
+        "matrix: revision {} ({}/{})\n",
+        report.matrix_revision, report.source_bead, report.source_plan_item
+    ));
+    output.push_str(&format!(
+        "dependencies: {} total, {} default-enabled, {} forbidden default hits\n",
+        report.summary.total_dependencies,
+        report.summary.default_enabled_count,
+        report.summary.forbidden_default_hit_count
+    ));
+    output.push_str(&format!(
+        "blocked feature gates: {}\n\n",
+        report.summary.blocked_feature_count
+    ));
+
+    for entry in report.entries {
+        output.push_str(&format!(
+            "- {} [{}] {} via {}\n",
+            entry.name, entry.owning_surface, entry.status, entry.diagnostic_command
+        ));
+    }
+
+    output
+}
+
+/// Render dependency diagnostics as TOON.
+#[must_use]
+pub fn render_dependency_diagnostics_toon(report: &DependencyDiagnosticsReport) -> String {
+    render_toon_from_json(&render_dependency_diagnostics_json(report))
+}
+
+/// Render franken-stack doctor health as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_franken_health_json(report: &FrankenHealthReport) -> String {
+    let mut b = JsonBuilder::with_capacity(4096);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", report.healthy);
+    b.field_object("data", |d| {
+        d.field_str("command", "doctor");
+        d.field_str("mode", "franken-health");
+        d.field_str("version", report.version);
+        d.field_str("schema", report.schema);
+        d.field_bool("healthy", report.healthy);
+        d.field_object("summary", |summary| {
+            summary.field_raw(
+                "totalDependencies",
+                &report.summary.total_dependencies.to_string(),
+            );
+            summary.field_raw("readyCount", &report.summary.ready_count.to_string());
+            summary.field_raw(
+                "featureGatedCount",
+                &report.summary.feature_gated_count.to_string(),
+            );
+            summary.field_raw(
+                "notLinkedCount",
+                &report.summary.not_linked_count.to_string(),
+            );
+            summary.field_raw(
+                "defaultEnabledCount",
+                &report.summary.default_enabled_count.to_string(),
+            );
+            summary.field_raw(
+                "localSourceCount",
+                &report.summary.local_source_count.to_string(),
+            );
+            summary.field_raw(
+                "forbiddenDefaultHitCount",
+                &report.summary.forbidden_default_hit_count.to_string(),
+            );
+            summary.field_raw(
+                "blockedFeatureCount",
+                &report.summary.blocked_feature_count.to_string(),
+            );
+        });
+        d.field_array_of_objects("dependencies", &report.dependencies, |obj, dependency| {
+            render_franken_dependency_health(obj, dependency);
+        });
+    });
+    b.finish()
+}
+
+/// Render franken-stack doctor health as human-readable text.
+#[must_use]
+pub fn render_franken_health_human(report: &FrankenHealthReport) -> String {
+    let mut output = String::from("ee doctor --franken-health\n\n");
+    output.push_str(&format!(
+        "healthy: {}\nready: {}/{}\nfeature-gated: {}\nblocked feature gates: {}\n\n",
+        report.healthy,
+        report.summary.ready_count,
+        report.summary.total_dependencies,
+        report.summary.feature_gated_count,
+        report.summary.blocked_feature_count
+    ));
+
+    for dependency in &report.dependencies {
+        output.push_str(&format!(
+            "- {} [{}]: {} ({})\n",
+            dependency.name, dependency.owning_surface, dependency.readiness, dependency.status
+        ));
+    }
+
+    output
+}
+
+/// Render franken-stack doctor health as TOON.
+#[must_use]
+pub fn render_franken_health_toon(report: &FrankenHealthReport) -> String {
+    render_toon_from_json(&render_franken_health_json(report))
+}
+
+fn render_dependency_diagnostics_summary(
+    d: &mut JsonBuilder,
+    report: &DependencyDiagnosticsReport,
+) {
+    d.field_object("summary", |summary| {
+        summary.field_raw(
+            "totalDependencies",
+            &report.summary.total_dependencies.to_string(),
+        );
+        summary.field_raw(
+            "acceptedDefaultCount",
+            &report.summary.accepted_default_count.to_string(),
+        );
+        summary.field_raw(
+            "acceptedExternalCount",
+            &report.summary.accepted_external_count.to_string(),
+        );
+        summary.field_raw(
+            "optionalFeatureGatedCount",
+            &report.summary.optional_feature_gated_count.to_string(),
+        );
+        summary.field_raw(
+            "plannedNotLinkedCount",
+            &report.summary.planned_not_linked_count.to_string(),
+        );
+        summary.field_raw(
+            "defaultEnabledCount",
+            &report.summary.default_enabled_count.to_string(),
+        );
+        summary.field_raw(
+            "forbiddenDefaultHitCount",
+            &report.summary.forbidden_default_hit_count.to_string(),
+        );
+        summary.field_raw(
+            "blockedFeatureCount",
+            &report.summary.blocked_feature_count.to_string(),
+        );
+    });
+}
+
+fn render_dependency_contract_entry(obj: &mut JsonBuilder, entry: &DependencyContractEntry) {
+    obj.field_str("name", entry.name);
+    obj.field_str("kind", entry.kind);
+    obj.field_str("owningSurface", entry.owning_surface);
+    obj.field_str("status", entry.status);
+    obj.field_str("readiness", entry.readiness());
+    obj.field_bool("enabledByDefault", entry.enabled_by_default);
+    render_dependency_source(obj, "source", &entry.source);
+    render_dependency_feature_profile(obj, "defaultFeatureProfile", &entry.default_feature_profile);
+    obj.field_array_of_objects(
+        "optionalFeatureProfiles",
+        entry.optional_feature_profiles,
+        render_optional_feature_profile,
+    );
+    obj.field_array_of_objects(
+        "blockedFeatures",
+        entry.blocked_features,
+        render_blocked_feature,
+    );
+    obj.field_array_of_strs(
+        "forbiddenTransitiveDependencies",
+        entry.forbidden_transitive_dependencies,
+    );
+    obj.field_str("minimumSmokeTest", entry.minimum_smoke_test);
+    obj.field_str("degradationCode", entry.degradation_code);
+    obj.field_array_of_strs("statusFields", entry.status_fields);
+    obj.field_str("diagnosticCommand", entry.diagnostic_command);
+    obj.field_str("releasePinDecision", entry.release_pin_decision);
+}
+
+fn render_franken_dependency_health(obj: &mut JsonBuilder, dependency: &FrankenDependencyHealth) {
+    obj.field_str("name", dependency.name);
+    obj.field_str("owningSurface", dependency.owning_surface);
+    obj.field_str("status", dependency.status);
+    obj.field_str("readiness", dependency.readiness);
+    obj.field_bool("enabledByDefault", dependency.enabled_by_default);
+    render_dependency_source(obj, "source", &dependency.source);
+    render_dependency_feature_profile(
+        obj,
+        "defaultFeatureProfile",
+        &dependency.default_feature_profile,
+    );
+    obj.field_array_of_objects(
+        "blockedFeatures",
+        dependency.blocked_features,
+        render_blocked_feature,
+    );
+    obj.field_array_of_strs(
+        "forbiddenTransitiveDependencies",
+        dependency.forbidden_transitive_dependencies,
+    );
+    obj.field_str("degradationCode", dependency.degradation_code);
+    obj.field_str("diagnosticCommand", dependency.diagnostic_command);
+    obj.field_str("minimumSmokeTest", dependency.minimum_smoke_test);
+    obj.field_str("releasePinDecision", dependency.release_pin_decision);
+}
+
+fn render_dependency_source(obj: &mut JsonBuilder, key: &str, source: &DependencySource) {
+    obj.field_object(key, |source_json| {
+        source_json.field_str("kind", source.kind);
+        source_json.field_str("version", source.version);
+        source_json.field_str("path", source.path);
+    });
+}
+
+fn render_dependency_feature_profile(
+    obj: &mut JsonBuilder,
+    key: &str,
+    profile: &DependencyFeatureProfile,
+) {
+    obj.field_object(key, |profile_json| {
+        profile_json.field_bool("defaultFeatures", profile.default_features);
+        profile_json.field_array_of_strs("features", profile.features);
+    });
+}
+
+fn render_optional_feature_profile(
+    obj: &mut JsonBuilder,
+    profile: &DependencyOptionalFeatureProfile,
+) {
+    obj.field_str("name", profile.name);
+    obj.field_array_of_strs("features", profile.features);
+    obj.field_str("status", profile.status);
+}
+
+fn render_blocked_feature(obj: &mut JsonBuilder, feature: &DependencyBlockedFeature) {
+    obj.field_str("name", feature.name);
+    obj.field_array_of_strs("forbiddenCrates", feature.forbidden_crates);
+    obj.field_str("action", feature.action);
+}
+
 /// Render a quarantine report as JSON (ee.response.v1 envelope).
 #[must_use]
 pub fn render_quarantine_json(report: &QuarantineReport) -> String {
@@ -1660,6 +1961,89 @@ pub fn render_memory_history_human(report: &MemoryHistoryReport) -> String {
 #[must_use]
 pub fn render_memory_history_toon(report: &MemoryHistoryReport) -> String {
     render_toon_from_json(&render_memory_history_json(report))
+}
+
+/// Render binary version and build provenance as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_version_json(report: &VersionReport) -> String {
+    let mut b = JsonBuilder::with_capacity(2048);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "version");
+        d.field_str("schema", VERSION_PROVENANCE_SCHEMA_V1);
+        d.field_str("package", report.build.package);
+        d.field_str("version", report.build.version);
+        d.field_str("releaseChannel", report.build.release_channel);
+        d.field_object("source", |source| {
+            field_optional_str(source, "gitCommit", report.build.git_commit);
+            field_optional_str(source, "gitTag", report.build.git_tag);
+            field_optional_bool(source, "gitDirty", report.build.git_dirty);
+            source.field_str("state", source_state(report));
+        });
+        d.field_object("build", |build| {
+            build.field_str("profile", report.build.build_profile);
+            build.field_str("targetTriple", report.build.target_triple);
+            build.field_str("targetArch", report.build.target_arch);
+            build.field_str("targetOs", report.build.target_os);
+            build.field_str("timestampPolicy", report.build.build_timestamp_policy);
+            build.field_raw("timestamp", "null");
+        });
+        d.field_array_of_objects("features", &report.features, |obj, feature| {
+            obj.field_str("name", feature.name);
+            obj.field_bool("enabled", feature.enabled);
+        });
+        d.field_array_of_objects("schemas", &report.schemas, |obj, schema| {
+            obj.field_str("name", schema.name);
+            obj.field_str("schema", schema.schema);
+        });
+        d.field_object("database", |db| {
+            db.field_object("supportedMigrationRange", |range| {
+                range.field_u32("min", report.build.min_db_migration);
+                range.field_u32("max", report.build.max_db_migration);
+            });
+            db.field_str("compatibility", "unknown_without_workspace");
+        });
+        d.field_object("provenance", |provenance| {
+            provenance.field_bool("available", report.provenance_available());
+            provenance.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
+                obj.field_str("code", deg.code);
+                obj.field_str("severity", deg.severity);
+                obj.field_str("message", deg.message);
+                obj.field_str("repair", deg.repair);
+            });
+        });
+    });
+    b.finish()
+}
+
+/// Render binary version and build provenance as TOON.
+#[must_use]
+pub fn render_version_toon(report: &VersionReport) -> String {
+    render_toon_from_json(&render_version_json(report))
+}
+
+fn field_optional_str(builder: &mut JsonBuilder, key: &str, value: Option<&str>) {
+    match value {
+        Some(value) => builder.field_str(key, value),
+        None => builder.field_raw(key, "null"),
+    };
+}
+
+fn field_optional_bool(builder: &mut JsonBuilder, key: &str, value: Option<bool>) {
+    match value {
+        Some(value) => builder.field_bool(key, value),
+        None => builder.field_raw(key, "null"),
+    };
+}
+
+fn source_state(report: &VersionReport) -> &'static str {
+    match report.build.git_dirty {
+        Some(true) => "dirty",
+        Some(false) => "clean",
+        None if report.build.git_commit.is_some() || report.build.git_tag.is_some() => "unknown",
+        None => "unavailable",
+    }
 }
 
 /// Render a capabilities report as JSON (ee.response.v1 envelope).
@@ -3750,14 +4134,20 @@ mod tests {
         render_agent_docs_toon, render_context_response_json, render_context_response_toon,
         render_doctor_json, render_doctor_toon, render_health_json, render_health_toon,
         render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
-        render_status_json, render_status_toon, status_response_json,
+        render_status_json, render_status_toon, render_version_json, status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::doctor::DoctorReport;
     use crate::core::health::HealthReport;
     use crate::core::status::StatusReport;
+    use crate::core::{
+        BUILD_TIMESTAMP_POLICY, BuildFeature, BuildInfo, BuildProvenanceDegradation,
+        SupportedSchema, VERSION_PROVENANCE_SCHEMA_V1, VersionReport,
+    };
     use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
-    use crate::models::{DomainError, MemoryId, ProvenanceUri, UnitScore};
+    use crate::models::{
+        DomainError, ERROR_SCHEMA_V1, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, UnitScore,
+    };
     use crate::pack::{
         ContextRequest, ContextResponse, PackCandidate, PackCandidateInput, PackProvenance,
         PackSection, TokenBudget, assemble_draft,
@@ -3822,6 +4212,180 @@ mod tests {
             .map_err(|error| format!("draft rejected: {error:?}"))?;
         ContextResponse::new(request, draft, Vec::new())
             .map_err(|error| format!("response rejected: {error:?}"))
+    }
+
+    fn version_report_fixture(
+        git_commit: Option<&'static str>,
+        git_tag: Option<&'static str>,
+        git_dirty: Option<bool>,
+        target_triple: &'static str,
+        build_profile: &'static str,
+        release_channel: &'static str,
+        degradations: Vec<BuildProvenanceDegradation>,
+    ) -> VersionReport {
+        VersionReport {
+            build: BuildInfo {
+                package: "ee",
+                version: "9.9.9",
+                git_commit,
+                git_tag,
+                git_dirty,
+                target_triple,
+                target_arch: "x86_64",
+                target_os: "linux",
+                build_profile,
+                release_channel,
+                build_timestamp_policy: BUILD_TIMESTAMP_POLICY,
+                min_db_migration: 1,
+                max_db_migration: 14,
+            },
+            features: vec![
+                BuildFeature::new("fts5", true),
+                BuildFeature::new("json", true),
+                BuildFeature::new("mcp", false),
+                BuildFeature::new("serve", false),
+            ],
+            schemas: vec![
+                SupportedSchema::new("response", RESPONSE_SCHEMA_V1),
+                SupportedSchema::new("error", ERROR_SCHEMA_V1),
+                SupportedSchema::new("version_provenance", VERSION_PROVENANCE_SCHEMA_V1),
+            ],
+            degradations,
+        }
+    }
+
+    #[test]
+    fn version_json_release_clean_fixture_has_full_provenance() -> TestResult {
+        let report = version_report_fixture(
+            Some("abcdef123456"),
+            Some("v9.9.9"),
+            Some(false),
+            "x86_64-unknown-linux-gnu",
+            "release",
+            "stable",
+            Vec::new(),
+        );
+        let json = render_version_json(&report);
+
+        ensure_starts_with(&json, "{\"schema\":\"ee.response.v1\"", "response schema")?;
+        ensure_contains(&json, "\"command\":\"version\"", "command")?;
+        ensure_contains(
+            &json,
+            "\"schema\":\"ee.version.provenance.v1\"",
+            "version schema",
+        )?;
+        ensure_contains(&json, "\"releaseChannel\":\"stable\"", "release channel")?;
+        ensure_contains(&json, "\"gitCommit\":\"abcdef123456\"", "git commit")?;
+        ensure_contains(&json, "\"gitTag\":\"v9.9.9\"", "git tag")?;
+        ensure_contains(&json, "\"gitDirty\":false", "clean source")?;
+        ensure_contains(&json, "\"state\":\"clean\"", "clean state")?;
+        ensure_contains(&json, "\"profile\":\"release\"", "release profile")?;
+        ensure_contains(
+            &json,
+            "\"targetTriple\":\"x86_64-unknown-linux-gnu\"",
+            "target triple",
+        )?;
+        ensure_contains(
+            &json,
+            "\"timestampPolicy\":\"omitted_for_reproducibility\",\"timestamp\":null",
+            "timestamp policy",
+        )?;
+        ensure_contains(&json, "\"available\":true", "available provenance")
+    }
+
+    #[test]
+    fn version_json_dirty_fixture_reports_dirty_source() -> TestResult {
+        let report = version_report_fixture(
+            Some("abcdef123456"),
+            Some("v9.9.9-dirty"),
+            Some(true),
+            "x86_64-unknown-linux-gnu",
+            "debug",
+            "dev",
+            Vec::new(),
+        );
+        let json = render_version_json(&report);
+
+        ensure_contains(&json, "\"gitDirty\":true", "dirty flag")?;
+        ensure_contains(&json, "\"state\":\"dirty\"", "dirty state")?;
+        ensure_contains(&json, "\"releaseChannel\":\"dev\"", "dev channel")
+    }
+
+    #[test]
+    fn version_json_missing_metadata_fixture_reports_degradations() -> TestResult {
+        let report = version_report_fixture(
+            None,
+            None,
+            None,
+            "unknown",
+            "debug",
+            "dev",
+            vec![
+                BuildProvenanceDegradation::new(
+                    "git_metadata_unavailable",
+                    "low",
+                    "Git source metadata was not provided by the build.",
+                    "Build with VERGEN_GIT_SHA, VERGEN_GIT_DESCRIBE, and VERGEN_GIT_DIRTY set.",
+                ),
+                BuildProvenanceDegradation::new(
+                    "target_triple_unavailable",
+                    "low",
+                    "Target triple was not provided by the build.",
+                    "Build with EE_BUILD_TARGET set to the target triple.",
+                ),
+            ],
+        );
+        let json = render_version_json(&report);
+
+        ensure_contains(&json, "\"gitCommit\":null", "missing commit")?;
+        ensure_contains(&json, "\"gitTag\":null", "missing tag")?;
+        ensure_contains(&json, "\"gitDirty\":null", "missing dirty flag")?;
+        ensure_contains(&json, "\"state\":\"unavailable\"", "unavailable state")?;
+        ensure_contains(&json, "\"available\":false", "degraded provenance")?;
+        ensure_contains(
+            &json,
+            "\"code\":\"git_metadata_unavailable\"",
+            "git degradation",
+        )?;
+        ensure_contains(
+            &json,
+            "\"code\":\"target_triple_unavailable\"",
+            "target degradation",
+        )
+    }
+
+    #[test]
+    fn version_json_feature_and_db_contracts_are_stable() -> TestResult {
+        let report = version_report_fixture(
+            Some("abcdef123456"),
+            Some("v9.9.9"),
+            Some(false),
+            "x86_64-unknown-linux-gnu",
+            "release",
+            "stable",
+            Vec::new(),
+        );
+        let json = render_version_json(&report);
+
+        ensure_contains(
+            &json,
+            "\"features\":[{\"name\":\"fts5\",\"enabled\":true},{\"name\":\"json\",\"enabled\":true},{\"name\":\"mcp\",\"enabled\":false},{\"name\":\"serve\",\"enabled\":false}]",
+            "feature order and adapter flags",
+        )?;
+        ensure_contains(
+            &json,
+            "\"supportedMigrationRange\":{\"min\":1,\"max\":14}",
+            "database range",
+        )?;
+        ensure_contains(
+            &json,
+            "\"compatibility\":\"unknown_without_workspace\"",
+            "workspace compatibility state",
+        )?;
+        ensure(
+            !json.contains("/tmp/") && !json.contains("TOKEN=") && !json.contains("ubuntu"),
+            "version JSON must not leak build paths, usernames, or assignment-like secrets",
+        )
     }
 
     #[test]

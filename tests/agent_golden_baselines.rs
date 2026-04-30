@@ -272,6 +272,26 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             expected_command: Some("doctor"),
         },
         ContractCase {
+            name: "doctor_franken_health_json",
+            args: &["doctor", "--franken-health", "--json"],
+            category: "dependencies",
+            golden_name: "doctor_franken_health",
+            format: ContractFormat::Json,
+            expected_success: true,
+            expected_schema: Some("ee.response.v1"),
+            expected_command: Some("doctor"),
+        },
+        ContractCase {
+            name: "diag_dependencies_json",
+            args: &["diag", "dependencies", "--json"],
+            category: "dependencies",
+            golden_name: "diag_dependencies",
+            format: ContractFormat::Json,
+            expected_success: true,
+            expected_schema: Some("ee.response.v1"),
+            expected_command: Some("diag dependencies"),
+        },
+        ContractCase {
             name: "capabilities_json",
             args: &["capabilities", "--json"],
             category: "capabilities",
@@ -310,6 +330,16 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             expected_success: true,
             expected_schema: None,
             expected_command: None,
+        },
+        ContractCase {
+            name: "version_json",
+            args: &["version", "--json"],
+            category: "version",
+            golden_name: "version",
+            format: ContractFormat::Json,
+            expected_success: true,
+            expected_schema: Some("ee.response.v1"),
+            expected_command: Some("version"),
         },
         ContractCase {
             name: "agent_docs_json",
@@ -704,6 +734,78 @@ fn doctor_toon_output_matches_golden() -> TestResult {
     assert_golden("doctor", "doctor_toon", &stdout)
 }
 
+#[test]
+fn doctor_franken_health_json_matches_golden() -> TestResult {
+    let output = run_ee(&["doctor", "--franken-health", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        output.status.success(),
+        format!("doctor --franken-health --json should succeed; stderr: {stderr}"),
+    )?;
+    ensure(
+        stderr.is_empty(),
+        "doctor --franken-health --json stderr must be empty",
+    )?;
+    ensure_starts_with(
+        &stdout,
+        "{\"schema\":\"ee.response.v1\"",
+        "franken health JSON schema",
+    )?;
+    ensure_contains(&stdout, "\"command\":\"doctor\"", "doctor JSON command")?;
+    ensure_contains(
+        &stdout,
+        "\"mode\":\"franken-health\"",
+        "franken health mode",
+    )?;
+    ensure_contains(
+        &stdout,
+        "\"schema\":\"ee.doctor.franken_health.v1\"",
+        "franken health data schema",
+    )?;
+
+    assert_golden("dependencies", "doctor_franken_health", &stdout)
+}
+
+#[test]
+fn diag_dependencies_json_matches_golden() -> TestResult {
+    let output = run_ee(&["diag", "dependencies", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        output.status.success(),
+        format!("diag dependencies --json should succeed; stderr: {stderr}"),
+    )?;
+    ensure(
+        stderr.is_empty(),
+        "diag dependencies --json stderr must be empty",
+    )?;
+    ensure_starts_with(
+        &stdout,
+        "{\"schema\":\"ee.response.v1\"",
+        "dependency diagnostics JSON schema",
+    )?;
+    ensure_contains(
+        &stdout,
+        "\"command\":\"diag dependencies\"",
+        "dependency diagnostics command",
+    )?;
+    ensure_contains(
+        &stdout,
+        "\"schema\":\"ee.diag.dependencies.v1\"",
+        "dependency diagnostics data schema",
+    )?;
+    ensure_contains(
+        &stdout,
+        "\"forbiddenCrates\":[",
+        "dependency diagnostics forbidden crates",
+    )?;
+
+    assert_golden("dependencies", "diag_dependencies", &stdout)
+}
+
 // =============================================================================
 // Capabilities command
 // =============================================================================
@@ -804,6 +906,43 @@ fn version_subcommand_matches_golden() -> TestResult {
     assert_golden("version", "version_output", &stdout)
 }
 
+#[test]
+fn version_json_matches_golden() -> TestResult {
+    let output = run_ee(&["version", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(output.status.success(), "version --json should succeed")?;
+    ensure(stderr.is_empty(), "version --json stderr must be empty")?;
+    ensure_starts_with(
+        &stdout,
+        "{\"schema\":\"ee.response.v1\"",
+        "version JSON schema",
+    )?;
+    ensure_contains(&stdout, "\"command\":\"version\"", "version JSON command")?;
+    ensure_contains(
+        &stdout,
+        "\"schema\":\"ee.version.provenance.v1\"",
+        "version provenance schema",
+    )?;
+
+    assert_golden("version", "version", &stdout)
+}
+
+#[test]
+fn version_json_contract_case_records_artifacts() -> TestResult {
+    validate_contract_case(ContractCase {
+        name: "version_json",
+        args: &["version", "--json"],
+        category: "version",
+        golden_name: "version",
+        format: ContractFormat::Json,
+        expected_success: true,
+        expected_schema: Some("ee.response.v1"),
+        expected_command: Some("version"),
+    })
+}
+
 // =============================================================================
 // Agent docs (--agent-docs flag)
 // =============================================================================
@@ -868,6 +1007,8 @@ fn all_json_commands_have_schema_envelope() -> TestResult {
         &["status", "--json"],
         &["check", "--json"],
         &["doctor", "--json"],
+        &["doctor", "--franken-health", "--json"],
+        &["diag", "dependencies", "--json"],
         &["capabilities", "--json"],
         &["--schema"],
         &["--help-json"],

@@ -1,0 +1,382 @@
+{
+  "schema": "ee.dependency_contract_matrix.v1",
+  "matrix_revision": 1,
+  "source_bead": "eidetic_engine_cli-ilcq",
+  "source_plan_item": "EE-307",
+  "default_feature_profile": "default",
+  "forbidden_crates": [
+    "tokio",
+    "tokio-util",
+    "async-std",
+    "smol",
+    "rusqlite",
+    "sqlx",
+    "diesel",
+    "sea-orm",
+    "petgraph",
+    "hyper",
+    "axum",
+    "tower",
+    "reqwest"
+  ],
+  "entries": [
+    {
+      "name": "asupersync",
+      "kind": "rust_crate",
+      "owning_surface": "ee-runtime",
+      "status": "accepted_default",
+      "enabled_by_default": true,
+      "source": {
+        "kind": "registry",
+        "version": "0.3.1",
+        "path": "/dp/asupersync/asupersync"
+      },
+      "default_feature_profile": {
+        "default_features": false,
+        "features": [
+          "tracing-integration"
+        ]
+      },
+      "optional_feature_profiles": [
+        {
+          "name": "deterministic-tests",
+          "features": [
+            "deterministic-mode"
+          ],
+          "status": "test_only"
+        }
+      ],
+      "blocked_features": [
+        {
+          "name": "sqlite",
+          "forbidden_crates": [
+            "rusqlite"
+          ],
+          "action": "do_not_enable_in_ee"
+        }
+      ],
+      "forbidden_transitive_dependencies": [],
+      "minimum_smoke_test": "runtime_status_reports_asupersync_engine",
+      "degradation_code": "runtime_unavailable",
+      "status_fields": [
+        "runtime.engine",
+        "runtime.profile",
+        "runtime.async_boundary"
+      ],
+      "diagnostic_command": "ee status --json",
+      "release_pin_decision": "Registry version 0.3.1 is accepted; /dp/asupersync remains the local source reference for API checks."
+    },
+    {
+      "name": "frankensqlite",
+      "kind": "rust_crate_family",
+      "owning_surface": "ee-db",
+      "status": "accepted_default",
+      "enabled_by_default": true,
+      "source": {
+        "kind": "path_patch",
+        "version": "0.1.2",
+        "path": "/data/projects/frankensqlite"
+      },
+      "default_feature_profile": {
+        "default_features": true,
+        "features": [
+          "json",
+          "fts5"
+        ]
+      },
+      "optional_feature_profiles": [
+        {
+          "name": "extended-sqlite-extensions",
+          "features": [
+            "rtree",
+            "session",
+            "icu",
+            "misc"
+          ],
+          "status": "not_in_default_profile"
+        }
+      ],
+      "blocked_features": [],
+      "forbidden_transitive_dependencies": [],
+      "minimum_smoke_test": "default_feature_tree_excludes_forbidden_crates and migration tests",
+      "degradation_code": "storage_unavailable",
+      "status_fields": [
+        "capabilities.storage",
+        "degraded[].code"
+      ],
+      "diagnostic_command": "ee doctor --json",
+      "release_pin_decision": "Local path patches are accepted only for development; release must record a registry pin or ADR-backed local source policy."
+    },
+    {
+      "name": "sqlmodel_rust",
+      "kind": "rust_crate_family",
+      "owning_surface": "ee-db",
+      "status": "accepted_default",
+      "enabled_by_default": true,
+      "source": {
+        "kind": "path_dependency",
+        "version": "0.2.2",
+        "path": "/data/projects/sqlmodel_rust"
+      },
+      "default_feature_profile": {
+        "default_features": true,
+        "features": [
+          "sqlmodel-core",
+          "sqlmodel-frankensqlite"
+        ]
+      },
+      "optional_feature_profiles": [],
+      "blocked_features": [
+        {
+          "name": "c-sqlite-tests",
+          "forbidden_crates": [
+            "rusqlite"
+          ],
+          "action": "parity_only_do_not_enable_in_ee"
+        }
+      ],
+      "forbidden_transitive_dependencies": [],
+      "minimum_smoke_test": "migration_sequence_is_contiguous and repository tests",
+      "degradation_code": "storage_unavailable",
+      "status_fields": [
+        "capabilities.storage",
+        "database.schema_version"
+      ],
+      "diagnostic_command": "ee db status --json",
+      "release_pin_decision": "Local path dependencies are accepted only for development; release must record a registry pin or ADR-backed local source policy."
+    },
+    {
+      "name": "frankensearch",
+      "kind": "rust_crate_family",
+      "owning_surface": "ee-search",
+      "status": "accepted_default",
+      "enabled_by_default": true,
+      "source": {
+        "kind": "path_dependency",
+        "version": "0.3.0",
+        "path": "/data/projects/frankensearch"
+      },
+      "default_feature_profile": {
+        "default_features": false,
+        "features": [
+          "hash",
+          "storage",
+          "model2vec",
+          "lexical",
+          "fts5"
+        ]
+      },
+      "optional_feature_profiles": [],
+      "blocked_features": [
+        {
+          "name": "fastembed",
+          "forbidden_crates": [
+            "tokio",
+            "tokio-util",
+            "hyper",
+            "tower",
+            "reqwest"
+          ],
+          "action": "block_embed_quality_until_upstream_has_clean_local_profile"
+        },
+        {
+          "name": "download_api",
+          "forbidden_crates": [
+            "reqwest"
+          ],
+          "action": "no_network_stack_in_core"
+        }
+      ],
+      "forbidden_transitive_dependencies": [],
+      "minimum_smoke_test": "search/index smoke tests with deterministic hash embeddings",
+      "degradation_code": "search_unavailable",
+      "status_fields": [
+        "capabilities.search",
+        "index.generation",
+        "degraded[].code"
+      ],
+      "diagnostic_command": "ee index status --json",
+      "release_pin_decision": "Local path dependencies are accepted only for development; release must record a registry pin or ADR-backed local source policy."
+    },
+    {
+      "name": "franken_networkx",
+      "kind": "rust_crate_family",
+      "owning_surface": "ee-graph",
+      "status": "optional_feature_gated",
+      "enabled_by_default": false,
+      "source": {
+        "kind": "path_dependency",
+        "version": "0.1.0",
+        "path": "/data/projects/franken_networkx"
+      },
+      "default_feature_profile": {
+        "default_features": false,
+        "features": []
+      },
+      "optional_feature_profiles": [
+        {
+          "name": "graph",
+          "features": [
+            "fnx-runtime/asupersync-integration",
+            "fnx-classes",
+            "fnx-algorithms"
+          ],
+          "status": "accepted_optional"
+        }
+      ],
+      "blocked_features": [
+        {
+          "name": "ftui-integration",
+          "forbidden_crates": [],
+          "action": "not_part_of_ee_graph_contract"
+        }
+      ],
+      "forbidden_transitive_dependencies": [],
+      "minimum_smoke_test": "graph projection and centrality tests",
+      "degradation_code": "graph_unavailable",
+      "status_fields": [
+        "capabilities.graph",
+        "graph.snapshot_generation"
+      ],
+      "diagnostic_command": "ee graph status --json",
+      "release_pin_decision": "Local path dependencies are accepted only for development; release must record a registry pin or ADR-backed local source policy."
+    },
+    {
+      "name": "coding_agent_session_search",
+      "kind": "external_process",
+      "owning_surface": "ee-cass",
+      "status": "accepted_external",
+      "enabled_by_default": true,
+      "source": {
+        "kind": "external_binary",
+        "version": "0.4.1",
+        "path": "/dp/coding_agent_session_search"
+      },
+      "default_feature_profile": {
+        "default_features": false,
+        "features": [
+          "cass --robot",
+          "cass --json"
+        ]
+      },
+      "optional_feature_profiles": [],
+      "blocked_features": [
+        {
+          "name": "interactive-output",
+          "forbidden_crates": [],
+          "action": "never_parse_bare_cass_output"
+        }
+      ],
+      "forbidden_transitive_dependencies": [],
+      "minimum_smoke_test": "CASS fixture parsing for capabilities, health, and API version",
+      "degradation_code": "cass_unavailable",
+      "status_fields": [
+        "capabilities.cass",
+        "degraded[].code"
+      ],
+      "diagnostic_command": "ee import cass --dry-run --json",
+      "release_pin_decision": "External process contract is accepted; no Rust crate is linked into ee."
+    },
+    {
+      "name": "toon_rust",
+      "kind": "rust_crate",
+      "owning_surface": "ee-output",
+      "status": "accepted_default",
+      "enabled_by_default": true,
+      "source": {
+        "kind": "path_dependency",
+        "version": "0.2.2",
+        "path": "/data/projects/toon_rust"
+      },
+      "default_feature_profile": {
+        "default_features": false,
+        "features": []
+      },
+      "optional_feature_profiles": [],
+      "blocked_features": [],
+      "forbidden_transitive_dependencies": [],
+      "minimum_smoke_test": "TOON renderer round-trip and golden parity tests",
+      "degradation_code": "toon_unavailable",
+      "status_fields": [
+        "capabilities.output.toon"
+      ],
+      "diagnostic_command": "ee status --json",
+      "release_pin_decision": "Local path dependency is accepted only for development; release must record a registry pin or ADR-backed local source policy."
+    },
+    {
+      "name": "franken_agent_detection",
+      "kind": "rust_crate",
+      "owning_surface": "ee-agent-detect",
+      "status": "accepted_default",
+      "enabled_by_default": true,
+      "source": {
+        "kind": "path_dependency",
+        "version": "0.1.3",
+        "path": "/data/projects/franken_agent_detection"
+      },
+      "default_feature_profile": {
+        "default_features": false,
+        "features": []
+      },
+      "optional_feature_profiles": [],
+      "blocked_features": [
+        {
+          "name": "connector-backed-scans",
+          "forbidden_crates": [],
+          "action": "requires_privacy_and_dependency_gates_before_default_use"
+        }
+      ],
+      "forbidden_transitive_dependencies": [],
+      "minimum_smoke_test": "agent detection fixture tests with root overrides",
+      "degradation_code": "agent_detection_unavailable",
+      "status_fields": [
+        "capabilities.agent_detection"
+      ],
+      "diagnostic_command": "ee agent sources --json",
+      "release_pin_decision": "Local path dependency is accepted only for development; release must record a registry pin or ADR-backed local source policy."
+    },
+    {
+      "name": "fastmcp-rust",
+      "kind": "planned_rust_crate",
+      "owning_surface": "ee-mcp",
+      "status": "planned_not_linked",
+      "enabled_by_default": false,
+      "source": {
+        "kind": "not_linked",
+        "version": "unresolved",
+        "path": "/dp/fastmcp-rust"
+      },
+      "default_feature_profile": {
+        "default_features": false,
+        "features": []
+      },
+      "optional_feature_profiles": [
+        {
+          "name": "mcp",
+          "features": [
+            "stdio"
+          ],
+          "status": "blocked_until_dependency_audit"
+        }
+      ],
+      "blocked_features": [],
+      "forbidden_transitive_dependencies": [],
+      "minimum_smoke_test": "MCP stdio initialize/tools/resources golden tests",
+      "degradation_code": "mcp_unavailable",
+      "status_fields": [
+        "capabilities.mcp"
+      ],
+      "diagnostic_command": "ee doctor --json",
+      "release_pin_decision": "Do not link before a clean feature-tree audit and ADR-backed release pin."
+    }
+  ],
+  "drift_policy": {
+    "cargo_update_dry_run": "advisory_only",
+    "fail_conditions": [
+      "introduces_forbidden_crate",
+      "duplicates_franken_stack_family",
+      "invalidates_accepted_feature_profile"
+    ],
+    "runtime_diagnostic_owner": "EE-308"
+  }
+}

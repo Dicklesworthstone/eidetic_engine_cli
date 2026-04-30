@@ -1,5 +1,7 @@
 use std::future::Future;
 
+use crate::models::{ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
+
 pub mod agent_detect;
 pub mod agent_docs;
 pub mod budget;
@@ -32,17 +34,217 @@ pub use outcome::{
     outcome_class, outcome_exit_code, record_outcome,
 };
 
+pub const VERSION_PROVENANCE_SCHEMA_V1: &str = "ee.version.provenance.v1";
+pub const BUILD_TIMESTAMP_POLICY: &str = "omitted_for_reproducibility";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuildFeature {
+    pub name: &'static str,
+    pub enabled: bool,
+}
+
+impl BuildFeature {
+    #[must_use]
+    pub const fn new(name: &'static str, enabled: bool) -> Self {
+        Self { name, enabled }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SupportedSchema {
+    pub name: &'static str,
+    pub schema: &'static str,
+}
+
+impl SupportedSchema {
+    #[must_use]
+    pub const fn new(name: &'static str, schema: &'static str) -> Self {
+        Self { name, schema }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuildProvenanceDegradation {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub message: &'static str,
+    pub repair: &'static str,
+}
+
+impl BuildProvenanceDegradation {
+    #[must_use]
+    pub const fn new(
+        code: &'static str,
+        severity: &'static str,
+        message: &'static str,
+        repair: &'static str,
+    ) -> Self {
+        Self {
+            code,
+            severity,
+            message,
+            repair,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BuildInfo {
     pub package: &'static str,
     pub version: &'static str,
+    pub git_commit: Option<&'static str>,
+    pub git_tag: Option<&'static str>,
+    pub git_dirty: Option<bool>,
+    pub target_triple: &'static str,
+    pub target_arch: &'static str,
+    pub target_os: &'static str,
+    pub build_profile: &'static str,
+    pub release_channel: &'static str,
+    pub build_timestamp_policy: &'static str,
+    pub min_db_migration: u32,
+    pub max_db_migration: u32,
 }
 
 #[must_use]
-pub const fn build_info() -> BuildInfo {
+pub fn build_info() -> BuildInfo {
+    let (min_db_migration, max_db_migration) = db_migration_range();
     BuildInfo {
         package: env!("CARGO_PKG_NAME"),
         version: env!("CARGO_PKG_VERSION"),
+        git_commit: clean_build_metadata(option_env!("VERGEN_GIT_SHA")),
+        git_tag: clean_build_metadata(option_env!("VERGEN_GIT_DESCRIBE")),
+        git_dirty: parse_build_bool(option_env!("VERGEN_GIT_DIRTY")),
+        target_triple: clean_build_metadata(option_env!("EE_BUILD_TARGET")).unwrap_or("unknown"),
+        target_arch: std::env::consts::ARCH,
+        target_os: std::env::consts::OS,
+        build_profile: build_profile(),
+        release_channel: release_channel(),
+        build_timestamp_policy: BUILD_TIMESTAMP_POLICY,
+        min_db_migration,
+        max_db_migration,
+    }
+}
+
+#[must_use]
+pub fn build_features() -> Vec<BuildFeature> {
+    vec![
+        BuildFeature::new("fts5", cfg!(feature = "fts5")),
+        BuildFeature::new("json", cfg!(feature = "json")),
+        BuildFeature::new("embed-fast", cfg!(feature = "embed-fast")),
+        BuildFeature::new("lexical-bm25", cfg!(feature = "lexical-bm25")),
+        BuildFeature::new("graph", cfg!(feature = "graph")),
+        BuildFeature::new("mcp", cfg!(feature = "mcp")),
+        BuildFeature::new("serve", cfg!(feature = "serve")),
+        BuildFeature::new("science-analytics", cfg!(feature = "science-analytics")),
+    ]
+}
+
+#[must_use]
+pub fn supported_schemas() -> Vec<SupportedSchema> {
+    vec![
+        SupportedSchema::new("response", RESPONSE_SCHEMA_V1),
+        SupportedSchema::new("error", ERROR_SCHEMA_V1),
+        SupportedSchema::new("version_provenance", VERSION_PROVENANCE_SCHEMA_V1),
+    ]
+}
+
+#[must_use]
+pub fn db_migration_range() -> (u32, u32) {
+    let min = crate::db::MIGRATIONS
+        .first()
+        .map_or(0, crate::db::Migration::version);
+    let max = crate::db::MIGRATIONS
+        .last()
+        .map_or(0, crate::db::Migration::version);
+    (min, max)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VersionReport {
+    pub build: BuildInfo,
+    pub features: Vec<BuildFeature>,
+    pub schemas: Vec<SupportedSchema>,
+    pub degradations: Vec<BuildProvenanceDegradation>,
+}
+
+impl VersionReport {
+    #[must_use]
+    pub fn gather() -> Self {
+        let build = build_info();
+        let mut degradations = Vec::new();
+
+        if build.git_commit.is_none() && build.git_tag.is_none() && build.git_dirty.is_none() {
+            degradations.push(BuildProvenanceDegradation::new(
+                "git_metadata_unavailable",
+                "low",
+                "Git source metadata was not provided by the build.",
+                "Build with VERGEN_GIT_SHA, VERGEN_GIT_DESCRIBE, and VERGEN_GIT_DIRTY set.",
+            ));
+        }
+
+        if build.target_triple == "unknown" {
+            degradations.push(BuildProvenanceDegradation::new(
+                "target_triple_unavailable",
+                "low",
+                "Target triple was not provided by the build.",
+                "Build with EE_BUILD_TARGET set to the target triple.",
+            ));
+        }
+
+        Self {
+            build,
+            features: build_features(),
+            schemas: supported_schemas(),
+            degradations,
+        }
+    }
+
+    #[must_use]
+    pub fn provenance_available(&self) -> bool {
+        self.degradations.is_empty()
+    }
+}
+
+fn clean_build_metadata(value: Option<&'static str>) -> Option<&'static str> {
+    match value {
+        Some(value)
+            if !value.is_empty()
+                && !value.contains('/')
+                && !value.contains('\\')
+                && !value.contains('=')
+                && !value.contains('\n')
+                && !value.contains('\r') =>
+        {
+            Some(value)
+        }
+        _ => None,
+    }
+}
+
+fn parse_build_bool(value: Option<&'static str>) -> Option<bool> {
+    match clean_build_metadata(value) {
+        Some("true" | "1" | "yes") => Some(true),
+        Some("false" | "0" | "no") => Some(false),
+        _ => None,
+    }
+}
+
+const fn build_profile() -> &'static str {
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
+}
+
+fn release_channel() -> &'static str {
+    match option_env!("EE_RELEASE_CHANNEL") {
+        Some("stable") => "stable",
+        Some("beta") => "beta",
+        Some("nightly") => "nightly",
+        Some("dev") => "dev",
+        _ if cfg!(debug_assertions) => "dev",
+        _ => "stable",
     }
 }
 
@@ -115,7 +317,11 @@ mod tests {
 
     use asupersync::{LabConfig, LabRuntime};
 
-    use super::{RuntimeProfile, build_info, run_cli_future, runtime_status};
+    use super::{
+        BUILD_TIMESTAMP_POLICY, RuntimeProfile, VERSION_PROVENANCE_SCHEMA_V1, VersionReport,
+        build_features, build_info, clean_build_metadata, db_migration_range, parse_build_bool,
+        run_cli_future, runtime_status, supported_schemas,
+    };
 
     type TestResult = Result<(), String>;
 
@@ -149,7 +355,107 @@ mod tests {
         ensure(
             !info.version.is_empty(),
             "package version must not be empty",
+        )?;
+        ensure_equal(
+            &info.build_timestamp_policy,
+            &BUILD_TIMESTAMP_POLICY,
+            "timestamp policy",
+        )?;
+        ensure(
+            info.min_db_migration <= info.max_db_migration,
+            "database migration range must be ordered",
         )
+    }
+
+    #[test]
+    fn version_report_uses_stable_ordered_contracts() -> TestResult {
+        let report = VersionReport::gather();
+        ensure_equal(
+            &report.features.first().map(|feature| feature.name),
+            &Some("fts5"),
+            "first feature",
+        )?;
+        ensure_equal(
+            &report
+                .schemas
+                .iter()
+                .any(|schema| schema.schema == VERSION_PROVENANCE_SCHEMA_V1),
+            &true,
+            "version schema advertised",
+        )?;
+        ensure_equal(
+            &report.provenance_available(),
+            &report.degradations.is_empty(),
+            "availability mirrors degradations",
+        )
+    }
+
+    #[test]
+    fn build_feature_flags_are_deterministically_ordered() -> TestResult {
+        let names: Vec<&str> = build_features()
+            .iter()
+            .map(|feature| feature.name)
+            .collect();
+        ensure_equal(
+            &names,
+            &vec![
+                "fts5",
+                "json",
+                "embed-fast",
+                "lexical-bm25",
+                "graph",
+                "mcp",
+                "serve",
+                "science-analytics",
+            ],
+            "feature order",
+        )
+    }
+
+    #[test]
+    fn supported_schemas_include_response_error_and_version() -> TestResult {
+        let schemas: Vec<&str> = supported_schemas()
+            .iter()
+            .map(|schema| schema.name)
+            .collect();
+        ensure_equal(
+            &schemas,
+            &vec!["response", "error", "version_provenance"],
+            "schema names",
+        )
+    }
+
+    #[test]
+    fn db_migration_range_matches_declared_migrations() -> TestResult {
+        let (min, max) = db_migration_range();
+        ensure(min > 0, "minimum migration should be known")?;
+        ensure(max >= min, "maximum migration should be >= minimum")
+    }
+
+    #[test]
+    fn build_metadata_sanitizer_rejects_path_like_values() -> TestResult {
+        ensure_equal(
+            &clean_build_metadata(Some("abc123")),
+            &Some("abc123"),
+            "plain metadata",
+        )?;
+        ensure_equal(
+            &clean_build_metadata(Some("/tmp/build/secret")),
+            &None,
+            "path metadata must be redacted",
+        )?;
+        ensure_equal(
+            &clean_build_metadata(Some("TOKEN=value")),
+            &None,
+            "assignment metadata must be redacted",
+        )
+    }
+
+    #[test]
+    fn build_bool_parser_accepts_stable_literals() -> TestResult {
+        ensure_equal(&parse_build_bool(Some("true")), &Some(true), "true")?;
+        ensure_equal(&parse_build_bool(Some("0")), &Some(false), "zero")?;
+        ensure_equal(&parse_build_bool(Some("maybe")), &None, "unknown bool")
     }
 
     #[test]
