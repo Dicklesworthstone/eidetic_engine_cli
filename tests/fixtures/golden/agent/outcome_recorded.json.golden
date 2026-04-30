@@ -1,0 +1,40 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "outcome",
+    "version": "0.1.0",
+    "status": "recorded",
+    "dryRun": false,
+    "target": {
+      "type": "memory",
+      "id": "mem_00000000000000000000000001",
+      "workspaceId": "wsp_searchjson0000000000000001",
+      "verified": true
+    },
+    "event": {
+      "id": "fb_31234567890123456789012345",
+      "auditId": "audit_DYNAMIC",
+      "signal": "helpful",
+      "weight": 2.0,
+      "sourceType": "human_explicit",
+      "sourceId": "golden-run",
+      "reasonPresent": true,
+      "evidenceJsonPresent": true,
+      "sessionId": null
+    },
+    "feedback": {
+      "positiveWeight": 2.0,
+      "positiveCount": 1,
+      "negativeWeight": 0.0,
+      "negativeCount": 0,
+      "neutralWeight": 0.0,
+      "neutralCount": 0,
+      "decayWeight": 0.0,
+      "decayCount": 0,
+      "totalCount": 1,
+      "netScore": 2.0,
+      "trustScore": 1.0
+    }
+  }
+}

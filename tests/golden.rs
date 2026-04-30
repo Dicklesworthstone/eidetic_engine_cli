@@ -174,6 +174,27 @@ mod tests {
         }
     }
 
+    fn ensure_json_number_close(
+        actual: &serde_json::Value,
+        expected: &serde_json::Value,
+        tolerance: f64,
+        context: &str,
+    ) -> TestResult {
+        let actual_number = actual
+            .as_f64()
+            .ok_or_else(|| format!("{context}: actual value must be numeric, got {actual:?}"))?;
+        let expected_number = expected.as_f64().ok_or_else(|| {
+            format!("{context}: expected value must be numeric, got {expected:?}")
+        })?;
+
+        ensure(
+            (actual_number - expected_number).abs() <= tolerance,
+            format!(
+                "{context}: expected {expected_number:?} within {tolerance}, got {actual_number:?}"
+            ),
+        )
+    }
+
     fn ensure_contains(haystack: &str, needle: &str, context: &str) -> TestResult {
         ensure(
             haystack.contains(needle),
@@ -422,6 +443,35 @@ mod tests {
             &value["data"]["results"][0]["doc_id"],
             &serde_json::json!("mem_00000000000000000000000001"),
             "search result memory id",
+        )?;
+        ensure_equal(
+            &value["data"]["metrics"]["requested_limit"],
+            &serde_json::json!(10),
+            "search metrics requested limit",
+        )?;
+        ensure_equal(
+            &value["data"]["metrics"]["returned_count"],
+            &serde_json::json!(1),
+            "search metrics returned count",
+        )?;
+        ensure_equal(
+            &value["data"]["metrics"]["error_count"],
+            &serde_json::json!(0),
+            "search metrics error count",
+        )?;
+        ensure_json_number_close(
+            &value["data"]["metrics"]["score_distribution"]["top"],
+            &value["data"]["results"][0]["score"],
+            0.000_001,
+            "search metrics top score",
+        )?;
+        let source = value["data"]["results"][0]["source"]
+            .as_str()
+            .ok_or_else(|| "search result source must be a string".to_string())?;
+        ensure_equal(
+            &value["data"]["metrics"]["source_counts"][source],
+            &serde_json::json!(1),
+            "search metrics source count",
         )
     }
 
@@ -513,6 +563,16 @@ mod tests {
             &value["data"]["request"]["candidatePool"],
             &serde_json::json!(10),
             "context request candidate pool",
+        )?;
+        ensure_equal(
+            &value["data"]["pack"]["selectionCertificate"]["objective"],
+            &serde_json::json!("mmr_redundancy"),
+            "context selection certificate objective",
+        )?;
+        ensure_equal(
+            &value["data"]["pack"]["selectionCertificate"]["steps"][0]["memoryId"],
+            &serde_json::json!("mem_00000000000000000000000001"),
+            "context selection certificate memory id",
         )?;
 
         let items = value["data"]["pack"]["items"]
@@ -695,6 +755,140 @@ mod tests {
         )?;
 
         assert_golden("agent", "why_selected.json", &stdout)
+    }
+
+    #[test]
+    fn agent_outcome_json_records_feedback_and_audit() -> TestResult {
+        let artifact_dir = unique_artifact_dir("outcome-json")?;
+        let workspace = artifact_dir.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        fs::create_dir_all(&workspace).map_err(|error| {
+            format!(
+                "failed to create workspace {}: {error}",
+                workspace.display()
+            )
+        })?;
+
+        seed_search_workspace(&workspace, &database)?;
+
+        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .arg("--json")
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("outcome")
+            .arg("mem_00000000000000000000000001")
+            .arg("--database")
+            .arg(&database)
+            .arg("--signal")
+            .arg("helpful")
+            .arg("--source-type")
+            .arg("human_explicit")
+            .arg("--source-id")
+            .arg("golden-run")
+            .arg("--reason")
+            .arg("The memory prevented a release workflow mistake.")
+            .arg("--evidence-json")
+            .arg(r#"{"outcome":"success","redacted":true}"#)
+            .arg("--event-id")
+            .arg("fb_31234567890123456789012345")
+            .arg("--actor")
+            .arg("golden-test")
+            .output()
+            .map_err(|error| format!("failed to run ee outcome --json: {error}"))?;
+
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|error| format!("outcome stdout was not UTF-8: {error}"))?;
+        let stderr = String::from_utf8(output.stderr)
+            .map_err(|error| format!("outcome stderr was not UTF-8: {error}"))?;
+
+        ensure(
+            output.status.success(),
+            format!("outcome --json should succeed; stderr: {stderr}"),
+        )?;
+        ensure(
+            stderr.is_empty(),
+            format!("outcome --json stderr must be empty, got: {stderr:?}"),
+        )?;
+        ensure(
+            stdout.starts_with('{'),
+            format!("outcome stdout must start with JSON data, got: {stdout:?}"),
+        )?;
+        ensure(
+            stdout.ends_with('\n'),
+            format!("outcome stdout must end with a newline, got: {stdout:?}"),
+        )?;
+        ensure(
+            !stdout.contains(r#""redacted""#),
+            "outcome output must not echo evidence JSON keys",
+        )?;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "outcome schema",
+        )?;
+        ensure_equal(
+            &value["success"],
+            &serde_json::json!(true),
+            "outcome success",
+        )?;
+        ensure_equal(
+            &value["data"]["command"],
+            &serde_json::json!("outcome"),
+            "outcome command",
+        )?;
+        ensure_equal(
+            &value["data"]["status"],
+            &serde_json::json!("recorded"),
+            "outcome status",
+        )?;
+        ensure_equal(
+            &value["data"]["event"]["id"],
+            &serde_json::json!("fb_31234567890123456789012345"),
+            "outcome event id",
+        )?;
+        ensure_equal(
+            &value["data"]["event"]["evidenceJsonPresent"],
+            &serde_json::json!(true),
+            "outcome evidence presence",
+        )?;
+        ensure_equal(
+            &value["data"]["feedback"]["totalCount"],
+            &serde_json::json!(1),
+            "outcome feedback count",
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let event = connection
+            .get_feedback_event("fb_31234567890123456789012345")
+            .map_err(|error| error.to_string())?;
+        ensure(event.is_some(), "feedback event must be durable")?;
+        let audit = connection
+            .list_audit_by_target("memory", "mem_00000000000000000000000001", None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&audit.len(), &1_usize, "outcome audit row count")?;
+
+        let normalized = normalize_outcome_json(&stdout);
+        assert_golden("agent", "outcome_recorded.json", &normalized)
+    }
+
+    fn normalize_outcome_json(json: &str) -> String {
+        let mut value: serde_json::Value = match serde_json::from_str(json) {
+            Ok(v) => v,
+            Err(_) => return json.to_string(),
+        };
+
+        if let Some(audit_id) = value
+            .get_mut("data")
+            .and_then(|data| data.get_mut("event"))
+            .and_then(|event| event.get_mut("auditId"))
+        {
+            *audit_id = serde_json::json!("audit_DYNAMIC");
+        }
+
+        serde_json::to_string_pretty(&value).unwrap_or_else(|_| json.to_string()) + "\n"
     }
 
     #[test]
