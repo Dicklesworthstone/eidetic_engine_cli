@@ -23,6 +23,7 @@ pub mod search;
 pub mod situation;
 pub mod status;
 pub mod streams;
+pub mod support_bundle;
 pub mod verify;
 pub mod why;
 

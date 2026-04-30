@@ -788,6 +788,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
             r.field_str("asyncBoundary", report.runtime.async_boundary);
         });
         render_memory_health_json(d, &report.memory_health);
+        render_derived_assets_json(d, &report.derived_assets, true);
         d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
             obj.field_str("code", deg.code);
             obj.field_str("severity", deg.severity);
@@ -819,6 +820,33 @@ fn render_memory_health_json(
     });
 }
 
+fn render_derived_assets_json(
+    parent: &mut JsonBuilder,
+    assets: &[crate::core::status::DerivedAssetReport],
+    include_repair: bool,
+) {
+    parent.field_array_of_objects("derivedAssets", assets, |obj, asset| {
+        obj.field_str("name", asset.name);
+        obj.field_str("status", asset.status.as_str());
+        match asset.source_high_watermark {
+            Some(value) => obj.field_raw("sourceHighWatermark", &value.to_string()),
+            None => obj.field_raw("sourceHighWatermark", "null"),
+        };
+        match asset.asset_high_watermark {
+            Some(value) => obj.field_raw("assetHighWatermark", &value.to_string()),
+            None => obj.field_raw("assetHighWatermark", "null"),
+        };
+        match asset.high_watermark_lag {
+            Some(value) => obj.field_raw("highWatermarkLag", &value.to_string()),
+            None => obj.field_raw("highWatermarkLag", "null"),
+        };
+        obj.field_str("path", asset.path);
+        if include_repair && let Some(repair) = asset.repair {
+            obj.field_str("repair", repair);
+        }
+    });
+}
+
 /// Render a status report as JSON with optional timing metadata.
 ///
 /// When `timing` is provided, adds a `meta` object with timing fields.
@@ -845,6 +873,7 @@ pub fn render_status_json_with_meta(
             r.field_str("asyncBoundary", report.runtime.async_boundary);
         });
         render_memory_health_json(d, &report.memory_health);
+        render_derived_assets_json(d, &report.derived_assets, true);
         d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
             obj.field_str("code", deg.code);
             obj.field_str("severity", deg.severity);
@@ -3459,6 +3488,11 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
                 r.field_str("asyncBoundary", report.runtime.async_boundary);
             });
             render_memory_health_json(d, &report.memory_health);
+            render_derived_assets_json(
+                d,
+                &report.derived_assets,
+                profile.include_verbose_details(),
+            );
             d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
                 obj.field_str("code", deg.code);
                 obj.field_str("severity", deg.severity);
@@ -3883,6 +3917,88 @@ pub fn render_claim_verify_human(report: &ClaimVerifyReport) -> String {
 #[must_use]
 pub fn render_claim_verify_toon(report: &ClaimVerifyReport) -> String {
     render_toon_from_json(&render_claim_verify_json(report))
+}
+
+// ============================================================================
+// EE-DIAG-001: Support Bundle Rendering
+// ============================================================================
+
+use crate::core::support_bundle::{BundleReport, InspectReport};
+
+#[must_use]
+pub fn render_support_bundle_json(report: &BundleReport) -> String {
+    let raw = serde_json::to_string(report).unwrap_or_default();
+    ResponseEnvelope::success().data_raw(&raw).finish()
+}
+
+#[must_use]
+pub fn render_support_bundle_human(report: &BundleReport) -> String {
+    let mut out = String::new();
+
+    let mode_str = if report.dry_run { "DRY RUN" } else { "CREATED" };
+
+    out.push_str(&format!("Support Bundle [{mode_str}]\n"));
+
+    if let Some(ref path) = report.output_path {
+        out.push_str(&format!("Output: {}\n", path.display()));
+    }
+
+    out.push_str(&format!(
+        "Redaction: {}\n",
+        if report.redaction_applied {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    ));
+
+    out.push_str(&format!("Size: {} bytes\n\n", report.total_size_bytes));
+
+    out.push_str("Files:\n");
+    for file in &report.files_collected {
+        out.push_str(&format!("  - {file}\n"));
+    }
+
+    out
+}
+
+#[must_use]
+pub fn render_support_bundle_toon(report: &BundleReport) -> String {
+    render_toon_from_json(&render_support_bundle_json(report))
+}
+
+#[must_use]
+pub fn render_support_inspect_json(report: &InspectReport) -> String {
+    let raw = serde_json::to_string(report).unwrap_or_default();
+    ResponseEnvelope::success().data_raw(&raw).finish()
+}
+
+#[must_use]
+pub fn render_support_inspect_human(report: &InspectReport) -> String {
+    let mut out = String::new();
+
+    out.push_str("Support Bundle Inspection\n");
+    out.push_str(&format!("Path: {}\n", report.bundle_path.display()));
+    out.push_str(&format!("Files: {}\n", report.files_found.len()));
+    out.push_str(&format!("Total Size: {} bytes\n", report.total_size_bytes));
+
+    if let Some(verified) = report.hash_verified {
+        out.push_str(&format!(
+            "Hash Verification: {}\n",
+            if verified { "passed" } else { "FAILED" }
+        ));
+    }
+
+    if let Some(ref version) = report.version_info {
+        out.push_str(&format!("Version: {version}\n"));
+    }
+
+    out
+}
+
+#[must_use]
+pub fn render_support_inspect_toon(report: &InspectReport) -> String {
+    render_toon_from_json(&render_support_inspect_json(report))
 }
 
 /// Schema identifier for shadow-run reports.
@@ -4409,6 +4525,13 @@ mod tests {
             &json,
             "\"search_not_implemented\"",
             "status search degradation",
+        )?;
+        ensure_contains(&json, "\"derivedAssets\":[", "derived assets")?;
+        ensure_contains(&json, "\"name\":\"search_index\"", "search index asset")?;
+        ensure_contains(
+            &json,
+            "\"assetHighWatermark\":null",
+            "asset watermark field",
         )
     }
 
@@ -4921,6 +5044,7 @@ mod tests {
         ensure_contains(&toon, "command: status", "toon command")?;
         ensure_contains(&toon, "capabilities:", "toon capabilities section")?;
         ensure_contains(&toon, "runtime:", "toon runtime section")?;
+        ensure_contains(&toon, "derivedAssets", "toon derived assets section")?;
         ensure_contains(&toon, "engine: asupersync", "toon engine")
     }
 
@@ -4930,11 +5054,16 @@ mod tests {
         let toon = render_status_toon(&report);
         ensure_contains(
             &toon,
-            "degraded[2]{code,severity,message,repair}:",
+            "degraded[3]{code,severity,message,repair}:",
             "degradation section",
         )?;
         ensure_contains(&toon, "storage_not_implemented", "storage degradation code")?;
-        ensure_contains(&toon, "search_not_implemented", "search degradation code")
+        ensure_contains(&toon, "search_not_implemented", "search degradation code")?;
+        ensure_contains(
+            &toon,
+            "memory_health_unavailable",
+            "memory health degradation code",
+        )
     }
 
     #[test]
@@ -5221,8 +5350,14 @@ mod tests {
         ensure_contains(&json, "\"fields\":\"summary\"", "fields indicator")?;
         ensure_contains(&json, "\"capabilities\":", "has capabilities")?;
         // Summary should NOT have runtime or degraded arrays
-        ensure(!json.contains("\"runtime\":"), "no runtime")?;
-        ensure(!json.contains("\"degraded\":"), "no degraded")
+        let value = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("status summary JSON parses: {error}"))?;
+        let data = value
+            .get("data")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| "status summary has data object".to_string())?;
+        ensure(!data.contains_key("runtime"), "no runtime object")?;
+        ensure(!data.contains_key("degraded"), "no degraded array")
     }
 
     #[test]

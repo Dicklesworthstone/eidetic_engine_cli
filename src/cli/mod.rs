@@ -179,6 +179,9 @@ pub enum Command {
     Situation(SituationCommand),
     /// Report workspace and subsystem readiness.
     Status,
+    /// Create or inspect redacted diagnostic support bundles.
+    #[command(subcommand)]
+    Support(SupportCommand),
     /// Print the ee version.
     Version,
     /// Explain why a memory was stored, retrieved, or selected.
@@ -744,6 +747,55 @@ pub struct SituationExplainArgs {
     pub situation_id: String,
 }
 
+/// Subcommands for `ee support`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum SupportCommand {
+    /// Create a redacted diagnostic support bundle.
+    Bundle(SupportBundleArgs),
+    /// Validate and inspect a previously created support bundle.
+    Inspect(SupportInspectArgs),
+}
+
+/// Arguments for `ee support bundle`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct SupportBundleArgs {
+    /// Output directory for the bundle. Required unless --dry-run.
+    #[arg(long, short = 'o', value_name = "PATH")]
+    pub out: Option<PathBuf>,
+
+    /// Report the bundle plan without writing artifacts.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Apply redaction to all sensitive content (default: true).
+    #[arg(long, action = ArgAction::SetTrue, default_value_t = true)]
+    pub redacted: bool,
+
+    /// Include raw unredacted content (requires explicit opt-in).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_raw: bool,
+
+    /// Workspace root. Defaults to current directory.
+    #[arg(long, value_name = "PATH")]
+    pub workspace: Option<PathBuf>,
+}
+
+/// Arguments for `ee support inspect`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct SupportInspectArgs {
+    /// Path to the support bundle directory or manifest.
+    #[arg(value_name = "PATH")]
+    pub bundle_path: PathBuf,
+
+    /// Verify content hashes against manifest.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub verify_hashes: bool,
+
+    /// Check for stale or unsupported schema versions.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub check_versions: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum OutputFormat {
     #[default]
@@ -1212,6 +1264,12 @@ where
                     )
                 }
             }
+        }
+        Some(Command::Support(SupportCommand::Bundle(ref args))) => {
+            handle_support_bundle(&cli, args, stdout, stderr)
+        }
+        Some(Command::Support(SupportCommand::Inspect(ref args))) => {
+            handle_support_inspect(&cli, args, stdout, stderr)
         }
         Some(Command::Version) => {
             let report = VersionReport::gather();
@@ -3021,6 +3079,112 @@ where
 }
 
 // ============================================================================
+// EE-DIAG-001: Redacted Diagnostic Support Bundle
+// ============================================================================
+
+fn handle_support_bundle<W, E>(
+    cli: &Cli,
+    args: &SupportBundleArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::support_bundle::{BundleOptions, create_bundle, plan_bundle};
+
+    if !args.dry_run && args.out.is_none() {
+        let error = DomainError::Usage {
+            message: "--out is required unless --dry-run is specified".to_string(),
+            repair: Some("ee support bundle --out <dir> --json".to_string()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    if args.include_raw && args.redacted {
+        let _ = writeln!(
+            stderr,
+            "warning: --include-raw overrides --redacted; bundle will contain unredacted content"
+        );
+    }
+
+    let workspace = args
+        .workspace
+        .clone()
+        .or_else(|| cli.workspace.clone())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let options = BundleOptions {
+        workspace: workspace.clone(),
+        output_dir: args.out.clone(),
+        dry_run: args.dry_run,
+        redacted: args.redacted && !args.include_raw,
+    };
+
+    let result = if args.dry_run {
+        plan_bundle(&options)
+    } else {
+        create_bundle(&options)
+    };
+
+    match result {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_support_bundle_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_support_bundle_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_support_bundle_json(&report) + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_support_inspect<W, E>(
+    cli: &Cli,
+    args: &SupportInspectArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::support_bundle::{InspectOptions, inspect_bundle};
+
+    let options = InspectOptions {
+        bundle_path: args.bundle_path.clone(),
+        verify_hashes: args.verify_hashes,
+        check_versions: args.check_versions,
+    };
+
+    match inspect_bundle(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_support_inspect_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_support_inspect_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_support_inspect_json(&report) + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+// ============================================================================
 // EE-040: Read-only Invocation Normalization and Did-You-Mean Errors
 // ============================================================================
 
@@ -3049,6 +3213,7 @@ const COMMAND_NAMES: &[&str] = &[
     "search",
     "situation",
     "status",
+    "support",
     "version",
     "why",
 ];
@@ -3163,6 +3328,10 @@ impl NormalizedInvocation {
                     SituationCommand::Explain(_) => "situation explain".to_string(),
                 },
                 Command::Status => "status".to_string(),
+                Command::Support(sup) => match sup {
+                    SupportCommand::Bundle(_) => "support bundle".to_string(),
+                    SupportCommand::Inspect(_) => "support inspect".to_string(),
+                },
                 Command::Version => "version".to_string(),
                 Command::Why(_) => "why".to_string(),
             },
