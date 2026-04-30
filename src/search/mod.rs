@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 
-use crate::models::CapabilityStatus;
+use crate::models::{CapabilityStatus, SEARCH_DOCUMENT_SCHEMA_V1, SEARCH_MODULE_SCHEMA_V1};
 
 pub use frankensearch::core::types::IndexableDocument;
 pub use frankensearch::{
-    Embedder, EmbedderStack, HashEmbedder, IndexBuilder, TwoTierConfig, TwoTierIndex,
+    Embedder, EmbedderStack, HashEmbedder, IndexBuilder, ScoreSource, TwoTierConfig, TwoTierIndex,
     TwoTierSearcher,
 };
 
 pub const SUBSYSTEM: &str = "search";
-pub const CANONICAL_DOCUMENT_SCHEMA: &str = "ee.search.document.v1";
+pub const CANONICAL_DOCUMENT_SCHEMA: &str = SEARCH_DOCUMENT_SCHEMA_V1;
 
 /// Source type for canonical search documents.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -413,7 +413,7 @@ pub fn session_to_document_with_context(
     builder.build(session)
 }
 
-pub const MODULE_CONTRACT: &str = "ee.search.module.v1";
+pub const MODULE_CONTRACT: &str = SEARCH_MODULE_SCHEMA_V1;
 pub const REQUIRED_RETRIEVAL_ENGINE: &str = "frankensearch::TwoTierSearcher";
 pub const FRANKENSEARCH_VERSION: &str = env!("CARGO_PKG_VERSION");
 

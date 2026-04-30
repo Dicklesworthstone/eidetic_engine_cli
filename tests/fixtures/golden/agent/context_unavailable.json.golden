@@ -1,0 +1,1 @@
+{"schema":"ee.error.v1","error":{"code":"storage","message":"Database not found at tests/fixtures/missing-ee-workspace/.ee/ee.db","repair":"ee init --workspace ."}}

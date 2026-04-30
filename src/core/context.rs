@@ -22,10 +22,19 @@
 //! EE-006 / EE-016. Strict scope: this module must not depend on any
 //! of those landing first.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::config::WorkspaceLocation;
 use crate::core::budget::RequestBudget;
+use crate::core::search::{SearchError, SearchOptions, SearchStatus, run_search};
+use crate::db::{DbConnection, StoredMemory};
+use crate::models::{MemoryId, ProvenanceUri, UnitScore};
+use crate::pack::{
+    ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
+    ContextResponseDegradation, ContextResponseSeverity, PackCandidate, PackCandidateInput,
+    PackProvenance, PackSection, TokenBudget, assemble_draft, estimate_tokens_default,
+};
 
 /// Per-subsystem permission level. `None < Read < Write` under the
 /// derived `Ord`, which is what the narrowing law relies on.
@@ -242,6 +251,251 @@ impl CommandContext {
             budget: self.budget,
             capabilities: self.capabilities.narrow(mask),
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ContextPackOptions {
+    pub workspace_path: PathBuf,
+    pub database_path: Option<PathBuf>,
+    pub index_dir: Option<PathBuf>,
+    pub query: String,
+    pub profile: Option<ContextPackProfile>,
+    pub max_tokens: Option<u32>,
+    pub candidate_pool: Option<u32>,
+}
+
+#[derive(Debug)]
+pub enum ContextPackError {
+    Storage(String),
+    Search(SearchError),
+    Pack(String),
+}
+
+impl ContextPackError {
+    #[must_use]
+    pub fn repair_hint(&self) -> Option<&str> {
+        match self {
+            Self::Storage(_) => Some("ee init --workspace ."),
+            Self::Search(error) => error.repair_hint(),
+            Self::Pack(_) => Some("ee context --help"),
+        }
+    }
+}
+
+impl std::fmt::Display for ContextPackError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Storage(message) | Self::Pack(message) => formatter.write_str(message),
+            Self::Search(error) => std::fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl std::error::Error for ContextPackError {}
+
+pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse, ContextPackError> {
+    let request = ContextRequest::new(ContextRequestInput {
+        query: options.query.clone(),
+        profile: options.profile,
+        max_tokens: options.max_tokens,
+        candidate_pool: options.candidate_pool,
+        sections: Vec::new(),
+    })
+    .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+
+    let database_path = options
+        .database_path
+        .clone()
+        .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        return Err(ContextPackError::Storage(format!(
+            "Database not found at {}",
+            database_path.display()
+        )));
+    }
+
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| ContextPackError::Storage(format!("Failed to open database: {error}")))?;
+
+    let search_report = run_search(&SearchOptions {
+        workspace_path: options.workspace_path.clone(),
+        database_path: Some(database_path),
+        index_dir: options.index_dir.clone(),
+        query: request.query.clone(),
+        limit: request.candidate_pool,
+    })
+    .map_err(ContextPackError::Search)?;
+
+    if search_report.status == SearchStatus::IndexError {
+        return Err(ContextPackError::Search(SearchError::Index(
+            search_report.errors.join("; "),
+        )));
+    }
+
+    let mut degraded = Vec::new();
+    if search_report.status == SearchStatus::NoResults {
+        push_degradation(
+            &mut degraded,
+            "context_no_results",
+            ContextResponseSeverity::Low,
+            "Search completed but returned no candidate memories.",
+            Some("ee remember --workspace . --level procedural --kind rule \"...\"".to_string()),
+        );
+    }
+
+    let candidates = candidates_from_search(&connection, &search_report, &mut degraded);
+    let budget = match options.max_tokens {
+        Some(max_tokens) => TokenBudget::new(max_tokens)
+            .map_err(|error| ContextPackError::Pack(error.to_string()))?,
+        None => TokenBudget::default_context(),
+    };
+    let draft = assemble_draft(request.query.clone(), budget, candidates)
+        .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+
+    ContextResponse::new(request, draft, degraded)
+        .map_err(|error| ContextPackError::Pack(error.to_string()))
+}
+
+fn candidates_from_search(
+    connection: &DbConnection,
+    search_report: &crate::core::search::SearchReport,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Vec<PackCandidate> {
+    let mut candidates = Vec::new();
+    for hit in &search_report.results {
+        match candidate_from_hit(connection, hit, &search_report.query, degraded) {
+            Some(candidate) => candidates.push(candidate),
+            None => push_degradation(
+                degraded,
+                "context_candidate_skipped",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Search hit {} could not be converted into a pack candidate.",
+                    hit.doc_id
+                ),
+                Some("ee index rebuild --workspace .".to_string()),
+            ),
+        }
+    }
+    candidates
+}
+
+fn candidate_from_hit(
+    connection: &DbConnection,
+    hit: &crate::core::search::SearchHit,
+    query: &str,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Option<PackCandidate> {
+    let memory_id = match MemoryId::from_str(&hit.doc_id) {
+        Ok(id) => id,
+        Err(_) => return None,
+    };
+    let memory = match connection.get_memory(&hit.doc_id) {
+        Ok(Some(memory)) if memory.tombstoned_at.is_none() => memory,
+        Ok(_) | Err(_) => return None,
+    };
+    let tags = match connection.get_memory_tags(&memory.id) {
+        Ok(tags) => tags,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_memory_tags_unavailable",
+                ContextResponseSeverity::Low,
+                format!("Tags for memory {} could not be loaded: {error}", memory.id),
+                Some(format!("ee memory show {} --json", memory.id)),
+            );
+            Vec::new()
+        }
+    };
+    let provenance = provenance_for_memory(&memory, memory_id, degraded)?;
+    let relevance = unit_score(hit.score)?;
+    let utility = unit_score(memory.utility)?;
+    let content = memory.content.clone();
+    let why = format!(
+        "Selected for query `{query}` from {} search result with score {:.4} and utility {:.4}.",
+        hit.source.as_str(),
+        hit.score,
+        memory.utility
+    );
+    let candidate = PackCandidate::new(PackCandidateInput {
+        memory_id,
+        section: section_for_memory(&memory),
+        content,
+        estimated_tokens: estimate_tokens_default(&memory.content),
+        relevance,
+        utility,
+        provenance: vec![provenance],
+        why,
+    })
+    .ok()?;
+
+    Some(candidate.with_diversity_key(diversity_key_for_memory(&memory, &tags)))
+}
+
+fn provenance_for_memory(
+    memory: &StoredMemory,
+    memory_id: MemoryId,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Option<PackProvenance> {
+    let uri = match memory.provenance_uri.as_deref() {
+        Some(raw) => match ProvenanceUri::from_str(raw) {
+            Ok(uri) => uri,
+            Err(error) => {
+                push_degradation(
+                    degraded,
+                    "context_invalid_provenance",
+                    ContextResponseSeverity::Low,
+                    format!("Memory {} has invalid provenance URI: {error}", memory.id),
+                    Some(format!("ee memory show {} --json", memory.id)),
+                );
+                ProvenanceUri::EeMemory(memory_id)
+            }
+        },
+        None => ProvenanceUri::EeMemory(memory_id),
+    };
+    PackProvenance::new(
+        uri,
+        format!("Memory {} selected for context pack", memory.id),
+    )
+    .ok()
+}
+
+fn section_for_memory(memory: &StoredMemory) -> PackSection {
+    match (memory.level.as_str(), memory.kind.as_str()) {
+        ("procedural", _) | (_, "rule" | "convention" | "playbook-step") => {
+            PackSection::ProceduralRules
+        }
+        (_, "decision") => PackSection::Decisions,
+        (_, "failure" | "anti-pattern" | "risk") => PackSection::Failures,
+        ("episodic", _) => PackSection::Evidence,
+        _ => PackSection::Artifacts,
+    }
+}
+
+fn diversity_key_for_memory(memory: &StoredMemory, tags: &[String]) -> String {
+    let tag = tags.first().map_or("untagged", String::as_str);
+    format!("{}:{}:{}", memory.level, memory.kind, tag)
+}
+
+fn unit_score(value: f32) -> Option<UnitScore> {
+    let bounded = if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    UnitScore::parse(bounded).ok()
+}
+
+fn push_degradation(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    code: &str,
+    severity: ContextResponseSeverity,
+    message: impl Into<String>,
+    repair: Option<String>,
+) {
+    if let Ok(entry) = ContextResponseDegradation::new(code, severity, message, repair) {
+        degraded.push(entry);
     }
 }
 

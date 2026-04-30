@@ -277,6 +277,170 @@ pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
     MemoryListReport::success(memories, total_count, truncated, filter)
 }
 
+/// Options for retrieving memory history.
+#[derive(Clone, Debug)]
+pub struct GetMemoryHistoryOptions<'a> {
+    /// Database path.
+    pub database_path: &'a Path,
+    /// Memory ID to retrieve history for.
+    pub memory_id: &'a str,
+    /// Maximum number of history entries to return.
+    pub limit: u32,
+}
+
+/// A single entry in the memory history timeline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemoryHistoryEntry {
+    /// Audit entry ID.
+    pub audit_id: String,
+    /// Timestamp of the event.
+    pub timestamp: String,
+    /// Actor who performed the action (if known).
+    pub actor: Option<String>,
+    /// Action performed (e.g., "create", "update", "tombstone").
+    pub action: String,
+    /// Details about the change (JSON string if available).
+    pub details: Option<String>,
+}
+
+/// Result of a memory history operation.
+#[derive(Clone, Debug)]
+pub struct MemoryHistoryReport {
+    /// Package version for stable output.
+    pub version: &'static str,
+    /// Memory ID for which history was requested.
+    pub memory_id: String,
+    /// Whether the memory exists.
+    pub memory_exists: bool,
+    /// Whether the memory is tombstoned.
+    pub is_tombstoned: bool,
+    /// History entries ordered from newest to oldest.
+    pub entries: Vec<MemoryHistoryEntry>,
+    /// Total number of history entries for this memory.
+    pub total_count: u32,
+    /// Whether results were truncated due to limit.
+    pub truncated: bool,
+    /// Error message if retrieval failed.
+    pub error: Option<String>,
+}
+
+impl MemoryHistoryReport {
+    /// Create a report for a found memory with history.
+    #[must_use]
+    pub fn found(
+        memory_id: String,
+        is_tombstoned: bool,
+        entries: Vec<MemoryHistoryEntry>,
+        total_count: u32,
+        truncated: bool,
+    ) -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            memory_id,
+            memory_exists: true,
+            is_tombstoned,
+            entries,
+            total_count,
+            truncated,
+            error: None,
+        }
+    }
+
+    /// Create a report for a not-found memory.
+    #[must_use]
+    pub fn not_found(memory_id: String) -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            memory_id,
+            memory_exists: false,
+            is_tombstoned: false,
+            entries: Vec::new(),
+            total_count: 0,
+            truncated: false,
+            error: None,
+        }
+    }
+
+    /// Create a report for a database error.
+    #[must_use]
+    pub fn error(memory_id: String, message: String) -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            memory_id,
+            memory_exists: false,
+            is_tombstoned: false,
+            entries: Vec::new(),
+            total_count: 0,
+            truncated: false,
+            error: Some(message),
+        }
+    }
+}
+
+/// Retrieve the history of a memory by querying audit log entries.
+///
+/// Returns all audit entries for the specified memory, ordered from newest to oldest.
+/// If the memory does not exist, returns a not-found report.
+pub fn get_memory_history(options: &GetMemoryHistoryOptions<'_>) -> MemoryHistoryReport {
+    let conn = match DbConnection::open_file(options.database_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return MemoryHistoryReport::error(
+                options.memory_id.to_string(),
+                format!("Failed to open database: {e}"),
+            );
+        }
+    };
+
+    // First check if memory exists
+    let memory = match conn.get_memory(options.memory_id) {
+        Ok(Some(m)) => m,
+        Ok(None) => return MemoryHistoryReport::not_found(options.memory_id.to_string()),
+        Err(e) => {
+            return MemoryHistoryReport::error(
+                options.memory_id.to_string(),
+                format!("Failed to query memory: {e}"),
+            );
+        }
+    };
+
+    let is_tombstoned = memory.tombstoned_at.is_some();
+
+    // Get audit entries for this memory
+    let all_entries = match conn.list_audit_by_target("memory", options.memory_id, None) {
+        Ok(entries) => entries,
+        Err(e) => {
+            return MemoryHistoryReport::error(
+                options.memory_id.to_string(),
+                format!("Failed to query audit log: {e}"),
+            );
+        }
+    };
+
+    let total_count = all_entries.len() as u32;
+    let truncated = total_count > options.limit;
+
+    let entries: Vec<MemoryHistoryEntry> = all_entries
+        .into_iter()
+        .take(options.limit as usize)
+        .map(|e| MemoryHistoryEntry {
+            audit_id: e.id,
+            timestamp: e.timestamp,
+            actor: e.actor,
+            action: e.action,
+            details: e.details,
+        })
+        .collect();
+
+    MemoryHistoryReport::found(
+        options.memory_id.to_string(),
+        is_tombstoned,
+        entries,
+        total_count,
+        truncated,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,6 +480,59 @@ mod tests {
     #[test]
     fn memory_show_report_version_matches_package() -> TestResult {
         let report = MemoryShowReport::not_found();
+        ensure(report.version, env!("CARGO_PKG_VERSION"), "version")
+    }
+
+    #[test]
+    fn memory_history_report_not_found_is_correct() -> TestResult {
+        let report = MemoryHistoryReport::not_found("mem_test".to_string());
+
+        ensure(report.memory_exists, false, "memory_exists")?;
+        ensure(report.entries.is_empty(), true, "entries empty")?;
+        ensure(report.is_tombstoned, false, "is_tombstoned")?;
+        ensure(report.error.is_none(), true, "no error")?;
+        ensure(report.memory_id, "mem_test".to_string(), "memory_id")
+    }
+
+    #[test]
+    fn memory_history_report_error_captures_message() -> TestResult {
+        let report = MemoryHistoryReport::error("mem_test".to_string(), "db error".to_string());
+
+        ensure(report.memory_exists, false, "memory_exists")?;
+        ensure(report.error, Some("db error".to_string()), "error message")
+    }
+
+    #[test]
+    fn memory_history_report_found_with_entries() -> TestResult {
+        let entries = vec![
+            MemoryHistoryEntry {
+                audit_id: "audit_001".to_string(),
+                timestamp: "2026-04-29T12:00:00Z".to_string(),
+                actor: Some("user@example.com".to_string()),
+                action: "create".to_string(),
+                details: None,
+            },
+            MemoryHistoryEntry {
+                audit_id: "audit_002".to_string(),
+                timestamp: "2026-04-29T13:00:00Z".to_string(),
+                actor: Some("user@example.com".to_string()),
+                action: "update".to_string(),
+                details: Some("{\"field\":\"content\"}".to_string()),
+            },
+        ];
+
+        let report = MemoryHistoryReport::found("mem_test".to_string(), false, entries, 2, false);
+
+        ensure(report.memory_exists, true, "memory_exists")?;
+        ensure(report.entries.len(), 2, "entry count")?;
+        ensure(report.total_count, 2, "total_count")?;
+        ensure(report.truncated, false, "truncated")?;
+        ensure(report.is_tombstoned, false, "is_tombstoned")
+    }
+
+    #[test]
+    fn memory_history_report_version_matches_package() -> TestResult {
+        let report = MemoryHistoryReport::not_found("mem_test".to_string());
         ensure(report.version, env!("CARGO_PKG_VERSION"), "version")
     }
 }

@@ -1,10 +1,16 @@
-//! Policy subsystem (EE-278).
+//! Policy subsystem (EE-278, EE-279).
 //!
 //! Implements trust, privacy, and access control policies for memories
-//! and import sources.
+//! and import sources. Includes security profiles and file-permission
+//! diagnostics.
 
+pub mod security_profile;
 pub mod trust_decay;
 
+pub use security_profile::{
+    FilePermissionCheck, FilePermissionReport, ParseSecurityProfileError, SecurityProfile,
+    check_workspace_permissions, load_profile_from_env,
+};
 pub use trust_decay::{DecayConfig, SourceTrustState, TrustAdvisory, TrustDecayCalculator};
 
 pub const SUBSYSTEM: &str = "policy";

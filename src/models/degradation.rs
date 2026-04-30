@@ -318,7 +318,7 @@ pub const AUTO_CURATION_DISABLED: DegradationCode = DegradationCode {
     description: "Automatic curation disabled",
     behavior_change: "Rules will not auto-promote; manual review required",
     auto_recoverable: false,
-    repair: None,
+    repair: Some("ee config set curate.auto_promote true"),
 };
 
 // Policy degradations (D600 - D699)

@@ -36,7 +36,34 @@ pub struct SearchReport {
 pub struct SearchHit {
     pub doc_id: String,
     pub score: f32,
-    pub source: String,
+    pub source: ScoreSource,
+    pub fast_score: Option<f32>,
+    pub quality_score: Option<f32>,
+    pub lexical_score: Option<f32>,
+    pub rerank_score: Option<f32>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScoreSource {
+    Lexical,
+    SemanticFast,
+    SemanticQuality,
+    Hybrid,
+    Reranked,
+}
+
+impl ScoreSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lexical => "lexical",
+            Self::SemanticFast => "semantic_fast",
+            Self::SemanticQuality => "semantic_quality",
+            Self::Hybrid => "hybrid",
+            Self::Reranked => "reranked",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,7 +112,7 @@ impl SearchReport {
                 i + 1,
                 hit.doc_id,
                 hit.score,
-                hit.source
+                hit.source.as_str()
             ));
         }
 
@@ -111,11 +138,27 @@ impl SearchReport {
             .results
             .iter()
             .map(|hit| {
-                serde_json::json!({
+                let mut obj = serde_json::json!({
                     "doc_id": hit.doc_id,
                     "score": hit.score,
-                    "source": hit.source,
-                })
+                    "source": hit.source.as_str(),
+                });
+                if let Some(fast) = hit.fast_score {
+                    obj["fast_score"] = serde_json::json!(fast);
+                }
+                if let Some(quality) = hit.quality_score {
+                    obj["quality_score"] = serde_json::json!(quality);
+                }
+                if let Some(lexical) = hit.lexical_score {
+                    obj["lexical_score"] = serde_json::json!(lexical);
+                }
+                if let Some(rerank) = hit.rerank_score {
+                    obj["rerank_score"] = serde_json::json!(rerank);
+                }
+                if let Some(ref meta) = hit.metadata {
+                    obj["metadata"] = meta.clone();
+                }
+                obj
             })
             .collect();
 
@@ -235,10 +278,28 @@ fn search_sync(
                 Ok((results, _metrics)) => {
                     let hits: Vec<SearchHit> = results
                         .into_iter()
-                        .map(|r| SearchHit {
-                            doc_id: r.doc_id,
-                            score: r.score,
-                            source: format!("{:?}", r.source),
+                        .map(|r| {
+                            let source = match r.source {
+                                crate::search::ScoreSource::Lexical => ScoreSource::Lexical,
+                                crate::search::ScoreSource::SemanticFast => {
+                                    ScoreSource::SemanticFast
+                                }
+                                crate::search::ScoreSource::SemanticQuality => {
+                                    ScoreSource::SemanticQuality
+                                }
+                                crate::search::ScoreSource::Hybrid => ScoreSource::Hybrid,
+                                crate::search::ScoreSource::Reranked => ScoreSource::Reranked,
+                            };
+                            SearchHit {
+                                doc_id: r.doc_id,
+                                score: r.score,
+                                source,
+                                fast_score: r.fast_score,
+                                quality_score: r.quality_score,
+                                lexical_score: r.lexical_score,
+                                rerank_score: r.rerank_score,
+                                metadata: r.metadata,
+                            }
                         })
                         .collect();
                     Ok((hits, Vec::new()))
@@ -288,7 +349,12 @@ mod tests {
             results: vec![SearchHit {
                 doc_id: "doc-1".to_string(),
                 score: 0.95,
-                source: "SemanticFast".to_string(),
+                source: ScoreSource::SemanticFast,
+                fast_score: Some(0.95),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: None,
             }],
             elapsed_ms: 12.3,
             errors: Vec::new(),
@@ -341,5 +407,76 @@ mod tests {
 
         let index_err = SearchError::Index("test".to_string());
         assert!(index_err.repair_hint().is_some());
+    }
+
+    #[test]
+    fn score_source_as_str_is_stable() {
+        assert_eq!(ScoreSource::Lexical.as_str(), "lexical");
+        assert_eq!(ScoreSource::SemanticFast.as_str(), "semantic_fast");
+        assert_eq!(ScoreSource::SemanticQuality.as_str(), "semantic_quality");
+        assert_eq!(ScoreSource::Hybrid.as_str(), "hybrid");
+        assert_eq!(ScoreSource::Reranked.as_str(), "reranked");
+    }
+
+    #[test]
+    fn search_json_includes_score_breakdown() {
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "hybrid query".to_string(),
+            results: vec![SearchHit {
+                doc_id: "doc-hybrid".to_string(),
+                score: 0.88,
+                source: ScoreSource::Hybrid,
+                fast_score: Some(0.72),
+                quality_score: Some(0.91),
+                lexical_score: Some(0.65),
+                rerank_score: None,
+                metadata: Some(serde_json::json!({"level": "procedural", "kind": "rule"})),
+            }],
+            elapsed_ms: 5.2,
+            errors: Vec::new(),
+        };
+
+        let json = report.data_json();
+        let result = &json["results"][0];
+
+        assert_eq!(result["doc_id"], "doc-hybrid");
+        assert!((result["score"].as_f64().unwrap_or(f64::NAN) - 0.88).abs() < 0.001);
+        assert_eq!(result["source"], "hybrid");
+        assert!((result["fast_score"].as_f64().unwrap_or(f64::NAN) - 0.72).abs() < 0.001);
+        assert!((result["quality_score"].as_f64().unwrap_or(f64::NAN) - 0.91).abs() < 0.001);
+        assert!((result["lexical_score"].as_f64().unwrap_or(f64::NAN) - 0.65).abs() < 0.001);
+        assert!(result.get("rerank_score").is_none());
+        assert_eq!(result["metadata"]["level"], "procedural");
+        assert_eq!(result["metadata"]["kind"], "rule");
+    }
+
+    #[test]
+    fn search_json_omits_null_scores() {
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "minimal".to_string(),
+            results: vec![SearchHit {
+                doc_id: "doc-min".to_string(),
+                score: 0.5,
+                source: ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(0.5),
+                rerank_score: None,
+                metadata: None,
+            }],
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+        };
+
+        let json = report.data_json();
+        let result = &json["results"][0];
+
+        assert!(result.get("fast_score").is_none());
+        assert!(result.get("quality_score").is_none());
+        assert!(result.get("rerank_score").is_none());
+        assert!(result.get("metadata").is_none());
+        assert!((result["lexical_score"].as_f64().unwrap_or(f64::NAN) - 0.5).abs() < 0.001);
     }
 }

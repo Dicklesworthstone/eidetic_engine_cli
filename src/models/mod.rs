@@ -41,8 +41,46 @@ pub use rule::{ParseRuleMaturityError, ParseRuleScopeError, RuleMaturity, RuleSc
 pub use timing::{DiagnosticTiming, TimingCapture, TimingPhase};
 pub use trust::{ParseTrustClassError, TrustClass};
 
+// ============================================================================
+// Public JSON Contract Schema Constants
+//
+// These constants define the schema identifiers for all public JSON contracts.
+// They MUST be used instead of inline string literals to ensure consistency
+// and enable schema drift detection.
+// ============================================================================
+
+/// Response envelope schema for successful command output.
 pub const RESPONSE_SCHEMA_V1: &str = "ee.response.v1";
+
+/// Error envelope schema for failed command output.
 pub const ERROR_SCHEMA_V1: &str = "ee.error.v1";
+
+/// Schema for CASS import reports (`ee import cass`).
+pub const IMPORT_CASS_SCHEMA_V1: &str = "ee.import.cass.v1";
+
+/// Schema for import ledger entries.
+pub const IMPORT_LEDGER_SCHEMA_V1: &str = "ee.import_ledger.v1";
+
+/// Schema for CASS-specific import ledger entries.
+pub const IMPORT_LEDGER_CASS_SCHEMA_V1: &str = "ee.import_ledger.cass.v1";
+
+/// Schema for imported CASS session metadata.
+pub const CASS_SESSION_SCHEMA_V1: &str = "ee.cass_session.v1";
+
+/// Schema for CASS evidence span entries.
+pub const CASS_EVIDENCE_SPAN_SCHEMA_V1: &str = "ee.cass_evidence_span.v1";
+
+/// Schema for search module readiness.
+pub const SEARCH_MODULE_SCHEMA_V1: &str = "ee.search.module.v1";
+
+/// Schema for canonical search documents.
+pub const SEARCH_DOCUMENT_SCHEMA_V1: &str = "ee.search.document.v1";
+
+/// Schema for graph module readiness.
+pub const GRAPH_MODULE_SCHEMA_V1: &str = "ee.graph.module.v1";
+
+/// Schema for evaluation fixtures.
+pub const EVAL_FIXTURE_SCHEMA_V1: &str = "ee.eval_fixture.v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DomainError {

@@ -11,10 +11,8 @@
 
 pub mod redaction;
 
+pub use crate::models::EVAL_FIXTURE_SCHEMA_V1;
 pub use redaction::{LeakDetection, LeakPattern, RedactionLeakDetector, RedactionLeakEvaluation};
-
-/// Schema version for evaluation fixtures.
-pub const EVAL_FIXTURE_SCHEMA_V1: &str = "ee.eval_fixture.v1";
 
 /// An evaluation scenario that tests an agent-facing journey.
 #[derive(Clone, Debug, Eq, PartialEq)]

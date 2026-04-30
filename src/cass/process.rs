@@ -248,9 +248,8 @@ impl CassInvocation {
 
         Err(CassError::InvalidBinary {
             binary: self.binary.clone(),
-            reason:
-                "binary must be 'cass' (PATH lookup) or an absolute path to a file named 'cass'"
-                    .to_string(),
+            reason: "EE-100 allowlist: binary must be 'cass' (PATH lookup) or an absolute path to a file named 'cass'"
+                .to_string(),
         })
     }
 }

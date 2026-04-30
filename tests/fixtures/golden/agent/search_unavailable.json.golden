@@ -1,0 +1,1 @@
+{"schema":"ee.error.v1","error":{"code":"search_index","message":"Search index not found","repair":"ee index rebuild --workspace ."}}

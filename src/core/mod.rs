@@ -5,6 +5,7 @@ pub mod budget;
 pub mod capabilities;
 pub mod check;
 pub mod context;
+pub mod degraded_honesty;
 pub mod doctor;
 pub mod health;
 pub mod index;

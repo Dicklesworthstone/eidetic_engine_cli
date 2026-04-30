@@ -1,4 +1,4 @@
-use crate::models::CapabilityStatus;
+use crate::models::{CapabilityStatus, GRAPH_MODULE_SCHEMA_V1};
 
 #[cfg(feature = "graph")]
 pub use fnx_algorithms::{
@@ -8,7 +8,7 @@ pub use fnx_algorithms::{
 pub use fnx_classes::{Graph, digraph::DiGraph};
 
 pub const SUBSYSTEM: &str = "graph";
-pub const MODULE_CONTRACT: &str = "ee.graph.module.v1";
+pub const MODULE_CONTRACT: &str = GRAPH_MODULE_SCHEMA_V1;
 pub const REQUIRED_GRAPH_ENGINE: &str = "franken_networkx";
 
 #[cfg(feature = "graph")]

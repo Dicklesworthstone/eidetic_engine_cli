@@ -21,7 +21,10 @@ use crate::db::{
     CreateEvidenceSpanInput, CreateImportLedgerInput, CreateSessionInput, CreateWorkspaceInput,
     DatabaseConfig, DbConnection, DbError, UpdateImportLedgerInput,
 };
-use crate::models::{EvidenceId, SessionId, WorkspaceId};
+use crate::models::{
+    CASS_EVIDENCE_SPAN_SCHEMA_V1, CASS_SESSION_SCHEMA_V1, EvidenceId, IMPORT_CASS_SCHEMA_V1,
+    IMPORT_LEDGER_CASS_SCHEMA_V1, SessionId, WorkspaceId,
+};
 
 const DEFAULT_DB_FILE: &str = "ee.db";
 const DEFAULT_VIEW_CONTEXT: u32 = 4;
@@ -326,7 +329,7 @@ pub fn import_cass_sessions(
     )?;
 
     Ok(CassImportReport {
-        schema: "ee.import.cass.v1",
+        schema: IMPORT_CASS_SCHEMA_V1,
         workspace_path: workspace_path.to_string_lossy().into_owned(),
         database_path: Some(database_path.to_string_lossy().into_owned()),
         source_id,
@@ -532,7 +535,7 @@ fn dry_run_report(
     sessions: Vec<CassSessionInfo>,
 ) -> CassImportReport {
     CassImportReport {
-        schema: "ee.import.cass.v1",
+        schema: IMPORT_CASS_SCHEMA_V1,
         workspace_path: workspace_path.to_string_lossy().into_owned(),
         database_path: None,
         source_id,
@@ -616,7 +619,7 @@ fn ensure_running_ledger(
             error_message: None,
             started_at: Some(now),
             completed_at: None,
-            metadata_json: Some(json!({"schema":"ee.import_ledger.cass.v1"}).to_string()),
+            metadata_json: Some(json!({"schema": IMPORT_LEDGER_CASS_SCHEMA_V1}).to_string()),
         },
     )?;
     Ok(id)
@@ -697,7 +700,7 @@ fn session_input(workspace_id: &str, session: &CassSessionInfo) -> CreateSession
             .unwrap_or_else(|| blake3_hex(&session.source_path)),
         metadata_json: Some(
             json!({
-                "schema": "ee.cass_session.v1",
+                "schema": CASS_SESSION_SCHEMA_V1,
                 "workspaceDir": session.workspace_dir,
             })
             .to_string(),
@@ -723,7 +726,7 @@ fn evidence_input(
         role: span.role.map(|role| role.as_str().to_string()),
         excerpt: span.excerpt.clone(),
         content_hash: span.content_hash.clone(),
-        metadata_json: Some(json!({"schema":"ee.cass_evidence_span.v1"}).to_string()),
+        metadata_json: Some(json!({"schema": CASS_EVIDENCE_SPAN_SCHEMA_V1}).to_string()),
     }
 }
 
@@ -929,7 +932,7 @@ mod tests {
     #[test]
     fn report_json_identifies_import_command_and_session_status() -> TestResult {
         let report = CassImportReport {
-            schema: "ee.import.cass.v1",
+            schema: IMPORT_CASS_SCHEMA_V1,
             workspace_path: "/tmp/work".to_string(),
             database_path: Some("/tmp/work/.ee/ee.db".to_string()),
             source_id: "cass://x".to_string(),
