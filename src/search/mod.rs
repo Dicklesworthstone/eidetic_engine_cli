@@ -438,10 +438,10 @@ static SEARCH_CAPABILITIES: [SearchCapability; 7] = [
         SearchSurface::Indexing,
         "Search index jobs table added (V005 migration).",
     ),
-    SearchCapability::pending(
+    SearchCapability::ready(
         SearchCapabilityName::IndexRebuild,
         SearchSurface::Indexing,
-        "Wire index rebuild through Frankensearch.",
+        "Index rebuild wired through Frankensearch.",
     ),
     SearchCapability::pending(
         SearchCapabilityName::JsonSearch,
@@ -663,7 +663,7 @@ mod tests {
                 .map(|capability| capability.status()),
             Some(CapabilityStatus::Ready)
         );
-        assert_eq!(readiness.missing_capabilities().count(), 3);
+        assert_eq!(readiness.missing_capabilities().count(), 2);
     }
 
     #[test]
@@ -716,16 +716,16 @@ mod tests {
 
         assert_eq!(
             missing.first().map(|capability| capability.name()),
-            Some(SearchCapabilityName::IndexRebuild)
+            Some(SearchCapabilityName::JsonSearch)
         );
         assert_eq!(
             missing.first().map(|capability| capability.surface()),
-            Some(SearchSurface::Indexing)
+            Some(SearchSurface::Query)
         );
         assert!(
             missing
                 .first()
-                .map(|capability| capability.repair().contains("index"))
+                .map(|capability| capability.repair().contains("search"))
                 .unwrap_or(false)
         );
     }
