@@ -309,6 +309,8 @@ pub struct ContextArgs {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum DiagCommand {
+    /// Report graph module readiness, capabilities, and metrics.
+    Graph,
     /// Report quarantine status for import sources.
     Quarantine,
     /// Verify stdout/stderr stream separation is correct.
@@ -865,6 +867,7 @@ where
         },
         Some(Command::Context(ref args)) => handle_context(&cli, args, stdout, stderr),
         Some(Command::Diag(ref diag_cmd)) => match diag_cmd {
+            DiagCommand::Graph => handle_diag_graph(&cli, stdout),
             DiagCommand::Quarantine => {
                 let report = QuarantineReport::gather();
                 let profile = cli.fields_level().to_field_profile();
@@ -1537,6 +1540,32 @@ where
                 repair: error.repair_hint().map(str::to_string),
             };
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+// ============================================================================
+// EE-243: Graph Diagnostic Output
+// ============================================================================
+
+fn handle_diag_graph<W>(cli: &Cli, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let readiness = crate::graph::module_readiness();
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_graph_diag_human(&readiness))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_graph_diag_toon(&readiness) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_graph_diag_json(&readiness) + "\n"))
         }
     }
 }
@@ -2950,7 +2979,7 @@ const COMMAND_NAMES: &[&str] = &[
 /// Subcommand names for nested commands.
 const AGENT_SUBCOMMANDS: &[&str] = &["detect"];
 const CLAIM_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
-const DIAG_SUBCOMMANDS: &[&str] = &["quarantine", "streams"];
+const DIAG_SUBCOMMANDS: &[&str] = &["graph", "quarantine", "streams"];
 const EVAL_SUBCOMMANDS: &[&str] = &["run", "list"];
 const IMPORT_SUBCOMMANDS: &[&str] = &["cass", "eidetic-legacy"];
 const INDEX_SUBCOMMANDS: &[&str] = &["rebuild", "status"];
@@ -3011,6 +3040,7 @@ impl NormalizedInvocation {
                 },
                 Command::Context(_) => "context".to_string(),
                 Command::Diag(diag) => match diag {
+                    DiagCommand::Graph => "diag graph".to_string(),
                     DiagCommand::Quarantine => "diag quarantine".to_string(),
                     DiagCommand::Streams => "diag streams".to_string(),
                 },
