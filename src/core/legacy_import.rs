@@ -1451,4 +1451,171 @@ mod tests {
         assert!(human.contains("Statistics:"));
         assert!(human.contains("Type Mappings:"));
     }
+
+    // ========================================================================
+    // EE-272: Legacy Import Idempotency Tests
+    // ========================================================================
+
+    #[test]
+    fn scan_is_idempotent_same_input_same_output() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::write(
+            tempdir.path().join("memories.jsonl"),
+            r#"{"memory":"test memory content","timestamp":"2026-04-30T00:00:00Z"}"#,
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            tempdir.path().join("sessions.json"),
+            r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let options = LegacyImportScanOptions {
+            source_path: tempdir.path().to_path_buf(),
+            dry_run: true,
+        };
+
+        let report1 = scan_eidetic_legacy_source(&options).map_err(|error| error.to_string())?;
+        let report2 = scan_eidetic_legacy_source(&options).map_err(|error| error.to_string())?;
+
+        ensure_equal(&report1.status, &report2.status, "status idempotent")?;
+        ensure_equal(
+            &report1.scanned_files,
+            &report2.scanned_files,
+            "scanned_files idempotent",
+        )?;
+        ensure_equal(
+            &report1.artifacts.len(),
+            &report2.artifacts.len(),
+            "artifact count idempotent",
+        )?;
+
+        for (a1, a2) in report1.artifacts.iter().zip(report2.artifacts.iter()) {
+            ensure_equal(&a1.path, &a2.path, "artifact path idempotent")?;
+            ensure_equal(
+                &a1.artifact_type,
+                &a2.artifact_type,
+                "artifact type idempotent",
+            )?;
+            ensure_equal(&a1.risk_flags, &a2.risk_flags, "risk flags idempotent")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scan_json_output_is_deterministic() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::write(
+            tempdir.path().join("data.jsonl"),
+            r#"{"memory":"deterministic test"}"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let options = LegacyImportScanOptions {
+            source_path: tempdir.path().to_path_buf(),
+            dry_run: true,
+        };
+
+        let report1 = scan_eidetic_legacy_source(&options).map_err(|error| error.to_string())?;
+        let report2 = scan_eidetic_legacy_source(&options).map_err(|error| error.to_string())?;
+
+        let json1 = report1.data_json();
+        let json2 = report2.data_json();
+
+        ensure_equal(&json1["schema"], &json2["schema"], "schema deterministic")?;
+        ensure_equal(
+            &json1["artifactsFound"],
+            &json2["artifactsFound"],
+            "artifactsFound deterministic",
+        )?;
+        ensure_equal(
+            &json1["scannedFiles"],
+            &json2["scannedFiles"],
+            "scannedFiles deterministic",
+        )
+    }
+
+    #[test]
+    fn scan_artifact_ordering_is_deterministic() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::write(tempdir.path().join("z_last.jsonl"), r#"{"memory":"z"}"#)
+            .map_err(|error| error.to_string())?;
+        fs::write(tempdir.path().join("a_first.jsonl"), r#"{"memory":"a"}"#)
+            .map_err(|error| error.to_string())?;
+        fs::write(tempdir.path().join("m_middle.jsonl"), r#"{"memory":"m"}"#)
+            .map_err(|error| error.to_string())?;
+
+        let options = LegacyImportScanOptions {
+            source_path: tempdir.path().to_path_buf(),
+            dry_run: true,
+        };
+
+        let report1 = scan_eidetic_legacy_source(&options).map_err(|error| error.to_string())?;
+        let report2 = scan_eidetic_legacy_source(&options).map_err(|error| error.to_string())?;
+
+        let paths1: Vec<_> = report1.artifacts.iter().map(|a| &a.path).collect();
+        let paths2: Vec<_> = report2.artifacts.iter().map(|a| &a.path).collect();
+
+        ensure_equal(&paths1, &paths2, "artifact order deterministic")
+    }
+
+    #[test]
+    fn mapping_report_from_scan_is_idempotent() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::write(
+            tempdir.path().join("memories.jsonl"),
+            r#"{"memory":"mapping test"}"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let options = LegacyImportScanOptions {
+            source_path: tempdir.path().to_path_buf(),
+            dry_run: true,
+        };
+        let scan = scan_eidetic_legacy_source(&options).map_err(|error| error.to_string())?;
+
+        let mapping1 = LegacyMappingReport::from_scan(&scan);
+        let mapping2 = LegacyMappingReport::from_scan(&scan);
+
+        let json1 = mapping1.data_json();
+        let json2 = mapping2.data_json();
+
+        ensure_equal(&json1["schema"], &json2["schema"], "mapping schema idempotent")?;
+        ensure_equal(
+            &json1["statistics"],
+            &json2["statistics"],
+            "mapping statistics idempotent",
+        )?;
+        ensure_equal(
+            &json1["mappings"],
+            &json2["mappings"],
+            "mappings array idempotent",
+        )
+    }
+
+    #[test]
+    fn empty_directory_scan_is_idempotent() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+
+        let options = LegacyImportScanOptions {
+            source_path: tempdir.path().to_path_buf(),
+            dry_run: true,
+        };
+
+        let report1 = scan_eidetic_legacy_source(&options).map_err(|error| error.to_string())?;
+        let report2 = scan_eidetic_legacy_source(&options).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &report1.status,
+            &LegacyImportScanStatus::NoArtifacts,
+            "empty status",
+        )?;
+        ensure_equal(&report1.status, &report2.status, "empty idempotent")?;
+        ensure_equal(&report1.artifacts.len(), &0, "no artifacts")?;
+        ensure_equal(
+            &report1.artifacts.len(),
+            &report2.artifacts.len(),
+            "artifact count idempotent",
+        )
+    }
 }
