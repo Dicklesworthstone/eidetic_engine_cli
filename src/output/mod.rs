@@ -8,7 +8,9 @@ use crate::core::health::HealthReport;
 use crate::core::memory::{MemoryDetails, MemoryHistoryReport, MemoryListReport, MemoryShowReport};
 use crate::core::quarantine::{QuarantineEntry, QuarantineReport};
 use crate::core::status::StatusReport;
-use crate::eval::{EvaluationReport, EvaluationStatus, ScenarioValidationResult, ValidationFailureKind};
+use crate::eval::{
+    EvaluationReport, EvaluationStatus, ScenarioValidationResult, ValidationFailureKind,
+};
 use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
 use crate::pack::{
     ContextResponse, PackDraftItem, PackItemProvenance, PackOmissionMetrics, PackQualityMetrics,
@@ -4060,5 +4062,248 @@ mod tests {
         ensure_contains(&json, "\"subsystems\":", "has subsystems")?;
         ensure_contains(&json, "\"description\":", "has descriptions")?;
         ensure_contains(&json, "\"summary\":", "has summary")
+    }
+
+    // ========================================================================
+    // Evaluation Report Renderer Tests (EE-255)
+    // ========================================================================
+
+    #[test]
+    fn render_eval_report_json_empty_report() -> TestResult {
+        use super::render_eval_report_json;
+        use crate::eval::EvaluationReport;
+
+        let report = EvaluationReport::new();
+        let json = render_eval_report_json(&report, None);
+
+        ensure_contains(&json, "\"schema\":\"ee.response.v1\"", "schema")?;
+        ensure_contains(&json, "\"success\":true", "success")?;
+        ensure_contains(&json, "\"command\":\"eval run\"", "command")?;
+        ensure_contains(&json, "\"status\":\"no_scenarios\"", "status")?;
+        ensure_contains(&json, "\"scenariosRun\":0", "scenariosRun")?;
+        ensure_contains(&json, "\"results\":[]", "empty results")
+    }
+
+    #[test]
+    fn render_eval_report_json_with_scenario_id() -> TestResult {
+        use super::render_eval_report_json;
+        use crate::eval::EvaluationReport;
+
+        let report = EvaluationReport::new();
+        let json = render_eval_report_json(&report, Some("test_scenario"));
+
+        ensure_contains(&json, "\"scenarioId\":\"test_scenario\"", "scenarioId")
+    }
+
+    #[test]
+    fn render_eval_report_json_all_passed() -> TestResult {
+        use super::render_eval_report_json;
+        use crate::eval::{EvaluationReport, EvaluationStatus, ScenarioValidationResult};
+
+        let mut report = EvaluationReport::new();
+        report.add_result(ScenarioValidationResult {
+            scenario_id: "scenario_1".to_string(),
+            passed: true,
+            steps_passed: 3,
+            steps_total: 3,
+            failures: vec![],
+        });
+        report.add_result(ScenarioValidationResult {
+            scenario_id: "scenario_2".to_string(),
+            passed: true,
+            steps_passed: 2,
+            steps_total: 2,
+            failures: vec![],
+        });
+        report.finalize();
+
+        ensure(report.status, EvaluationStatus::AllPassed, "status")?;
+
+        let json = render_eval_report_json(&report, None);
+        ensure_contains(&json, "\"success\":true", "success")?;
+        ensure_contains(&json, "\"status\":\"all_passed\"", "status")?;
+        ensure_contains(&json, "\"scenariosRun\":2", "scenariosRun")?;
+        ensure_contains(&json, "\"scenariosPassed\":2", "scenariosPassed")?;
+        ensure_contains(&json, "\"scenariosFailed\":0", "scenariosFailed")?;
+        ensure_contains(&json, "\"scenarioId\":\"scenario_1\"", "result 1")?;
+        ensure_contains(&json, "\"scenarioId\":\"scenario_2\"", "result 2")
+    }
+
+    #[test]
+    fn render_eval_report_json_some_failed() -> TestResult {
+        use super::render_eval_report_json;
+        use crate::eval::{
+            EvaluationReport, EvaluationStatus, ScenarioValidationResult, ValidationFailure,
+            ValidationFailureKind,
+        };
+
+        let mut report = EvaluationReport::new();
+        report.add_result(ScenarioValidationResult {
+            scenario_id: "passing".to_string(),
+            passed: true,
+            steps_passed: 2,
+            steps_total: 2,
+            failures: vec![],
+        });
+        report.add_result(ScenarioValidationResult {
+            scenario_id: "failing".to_string(),
+            passed: false,
+            steps_passed: 1,
+            steps_total: 2,
+            failures: vec![ValidationFailure {
+                step: 2,
+                kind: ValidationFailureKind::GoldenMismatch,
+                message: "Output differs from golden".to_string(),
+            }],
+        });
+        report.finalize();
+
+        ensure(report.status, EvaluationStatus::SomeFailed, "status")?;
+
+        let json = render_eval_report_json(&report, None);
+        ensure_contains(&json, "\"success\":false", "not success")?;
+        ensure_contains(&json, "\"status\":\"some_failed\"", "status")?;
+        ensure_contains(&json, "\"scenariosPassed\":1", "scenariosPassed")?;
+        ensure_contains(&json, "\"scenariosFailed\":1", "scenariosFailed")?;
+        ensure_contains(&json, "\"kind\":\"golden_mismatch\"", "failure kind")?;
+        ensure_contains(
+            &json,
+            "\"message\":\"Output differs from golden\"",
+            "failure msg",
+        )
+    }
+
+    #[test]
+    fn render_eval_report_human_empty_report() -> TestResult {
+        use super::render_eval_report_human;
+        use crate::eval::EvaluationReport;
+
+        let report = EvaluationReport::new();
+        let human = render_eval_report_human(&report, None);
+
+        ensure_contains(&human, "ee eval run", "header")?;
+        ensure_contains(&human, "Status: no scenarios available", "status")?;
+        ensure_contains(&human, "Results: 0 run, 0 passed, 0 failed", "results")?;
+        ensure_contains(&human, "No evaluation scenarios configured", "message")
+    }
+
+    #[test]
+    fn render_eval_report_human_with_results() -> TestResult {
+        use super::render_eval_report_human;
+        use crate::eval::{
+            EvaluationReport, ScenarioValidationResult, ValidationFailure, ValidationFailureKind,
+        };
+
+        let mut report = EvaluationReport::new();
+        report.add_result(ScenarioValidationResult {
+            scenario_id: "test_scenario".to_string(),
+            passed: false,
+            steps_passed: 2,
+            steps_total: 3,
+            failures: vec![ValidationFailure {
+                step: 3,
+                kind: ValidationFailureKind::ExitCodeMismatch,
+                message: "Expected 0, got 1".to_string(),
+            }],
+        });
+        report.finalize();
+
+        let human = render_eval_report_human(&report, None);
+
+        ensure_contains(&human, "[FAIL] test_scenario: 2/3 steps", "scenario result")?;
+        ensure_contains(&human, "Step 3: exit_code_mismatch", "failure step")?;
+        ensure_contains(&human, "Expected 0, got 1", "failure message")
+    }
+
+    #[test]
+    fn render_eval_report_toon_produces_valid_toon() -> TestResult {
+        use super::render_eval_report_toon;
+        use crate::eval::{EvaluationReport, ScenarioValidationResult};
+
+        let mut report = EvaluationReport::new();
+        report.add_result(ScenarioValidationResult {
+            scenario_id: "test".to_string(),
+            passed: true,
+            steps_passed: 1,
+            steps_total: 1,
+            failures: vec![],
+        });
+        report.finalize();
+
+        let toon = render_eval_report_toon(&report, None);
+
+        ensure_contains(&toon, "ee.response.v1", "schema")?;
+        ensure_contains(&toon, "all_passed", "status")?;
+        ensure_contains(&toon, "test", "scenario id")
+    }
+
+    #[test]
+    fn evaluation_status_strings_are_stable() -> TestResult {
+        use crate::eval::EvaluationStatus;
+
+        ensure(
+            EvaluationStatus::NoScenarios.as_str(),
+            "no_scenarios",
+            "no_scenarios",
+        )?;
+        ensure(
+            EvaluationStatus::AllPassed.as_str(),
+            "all_passed",
+            "all_passed",
+        )?;
+        ensure(
+            EvaluationStatus::SomeFailed.as_str(),
+            "some_failed",
+            "some_failed",
+        )?;
+        ensure(
+            EvaluationStatus::AllFailed.as_str(),
+            "all_failed",
+            "all_failed",
+        )
+    }
+
+    #[test]
+    fn evaluation_status_is_success() -> TestResult {
+        use crate::eval::EvaluationStatus;
+
+        ensure(
+            EvaluationStatus::NoScenarios.is_success(),
+            true,
+            "no_scenarios is success",
+        )?;
+        ensure(
+            EvaluationStatus::AllPassed.is_success(),
+            true,
+            "all_passed is success",
+        )?;
+        ensure(
+            EvaluationStatus::SomeFailed.is_success(),
+            false,
+            "some_failed not success",
+        )?;
+        ensure(
+            EvaluationStatus::AllFailed.is_success(),
+            false,
+            "all_failed not success",
+        )
+    }
+
+    #[test]
+    fn render_eval_report_with_elapsed_and_fixture_dir() -> TestResult {
+        use super::render_eval_report_json;
+        use crate::eval::EvaluationReport;
+
+        let report = EvaluationReport::new()
+            .with_elapsed_ms(42.5)
+            .with_fixture_dir("tests/fixtures/eval/");
+        let json = render_eval_report_json(&report, None);
+
+        ensure_contains(&json, "\"elapsedMs\":42.50", "elapsedMs")?;
+        ensure_contains(
+            &json,
+            "\"fixtureDir\":\"tests/fixtures/eval/\"",
+            "fixtureDir",
+        )
     }
 }

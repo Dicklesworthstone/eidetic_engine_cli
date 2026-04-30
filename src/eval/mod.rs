@@ -299,6 +299,101 @@ pub struct ScenarioValidationResult {
     pub failures: Vec<ValidationFailure>,
 }
 
+/// Aggregate report of an evaluation run (EE-255).
+#[derive(Clone, Debug, Default)]
+pub struct EvaluationReport {
+    /// Overall status of the evaluation run.
+    pub status: EvaluationStatus,
+    /// Total scenarios run.
+    pub scenarios_run: u32,
+    /// Scenarios that passed all validations.
+    pub scenarios_passed: u32,
+    /// Scenarios that failed one or more validations.
+    pub scenarios_failed: u32,
+    /// Individual scenario results.
+    pub results: Vec<ScenarioValidationResult>,
+    /// Elapsed time in milliseconds.
+    pub elapsed_ms: f64,
+    /// Fixture directory path used.
+    pub fixture_dir: Option<String>,
+}
+
+impl EvaluationReport {
+    /// Create a new empty evaluation report.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a scenario result to the report.
+    pub fn add_result(&mut self, result: ScenarioValidationResult) {
+        if result.passed {
+            self.scenarios_passed += 1;
+        } else {
+            self.scenarios_failed += 1;
+        }
+        self.scenarios_run += 1;
+        self.results.push(result);
+    }
+
+    /// Set the elapsed time.
+    pub fn with_elapsed_ms(mut self, elapsed_ms: f64) -> Self {
+        self.elapsed_ms = elapsed_ms;
+        self
+    }
+
+    /// Set the fixture directory.
+    pub fn with_fixture_dir(mut self, dir: impl Into<String>) -> Self {
+        self.fixture_dir = Some(dir.into());
+        self
+    }
+
+    /// Finalize the report status based on results.
+    pub fn finalize(&mut self) {
+        self.status = if self.scenarios_run == 0 {
+            EvaluationStatus::NoScenarios
+        } else if self.scenarios_failed == 0 {
+            EvaluationStatus::AllPassed
+        } else if self.scenarios_passed == 0 {
+            EvaluationStatus::AllFailed
+        } else {
+            EvaluationStatus::SomeFailed
+        };
+    }
+}
+
+/// Overall status of an evaluation run.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EvaluationStatus {
+    /// No scenarios were available to run.
+    #[default]
+    NoScenarios,
+    /// All scenarios passed.
+    AllPassed,
+    /// Some scenarios passed, some failed.
+    SomeFailed,
+    /// All scenarios failed.
+    AllFailed,
+}
+
+impl EvaluationStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoScenarios => "no_scenarios",
+            Self::AllPassed => "all_passed",
+            Self::SomeFailed => "some_failed",
+            Self::AllFailed => "all_failed",
+        }
+    }
+
+    /// Whether the evaluation is considered successful (all passed or no scenarios).
+    #[must_use]
+    pub const fn is_success(self) -> bool {
+        matches!(self, Self::NoScenarios | Self::AllPassed)
+    }
+}
+
 /// A single validation failure.
 #[derive(Clone, Debug)]
 pub struct ValidationFailure {
@@ -454,5 +549,167 @@ mod tests {
 
         let explicit = branch.signal_not_preserved();
         ensure(explicit.preserves_success_signal, false, "explicit false")
+    }
+
+    // ========================================================================
+    // EvaluationReport Tests (EE-255)
+    // ========================================================================
+
+    #[test]
+    fn evaluation_report_new_is_empty() -> TestResult {
+        let report = EvaluationReport::new();
+        ensure(report.scenarios_run, 0, "scenarios_run")?;
+        ensure(report.scenarios_passed, 0, "scenarios_passed")?;
+        ensure(report.scenarios_failed, 0, "scenarios_failed")?;
+        ensure(report.results.len(), 0, "results empty")?;
+        ensure(
+            report.status,
+            EvaluationStatus::NoScenarios,
+            "initial status",
+        )
+    }
+
+    #[test]
+    fn evaluation_report_add_result_updates_counts() -> TestResult {
+        let mut report = EvaluationReport::new();
+
+        report.add_result(ScenarioValidationResult {
+            scenario_id: "test_1".to_string(),
+            passed: true,
+            steps_passed: 2,
+            steps_total: 2,
+            failures: vec![],
+        });
+        ensure(report.scenarios_run, 1, "after first")?;
+        ensure(report.scenarios_passed, 1, "passed after first")?;
+        ensure(report.scenarios_failed, 0, "failed after first")?;
+
+        report.add_result(ScenarioValidationResult {
+            scenario_id: "test_2".to_string(),
+            passed: false,
+            steps_passed: 1,
+            steps_total: 2,
+            failures: vec![ValidationFailure {
+                step: 2,
+                kind: ValidationFailureKind::ExitCodeMismatch,
+                message: "Failed".to_string(),
+            }],
+        });
+        ensure(report.scenarios_run, 2, "after second")?;
+        ensure(report.scenarios_passed, 1, "passed after second")?;
+        ensure(report.scenarios_failed, 1, "failed after second")
+    }
+
+    #[test]
+    fn evaluation_report_finalize_sets_status() -> TestResult {
+        let mut empty = EvaluationReport::new();
+        empty.finalize();
+        ensure(empty.status, EvaluationStatus::NoScenarios, "empty")?;
+
+        let mut all_pass = EvaluationReport::new();
+        all_pass.add_result(ScenarioValidationResult {
+            scenario_id: "t".to_string(),
+            passed: true,
+            steps_passed: 1,
+            steps_total: 1,
+            failures: vec![],
+        });
+        all_pass.finalize();
+        ensure(all_pass.status, EvaluationStatus::AllPassed, "all_pass")?;
+
+        let mut some_fail = EvaluationReport::new();
+        some_fail.add_result(ScenarioValidationResult {
+            scenario_id: "p".to_string(),
+            passed: true,
+            steps_passed: 1,
+            steps_total: 1,
+            failures: vec![],
+        });
+        some_fail.add_result(ScenarioValidationResult {
+            scenario_id: "f".to_string(),
+            passed: false,
+            steps_passed: 0,
+            steps_total: 1,
+            failures: vec![ValidationFailure {
+                step: 1,
+                kind: ValidationFailureKind::SchemaMismatch,
+                message: "x".to_string(),
+            }],
+        });
+        some_fail.finalize();
+        ensure(some_fail.status, EvaluationStatus::SomeFailed, "some_fail")?;
+
+        let mut all_fail = EvaluationReport::new();
+        all_fail.add_result(ScenarioValidationResult {
+            scenario_id: "f".to_string(),
+            passed: false,
+            steps_passed: 0,
+            steps_total: 1,
+            failures: vec![ValidationFailure {
+                step: 1,
+                kind: ValidationFailureKind::MissingField,
+                message: "x".to_string(),
+            }],
+        });
+        all_fail.finalize();
+        ensure(all_fail.status, EvaluationStatus::AllFailed, "all_fail")
+    }
+
+    #[test]
+    fn evaluation_report_builder_methods() -> TestResult {
+        let report = EvaluationReport::new()
+            .with_elapsed_ms(123.45)
+            .with_fixture_dir("/path/to/fixtures");
+
+        ensure(report.elapsed_ms, 123.45, "elapsed_ms")?;
+        ensure(
+            report.fixture_dir,
+            Some("/path/to/fixtures".to_string()),
+            "fixture_dir",
+        )
+    }
+
+    #[test]
+    fn evaluation_status_strings_are_stable() -> TestResult {
+        ensure(
+            EvaluationStatus::NoScenarios.as_str(),
+            "no_scenarios",
+            "no_scenarios",
+        )?;
+        ensure(
+            EvaluationStatus::AllPassed.as_str(),
+            "all_passed",
+            "all_passed",
+        )?;
+        ensure(
+            EvaluationStatus::SomeFailed.as_str(),
+            "some_failed",
+            "some_failed",
+        )?;
+        ensure(
+            EvaluationStatus::AllFailed.as_str(),
+            "all_failed",
+            "all_failed",
+        )
+    }
+
+    #[test]
+    fn evaluation_status_is_success_logic() -> TestResult {
+        ensure(
+            EvaluationStatus::NoScenarios.is_success(),
+            true,
+            "no_scenarios",
+        )?;
+        ensure(EvaluationStatus::AllPassed.is_success(), true, "all_passed")?;
+        ensure(
+            EvaluationStatus::SomeFailed.is_success(),
+            false,
+            "some_failed",
+        )?;
+        ensure(
+            EvaluationStatus::AllFailed.is_success(),
+            false,
+            "all_failed",
+        )
     }
 }
