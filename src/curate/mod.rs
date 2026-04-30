@@ -4,6 +4,8 @@
 //! consolidation, promotion, deprecation, supersession, tombstoning, etc.
 //! No silent durable mutation — every change goes through this queue.
 
+pub mod regret;
+
 use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;

@@ -1,4 +1,5 @@
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use sqlmodel_core::{IsolationLevel, Row, Value};
 use sqlmodel_frankensqlite::FrankenConnection;
 use std::error::Error;
@@ -16,6 +17,7 @@ pub const PROVENANCE_STATUS_SKIPPED: &str = "skipped";
 
 /// Standard audit action types for memory operations (EE-070).
 pub mod audit_actions {
+    pub const FEEDBACK_RECORD: &str = "feedback.record";
     pub const MEMORY_CREATE: &str = "memory.create";
     pub const MEMORY_UPDATE: &str = "memory.update";
     pub const MEMORY_TOMBSTONE: &str = "memory.tombstone";
@@ -1309,6 +1311,38 @@ CREATE INDEX idx_memories_provenance_verification_status
     "blake3:v012_provenance_chain_hash_2026_04_30",
 );
 
+/// V013: Add task_episodes table for counterfactual memory lab (EE-381).
+pub const V013_TASK_EPISODES: Migration = Migration::new(
+    13,
+    "task_episodes",
+    r#"
+-- Task episodes table (EE-381)
+-- Frozen snapshots of task executions for counterfactual analysis.
+CREATE TABLE task_episodes (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'ep_*' AND length(id) = 30),
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
+    session_id TEXT CHECK (session_id IS NULL OR session_id GLOB 'sess_*'),
+    task_input TEXT NOT NULL CHECK (length(trim(task_input)) > 0 AND length(task_input) <= 65536),
+    retrieved_memory_ids TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(retrieved_memory_ids)),
+    context_pack_id TEXT CHECK (context_pack_id IS NULL OR context_pack_id GLOB 'pack_*'),
+    actions TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(actions)),
+    outcome TEXT NOT NULL DEFAULT 'unknown' CHECK (outcome IN ('success', 'failure', 'partial', 'cancelled', 'unknown')),
+    outcome_details TEXT CHECK (outcome_details IS NULL OR length(trim(outcome_details)) > 0),
+    started_at TEXT NOT NULL CHECK (length(trim(started_at)) > 0),
+    ended_at TEXT CHECK (ended_at IS NULL OR length(trim(ended_at)) > 0),
+    duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+    agent TEXT CHECK (agent IS NULL OR length(trim(agent)) > 0),
+    episode_hash TEXT CHECK (episode_hash IS NULL OR episode_hash GLOB 'blake3:*'),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0)
+);
+CREATE INDEX idx_task_episodes_workspace ON task_episodes(workspace_id);
+CREATE INDEX idx_task_episodes_session ON task_episodes(session_id);
+CREATE INDEX idx_task_episodes_started ON task_episodes(started_at);
+CREATE INDEX idx_task_episodes_outcome ON task_episodes(outcome);
+"#,
+    "blake3:v013_task_episodes_2026_04_30",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -1323,6 +1357,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V010_IMPORT_LEDGER,
     V011_FEEDBACK_EVENTS,
     V012_PROVENANCE_CHAIN_HASH,
+    V013_TASK_EPISODES,
 ];
 
 /// Result of applying migrations.
@@ -2038,6 +2073,14 @@ pub struct StoredFeedbackEvent {
     pub created_at: String,
 }
 
+/// Input for audited feedback event recording (EE-083).
+#[derive(Debug, Clone)]
+pub struct AuditedFeedbackEventInput {
+    pub event: CreateFeedbackEventInput,
+    pub actor: Option<String>,
+    pub details: Option<String>,
+}
+
 impl DbConnection {
     /// Insert a new feedback event.
     pub fn insert_feedback_event(&self, id: &str, input: &CreateFeedbackEventInput) -> Result<()> {
@@ -2189,6 +2232,63 @@ impl DbConnection {
         }
 
         Ok(counts)
+    }
+
+    /// Insert a feedback event and audit entry in one transaction (EE-083).
+    pub fn insert_feedback_event_audited(
+        &self,
+        id: &str,
+        input: &AuditedFeedbackEventInput,
+    ) -> Result<String> {
+        self.begin()?;
+
+        match self.insert_feedback_event_audited_inner(id, input) {
+            Ok(audit_id) => {
+                self.commit()?;
+                Ok(audit_id)
+            }
+            Err(err) => {
+                let _ = self.rollback();
+                Err(err)
+            }
+        }
+    }
+
+    fn insert_feedback_event_audited_inner(
+        &self,
+        id: &str,
+        input: &AuditedFeedbackEventInput,
+    ) -> Result<String> {
+        self.insert_feedback_event(id, &input.event)?;
+
+        let audit_id = generate_audit_id();
+        let details = input.details.clone().unwrap_or_else(|| {
+            serde_json::json!({
+                "feedbackEventId": id,
+                "signal": &input.event.signal,
+                "weight": input.event.weight,
+                "sourceType": &input.event.source_type,
+                "sourceId": &input.event.source_id,
+                "reasonPresent": input.event.reason.is_some(),
+                "evidenceJsonPresent": input.event.evidence_json.is_some(),
+                "sessionId": &input.event.session_id,
+            })
+            .to_string()
+        });
+
+        self.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(input.event.workspace_id.clone()),
+                actor: input.actor.clone(),
+                action: audit_actions::FEEDBACK_RECORD.to_string(),
+                target_type: Some(input.event.target_type.clone()),
+                target_id: Some(input.event.target_id.clone()),
+                details: Some(details),
+            },
+        )?;
+
+        Ok(audit_id)
     }
 }
 
@@ -4123,8 +4223,13 @@ impl AdvisoryLock {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AcquireLockResult {
     Acquired(AdvisoryLock),
-    AlreadyHeld { holder_id: String, acquired_at: String },
-    Expired { previous_holder: String },
+    AlreadyHeld {
+        holder_id: String,
+        acquired_at: String,
+    },
+    Expired {
+        previous_holder: String,
+    },
 }
 
 impl AcquireLockResult {
@@ -4202,9 +4307,7 @@ impl DbConnection {
         let now = Utc::now().to_rfc3339();
         let ttl = ttl_secs.unwrap_or(concurrent_writer_contract::DEFAULT_LOCK_TTL_SECS);
         let expires_at = if ttl > 0 {
-            Some(
-                (Utc::now() + chrono::Duration::seconds(ttl as i64)).to_rfc3339(),
-            )
+            Some((Utc::now() + chrono::Duration::seconds(ttl as i64)).to_rfc3339())
         } else {
             None
         };
@@ -4363,6 +4466,228 @@ impl DbConnection {
             &[Value::Text(now)],
         )
     }
+
+    // =========================================================================
+    // Task Episode Persistence (EE-381)
+    // =========================================================================
+
+    /// Insert a new task episode.
+    pub fn insert_task_episode(&self, id: &str, input: &CreateTaskEpisodeInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let memory_ids_json =
+            serde_json::to_string(&input.retrieved_memory_ids).unwrap_or_else(|_| "[]".to_string());
+        let actions_json =
+            serde_json::to_string(&input.actions).unwrap_or_else(|_| "[]".to_string());
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO task_episodes (
+                id, workspace_id, session_id, task_input, retrieved_memory_ids,
+                context_pack_id, actions, outcome, outcome_details, started_at,
+                ended_at, duration_ms, agent, episode_hash, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            &[
+                Value::Text(id.to_string()),
+                input
+                    .workspace_id
+                    .as_ref()
+                    .map(|s| Value::Text(s.clone()))
+                    .unwrap_or(Value::Null),
+                input
+                    .session_id
+                    .as_ref()
+                    .map(|s| Value::Text(s.clone()))
+                    .unwrap_or(Value::Null),
+                Value::Text(input.task_input.clone()),
+                Value::Text(memory_ids_json),
+                input
+                    .context_pack_id
+                    .as_ref()
+                    .map(|s| Value::Text(s.clone()))
+                    .unwrap_or(Value::Null),
+                Value::Text(actions_json),
+                Value::Text(input.outcome.clone()),
+                input
+                    .outcome_details
+                    .as_ref()
+                    .map(|s| Value::Text(s.clone()))
+                    .unwrap_or(Value::Null),
+                Value::Text(input.started_at.clone()),
+                input
+                    .ended_at
+                    .as_ref()
+                    .map(|s| Value::Text(s.clone()))
+                    .unwrap_or(Value::Null),
+                input
+                    .duration_ms
+                    .map(|d| Value::BigInt(d as i64))
+                    .unwrap_or(Value::Null),
+                input
+                    .agent
+                    .as_ref()
+                    .map(|s| Value::Text(s.clone()))
+                    .unwrap_or(Value::Null),
+                input
+                    .episode_hash
+                    .as_ref()
+                    .map(|s| Value::Text(s.clone()))
+                    .unwrap_or(Value::Null),
+                Value::Text(now),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieve a task episode by ID.
+    pub fn get_task_episode(&self, id: &str) -> Result<Option<StoredTaskEpisode>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, session_id, task_input, retrieved_memory_ids,
+                    context_pack_id, actions, outcome, outcome_details, started_at,
+                    ended_at, duration_ms, agent, episode_hash, created_at
+             FROM task_episodes WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        stored_task_episode_from_row(&rows[0]).map(Some)
+    }
+
+    /// List task episodes with optional filters.
+    pub fn list_task_episodes(
+        &self,
+        workspace_id: Option<&str>,
+        outcome: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<StoredTaskEpisode>> {
+        let (sql, params) = match (workspace_id, outcome) {
+            (Some(ws), Some(out)) => (
+                "SELECT id, workspace_id, session_id, task_input, retrieved_memory_ids,
+                        context_pack_id, actions, outcome, outcome_details, started_at,
+                        ended_at, duration_ms, agent, episode_hash, created_at
+                 FROM task_episodes WHERE workspace_id = ?1 AND outcome = ?2
+                 ORDER BY started_at DESC LIMIT ?3",
+                vec![
+                    Value::Text(ws.to_string()),
+                    Value::Text(out.to_string()),
+                    Value::BigInt(i64::from(limit)),
+                ],
+            ),
+            (Some(ws), None) => (
+                "SELECT id, workspace_id, session_id, task_input, retrieved_memory_ids,
+                        context_pack_id, actions, outcome, outcome_details, started_at,
+                        ended_at, duration_ms, agent, episode_hash, created_at
+                 FROM task_episodes WHERE workspace_id = ?1
+                 ORDER BY started_at DESC LIMIT ?2",
+                vec![
+                    Value::Text(ws.to_string()),
+                    Value::BigInt(i64::from(limit)),
+                ],
+            ),
+            (None, Some(out)) => (
+                "SELECT id, workspace_id, session_id, task_input, retrieved_memory_ids,
+                        context_pack_id, actions, outcome, outcome_details, started_at,
+                        ended_at, duration_ms, agent, episode_hash, created_at
+                 FROM task_episodes WHERE outcome = ?1
+                 ORDER BY started_at DESC LIMIT ?2",
+                vec![
+                    Value::Text(out.to_string()),
+                    Value::BigInt(i64::from(limit)),
+                ],
+            ),
+            (None, None) => (
+                "SELECT id, workspace_id, session_id, task_input, retrieved_memory_ids,
+                        context_pack_id, actions, outcome, outcome_details, started_at,
+                        ended_at, duration_ms, agent, episode_hash, created_at
+                 FROM task_episodes ORDER BY started_at DESC LIMIT ?1",
+                vec![Value::BigInt(i64::from(limit))],
+            ),
+        };
+
+        let rows = self.query_for(DbOperation::Query, sql, &params)?;
+        rows.iter().map(stored_task_episode_from_row).collect()
+    }
+}
+
+// =============================================================================
+// Task Episode Storage Types (EE-381)
+// =============================================================================
+
+/// A stored task episode record.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredTaskEpisode {
+    pub id: String,
+    pub workspace_id: Option<String>,
+    pub session_id: Option<String>,
+    pub task_input: String,
+    pub retrieved_memory_ids: Vec<String>,
+    pub context_pack_id: Option<String>,
+    pub actions: Vec<StoredEpisodeAction>,
+    pub outcome: String,
+    pub outcome_details: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub agent: Option<String>,
+    pub episode_hash: Option<String>,
+    pub created_at: String,
+}
+
+/// A stored episode action record.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StoredEpisodeAction {
+    pub action_type: String,
+    pub target_id: Option<String>,
+    pub details: Option<String>,
+    pub timestamp: String,
+}
+
+/// Input for creating a new task episode.
+#[derive(Clone, Debug)]
+pub struct CreateTaskEpisodeInput {
+    pub workspace_id: Option<String>,
+    pub session_id: Option<String>,
+    pub task_input: String,
+    pub retrieved_memory_ids: Vec<String>,
+    pub context_pack_id: Option<String>,
+    pub actions: Vec<StoredEpisodeAction>,
+    pub outcome: String,
+    pub outcome_details: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub agent: Option<String>,
+    pub episode_hash: Option<String>,
+}
+
+fn stored_task_episode_from_row(row: &Row) -> Result<StoredTaskEpisode> {
+    let memory_ids_json = required_text(row, 4, DbOperation::Query, "retrieved_memory_ids")?;
+    let retrieved_memory_ids: Vec<String> =
+        serde_json::from_str(memory_ids_json).unwrap_or_default();
+
+    let actions_json = required_text(row, 6, DbOperation::Query, "actions")?;
+    let actions: Vec<StoredEpisodeAction> = serde_json::from_str(actions_json).unwrap_or_default();
+
+    Ok(StoredTaskEpisode {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: optional_text(row, 1)?.map(str::to_string),
+        session_id: optional_text(row, 2)?.map(str::to_string),
+        task_input: required_text(row, 3, DbOperation::Query, "task_input")?.to_string(),
+        retrieved_memory_ids,
+        context_pack_id: optional_text(row, 5)?.map(str::to_string),
+        actions,
+        outcome: required_text(row, 7, DbOperation::Query, "outcome")?.to_string(),
+        outcome_details: optional_text(row, 8)?.map(str::to_string),
+        started_at: required_text(row, 9, DbOperation::Query, "started_at")?.to_string(),
+        ended_at: optional_text(row, 10)?.map(str::to_string),
+        duration_ms: row.get(11).and_then(|v| v.as_i64()).map(|i| i as u64),
+        agent: optional_text(row, 12)?.map(str::to_string),
+        episode_hash: optional_text(row, 13)?.map(str::to_string),
+        created_at: required_text(row, 14, DbOperation::Query, "created_at")?.to_string(),
+    })
 }
 
 #[cfg(test)]
