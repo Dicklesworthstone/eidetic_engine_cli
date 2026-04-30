@@ -223,6 +223,27 @@ pub const SEMANTIC_SEARCH_REQUIRED: ErrorCode = ErrorCode {
     default_repair: Some("ee search --lexical-only"),
 };
 
+pub const UNKNOWN_AGENT_CONNECTOR: ErrorCode = ErrorCode {
+    id: "EE-E502",
+    category: ErrorCategory::UnsatisfiedDegradedMode,
+    description: "Agent connector type not recognized",
+    default_repair: Some("ee agent detect --json"),
+};
+
+pub const AGENT_DETECTOR_UNAVAILABLE: ErrorCode = ErrorCode {
+    id: "EE-E503",
+    category: ErrorCategory::UnsatisfiedDegradedMode,
+    description: "Agent detector subsystem is unavailable",
+    default_repair: Some("ee doctor --json"),
+};
+
+pub const AGENT_SOURCE_NOT_IMPORTED: ErrorCode = ErrorCode {
+    id: "EE-E504",
+    category: ErrorCategory::UnsatisfiedDegradedMode,
+    description: "Agent source detected but not yet imported",
+    default_repair: Some("ee import cass --source <path>"),
+};
+
 // Policy errors (EE-E600 - EE-E699)
 pub const REDACTION_BLOCKED: ErrorCode = ErrorCode {
     id: "EE-E600",
@@ -288,6 +309,9 @@ pub const ALL_ERROR_CODES: &[ErrorCode] = &[
     // Degraded mode
     REQUIRED_CAPABILITY_UNAVAILABLE,
     SEMANTIC_SEARCH_REQUIRED,
+    UNKNOWN_AGENT_CONNECTOR,
+    AGENT_DETECTOR_UNAVAILABLE,
+    AGENT_SOURCE_NOT_IMPORTED,
     // Policy
     REDACTION_BLOCKED,
     RETENTION_BLOCKED,
