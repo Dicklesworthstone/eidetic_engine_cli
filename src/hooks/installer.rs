@@ -203,7 +203,10 @@ fn determine_action(
             } else if preserve_existing {
                 (HookAction::Skip, "Preserving external hook")
             } else {
-                (HookAction::Skip, "External hook exists; use --force to overwrite")
+                (
+                    HookAction::Skip,
+                    "External hook exists; use --force to overwrite",
+                )
             }
         }
         ExistingHookStatus::Unreadable => {
@@ -281,8 +284,7 @@ pub fn install_hooks(options: &HookInstallOptions) -> Result<HookInstallReport, 
     }
 
     let idempotent = plan.iter().all(|item| {
-        item.action == HookAction::NoChange.as_str()
-            || item.action == HookAction::Skip.as_str()
+        item.action == HookAction::NoChange.as_str() || item.action == HookAction::Skip.as_str()
     });
 
     Ok(HookInstallReport {
@@ -399,9 +401,11 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    type TestResult = Result<(), String>;
+
     #[test]
-    fn dry_run_does_not_create_files() {
-        let temp = TempDir::new().unwrap();
+    fn dry_run_does_not_create_files() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
         let options = HookInstallOptions {
             hook_dir: temp.path().to_path_buf(),
             hooks: vec![HookType::PreTask],
@@ -410,17 +414,18 @@ mod tests {
             force: false,
         };
 
-        let report = install_hooks(&options).unwrap();
+        let report = install_hooks(&options).map_err(|e| e.message())?;
         assert!(report.dry_run);
         assert_eq!(report.installed_count, 1);
 
         let hook_path = temp.path().join("pre-task");
         assert!(!hook_path.exists(), "dry-run should not create files");
+        Ok(())
     }
 
     #[test]
-    fn install_creates_hook_file() {
-        let temp = TempDir::new().unwrap();
+    fn install_creates_hook_file() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
         let options = HookInstallOptions {
             hook_dir: temp.path().to_path_buf(),
             hooks: vec![HookType::PostTask],
@@ -429,20 +434,21 @@ mod tests {
             force: false,
         };
 
-        let report = install_hooks(&options).unwrap();
+        let report = install_hooks(&options).map_err(|e| e.message())?;
         assert!(!report.dry_run);
         assert_eq!(report.installed_count, 1);
 
         let hook_path = temp.path().join("post-task");
         assert!(hook_path.exists(), "hook file should exist");
 
-        let content = fs::read_to_string(&hook_path).unwrap();
+        let content = fs::read_to_string(&hook_path).map_err(|e| e.to_string())?;
         assert!(content.contains(EE_HOOK_MARKER));
+        Ok(())
     }
 
     #[test]
-    fn idempotent_reinstall_updates_managed_hook() {
-        let temp = TempDir::new().unwrap();
+    fn idempotent_reinstall_updates_managed_hook() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
         let options = HookInstallOptions {
             hook_dir: temp.path().to_path_buf(),
             hooks: vec![HookType::PreCommit],
@@ -451,19 +457,20 @@ mod tests {
             force: false,
         };
 
-        let report1 = install_hooks(&options).unwrap();
+        let report1 = install_hooks(&options).map_err(|e| e.message())?;
         assert_eq!(report1.installed_count, 1);
 
-        let report2 = install_hooks(&options).unwrap();
+        let report2 = install_hooks(&options).map_err(|e| e.message())?;
         assert_eq!(report2.updated_count, 1);
         assert_eq!(report2.installed_count, 0);
+        Ok(())
     }
 
     #[test]
-    fn preserve_existing_skips_external_hook() {
-        let temp = TempDir::new().unwrap();
+    fn preserve_existing_skips_external_hook() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
         let hook_path = temp.path().join("pre-task");
-        fs::write(&hook_path, "#!/bin/sh\necho 'external hook'\n").unwrap();
+        fs::write(&hook_path, "#!/bin/sh\necho 'external hook'\n").map_err(|e| e.to_string())?;
 
         let options = HookInstallOptions {
             hook_dir: temp.path().to_path_buf(),
@@ -473,18 +480,22 @@ mod tests {
             force: false,
         };
 
-        let report = install_hooks(&options).unwrap();
+        let report = install_hooks(&options).map_err(|e| e.message())?;
         assert_eq!(report.skipped_count, 1);
 
-        let content = fs::read_to_string(&hook_path).unwrap();
-        assert!(!content.contains(EE_HOOK_MARKER), "should not overwrite external hook");
+        let content = fs::read_to_string(&hook_path).map_err(|e| e.to_string())?;
+        assert!(
+            !content.contains(EE_HOOK_MARKER),
+            "should not overwrite external hook"
+        );
+        Ok(())
     }
 
     #[test]
-    fn force_overwrites_external_hook() {
-        let temp = TempDir::new().unwrap();
+    fn force_overwrites_external_hook() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
         let hook_path = temp.path().join("pre-task");
-        fs::write(&hook_path, "#!/bin/sh\necho 'external hook'\n").unwrap();
+        fs::write(&hook_path, "#!/bin/sh\necho 'external hook'\n").map_err(|e| e.to_string())?;
 
         let options = HookInstallOptions {
             hook_dir: temp.path().to_path_buf(),
@@ -494,31 +505,40 @@ mod tests {
             force: true,
         };
 
-        let report = install_hooks(&options).unwrap();
+        let report = install_hooks(&options).map_err(|e| e.message())?;
         assert_eq!(report.updated_count, 1);
 
-        let content = fs::read_to_string(&hook_path).unwrap();
-        assert!(content.contains(EE_HOOK_MARKER), "should overwrite with force");
+        let content = fs::read_to_string(&hook_path).map_err(|e| e.to_string())?;
+        assert!(
+            content.contains(EE_HOOK_MARKER),
+            "should overwrite with force"
+        );
+        Ok(())
     }
 
     #[test]
-    fn status_reports_hook_states() {
-        let temp = TempDir::new().unwrap();
+    fn status_reports_hook_states() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
 
         let managed_path = temp.path().join("pre-task");
-        fs::write(&managed_path, format!("{}\nmanaged content", EE_HOOK_MARKER)).unwrap();
+        fs::write(
+            &managed_path,
+            format!("{}\nmanaged content", EE_HOOK_MARKER),
+        )
+        .map_err(|e| e.to_string())?;
 
         let external_path = temp.path().join("post-task");
-        fs::write(&external_path, "external content").unwrap();
+        fs::write(&external_path, "external content").map_err(|e| e.to_string())?;
 
         let options = HookStatusOptions {
             hook_dir: temp.path().to_path_buf(),
             hooks: vec![HookType::PreTask, HookType::PostTask, HookType::PreCommit],
         };
 
-        let report = check_hook_status(&options).unwrap();
+        let report = check_hook_status(&options).map_err(|e| e.message())?;
         assert_eq!(report.managed_count, 1);
         assert_eq!(report.external_count, 1);
         assert_eq!(report.missing_count, 1);
+        Ok(())
     }
 }
