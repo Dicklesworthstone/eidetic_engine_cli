@@ -660,6 +660,10 @@ Memories carry a trust class that affects packing priority:
 | `cass_evidence` | Imported session span | 0.45 |
 | `legacy_import` | Old Eidetic Engine artifact | 0.30 (caps until validated) |
 
+Lifecycle rules, advisory priority, and prompt-injection handling are specified
+in [`docs/trust-model.md`](docs/trust-model.md); ADR 0009 remains the canonical
+trust taxonomy.
+
 ### Prompt-injection guard
 
 The trust pipeline flags suspicious patterns (fake instructions, role override attempts, exfiltration cues) before promotion. Flagged memories quarantine into `curate candidates` and never silently enter the procedural layer.
