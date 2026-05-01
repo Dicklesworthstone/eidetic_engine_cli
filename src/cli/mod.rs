@@ -51,6 +51,10 @@ use crate::core::quarantine::QuarantineReport;
 use crate::core::search::{SearchOptions, run_search};
 use crate::core::situation::{classify_task, explain_situation, show_situation};
 use crate::core::status::StatusReport;
+use crate::core::tripwire::{
+    CheckOptions as TripwireCheckOptions, ListOptions as TripwireListOptions, check_tripwire,
+    list_tripwires,
+};
 use crate::core::why::{WhyOptions, explain_memory};
 use crate::models::{
     DomainError, ExperimentSafetyBoundary, InstallOperation, ProcessExitCode, QUERY_SCHEMA_V1,
@@ -282,6 +286,9 @@ pub enum Command {
     /// Create or inspect redacted diagnostic support bundles.
     #[command(subcommand)]
     Support(SupportCommand),
+    /// List and check tripwires from preflight assessments.
+    #[command(subcommand)]
+    Tripwire(TripwireCommand),
     /// Print the ee version.
     Version,
     /// Plan an update without mutating the installation.
@@ -1207,6 +1214,55 @@ pub struct PreflightCloseArgs {
     pub reason: Option<String>,
 
     /// Report the close action without executing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Subcommands for `ee tripwire`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum TripwireCommand {
+    /// List tripwires from preflight assessments.
+    List(TripwireListArgs),
+    /// Check a specific tripwire condition.
+    Check(TripwireCheckArgs),
+}
+
+/// Arguments for `ee tripwire list`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct TripwireListArgs {
+    /// Filter by tripwire state (armed, triggered, disarmed, error).
+    #[arg(long, value_name = "STATE")]
+    pub state: Option<String>,
+
+    /// Filter by preflight run ID.
+    #[arg(long, value_name = "RUN_ID")]
+    pub preflight_run_id: Option<String>,
+
+    /// Filter by tripwire type.
+    #[arg(long, value_name = "TYPE")]
+    pub tripwire_type: Option<String>,
+
+    /// Maximum number of tripwires to list.
+    #[arg(long, short = 'n', value_name = "N")]
+    pub limit: Option<usize>,
+
+    /// Include disarmed tripwires.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_disarmed: bool,
+}
+
+/// Arguments for `ee tripwire check`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct TripwireCheckArgs {
+    /// Tripwire ID to check.
+    #[arg(value_name = "ID")]
+    pub tripwire_id: String,
+
+    /// Update the last_checked_at timestamp.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub update_timestamp: bool,
+
+    /// Dry-run mode (check without persisting state changes).
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 }
@@ -2829,6 +2885,12 @@ where
         }
         Some(Command::Support(SupportCommand::Inspect(ref args))) => {
             handle_support_inspect(&cli, args, stdout, stderr)
+        }
+        Some(Command::Tripwire(TripwireCommand::List(ref args))) => {
+            handle_tripwire_list(&cli, args, stdout, stderr)
+        }
+        Some(Command::Tripwire(TripwireCommand::Check(ref args))) => {
+            handle_tripwire_check(&cli, args, stdout, stderr)
         }
         Some(Command::Version) => {
             let report = VersionReport::gather();
@@ -8319,6 +8381,10 @@ impl NormalizedInvocation {
                     SupportCommand::Bundle(_) => "support bundle".to_string(),
                     SupportCommand::Inspect(_) => "support inspect".to_string(),
                 },
+                Command::Tripwire(tw) => match tw {
+                    TripwireCommand::List(_) => "tripwire list".to_string(),
+                    TripwireCommand::Check(_) => "tripwire check".to_string(),
+                },
                 Command::Update(_) => "update".to_string(),
                 Command::Version => "version".to_string(),
                 Command::Why(_) => "why".to_string(),
@@ -8629,6 +8695,138 @@ impl InvocationHints {
         !self.single_dash_fixes.is_empty()
             || !self.case_fixes.is_empty()
             || self.flag_before_command
+    }
+}
+
+// ============================================================================
+// EE-393: Tripwire List and Check Commands
+// ============================================================================
+
+fn handle_tripwire_list<W, E>(
+    cli: &Cli,
+    args: &TripwireListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::models::preflight::{TripwireState, TripwireType};
+
+    let state = args
+        .state
+        .as_ref()
+        .and_then(|s| s.parse::<TripwireState>().ok());
+    let tripwire_type = args
+        .tripwire_type
+        .as_ref()
+        .and_then(|t| t.parse::<TripwireType>().ok());
+
+    let options = TripwireListOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        state,
+        preflight_run_id: args.preflight_run_id.clone(),
+        tripwire_type,
+        limit: args.limit,
+        include_disarmed: args.include_disarmed,
+    };
+
+    match list_tripwires(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                let mut buf = String::new();
+                buf.push_str(&format!(
+                    "Tripwires: {} total ({} armed, {} triggered, {} disarmed, {} error)\n\n",
+                    report.total_count,
+                    report.armed_count,
+                    report.triggered_count,
+                    report.disarmed_count,
+                    report.error_count,
+                ));
+                for tw in &report.tripwires {
+                    buf.push_str(&format!(
+                        "  {} [{}] {}: {}\n",
+                        tw.id, tw.state, tw.tripwire_type, tw.condition
+                    ));
+                    if let Some(ref msg) = tw.message {
+                        buf.push_str(&format!("    message: {msg}\n"));
+                    }
+                }
+                if !report.filters_applied.is_empty() {
+                    buf.push_str(&format!(
+                        "\nFilters: {}\n",
+                        report.filters_applied.join(", ")
+                    ));
+                }
+                write_stdout(stdout, &buf)
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&report.to_json()) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(report.to_json() + "\n")),
+        },
+        Err(err) => write_domain_error(&err, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_tripwire_check<W, E>(
+    cli: &Cli,
+    args: &TripwireCheckArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = TripwireCheckOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        tripwire_id: args.tripwire_id.clone(),
+        update_timestamp: args.update_timestamp,
+        dry_run: args.dry_run,
+    };
+
+    match check_tripwire(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                let mut buf = String::new();
+                buf.push_str(&format!(
+                    "Tripwire {}: {}\n",
+                    report.tripwire_id,
+                    report.result.as_str().to_uppercase()
+                ));
+                buf.push_str(&format!("  State: {}\n", report.state));
+                buf.push_str(&format!("  Action: {}\n", report.action));
+                buf.push_str(&format!("  Condition: {}\n", report.condition));
+                if let Some(ref msg) = report.message {
+                    buf.push_str(&format!("  Message: {msg}\n"));
+                }
+                if report.should_halt {
+                    buf.push_str("  !! Should halt execution\n");
+                }
+                if let Some(ref details) = report.details {
+                    buf.push_str(&format!("  Details: {details}\n"));
+                }
+                if report.dry_run {
+                    buf.push_str("  (dry-run mode)\n");
+                }
+                write_stdout(stdout, &buf)
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&report.to_json()) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(report.to_json() + "\n")),
+        },
+        Err(err) => write_domain_error(&err, cli.wants_json(), stdout, stderr),
     }
 }
 

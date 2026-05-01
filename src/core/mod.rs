@@ -41,6 +41,7 @@ pub mod situation;
 pub mod status;
 pub mod streams;
 pub mod support_bundle;
+pub mod tripwire;
 pub mod verify;
 pub mod why;
 
