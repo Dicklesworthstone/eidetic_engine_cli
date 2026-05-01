@@ -17,6 +17,7 @@ pub mod output;
 pub mod pack;
 pub mod policy;
 pub mod search;
+pub mod shadow;
 pub mod steward;
 
 #[cfg(feature = "mcp")]

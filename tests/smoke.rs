@@ -1379,7 +1379,10 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         remember1.status.success(),
         format!("remember1 should succeed; stderr: {remember1_stderr}"),
     )?;
-    ensure(remember1.stderr.is_empty(), "remember1 stderr must be empty")?;
+    ensure(
+        remember1.stderr.is_empty(),
+        "remember1 stderr must be empty",
+    )?;
     let remember1_json: serde_json::Value = serde_json::from_slice(&remember1.stdout)
         .map_err(|error| format!("remember1 stdout must be valid JSON: {error}"))?;
     ensure_equal(
@@ -1414,13 +1417,20 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         remember2.status.success(),
         format!("remember2 should succeed; stderr: {remember2_stderr}"),
     )?;
-    ensure(remember2.stderr.is_empty(), "remember2 stderr must be empty")?;
+    ensure(
+        remember2.stderr.is_empty(),
+        "remember2 stderr must be empty",
+    )?;
     let remember2_json: serde_json::Value = serde_json::from_slice(&remember2.stdout)
         .map_err(|error| format!("remember2 stdout must be valid JSON: {error}"))?;
     let memory2_id = remember2_json["data"]["memory_id"]
         .as_str()
         .ok_or_else(|| "remember2 memory_id must be a string".to_string())?
         .to_string();
+    ensure(
+        memory2_id != memory1_id,
+        "second remembered memory should get a distinct ID",
+    )?;
 
     // Step 4: Verify database exists
     let database_path = workspace.join(".ee").join("ee.db");
@@ -1576,7 +1586,11 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         context_md.stderr.is_empty(),
         "context markdown stderr must be empty",
     )?;
-    ensure_contains(&context_md_stdout, "# ", "context markdown should have header")?;
+    ensure_contains(
+        &context_md_stdout,
+        "# ",
+        "context markdown should have header",
+    )?;
     ensure_no_ansi(&context_md_stdout, "context markdown stdout")?;
 
     // Step 11: Why command
@@ -1596,7 +1610,11 @@ fn walking_skeleton_durability_scenario() -> TestResult {
     ensure(why.stderr.is_empty(), "why stderr must be empty")?;
     let why_json: serde_json::Value = serde_json::from_slice(&why.stdout)
         .map_err(|error| format!("why stdout must be valid JSON: {error}"))?;
-    ensure_equal(&why_json["schema"], &serde_json::json!("ee.response.v1"), "why schema")?;
+    ensure_equal(
+        &why_json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "why schema",
+    )?;
     ensure(
         why_json["data"]["storage"].is_object(),
         "why should include storage explanation",

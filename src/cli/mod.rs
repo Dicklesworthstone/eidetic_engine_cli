@@ -34,8 +34,8 @@ use crate::core::lab::{
     ReplayOptions as LabReplayOptions, capture_episode, replay_episode, run_counterfactual,
 };
 use crate::core::learn::{
-    LearnAgendaOptions, LearnSummaryOptions, LearnUncertaintyOptions, show_agenda, show_summary,
-    show_uncertainty,
+    LearnAgendaOptions, LearnExperimentProposeOptions, LearnSummaryOptions, LearnUncertaintyOptions,
+    propose_experiments, show_agenda, show_summary, show_uncertainty,
 };
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
@@ -52,7 +52,9 @@ use crate::core::search::{SearchOptions, run_search};
 use crate::core::situation::{classify_task, explain_situation, show_situation};
 use crate::core::status::StatusReport;
 use crate::core::why::{WhyOptions, explain_memory};
-use crate::models::{DomainError, InstallOperation, ProcessExitCode, QUERY_SCHEMA_V1};
+use crate::models::{
+    DomainError, ExperimentSafetyBoundary, InstallOperation, ProcessExitCode, QUERY_SCHEMA_V1,
+};
 use crate::output;
 use crate::pack::{
     ContextPackProfile, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
@@ -878,6 +880,9 @@ pub enum LearnCommand {
     Agenda(LearnAgendaArgs),
     /// Show uncertainty estimates and sampling priorities.
     Uncertainty(LearnUncertaintyArgs),
+    /// Propose and inspect safe active learning experiments.
+    #[command(subcommand)]
+    Experiment(LearnExperimentCommand),
     /// Report what the system has learned from recent activity.
     Summary(LearnSummaryArgs),
 }
@@ -920,6 +925,41 @@ pub struct LearnUncertaintyArgs {
     /// Include low-confidence items only.
     #[arg(long, action = ArgAction::SetTrue)]
     pub low_confidence: bool,
+}
+
+/// Subcommands for `ee learn experiment`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum LearnExperimentCommand {
+    /// Propose dry-run-first experiments that can change memory decisions.
+    Propose(LearnExperimentProposeArgs),
+}
+
+/// Arguments for `ee learn experiment propose`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct LearnExperimentProposeArgs {
+    /// Maximum proposals to show.
+    #[arg(long, short = 'n', default_value_t = 3)]
+    pub limit: u32,
+
+    /// Filter proposals by topic/domain.
+    #[arg(long, value_name = "TOPIC")]
+    pub topic: Option<String>,
+
+    /// Minimum expected-value threshold (0.0 to 1.0).
+    #[arg(long, default_value = "0.0")]
+    pub min_expected_value: String,
+
+    /// Maximum attention tokens for each proposal.
+    #[arg(long, default_value_t = 1_200)]
+    pub max_attention_tokens: u32,
+
+    /// Maximum runtime seconds for each proposal.
+    #[arg(long, default_value_t = 300)]
+    pub max_runtime_seconds: u32,
+
+    /// Safety boundary: dry_run_only, ask_before_acting, human_review, denied.
+    #[arg(long, value_name = "BOUNDARY", default_value = "dry_run_only")]
+    pub safety_boundary: String,
 }
 
 /// Arguments for `ee learn summary`.
@@ -2549,6 +2589,9 @@ where
         Some(Command::Learn(LearnCommand::Uncertainty(ref args))) => {
             handle_learn_uncertainty(&cli, args, stdout, stderr)
         }
+        Some(Command::Learn(LearnCommand::Experiment(LearnExperimentCommand::Propose(
+            ref args,
+        )))) => handle_learn_experiment_propose(&cli, args, stdout, stderr),
         Some(Command::Learn(LearnCommand::Summary(ref args))) => {
             handle_learn_summary(&cli, args, stdout, stderr)
         }

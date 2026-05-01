@@ -860,7 +860,9 @@ mod tests {
             generate_candidate_from_regret(&entry, "ws_test", CounterfactualMode::DryRun);
 
         assert!(candidate.is_some());
-        let c = candidate.unwrap();
+        let Some(c) = candidate else {
+            panic!("actionable regret should generate a curation candidate");
+        };
         assert_eq!(c.regret_entry_id, "reg_004");
         assert_eq!(c.workspace_id, "ws_test");
         assert!(c.dry_run);
@@ -984,8 +986,11 @@ mod tests {
             "2026-04-30T12:00:00Z",
         );
 
-        let candidate =
-            generate_candidate_from_regret(&entry, "ws_test", CounterfactualMode::DryRun).unwrap();
+        let Some(candidate) =
+            generate_candidate_from_regret(&entry, "ws_test", CounterfactualMode::DryRun)
+        else {
+            panic!("stale information regret should generate a candidate");
+        };
 
         assert!(candidate.reason.contains("stale_information"));
         assert!(candidate.reason.contains("supersede_memory"));
