@@ -1,0 +1,161 @@
+{
+  "schema": "ee.eval_fixture.v1",
+  "fixture_id": "fx.semantic_model_admissibility.v1",
+  "scenario_ids": [
+    "usr_semantic_model_budget_guard"
+  ],
+  "fixture_family": "semantic_model_admissibility",
+  "coverage_state": "implemented",
+  "journey": "Semantic retrieval only admits local embedding models that fit deterministic budget and metadata requirements; otherwise the agent sees lexical fallback or a stable rejection reason.",
+  "owning_bead_ids": [
+    "eidetic_engine_cli-dsx4"
+  ],
+  "owning_gate_ids": [
+    "gate.4.frankensearch_contract",
+    "gate.14.executable_claims"
+  ],
+  "deterministic": {
+    "fixed_clock": "2026-04-29T12:40:00Z",
+    "deterministic_seed": "seed.semantic_model_admissibility.v1",
+    "stable_ids": [
+      "model_hash_384_local",
+      "model_hash_384_disabled",
+      "model_model2vec_8192_local",
+      "model_external_semantic_api"
+    ],
+    "workspace_fingerprints": [
+      "workspace.semantic_model_admissibility.v1"
+    ]
+  },
+  "source": {
+    "kind": "synthetic",
+    "path": "tests/fixtures/eval/semantic_model_admissibility/source_memory.json",
+    "source_hash": "staged:eidetic_engine_cli-dsx4",
+    "synthetic_secret_policy": "none"
+  },
+  "semantic_budget": {
+    "schema": "ee.semantic_model_admissibility.v1",
+    "maxDimension": 4096,
+    "maxQueryTokens": 4096,
+    "maxModelBytes": 500000000,
+    "maxP95LatencyMs": 250,
+    "allowRemoteModels": false,
+    "requireDeterministic": true,
+    "requireKnownTokenLimit": true
+  },
+  "command_sequence": [
+    {
+      "step": 1,
+      "argv": [
+        "ee",
+        "status",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/semantic_model_admissibility/<run-id>/01-status.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/semantic_model_admissibility/<run-id>/01-status.stderr.txt"
+    },
+    {
+      "step": 2,
+      "argv": [
+        "ee",
+        "search",
+        "format release",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/semantic_model_admissibility/<run-id>/02-search.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/semantic_model_admissibility/<run-id>/02-search.stderr.txt"
+    },
+    {
+      "step": 3,
+      "argv": [
+        "ee",
+        "context",
+        "prepare release with semantic fallback",
+        "--workspace",
+        "<workspace>",
+        "--max-tokens",
+        "4000",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/semantic_model_admissibility/<run-id>/03-context.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/semantic_model_admissibility/<run-id>/03-context.stderr.txt"
+    }
+  ],
+  "expected_outputs": [
+    {
+      "step": 1,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.degraded"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 2,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.results",
+        "data.degraded"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 3,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.pack",
+        "data.degraded"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    }
+  ],
+  "degraded_branches": [
+    {
+      "code": "semantic_disabled",
+      "description": "Semantic model is explicitly disabled; lexical retrieval continues with a repair action.",
+      "repair_action": "enable a local embedding model in Frankensearch config, then run ee index reembed --workspace <workspace>",
+      "preserves_success_signal": true
+    },
+    {
+      "code": "semantic_dimension_exceeds_budget",
+      "description": "Configured model exceeds the command's semantic resource budget; lexical fallback preserves core retrieval signal.",
+      "repair_action": "select a smaller local embedding model or raise the explicit semantic budget",
+      "preserves_success_signal": true
+    },
+    {
+      "code": "remote_semantic_model_denied",
+      "description": "Remote semantic backend is denied by local-first policy unless explicitly opted in.",
+      "repair_action": "configure a local embedding model or explicitly opt in to remote semantic models",
+      "preserves_success_signal": false
+    }
+  ],
+  "agent_success_signal": "A fresh agent can tell whether semantic retrieval is safely available, honestly degraded to lexical search, or rejected by local-first model policy before relying on context-pack evidence."
+}

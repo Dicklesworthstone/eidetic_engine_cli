@@ -15,6 +15,9 @@ pub const MODEL_REGISTRY_SCHEMA_V1: &str = "ee.model_registry.v1";
 /// Schema identifier for embedding metadata stored in model registry rows.
 pub const EMBEDDING_METADATA_SCHEMA_V1: &str = "ee.embedding.metadata.v1";
 
+/// Schema identifier for semantic model admissibility reports.
+pub const SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1: &str = "ee.semantic_model_admissibility.v1";
+
 /// Provider or embedding implementation family for a registered model.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -545,6 +548,672 @@ impl fmt::Display for EmbeddingMetadataValidationError {
 
 impl std::error::Error for EmbeddingMetadataValidationError {}
 
+/// Runtime mode selected after semantic model admissibility checks.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticModelAdmissionMode {
+    /// Semantic retrieval may use this model.
+    Semantic,
+    /// Semantic retrieval is skipped, but lexical retrieval may continue.
+    LexicalFallback,
+    /// The model choice is unsafe or invalid for this command.
+    Rejected,
+}
+
+impl SemanticModelAdmissionMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Semantic => "semantic",
+            Self::LexicalFallback => "lexical_fallback",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+impl fmt::Display for SemanticModelAdmissionMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Budget policy used to decide whether a semantic model is admissible.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticModelAdmissibilityBudget {
+    pub schema: String,
+    pub max_dimension: u32,
+    pub max_query_tokens: u32,
+    pub max_model_bytes: Option<u64>,
+    pub max_p95_latency_ms: Option<u32>,
+    pub allow_remote_models: bool,
+    pub require_deterministic: bool,
+    pub require_known_token_limit: bool,
+}
+
+impl SemanticModelAdmissibilityBudget {
+    #[must_use]
+    pub fn local_default() -> Self {
+        Self {
+            schema: SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1.to_string(),
+            max_dimension: 4096,
+            max_query_tokens: 4096,
+            max_model_bytes: Some(500_000_000),
+            max_p95_latency_ms: Some(250),
+            allow_remote_models: false,
+            require_deterministic: false,
+            require_known_token_limit: true,
+        }
+    }
+
+    /// Validate budget invariants before evaluating a model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticModelAdmissibilityError`] when a positive budget
+    /// field is zero or the schema identifier is unsupported.
+    pub fn validate(&self) -> Result<(), SemanticModelAdmissibilityError> {
+        if self.schema != SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1 {
+            return Err(SemanticModelAdmissibilityError::InvalidBudget {
+                field: "schema",
+                message: format!("expected {}", SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1),
+            });
+        }
+        validate_positive_budget("max_dimension", u64::from(self.max_dimension))?;
+        validate_positive_budget("max_query_tokens", u64::from(self.max_query_tokens))?;
+        if let Some(max_model_bytes) = self.max_model_bytes {
+            validate_positive_budget("max_model_bytes", max_model_bytes)?;
+        }
+        if let Some(max_p95_latency_ms) = self.max_p95_latency_ms {
+            validate_positive_budget("max_p95_latency_ms", u64::from(max_p95_latency_ms))?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_positive_budget(
+    field: &'static str,
+    value: u64,
+) -> Result<(), SemanticModelAdmissibilityError> {
+    if value == 0 {
+        Err(SemanticModelAdmissibilityError::InvalidBudget {
+            field,
+            message: "must be greater than zero".to_string(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+/// Candidate model and observed local metadata for an admissibility decision.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticModelCandidate {
+    pub model_id: String,
+    pub provider: ModelProvider,
+    pub purpose: ModelPurpose,
+    pub status: ModelRegistryStatus,
+    pub metadata: EmbeddingMetadataRecord,
+    pub model_bytes: Option<u64>,
+    pub p95_latency_ms: Option<u32>,
+    pub remote: bool,
+}
+
+impl SemanticModelCandidate {
+    #[must_use]
+    pub fn new(
+        model_id: impl Into<String>,
+        provider: ModelProvider,
+        metadata: EmbeddingMetadataRecord,
+    ) -> Self {
+        Self {
+            model_id: model_id.into(),
+            provider,
+            purpose: ModelPurpose::Embedding,
+            status: ModelRegistryStatus::Available,
+            metadata,
+            model_bytes: None,
+            p95_latency_ms: None,
+            remote: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_purpose(mut self, purpose: ModelPurpose) -> Self {
+        self.purpose = purpose;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_status(mut self, status: ModelRegistryStatus) -> Self {
+        self.status = status;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_model_bytes(mut self, bytes: u64) -> Self {
+        self.model_bytes = Some(bytes);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_p95_latency_ms(mut self, latency_ms: u32) -> Self {
+        self.p95_latency_ms = Some(latency_ms);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_remote(mut self, remote: bool) -> Self {
+        self.remote = remote;
+        self
+    }
+
+    fn validate(&self) -> Result<(), SemanticModelAdmissibilityError> {
+        if self.model_id.trim().is_empty() {
+            return Err(SemanticModelAdmissibilityError::InvalidCandidate {
+                field: "model_id",
+                message: "must not be blank".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// One check within a semantic model admissibility report.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticModelAdmissibilityCheck {
+    pub name: String,
+    pub actual: Option<u64>,
+    pub limit: Option<u64>,
+    pub passed: bool,
+    pub code: Option<String>,
+    pub message: String,
+}
+
+impl SemanticModelAdmissibilityCheck {
+    #[must_use]
+    pub fn new(
+        name: &'static str,
+        actual: Option<u64>,
+        limit: Option<u64>,
+        passed: bool,
+        code: Option<&'static str>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            actual,
+            limit,
+            passed,
+            code: code.map(str::to_string),
+            message: message.into(),
+        }
+    }
+}
+
+/// Stable report for a semantic model admissibility decision.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticModelAdmissibilityReport {
+    pub schema: String,
+    pub model_id: String,
+    pub provider: ModelProvider,
+    pub mode: SemanticModelAdmissionMode,
+    pub admissible: bool,
+    pub degradation_codes: Vec<String>,
+    pub rejection_codes: Vec<String>,
+    pub repair_actions: Vec<String>,
+    pub checks: Vec<SemanticModelAdmissibilityCheck>,
+}
+
+impl SemanticModelAdmissibilityReport {
+    /// Evaluate a candidate against the supplied budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SemanticModelAdmissibilityError`] when the budget or candidate
+    /// shape is invalid. Invalid embedding metadata is represented as a
+    /// rejected report so callers can emit a stable machine-readable reason.
+    pub fn evaluate(
+        candidate: &SemanticModelCandidate,
+        budget: &SemanticModelAdmissibilityBudget,
+    ) -> Result<Self, SemanticModelAdmissibilityError> {
+        budget.validate()?;
+        candidate.validate()?;
+
+        let mut checks = Vec::new();
+        let mut degradation_codes = Vec::new();
+        let mut rejection_codes = Vec::new();
+        let mut repair_actions = Vec::new();
+
+        if let Err(error) = candidate.metadata.validate() {
+            record_rejection(
+                &mut rejection_codes,
+                &mut repair_actions,
+                "semantic_metadata_invalid",
+            );
+            checks.push(SemanticModelAdmissibilityCheck::new(
+                "metadata",
+                None,
+                None,
+                false,
+                Some("semantic_metadata_invalid"),
+                error.to_string(),
+            ));
+        } else {
+            checks.push(SemanticModelAdmissibilityCheck::new(
+                "metadata",
+                None,
+                None,
+                true,
+                None,
+                "embedding metadata validates",
+            ));
+        }
+
+        if candidate.purpose == ModelPurpose::Embedding {
+            checks.push(SemanticModelAdmissibilityCheck::new(
+                "purpose",
+                None,
+                None,
+                true,
+                None,
+                "model purpose is embedding",
+            ));
+        } else {
+            record_rejection(
+                &mut rejection_codes,
+                &mut repair_actions,
+                "semantic_model_wrong_purpose",
+            );
+            checks.push(SemanticModelAdmissibilityCheck::new(
+                "purpose",
+                None,
+                None,
+                false,
+                Some("semantic_model_wrong_purpose"),
+                format!("model purpose is {}", candidate.purpose),
+            ));
+        }
+
+        match candidate.status {
+            ModelRegistryStatus::Available => checks.push(SemanticModelAdmissibilityCheck::new(
+                "status",
+                None,
+                None,
+                true,
+                None,
+                "model is available",
+            )),
+            ModelRegistryStatus::Disabled => {
+                record_degradation(
+                    &mut degradation_codes,
+                    &mut repair_actions,
+                    "semantic_disabled",
+                );
+                checks.push(SemanticModelAdmissibilityCheck::new(
+                    "status",
+                    None,
+                    None,
+                    false,
+                    Some("semantic_disabled"),
+                    "model is intentionally disabled",
+                ));
+            }
+            ModelRegistryStatus::Unavailable => {
+                record_degradation(
+                    &mut degradation_codes,
+                    &mut repair_actions,
+                    "semantic_model_unavailable",
+                );
+                checks.push(SemanticModelAdmissibilityCheck::new(
+                    "status",
+                    None,
+                    None,
+                    false,
+                    Some("semantic_model_unavailable"),
+                    "model is configured but unavailable",
+                ));
+            }
+        }
+
+        push_numeric_check(
+            &mut checks,
+            &mut degradation_codes,
+            &mut repair_actions,
+            NumericCheck {
+                name: "dimension",
+                actual: u64::from(candidate.metadata.dimension),
+                limit: u64::from(budget.max_dimension),
+                code: "semantic_dimension_exceeds_budget",
+                ok_message: "embedding dimension is within the configured budget",
+                fail_message: "embedding dimension exceeds the configured budget",
+            },
+        );
+
+        push_optional_limit_check(
+            &mut checks,
+            &mut degradation_codes,
+            &mut repair_actions,
+            OptionalLimitCheck {
+                name: "query_tokens",
+                actual: u64::from(budget.max_query_tokens),
+                limit: candidate.metadata.max_input_tokens.map(u64::from),
+                require_known_limit: budget.require_known_token_limit,
+                unknown_code: "semantic_token_limit_unknown",
+                exceeds_code: "semantic_input_tokens_exceed_model_limit",
+                ok_message: "query token budget fits the model token limit",
+                unknown_message: "model token limit is unknown",
+                fail_message: "query token budget exceeds the model token limit",
+            },
+        );
+
+        if let Some(max_model_bytes) = budget.max_model_bytes {
+            push_optional_limit_check(
+                &mut checks,
+                &mut degradation_codes,
+                &mut repair_actions,
+                OptionalLimitCheck {
+                    name: "model_bytes",
+                    actual: candidate.model_bytes.unwrap_or(0),
+                    limit: candidate.model_bytes.map(|_| max_model_bytes),
+                    require_known_limit: true,
+                    unknown_code: "semantic_model_size_unknown",
+                    exceeds_code: "semantic_model_bytes_exceeds_budget",
+                    ok_message: "model size is within the configured budget",
+                    unknown_message: "model size is unknown",
+                    fail_message: "model size exceeds the configured budget",
+                },
+            );
+        }
+
+        if let Some(max_p95_latency_ms) = budget.max_p95_latency_ms {
+            push_optional_limit_check(
+                &mut checks,
+                &mut degradation_codes,
+                &mut repair_actions,
+                OptionalLimitCheck {
+                    name: "p95_latency_ms",
+                    actual: candidate.p95_latency_ms.map_or(0, u64::from),
+                    limit: candidate
+                        .p95_latency_ms
+                        .map(|_| u64::from(max_p95_latency_ms)),
+                    require_known_limit: true,
+                    unknown_code: "semantic_latency_unknown",
+                    exceeds_code: "semantic_latency_exceeds_budget",
+                    ok_message: "p95 latency is within the configured budget",
+                    unknown_message: "p95 latency is unknown",
+                    fail_message: "p95 latency exceeds the configured budget",
+                },
+            );
+        }
+
+        if candidate.remote && !budget.allow_remote_models {
+            record_rejection(
+                &mut rejection_codes,
+                &mut repair_actions,
+                "remote_semantic_model_denied",
+            );
+            checks.push(SemanticModelAdmissibilityCheck::new(
+                "remote",
+                None,
+                None,
+                false,
+                Some("remote_semantic_model_denied"),
+                "remote semantic models require explicit opt-in",
+            ));
+        } else {
+            checks.push(SemanticModelAdmissibilityCheck::new(
+                "remote",
+                None,
+                None,
+                true,
+                None,
+                "remote model policy is satisfied",
+            ));
+        }
+
+        if budget.require_deterministic && !candidate.metadata.deterministic {
+            record_rejection(
+                &mut rejection_codes,
+                &mut repair_actions,
+                "semantic_nondeterministic_model",
+            );
+            checks.push(SemanticModelAdmissibilityCheck::new(
+                "deterministic",
+                None,
+                None,
+                false,
+                Some("semantic_nondeterministic_model"),
+                "deterministic embeddings are required by the semantic budget",
+            ));
+        } else {
+            checks.push(SemanticModelAdmissibilityCheck::new(
+                "deterministic",
+                None,
+                None,
+                true,
+                None,
+                "determinism policy is satisfied",
+            ));
+        }
+
+        let mode = if rejection_codes.is_empty() {
+            if degradation_codes.is_empty() {
+                SemanticModelAdmissionMode::Semantic
+            } else {
+                SemanticModelAdmissionMode::LexicalFallback
+            }
+        } else {
+            SemanticModelAdmissionMode::Rejected
+        };
+
+        Ok(Self {
+            schema: SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1.to_string(),
+            model_id: candidate.model_id.clone(),
+            provider: candidate.provider,
+            mode,
+            admissible: mode == SemanticModelAdmissionMode::Semantic,
+            degradation_codes,
+            rejection_codes,
+            repair_actions,
+            checks,
+        })
+    }
+}
+
+struct NumericCheck {
+    name: &'static str,
+    actual: u64,
+    limit: u64,
+    code: &'static str,
+    ok_message: &'static str,
+    fail_message: &'static str,
+}
+
+fn push_numeric_check(
+    checks: &mut Vec<SemanticModelAdmissibilityCheck>,
+    degradation_codes: &mut Vec<String>,
+    repair_actions: &mut Vec<String>,
+    check: NumericCheck,
+) {
+    let passed = check.actual <= check.limit;
+    if passed {
+        checks.push(SemanticModelAdmissibilityCheck::new(
+            check.name,
+            Some(check.actual),
+            Some(check.limit),
+            true,
+            None,
+            check.ok_message,
+        ));
+    } else {
+        record_degradation(degradation_codes, repair_actions, check.code);
+        checks.push(SemanticModelAdmissibilityCheck::new(
+            check.name,
+            Some(check.actual),
+            Some(check.limit),
+            false,
+            Some(check.code),
+            check.fail_message,
+        ));
+    }
+}
+
+struct OptionalLimitCheck {
+    name: &'static str,
+    actual: u64,
+    limit: Option<u64>,
+    require_known_limit: bool,
+    unknown_code: &'static str,
+    exceeds_code: &'static str,
+    ok_message: &'static str,
+    unknown_message: &'static str,
+    fail_message: &'static str,
+}
+
+fn push_optional_limit_check(
+    checks: &mut Vec<SemanticModelAdmissibilityCheck>,
+    degradation_codes: &mut Vec<String>,
+    repair_actions: &mut Vec<String>,
+    check: OptionalLimitCheck,
+) {
+    match check.limit {
+        Some(limit) if check.actual <= limit => checks.push(SemanticModelAdmissibilityCheck::new(
+            check.name,
+            Some(check.actual),
+            Some(limit),
+            true,
+            None,
+            check.ok_message,
+        )),
+        Some(limit) => {
+            record_degradation(degradation_codes, repair_actions, check.exceeds_code);
+            checks.push(SemanticModelAdmissibilityCheck::new(
+                check.name,
+                Some(check.actual),
+                Some(limit),
+                false,
+                Some(check.exceeds_code),
+                check.fail_message,
+            ));
+        }
+        None if check.require_known_limit => {
+            record_degradation(degradation_codes, repair_actions, check.unknown_code);
+            checks.push(SemanticModelAdmissibilityCheck::new(
+                check.name,
+                None,
+                None,
+                false,
+                Some(check.unknown_code),
+                check.unknown_message,
+            ));
+        }
+        None => checks.push(SemanticModelAdmissibilityCheck::new(
+            check.name,
+            None,
+            None,
+            true,
+            None,
+            check.ok_message,
+        )),
+    }
+}
+
+fn record_degradation(
+    degradation_codes: &mut Vec<String>,
+    repair_actions: &mut Vec<String>,
+    code: &'static str,
+) {
+    push_unique(degradation_codes, code);
+    push_unique(repair_actions, repair_action_for_code(code));
+}
+
+fn record_rejection(
+    rejection_codes: &mut Vec<String>,
+    repair_actions: &mut Vec<String>,
+    code: &'static str,
+) {
+    push_unique(rejection_codes, code);
+    push_unique(repair_actions, repair_action_for_code(code));
+}
+
+fn push_unique(values: &mut Vec<String>, value: &'static str) {
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
+    }
+}
+
+fn repair_action_for_code(code: &'static str) -> &'static str {
+    match code {
+        "semantic_disabled" => {
+            "enable a local embedding model in Frankensearch config, then run ee index reembed --workspace <workspace>"
+        }
+        "semantic_model_unavailable" => {
+            "install or refresh the configured local embedding model, then run ee index reembed --workspace <workspace>"
+        }
+        "semantic_dimension_exceeds_budget"
+        | "semantic_input_tokens_exceed_model_limit"
+        | "semantic_model_bytes_exceeds_budget"
+        | "semantic_latency_exceeds_budget" => {
+            "select a smaller local embedding model or raise the explicit semantic budget"
+        }
+        "semantic_token_limit_unknown"
+        | "semantic_model_size_unknown"
+        | "semantic_latency_unknown" => {
+            "record complete embedding metadata before enabling semantic retrieval"
+        }
+        "remote_semantic_model_denied" => {
+            "configure a local embedding model or explicitly opt in to remote semantic models"
+        }
+        "semantic_nondeterministic_model" => {
+            "use the deterministic hash embedder or disable deterministic semantic mode"
+        }
+        "semantic_metadata_invalid" => {
+            "repair the model registry row so embedding metadata validates against ee.embedding.metadata.v1"
+        }
+        "semantic_model_wrong_purpose" => {
+            "register an embedding-purpose model for semantic retrieval"
+        }
+        _ => "inspect ee status --json for semantic retrieval repair guidance",
+    }
+}
+
+/// Error returned before an admissibility report can be produced.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SemanticModelAdmissibilityError {
+    InvalidBudget {
+        field: &'static str,
+        message: String,
+    },
+    InvalidCandidate {
+        field: &'static str,
+        message: String,
+    },
+}
+
+impl fmt::Display for SemanticModelAdmissibilityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidBudget { field, message } => {
+                write!(
+                    formatter,
+                    "invalid semantic model budget {field}: {message}"
+                )
+            }
+            Self::InvalidCandidate { field, message } => {
+                write!(
+                    formatter,
+                    "invalid semantic model candidate {field}: {message}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for SemanticModelAdmissibilityError {}
+
 /// Field descriptor used by the embedding metadata schema catalog.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -742,15 +1411,21 @@ mod tests {
     use std::io;
     use std::str::FromStr;
 
+    use serde::Serialize;
+
     use super::{
         EMBEDDING_METADATA_SCHEMA_V1, EmbeddingMetadataRecord, EmbeddingMetadataValidationError,
         EmbeddingPooling, EmbeddingVectorDtype, ModelDistanceMetric, ModelProvider, ModelPurpose,
-        ModelRegistryStatus, ParseModelRegistryValueError, embedding_metadata_schema_catalog_json,
+        ModelRegistryStatus, ParseModelRegistryValueError, SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1,
+        SemanticModelAdmissibilityBudget, SemanticModelAdmissibilityReport,
+        SemanticModelAdmissionMode, SemanticModelCandidate, embedding_metadata_schema_catalog_json,
         embedding_metadata_schemas,
     };
 
     const EMBEDDING_METADATA_SCHEMA_GOLDEN: &str =
         include_str!("../../tests/fixtures/golden/models/embedding_metadata_schemas.json.golden");
+    const SEMANTIC_MODEL_ADMISSIBILITY_GOLDEN: &str =
+        include_str!("../../tests/fixtures/golden/models/semantic_model_admissibility.json.golden");
 
     type TestResult = Result<(), Box<dyn Error>>;
 
@@ -972,6 +1647,239 @@ mod tests {
     #[test]
     fn embedding_metadata_schema_catalog_is_valid_json() -> TestResult {
         serde_json::from_str::<serde_json::Value>(&embedding_metadata_schema_catalog_json())?;
+        Ok(())
+    }
+
+    fn budgeted_metadata(
+        dimension: u32,
+        max_input_tokens: u32,
+        deterministic: bool,
+    ) -> EmbeddingMetadataRecord {
+        let mut metadata = EmbeddingMetadataRecord::new(dimension, ModelDistanceMetric::Cosine);
+        metadata.max_input_tokens = Some(max_input_tokens);
+        metadata.tokenizer = Some("bpe:frankensearch-model2vec".to_string());
+        metadata.model_revision = Some("2026-04-30".to_string());
+        metadata.deterministic = deterministic;
+        metadata
+    }
+
+    fn admissible_hash_candidate() -> SemanticModelCandidate {
+        SemanticModelCandidate::new(
+            "hash-384-local",
+            ModelProvider::Hash,
+            budgeted_metadata(384, 4096, true),
+        )
+        .with_model_bytes(42_000_000)
+        .with_p95_latency_ms(24)
+    }
+
+    #[test]
+    fn semantic_model_admissibility_accepts_budgeted_local_model() -> TestResult {
+        let budget = SemanticModelAdmissibilityBudget::local_default();
+        let report =
+            SemanticModelAdmissibilityReport::evaluate(&admissible_hash_candidate(), &budget)?;
+
+        assert_eq!(report.schema, SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1);
+        assert_eq!(report.mode, SemanticModelAdmissionMode::Semantic);
+        assert!(report.admissible);
+        assert!(report.degradation_codes.is_empty());
+        assert!(report.rejection_codes.is_empty());
+        assert!(report.checks.iter().all(|check| check.passed));
+
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_model_admissibility_falls_back_for_disabled_or_oversized_model() -> TestResult {
+        let budget = SemanticModelAdmissibilityBudget::local_default();
+        let disabled = admissible_hash_candidate().with_status(ModelRegistryStatus::Disabled);
+        let disabled_report = SemanticModelAdmissibilityReport::evaluate(&disabled, &budget)?;
+
+        assert_eq!(
+            disabled_report.mode,
+            SemanticModelAdmissionMode::LexicalFallback
+        );
+        assert!(!disabled_report.admissible);
+        assert_eq!(disabled_report.degradation_codes, vec!["semantic_disabled"]);
+        assert!(disabled_report.rejection_codes.is_empty());
+
+        let oversized = SemanticModelCandidate::new(
+            "model2vec-8192-local",
+            ModelProvider::Model2Vec,
+            budgeted_metadata(8192, 2048, true),
+        )
+        .with_model_bytes(640_000_000)
+        .with_p95_latency_ms(280);
+        let oversized_report = SemanticModelAdmissibilityReport::evaluate(&oversized, &budget)?;
+
+        assert_eq!(
+            oversized_report.mode,
+            SemanticModelAdmissionMode::LexicalFallback
+        );
+        assert_eq!(
+            oversized_report.degradation_codes,
+            vec![
+                "semantic_dimension_exceeds_budget",
+                "semantic_input_tokens_exceed_model_limit",
+                "semantic_model_bytes_exceeds_budget",
+                "semantic_latency_exceeds_budget",
+            ]
+        );
+        assert!(oversized_report.rejection_codes.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_model_admissibility_rejects_remote_or_nondeterministic_model() -> TestResult {
+        let mut budget = SemanticModelAdmissibilityBudget::local_default();
+        budget.require_deterministic = true;
+
+        let remote = SemanticModelCandidate::new(
+            "external-semantic-api",
+            ModelProvider::External,
+            budgeted_metadata(1024, 4096, false),
+        )
+        .with_model_bytes(1)
+        .with_p95_latency_ms(40)
+        .with_remote(true);
+
+        let report = SemanticModelAdmissibilityReport::evaluate(&remote, &budget)?;
+
+        assert_eq!(report.mode, SemanticModelAdmissionMode::Rejected);
+        assert!(!report.admissible);
+        assert_eq!(
+            report.rejection_codes,
+            vec![
+                "remote_semantic_model_denied",
+                "semantic_nondeterministic_model",
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_model_admissibility_rejects_invalid_budget_shape() -> TestResult {
+        let mut budget = SemanticModelAdmissibilityBudget::local_default();
+        budget.max_dimension = 0;
+
+        let error =
+            SemanticModelAdmissibilityReport::evaluate(&admissible_hash_candidate(), &budget)
+                .expect_err("zero dimension budget must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid semantic model budget max_dimension: must be greater than zero"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_model_admissibility_rejects_wrong_purpose() -> TestResult {
+        let budget = SemanticModelAdmissibilityBudget::local_default();
+        let candidate = admissible_hash_candidate().with_purpose(ModelPurpose::Classifier);
+
+        let report = SemanticModelAdmissibilityReport::evaluate(&candidate, &budget)?;
+
+        assert_eq!(report.mode, SemanticModelAdmissionMode::Rejected);
+        assert_eq!(report.rejection_codes, vec!["semantic_model_wrong_purpose"]);
+
+        Ok(())
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SemanticModelAdmissibilityRegressionFixture {
+        schema: &'static str,
+        cases: Vec<SemanticModelAdmissibilityRegressionCase>,
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SemanticModelAdmissibilityRegressionCase {
+        model_id: String,
+        mode: SemanticModelAdmissionMode,
+        admissible: bool,
+        degradation_codes: Vec<String>,
+        rejection_codes: Vec<String>,
+        failed_checks: Vec<String>,
+    }
+
+    fn regression_case(
+        report: SemanticModelAdmissibilityReport,
+    ) -> SemanticModelAdmissibilityRegressionCase {
+        let failed_checks = report
+            .checks
+            .iter()
+            .filter(|check| !check.passed)
+            .map(|check| check.name.clone())
+            .collect();
+        SemanticModelAdmissibilityRegressionCase {
+            model_id: report.model_id,
+            mode: report.mode,
+            admissible: report.admissible,
+            degradation_codes: report.degradation_codes,
+            rejection_codes: report.rejection_codes,
+            failed_checks,
+        }
+    }
+
+    fn semantic_model_admissibility_regression_json() -> Result<String, Box<dyn Error>> {
+        let budget = SemanticModelAdmissibilityBudget::local_default();
+        let accepted =
+            SemanticModelAdmissibilityReport::evaluate(&admissible_hash_candidate(), &budget)?;
+        let disabled = SemanticModelAdmissibilityReport::evaluate(
+            &admissible_hash_candidate().with_status(ModelRegistryStatus::Disabled),
+            &budget,
+        )?;
+        let oversized = SemanticModelAdmissibilityReport::evaluate(
+            &SemanticModelCandidate::new(
+                "model2vec-8192-local",
+                ModelProvider::Model2Vec,
+                budgeted_metadata(8192, 2048, true),
+            )
+            .with_model_bytes(640_000_000)
+            .with_p95_latency_ms(280),
+            &budget,
+        )?;
+        let mut deterministic_budget = SemanticModelAdmissibilityBudget::local_default();
+        deterministic_budget.require_deterministic = true;
+        let rejected = SemanticModelAdmissibilityReport::evaluate(
+            &SemanticModelCandidate::new(
+                "external-semantic-api",
+                ModelProvider::External,
+                budgeted_metadata(1024, 4096, false),
+            )
+            .with_model_bytes(1)
+            .with_p95_latency_ms(40)
+            .with_remote(true),
+            &deterministic_budget,
+        )?;
+
+        let fixture = SemanticModelAdmissibilityRegressionFixture {
+            schema: SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1,
+            cases: vec![
+                regression_case(accepted),
+                regression_case(disabled),
+                regression_case(oversized),
+                regression_case(rejected),
+            ],
+        };
+
+        let mut json = serde_json::to_string_pretty(&fixture)?;
+        json.push('\n');
+        Ok(json)
+    }
+
+    #[test]
+    fn semantic_model_admissibility_regression_matches_golden_fixture() -> TestResult {
+        assert_eq!(
+            semantic_model_admissibility_regression_json()?,
+            SEMANTIC_MODEL_ADMISSIBILITY_GOLDEN
+        );
+
         Ok(())
     }
 }

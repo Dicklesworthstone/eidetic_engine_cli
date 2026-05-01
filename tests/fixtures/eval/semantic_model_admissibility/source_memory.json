@@ -1,0 +1,94 @@
+{
+  "schema": "ee.eval_source_memory.v1",
+  "fixture_id": "fx.semantic_model_admissibility.v1",
+  "source_kind": "synthetic",
+  "fixed_clock": "2026-04-29T12:40:00Z",
+  "budget": {
+    "schema": "ee.semantic_model_admissibility.v1",
+    "maxDimension": 4096,
+    "maxQueryTokens": 4096,
+    "maxModelBytes": 500000000,
+    "maxP95LatencyMs": 250,
+    "allowRemoteModels": false,
+    "requireDeterministic": true,
+    "requireKnownTokenLimit": true
+  },
+  "candidates": [
+    {
+      "model_id": "hash-384-local",
+      "provider": "hash",
+      "purpose": "embedding",
+      "status": "available",
+      "dimension": 384,
+      "max_input_tokens": 4096,
+      "model_bytes": 42000000,
+      "p95_latency_ms": 24,
+      "remote": false,
+      "deterministic": true,
+      "expected_mode": "semantic",
+      "expected_codes": []
+    },
+    {
+      "model_id": "hash-384-disabled",
+      "provider": "hash",
+      "purpose": "embedding",
+      "status": "disabled",
+      "dimension": 384,
+      "max_input_tokens": 4096,
+      "model_bytes": 42000000,
+      "p95_latency_ms": 24,
+      "remote": false,
+      "deterministic": true,
+      "expected_mode": "lexical_fallback",
+      "expected_codes": [
+        "semantic_disabled"
+      ]
+    },
+    {
+      "model_id": "model2vec-8192-local",
+      "provider": "model2vec",
+      "purpose": "embedding",
+      "status": "available",
+      "dimension": 8192,
+      "max_input_tokens": 2048,
+      "model_bytes": 640000000,
+      "p95_latency_ms": 280,
+      "remote": false,
+      "deterministic": true,
+      "expected_mode": "lexical_fallback",
+      "expected_codes": [
+        "semantic_dimension_exceeds_budget",
+        "semantic_input_tokens_exceed_model_limit",
+        "semantic_model_bytes_exceeds_budget",
+        "semantic_latency_exceeds_budget"
+      ]
+    },
+    {
+      "model_id": "external-semantic-api",
+      "provider": "external",
+      "purpose": "embedding",
+      "status": "available",
+      "dimension": 1024,
+      "max_input_tokens": 4096,
+      "model_bytes": 1,
+      "p95_latency_ms": 40,
+      "remote": true,
+      "deterministic": false,
+      "expected_mode": "rejected",
+      "expected_codes": [
+        "remote_semantic_model_denied",
+        "semantic_nondeterministic_model"
+      ]
+    }
+  ],
+  "secret_policy": {
+    "synthetic_secret_policy": "none",
+    "secret_like_values_present": false,
+    "blocked_classes": [
+      "api_token",
+      "github_token",
+      "cloud_access_key",
+      "private_key"
+    ]
+  }
+}

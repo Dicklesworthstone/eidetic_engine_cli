@@ -1,6 +1,11 @@
 use ee::eval::{
     CommandStep, DegradedBranch, EVAL_FIXTURE_SCHEMA_V1, EvaluationScenario, ExpectedOutput,
 };
+use ee::models::model_registry::{
+    EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
+    SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1, SemanticModelAdmissibilityBudget,
+    SemanticModelAdmissibilityReport, SemanticModelCandidate,
+};
 use ee::policy::detect_instruction_like_content;
 use serde_json::Value;
 
@@ -30,6 +35,13 @@ const DATA_SIZE_TIERS_SCENARIO: &str = include_str!("fixtures/eval/data_size_tie
 const DATA_SIZE_TIERS_SOURCE: &str =
     include_str!("fixtures/eval/data_size_tiers/source_memory.json");
 const DATA_SIZE_TIERS_README: &str = include_str!("fixtures/eval/data_size_tiers/README.md");
+
+const SEMANTIC_MODEL_ADMISSIBILITY_SCENARIO: &str =
+    include_str!("fixtures/eval/semantic_model_admissibility/scenario.json");
+const SEMANTIC_MODEL_ADMISSIBILITY_SOURCE: &str =
+    include_str!("fixtures/eval/semantic_model_admissibility/source_memory.json");
+const SEMANTIC_MODEL_ADMISSIBILITY_README: &str =
+    include_str!("fixtures/eval/semantic_model_admissibility/README.md");
 
 type TestResult = Result<(), String>;
 
@@ -73,6 +85,25 @@ fn ensure_equal<T: std::fmt::Debug + PartialEq>(actual: T, expected: T, ctx: &st
 
 fn array_contains_string(values: &[Value], expected: &str) -> bool {
     values.iter().any(|value| value.as_str() == Some(expected))
+}
+
+fn u32_field(value: &Value, name: &str) -> Result<u32, String> {
+    let raw = field(value, name)?
+        .as_u64()
+        .ok_or_else(|| format!("field `{name}` must be an unsigned integer"))?;
+    u32::try_from(raw).map_err(|error| format!("field `{name}` is out of range: {error}"))
+}
+
+fn u64_field(value: &Value, name: &str) -> Result<u64, String> {
+    field(value, name)?
+        .as_u64()
+        .ok_or_else(|| format!("field `{name}` must be an unsigned integer"))
+}
+
+fn bool_field(value: &Value, name: &str) -> Result<bool, String> {
+    field(value, name)?
+        .as_bool()
+        .ok_or_else(|| format!("field `{name}` must be a boolean"))
 }
 
 #[test]
@@ -1746,5 +1777,222 @@ fn async_migration_json_fixture_maps_to_eval_domain_types() -> TestResult {
     ensure(
         scenario.agent_success_signal.contains("migration"),
         "success signal remains agent-facing",
+    )
+}
+
+#[test]
+fn semantic_model_admissibility_scenario_contract_is_complete() -> TestResult {
+    let scenario = parse_json(
+        SEMANTIC_MODEL_ADMISSIBILITY_SCENARIO,
+        "semantic_model_admissibility scenario",
+    )?;
+
+    ensure_equal(
+        string_field(&scenario, "schema")?,
+        EVAL_FIXTURE_SCHEMA_V1,
+        "scenario schema",
+    )?;
+    ensure_equal(
+        string_field(&scenario, "fixture_id")?,
+        "fx.semantic_model_admissibility.v1",
+        "fixture id",
+    )?;
+    ensure_equal(
+        string_field(&scenario, "coverage_state")?,
+        "implemented",
+        "coverage state",
+    )?;
+    ensure(
+        array_contains_string(
+            array_field(&scenario, "owning_bead_ids")?,
+            "eidetic_engine_cli-dsx4",
+        ),
+        "fixture must be owned by EE-315",
+    )?;
+    ensure(
+        array_contains_string(
+            array_field(&scenario, "scenario_ids")?,
+            "usr_semantic_model_budget_guard",
+        ),
+        "fixture must cover usr_semantic_model_budget_guard",
+    )?;
+
+    let budget = field(&scenario, "semantic_budget")?;
+    ensure_equal(
+        string_field(budget, "schema")?,
+        SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1,
+        "budget schema",
+    )?;
+    ensure_equal(u32_field(budget, "maxDimension")?, 4096, "max dimension")?;
+    ensure_equal(
+        u32_field(budget, "maxQueryTokens")?,
+        4096,
+        "max query tokens",
+    )?;
+    ensure_equal(
+        bool_field(budget, "allowRemoteModels")?,
+        false,
+        "remote models disabled",
+    )?;
+    ensure_equal(
+        bool_field(budget, "requireDeterministic")?,
+        true,
+        "deterministic mode required",
+    )?;
+
+    let commands = array_field(&scenario, "command_sequence")?;
+    ensure_equal(commands.len(), 3, "command count")?;
+    for command in commands {
+        ensure_equal(
+            string_field(command, "stdout_schema")?,
+            "ee.response.v1",
+            "stdout schema",
+        )?;
+        ensure_equal(
+            string_field(command, "stderr_policy")?,
+            "diagnostics_only",
+            "stderr policy",
+        )?;
+        ensure(
+            string_field(command, "stdout_artifact_path")?
+                .starts_with("target/ee-e2e/semantic_model_admissibility/"),
+            "stdout artifact path must use fixture root",
+        )?;
+    }
+
+    let degraded_codes: Vec<&str> = array_field(&scenario, "degraded_branches")?
+        .iter()
+        .filter_map(|branch| branch.get("code").and_then(Value::as_str))
+        .collect();
+    for required in [
+        "semantic_disabled",
+        "semantic_dimension_exceeds_budget",
+        "remote_semantic_model_denied",
+    ] {
+        ensure(
+            degraded_codes.contains(&required),
+            &format!("degraded branch must contain `{required}`"),
+        )?;
+    }
+
+    let all_fixture_text = format!(
+        "{SEMANTIC_MODEL_ADMISSIBILITY_SCENARIO}\n{SEMANTIC_MODEL_ADMISSIBILITY_SOURCE}\n{SEMANTIC_MODEL_ADMISSIBILITY_README}"
+    );
+    for forbidden in ["sk-", "ghp_", "AKIA", "-----BEGIN PRIVATE KEY-----"] {
+        ensure(
+            !all_fixture_text.contains(forbidden),
+            &format!("fixture files must not contain secret marker `{forbidden}`"),
+        )?;
+    }
+
+    ensure(
+        SEMANTIC_MODEL_ADMISSIBILITY_README.contains("fx.semantic_model_admissibility.v1"),
+        "README must name fixture ID",
+    )?;
+    ensure(
+        SEMANTIC_MODEL_ADMISSIBILITY_README.contains("usr_semantic_model_budget_guard"),
+        "README must name scenario ID",
+    )
+}
+
+#[test]
+fn semantic_model_admissibility_source_maps_to_domain_reports() -> TestResult {
+    let source = parse_json(
+        SEMANTIC_MODEL_ADMISSIBILITY_SOURCE,
+        "semantic_model_admissibility source",
+    )?;
+
+    ensure_equal(
+        string_field(&source, "schema")?,
+        "ee.eval_source_memory.v1",
+        "source schema",
+    )?;
+    ensure_equal(
+        string_field(&source, "fixture_id")?,
+        "fx.semantic_model_admissibility.v1",
+        "source fixture id",
+    )?;
+
+    let budget_json = field(&source, "budget")?;
+    let mut budget = SemanticModelAdmissibilityBudget::local_default();
+    budget.max_dimension = u32_field(budget_json, "maxDimension")?;
+    budget.max_query_tokens = u32_field(budget_json, "maxQueryTokens")?;
+    budget.max_model_bytes = Some(u64_field(budget_json, "maxModelBytes")?);
+    budget.max_p95_latency_ms = Some(u32_field(budget_json, "maxP95LatencyMs")?);
+    budget.allow_remote_models = bool_field(budget_json, "allowRemoteModels")?;
+    budget.require_deterministic = bool_field(budget_json, "requireDeterministic")?;
+    budget.require_known_token_limit = bool_field(budget_json, "requireKnownTokenLimit")?;
+    budget.validate().map_err(|error| error.to_string())?;
+
+    let candidates = array_field(&source, "candidates")?;
+    ensure_equal(candidates.len(), 4, "candidate count")?;
+
+    let mut observed_modes = Vec::new();
+    for candidate_json in candidates {
+        let mut metadata = EmbeddingMetadataRecord::new(
+            u32_field(candidate_json, "dimension")?,
+            ModelDistanceMetric::Cosine,
+        );
+        metadata.max_input_tokens = Some(u32_field(candidate_json, "max_input_tokens")?);
+        metadata.tokenizer = Some("fixture:semantic_model_admissibility".to_string());
+        metadata.model_revision = Some("fixture.v1".to_string());
+        metadata.deterministic = bool_field(candidate_json, "deterministic")?;
+
+        let provider = string_field(candidate_json, "provider")?
+            .parse::<ModelProvider>()
+            .map_err(|error| error.to_string())?;
+        let purpose = string_field(candidate_json, "purpose")?
+            .parse::<ModelPurpose>()
+            .map_err(|error| error.to_string())?;
+        let status = string_field(candidate_json, "status")?
+            .parse::<ModelRegistryStatus>()
+            .map_err(|error| error.to_string())?;
+
+        let candidate = SemanticModelCandidate::new(
+            string_field(candidate_json, "model_id")?,
+            provider,
+            metadata,
+        )
+        .with_purpose(purpose)
+        .with_status(status)
+        .with_model_bytes(u64_field(candidate_json, "model_bytes")?)
+        .with_p95_latency_ms(u32_field(candidate_json, "p95_latency_ms")?)
+        .with_remote(bool_field(candidate_json, "remote")?);
+
+        let report = SemanticModelAdmissibilityReport::evaluate(&candidate, &budget)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            report.mode.as_str(),
+            string_field(candidate_json, "expected_mode")?,
+            "expected mode",
+        )?;
+
+        let actual_codes: Vec<&str> = report
+            .degradation_codes
+            .iter()
+            .chain(report.rejection_codes.iter())
+            .map(String::as_str)
+            .collect();
+        let expected_codes: Vec<&str> = array_field(candidate_json, "expected_codes")?
+            .iter()
+            .map(|code| {
+                code.as_str()
+                    .ok_or_else(|| "expected code must be a string".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        ensure_equal(actual_codes, expected_codes, "expected codes")?;
+
+        observed_modes.push(report.mode.as_str());
+    }
+
+    ensure_equal(
+        observed_modes,
+        vec![
+            "semantic",
+            "lexical_fallback",
+            "lexical_fallback",
+            "rejected",
+        ],
+        "mode coverage",
     )
 }

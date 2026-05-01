@@ -1,0 +1,57 @@
+{
+  "schema": "ee.semantic_model_admissibility.v1",
+  "cases": [
+    {
+      "modelId": "hash-384-local",
+      "mode": "semantic",
+      "admissible": true,
+      "degradationCodes": [],
+      "rejectionCodes": [],
+      "failedChecks": []
+    },
+    {
+      "modelId": "hash-384-local",
+      "mode": "lexical_fallback",
+      "admissible": false,
+      "degradationCodes": [
+        "semantic_disabled"
+      ],
+      "rejectionCodes": [],
+      "failedChecks": [
+        "status"
+      ]
+    },
+    {
+      "modelId": "model2vec-8192-local",
+      "mode": "lexical_fallback",
+      "admissible": false,
+      "degradationCodes": [
+        "semantic_dimension_exceeds_budget",
+        "semantic_input_tokens_exceed_model_limit",
+        "semantic_model_bytes_exceeds_budget",
+        "semantic_latency_exceeds_budget"
+      ],
+      "rejectionCodes": [],
+      "failedChecks": [
+        "dimension",
+        "query_tokens",
+        "model_bytes",
+        "p95_latency_ms"
+      ]
+    },
+    {
+      "modelId": "external-semantic-api",
+      "mode": "rejected",
+      "admissible": false,
+      "degradationCodes": [],
+      "rejectionCodes": [
+        "remote_semantic_model_denied",
+        "semantic_nondeterministic_model"
+      ],
+      "failedChecks": [
+        "remote",
+        "deterministic"
+      ]
+    }
+  ]
+}
