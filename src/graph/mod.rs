@@ -365,7 +365,7 @@ pub fn generate_autolink_candidates(
                 metadata_json: serde_json::json!({
                     "strategy": "tag_cooccurrence",
                     "dryRun": true,
-                    "sharedTags": shared_tags,
+                    "sharedTags": &shared_tags,
                     "tagFrequencies": tag_frequency_metadata,
                     "commonTagMaxCount": options.common_tag_max_count,
                     "commonTagCount": common_tag_count,
