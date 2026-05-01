@@ -12,3 +12,12 @@ mod sqlmodel_frankensqlite;
 
 #[path = "contracts/frankensearch_local.rs"]
 mod frankensearch_local;
+
+#[path = "contracts/asupersync_budget.rs"]
+mod asupersync_budget;
+
+#[path = "contracts/asupersync_cancellation.rs"]
+mod asupersync_cancellation;
+
+#[path = "contracts/asupersync_quiescence.rs"]
+mod asupersync_quiescence;
