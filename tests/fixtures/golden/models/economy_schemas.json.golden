@@ -1,0 +1,202 @@
+{
+  "schema": "ee.economy.schemas.v1",
+  "schemas": [
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:economy-utility-value:v1",
+      "eeSchema": "ee.economy.utility_value.v1",
+      "kind": "utility_value",
+      "title": "UtilityValue",
+      "description": "Evidence-backed value estimate for surfacing an artifact.",
+      "type": "object",
+      "required": [
+        "schema",
+        "score",
+        "retrievalCount",
+        "successCount",
+        "falseAlarmCount",
+        "projectedUtility",
+        "confidence",
+        "effective",
+        "falseAlarmRate"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "score", "type": "number", "required": true, "description": "Raw utility score from 0.0 to 1.0."},
+        {"name": "retrievalCount", "type": "integer", "required": true, "description": "Times the artifact was retrieved."},
+        {"name": "successCount", "type": "integer", "required": true, "description": "Times retrieval contributed to a successful outcome."},
+        {"name": "falseAlarmCount", "type": "integer", "required": true, "description": "Times retrieval wasted attention or produced a false alarm."},
+        {"name": "projectedUtility", "type": "number", "required": true, "description": "Projected future utility based on trend evidence."},
+        {"name": "confidence", "type": "number", "required": true, "description": "Confidence in the utility estimate from 0.0 to 1.0."},
+        {"name": "effective", "type": "number", "required": true, "description": "Utility score adjusted by confidence."},
+        {"name": "falseAlarmRate", "type": "number", "required": true, "description": "False alarms divided by retrieval count."}
+      ],
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:economy-attention-cost:v1",
+      "eeSchema": "ee.economy.attention_cost.v1",
+      "kind": "attention_cost",
+      "title": "AttentionCost",
+      "description": "Token and cognitive cost estimate for surfacing an artifact.",
+      "type": "object",
+      "required": [
+        "schema",
+        "tokenCost",
+        "cognitiveLoad",
+        "relevanceDecay",
+        "contextSwitchCost",
+        "displacementCost",
+        "totalCost"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "tokenCost", "type": "integer", "required": true, "description": "Token cost of surfacing the artifact."},
+        {"name": "cognitiveLoad", "type": "number", "required": true, "description": "Estimated cognitive load from 0.0 to 1.0."},
+        {"name": "relevanceDecay", "type": "number", "required": true, "description": "Relevance decay since last use from 0.0 to 1.0."},
+        {"name": "contextSwitchCost", "type": "number", "required": true, "description": "Cost of switching context to use the artifact."},
+        {"name": "displacementCost", "type": "number", "required": true, "description": "Opportunity cost of displacing other artifacts."},
+        {"name": "totalCost", "type": "number", "required": true, "description": "Weighted aggregate attention cost."}
+      ],
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:economy-risk-reserve:v1",
+      "eeSchema": "ee.economy.risk_reserve.v1",
+      "kind": "risk_reserve",
+      "title": "RiskReserve",
+      "description": "Reserved attention budget for tail-risk coverage and fallback evidence.",
+      "type": "object",
+      "required": [
+        "schema",
+        "tokenBudget",
+        "memorySlots",
+        "utilization",
+        "coveredRisks",
+        "minLevel",
+        "maxLevel",
+        "availableTokens",
+        "availableSlots",
+        "isDepleted",
+        "hasExcess"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "tokenBudget", "type": "integer", "required": true, "description": "Token budget reserved for tail-risk coverage."},
+        {"name": "memorySlots", "type": "integer", "required": true, "description": "Artifact slots reserved for critical fallback information."},
+        {"name": "utilization", "type": "number", "required": true, "description": "Reserve utilization from 0.0 to 1.0."},
+        {"name": "coveredRisks", "type": "array<string>", "required": true, "description": "Risk categories covered by the reserve."},
+        {"name": "minLevel", "type": "number", "required": true, "description": "Minimum reserve level before depletion warnings."},
+        {"name": "maxLevel", "type": "number", "required": true, "description": "Maximum reserve level before excess capacity can be released."},
+        {"name": "availableTokens", "type": "integer", "required": true, "description": "Token budget still available in the reserve."},
+        {"name": "availableSlots", "type": "integer", "required": true, "description": "Artifact slots still available in the reserve."},
+        {"name": "isDepleted", "type": "boolean", "required": true, "description": "Whether reserve capacity is depleted."},
+        {"name": "hasExcess", "type": "boolean", "required": true, "description": "Whether reserve capacity is above its target maximum."}
+      ],
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:economy-maintenance-debt:v1",
+      "eeSchema": "ee.economy.maintenance_debt.v1",
+      "kind": "maintenance_debt",
+      "title": "MaintenanceDebt",
+      "description": "Deferred memory maintenance work that degrades retrieval quality.",
+      "type": "object",
+      "required": [
+        "schema",
+        "staleMemories",
+        "orphanedLinks",
+        "pendingConsolidations",
+        "indexDrift",
+        "unvalidatedRules",
+        "daysSinceSweep",
+        "debtScore",
+        "level",
+        "isUrgent",
+        "isHealthy"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "staleMemories", "type": "integer", "required": true, "description": "Stale memories needing review."},
+        {"name": "orphanedLinks", "type": "integer", "required": true, "description": "Orphaned links needing cleanup."},
+        {"name": "pendingConsolidations", "type": "integer", "required": true, "description": "Consolidation candidates waiting for review."},
+        {"name": "indexDrift", "type": "integer", "required": true, "description": "Index entries out of sync."},
+        {"name": "unvalidatedRules", "type": "integer", "required": true, "description": "Procedural rules that still lack validation evidence."},
+        {"name": "daysSinceSweep", "type": "integer", "required": true, "description": "Days since the last full maintenance sweep."},
+        {"name": "debtScore", "type": "number", "required": true, "description": "Overall maintenance debt score from 0.0 to 1.0."},
+        {"name": "level", "type": "string", "required": true, "description": "Categorical maintenance debt level."},
+        {"name": "isUrgent", "type": "boolean", "required": true, "description": "Whether maintenance should be prioritized immediately."},
+        {"name": "isHealthy", "type": "boolean", "required": true, "description": "Whether maintenance debt is within the healthy range."}
+      ],
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:economy-recommendation:v1",
+      "eeSchema": "ee.economy.recommendation.v1",
+      "kind": "economy_recommendation",
+      "title": "EconomyRecommendation",
+      "description": "Recommended action to improve utility, reserves, or maintenance debt.",
+      "type": "object",
+      "required": [
+        "schema",
+        "id",
+        "type",
+        "priority",
+        "adjustedPriority",
+        "title",
+        "description",
+        "expectedImpact",
+        "effort",
+        "automatable"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "id", "type": "string", "required": true, "description": "Stable recommendation identifier."},
+        {"name": "type", "type": "string", "required": true, "description": "Recommendation type."},
+        {"name": "priority", "type": "integer", "required": true, "description": "Base priority from 0 to 100."},
+        {"name": "adjustedPriority", "type": "integer", "required": true, "description": "Priority adjusted by expected impact and effort."},
+        {"name": "title", "type": "string", "required": true, "description": "Human-readable recommendation title."},
+        {"name": "description", "type": "string", "required": true, "description": "Recommendation details."},
+        {"name": "expectedImpact", "type": "string", "required": true, "description": "Expected impact level."},
+        {"name": "effort", "type": "string", "required": true, "description": "Estimated implementation effort."},
+        {"name": "automatable", "type": "boolean", "required": true, "description": "Whether action may be automated."},
+        {"name": "suggestedCommand", "type": "string|null", "required": false, "description": "Suggested CLI command when automation is safe."}
+      ],
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:economy-report:v1",
+      "eeSchema": "ee.economy.report.v1",
+      "kind": "economy_report",
+      "title": "EconomyReport",
+      "description": "Snapshot report over utility, attention cost, reserves, debt, and recommendations.",
+      "type": "object",
+      "required": [
+        "schema",
+        "generatedAt",
+        "healthScore",
+        "riskReserve",
+        "maintenanceDebt",
+        "aggregateUtility",
+        "recommendationCount",
+        "recommendations"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "generatedAt", "type": "string", "required": true, "description": "RFC 3339 report timestamp."},
+        {"name": "healthScore", "type": "number", "required": true, "description": "Overall economy health score."},
+        {"name": "riskReserve", "type": "object", "required": true, "description": "Current risk reserve status."},
+        {"name": "maintenanceDebt", "type": "object", "required": true, "description": "Current maintenance debt status."},
+        {"name": "aggregateUtility", "type": "object", "required": true, "description": "Aggregate utility metrics across artifacts."},
+        {"name": "recommendationCount", "type": "integer", "required": true, "description": "Number of active recommendations."},
+        {"name": "recommendations", "type": "array<object>", "required": true, "description": "Active economy recommendations sorted by priority."}
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

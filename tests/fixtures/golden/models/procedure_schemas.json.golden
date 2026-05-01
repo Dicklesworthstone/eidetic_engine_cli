@@ -1,0 +1,167 @@
+{
+  "schema": "ee.procedure.schemas.v1",
+  "schemas": [
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:procedure:v1",
+      "eeSchema": "ee.procedure.v1",
+      "kind": "procedure",
+      "title": "Procedure",
+      "description": "Evidence-backed reusable workflow distilled from successful traces.",
+      "type": "object",
+      "required": [
+        "schema",
+        "procedureId",
+        "title",
+        "summary",
+        "status",
+        "sourceRunIds",
+        "evidenceIds",
+        "stepCount",
+        "createdAt",
+        "updatedAt"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "procedureId", "type": "string", "required": true, "description": "Stable procedure identifier."},
+        {"name": "title", "type": "string", "required": true, "description": "Human-readable procedure title."},
+        {"name": "summary", "type": "string", "required": true, "description": "Short procedure summary."},
+        {"name": "status", "type": "string", "required": true, "description": "Procedure lifecycle status."},
+        {"name": "sourceRunIds", "type": "array<string>", "required": true, "description": "Recorder run identifiers that support the procedure."},
+        {"name": "evidenceIds", "type": "array<string>", "required": true, "description": "Evidence identifiers cited by the procedure."},
+        {"name": "stepCount", "type": "integer", "required": true, "description": "Number of ordered steps."},
+        {"name": "createdAt", "type": "string", "required": true, "description": "RFC 3339 creation timestamp."},
+        {"name": "updatedAt", "type": "string", "required": true, "description": "RFC 3339 update timestamp."},
+        {"name": "verifiedAt", "type": "string|null", "required": false, "description": "RFC 3339 verification timestamp when the procedure is verified."}
+      ],
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:procedure-step:v1",
+      "eeSchema": "ee.procedure.step.v1",
+      "kind": "procedure_step",
+      "title": "ProcedureStep",
+      "description": "One deterministic ordered step within a procedure.",
+      "type": "object",
+      "required": [
+        "schema",
+        "procedureId",
+        "stepId",
+        "sequence",
+        "title",
+        "instruction",
+        "expectedEvidence",
+        "failureModes",
+        "required"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "procedureId", "type": "string", "required": true, "description": "Parent procedure identifier."},
+        {"name": "stepId", "type": "string", "required": true, "description": "Stable procedure step identifier."},
+        {"name": "sequence", "type": "integer", "required": true, "description": "One-based deterministic step order."},
+        {"name": "title", "type": "string", "required": true, "description": "Short step title."},
+        {"name": "instruction", "type": "string", "required": true, "description": "Action the agent should perform."},
+        {"name": "commandHint", "type": "string|null", "required": false, "description": "Optional command or tool hint, never an automatic execution request."},
+        {"name": "expectedEvidence", "type": "array<string>", "required": true, "description": "Evidence expected after completing the step."},
+        {"name": "failureModes", "type": "array<string>", "required": true, "description": "Known step failure modes or tripwires."},
+        {"name": "required", "type": "boolean", "required": true, "description": "Whether the step is required."}
+      ],
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:procedure-verification:v1",
+      "eeSchema": "ee.procedure.verification.v1",
+      "kind": "procedure_verification",
+      "title": "ProcedureVerification",
+      "description": "Verification result for a procedure and its supporting evidence.",
+      "type": "object",
+      "required": [
+        "schema",
+        "verificationId",
+        "procedureId",
+        "status",
+        "verifiedAt",
+        "verifier",
+        "evidenceIds",
+        "replayArtifactIds"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "verificationId", "type": "string", "required": true, "description": "Stable verification record identifier."},
+        {"name": "procedureId", "type": "string", "required": true, "description": "Verified procedure identifier."},
+        {"name": "status", "type": "string", "required": true, "description": "Verification outcome status."},
+        {"name": "verifiedAt", "type": "string", "required": true, "description": "RFC 3339 verification timestamp."},
+        {"name": "verifier", "type": "string", "required": true, "description": "Tool, agent, or harness verifier."},
+        {"name": "evidenceIds", "type": "array<string>", "required": true, "description": "Evidence identifiers checked during verification."},
+        {"name": "replayArtifactIds", "type": "array<string>", "required": true, "description": "Replay or evaluation artifact identifiers used for verification."},
+        {"name": "failureReason", "type": "string|null", "required": false, "description": "Reason verification failed or became stale."}
+      ],
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:procedure-export:v1",
+      "eeSchema": "ee.procedure.export.v1",
+      "kind": "procedure_export",
+      "title": "ProcedureExport",
+      "description": "Manifest for a rendered procedure export artifact.",
+      "type": "object",
+      "required": [
+        "schema",
+        "exportId",
+        "procedureId",
+        "format",
+        "generatedAt",
+        "includesEvidence",
+        "redactionStatus"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "exportId", "type": "string", "required": true, "description": "Stable export identifier."},
+        {"name": "procedureId", "type": "string", "required": true, "description": "Exported procedure identifier."},
+        {"name": "format", "type": "string", "required": true, "description": "Stable export format."},
+        {"name": "generatedAt", "type": "string", "required": true, "description": "RFC 3339 generation timestamp."},
+        {"name": "includesEvidence", "type": "boolean", "required": true, "description": "Whether the export includes supporting evidence excerpts."},
+        {"name": "redactionStatus", "type": "string", "required": true, "description": "Redaction state applied before export."},
+        {"name": "artifactHash", "type": "string|null", "required": false, "description": "Hash of the rendered export artifact when available."}
+      ],
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:skill-capsule:v1",
+      "eeSchema": "ee.skill_capsule.v1",
+      "kind": "skill_capsule",
+      "title": "SkillCapsule",
+      "description": "Render-only reusable skill capsule derived from a verified procedure.",
+      "type": "object",
+      "required": [
+        "schema",
+        "capsuleId",
+        "procedureId",
+        "title",
+        "summary",
+        "generatedAt",
+        "installMode",
+        "markdownBodyHash",
+        "sourceExportId",
+        "warnings"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "capsuleId", "type": "string", "required": true, "description": "Stable skill capsule identifier."},
+        {"name": "procedureId", "type": "string", "required": true, "description": "Source procedure identifier."},
+        {"name": "title", "type": "string", "required": true, "description": "Capsule title."},
+        {"name": "summary", "type": "string", "required": true, "description": "Capsule summary."},
+        {"name": "generatedAt", "type": "string", "required": true, "description": "RFC 3339 generation timestamp."},
+        {"name": "installMode", "type": "string", "required": true, "description": "Installation posture; capsules are render-only unless reviewed manually."},
+        {"name": "markdownBodyHash", "type": "string", "required": true, "description": "Hash of the rendered Markdown body."},
+        {"name": "sourceExportId", "type": "string", "required": true, "description": "Source procedure export ID."},
+        {"name": "warnings", "type": "array<string>", "required": true, "description": "Sorted warnings shown with the capsule."}
+      ],
+      "additionalProperties": false
+    }
+  ]
+}
