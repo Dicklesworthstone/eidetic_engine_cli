@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![doc = "Library surface for the `ee` command-line memory substrate."]
 
+pub mod cache;
 pub mod cass;
 pub mod cli;
 pub mod config;

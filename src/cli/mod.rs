@@ -1,6 +1,7 @@
 use std::ffi::OsString;
+use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -51,9 +52,11 @@ use crate::core::search::{SearchOptions, run_search};
 use crate::core::situation::{classify_task, explain_situation, show_situation};
 use crate::core::status::StatusReport;
 use crate::core::why::{WhyOptions, explain_memory};
-use crate::models::{DomainError, InstallOperation, ProcessExitCode};
+use crate::models::{DomainError, InstallOperation, ProcessExitCode, QUERY_SCHEMA_V1};
 use crate::output;
-use crate::pack::ContextPackProfile;
+use crate::pack::{
+    ContextPackProfile, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
+};
 
 #[derive(Clone, Debug, Parser, PartialEq)]
 #[command(
@@ -239,6 +242,8 @@ pub enum Command {
     Memory(MemoryCommand),
     /// Record observed feedback about a memory or related target.
     Outcome(OutcomeArgs),
+    /// Build a context pack from an explicit query document.
+    Pack(PackArgs),
     /// Run, show, or close preflight risk assessments.
     #[command(subcommand)]
     Preflight(PreflightCommand),
@@ -425,6 +430,34 @@ pub struct ContextArgs {
     /// Context profile: compact, balanced, thorough, submodular.
     #[arg(long, short = 'p', default_value = "balanced")]
     pub profile: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Index directory. Defaults to <workspace>/.ee/index/.
+    #[arg(long, value_name = "PATH")]
+    pub index_dir: Option<PathBuf>,
+}
+
+/// Arguments for `ee pack`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct PackArgs {
+    /// Path to an `ee.query.v1` JSON query document.
+    #[arg(long, value_name = "PATH")]
+    pub query_file: PathBuf,
+
+    /// Maximum token budget for the context pack. Overrides query-file budget.
+    #[arg(long, short = 't')]
+    pub max_tokens: Option<u32>,
+
+    /// Maximum candidate memories to retrieve before packing. Overrides query-file budget.
+    #[arg(long)]
+    pub candidate_pool: Option<u32>,
+
+    /// Context profile: compact, balanced, thorough, or submodular.
+    #[arg(long, short = 'p')]
+    pub profile: Option<String>,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -2523,6 +2556,7 @@ where
             handle_graph_centrality_refresh(&cli, args, stdout, stderr)
         }
         Some(Command::Outcome(ref args)) => handle_outcome(&cli, args, stdout, stderr),
+        Some(Command::Pack(ref args)) => handle_pack(&cli, args, stdout, stderr),
         Some(Command::Preflight(PreflightCommand::Run(ref args))) => {
             handle_preflight_run(&cli, args, stdout, stderr)
         }
@@ -5229,6 +5263,64 @@ where
     }
 }
 
+fn parse_context_profile(value: &str) -> Result<ContextPackProfile, String> {
+    match value.to_lowercase().as_str() {
+        "compact" => Ok(ContextPackProfile::Compact),
+        "balanced" => Ok(ContextPackProfile::Balanced),
+        "thorough" => Ok(ContextPackProfile::Thorough),
+        "submodular" => Ok(ContextPackProfile::Submodular),
+        _ => Err(format!(
+            "Invalid context profile '{value}'. Expected compact, balanced, thorough, or submodular."
+        )),
+    }
+}
+
+fn write_context_response<W>(
+    renderer: output::Renderer,
+    response: &ContextResponse,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match renderer {
+        output::Renderer::Human => {
+            write_stdout(stdout, &output::render_context_response_human(response))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_context_response_toon(response) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_context_response_json(response) + "\n"),
+        ),
+        output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_context_response_markdown(response))
+        }
+    }
+}
+
+fn context_error_to_domain(error: &ContextPackError) -> DomainError {
+    match error {
+        ContextPackError::Storage(message) => DomainError::Storage {
+            message: message.clone(),
+            repair: error.repair_hint().map(str::to_string),
+        },
+        ContextPackError::Search(search_error) => DomainError::SearchIndex {
+            message: search_error.to_string(),
+            repair: error.repair_hint().map(str::to_string),
+        },
+        ContextPackError::Pack(message) => DomainError::Usage {
+            message: message.clone(),
+            repair: error.repair_hint().map(str::to_string),
+        },
+    }
+}
+
 fn handle_context<W, E>(
     cli: &Cli,
     args: &ContextArgs,
@@ -5239,17 +5331,11 @@ where
     W: Write,
     E: Write,
 {
-    let profile = match args.profile.to_lowercase().as_str() {
-        "compact" => ContextPackProfile::Compact,
-        "balanced" => ContextPackProfile::Balanced,
-        "thorough" => ContextPackProfile::Thorough,
-        "submodular" => ContextPackProfile::Submodular,
-        _ => {
+    let profile = match parse_context_profile(&args.profile) {
+        Ok(profile) => profile,
+        Err(message) => {
             let domain_error = DomainError::Usage {
-                message: format!(
-                    "Invalid context profile '{}'. Expected compact, balanced, thorough, or submodular.",
-                    args.profile
-                ),
+                message,
                 repair: Some("ee context --help".to_string()),
             };
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
@@ -5268,43 +5354,671 @@ where
     };
 
     match run_context_pack(&options) {
-        Ok(response) => match cli.renderer() {
-            output::Renderer::Human => {
-                write_stdout(stdout, &output::render_context_response_human(&response))
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_context_response_toon(&response) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(output::render_context_response_json(&response) + "\n"),
-            ),
-            output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_context_response_markdown(&response))
-            }
-        },
+        Ok(response) => write_context_response(cli.renderer(), &response, stdout),
         Err(error) => {
-            let domain_error = match &error {
-                ContextPackError::Storage(message) => DomainError::Storage {
-                    message: message.clone(),
-                    repair: error.repair_hint().map(str::to_string),
-                },
-                ContextPackError::Search(search_error) => DomainError::SearchIndex {
-                    message: search_error.to_string(),
-                    repair: error.repair_hint().map(str::to_string),
-                },
-                ContextPackError::Pack(message) => DomainError::Usage {
-                    message: message.clone(),
-                    repair: error.repair_hint().map(str::to_string),
-                },
-            };
+            let domain_error = context_error_to_domain(&error);
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
     }
+}
+
+const QUERY_FILE_MAX_BYTES: u64 = 256 * 1024;
+const QUERY_FILE_TOP_LEVEL_FIELDS: &[&str] = &[
+    "version",
+    "workspace",
+    "query",
+    "tags",
+    "filters",
+    "time",
+    "asOf",
+    "temporalValidity",
+    "trust",
+    "redaction",
+    "graph",
+    "output",
+    "budget",
+    "pagination",
+    "eval",
+];
+const QUERY_FILE_FILTER_OPERATORS: &[&str] = &[
+    "eq",
+    "neq",
+    "in",
+    "notIn",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+    "exists",
+    "startsWith",
+    "endsWith",
+    "contains",
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QueryFileErrorCode {
+    MalformedJson,
+    UnknownVersion,
+    EmptyQuery,
+    InvalidOperator,
+    UnsafePath,
+    UnsupportedFeature,
+    ZeroBudget,
+    MissingFile,
+    InvalidFile,
+}
+
+impl QueryFileErrorCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MalformedJson => "ERR_MALFORMED_JSON",
+            Self::UnknownVersion => "ERR_UNKNOWN_VERSION",
+            Self::EmptyQuery => "ERR_EMPTY_QUERY",
+            Self::InvalidOperator => "ERR_INVALID_OPERATOR",
+            Self::UnsafePath => "ERR_UNSAFE_PATH",
+            Self::UnsupportedFeature => "ERR_UNSUPPORTED_FEATURE",
+            Self::ZeroBudget => "ERR_ZERO_BUDGET",
+            Self::MissingFile => "ERR_QUERY_FILE_NOT_FOUND",
+            Self::InvalidFile => "ERR_INVALID_QUERY_FILE",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryFileError {
+    code: QueryFileErrorCode,
+    message: String,
+    repair: Option<String>,
+}
+
+impl QueryFileError {
+    fn new(code: QueryFileErrorCode, message: impl Into<String>, repair: Option<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            repair,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct QueryFileRequest {
+    workspace_path: Option<PathBuf>,
+    query: String,
+    profile: Option<ContextPackProfile>,
+    max_tokens: Option<u32>,
+    candidate_pool: Option<u32>,
+    renderer: Option<output::Renderer>,
+    degraded: Vec<ContextResponseDegradation>,
+}
+
+type QueryOutputControls = (
+    Option<ContextPackProfile>,
+    Option<output::Renderer>,
+    Vec<ContextResponseDegradation>,
+);
+
+fn handle_pack<W, E>(cli: &Cli, args: &PackArgs, stdout: &mut W, stderr: &mut E) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let mut request = match load_query_file(&args.query_file) {
+        Ok(request) => request,
+        Err(error) => return write_query_file_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    let profile = match args.profile.as_deref() {
+        Some(profile) => match parse_context_profile(profile) {
+            Ok(profile) => Some(profile),
+            Err(message) => {
+                let error = QueryFileError::new(
+                    QueryFileErrorCode::UnsupportedFeature,
+                    message,
+                    Some("ee pack --help".to_string()),
+                );
+                return write_query_file_error(&error, cli.wants_json(), stdout, stderr);
+            }
+        },
+        None => request.profile,
+    };
+
+    let workspace_path = cli
+        .workspace
+        .clone()
+        .or_else(|| request.workspace_path.take())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let options = ContextPackOptions {
+        workspace_path,
+        database_path: args.database.clone(),
+        index_dir: args.index_dir.clone(),
+        query: request.query,
+        profile,
+        max_tokens: args.max_tokens.or(request.max_tokens),
+        candidate_pool: args.candidate_pool.or(request.candidate_pool),
+    };
+    let renderer = effective_pack_renderer(cli, request.renderer);
+
+    match run_context_pack(&options) {
+        Ok(mut response) => {
+            response.data.degraded.extend(request.degraded);
+            write_context_response(renderer, &response, stdout)
+        }
+        Err(error) => {
+            let domain_error = context_error_to_domain(&error);
+            write_domain_error(
+                &domain_error,
+                cli.wants_json() || matches!(renderer, output::Renderer::Json),
+                stdout,
+                stderr,
+            )
+        }
+    }
+}
+
+fn load_query_file(path: &Path) -> Result<QueryFileRequest, QueryFileError> {
+    validate_query_file_path(path)?;
+    let bytes = fs::read(path).map_err(|error| {
+        QueryFileError::new(
+            QueryFileErrorCode::InvalidFile,
+            format!("Failed to read query file {}: {error}", path.display()),
+            Some("Check file permissions and retry.".to_string()),
+        )
+    })?;
+    let content = String::from_utf8(bytes).map_err(|error| {
+        QueryFileError::new(
+            QueryFileErrorCode::MalformedJson,
+            format!("Query file is not valid UTF-8 JSON: {error}"),
+            Some("Save the query document as UTF-8 JSON.".to_string()),
+        )
+    })?;
+    parse_query_document(&content)
+}
+
+fn validate_query_file_path(path: &Path) -> Result<(), QueryFileError> {
+    if path.as_os_str().is_empty() || path_has_parent_dir(path) {
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::UnsafePath,
+            format!("Unsafe query file path: {}", path.display()),
+            Some("Pass a direct JSON file path without '..' components.".to_string()),
+        ));
+    }
+
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        QueryFileError::new(
+            QueryFileErrorCode::MissingFile,
+            format!("Query file not found at {}: {error}", path.display()),
+            Some("Create the query file or pass the correct --query-file path.".to_string()),
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::UnsafePath,
+            format!(
+                "Query file path is a symlink and is not accepted: {}",
+                path.display()
+            ),
+            Some("Pass the canonical JSON file path directly.".to_string()),
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::InvalidFile,
+            format!("Query file path is not a regular file: {}", path.display()),
+            Some("Pass a regular JSON file to --query-file.".to_string()),
+        ));
+    }
+    if metadata.len() > QUERY_FILE_MAX_BYTES {
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::InvalidFile,
+            format!(
+                "Query file is too large: {} bytes exceeds the {} byte limit.",
+                metadata.len(),
+                QUERY_FILE_MAX_BYTES
+            ),
+            Some("Use a smaller ee.query.v1 JSON document.".to_string()),
+        ));
+    }
+
+    Ok(())
+}
+
+fn path_has_parent_dir(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn parse_query_document(content: &str) -> Result<QueryFileRequest, QueryFileError> {
+    let value: serde_json::Value = serde_json::from_str(content).map_err(|error| {
+        QueryFileError::new(
+            QueryFileErrorCode::MalformedJson,
+            format!("Malformed ee.query.v1 JSON: {error}"),
+            Some("Fix the JSON syntax and retry.".to_string()),
+        )
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        QueryFileError::new(
+            QueryFileErrorCode::MalformedJson,
+            "Query document must be a JSON object.",
+            Some("Use an object with version and query fields.".to_string()),
+        )
+    })?;
+
+    let mut degraded = unknown_field_degradations(object)?;
+    validate_query_version(object)?;
+    validate_unsupported_query_features(object)?;
+
+    let query = query_text_from_document(object)?;
+    let workspace_path = optional_path_field(object, "workspace")?;
+    let (max_tokens, candidate_pool) = budget_from_document(object)?;
+    let (profile, renderer, mut output_degraded) = output_from_document(object)?;
+    degraded.append(&mut output_degraded);
+
+    Ok(QueryFileRequest {
+        workspace_path,
+        query,
+        profile,
+        max_tokens,
+        candidate_pool,
+        renderer,
+        degraded,
+    })
+}
+
+fn unknown_field_degradations(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<ContextResponseDegradation>, QueryFileError> {
+    let mut degraded = Vec::new();
+    for key in object.keys() {
+        if !QUERY_FILE_TOP_LEVEL_FIELDS.contains(&key.as_str()) {
+            let entry = ContextResponseDegradation::new(
+                "query_unknown_field",
+                ContextResponseSeverity::Low,
+                format!("Unknown ee.query.v1 field '{key}' was ignored."),
+                Some(
+                    "Remove the field or upgrade ee if the field is from a newer schema."
+                        .to_string(),
+                ),
+            )
+            .map_err(|error| {
+                QueryFileError::new(
+                    QueryFileErrorCode::UnsupportedFeature,
+                    error.to_string(),
+                    Some("Fix the query document and retry.".to_string()),
+                )
+            })?;
+            degraded.push(entry);
+        }
+    }
+    Ok(degraded)
+}
+
+fn validate_query_version(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), QueryFileError> {
+    match object.get("version").and_then(serde_json::Value::as_str) {
+        Some(QUERY_SCHEMA_V1) => Ok(()),
+        Some(version) => Err(QueryFileError::new(
+            QueryFileErrorCode::UnknownVersion,
+            format!("Unsupported query schema version '{version}'. Expected {QUERY_SCHEMA_V1}."),
+            Some(format!("Set version to \"{QUERY_SCHEMA_V1}\".")),
+        )),
+        None => Err(QueryFileError::new(
+            QueryFileErrorCode::UnknownVersion,
+            format!("Missing required query schema version. Expected {QUERY_SCHEMA_V1}."),
+            Some(format!(
+                "Add \"version\": \"{QUERY_SCHEMA_V1}\" to the query file."
+            )),
+        )),
+    }
+}
+
+fn validate_unsupported_query_features(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), QueryFileError> {
+    if let Some(filters) = object.get("filters") {
+        validate_filters(filters)?;
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::UnsupportedFeature,
+            "ee.query.v1 filters are validated but not yet wired into context pack execution.",
+            Some("Remove filters or use a plain query until filter execution lands.".to_string()),
+        ));
+    }
+
+    for feature in [
+        "tags",
+        "time",
+        "asOf",
+        "temporalValidity",
+        "trust",
+        "redaction",
+        "graph",
+        "pagination",
+    ] {
+        if object.contains_key(feature) {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::UnsupportedFeature,
+                format!(
+                    "ee.query.v1 field '{feature}' is recognized but not yet supported by ee pack."
+                ),
+                Some(
+                    "Remove the field or use ee search/context flags that already support it."
+                        .to_string(),
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_filters(value: &serde_json::Value) -> Result<(), QueryFileError> {
+    let filters = value.as_object().ok_or_else(|| {
+        QueryFileError::new(
+            QueryFileErrorCode::InvalidOperator,
+            "filters must be a JSON object.",
+            Some("Use {\"field\": {\"operator\": value}} filter objects.".to_string()),
+        )
+    })?;
+    for (field, predicate) in filters {
+        let predicate = predicate.as_object().ok_or_else(|| {
+            QueryFileError::new(
+                QueryFileErrorCode::InvalidOperator,
+                format!("Filter '{field}' must be an object of operators."),
+                Some("Use supported operators such as eq, in, gte, or exists.".to_string()),
+            )
+        })?;
+        for operator in predicate.keys() {
+            if !QUERY_FILE_FILTER_OPERATORS.contains(&operator.as_str()) {
+                return Err(QueryFileError::new(
+                    QueryFileErrorCode::InvalidOperator,
+                    format!("Invalid filter operator '{operator}' for field '{field}'."),
+                    Some(format!(
+                        "Use one of: {}.",
+                        QUERY_FILE_FILTER_OPERATORS.join(", ")
+                    )),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn query_text_from_document(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<String, QueryFileError> {
+    let query = object.get("query").ok_or_else(|| {
+        QueryFileError::new(
+            QueryFileErrorCode::EmptyQuery,
+            "Missing required query.text field.",
+            Some("Add {\"query\": {\"text\": \"...\"}} to the query file.".to_string()),
+        )
+    })?;
+    let query_object = query.as_object().ok_or_else(|| {
+        QueryFileError::new(
+            QueryFileErrorCode::EmptyQuery,
+            "query must be an object with a text field.",
+            Some("Use {\"query\": {\"text\": \"...\"}}.".to_string()),
+        )
+    })?;
+    let text = query_object
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            QueryFileError::new(
+                QueryFileErrorCode::EmptyQuery,
+                "query.text is required and must not be empty.",
+                Some("Provide a non-empty query.text value.".to_string()),
+            )
+        })?;
+
+    if let Some(mode) = query_object
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .filter(|mode| *mode != "hybrid")
+    {
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::UnsupportedFeature,
+            format!(
+                "query.mode '{mode}' is recognized but only hybrid mode is currently supported."
+            ),
+            Some("Set query.mode to \"hybrid\" or omit it.".to_string()),
+        ));
+    }
+
+    Ok(text.to_string())
+}
+
+fn optional_path_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<PathBuf>, QueryFileError> {
+    let Some(value) = object.get(field) else {
+        return Ok(None);
+    };
+    let path = value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            QueryFileError::new(
+                QueryFileErrorCode::UnsafePath,
+                format!("{field} must be a non-empty string path."),
+                Some(format!("Set {field} to a direct workspace path.")),
+            )
+        })?;
+    let path = PathBuf::from(path);
+    if path_has_parent_dir(&path) {
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::UnsafePath,
+            format!("Unsafe {field} path contains '..': {}", path.display()),
+            Some(
+                "Use a direct absolute path or path relative to the current directory.".to_string(),
+            ),
+        ));
+    }
+    Ok(Some(path))
+}
+
+fn budget_from_document(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(Option<u32>, Option<u32>), QueryFileError> {
+    let Some(budget) = object.get("budget") else {
+        return Ok((None, None));
+    };
+    let budget = budget.as_object().ok_or_else(|| {
+        QueryFileError::new(
+            QueryFileErrorCode::ZeroBudget,
+            "budget must be a JSON object.",
+            Some("Use {\"budget\": {\"maxTokens\": 4000, \"candidatePool\": 100}}.".to_string()),
+        )
+    })?;
+    let max_tokens = optional_positive_u32(budget, "maxTokens")?;
+    let candidate_pool = optional_positive_u32(budget, "candidatePool")?;
+    Ok((max_tokens, candidate_pool))
+}
+
+fn optional_positive_u32(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<u32>, QueryFileError> {
+    let Some(value) = object.get(field) else {
+        return Ok(None);
+    };
+    let Some(raw) = value.as_u64() else {
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::ZeroBudget,
+            format!("budget.{field} must be a positive integer."),
+            Some("Use non-zero integer budget values.".to_string()),
+        ));
+    };
+    if raw == 0 || raw > u64::from(u32::MAX) {
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::ZeroBudget,
+            format!("budget.{field} must be between 1 and {}.", u32::MAX),
+            Some("Use non-zero integer budget values.".to_string()),
+        ));
+    }
+    Ok(Some(raw as u32))
+}
+
+fn output_from_document(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<QueryOutputControls, QueryFileError> {
+    let Some(output) = object.get("output") else {
+        return Ok((None, None, Vec::new()));
+    };
+    let output = output.as_object().ok_or_else(|| {
+        QueryFileError::new(
+            QueryFileErrorCode::UnsupportedFeature,
+            "output must be a JSON object.",
+            Some(
+                "Use {\"output\": {\"profile\": \"balanced\", \"format\": \"json\"}}.".to_string(),
+            ),
+        )
+    })?;
+
+    let profile = match output.get("profile").and_then(serde_json::Value::as_str) {
+        Some("compact") => Some(ContextPackProfile::Compact),
+        Some("balanced") => Some(ContextPackProfile::Balanced),
+        Some("thorough" | "wide") => Some(ContextPackProfile::Thorough),
+        Some("submodular") => Some(ContextPackProfile::Submodular),
+        Some("custom") => {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::UnsupportedFeature,
+                "output.profile 'custom' requires named custom profile support, which is not wired yet.",
+                Some("Use compact, balanced, wide, thorough, or submodular.".to_string()),
+            ));
+        }
+        Some(profile) => {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::UnsupportedFeature,
+                format!("Unsupported output.profile '{profile}'."),
+                Some("Use compact, balanced, wide, thorough, or submodular.".to_string()),
+            ));
+        }
+        None => None,
+    };
+
+    let renderer = match output.get("format").and_then(serde_json::Value::as_str) {
+        Some("human") => Some(output::Renderer::Human),
+        Some("json") => Some(output::Renderer::Json),
+        Some("jsonl") => Some(output::Renderer::Jsonl),
+        Some("compact") => Some(output::Renderer::Compact),
+        Some("hook") => Some(output::Renderer::Hook),
+        Some("markdown") => Some(output::Renderer::Markdown),
+        Some("toon") => Some(output::Renderer::Toon),
+        Some(format) => {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::UnsupportedFeature,
+                format!("Unsupported output.format '{format}'."),
+                Some("Use json, markdown, toon, human, jsonl, compact, or hook.".to_string()),
+            ));
+        }
+        None => None,
+    };
+
+    validate_output_fields(output)?;
+    let degraded = if output.contains_key("fields") {
+        vec![
+            ContextResponseDegradation::new(
+                "query_output_fields_cli_controlled",
+                ContextResponseSeverity::Low,
+                "output.fields was validated; effective field projection is controlled by the global --fields flag.",
+                Some("Pass --fields on the ee command line to control projection.".to_string()),
+            )
+            .map_err(|error| {
+                QueryFileError::new(
+                    QueryFileErrorCode::UnsupportedFeature,
+                    error.to_string(),
+                    Some("Fix the query document and retry.".to_string()),
+                )
+            })?,
+        ]
+    } else {
+        Vec::new()
+    };
+
+    Ok((profile, renderer, degraded))
+}
+
+fn validate_output_fields(
+    output: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), QueryFileError> {
+    let Some(fields) = output.get("fields") else {
+        return Ok(());
+    };
+    match fields.as_str() {
+        Some("minimal" | "summary" | "standard" | "full") => Ok(()),
+        Some(fields) => Err(QueryFileError::new(
+            QueryFileErrorCode::UnsupportedFeature,
+            format!("Unsupported output.fields '{fields}'."),
+            Some("Use minimal, summary, standard, or full.".to_string()),
+        )),
+        None => Err(QueryFileError::new(
+            QueryFileErrorCode::UnsupportedFeature,
+            "output.fields must be a string.",
+            Some("Use minimal, summary, standard, or full.".to_string()),
+        )),
+    }
+}
+
+fn effective_pack_renderer(
+    cli: &Cli,
+    query_renderer: Option<output::Renderer>,
+) -> output::Renderer {
+    if cli.format != OutputFormat::Human || cli.json || cli.robot {
+        cli.renderer()
+    } else {
+        query_renderer.unwrap_or_else(|| cli.renderer())
+    }
+}
+
+fn write_query_file_error<W, E>(
+    error: &QueryFileError,
+    wants_json: bool,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if wants_json {
+        let message = output::escape_json_string(&error.message);
+        let code = error.code.as_str();
+        match &error.repair {
+            Some(repair) => {
+                let repair = output::escape_json_string(repair);
+                let _ = writeln!(
+                    stdout,
+                    "{{\"schema\":\"{}\",\"error\":{{\"code\":\"{}\",\"message\":\"{}\",\"repair\":\"{}\"}}}}",
+                    crate::models::ERROR_SCHEMA_V1,
+                    code,
+                    message,
+                    repair
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    stdout,
+                    "{{\"schema\":\"{}\",\"error\":{{\"code\":\"{}\",\"message\":\"{}\"}}}}",
+                    crate::models::ERROR_SCHEMA_V1,
+                    code,
+                    message
+                );
+            }
+        }
+    } else {
+        let _ = writeln!(stderr, "error: {}: {}", error.code.as_str(), error.message);
+        if let Some(repair) = &error.repair {
+            let _ = writeln!(stderr, "\nNext:\n  {repair}");
+        }
+    }
+    ProcessExitCode::Usage
 }
 
 // ============================================================================
@@ -7084,6 +7798,7 @@ impl NormalizedInvocation {
                     MemoryCommand::History(_) => "memory history".to_string(),
                 },
                 Command::Outcome(_) => "outcome".to_string(),
+                Command::Pack(_) => "pack".to_string(),
                 Command::Preflight(preflight) => match preflight {
                     PreflightCommand::Run(_) => "preflight run".to_string(),
                     PreflightCommand::Show(_) => "preflight show".to_string(),
@@ -8596,6 +9311,142 @@ mod tests {
             }
             _ => Err("expected Context command".to_string()),
         }
+    }
+
+    #[test]
+    fn pack_command_parses_query_file() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "pack",
+            "--query-file",
+            "task.eeq.json",
+            "--max-tokens",
+            "3000",
+            "--candidate-pool",
+            "42",
+            "--profile",
+            "compact",
+        ])
+        .map_err(|e| format!("failed to parse pack: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Pack(ref args)) => {
+                ensure_equal(
+                    &args.query_file,
+                    &std::path::PathBuf::from("task.eeq.json"),
+                    "pack query file",
+                )?;
+                ensure_equal(&args.max_tokens, &Some(3000), "pack max tokens")?;
+                ensure_equal(&args.candidate_pool, &Some(42), "pack candidate pool")?;
+                ensure_equal(&args.profile, &Some("compact".to_string()), "pack profile")
+            }
+            _ => Err("expected Pack command".to_string()),
+        }
+    }
+
+    #[test]
+    fn query_file_document_parses_supported_pack_request() -> TestResult {
+        let request = super::parse_query_document(
+            r#"{
+              "version": "ee.query.v1",
+              "workspace": "/data/projects/eidetic_engine_cli",
+              "query": {"text": "prepare release", "mode": "hybrid"},
+              "budget": {"maxTokens": 3000, "candidatePool": 25},
+              "output": {"profile": "wide", "format": "json", "fields": "summary"}
+            }"#,
+        )
+        .map_err(|error| error.message)?;
+
+        ensure_equal(&request.query, &"prepare release".to_string(), "query text")?;
+        ensure_equal(
+            &request.workspace_path,
+            &Some(std::path::PathBuf::from(
+                "/data/projects/eidetic_engine_cli",
+            )),
+            "workspace",
+        )?;
+        ensure_equal(&request.max_tokens, &Some(3000), "max tokens")?;
+        ensure_equal(&request.candidate_pool, &Some(25), "candidate pool")?;
+        ensure_equal(
+            &request.profile,
+            &Some(super::ContextPackProfile::Thorough),
+            "wide profile maps to thorough",
+        )?;
+        ensure_equal(
+            &request.renderer,
+            &Some(crate::output::Renderer::Json),
+            "json renderer",
+        )?;
+        ensure(
+            request
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "query_output_fields_cli_controlled"),
+            "output.fields should produce a low-severity degradation",
+        )
+    }
+
+    #[test]
+    fn query_file_document_reports_unknown_fields_as_degradation() -> TestResult {
+        let request = super::parse_query_document(
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "release"},
+              "futureField": true
+            }"#,
+        )
+        .map_err(|error| error.message)?;
+
+        ensure(
+            request
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "query_unknown_field"),
+            "unknown top-level field should be reported in degraded[]",
+        )
+    }
+
+    #[test]
+    fn query_file_document_rejects_invalid_filter_operator() -> TestResult {
+        let error = match super::parse_query_document(
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "release"},
+              "filters": {"level": {"approximately": "procedural"}}
+            }"#,
+        ) {
+            Ok(_) => return Err("invalid filter operator should fail".into()),
+            Err(error) => error,
+        };
+
+        ensure_equal(
+            &error.code,
+            &super::QueryFileErrorCode::InvalidOperator,
+            "invalid operator error code",
+        )
+    }
+
+    #[test]
+    fn pack_json_missing_query_file_writes_machine_error_to_stdout() -> TestResult {
+        let missing = format!(
+            "/tmp/ee-missing-query-file-{}-{}.json",
+            std::process::id(),
+            "query"
+        );
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "--json", "pack", "--query-file", missing.as_str()]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "pack missing file exit")?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.error.v1\"",
+            "pack missing file error schema",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"code\":\"ERR_QUERY_FILE_NOT_FOUND\"",
+            "query-file-specific error code",
+        )?;
+        ensure(stderr.is_empty(), "pack json error stderr must be empty")
     }
 
     #[test]

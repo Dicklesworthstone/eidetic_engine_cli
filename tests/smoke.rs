@@ -697,8 +697,46 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
         .map_err(|error| format!("context stdout must be JSON: {error}"))?;
     ensure_equal(
         &context_json["schema"],
-        &serde_json::json!("ee.context.v1"),
+        &serde_json::json!("ee.response.v1"),
         "context schema",
+    )?;
+
+    let query_file = workspace.join("task.eeq.json");
+    fs::write(
+        &query_file,
+        r#"{
+          "version": "ee.query.v1",
+          "query": {"text": "prepare release", "mode": "hybrid"},
+          "budget": {"maxTokens": 3000, "candidatePool": 25},
+          "output": {"format": "json", "profile": "balanced"}
+        }"#,
+    )
+    .map_err(|error| error.to_string())?;
+    let query_file_arg = query_file.to_string_lossy().into_owned();
+    let pack = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "pack",
+        "--query-file",
+        query_file_arg.as_str(),
+    ])?;
+    let pack_stderr = String::from_utf8_lossy(&pack.stderr);
+    ensure(
+        pack.status.success(),
+        format!("pack query-file should succeed; stderr: {pack_stderr}"),
+    )?;
+    ensure(pack.stderr.is_empty(), "pack query-file stderr clean")?;
+    let pack_json: serde_json::Value = serde_json::from_slice(&pack.stdout)
+        .map_err(|error| format!("pack query-file stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &pack_json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "pack query-file schema",
+    )?;
+    ensure_equal(
+        &pack_json["data"]["request"]["query"],
+        &serde_json::json!("prepare release"),
+        "pack query-file request query",
     )
 }
 

@@ -478,7 +478,7 @@ pub fn poll_follow_events(run_id: &str, from_sequence: u64, _limit: u32) -> Tail
     // Check if run is completed (stub: runs starting with "run_completed" are done).
     if run_id.starts_with("run_completed") {
         return TailFollowResult::RunCompleted {
-            final_sequence: from_sequence.saturating_sub(1).max(0),
+            final_sequence: from_sequence.saturating_sub(1),
         };
     }
 
@@ -1003,10 +1003,22 @@ mod tests {
             payload_preview: None,
         }]);
 
-        assert!(follow_diagnostic(&waiting).unwrap().contains("waiting"));
-        assert!(follow_diagnostic(&completed).unwrap().contains("completed"));
-        assert!(follow_diagnostic(&not_found).unwrap().contains("not found"));
-        assert!(follow_diagnostic(&events).unwrap().contains("1 event"));
+        assert!(matches!(
+            follow_diagnostic(&waiting),
+            Some(message) if message.contains("waiting")
+        ));
+        assert!(matches!(
+            follow_diagnostic(&completed),
+            Some(message) if message.contains("completed")
+        ));
+        assert!(matches!(
+            follow_diagnostic(&not_found),
+            Some(message) if message.contains("not found")
+        ));
+        assert!(matches!(
+            follow_diagnostic(&events),
+            Some(message) if message.contains("1 event")
+        ));
     }
 
     #[test]

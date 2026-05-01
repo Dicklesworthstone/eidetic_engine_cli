@@ -1194,6 +1194,8 @@ mod tests {
             created_at: "2026-04-29T12:00:00Z".to_string(),
             updated_at: "2026-04-29T12:00:00Z".to_string(),
             tombstoned_at: None,
+            valid_from: None,
+            valid_to: None,
         }
     }
 

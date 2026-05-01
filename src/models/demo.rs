@@ -831,17 +831,22 @@ mod tests {
     use super::*;
 
     fn test_demo_id() -> DemoId {
-        DemoId::from_str("demo_00000000000000000000000001").unwrap()
+        DemoId::from_str("demo_00000000000000000000000001")
+            .unwrap_or_else(|error| panic!("valid demo id fixture: {error}"))
     }
 
     fn test_claim_id() -> ClaimId {
-        ClaimId::from_str("claim_00000000000000000000000001").unwrap()
+        ClaimId::from_str("claim_00000000000000000000000001")
+            .unwrap_or_else(|error| panic!("valid claim id fixture: {error}"))
     }
 
     #[test]
     fn demo_status_roundtrip() {
         for status in DemoStatus::all() {
-            let parsed: DemoStatus = status.as_str().parse().unwrap();
+            let parsed: DemoStatus = status
+                .as_str()
+                .parse()
+                .unwrap_or_else(|error| panic!("status roundtrip fixture parses: {error}"));
             assert_eq!(status, parsed);
         }
     }
@@ -849,7 +854,10 @@ mod tests {
     #[test]
     fn output_verification_roundtrip() {
         for verification in OutputVerification::all() {
-            let parsed: OutputVerification = verification.as_str().parse().unwrap();
+            let parsed: OutputVerification =
+                verification.as_str().parse().unwrap_or_else(|error| {
+                    panic!("output verification roundtrip fixture parses: {error}")
+                });
             assert_eq!(verification, parsed);
         }
     }

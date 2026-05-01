@@ -60,6 +60,8 @@ fn test_memory_input() -> CreateMemoryInput {
         provenance_uri: None,
         trust_class: "agent_assertion".to_string(),
         trust_subclass: None,
+        valid_from: None,
+        valid_to: None,
         tags: vec![],
     }
 }

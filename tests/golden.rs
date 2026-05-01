@@ -267,6 +267,8 @@ mod tests {
                     provenance_uri: Some("file://AGENTS.md#compiler-checks".to_string()),
                     trust_class: "human_explicit".to_string(),
                     trust_subclass: Some("project-rule".to_string()),
+                    valid_from: None,
+                    valid_to: None,
                     tags: vec!["cargo".to_string(), "formatting".to_string()],
                 },
             )
