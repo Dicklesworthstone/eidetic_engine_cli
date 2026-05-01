@@ -53,6 +53,7 @@ pub enum SchemaCategory {
     Doctor,
     Install,
     Hooks,
+    Eval,
 }
 
 impl SchemaCategory {
@@ -78,6 +79,7 @@ impl SchemaCategory {
             Self::Doctor => "doctor",
             Self::Install => "install",
             Self::Hooks => "hooks",
+            Self::Eval => "eval",
         }
     }
 }
@@ -86,75 +88,199 @@ impl SchemaCategory {
 pub const CORE_SCHEMAS: &[SchemaEntry] = &[
     SchemaEntry::new("response", "ee.response.v1", SchemaCategory::Response),
     SchemaEntry::new("error", "ee.error.v1", SchemaCategory::Error),
-    SchemaEntry::new("version_provenance", "ee.version.provenance.v1", SchemaCategory::Response),
+    SchemaEntry::new(
+        "version_provenance",
+        "ee.version.provenance.v1",
+        SchemaCategory::Response,
+    ),
 ];
 
 /// Handoff schemas.
 pub const HANDOFF_SCHEMAS: &[SchemaEntry] = &[
-    SchemaEntry::new("handoff_capsule", "ee.handoff.capsule.v1", SchemaCategory::Handoff),
-    SchemaEntry::new("handoff_preview", "ee.handoff.preview.v1", SchemaCategory::Handoff),
-    SchemaEntry::new("handoff_create", "ee.handoff.create.v1", SchemaCategory::Handoff),
-    SchemaEntry::new("handoff_inspect", "ee.handoff.inspect.v1", SchemaCategory::Handoff),
-    SchemaEntry::new("handoff_resume", "ee.handoff.resume.v1", SchemaCategory::Handoff),
+    SchemaEntry::new(
+        "handoff_capsule",
+        "ee.handoff.capsule.v1",
+        SchemaCategory::Handoff,
+    ),
+    SchemaEntry::new(
+        "handoff_preview",
+        "ee.handoff.preview.v1",
+        SchemaCategory::Handoff,
+    ),
+    SchemaEntry::new(
+        "handoff_create",
+        "ee.handoff.create.v1",
+        SchemaCategory::Handoff,
+    ),
+    SchemaEntry::new(
+        "handoff_inspect",
+        "ee.handoff.inspect.v1",
+        SchemaCategory::Handoff,
+    ),
+    SchemaEntry::new(
+        "handoff_resume",
+        "ee.handoff.resume.v1",
+        SchemaCategory::Handoff,
+    ),
 ];
 
 /// Context and search schemas.
 pub const CONTEXT_SCHEMAS: &[SchemaEntry] = &[
-    SchemaEntry::new("context_pack", "ee.context.pack.v1", SchemaCategory::Context),
+    SchemaEntry::new(
+        "context_pack",
+        "ee.context.pack.v1",
+        SchemaCategory::Context,
+    ),
     SchemaEntry::new("query", "ee.query.v1", SchemaCategory::Context),
-    SchemaEntry::new("search_results", "ee.search.results.v1", SchemaCategory::Search),
+    SchemaEntry::new(
+        "search_results",
+        "ee.search.results.v1",
+        SchemaCategory::Search,
+    ),
 ];
 
 /// Procedure schemas.
 pub const PROCEDURE_SCHEMAS: &[SchemaEntry] = &[
-    SchemaEntry::new("procedure_propose", "ee.procedure.propose_report.v1", SchemaCategory::Procedure),
-    SchemaEntry::new("procedure_show", "ee.procedure.show_report.v1", SchemaCategory::Procedure),
-    SchemaEntry::new("procedure_list", "ee.procedure.list_report.v1", SchemaCategory::Procedure),
-    SchemaEntry::new("procedure_export", "ee.procedure.export_report.v1", SchemaCategory::Procedure),
-    SchemaEntry::new("procedure_verify", "ee.procedure.verify_report.v1", SchemaCategory::Procedure),
+    SchemaEntry::new(
+        "procedure_propose",
+        "ee.procedure.propose_report.v1",
+        SchemaCategory::Procedure,
+    ),
+    SchemaEntry::new(
+        "procedure_show",
+        "ee.procedure.show_report.v1",
+        SchemaCategory::Procedure,
+    ),
+    SchemaEntry::new(
+        "procedure_list",
+        "ee.procedure.list_report.v1",
+        SchemaCategory::Procedure,
+    ),
+    SchemaEntry::new(
+        "procedure_export",
+        "ee.procedure.export_report.v1",
+        SchemaCategory::Procedure,
+    ),
+    SchemaEntry::new(
+        "procedure_verify",
+        "ee.procedure.verify_report.v1",
+        SchemaCategory::Procedure,
+    ),
 ];
 
 /// Graph schemas.
 pub const GRAPH_SCHEMAS: &[SchemaEntry] = &[
     SchemaEntry::new("graph_module", "ee.graph.module.v1", SchemaCategory::Graph),
-    SchemaEntry::new("centrality_refresh", "ee.graph.centrality_refresh.v1", SchemaCategory::Graph),
-    SchemaEntry::new("snapshot_validation", "ee.graph.snapshot_validation.v1", SchemaCategory::Graph),
+    SchemaEntry::new(
+        "centrality_refresh",
+        "ee.graph.centrality_refresh.v1",
+        SchemaCategory::Graph,
+    ),
+    SchemaEntry::new(
+        "snapshot_validation",
+        "ee.graph.snapshot_validation.v1",
+        SchemaCategory::Graph,
+    ),
 ];
 
 /// Preflight and recorder schemas.
 pub const PREFLIGHT_SCHEMAS: &[SchemaEntry] = &[
-    SchemaEntry::new("preflight_report", "ee.preflight.report.v1", SchemaCategory::Preflight),
-    SchemaEntry::new("recorder_start", "ee.recorder.start.v1", SchemaCategory::Recorder),
-    SchemaEntry::new("recorder_event", "ee.recorder.event_response.v1", SchemaCategory::Recorder),
-    SchemaEntry::new("recorder_finish", "ee.recorder.finish.v1", SchemaCategory::Recorder),
-    SchemaEntry::new("recorder_tail", "ee.recorder.tail.v1", SchemaCategory::Recorder),
-    SchemaEntry::new("recorder_links", "ee.recorder.links.v1", SchemaCategory::Recorder),
+    SchemaEntry::new(
+        "preflight_report",
+        "ee.preflight.report.v1",
+        SchemaCategory::Preflight,
+    ),
+    SchemaEntry::new(
+        "recorder_start",
+        "ee.recorder.start.v1",
+        SchemaCategory::Recorder,
+    ),
+    SchemaEntry::new(
+        "recorder_event",
+        "ee.recorder.event_response.v1",
+        SchemaCategory::Recorder,
+    ),
+    SchemaEntry::new(
+        "recorder_finish",
+        "ee.recorder.finish.v1",
+        SchemaCategory::Recorder,
+    ),
+    SchemaEntry::new(
+        "recorder_tail",
+        "ee.recorder.tail.v1",
+        SchemaCategory::Recorder,
+    ),
+    SchemaEntry::new(
+        "recorder_links",
+        "ee.recorder.links.v1",
+        SchemaCategory::Recorder,
+    ),
 ];
 
 /// Lab schemas.
 pub const LAB_SCHEMAS: &[SchemaEntry] = &[
     SchemaEntry::new("lab_capture", "ee.lab.capture.v1", SchemaCategory::Lab),
     SchemaEntry::new("lab_replay", "ee.lab.replay.v1", SchemaCategory::Lab),
-    SchemaEntry::new("lab_counterfactual", "ee.lab.counterfactual.v1", SchemaCategory::Lab),
-    SchemaEntry::new("lab_reconstruct", "ee.lab.reconstruct.v1", SchemaCategory::Lab),
+    SchemaEntry::new(
+        "lab_counterfactual",
+        "ee.lab.counterfactual.v1",
+        SchemaCategory::Lab,
+    ),
+    SchemaEntry::new(
+        "lab_reconstruct",
+        "ee.lab.reconstruct.v1",
+        SchemaCategory::Lab,
+    ),
 ];
 
 /// Situation and plan schemas.
 pub const SITUATION_SCHEMAS: &[SchemaEntry] = &[
-    SchemaEntry::new("situation_classify", "ee.situation.classify.v1", SchemaCategory::Situation),
-    SchemaEntry::new("situation_show", "ee.situation.show.v1", SchemaCategory::Situation),
-    SchemaEntry::new("situation_explain", "ee.situation.explain.v1", SchemaCategory::Situation),
+    SchemaEntry::new(
+        "situation_classify",
+        "ee.situation.classify.v1",
+        SchemaCategory::Situation,
+    ),
+    SchemaEntry::new(
+        "situation_show",
+        "ee.situation.show.v1",
+        SchemaCategory::Situation,
+    ),
+    SchemaEntry::new(
+        "situation_explain",
+        "ee.situation.explain.v1",
+        SchemaCategory::Situation,
+    ),
     SchemaEntry::new("goal_plan", "ee.plan.goal.v1", SchemaCategory::Plan),
-    SchemaEntry::new("recipe_list", "ee.plan.recipe_list.v1", SchemaCategory::Plan),
+    SchemaEntry::new(
+        "recipe_list",
+        "ee.plan.recipe_list.v1",
+        SchemaCategory::Plan,
+    ),
     SchemaEntry::new("recipe_show", "ee.plan.recipe.v1", SchemaCategory::Plan),
 ];
 
 /// Doctor and diagnostics schemas.
 pub const DOCTOR_SCHEMAS: &[SchemaEntry] = &[
-    SchemaEntry::new("doctor_report", "ee.doctor.report.v1", SchemaCategory::Doctor),
-    SchemaEntry::new("franken_health", "ee.doctor.franken_health.v1", SchemaCategory::Doctor),
-    SchemaEntry::new("dependency_diagnostics", "ee.diag.dependencies.v1", SchemaCategory::Doctor),
-    SchemaEntry::new("integrity_diagnostics", "ee.diag.integrity.v1", SchemaCategory::Doctor),
+    SchemaEntry::new(
+        "doctor_report",
+        "ee.doctor.report.v1",
+        SchemaCategory::Doctor,
+    ),
+    SchemaEntry::new(
+        "franken_health",
+        "ee.doctor.franken_health.v1",
+        SchemaCategory::Doctor,
+    ),
+    SchemaEntry::new(
+        "dependency_diagnostics",
+        "ee.diag.dependencies.v1",
+        SchemaCategory::Doctor,
+    ),
+    SchemaEntry::new(
+        "integrity_diagnostics",
+        "ee.diag.integrity.v1",
+        SchemaCategory::Doctor,
+    ),
 ];
 
 /// Hooks schemas.
@@ -166,16 +292,48 @@ pub const HOOKS_SCHEMAS: &[SchemaEntry] = &[
 /// Learn schemas.
 pub const LEARN_SCHEMAS: &[SchemaEntry] = &[
     SchemaEntry::new("learn_agenda", "ee.learn.agenda.v1", SchemaCategory::Memory),
-    SchemaEntry::new("learn_uncertainty", "ee.learn.uncertainty.v1", SchemaCategory::Memory),
-    SchemaEntry::new("learn_summary", "ee.learn.summary.v1", SchemaCategory::Memory),
+    SchemaEntry::new(
+        "learn_uncertainty",
+        "ee.learn.uncertainty.v1",
+        SchemaCategory::Memory,
+    ),
+    SchemaEntry::new(
+        "learn_summary",
+        "ee.learn.summary.v1",
+        SchemaCategory::Memory,
+    ),
+    SchemaEntry::new(
+        "learn_experiment_proposal",
+        "ee.learn.experiment_proposal.v1",
+        SchemaCategory::Memory,
+    ),
 ];
 
 /// Audit schemas.
 pub const AUDIT_SCHEMAS: &[SchemaEntry] = &[
-    SchemaEntry::new("audit_timeline", "ee.audit.timeline.v1", SchemaCategory::Audit),
+    SchemaEntry::new(
+        "audit_timeline",
+        "ee.audit.timeline.v1",
+        SchemaCategory::Audit,
+    ),
     SchemaEntry::new("audit_show", "ee.audit.show.v1", SchemaCategory::Audit),
     SchemaEntry::new("audit_diff", "ee.audit.diff.v1", SchemaCategory::Audit),
     SchemaEntry::new("audit_verify", "ee.audit.verify.v1", SchemaCategory::Audit),
+];
+
+/// Eval schemas (EE-348).
+pub const EVAL_SCHEMAS: &[SchemaEntry] = &[
+    SchemaEntry::new("eval_fixture", "ee.eval_fixture.v1", SchemaCategory::Eval),
+    SchemaEntry::new(
+        "release_gate",
+        "ee.eval.release_gate.v1",
+        SchemaCategory::Eval,
+    ),
+    SchemaEntry::new(
+        "tail_budget_config",
+        "ee.eval.tail_budget_config.v1",
+        SchemaCategory::Eval,
+    ),
 ];
 
 /// All registered schemas.
@@ -193,6 +351,7 @@ pub fn all_schemas() -> Vec<&'static SchemaEntry> {
     schemas.extend(HOOKS_SCHEMAS.iter());
     schemas.extend(LEARN_SCHEMAS.iter());
     schemas.extend(AUDIT_SCHEMAS.iter());
+    schemas.extend(EVAL_SCHEMAS.iter());
     schemas
 }
 
@@ -202,7 +361,9 @@ pub fn validate_schema_version(version: &str) -> Result<(), String> {
         return Err(format!("schema version must start with 'ee.': {version}"));
     }
     if !version.ends_with(".v1") && !version.contains(".v") {
-        return Err(format!("schema version must contain version suffix: {version}"));
+        return Err(format!(
+            "schema version must contain version suffix: {version}"
+        ));
     }
     Ok(())
 }
@@ -269,9 +430,8 @@ mod tests {
     #[test]
     fn all_schema_versions_are_valid() -> TestResult {
         for schema in all_schemas() {
-            validate_schema_version(schema.version).map_err(|e| {
-                format!("schema '{}' has invalid version: {}", schema.name, e)
-            })?;
+            validate_schema_version(schema.version)
+                .map_err(|e| format!("schema '{}' has invalid version: {}", schema.name, e))?;
         }
         Ok(())
     }
@@ -287,7 +447,10 @@ mod tests {
         for schema in all_schemas() {
             ensure(
                 !schema.name.is_empty(),
-                format!("schema name must not be empty for version {}", schema.version),
+                format!(
+                    "schema name must not be empty for version {}",
+                    schema.version
+                ),
             )?;
         }
         Ok(())
@@ -383,13 +546,53 @@ mod tests {
     }
 
     #[test]
-    fn schema_category_strings_are_stable() {
-        assert_eq!(SchemaCategory::Response.as_str(), "response");
-        assert_eq!(SchemaCategory::Error.as_str(), "error");
-        assert_eq!(SchemaCategory::Database.as_str(), "database");
-        assert_eq!(SchemaCategory::Graph.as_str(), "graph");
-        assert_eq!(SchemaCategory::Recorder.as_str(), "recorder");
-        assert_eq!(SchemaCategory::Lab.as_str(), "lab");
+    fn eval_schemas_include_release_gate_and_tail_budget() -> TestResult {
+        let versions: Vec<&str> = EVAL_SCHEMAS.iter().map(|s| s.version).collect();
+        ensure(
+            versions.contains(&"ee.eval.release_gate.v1"),
+            "eval schemas must include release_gate (EE-348)",
+        )?;
+        ensure(
+            versions.contains(&"ee.eval.tail_budget_config.v1"),
+            "eval schemas must include tail_budget_config (EE-348)",
+        )
+    }
+
+    #[test]
+    fn schema_category_strings_are_stable() -> TestResult {
+        ensure_equal(&SchemaCategory::Response.as_str(), &"response", "response")?;
+        ensure_equal(&SchemaCategory::Error.as_str(), &"error", "error")?;
+        ensure_equal(&SchemaCategory::Database.as_str(), &"database", "database")?;
+        ensure_equal(&SchemaCategory::Index.as_str(), &"index", "index")?;
+        ensure_equal(&SchemaCategory::Audit.as_str(), &"audit", "audit")?;
+        ensure_equal(&SchemaCategory::Config.as_str(), &"config", "config")?;
+        ensure_equal(&SchemaCategory::Handoff.as_str(), &"handoff", "handoff")?;
+        ensure_equal(&SchemaCategory::Context.as_str(), &"context", "context")?;
+        ensure_equal(&SchemaCategory::Search.as_str(), &"search", "search")?;
+        ensure_equal(&SchemaCategory::Memory.as_str(), &"memory", "memory")?;
+        ensure_equal(
+            &SchemaCategory::Procedure.as_str(),
+            &"procedure",
+            "procedure",
+        )?;
+        ensure_equal(&SchemaCategory::Graph.as_str(), &"graph", "graph")?;
+        ensure_equal(
+            &SchemaCategory::Preflight.as_str(),
+            &"preflight",
+            "preflight",
+        )?;
+        ensure_equal(&SchemaCategory::Recorder.as_str(), &"recorder", "recorder")?;
+        ensure_equal(&SchemaCategory::Lab.as_str(), &"lab", "lab")?;
+        ensure_equal(
+            &SchemaCategory::Situation.as_str(),
+            &"situation",
+            "situation",
+        )?;
+        ensure_equal(&SchemaCategory::Plan.as_str(), &"plan", "plan")?;
+        ensure_equal(&SchemaCategory::Doctor.as_str(), &"doctor", "doctor")?;
+        ensure_equal(&SchemaCategory::Install.as_str(), &"install", "install")?;
+        ensure_equal(&SchemaCategory::Hooks.as_str(), &"hooks", "hooks")?;
+        ensure_equal(&SchemaCategory::Eval.as_str(), &"eval", "eval")
     }
 
     #[test]

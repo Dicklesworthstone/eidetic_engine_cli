@@ -14,6 +14,12 @@ pub mod redaction;
 pub use crate::models::EVAL_FIXTURE_SCHEMA_V1;
 pub use redaction::{LeakDetection, LeakPattern, RedactionLeakDetector, RedactionLeakEvaluation};
 
+/// Schema version for release gate checks.
+pub const RELEASE_GATE_SCHEMA_V1: &str = "ee.eval.release_gate.v1";
+
+/// Schema version for tail budget configuration.
+pub const TAIL_BUDGET_CONFIG_SCHEMA_V1: &str = "ee.eval.tail_budget_config.v1";
+
 /// An evaluation scenario that tests an agent-facing journey.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluationScenario {
@@ -429,6 +435,512 @@ impl ValidationFailureKind {
     }
 }
 
+// ============================================================================
+// Release Gate Checks (EE-348)
+// ============================================================================
+
+/// Kind of release gate check.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ReleaseGateKind {
+    /// All evaluation scenarios must pass.
+    EvaluationPassed,
+    /// Schema drift detection must pass.
+    SchemaDriftPassed,
+    /// Forbidden dependencies must not be present.
+    ForbiddenDepsFree,
+    /// Tail-risk budget must not be exceeded.
+    TailBudgetWithinLimit,
+    /// Privacy budget must not be exceeded.
+    PrivacyBudgetWithinLimit,
+    /// Conformal calibration must be valid.
+    CalibrationValid,
+    /// All required test coverage gates must pass.
+    CoverageGatePassed,
+}
+
+impl ReleaseGateKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EvaluationPassed => "evaluation_passed",
+            Self::SchemaDriftPassed => "schema_drift_passed",
+            Self::ForbiddenDepsFree => "forbidden_deps_free",
+            Self::TailBudgetWithinLimit => "tail_budget_within_limit",
+            Self::PrivacyBudgetWithinLimit => "privacy_budget_within_limit",
+            Self::CalibrationValid => "calibration_valid",
+            Self::CoverageGatePassed => "coverage_gate_passed",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 7] {
+        [
+            Self::EvaluationPassed,
+            Self::SchemaDriftPassed,
+            Self::ForbiddenDepsFree,
+            Self::TailBudgetWithinLimit,
+            Self::PrivacyBudgetWithinLimit,
+            Self::CalibrationValid,
+            Self::CoverageGatePassed,
+        ]
+    }
+
+    /// Whether this gate is critical (blocks release if failed).
+    #[must_use]
+    pub const fn is_critical(self) -> bool {
+        matches!(
+            self,
+            Self::ForbiddenDepsFree | Self::TailBudgetWithinLimit | Self::SchemaDriftPassed
+        )
+    }
+}
+
+impl std::fmt::Display for ReleaseGateKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Result of a single release gate check.
+#[derive(Clone, Debug)]
+pub struct ReleaseGateCheck {
+    pub gate: ReleaseGateKind,
+    pub passed: bool,
+    pub message: String,
+    pub details: Option<String>,
+}
+
+impl ReleaseGateCheck {
+    #[must_use]
+    pub fn passed(gate: ReleaseGateKind, message: impl Into<String>) -> Self {
+        Self {
+            gate,
+            passed: true,
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    #[must_use]
+    pub fn failed(gate: ReleaseGateKind, message: impl Into<String>) -> Self {
+        Self {
+            gate,
+            passed: false,
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_details(mut self, details: impl Into<String>) -> Self {
+        self.details = Some(details.into());
+        self
+    }
+
+    /// Whether this check blocks the release.
+    #[must_use]
+    pub fn blocks_release(&self) -> bool {
+        !self.passed && self.gate.is_critical()
+    }
+}
+
+/// Aggregate report of all release gate checks.
+#[derive(Clone, Debug, Default)]
+pub struct ReleaseGateReport {
+    pub checks: Vec<ReleaseGateCheck>,
+    pub all_passed: bool,
+    pub critical_failed: bool,
+    pub elapsed_ms: f64,
+}
+
+impl ReleaseGateReport {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a check result to the report.
+    pub fn add_check(&mut self, check: ReleaseGateCheck) {
+        if check.blocks_release() {
+            self.critical_failed = true;
+        }
+        self.checks.push(check);
+    }
+
+    /// Finalize the report and compute aggregate status.
+    pub fn finalize(&mut self) {
+        self.all_passed = self.checks.iter().all(|c| c.passed);
+    }
+
+    /// Get checks that failed.
+    #[must_use]
+    pub fn failed_checks(&self) -> Vec<&ReleaseGateCheck> {
+        self.checks.iter().filter(|c| !c.passed).collect()
+    }
+
+    /// Whether the release should be blocked.
+    #[must_use]
+    pub fn should_block(&self) -> bool {
+        self.critical_failed
+    }
+}
+
+// ============================================================================
+// Tail Budget Checks (EE-348)
+// ============================================================================
+
+/// Configuration for tail-risk budget checks.
+#[derive(Clone, Debug)]
+pub struct TailBudgetConfig {
+    /// Maximum acceptable observed risk value.
+    pub max_observed_risk: f64,
+    /// Maximum acceptable upper bound of risk estimate.
+    pub max_upper_bound: f64,
+    /// Minimum required confidence level for risk assessments.
+    pub min_confidence_level: f64,
+    /// Maximum number of metrics allowed to exceed thresholds.
+    pub max_exceeded_metrics: usize,
+    /// Whether to fail on any exceeded bound.
+    pub strict_mode: bool,
+}
+
+impl Default for TailBudgetConfig {
+    fn default() -> Self {
+        Self {
+            max_observed_risk: 0.15,
+            max_upper_bound: 0.25,
+            min_confidence_level: 0.90,
+            max_exceeded_metrics: 0,
+            strict_mode: true,
+        }
+    }
+}
+
+impl TailBudgetConfig {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_max_observed_risk(mut self, value: f64) -> Self {
+        self.max_observed_risk = value;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_upper_bound(mut self, value: f64) -> Self {
+        self.max_upper_bound = value;
+        self
+    }
+
+    #[must_use]
+    pub fn with_min_confidence(mut self, value: f64) -> Self {
+        self.min_confidence_level = value;
+        self
+    }
+
+    #[must_use]
+    pub fn lenient(mut self) -> Self {
+        self.strict_mode = false;
+        self.max_exceeded_metrics = 2;
+        self
+    }
+}
+
+/// Result of a tail budget check.
+#[derive(Clone, Debug)]
+pub struct TailBudgetResult {
+    pub passed: bool,
+    pub metrics_checked: usize,
+    pub metrics_exceeded: usize,
+    pub worst_metric: Option<String>,
+    pub worst_observed: Option<f64>,
+    pub worst_threshold: Option<f64>,
+    pub message: String,
+}
+
+impl TailBudgetResult {
+    #[must_use]
+    pub fn passed(metrics_checked: usize) -> Self {
+        Self {
+            passed: true,
+            metrics_checked,
+            metrics_exceeded: 0,
+            worst_metric: None,
+            worst_observed: None,
+            worst_threshold: None,
+            message: format!("All {metrics_checked} tail-risk metrics within budget"),
+        }
+    }
+
+    #[must_use]
+    pub fn failed(
+        metrics_checked: usize,
+        metrics_exceeded: usize,
+        worst_metric: String,
+        worst_observed: f64,
+        worst_threshold: f64,
+    ) -> Self {
+        Self {
+            passed: false,
+            metrics_checked,
+            metrics_exceeded,
+            worst_metric: Some(worst_metric.clone()),
+            worst_observed: Some(worst_observed),
+            worst_threshold: Some(worst_threshold),
+            message: format!(
+                "Tail budget exceeded: {metrics_exceeded}/{metrics_checked} metrics over limit. \
+                 Worst: {worst_metric} ({worst_observed:.4} > {worst_threshold:.4})"
+            ),
+        }
+    }
+
+    /// Convert to a release gate check result.
+    #[must_use]
+    pub fn to_gate_check(&self) -> ReleaseGateCheck {
+        if self.passed {
+            ReleaseGateCheck::passed(ReleaseGateKind::TailBudgetWithinLimit, &self.message)
+        } else {
+            ReleaseGateCheck::failed(ReleaseGateKind::TailBudgetWithinLimit, &self.message)
+                .with_details(format!(
+                    "exceeded_count={}, worst_metric={:?}",
+                    self.metrics_exceeded, self.worst_metric
+                ))
+        }
+    }
+}
+
+/// Tail-risk stress fixture for testing edge cases.
+#[derive(Clone, Debug)]
+pub struct TailRiskStressFixture {
+    pub name: String,
+    pub description: String,
+    pub metrics: Vec<StressMetric>,
+    pub expected_outcome: StressOutcome,
+}
+
+/// A single metric in a stress fixture.
+#[derive(Clone, Debug)]
+pub struct StressMetric {
+    pub name: String,
+    pub observed: f64,
+    pub threshold: f64,
+    pub upper_bound: f64,
+    pub confidence_level: f64,
+}
+
+impl StressMetric {
+    #[must_use]
+    pub fn new(name: impl Into<String>, observed: f64, threshold: f64) -> Self {
+        Self {
+            name: name.into(),
+            observed,
+            threshold,
+            upper_bound: observed * 1.2,
+            confidence_level: 0.95,
+        }
+    }
+
+    #[must_use]
+    pub fn with_upper_bound(mut self, value: f64) -> Self {
+        self.upper_bound = value;
+        self
+    }
+
+    #[must_use]
+    pub fn with_confidence(mut self, value: f64) -> Self {
+        self.confidence_level = value;
+        self
+    }
+
+    /// Whether this metric exceeds its threshold.
+    #[must_use]
+    pub fn exceeds_threshold(&self) -> bool {
+        self.observed > self.threshold
+    }
+
+    /// Margin to threshold (positive = safe, negative = exceeded).
+    #[must_use]
+    pub fn margin(&self) -> f64 {
+        self.threshold - self.observed
+    }
+}
+
+/// Expected outcome of a stress test.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StressOutcome {
+    Pass,
+    Fail,
+    Warning,
+}
+
+impl StressOutcome {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::Warning => "warning",
+        }
+    }
+}
+
+impl std::fmt::Display for StressOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TailRiskStressFixture {
+    #[must_use]
+    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            metrics: Vec::new(),
+            expected_outcome: StressOutcome::Pass,
+        }
+    }
+
+    #[must_use]
+    pub fn with_metric(mut self, metric: StressMetric) -> Self {
+        self.metrics.push(metric);
+        self
+    }
+
+    #[must_use]
+    pub fn expect_fail(mut self) -> Self {
+        self.expected_outcome = StressOutcome::Fail;
+        self
+    }
+
+    #[must_use]
+    pub fn expect_warning(mut self) -> Self {
+        self.expected_outcome = StressOutcome::Warning;
+        self
+    }
+
+    /// Evaluate this fixture against a budget config.
+    #[must_use]
+    pub fn evaluate(&self, config: &TailBudgetConfig) -> TailBudgetResult {
+        check_tail_budget(&self.metrics, config)
+    }
+}
+
+/// Check tail-risk metrics against budget configuration.
+#[must_use]
+pub fn check_tail_budget(metrics: &[StressMetric], config: &TailBudgetConfig) -> TailBudgetResult {
+    if metrics.is_empty() {
+        return TailBudgetResult::passed(0);
+    }
+
+    let mut exceeded_count = 0_usize;
+    let mut worst_metric: Option<&StressMetric> = None;
+    let mut worst_margin = f64::MAX;
+
+    for metric in metrics {
+        let mut exceeds = false;
+
+        if metric.observed > config.max_observed_risk {
+            exceeds = true;
+        }
+        if metric.upper_bound > config.max_upper_bound {
+            exceeds = true;
+        }
+        if metric.confidence_level < config.min_confidence_level {
+            exceeds = true;
+        }
+        if metric.exceeds_threshold() {
+            exceeds = true;
+        }
+
+        if exceeds {
+            exceeded_count += 1;
+            let margin = metric.margin();
+            if margin < worst_margin {
+                worst_margin = margin;
+                worst_metric = Some(metric);
+            }
+        }
+    }
+
+    let passed = if config.strict_mode {
+        exceeded_count == 0
+    } else {
+        exceeded_count <= config.max_exceeded_metrics
+    };
+
+    if passed {
+        TailBudgetResult::passed(metrics.len())
+    } else {
+        match worst_metric {
+            Some(worst) => TailBudgetResult::failed(
+                metrics.len(),
+                exceeded_count,
+                worst.name.clone(),
+                worst.observed,
+                worst.threshold,
+            ),
+            None => TailBudgetResult::failed(
+                metrics.len(),
+                exceeded_count,
+                "unknown".to_owned(),
+                0.0,
+                0.0,
+            ),
+        }
+    }
+}
+
+/// Standard stress fixtures for tail-risk testing.
+#[must_use]
+pub fn tail_risk_stress_fixtures() -> Vec<TailRiskStressFixture> {
+    vec![
+        TailRiskStressFixture::new("all_safe", "All metrics well within bounds")
+            .with_metric(StressMetric::new("false_positive_rate", 0.03, 0.10))
+            .with_metric(StressMetric::new("false_negative_rate", 0.02, 0.10))
+            .with_metric(StressMetric::new("calibration_error", 0.01, 0.05)),
+        TailRiskStressFixture::new("single_exceeded", "One metric exceeds threshold")
+            .with_metric(StressMetric::new("false_positive_rate", 0.12, 0.10))
+            .with_metric(StressMetric::new("false_negative_rate", 0.02, 0.10))
+            .expect_fail(),
+        TailRiskStressFixture::new("boundary_exact", "Metric exactly at threshold")
+            .with_metric(StressMetric::new("false_positive_rate", 0.10, 0.10))
+            .with_metric(StressMetric::new("calibration_error", 0.05, 0.05)),
+        TailRiskStressFixture::new("all_exceeded", "All metrics exceed thresholds")
+            .with_metric(StressMetric::new("false_positive_rate", 0.25, 0.10))
+            .with_metric(StressMetric::new("false_negative_rate", 0.30, 0.10))
+            .with_metric(StressMetric::new("calibration_error", 0.20, 0.05))
+            .expect_fail(),
+        TailRiskStressFixture::new(
+            "high_upper_bound",
+            "Upper bound exceeds limit even though observed is OK",
+        )
+        .with_metric(StressMetric::new("latency_p99", 0.05, 0.10).with_upper_bound(0.40))
+        .expect_fail(),
+        TailRiskStressFixture::new("low_confidence", "Confidence level below minimum")
+            .with_metric(StressMetric::new("error_rate", 0.02, 0.10).with_confidence(0.80))
+            .expect_fail(),
+        TailRiskStressFixture::new(
+            "epsilon_under",
+            "Just barely under threshold (epsilon test)",
+        )
+        .with_metric(StressMetric::new("budget_utilization", 0.0999999, 0.10)),
+        TailRiskStressFixture::new("epsilon_over", "Just barely over threshold (epsilon test)")
+            .with_metric(StressMetric::new("budget_utilization", 0.1000001, 0.10))
+            .expect_fail(),
+        TailRiskStressFixture::new("zero_values", "Zero observed and threshold values")
+            .with_metric(StressMetric::new("zero_metric", 0.0, 0.0)),
+        TailRiskStressFixture::new(
+            "negative_margin",
+            "Large negative margin (severely exceeded)",
+        )
+        .with_metric(StressMetric::new("catastrophic_failure", 0.95, 0.05))
+        .expect_fail(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -710,6 +1222,316 @@ mod tests {
             EvaluationStatus::AllFailed.is_success(),
             false,
             "all_failed",
+        )
+    }
+
+    // ========================================================================
+    // Release Gate Tests (EE-348)
+    // ========================================================================
+
+    #[test]
+    fn release_gate_kind_strings_are_stable() -> TestResult {
+        ensure(
+            ReleaseGateKind::EvaluationPassed.as_str(),
+            "evaluation_passed",
+            "evaluation_passed",
+        )?;
+        ensure(
+            ReleaseGateKind::SchemaDriftPassed.as_str(),
+            "schema_drift_passed",
+            "schema_drift_passed",
+        )?;
+        ensure(
+            ReleaseGateKind::ForbiddenDepsFree.as_str(),
+            "forbidden_deps_free",
+            "forbidden_deps_free",
+        )?;
+        ensure(
+            ReleaseGateKind::TailBudgetWithinLimit.as_str(),
+            "tail_budget_within_limit",
+            "tail_budget_within_limit",
+        )?;
+        ensure(
+            ReleaseGateKind::PrivacyBudgetWithinLimit.as_str(),
+            "privacy_budget_within_limit",
+            "privacy_budget_within_limit",
+        )?;
+        ensure(
+            ReleaseGateKind::CalibrationValid.as_str(),
+            "calibration_valid",
+            "calibration_valid",
+        )?;
+        ensure(
+            ReleaseGateKind::CoverageGatePassed.as_str(),
+            "coverage_gate_passed",
+            "coverage_gate_passed",
+        )
+    }
+
+    #[test]
+    fn release_gate_critical_gates_are_identified() -> TestResult {
+        ensure(
+            ReleaseGateKind::TailBudgetWithinLimit.is_critical(),
+            true,
+            "tail_budget critical",
+        )?;
+        ensure(
+            ReleaseGateKind::ForbiddenDepsFree.is_critical(),
+            true,
+            "forbidden_deps critical",
+        )?;
+        ensure(
+            ReleaseGateKind::SchemaDriftPassed.is_critical(),
+            true,
+            "schema_drift critical",
+        )?;
+        ensure(
+            ReleaseGateKind::EvaluationPassed.is_critical(),
+            false,
+            "evaluation not critical",
+        )
+    }
+
+    #[test]
+    fn release_gate_check_passed_does_not_block() -> TestResult {
+        let check = ReleaseGateCheck::passed(ReleaseGateKind::TailBudgetWithinLimit, "All good");
+        ensure(check.passed, true, "passed")?;
+        ensure(check.blocks_release(), false, "does not block")
+    }
+
+    #[test]
+    fn release_gate_check_failed_critical_blocks() -> TestResult {
+        let check =
+            ReleaseGateCheck::failed(ReleaseGateKind::TailBudgetWithinLimit, "Budget exceeded");
+        ensure(check.passed, false, "failed")?;
+        ensure(check.blocks_release(), true, "blocks release")
+    }
+
+    #[test]
+    fn release_gate_check_failed_non_critical_does_not_block() -> TestResult {
+        let check =
+            ReleaseGateCheck::failed(ReleaseGateKind::EvaluationPassed, "Some tests failed");
+        ensure(check.passed, false, "failed")?;
+        ensure(check.blocks_release(), false, "does not block")
+    }
+
+    #[test]
+    fn release_gate_report_tracks_critical_failures() -> TestResult {
+        let mut report = ReleaseGateReport::new();
+
+        report.add_check(ReleaseGateCheck::passed(
+            ReleaseGateKind::EvaluationPassed,
+            "OK",
+        ));
+        ensure(report.critical_failed, false, "no critical failure yet")?;
+
+        report.add_check(ReleaseGateCheck::failed(
+            ReleaseGateKind::TailBudgetWithinLimit,
+            "Exceeded",
+        ));
+        ensure(report.critical_failed, true, "critical failure detected")?;
+        ensure(report.should_block(), true, "should block")
+    }
+
+    #[test]
+    fn release_gate_report_finalize_computes_all_passed() -> TestResult {
+        let mut report = ReleaseGateReport::new();
+        report.add_check(ReleaseGateCheck::passed(
+            ReleaseGateKind::EvaluationPassed,
+            "OK",
+        ));
+        report.add_check(ReleaseGateCheck::passed(
+            ReleaseGateKind::TailBudgetWithinLimit,
+            "OK",
+        ));
+        report.finalize();
+
+        ensure(report.all_passed, true, "all passed")?;
+        ensure(report.should_block(), false, "should not block")
+    }
+
+    // ========================================================================
+    // Tail Budget Tests (EE-348)
+    // ========================================================================
+
+    #[test]
+    fn tail_budget_config_default_is_strict() -> TestResult {
+        let config = TailBudgetConfig::default();
+        ensure(config.strict_mode, true, "strict_mode")?;
+        ensure(config.max_exceeded_metrics, 0, "max_exceeded")
+    }
+
+    #[test]
+    fn tail_budget_config_lenient_allows_some_exceeded() -> TestResult {
+        let config = TailBudgetConfig::new().lenient();
+        ensure(config.strict_mode, false, "not strict")?;
+        ensure(config.max_exceeded_metrics, 2, "allows 2 exceeded")
+    }
+
+    #[test]
+    fn stress_metric_exceeds_threshold_correctly() -> TestResult {
+        let safe = StressMetric::new("test", 0.05, 0.10);
+        ensure(safe.exceeds_threshold(), false, "safe does not exceed")?;
+
+        let exceeded = StressMetric::new("test", 0.15, 0.10);
+        ensure(exceeded.exceeds_threshold(), true, "exceeded does exceed")
+    }
+
+    #[test]
+    fn stress_metric_margin_calculation() -> TestResult {
+        let safe = StressMetric::new("test", 0.05, 0.10);
+        ensure(safe.margin() > 0.0, true, "positive margin for safe")?;
+
+        let exceeded = StressMetric::new("test", 0.15, 0.10);
+        ensure(
+            exceeded.margin() < 0.0,
+            true,
+            "negative margin for exceeded",
+        )
+    }
+
+    #[test]
+    fn check_tail_budget_empty_metrics_passes() -> TestResult {
+        let config = TailBudgetConfig::default();
+        let result = check_tail_budget(&[], &config);
+        ensure(result.passed, true, "empty passes")?;
+        ensure(result.metrics_checked, 0, "zero checked")
+    }
+
+    #[test]
+    fn check_tail_budget_all_safe_passes() -> TestResult {
+        let config = TailBudgetConfig::default();
+        let metrics = vec![
+            StressMetric::new("a", 0.05, 0.20),
+            StressMetric::new("b", 0.08, 0.20),
+        ];
+        let result = check_tail_budget(&metrics, &config);
+        ensure(result.passed, true, "all safe passes")?;
+        ensure(result.metrics_exceeded, 0, "none exceeded")
+    }
+
+    #[test]
+    fn check_tail_budget_one_exceeded_fails_strict() -> TestResult {
+        let config = TailBudgetConfig::default();
+        let metrics = vec![
+            StressMetric::new("a", 0.05, 0.10),
+            StressMetric::new("b", 0.25, 0.10),
+        ];
+        let result = check_tail_budget(&metrics, &config);
+        ensure(result.passed, false, "one exceeded fails")?;
+        ensure(result.metrics_exceeded, 1, "one exceeded")?;
+        ensure(result.worst_metric, Some("b".to_string()), "worst is b")
+    }
+
+    #[test]
+    fn check_tail_budget_one_exceeded_passes_lenient() -> TestResult {
+        let config = TailBudgetConfig::new().lenient();
+        let metrics = vec![
+            StressMetric::new("a", 0.05, 0.10),
+            StressMetric::new("b", 0.25, 0.10),
+        ];
+        let result = check_tail_budget(&metrics, &config);
+        ensure(result.passed, true, "one exceeded passes lenient")
+    }
+
+    #[test]
+    fn check_tail_budget_upper_bound_triggers_failure() -> TestResult {
+        let config = TailBudgetConfig::default();
+        let metrics = vec![StressMetric::new("a", 0.05, 0.20).with_upper_bound(0.50)];
+        let result = check_tail_budget(&metrics, &config);
+        ensure(result.passed, false, "high upper bound fails")
+    }
+
+    #[test]
+    fn check_tail_budget_low_confidence_triggers_failure() -> TestResult {
+        let config = TailBudgetConfig::default();
+        let metrics = vec![StressMetric::new("a", 0.05, 0.20).with_confidence(0.70)];
+        let result = check_tail_budget(&metrics, &config);
+        ensure(result.passed, false, "low confidence fails")
+    }
+
+    #[test]
+    fn tail_budget_result_to_gate_check_passed() -> TestResult {
+        let result = TailBudgetResult::passed(5);
+        let check = result.to_gate_check();
+        ensure(check.passed, true, "gate passed")?;
+        ensure(
+            check.gate,
+            ReleaseGateKind::TailBudgetWithinLimit,
+            "correct gate kind",
+        )
+    }
+
+    #[test]
+    fn tail_budget_result_to_gate_check_failed() -> TestResult {
+        let result = TailBudgetResult::failed(5, 2, "test".to_string(), 0.25, 0.10);
+        let check = result.to_gate_check();
+        ensure(check.passed, false, "gate failed")?;
+        ensure(check.blocks_release(), true, "blocks release")?;
+        ensure(check.details.is_some(), true, "has details")
+    }
+
+    #[test]
+    fn stress_outcome_strings_are_stable() -> TestResult {
+        ensure(StressOutcome::Pass.as_str(), "pass", "pass")?;
+        ensure(StressOutcome::Fail.as_str(), "fail", "fail")?;
+        ensure(StressOutcome::Warning.as_str(), "warning", "warning")
+    }
+
+    #[test]
+    fn tail_risk_stress_fixtures_are_non_empty() -> TestResult {
+        let fixtures = tail_risk_stress_fixtures();
+        ensure(fixtures.len() >= 8, true, "at least 8 fixtures")
+    }
+
+    #[test]
+    fn tail_risk_stress_fixtures_have_valid_expectations() -> TestResult {
+        let fixtures = tail_risk_stress_fixtures();
+        let config = TailBudgetConfig::default();
+
+        for fixture in &fixtures {
+            let result = fixture.evaluate(&config);
+            let expected_pass = fixture.expected_outcome == StressOutcome::Pass;
+            if result.passed != expected_pass {
+                return Err(format!(
+                    "Fixture '{}' expected {:?} but got passed={}",
+                    fixture.name, fixture.expected_outcome, result.passed
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stress_fixture_boundary_exact_is_not_exceeded() -> TestResult {
+        let metric = StressMetric::new("exact", 0.10, 0.10);
+        ensure(
+            metric.exceeds_threshold(),
+            false,
+            "exact boundary does not exceed",
+        )
+    }
+
+    #[test]
+    fn stress_fixture_epsilon_detection() -> TestResult {
+        let under = StressMetric::new("under", 0.0999999, 0.10);
+        let over = StressMetric::new("over", 0.1000001, 0.10);
+
+        ensure(under.exceeds_threshold(), false, "epsilon under")?;
+        ensure(over.exceeds_threshold(), true, "epsilon over")
+    }
+
+    #[test]
+    fn release_gate_schema_version_is_stable() -> TestResult {
+        ensure(
+            RELEASE_GATE_SCHEMA_V1,
+            "ee.eval.release_gate.v1",
+            "release gate schema",
+        )?;
+        ensure(
+            TAIL_BUDGET_CONFIG_SCHEMA_V1,
+            "ee.eval.tail_budget_config.v1",
+            "tail budget config schema",
         )
     }
 }

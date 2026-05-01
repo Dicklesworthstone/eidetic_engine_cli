@@ -245,6 +245,12 @@ pub const GRAPH_MODULE_SCHEMA_V1: &str = "ee.graph.module.v1";
 /// Schema for evaluation fixtures.
 pub const EVAL_FIXTURE_SCHEMA_V1: &str = "ee.eval_fixture.v1";
 
+/// Schema for release gate checks (EE-348).
+pub const RELEASE_GATE_SCHEMA_V1: &str = "ee.eval.release_gate.v1";
+
+/// Schema for tail budget configuration (EE-348).
+pub const TAIL_BUDGET_CONFIG_SCHEMA_V1: &str = "ee.eval.tail_budget_config.v1";
+
 /// Schema for index manifest (tracking index state and staleness).
 pub const INDEX_MANIFEST_SCHEMA_V1: &str = "ee.index_manifest.v1";
 
