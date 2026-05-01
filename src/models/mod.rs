@@ -206,6 +206,9 @@ pub const RESPONSE_SCHEMA_V1: &str = "ee.response.v1";
 /// Error envelope schema for failed command output.
 pub const ERROR_SCHEMA_V1: &str = "ee.error.v1";
 
+/// Schema for query request documents (`--query-file`).
+pub const QUERY_SCHEMA_V1: &str = "ee.query.v1";
+
 /// Schema for CASS import reports (`ee import cass`).
 pub const IMPORT_CASS_SCHEMA_V1: &str = "ee.import.cass.v1";
 

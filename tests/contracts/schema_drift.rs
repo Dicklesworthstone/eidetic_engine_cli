@@ -101,6 +101,7 @@ pub const HANDOFF_SCHEMAS: &[SchemaEntry] = &[
 /// Context and search schemas.
 pub const CONTEXT_SCHEMAS: &[SchemaEntry] = &[
     SchemaEntry::new("context_pack", "ee.context.pack.v1", SchemaCategory::Context),
+    SchemaEntry::new("query", "ee.query.v1", SchemaCategory::Context),
     SchemaEntry::new("search_results", "ee.search.results.v1", SchemaCategory::Search),
 ];
 
