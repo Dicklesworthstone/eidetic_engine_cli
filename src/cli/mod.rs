@@ -89,6 +89,10 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = FieldsLevel::Standard)]
     pub fields: FieldsLevel,
 
+    /// Control cards output verbosity (none/summary/math/full).
+    #[arg(long, global = true, value_enum, default_value_t = CardsLevel::Math)]
+    pub cards: CardsLevel,
+
     /// Print the JSON schema for the response envelope and exit.
     #[arg(long, global = true, action = ArgAction::SetTrue)]
     pub schema: bool,
@@ -135,6 +139,11 @@ impl Cli {
     }
 
     #[must_use]
+    pub const fn cards_level(&self) -> CardsLevel {
+        self.cards
+    }
+
+    #[must_use]
     pub const fn wants_meta(&self) -> bool {
         self.meta
     }
@@ -154,6 +163,9 @@ pub enum Command {
     Capabilities,
     /// Quick posture summary: ready, degraded, or needs attention.
     Check,
+    /// List, show, and verify certificate records.
+    #[command(subcommand)]
+    Certificate(CertificateCommand),
     /// Manage and verify executable claims.
     #[command(subcommand)]
     Claim(ClaimCommand),
@@ -917,6 +929,53 @@ pub struct AuditVerifyArgs {
     /// Start verification from this time or operation ID.
     #[arg(long, value_name = "TIME_OR_ID")]
     pub since: Option<String>,
+}
+
+/// Subcommands for `ee certificate`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum CertificateCommand {
+    /// List certificates in the workspace.
+    List(CertificateListArgs),
+    /// Show details of a certificate.
+    Show(CertificateShowArgs),
+    /// Verify a certificate's validity.
+    Verify(CertificateVerifyArgs),
+}
+
+/// Arguments for `ee certificate list`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct CertificateListArgs {
+    /// Filter by certificate kind (pack, curation, tail_risk, privacy_budget, lifecycle).
+    #[arg(long, value_name = "KIND")]
+    pub kind: Option<String>,
+
+    /// Filter by certificate status (valid, pending, invalid, expired, revoked).
+    #[arg(long, value_name = "STATUS")]
+    pub status: Option<String>,
+
+    /// Maximum certificates to show.
+    #[arg(long, short = 'n', default_value_t = 50)]
+    pub limit: u32,
+
+    /// Include expired certificates.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_expired: bool,
+}
+
+/// Arguments for `ee certificate show`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct CertificateShowArgs {
+    /// Certificate ID to show.
+    #[arg(value_name = "CERTIFICATE_ID")]
+    pub certificate_id: String,
+}
+
+/// Arguments for `ee certificate verify`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct CertificateVerifyArgs {
+    /// Certificate ID to verify.
+    #[arg(value_name = "CERTIFICATE_ID")]
+    pub certificate_id: String,
 }
 
 /// Subcommands for `ee preflight`.
@@ -1846,6 +1905,54 @@ impl FieldsLevel {
     }
 }
 
+/// Cards output verbosity level (EE-341).
+///
+/// Controls which cards are included in structured output:
+/// - `none`: No cards in output (minimal response)
+/// - `summary`: One-line card summaries only
+/// - `math`: Include mathematical artifacts and certificates
+/// - `full`: All cards with full provenance and explanations
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum CardsLevel {
+    None,
+    Summary,
+    #[default]
+    Math,
+    Full,
+}
+
+impl CardsLevel {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Summary => "summary",
+            Self::Math => "math",
+            Self::Full => "full",
+        }
+    }
+
+    #[must_use]
+    pub const fn to_cards_profile(self) -> output::CardsProfile {
+        match self {
+            Self::None => output::CardsProfile::None,
+            Self::Summary => output::CardsProfile::Summary,
+            Self::Math => output::CardsProfile::Math,
+            Self::Full => output::CardsProfile::Full,
+        }
+    }
+
+    #[must_use]
+    pub const fn includes_math(self) -> bool {
+        matches!(self, Self::Math | Self::Full)
+    }
+
+    #[must_use]
+    pub const fn includes_provenance(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
 pub fn run_from_env() -> ProcessExitCode {
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
@@ -1936,6 +2043,17 @@ where
                 ),
             }
         }
+        Some(Command::Certificate(ref cert_cmd)) => match cert_cmd {
+            CertificateCommand::List(args) => {
+                handle_certificate_list(&cli, args, stdout, stderr)
+            }
+            CertificateCommand::Show(args) => {
+                handle_certificate_show(&cli, args, stdout, stderr)
+            }
+            CertificateCommand::Verify(args) => {
+                handle_certificate_verify(&cli, args, stdout, stderr)
+            }
+        },
         Some(Command::Claim(ref claim_cmd)) => match claim_cmd {
             ClaimCommand::List(args) => handle_claim_list(&cli, args, stdout, stderr),
             ClaimCommand::Show(args) => handle_claim_show(&cli, args, stdout, stderr),
@@ -6109,6 +6227,138 @@ where
                 repair: Some("ee situation classify <text>".to_string()),
             };
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+// ============================================================================
+// EE-342: Certificate handlers
+// ============================================================================
+
+fn handle_certificate_list<W, E>(
+    cli: &Cli,
+    args: &CertificateListArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::certificate::{CertificateListOptions, list_certificates};
+    use crate::models::{CertificateKind, CertificateStatus};
+    use std::str::FromStr;
+
+    let mut options = CertificateListOptions::new().with_limit(args.limit);
+
+    if let Some(ref kind_str) = args.kind {
+        if let Ok(kind) = CertificateKind::from_str(kind_str) {
+            options = options.with_kind(kind);
+        }
+    }
+
+    if let Some(ref status_str) = args.status {
+        if let Ok(status) = CertificateStatus::from_str(status_str) {
+            options = options.with_status(status);
+        }
+    }
+
+    if args.include_expired {
+        options = options.include_expired();
+    }
+
+    let report = list_certificates(&options);
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_certificate_list_human(&report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_certificate_list_toon(&report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_certificate_list_json(&report) + "\n"))
+        }
+    }
+}
+
+fn handle_certificate_show<W, E>(
+    cli: &Cli,
+    args: &CertificateShowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::certificate::{VerificationResult, show_certificate};
+
+    let report = show_certificate(&args.certificate_id);
+
+    if report.verification_status == VerificationResult::NotFound {
+        let domain_error = DomainError::NotFound {
+            resource: "certificate".to_string(),
+            id: args.certificate_id.clone(),
+            repair: Some("ee certificate list --json".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_certificate_show_human(&report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_certificate_show_toon(&report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_certificate_show_json(&report) + "\n"))
+        }
+    }
+}
+
+fn handle_certificate_verify<W, E>(
+    cli: &Cli,
+    args: &CertificateVerifyArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::certificate::{VerificationResult, verify_certificate};
+
+    let report = verify_certificate(&args.certificate_id);
+
+    if report.result == VerificationResult::NotFound {
+        let domain_error = DomainError::NotFound {
+            resource: "certificate".to_string(),
+            id: args.certificate_id.clone(),
+            repair: Some("ee certificate list --json".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_certificate_verify_human(&report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_certificate_verify_toon(&report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_certificate_verify_json(&report) + "\n"))
         }
     }
 }

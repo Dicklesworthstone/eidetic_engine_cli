@@ -106,6 +106,221 @@ impl FieldProfile {
     }
 }
 
+/// Cards output profile (EE-341).
+///
+/// Controls which cards are included in structured output:
+/// - `None`: No cards in output (minimal response)
+/// - `Summary`: One-line card summaries only
+/// - `Math`: Include mathematical artifacts and certificates
+/// - `Full`: All cards with full provenance and explanations
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CardsProfile {
+    None,
+    Summary,
+    #[default]
+    Math,
+    Full,
+}
+
+impl CardsProfile {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Summary => "summary",
+            Self::Math => "math",
+            Self::Full => "full",
+        }
+    }
+
+    #[must_use]
+    pub const fn include_cards(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    #[must_use]
+    pub const fn include_math(self) -> bool {
+        matches!(self, Self::Math | Self::Full)
+    }
+
+    #[must_use]
+    pub const fn include_provenance(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
+/// Schema identifier for cards output.
+pub const CARDS_SCHEMA_V1: &str = "ee.cards.v1";
+
+/// A single card in structured output.
+#[derive(Clone, Debug)]
+pub struct Card {
+    pub id: String,
+    pub kind: CardKind,
+    pub title: String,
+    pub summary: Option<String>,
+    pub math: Option<CardMath>,
+    pub provenance: Option<String>,
+}
+
+impl Card {
+    #[must_use]
+    pub fn new(id: impl Into<String>, kind: CardKind, title: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            kind,
+            title: title.into(),
+            summary: None,
+            math: None,
+            provenance: None,
+        }
+    }
+
+    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = Some(summary.into());
+        self
+    }
+
+    pub fn with_math(mut self, math: CardMath) -> Self {
+        self.math = Some(math);
+        self
+    }
+
+    pub fn with_provenance(mut self, provenance: impl Into<String>) -> Self {
+        self.provenance = Some(provenance.into());
+        self
+    }
+
+    #[must_use]
+    pub fn to_json(&self, profile: CardsProfile) -> String {
+        let mut b = JsonBuilder::with_capacity(256);
+        b.field_str("id", &self.id);
+        b.field_str("kind", self.kind.as_str());
+        b.field_str("title", &self.title);
+        if profile.include_cards() {
+            if let Some(ref summary) = self.summary {
+                b.field_str("summary", summary);
+            }
+        }
+        if profile.include_math() {
+            if let Some(ref math) = self.math {
+                b.field_raw("math", &math.to_json());
+            }
+        }
+        if profile.include_provenance() {
+            if let Some(ref prov) = self.provenance {
+                b.field_str("provenance", prov);
+            }
+        }
+        b.finish()
+    }
+}
+
+/// Kind of card.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CardKind {
+    Certificate,
+    Artifact,
+    Audit,
+    Risk,
+    Lifecycle,
+}
+
+impl CardKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Certificate => "certificate",
+            Self::Artifact => "artifact",
+            Self::Audit => "audit",
+            Self::Risk => "risk",
+            Self::Lifecycle => "lifecycle",
+        }
+    }
+}
+
+/// Mathematical content in a card.
+#[derive(Clone, Debug)]
+pub struct CardMath {
+    pub formula: Option<String>,
+    pub value: Option<f64>,
+    pub confidence: Option<f64>,
+    pub unit: Option<String>,
+}
+
+impl CardMath {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            formula: None,
+            value: None,
+            confidence: None,
+            unit: None,
+        }
+    }
+
+    pub fn with_value(mut self, value: f64) -> Self {
+        self.value = Some(value);
+        self
+    }
+
+    pub fn with_confidence(mut self, confidence: f64) -> Self {
+        self.confidence = Some(confidence);
+        self
+    }
+
+    pub fn with_formula(mut self, formula: impl Into<String>) -> Self {
+        self.formula = Some(formula.into());
+        self
+    }
+
+    pub fn with_unit(mut self, unit: impl Into<String>) -> Self {
+        self.unit = Some(unit.into());
+        self
+    }
+
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let mut b = JsonBuilder::new();
+        if let Some(ref formula) = self.formula {
+            b.field_str("formula", formula);
+        }
+        if let Some(value) = self.value {
+            b.field_raw("value", &format!("{:.6}", value));
+        }
+        if let Some(confidence) = self.confidence {
+            b.field_raw("confidence", &format!("{:.4}", confidence));
+        }
+        if let Some(ref unit) = self.unit {
+            b.field_str("unit", unit);
+        }
+        b.finish()
+    }
+}
+
+impl Default for CardMath {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Render a cards array for JSON output.
+#[must_use]
+pub fn render_cards_json(cards: &[Card], profile: CardsProfile) -> String {
+    if !profile.include_cards() || cards.is_empty() {
+        return "[]".to_string();
+    }
+    let mut result = String::from("[");
+    for (i, card) in cards.iter().enumerate() {
+        if i > 0 {
+            result.push(',');
+        }
+        result.push_str(&card.to_json(profile));
+    }
+    result.push(']');
+    result
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct OutputContext {
     pub renderer: Renderer,
@@ -4345,6 +4560,184 @@ pub fn render_quarantine_json_filtered(report: &QuarantineReport, profile: Field
 }
 
 // ============================================================================
+// EE-342: Certificate output renderers
+// ============================================================================
+
+use crate::core::certificate::{
+    CertificateListReport, CertificateShowReport, CertificateVerifyReport,
+    CERTIFICATE_LIST_SCHEMA_V1, CERTIFICATE_SHOW_SCHEMA_V1, CERTIFICATE_VERIFY_SCHEMA_V1,
+};
+
+#[must_use]
+pub fn render_certificate_list_json(report: &CertificateListReport) -> String {
+    let mut b = JsonBuilder::with_capacity(1024);
+    b.field_str("schema", CERTIFICATE_LIST_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "certificate list");
+        d.field_u32("totalCount", report.total_count);
+        d.field_u32("usableCount", report.usable_count);
+        d.field_u32("expiredCount", report.expired_count);
+        d.field_array_of_strings(
+            "kindsPresent",
+            &report
+                .kinds_present
+                .iter()
+                .map(|k| k.as_str().to_owned())
+                .collect::<Vec<_>>(),
+        );
+        d.field_array_of_objects("certificates", &report.certificates, |d, cert| {
+            d.field_str("id", &cert.id);
+            d.field_str("kind", cert.kind.as_str());
+            d.field_str("status", cert.status.as_str());
+            d.field_str("issuedAt", &cert.issued_at);
+            d.field_str("workspaceId", &cert.workspace_id);
+            d.field_bool("isUsable", cert.is_usable);
+        });
+    });
+    b.finish()
+}
+
+#[must_use]
+pub fn render_certificate_list_human(report: &CertificateListReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Certificates: {} total, {} usable, {} expired\n\n",
+        report.total_count, report.usable_count, report.expired_count
+    ));
+    if report.certificates.is_empty() {
+        out.push_str("No certificates found.\n");
+    } else {
+        for cert in &report.certificates {
+            let status_marker = if cert.is_usable { "✓" } else { "✗" };
+            out.push_str(&format!(
+                "  {} {} [{}] {}\n",
+                status_marker,
+                cert.id,
+                cert.kind.as_str(),
+                cert.status.as_str()
+            ));
+        }
+    }
+    out
+}
+
+#[must_use]
+pub fn render_certificate_list_toon(report: &CertificateListReport) -> String {
+    render_toon_from_json(&render_certificate_list_json(report))
+}
+
+#[must_use]
+pub fn render_certificate_show_json(report: &CertificateShowReport) -> String {
+    let mut b = JsonBuilder::with_capacity(1024);
+    b.field_str("schema", CERTIFICATE_SHOW_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "certificate show");
+        d.field_str("verificationStatus", report.verification_status.as_str());
+        d.field_str("payloadSummary", &report.payload_summary);
+        d.field_object("certificate", |d| {
+            d.field_str("id", &report.certificate.id);
+            d.field_str("kind", report.certificate.kind.as_str());
+            d.field_str("status", report.certificate.status.as_str());
+            d.field_str("workspaceId", &report.certificate.workspace_id);
+            d.field_str("issuedAt", &report.certificate.issued_at);
+            if let Some(ref expires) = report.certificate.expires_at {
+                d.field_str("expiresAt", expires);
+            }
+            d.field_str("payloadHash", &report.certificate.payload_hash);
+            d.field_bool("isUsable", report.certificate.is_usable());
+        });
+    });
+    b.finish()
+}
+
+#[must_use]
+pub fn render_certificate_show_human(report: &CertificateShowReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Certificate: {}\n", report.certificate.id));
+    out.push_str(&format!("  Kind: {}\n", report.certificate.kind.as_str()));
+    out.push_str(&format!(
+        "  Status: {}\n",
+        report.certificate.status.as_str()
+    ));
+    out.push_str(&format!(
+        "  Workspace: {}\n",
+        report.certificate.workspace_id
+    ));
+    out.push_str(&format!("  Issued: {}\n", report.certificate.issued_at));
+    if let Some(ref expires) = report.certificate.expires_at {
+        out.push_str(&format!("  Expires: {}\n", expires));
+    }
+    out.push_str(&format!(
+        "  Payload Hash: {}\n",
+        report.certificate.payload_hash
+    ));
+    out.push_str(&format!(
+        "  Verification: {}\n",
+        report.verification_status.as_str()
+    ));
+    out.push_str(&format!("  Summary: {}\n", report.payload_summary));
+    out
+}
+
+#[must_use]
+pub fn render_certificate_show_toon(report: &CertificateShowReport) -> String {
+    render_toon_from_json(&render_certificate_show_json(report))
+}
+
+#[must_use]
+pub fn render_certificate_verify_json(report: &CertificateVerifyReport) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", CERTIFICATE_VERIFY_SCHEMA_V1);
+    b.field_bool("success", report.is_valid());
+    b.field_object("data", |d| {
+        d.field_str("command", "certificate verify");
+        d.field_str("certificateId", &report.certificate_id);
+        d.field_str("result", report.result.as_str());
+        d.field_str("checkedAt", &report.checked_at);
+        d.field_bool("hashVerified", report.hash_verified);
+        d.field_bool("statusValid", report.status_valid);
+        d.field_bool("expiryValid", report.expiry_valid);
+        d.field_str("message", &report.message);
+    });
+    b.finish()
+}
+
+#[must_use]
+pub fn render_certificate_verify_human(report: &CertificateVerifyReport) -> String {
+    let mut out = String::new();
+    let status = if report.is_valid() {
+        "PASSED"
+    } else {
+        "FAILED"
+    };
+    out.push_str(&format!("Certificate Verification: {}\n\n", status));
+    out.push_str(&format!("  Certificate: {}\n", report.certificate_id));
+    out.push_str(&format!("  Result: {}\n", report.result.as_str()));
+    out.push_str(&format!("  Checked: {}\n", report.checked_at));
+    out.push_str(&format!(
+        "  Hash Verified: {}\n",
+        if report.hash_verified { "yes" } else { "no" }
+    ));
+    out.push_str(&format!(
+        "  Status Valid: {}\n",
+        if report.status_valid { "yes" } else { "no" }
+    ));
+    out.push_str(&format!(
+        "  Expiry Valid: {}\n",
+        if report.expiry_valid { "yes" } else { "no" }
+    ));
+    out.push_str(&format!("  Message: {}\n", report.message));
+    out
+}
+
+#[must_use]
+pub fn render_certificate_verify_toon(report: &CertificateVerifyReport) -> String {
+    render_toon_from_json(&render_certificate_verify_json(report))
+}
+
+// ============================================================================
 // EE-362: Claim verification output renderers
 // ============================================================================
 
@@ -8401,5 +8794,161 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+
+    // ========================================================================
+    // Cards Output Tests (EE-341)
+    // ========================================================================
+
+    use super::{Card, CardKind, CardMath, CardsProfile, render_cards_json, CARDS_SCHEMA_V1};
+
+    #[test]
+    fn cards_profile_none_excludes_all_cards() -> TestResult {
+        let profile = CardsProfile::None;
+        ensure(!profile.include_cards(), "none excludes cards")?;
+        ensure(!profile.include_math(), "none excludes math")?;
+        ensure(!profile.include_provenance(), "none excludes provenance")
+    }
+
+    #[test]
+    fn cards_profile_summary_includes_cards_only() -> TestResult {
+        let profile = CardsProfile::Summary;
+        ensure(profile.include_cards(), "summary includes cards")?;
+        ensure(!profile.include_math(), "summary excludes math")?;
+        ensure(!profile.include_provenance(), "summary excludes provenance")
+    }
+
+    #[test]
+    fn cards_profile_math_includes_math() -> TestResult {
+        let profile = CardsProfile::Math;
+        ensure(profile.include_cards(), "math includes cards")?;
+        ensure(profile.include_math(), "math includes math")?;
+        ensure(!profile.include_provenance(), "math excludes provenance")
+    }
+
+    #[test]
+    fn cards_profile_full_includes_everything() -> TestResult {
+        let profile = CardsProfile::Full;
+        ensure(profile.include_cards(), "full includes cards")?;
+        ensure(profile.include_math(), "full includes math")?;
+        ensure(profile.include_provenance(), "full includes provenance")
+    }
+
+    #[test]
+    fn card_to_json_respects_profile_none() -> TestResult {
+        let card = Card::new("card_001", CardKind::Certificate, "Test Card")
+            .with_summary("A test summary")
+            .with_math(CardMath::new().with_value(0.95))
+            .with_provenance("file://test.rs#L42");
+
+        let json = card.to_json(CardsProfile::None);
+        ensure_contains(&json, "\"id\":\"card_001\"", "id always present")?;
+        ensure_contains(&json, "\"kind\":\"certificate\"", "kind always present")?;
+        ensure_contains(&json, "\"title\":\"Test Card\"", "title always present")?;
+        // Summary excluded in None profile
+        ensure(
+            !json.contains("summary"),
+            "summary should be excluded in None profile".into(),
+        )
+    }
+
+    #[test]
+    fn card_to_json_respects_profile_summary() -> TestResult {
+        let card = Card::new("card_002", CardKind::Risk, "Risk Card")
+            .with_summary("Risk summary")
+            .with_math(CardMath::new().with_value(0.75).with_confidence(0.9));
+
+        let json = card.to_json(CardsProfile::Summary);
+        ensure_contains(&json, "\"summary\":\"Risk summary\"", "summary included")?;
+        ensure(
+            !json.contains("math"),
+            "math should be excluded in Summary profile".into(),
+        )
+    }
+
+    #[test]
+    fn card_to_json_respects_profile_math() -> TestResult {
+        let card = Card::new("card_003", CardKind::Artifact, "Math Card")
+            .with_summary("Summary here")
+            .with_math(
+                CardMath::new()
+                    .with_value(0.85)
+                    .with_formula("f(x) = x^2")
+                    .with_unit("score"),
+            )
+            .with_provenance("file://math.rs");
+
+        let json = card.to_json(CardsProfile::Math);
+        ensure_contains(&json, "\"summary\":", "summary included")?;
+        ensure_contains(&json, "\"math\":", "math included")?;
+        ensure_contains(&json, "\"formula\":\"f(x) = x^2\"", "formula in math")?;
+        ensure(
+            !json.contains("provenance"),
+            "provenance should be excluded in Math profile".into(),
+        )
+    }
+
+    #[test]
+    fn card_to_json_respects_profile_full() -> TestResult {
+        let card = Card::new("card_004", CardKind::Lifecycle, "Full Card")
+            .with_summary("Full summary")
+            .with_math(CardMath::new().with_confidence(0.99))
+            .with_provenance("file://full.rs#L100");
+
+        let json = card.to_json(CardsProfile::Full);
+        ensure_contains(&json, "\"summary\":", "summary included")?;
+        ensure_contains(&json, "\"math\":", "math included")?;
+        ensure_contains(&json, "\"provenance\":\"file://full.rs#L100\"", "provenance included")
+    }
+
+    #[test]
+    fn render_cards_json_returns_empty_array_for_none_profile() -> TestResult {
+        let cards = vec![Card::new("c1", CardKind::Certificate, "Card 1")];
+        let json = render_cards_json(&cards, CardsProfile::None);
+        ensure(json == "[]", format!("expected [], got {json}"))
+    }
+
+    #[test]
+    fn render_cards_json_returns_empty_array_for_empty_list() -> TestResult {
+        let cards: Vec<Card> = vec![];
+        let json = render_cards_json(&cards, CardsProfile::Full);
+        ensure(json == "[]", format!("expected [], got {json}"))
+    }
+
+    #[test]
+    fn render_cards_json_formats_array_correctly() -> TestResult {
+        let cards = vec![
+            Card::new("c1", CardKind::Certificate, "Card 1"),
+            Card::new("c2", CardKind::Risk, "Card 2"),
+        ];
+        let json = render_cards_json(&cards, CardsProfile::Summary);
+
+        ensure_contains(&json, "[{", "starts with array")?;
+        ensure_contains(&json, "}]", "ends with array")?;
+        ensure_contains(&json, "},{", "cards separated by comma")
+    }
+
+    #[test]
+    fn card_kind_as_str_covers_all_variants() -> TestResult {
+        ensure(CardKind::Certificate.as_str() == "certificate", true, "certificate")?;
+        ensure(CardKind::Artifact.as_str() == "artifact", true, "artifact")?;
+        ensure(CardKind::Audit.as_str() == "audit", true, "audit")?;
+        ensure(CardKind::Risk.as_str() == "risk", true, "risk")?;
+        ensure(CardKind::Lifecycle.as_str() == "lifecycle", true, "lifecycle")
+    }
+
+    #[test]
+    fn card_math_to_json_includes_all_fields() -> TestResult {
+        let math = CardMath::new()
+            .with_value(0.123456)
+            .with_confidence(0.9999)
+            .with_formula("E = mc^2")
+            .with_unit("joules");
+        let json = math.to_json();
+
+        ensure_contains(&json, "\"formula\":\"E = mc^2\"", "formula")?;
+        ensure_contains(&json, "\"value\":0.123456", "value")?;
+        ensure_contains(&json, "\"confidence\":0.9999", "confidence")?;
+        ensure_contains(&json, "\"unit\":\"joules\"", "unit")
     }
 }
