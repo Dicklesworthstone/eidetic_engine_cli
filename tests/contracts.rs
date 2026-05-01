@@ -9,3 +9,6 @@ mod integration_foundation;
 
 #[path = "contracts/sqlmodel_frankensqlite.rs"]
 mod sqlmodel_frankensqlite;
+
+#[path = "contracts/frankensearch_local.rs"]
+mod frankensearch_local;

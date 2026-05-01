@@ -417,7 +417,11 @@ pub fn session_to_document_with_context(
 
 pub const MODULE_CONTRACT: &str = SEARCH_MODULE_SCHEMA_V1;
 pub const REQUIRED_RETRIEVAL_ENGINE: &str = "frankensearch::TwoTierSearcher";
-pub const FRANKENSEARCH_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Frankensearch crate version selected by this package.
+///
+/// Keep this synchronized with the explicit `frankensearch` dependency version
+/// in `Cargo.toml`; the local search contract test checks that drift.
+pub const FRANKENSEARCH_VERSION: &str = "0.3.0";
 
 static SEARCH_CAPABILITIES: [SearchCapability; 8] = [
     SearchCapability::ready(
@@ -821,6 +825,10 @@ pub struct IndexManifest {
     pub schema: String,
     /// Index generation (incremented on each rebuild).
     pub generation: u64,
+    /// Canonical document schema used to populate this index.
+    pub document_schema: String,
+    /// Frankensearch crate version used to build the index artifacts.
+    pub frankensearch_version: String,
     /// RFC 3339 timestamp when the index was created.
     pub created_at: String,
     /// RFC 3339 timestamp when the index was last updated.
@@ -851,6 +859,8 @@ impl IndexManifest {
         Self {
             schema: INDEX_MANIFEST_SCHEMA_V1.to_owned(),
             generation,
+            document_schema: CANONICAL_DOCUMENT_SCHEMA.to_owned(),
+            frankensearch_version: FRANKENSEARCH_VERSION.to_owned(),
             created_at: created.clone(),
             updated_at: created,
             document_count,
@@ -932,6 +942,36 @@ impl IndexManifest {
         self.validate_schema()?;
         self.validate_embedding(expected_embedding)?;
         Ok(self.check_staleness(current_db_generation))
+    }
+
+    /// Stable JSON representation for index-manifest contract tests and
+    /// future machine-facing output.
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        let mut value = serde_json::json!({
+            "schema": self.schema,
+            "generation": self.generation,
+            "document_schema": self.document_schema,
+            "frankensearch_version": self.frankensearch_version,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "document_count": self.document_count,
+            "db_generation": self.db_generation,
+            "embedding": {
+                "model_id": self.embedding.model_id,
+                "dimension": self.embedding.dimension,
+                "deterministic": self.embedding.deterministic,
+            },
+        });
+
+        if let Some(path) = &self.lexical_index_path {
+            value["lexical_index_path"] = serde_json::json!(path);
+        }
+        if let Some(path) = &self.vector_index_path {
+            value["vector_index_path"] = serde_json::json!(path);
+        }
+
+        value
     }
 }
 
@@ -1397,8 +1437,8 @@ mod tests {
     // =========================================================================
 
     use super::{
-        EmbeddingConfig, INDEX_MANIFEST_SCHEMA_V1, IndexManifest, IndexManifestError,
-        IndexStaleness,
+        CANONICAL_DOCUMENT_SCHEMA, EmbeddingConfig, FRANKENSEARCH_VERSION,
+        INDEX_MANIFEST_SCHEMA_V1, IndexManifest, IndexManifestError, IndexStaleness,
     };
 
     #[test]
@@ -1439,6 +1479,8 @@ mod tests {
             5,
             EmbeddingConfig::default(),
         );
+        assert_eq!(manifest.document_schema, CANONICAL_DOCUMENT_SCHEMA);
+        assert_eq!(manifest.frankensearch_version, FRANKENSEARCH_VERSION);
         assert_eq!(manifest.check_staleness(5), IndexStaleness::Current);
     }
 
@@ -1644,5 +1686,27 @@ mod tests {
 
         assert_eq!(manifest.lexical_index_path, Some("lexical.idx".to_owned()));
         assert_eq!(manifest.vector_index_path, Some("vector.idx".to_owned()));
+    }
+
+    #[test]
+    fn index_manifest_data_json_includes_contract_metadata() {
+        let manifest =
+            IndexManifest::new(7, "2026-04-30T12:00:00Z", 3, 7, EmbeddingConfig::default())
+                .with_lexical_path("lexical")
+                .with_vector_path("vector.fast.idx");
+
+        let json = manifest.data_json();
+
+        assert_eq!(json["schema"], INDEX_MANIFEST_SCHEMA_V1);
+        assert_eq!(json["generation"], 7);
+        assert_eq!(json["document_schema"], CANONICAL_DOCUMENT_SCHEMA);
+        assert_eq!(json["frankensearch_version"], FRANKENSEARCH_VERSION);
+        assert_eq!(json["document_count"], 3);
+        assert_eq!(json["db_generation"], 7);
+        assert_eq!(json["embedding"]["model_id"], "hash-256");
+        assert_eq!(json["embedding"]["dimension"], 256);
+        assert_eq!(json["embedding"]["deterministic"], true);
+        assert_eq!(json["lexical_index_path"], "lexical");
+        assert_eq!(json["vector_index_path"], "vector.fast.idx");
     }
 }
