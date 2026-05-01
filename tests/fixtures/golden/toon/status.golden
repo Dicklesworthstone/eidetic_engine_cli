@@ -12,6 +12,25 @@ data:
     profile: current_thread
     workerThreads: 1
     asyncBoundary: core
-  degraded[2]{code,severity,message,repair}:
+  memoryHealth:
+    status: unavailable
+    totalCount: 0
+    activeCount: 0
+    tombstonedCount: 0
+    staleCount: 0
+    healthScore: null
+    averageConfidence: null
+    provenanceCoverage: null
+    scoreComponents:
+      activeRatio: null
+      freshnessScore: null
+      confidenceScore: null
+      provenanceScore: null
+      tombstonePenalty: null
+  derivedAssets[2]{name,status,sourceHighWatermark,assetHighWatermark,highWatermarkLag,path,repair}:
+    search_index,not_inspected,null,null,null,.ee/index,Run `ee status --workspace . --json` to inspect this asset.
+    graph_snapshot,unimplemented,null,null,null,.ee/graph,Implement the persistent derived asset before reporting a watermark.
+  degraded[3]{code,severity,message,repair}:
     storage_not_implemented,medium,Storage subsystem is not wired yet.,Implement EE-040 through EE-044.
     search_not_implemented,medium,Search subsystem is not wired yet.,Implement EE-120 and dependent search beads.
+    memory_health_unavailable,low,Memory health metrics unavailable until storage is wired.,Implement storage subsystem.
