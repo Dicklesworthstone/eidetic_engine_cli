@@ -178,6 +178,8 @@ pub enum CandidateSource {
     ContradictionDetected,
     /// Decay trigger based on age or inactivity.
     DecayTrigger,
+    /// Counterfactual replay analysis.
+    CounterfactualReplay,
 }
 
 impl CandidateSource {
@@ -190,11 +192,12 @@ impl CandidateSource {
             Self::FeedbackEvent => "feedback_event",
             Self::ContradictionDetected => "contradiction_detected",
             Self::DecayTrigger => "decay_trigger",
+            Self::CounterfactualReplay => "counterfactual_replay",
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 6] {
+    pub const fn all() -> [Self; 7] {
         [
             Self::AgentInference,
             Self::RuleEngine,
@@ -202,6 +205,7 @@ impl CandidateSource {
             Self::FeedbackEvent,
             Self::ContradictionDetected,
             Self::DecayTrigger,
+            Self::CounterfactualReplay,
         ]
     }
 }
@@ -228,7 +232,7 @@ impl fmt::Display for ParseCandidateSourceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown candidate source `{}`; expected one of agent_inference, rule_engine, human_request, feedback_event, contradiction_detected, decay_trigger",
+            "unknown candidate source `{}`; expected one of agent_inference, rule_engine, human_request, feedback_event, contradiction_detected, decay_trigger, counterfactual_replay",
             self.input
         )
     }
@@ -247,6 +251,7 @@ impl FromStr for CandidateSource {
             "feedback_event" => Ok(Self::FeedbackEvent),
             "contradiction_detected" => Ok(Self::ContradictionDetected),
             "decay_trigger" => Ok(Self::DecayTrigger),
+            "counterfactual_replay" => Ok(Self::CounterfactualReplay),
             _ => Err(ParseCandidateSourceError {
                 input: input.to_owned(),
             }),
@@ -1723,6 +1728,7 @@ pub fn assess_risk(candidate: &ValidatedCandidate, report_only: bool) -> RiskCer
         CandidateSource::HumanRequest => 0.1,
         CandidateSource::RuleEngine => 0.2,
         CandidateSource::FeedbackEvent => 0.3,
+        CandidateSource::CounterfactualReplay => 0.3,
         CandidateSource::AgentInference => 0.5,
         CandidateSource::ContradictionDetected => 0.6,
         CandidateSource::DecayTrigger => 0.4,

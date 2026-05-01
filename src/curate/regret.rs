@@ -356,7 +356,7 @@ impl RegretStatistics {
 }
 
 /// Suggest curation action based on regret entry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SuggestedCurationAction {
     /// Add a new memory based on intervention.
     AddMemory,
@@ -404,6 +404,176 @@ pub fn suggest_curation(entry: &RegretEntry) -> SuggestedCurationAction {
             }
         }
     }
+}
+
+/// Schema version for counterfactual curation candidate output.
+pub const COUNTERFACTUAL_CANDIDATE_SCHEMA_V1: &str = "ee.counterfactual_candidate.v1";
+
+/// Counterfactual candidate generation mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CounterfactualMode {
+    /// Generate candidates in dry-run mode (no persistence).
+    DryRun,
+    /// Generate and persist candidates.
+    Persist,
+}
+
+impl CounterfactualMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DryRun => "dry_run",
+            Self::Persist => "persist",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_dry_run(self) -> bool {
+        matches!(self, Self::DryRun)
+    }
+}
+
+/// A curation candidate generated from counterfactual analysis.
+#[derive(Clone, Debug)]
+pub struct CounterfactualCandidate {
+    /// Schema version.
+    pub schema: &'static str,
+    /// Source regret entry ID.
+    pub regret_entry_id: String,
+    /// Episode that was analyzed.
+    pub episode_id: String,
+    /// Workspace ID for the candidate.
+    pub workspace_id: String,
+    /// Target memory ID (if known).
+    pub target_memory_id: Option<String>,
+    /// Suggested candidate type.
+    pub candidate_type: super::CandidateType,
+    /// Suggested curation action.
+    pub suggested_action: SuggestedCurationAction,
+    /// Reason for the curation.
+    pub reason: String,
+    /// Confidence score.
+    pub confidence: f64,
+    /// Regret score from original analysis.
+    pub regret_score: f64,
+    /// Regret category.
+    pub category: RegretCategory,
+    /// Dry-run flag.
+    pub dry_run: bool,
+}
+
+impl CounterfactualCandidate {
+    #[must_use]
+    pub fn is_actionable(&self) -> bool {
+        !matches!(self.suggested_action, SuggestedCurationAction::None)
+    }
+}
+
+/// Generate a curation candidate from a regret entry.
+#[must_use]
+pub fn generate_candidate_from_regret(
+    entry: &RegretEntry,
+    workspace_id: &str,
+    mode: CounterfactualMode,
+) -> Option<CounterfactualCandidate> {
+    let suggested_action = suggest_curation(entry);
+    if matches!(suggested_action, SuggestedCurationAction::None) {
+        return None;
+    }
+
+    let candidate_type = action_to_candidate_type(suggested_action);
+    let reason = build_candidate_reason(entry, suggested_action);
+
+    Some(CounterfactualCandidate {
+        schema: COUNTERFACTUAL_CANDIDATE_SCHEMA_V1,
+        regret_entry_id: entry.id.clone(),
+        episode_id: entry.episode_id.clone(),
+        workspace_id: workspace_id.to_string(),
+        target_memory_id: entry.promoted_memory_id.clone(),
+        candidate_type,
+        suggested_action,
+        reason,
+        confidence: entry.confidence,
+        regret_score: entry.regret_score,
+        category: entry.category,
+        dry_run: mode.is_dry_run(),
+    })
+}
+
+/// Generate curation candidates from multiple regret entries.
+#[must_use]
+pub fn generate_candidates_from_counterfactuals(
+    entries: &[RegretEntry],
+    workspace_id: &str,
+    mode: CounterfactualMode,
+) -> Vec<CounterfactualCandidate> {
+    entries
+        .iter()
+        .filter_map(|e| generate_candidate_from_regret(e, workspace_id, mode))
+        .collect()
+}
+
+/// Report for counterfactual candidate generation.
+#[derive(Clone, Debug, Default)]
+pub struct CounterfactualCandidateReport {
+    /// Total regret entries analyzed.
+    pub entries_analyzed: u32,
+    /// Candidates generated.
+    pub candidates_generated: u32,
+    /// Candidates by type.
+    pub by_type: Vec<(super::CandidateType, u32)>,
+    /// Candidates by action.
+    pub by_action: Vec<(SuggestedCurationAction, u32)>,
+    /// Mode used.
+    pub mode: Option<CounterfactualMode>,
+}
+
+impl CounterfactualCandidateReport {
+    /// Build a report from generated candidates.
+    #[must_use]
+    pub fn from_candidates(
+        entries_analyzed: usize,
+        candidates: &[CounterfactualCandidate],
+        mode: CounterfactualMode,
+    ) -> Self {
+        let mut type_counts = std::collections::HashMap::new();
+        let mut action_counts = std::collections::HashMap::new();
+
+        for c in candidates {
+            *type_counts.entry(c.candidate_type).or_insert(0u32) += 1;
+            *action_counts.entry(c.suggested_action).or_insert(0u32) += 1;
+        }
+
+        Self {
+            entries_analyzed: entries_analyzed as u32,
+            candidates_generated: candidates.len() as u32,
+            by_type: type_counts.into_iter().collect(),
+            by_action: action_counts.into_iter().collect(),
+            mode: Some(mode),
+        }
+    }
+}
+
+fn action_to_candidate_type(action: SuggestedCurationAction) -> super::CandidateType {
+    match action {
+        SuggestedCurationAction::AddMemory => super::CandidateType::Consolidate,
+        SuggestedCurationAction::PromoteConfidence => super::CandidateType::Promote,
+        SuggestedCurationAction::DeprecateMemory => super::CandidateType::Deprecate,
+        SuggestedCurationAction::SupersedeMemory => super::CandidateType::Supersede,
+        SuggestedCurationAction::TuneRetrieval => super::CandidateType::Promote,
+        SuggestedCurationAction::None => super::CandidateType::Promote,
+    }
+}
+
+fn build_candidate_reason(entry: &RegretEntry, action: SuggestedCurationAction) -> String {
+    format!(
+        "Counterfactual analysis ({}) suggests {} for episode {}. Regret score: {:.3}, confidence: {:.2}.",
+        entry.category.as_str(),
+        action.as_str(),
+        entry.episode_id,
+        entry.regret_score,
+        entry.confidence,
+    )
 }
 
 #[cfg(test)]
@@ -663,5 +833,162 @@ mod tests {
             "tune_retrieval"
         );
         assert_eq!(SuggestedCurationAction::None.as_str(), "none");
+    }
+
+    #[test]
+    fn counterfactual_mode_dry_run() {
+        assert!(CounterfactualMode::DryRun.is_dry_run());
+        assert!(!CounterfactualMode::Persist.is_dry_run());
+        assert_eq!(CounterfactualMode::DryRun.as_str(), "dry_run");
+        assert_eq!(CounterfactualMode::Persist.as_str(), "persist");
+    }
+
+    #[test]
+    fn generate_candidate_from_actionable_regret() {
+        let entry = RegretEntry::new(
+            "reg_004",
+            "ep_test_001",
+            "cfr_test_001",
+            "int_test_001",
+            0.8,
+            0.9,
+            RegretCategory::MissingKnowledge,
+            "2026-04-30T12:00:00Z",
+        );
+
+        let candidate =
+            generate_candidate_from_regret(&entry, "ws_test", CounterfactualMode::DryRun);
+
+        assert!(candidate.is_some());
+        let c = candidate.unwrap();
+        assert_eq!(c.regret_entry_id, "reg_004");
+        assert_eq!(c.workspace_id, "ws_test");
+        assert!(c.dry_run);
+        assert!(c.is_actionable());
+        assert_eq!(c.suggested_action, SuggestedCurationAction::AddMemory);
+        assert_eq!(c.candidate_type, super::super::CandidateType::Consolidate);
+    }
+
+    #[test]
+    fn generate_candidate_from_non_actionable_regret() {
+        let entry = RegretEntry::new(
+            "reg_005",
+            "ep_test_002",
+            "cfr_test_002",
+            "int_test_002",
+            0.2,
+            0.3,
+            RegretCategory::Other,
+            "2026-04-30T12:00:00Z",
+        );
+
+        let candidate =
+            generate_candidate_from_regret(&entry, "ws_test", CounterfactualMode::DryRun);
+        assert!(candidate.is_none());
+    }
+
+    #[test]
+    fn generate_candidates_from_multiple_entries() {
+        let entries = vec![
+            RegretEntry::new(
+                "reg_006",
+                "ep_001",
+                "cfr_001",
+                "int_001",
+                0.8,
+                0.9,
+                RegretCategory::MissingKnowledge,
+                "2026-04-30T12:00:00Z",
+            ),
+            RegretEntry::new(
+                "reg_007",
+                "ep_002",
+                "cfr_002",
+                "int_002",
+                0.7,
+                0.85,
+                RegretCategory::StaleInformation,
+                "2026-04-30T12:00:00Z",
+            ),
+            RegretEntry::new(
+                "reg_008",
+                "ep_003",
+                "cfr_003",
+                "int_003",
+                0.1,
+                0.2,
+                RegretCategory::Other,
+                "2026-04-30T12:00:00Z",
+            ),
+        ];
+
+        let candidates = generate_candidates_from_counterfactuals(
+            &entries,
+            "ws_test",
+            CounterfactualMode::DryRun,
+        );
+        assert_eq!(candidates.len(), 2);
+    }
+
+    #[test]
+    fn counterfactual_candidate_report_from_candidates() {
+        let entries = vec![
+            RegretEntry::new(
+                "reg_009",
+                "ep_001",
+                "cfr_001",
+                "int_001",
+                0.8,
+                0.9,
+                RegretCategory::MissingKnowledge,
+                "2026-04-30T12:00:00Z",
+            ),
+            RegretEntry::new(
+                "reg_010",
+                "ep_002",
+                "cfr_002",
+                "int_002",
+                0.9,
+                0.95,
+                RegretCategory::Misinformation,
+                "2026-04-30T12:00:00Z",
+            ),
+        ];
+
+        let candidates = generate_candidates_from_counterfactuals(
+            &entries,
+            "ws_test",
+            CounterfactualMode::DryRun,
+        );
+        let report = CounterfactualCandidateReport::from_candidates(
+            entries.len(),
+            &candidates,
+            CounterfactualMode::DryRun,
+        );
+
+        assert_eq!(report.entries_analyzed, 2);
+        assert_eq!(report.candidates_generated, 2);
+        assert_eq!(report.mode, Some(CounterfactualMode::DryRun));
+    }
+
+    #[test]
+    fn candidate_reason_format() {
+        let entry = RegretEntry::new(
+            "reg_011",
+            "ep_reason_test",
+            "cfr_001",
+            "int_001",
+            0.75,
+            0.88,
+            RegretCategory::StaleInformation,
+            "2026-04-30T12:00:00Z",
+        );
+
+        let candidate =
+            generate_candidate_from_regret(&entry, "ws_test", CounterfactualMode::DryRun).unwrap();
+
+        assert!(candidate.reason.contains("stale_information"));
+        assert!(candidate.reason.contains("supersede_memory"));
+        assert!(candidate.reason.contains("ep_reason_test"));
     }
 }

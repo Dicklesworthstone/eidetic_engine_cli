@@ -105,6 +105,13 @@ fn ensure_contains(haystack: &str, needle: &str, context: &str) -> TestResult {
     )
 }
 
+fn ensure_no_ansi(output: &str, context: &str) -> TestResult {
+    ensure(
+        !output.contains('\x1b'),
+        format!("{context}: machine output must not contain ANSI escape bytes"),
+    )
+}
+
 fn ensure_starts_with(haystack: &str, prefix: &str, context: &str) -> TestResult {
     ensure(
         haystack.starts_with(prefix),
@@ -737,6 +744,138 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
         &pack_json["data"]["request"]["query"],
         &serde_json::json!("prepare release"),
         "pack query-file request query",
+    )?;
+    ensure_no_ansi(&String::from_utf8_lossy(&pack.stdout), "pack JSON stdout")?;
+
+    let unknown_field_query_file = workspace.join("task-unknown-field.eeq.json");
+    fs::write(
+        &unknown_field_query_file,
+        r#"{
+          "version": "ee.query.v1",
+          "query": {"text": "prepare release"},
+          "futureField": true,
+          "output": {"format": "json"}
+        }"#,
+    )
+    .map_err(|error| error.to_string())?;
+    let unknown_field_query_file_arg = unknown_field_query_file.to_string_lossy().into_owned();
+    let unknown_field_pack = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "pack",
+        "--query-file",
+        unknown_field_query_file_arg.as_str(),
+    ])?;
+    let unknown_field_stdout = String::from_utf8_lossy(&unknown_field_pack.stdout);
+    let unknown_field_stderr = String::from_utf8_lossy(&unknown_field_pack.stderr);
+    ensure(
+        unknown_field_pack.status.success(),
+        format!(
+            "pack query-file with unknown field should succeed; stderr: {unknown_field_stderr}"
+        ),
+    )?;
+    ensure(
+        unknown_field_pack.stderr.is_empty(),
+        "unknown-field pack stderr clean",
+    )?;
+    ensure_no_ansi(&unknown_field_stdout, "unknown-field pack JSON stdout")?;
+    let unknown_field_json: serde_json::Value = serde_json::from_slice(&unknown_field_pack.stdout)
+        .map_err(|error| format!("unknown-field pack stdout must be JSON: {error}"))?;
+    ensure(
+        unknown_field_json["data"]["degraded"]
+            .as_array()
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item["code"] == "query_unknown_field")
+            }),
+        "unknown query-file field should be reported as degraded metadata",
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn pack_query_file_invalid_json_uses_stable_machine_error() -> TestResult {
+    let workspace = unique_artifact_dir("pack-invalid-json")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let query_file = workspace.join("invalid.eeq.json");
+    fs::write(&query_file, "{").map_err(|error| error.to_string())?;
+    let query_file_arg = query_file.to_string_lossy().into_owned();
+
+    let output = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "pack",
+        "--query-file",
+        query_file_arg.as_str(),
+    ])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    ensure(
+        !output.status.success(),
+        "invalid JSON query-file should fail",
+    )?;
+    ensure(output.stderr.is_empty(), "invalid JSON stderr clean")?;
+    ensure_no_ansi(&stdout, "invalid JSON error stdout")?;
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("invalid JSON error stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.error.v1"),
+        "invalid JSON error schema",
+    )?;
+    ensure_equal(
+        &json["error"]["code"],
+        &serde_json::json!("ERR_MALFORMED_JSON"),
+        "invalid JSON error code",
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn pack_query_file_unsupported_version_uses_stable_machine_error() -> TestResult {
+    let workspace = unique_artifact_dir("pack-unsupported-version")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let query_file = workspace.join("future.eeq.json");
+    fs::write(
+        &query_file,
+        r#"{
+          "version": "ee.query.v2",
+          "query": {"text": "prepare release"}
+        }"#,
+    )
+    .map_err(|error| error.to_string())?;
+    let query_file_arg = query_file.to_string_lossy().into_owned();
+
+    let output = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "pack",
+        "--query-file",
+        query_file_arg.as_str(),
+    ])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    ensure(
+        !output.status.success(),
+        "unsupported query-file version should fail",
+    )?;
+    ensure(output.stderr.is_empty(), "unsupported version stderr clean")?;
+    ensure_no_ansi(&stdout, "unsupported version error stdout")?;
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("unsupported version error stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.error.v1"),
+        "unsupported version error schema",
+    )?;
+    ensure_equal(
+        &json["error"]["code"],
+        &serde_json::json!("ERR_UNKNOWN_VERSION"),
+        "unsupported version error code",
     )
 }
 
@@ -1185,4 +1324,294 @@ fn contract_drift_data_field_present_on_success() -> TestResult {
         json["data"].is_object(),
         "successful command must have data object",
     )
+}
+
+#[cfg(unix)]
+#[test]
+fn walking_skeleton_durability_scenario() -> TestResult {
+    use std::time::Instant;
+
+    let workspace = unique_artifact_dir("walking-skeleton")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+
+    let start = Instant::now();
+
+    // Step 1: Initialize workspace
+    let init = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "init"])?;
+    let init_stdout = String::from_utf8_lossy(&init.stdout);
+    let init_stderr = String::from_utf8_lossy(&init.stderr);
+    ensure(
+        init.status.success(),
+        format!("init should succeed; stderr: {init_stderr}"),
+    )?;
+    ensure(init.stderr.is_empty(), "init stderr must be empty")?;
+    let init_json: serde_json::Value = serde_json::from_slice(&init.stdout)
+        .map_err(|error| format!("init stdout must be valid JSON: {error}"))?;
+    ensure_equal(
+        &init_json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "init schema",
+    )?;
+    ensure_no_ansi(&init_stdout, "init stdout")?;
+
+    // Step 2: Remember first memory (procedural rule)
+    let remember1 = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "remember",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--tags",
+        "cargo,release,checks",
+        "--confidence",
+        "0.95",
+        "--source",
+        "file://AGENTS.md#compiler-checks",
+        "Run cargo fmt --check before every release.",
+    ])?;
+    let remember1_stdout = String::from_utf8_lossy(&remember1.stdout);
+    let remember1_stderr = String::from_utf8_lossy(&remember1.stderr);
+    ensure(
+        remember1.status.success(),
+        format!("remember1 should succeed; stderr: {remember1_stderr}"),
+    )?;
+    ensure(remember1.stderr.is_empty(), "remember1 stderr must be empty")?;
+    let remember1_json: serde_json::Value = serde_json::from_slice(&remember1.stdout)
+        .map_err(|error| format!("remember1 stdout must be valid JSON: {error}"))?;
+    ensure_equal(
+        &remember1_json["data"]["persisted"],
+        &serde_json::json!(true),
+        "remember1 persisted flag",
+    )?;
+    let memory1_id = remember1_json["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "remember1 memory_id must be a string".to_string())?
+        .to_string();
+    ensure_no_ansi(&remember1_stdout, "remember1 stdout")?;
+
+    // Step 3: Remember second memory (semantic fact)
+    let remember2 = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "remember",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--tags",
+        "architecture,async",
+        "--confidence",
+        "0.85",
+        "The runtime uses asupersync, not tokio.",
+    ])?;
+    let remember2_stderr = String::from_utf8_lossy(&remember2.stderr);
+    ensure(
+        remember2.status.success(),
+        format!("remember2 should succeed; stderr: {remember2_stderr}"),
+    )?;
+    ensure(remember2.stderr.is_empty(), "remember2 stderr must be empty")?;
+    let remember2_json: serde_json::Value = serde_json::from_slice(&remember2.stdout)
+        .map_err(|error| format!("remember2 stdout must be valid JSON: {error}"))?;
+    let memory2_id = remember2_json["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "remember2 memory_id must be a string".to_string())?
+        .to_string();
+
+    // Step 4: Verify database exists
+    let database_path = workspace.join(".ee").join("ee.db");
+    ensure(database_path.exists(), "database must exist after remember")?;
+
+    // Step 5: Memory show
+    let show = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "memory",
+        "show",
+        &memory1_id,
+    ])?;
+    let show_stderr = String::from_utf8_lossy(&show.stderr);
+    ensure(
+        show.status.success(),
+        format!("memory show should succeed; stderr: {show_stderr}"),
+    )?;
+    ensure(show.stderr.is_empty(), "memory show stderr must be empty")?;
+    let show_json: serde_json::Value = serde_json::from_slice(&show.stdout)
+        .map_err(|error| format!("memory show stdout must be valid JSON: {error}"))?;
+    ensure_equal(
+        &show_json["data"]["memory"]["content"],
+        &serde_json::json!("Run cargo fmt --check before every release."),
+        "memory show content",
+    )?;
+    ensure_equal(
+        &show_json["data"]["memory"]["level"],
+        &serde_json::json!("procedural"),
+        "memory show level",
+    )?;
+    ensure_equal(
+        &show_json["data"]["memory"]["trust_class"],
+        &serde_json::json!("human_explicit"),
+        "memory show trust_class",
+    )?;
+
+    // Step 6: Memory list
+    let list = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "memory",
+        "list",
+    ])?;
+    let list_stderr = String::from_utf8_lossy(&list.stderr);
+    ensure(
+        list.status.success(),
+        format!("memory list should succeed; stderr: {list_stderr}"),
+    )?;
+    ensure(list.stderr.is_empty(), "memory list stderr must be empty")?;
+    let list_json: serde_json::Value = serde_json::from_slice(&list.stdout)
+        .map_err(|error| format!("memory list stdout must be valid JSON: {error}"))?;
+    let memories = list_json["data"]["memories"]
+        .as_array()
+        .ok_or_else(|| "memory list must have memories array".to_string())?;
+    ensure_equal(&memories.len(), &2, "memory list should show 2 memories")?;
+
+    // Step 7: Index rebuild
+    let rebuild = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "index",
+        "rebuild",
+    ])?;
+    let rebuild_stderr = String::from_utf8_lossy(&rebuild.stderr);
+    ensure(
+        rebuild.status.success(),
+        format!("index rebuild should succeed; stderr: {rebuild_stderr}"),
+    )?;
+    ensure(
+        rebuild.stderr.is_empty(),
+        "index rebuild stderr must be empty",
+    )?;
+    let rebuild_json: serde_json::Value = serde_json::from_slice(&rebuild.stdout)
+        .map_err(|error| format!("index rebuild stdout must be valid JSON: {error}"))?;
+    ensure_equal(
+        &rebuild_json["data"]["memories_indexed"],
+        &serde_json::json!(2),
+        "index rebuild should index 2 memories",
+    )?;
+
+    // Step 8: Search
+    let search = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "search",
+        "cargo release checks",
+    ])?;
+    let search_stderr = String::from_utf8_lossy(&search.stderr);
+    ensure(
+        search.status.success(),
+        format!("search should succeed; stderr: {search_stderr}"),
+    )?;
+    ensure(search.stderr.is_empty(), "search stderr must be empty")?;
+    let search_json: serde_json::Value = serde_json::from_slice(&search.stdout)
+        .map_err(|error| format!("search stdout must be valid JSON: {error}"))?;
+    ensure(
+        search_json["data"]["results"]
+            .as_array()
+            .is_some_and(|results| !results.is_empty()),
+        "search should return results",
+    )?;
+
+    // Step 9: Context JSON
+    let context_json = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "context",
+        "prepare release",
+    ])?;
+    let context_json_stderr = String::from_utf8_lossy(&context_json.stderr);
+    ensure(
+        context_json.status.success(),
+        format!("context --json should succeed; stderr: {context_json_stderr}"),
+    )?;
+    ensure(
+        context_json.stderr.is_empty(),
+        "context --json stderr must be empty",
+    )?;
+    let context_json_parsed: serde_json::Value = serde_json::from_slice(&context_json.stdout)
+        .map_err(|error| format!("context --json stdout must be valid JSON: {error}"))?;
+    ensure_equal(
+        &context_json_parsed["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "context --json schema",
+    )?;
+    ensure_no_ansi(
+        &String::from_utf8_lossy(&context_json.stdout),
+        "context --json stdout",
+    )?;
+
+    // Step 10: Context Markdown
+    let context_md = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--format",
+        "markdown",
+        "context",
+        "prepare release",
+    ])?;
+    let context_md_stdout = String::from_utf8_lossy(&context_md.stdout);
+    let context_md_stderr = String::from_utf8_lossy(&context_md.stderr);
+    ensure(
+        context_md.status.success(),
+        format!("context --format markdown should succeed; stderr: {context_md_stderr}"),
+    )?;
+    ensure(
+        context_md.stderr.is_empty(),
+        "context markdown stderr must be empty",
+    )?;
+    ensure_contains(&context_md_stdout, "# ", "context markdown should have header")?;
+    ensure_no_ansi(&context_md_stdout, "context markdown stdout")?;
+
+    // Step 11: Why command
+    let why = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "why",
+        &memory1_id,
+    ])?;
+    let why_stdout = String::from_utf8_lossy(&why.stdout);
+    let why_stderr = String::from_utf8_lossy(&why.stderr);
+    ensure(
+        why.status.success(),
+        format!("why should succeed; stderr: {why_stderr}"),
+    )?;
+    ensure(why.stderr.is_empty(), "why stderr must be empty")?;
+    let why_json: serde_json::Value = serde_json::from_slice(&why.stdout)
+        .map_err(|error| format!("why stdout must be valid JSON: {error}"))?;
+    ensure_equal(&why_json["schema"], &serde_json::json!("ee.response.v1"), "why schema")?;
+    ensure(
+        why_json["data"]["storage"].is_object(),
+        "why should include storage explanation",
+    )?;
+    ensure_no_ansi(&why_stdout, "why stdout")?;
+
+    // Scenario timing
+    let elapsed = start.elapsed();
+    ensure(
+        elapsed.as_secs() < 60,
+        format!(
+            "walking skeleton scenario should complete in under 60s, took {}s",
+            elapsed.as_secs()
+        ),
+    )?;
+
+    Ok(())
 }
