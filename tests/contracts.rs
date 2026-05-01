@@ -21,3 +21,6 @@ mod asupersync_cancellation;
 
 #[path = "contracts/asupersync_quiescence.rs"]
 mod asupersync_quiescence;
+
+#[path = "contracts/schema_drift.rs"]
+mod schema_drift;
