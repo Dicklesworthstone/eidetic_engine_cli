@@ -401,6 +401,8 @@ pub struct ContextArgs {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum DiagCommand {
+    /// Report claim verification posture: unverified, stale, and regressed claims.
+    Claims(DiagClaimsArgs),
     /// Report accepted dependency contracts and forbidden dependency gates.
     Dependencies,
     /// Report graph module readiness, capabilities, and metrics.
@@ -411,6 +413,22 @@ pub enum DiagCommand {
     Quarantine,
     /// Verify stdout/stderr stream separation is correct.
     Streams,
+}
+
+/// Arguments for `ee diag claims`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagClaimsArgs {
+    /// Path to claims.yaml file. Defaults to <workspace>/claims.yaml.
+    #[arg(long, value_name = "PATH")]
+    pub claims_file: Option<PathBuf>,
+
+    /// Staleness threshold in days. Claims older than this are marked stale.
+    #[arg(long, default_value_t = 30)]
+    pub staleness_threshold: u32,
+
+    /// Include verified claims in output (normally filtered out).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_verified: bool,
 }
 
 /// Arguments for `ee diag integrity`.
@@ -1905,6 +1923,7 @@ where
         },
         Some(Command::Context(ref args)) => handle_context(&cli, args, stdout, stderr),
         Some(Command::Diag(ref diag_cmd)) => match diag_cmd {
+            DiagCommand::Claims(args) => handle_diag_claims(&cli, args, stdout),
             DiagCommand::Dependencies => {
                 let report = DependencyDiagnosticsReport::gather();
                 match cli.renderer() {
@@ -6462,6 +6481,7 @@ impl NormalizedInvocation {
                 },
                 Command::Context(_) => "context".to_string(),
                 Command::Diag(diag) => match diag {
+                    DiagCommand::Claims(_) => "diag claims".to_string(),
                     DiagCommand::Dependencies => "diag dependencies".to_string(),
                     DiagCommand::Graph => "diag graph".to_string(),
                     DiagCommand::Integrity(_) => "diag integrity".to_string(),
