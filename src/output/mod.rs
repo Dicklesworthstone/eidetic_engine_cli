@@ -224,6 +224,7 @@ pub enum CardKind {
     Audit,
     Risk,
     Lifecycle,
+    Recommendation,
 }
 
 impl CardKind {
@@ -235,6 +236,7 @@ impl CardKind {
             Self::Audit => "audit",
             Self::Risk => "risk",
             Self::Lifecycle => "lifecycle",
+            Self::Recommendation => "recommendation",
         }
     }
 }
@@ -449,6 +451,232 @@ pub fn diversity_penalty_card(
             .with_formula(formula)
             .with_value(final_score as f64),
     )
+}
+
+// ============================================================================
+// EE-374: Graveyard recommendation cards
+// ============================================================================
+
+/// Priority level for graveyard recommendations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum GraveyardPriority {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl GraveyardPriority {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 4] {
+        [Self::Low, Self::Medium, Self::High, Self::Critical]
+    }
+}
+
+/// Type of graveyard recommendation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraveyardRecommendationType {
+    /// Claim has not been verified recently.
+    StaleClaim,
+    /// Claim has no associated demo.
+    MissingDemo,
+    /// Recent verification attempt failed.
+    FailedVerification,
+    /// Claim is a candidate for uplift/promotion.
+    UpliftCandidate,
+    /// Demo output has drifted from expected.
+    OutputDrift,
+    /// Claim depends on deprecated feature.
+    DeprecatedDependency,
+}
+
+impl GraveyardRecommendationType {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StaleClaim => "stale_claim",
+            Self::MissingDemo => "missing_demo",
+            Self::FailedVerification => "failed_verification",
+            Self::UpliftCandidate => "uplift_candidate",
+            Self::OutputDrift => "output_drift",
+            Self::DeprecatedDependency => "deprecated_dependency",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 6] {
+        [
+            Self::StaleClaim,
+            Self::MissingDemo,
+            Self::FailedVerification,
+            Self::UpliftCandidate,
+            Self::OutputDrift,
+            Self::DeprecatedDependency,
+        ]
+    }
+
+    #[must_use]
+    pub const fn default_priority(self) -> GraveyardPriority {
+        match self {
+            Self::StaleClaim => GraveyardPriority::Medium,
+            Self::MissingDemo => GraveyardPriority::High,
+            Self::FailedVerification => GraveyardPriority::Critical,
+            Self::UpliftCandidate => GraveyardPriority::Low,
+            Self::OutputDrift => GraveyardPriority::High,
+            Self::DeprecatedDependency => GraveyardPriority::Medium,
+        }
+    }
+}
+
+/// Create a stale claim recommendation card.
+#[must_use]
+pub fn graveyard_stale_claim_card(
+    claim_id: &str,
+    days_since_verification: u32,
+    stale_threshold_days: u32,
+) -> Card {
+    let summary = format!(
+        "Claim {} has not been verified in {} days (threshold: {} days). \
+         Run `ee claim verify {}` to update verification status.",
+        claim_id, days_since_verification, stale_threshold_days, claim_id
+    );
+    Card::new(
+        format!("card_graveyard_stale_{}", claim_id),
+        CardKind::Recommendation,
+        "Stale Claim Verification",
+    )
+    .with_summary(summary)
+}
+
+/// Create a missing demo recommendation card.
+#[must_use]
+pub fn graveyard_missing_demo_card(claim_id: &str, claim_title: &str) -> Card {
+    let summary = format!(
+        "Claim '{}' ({}) has no associated demo. \
+         Add a demo to demo.yaml with claim_id: {} to make this claim executable.",
+        claim_title, claim_id, claim_id
+    );
+    Card::new(
+        format!("card_graveyard_missing_demo_{}", claim_id),
+        CardKind::Recommendation,
+        "Missing Demo for Claim",
+    )
+    .with_summary(summary)
+}
+
+/// Create a failed verification recommendation card.
+#[must_use]
+pub fn graveyard_failed_verification_card(
+    claim_id: &str,
+    failure_reason: &str,
+    last_attempt: &str,
+) -> Card {
+    let summary = format!(
+        "Claim {} verification failed on {}: {}. \
+         Review and fix the underlying issue, then re-run verification.",
+        claim_id, last_attempt, failure_reason
+    );
+    Card::new(
+        format!("card_graveyard_failed_{}", claim_id),
+        CardKind::Recommendation,
+        "Failed Verification",
+    )
+    .with_summary(summary)
+}
+
+/// Create an uplift candidate recommendation card.
+#[must_use]
+pub fn graveyard_uplift_candidate_card(
+    claim_id: &str,
+    consecutive_passes: u32,
+    confidence_score: f32,
+) -> Card {
+    let summary = format!(
+        "Claim {} has passed verification {} consecutive times with {:.1}% confidence. \
+         Consider promoting to 'verified' status.",
+        claim_id,
+        consecutive_passes,
+        confidence_score * 100.0
+    );
+    Card::new(
+        format!("card_graveyard_uplift_{}", claim_id),
+        CardKind::Recommendation,
+        "Uplift Candidate",
+    )
+    .with_summary(summary)
+    .with_math(
+        CardMath::new()
+            .with_value(confidence_score as f64)
+            .with_unit("confidence"),
+    )
+}
+
+/// Create an output drift recommendation card.
+#[must_use]
+pub fn graveyard_output_drift_card(
+    demo_id: &str,
+    expected_hash: &str,
+    actual_hash: &str,
+    drift_percentage: f32,
+) -> Card {
+    let summary = format!(
+        "Demo {} output has drifted {:.1}% from expected. \
+         Expected hash: {}..., actual: {}... \
+         Update expected values or investigate regression.",
+        demo_id,
+        drift_percentage * 100.0,
+        &expected_hash[..8.min(expected_hash.len())],
+        &actual_hash[..8.min(actual_hash.len())]
+    );
+    Card::new(
+        format!("card_graveyard_drift_{}", demo_id),
+        CardKind::Recommendation,
+        "Output Drift Detected",
+    )
+    .with_summary(summary)
+    .with_math(
+        CardMath::new()
+            .with_value(drift_percentage as f64)
+            .with_unit("drift"),
+    )
+}
+
+/// Create a deprecated dependency recommendation card.
+#[must_use]
+pub fn graveyard_deprecated_dependency_card(
+    claim_id: &str,
+    deprecated_feature: &str,
+    replacement: Option<&str>,
+) -> Card {
+    let summary = if let Some(repl) = replacement {
+        format!(
+            "Claim {} depends on deprecated feature '{}'. \
+             Migrate to '{}' before the feature is removed.",
+            claim_id, deprecated_feature, repl
+        )
+    } else {
+        format!(
+            "Claim {} depends on deprecated feature '{}'. \
+             Review and remove this dependency.",
+            claim_id, deprecated_feature
+        )
+    };
+    Card::new(
+        format!("card_graveyard_deprecated_{}", claim_id),
+        CardKind::Recommendation,
+        "Deprecated Dependency",
+    )
+    .with_summary(summary)
 }
 
 /// Render a cards array for JSON output.
@@ -9080,9 +9308,12 @@ mod tests {
     // ========================================================================
 
     use super::{
-        Card, CardKind, CardMath, CardsProfile, diversity_penalty_card, pack_budget_card,
-        relevance_score_card, render_cards_json, selection_score_card, trust_score_card,
-        utility_decay_card,
+        Card, CardKind, CardMath, CardsProfile, GraveyardPriority, GraveyardRecommendationType,
+        diversity_penalty_card, graveyard_deprecated_dependency_card,
+        graveyard_failed_verification_card, graveyard_missing_demo_card,
+        graveyard_output_drift_card, graveyard_stale_claim_card, graveyard_uplift_candidate_card,
+        pack_budget_card, relevance_score_card, render_cards_json, selection_score_card,
+        trust_score_card, utility_decay_card,
     };
 
     #[test]
@@ -9322,5 +9553,216 @@ mod tests {
             return Err("formula present".to_string());
         };
         ensure_contains(formula, "max_sim", "formula references similarity")
+    }
+
+    // ====================================================================
+    // EE-374: Graveyard recommendation card tests
+    // ====================================================================
+
+    #[test]
+    fn graveyard_priority_ordering() {
+        assert!(GraveyardPriority::Low < GraveyardPriority::Medium);
+        assert!(GraveyardPriority::Medium < GraveyardPriority::High);
+        assert!(GraveyardPriority::High < GraveyardPriority::Critical);
+    }
+
+    #[test]
+    fn graveyard_priority_strings_stable() {
+        assert_eq!(GraveyardPriority::Low.as_str(), "low");
+        assert_eq!(GraveyardPriority::Medium.as_str(), "medium");
+        assert_eq!(GraveyardPriority::High.as_str(), "high");
+        assert_eq!(GraveyardPriority::Critical.as_str(), "critical");
+    }
+
+    #[test]
+    fn graveyard_recommendation_type_strings_stable() {
+        assert_eq!(
+            GraveyardRecommendationType::StaleClaim.as_str(),
+            "stale_claim"
+        );
+        assert_eq!(
+            GraveyardRecommendationType::MissingDemo.as_str(),
+            "missing_demo"
+        );
+        assert_eq!(
+            GraveyardRecommendationType::FailedVerification.as_str(),
+            "failed_verification"
+        );
+        assert_eq!(
+            GraveyardRecommendationType::UpliftCandidate.as_str(),
+            "uplift_candidate"
+        );
+        assert_eq!(
+            GraveyardRecommendationType::OutputDrift.as_str(),
+            "output_drift"
+        );
+        assert_eq!(
+            GraveyardRecommendationType::DeprecatedDependency.as_str(),
+            "deprecated_dependency"
+        );
+    }
+
+    #[test]
+    fn graveyard_recommendation_default_priorities() {
+        assert_eq!(
+            GraveyardRecommendationType::StaleClaim.default_priority(),
+            GraveyardPriority::Medium
+        );
+        assert_eq!(
+            GraveyardRecommendationType::MissingDemo.default_priority(),
+            GraveyardPriority::High
+        );
+        assert_eq!(
+            GraveyardRecommendationType::FailedVerification.default_priority(),
+            GraveyardPriority::Critical
+        );
+        assert_eq!(
+            GraveyardRecommendationType::UpliftCandidate.default_priority(),
+            GraveyardPriority::Low
+        );
+    }
+
+    #[test]
+    fn graveyard_stale_claim_card_fixture() -> TestResult {
+        let card = graveyard_stale_claim_card("claim_test_001", 45, 30);
+        ensure(
+            card.id.contains("graveyard_stale"),
+            "card id contains graveyard_stale",
+        )?;
+        ensure_equal(
+            &card.kind,
+            &CardKind::Recommendation,
+            "card kind is recommendation",
+        )?;
+        ensure(card.summary.is_some(), "summary present")?;
+        let Some(summary) = card.summary else {
+            return Err("summary present".to_string());
+        };
+        ensure_contains(&summary, "45 days", "shows days since verification")?;
+        ensure_contains(&summary, "claim_test_001", "includes claim id")
+    }
+
+    #[test]
+    fn graveyard_missing_demo_card_fixture() -> TestResult {
+        let card = graveyard_missing_demo_card("claim_test_002", "Test Claim Title");
+        ensure(
+            card.id.contains("missing_demo"),
+            "card id contains missing_demo",
+        )?;
+        ensure_equal(
+            &card.kind,
+            &CardKind::Recommendation,
+            "card kind is recommendation",
+        )?;
+        ensure(card.summary.is_some(), "summary present")?;
+        let Some(summary) = card.summary else {
+            return Err("summary present".to_string());
+        };
+        ensure_contains(&summary, "Test Claim Title", "includes claim title")?;
+        ensure_contains(&summary, "demo.yaml", "mentions demo.yaml")
+    }
+
+    #[test]
+    fn graveyard_failed_verification_card_fixture() -> TestResult {
+        let card =
+            graveyard_failed_verification_card("claim_test_003", "Exit code 1", "2026-04-30");
+        ensure(
+            card.id.contains("graveyard_failed"),
+            "card id contains graveyard_failed",
+        )?;
+        ensure_equal(
+            &card.kind,
+            &CardKind::Recommendation,
+            "card kind is recommendation",
+        )?;
+        ensure(card.summary.is_some(), "summary present")?;
+        let Some(summary) = card.summary else {
+            return Err("summary present".to_string());
+        };
+        ensure_contains(&summary, "Exit code 1", "includes failure reason")?;
+        ensure_contains(&summary, "2026-04-30", "includes last attempt date")
+    }
+
+    #[test]
+    fn graveyard_uplift_candidate_card_fixture() -> TestResult {
+        let card = graveyard_uplift_candidate_card("claim_test_004", 5, 0.95);
+        ensure(
+            card.id.contains("graveyard_uplift"),
+            "card id contains graveyard_uplift",
+        )?;
+        ensure_equal(
+            &card.kind,
+            &CardKind::Recommendation,
+            "card kind is recommendation",
+        )?;
+        ensure(card.summary.is_some(), "summary present")?;
+        let Some(summary) = card.summary else {
+            return Err("summary present".to_string());
+        };
+        ensure_contains(&summary, "5 consecutive", "shows consecutive passes")?;
+        ensure_contains(&summary, "95.0%", "shows confidence percentage")?;
+        ensure(card.math.is_some(), "math present for uplift card")
+    }
+
+    #[test]
+    fn graveyard_output_drift_card_fixture() -> TestResult {
+        let card =
+            graveyard_output_drift_card("demo_test_001", "abc123def456", "xyz789uvw012", 0.15);
+        ensure(
+            card.id.contains("graveyard_drift"),
+            "card id contains graveyard_drift",
+        )?;
+        ensure_equal(
+            &card.kind,
+            &CardKind::Recommendation,
+            "card kind is recommendation",
+        )?;
+        ensure(card.summary.is_some(), "summary present")?;
+        let Some(summary) = card.summary else {
+            return Err("summary present".to_string());
+        };
+        ensure_contains(&summary, "15.0%", "shows drift percentage")?;
+        ensure_contains(&summary, "abc123de", "shows truncated expected hash")?;
+        ensure(card.math.is_some(), "math present for drift card")
+    }
+
+    #[test]
+    fn graveyard_deprecated_dependency_card_fixture() -> TestResult {
+        let card = graveyard_deprecated_dependency_card(
+            "claim_test_005",
+            "old_feature_v1",
+            Some("new_feature_v2"),
+        );
+        ensure(
+            card.id.contains("graveyard_deprecated"),
+            "card id contains graveyard_deprecated",
+        )?;
+        ensure_equal(
+            &card.kind,
+            &CardKind::Recommendation,
+            "card kind is recommendation",
+        )?;
+        ensure(card.summary.is_some(), "summary present")?;
+        let Some(summary) = card.summary else {
+            return Err("summary present".to_string());
+        };
+        ensure_contains(&summary, "old_feature_v1", "shows deprecated feature")?;
+        ensure_contains(&summary, "new_feature_v2", "shows replacement")
+    }
+
+    #[test]
+    fn graveyard_deprecated_dependency_card_no_replacement() -> TestResult {
+        let card = graveyard_deprecated_dependency_card("claim_test_006", "legacy_api", None);
+        ensure(card.summary.is_some(), "summary present")?;
+        let Some(summary) = card.summary else {
+            return Err("summary present".to_string());
+        };
+        ensure_contains(&summary, "legacy_api", "shows deprecated feature")?;
+        ensure_contains(&summary, "remove", "suggests removal when no replacement")
+    }
+
+    #[test]
+    fn card_kind_recommendation_stable() {
+        assert_eq!(CardKind::Recommendation.as_str(), "recommendation");
     }
 }
