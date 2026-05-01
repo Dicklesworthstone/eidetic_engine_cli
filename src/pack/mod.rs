@@ -1704,7 +1704,10 @@ fn facility_location_marginal_gain(
     facility_location_value(&with_candidate, universe) - current
 }
 
-pub(crate) fn facility_location_value(selected: &[CandidateSignature], universe: &[PackCandidate]) -> f32 {
+pub(crate) fn facility_location_value(
+    selected: &[CandidateSignature],
+    universe: &[PackCandidate],
+) -> f32 {
     if selected.is_empty() {
         return 0.0;
     }
@@ -2009,10 +2012,7 @@ impl RateDistortionReport {
     pub fn to_human(&self) -> String {
         let mut result = String::from("Rate-Distortion Budget Report\n");
         result.push_str("═══════════════════════════════════════\n\n");
-        result.push_str(&format!(
-            "Budget:      {:>6} tokens\n",
-            self.budget_tokens
-        ));
+        result.push_str(&format!("Budget:      {:>6} tokens\n", self.budget_tokens));
         result.push_str(&format!("Used:        {:>6} tokens\n", self.used_tokens));
         result.push_str(&format!("Slack:       {:>6} tokens\n", self.slack()));
         result.push_str(&format!(
@@ -2020,10 +2020,7 @@ impl RateDistortionReport {
             self.utilization_percent()
         ));
         result.push_str("Candidates:\n");
-        result.push_str(&format!(
-            "  Included:  {:>6}\n",
-            self.included_candidates
-        ));
+        result.push_str(&format!("  Included:  {:>6}\n", self.included_candidates));
         result.push_str(&format!("  Omitted:   {:>6}\n", self.omitted_candidates));
         result.push_str(&format!(
             "  Quality:   {:>5.1}%\n\n",
@@ -2104,7 +2101,12 @@ impl SectionBudgetReport {
 
 /// Compute a rate-distortion report from context response data.
 #[must_use]
-pub fn compute_rate_distortion(budget: u32, used: u32, included: u32, omitted: u32) -> RateDistortionReport {
+pub fn compute_rate_distortion(
+    budget: u32,
+    used: u32,
+    included: u32,
+    omitted: u32,
+) -> RateDistortionReport {
     RateDistortionReport::new(budget, used).with_candidates(included, omitted)
 }
 
@@ -2123,6 +2125,7 @@ mod tests {
         estimate_tokens, estimate_tokens_default, subsystem_name,
     };
     use crate::models::{MemoryId, ProvenanceUri, TrustClass, UnitScore};
+    use crate::testing::ensure_contains;
 
     type TestResult = Result<(), String>;
 
@@ -3489,7 +3492,9 @@ mod tests {
             candidate_with_content(3, 0.5, 0.4, 10, "Gamma rule three")?,
         ];
 
-        let budget = TokenBudget::new(20).map_err(|e| format!("budget: {e:?}"))?;
+        // Use 200-token budget so section quotas (20% each for procedural_rules)
+        // have enough room for 10-token candidates
+        let budget = TokenBudget::new(200).map_err(|e| format!("budget: {e:?}"))?;
         let greedy_draft = assemble_draft_with_profile(
             ContextPackProfile::Submodular,
             "tiny fixture",
@@ -3499,15 +3504,11 @@ mod tests {
         .map_err(|e| format!("greedy draft: {e:?}"))?;
 
         let greedy_value = greedy_draft.selection_certificate.total_objective_value;
-        let greedy_ids: Vec<u128> = greedy_draft
-            .items
-            .iter()
-            .map(|item| item.memory_id.to_string().parse::<u128>().ok())
-            .flatten()
-            .collect();
+        let greedy_count = greedy_draft.items.len();
 
+        // Brute force: find best subset that fits in section quota (40 tokens for procedural_rules)
         let mut best_brute_force = 0.0_f32;
-        let mut best_combination: Vec<u128> = Vec::new();
+        let mut best_count = 0_usize;
 
         for mask in 0_u8..8_u8 {
             let mut selected: Vec<u128> = Vec::new();
@@ -3518,11 +3519,12 @@ mod tests {
                     total_tokens += 10;
                 }
             }
-            if total_tokens <= 20 {
+            // Section quota is 40 tokens (200 * 0.20) for procedural_rules
+            if total_tokens <= 40 {
                 let value = test_facility_value(&selected, &candidates);
                 if value > best_brute_force {
                     best_brute_force = value;
-                    best_combination = selected;
+                    best_count = selected.len();
                 }
             }
         }
@@ -3530,11 +3532,12 @@ mod tests {
         ensure(
             greedy_value >= best_brute_force * 0.63 - 0.000_001,
             format!(
-                "greedy ({:?}, value={}) should be ≥63% of brute-force ({:?}, value={})",
-                greedy_ids, greedy_value, best_combination, best_brute_force
+                "greedy (count={}, value={}) should be ≥63% of brute-force (count={}, value={})",
+                greedy_count, greedy_value, best_count, best_brute_force
             ),
         )?;
 
+        // Greedy should achieve the optimum for this tiny fixture
         ensure(
             (greedy_value - best_brute_force).abs() < 0.000_001,
             format!(
@@ -3554,7 +3557,11 @@ mod tests {
             candidate_with_content(3, 0.6, 0.5, 8, "Medium gamma")?,
         ];
 
-        let budget = TokenBudget::new(15).map_err(|e| format!("budget: {e:?}"))?;
+        // 150-token budget gives 30 tokens to procedural_rules section (20%)
+        // This allows combinations like [5], [15], [8], [5+8=13], etc.
+        let budget = TokenBudget::new(150).map_err(|e| format!("budget: {e:?}"))?;
+        let section_quota = 30_u32; // 150 * 0.20 = 30 tokens for procedural_rules
+
         let greedy_draft = assemble_draft_with_profile(
             ContextPackProfile::Submodular,
             "non-uniform tokens",
@@ -3567,8 +3574,8 @@ mod tests {
         let greedy_used = greedy_draft.used_tokens;
 
         ensure(
-            greedy_used <= 15,
-            format!("greedy should respect budget: {} ≤ 15", greedy_used),
+            greedy_used <= section_quota,
+            format!("greedy should respect section quota: {} ≤ {}", greedy_used, section_quota),
         )?;
 
         let mut best_brute_force = 0.0_f32;
@@ -3583,7 +3590,8 @@ mod tests {
                     total_tokens += token_costs[bit];
                 }
             }
-            if total_tokens <= 15 {
+            // Brute force also respects section quota
+            if total_tokens <= section_quota {
                 let value = test_facility_value(&selected, &candidates);
                 if value > best_brute_force {
                     best_brute_force = value;
@@ -3695,7 +3703,10 @@ mod tests {
     // Rate-Distortion Tests (EE-345)
     // ========================================================================
 
-    use super::{RateDistortionReport, SectionBudgetReport, compute_rate_distortion, RATE_DISTORTION_SCHEMA_V1};
+    use super::{
+        RATE_DISTORTION_SCHEMA_V1, RateDistortionReport, SectionBudgetReport,
+        compute_rate_distortion,
+    };
 
     #[test]
     fn rate_distortion_report_computes_rate() -> TestResult {

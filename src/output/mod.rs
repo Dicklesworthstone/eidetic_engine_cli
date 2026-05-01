@@ -789,7 +789,10 @@ impl OutputSizeDiagnostic {
         b.field_object("savings", |s| {
             s.field_raw("bytes", &self.byte_savings.to_string());
             s.field_raw("tokens", &self.token_savings.to_string());
-            s.field_raw("compressionRatio", &format!("{:.3}", self.compression_ratio));
+            s.field_raw(
+                "compressionRatio",
+                &format!("{:.3}", self.compression_ratio),
+            );
         });
         b.finish()
     }
@@ -4564,8 +4567,8 @@ pub fn render_quarantine_json_filtered(report: &QuarantineReport, profile: Field
 // ============================================================================
 
 use crate::core::certificate::{
-    CertificateListReport, CertificateShowReport, CertificateVerifyReport,
     CERTIFICATE_LIST_SCHEMA_V1, CERTIFICATE_SHOW_SCHEMA_V1, CERTIFICATE_VERIFY_SCHEMA_V1,
+    CertificateListReport, CertificateShowReport, CertificateVerifyReport,
 };
 
 #[must_use]
@@ -8676,7 +8679,7 @@ mod tests {
 
     #[test]
     fn size_diagnostic_from_json_computes_all_fields() -> TestResult {
-        use super::{OutputSizeDiagnostic, OUTPUT_SIZE_DIAGNOSTIC_SCHEMA_V1};
+        use super::OutputSizeDiagnostic;
 
         let json = r#"{"schema":"ee.response.v1","success":true,"data":{"command":"status"}}"#;
         let diagnostic = OutputSizeDiagnostic::from_json(json);
@@ -8702,7 +8705,7 @@ mod tests {
 
     #[test]
     fn size_diagnostic_json_output_has_required_schema() -> TestResult {
-        use super::{OutputSizeDiagnostic, OUTPUT_SIZE_DIAGNOSTIC_SCHEMA_V1};
+        use super::{OUTPUT_SIZE_DIAGNOSTIC_SCHEMA_V1, OutputSizeDiagnostic};
 
         let json = r#"{"schema":"ee.response.v1","success":true,"data":{"command":"test"}}"#;
         let diagnostic = OutputSizeDiagnostic::from_json(json);
@@ -8800,7 +8803,7 @@ mod tests {
     // Cards Output Tests (EE-341)
     // ========================================================================
 
-    use super::{Card, CardKind, CardMath, CardsProfile, render_cards_json, CARDS_SCHEMA_V1};
+    use super::{Card, CardKind, CardMath, CardsProfile, render_cards_json};
 
     #[test]
     fn cards_profile_none_excludes_all_cards() -> TestResult {
@@ -8898,7 +8901,11 @@ mod tests {
         let json = card.to_json(CardsProfile::Full);
         ensure_contains(&json, "\"summary\":", "summary included")?;
         ensure_contains(&json, "\"math\":", "math included")?;
-        ensure_contains(&json, "\"provenance\":\"file://full.rs#L100\"", "provenance included")
+        ensure_contains(
+            &json,
+            "\"provenance\":\"file://full.rs#L100\"",
+            "provenance included",
+        )
     }
 
     #[test]
@@ -8930,7 +8937,10 @@ mod tests {
 
     #[test]
     fn card_kind_as_str_covers_all_variants() -> TestResult {
-        ensure(CardKind::Certificate.as_str() == "certificate", "certificate")?;
+        ensure(
+            CardKind::Certificate.as_str() == "certificate",
+            "certificate",
+        )?;
         ensure(CardKind::Artifact.as_str() == "artifact", "artifact")?;
         ensure(CardKind::Audit.as_str() == "audit", "audit")?;
         ensure(CardKind::Risk.as_str() == "risk", "risk")?;
