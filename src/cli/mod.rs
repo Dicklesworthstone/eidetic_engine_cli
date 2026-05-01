@@ -1310,8 +1310,8 @@ pub struct RecorderTailArgs {
     pub follow: bool,
 
     /// Output format for follow mode (jsonl for machine-readable stream).
-    #[arg(long, value_name = "FORMAT")]
-    pub format: Option<String>,
+    #[arg(long = "tail-format", value_name = "FORMAT")]
+    pub tail_format: Option<String>,
 }
 
 /// Subcommands for `ee rehearse`.
@@ -4498,7 +4498,7 @@ where
     // Check if follow mode with JSONL format.
     let use_jsonl_follow = args.follow
         && args
-            .format
+            .tail_format
             .as_ref()
             .is_some_and(|f| f.eq_ignore_ascii_case("jsonl"));
 
