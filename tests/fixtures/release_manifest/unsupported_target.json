@@ -1,0 +1,43 @@
+{
+  "schema": "ee.release_manifest.v1",
+  "releaseVersion": "0.1.0",
+  "gitCommit": "dddddddddddddddddddddddddddddddddddddddd",
+  "gitTag": "v0.1.0",
+  "binaryName": "ee",
+  "artifactCount": 1,
+  "artifacts": [
+    {
+      "schema": "ee.release_artifact.v1",
+      "artifactId": "ee-0.1.0-sparc64-unknown-plan9",
+      "releaseVersion": "0.1.0",
+      "fileName": "ee-sparc64-unknown-plan9.tar.xz",
+      "targetTriple": "sparc64-unknown-plan9",
+      "archiveFormat": "tar_xz",
+      "binaryName": "ee",
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "7777777777777777777777777777777777777777777777777777777777777777"
+      },
+      "signature": {
+        "kind": "sigstore",
+        "fileName": "ee-sparc64-unknown-plan9.tar.xz.sigstore.json",
+        "checksum": null
+      },
+      "provenance": {
+        "sourceCommit": "dddddddddddddddddddddddddddddddddddddddd",
+        "sourceTag": "v0.1.0",
+        "buildProfile": "release",
+        "releaseChannel": "stable",
+        "dirty": false
+      },
+      "install": {
+        "binaryName": "ee",
+        "executableName": "ee",
+        "installPath": "~/.local/bin/ee"
+      },
+      "minimumOs": ["unknown"],
+      "compatibilityNotes": []
+    }
+  ],
+  "compatibilityNotes": ["Fixture intentionally uses an unsupported target."]
+}

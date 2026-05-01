@@ -1,0 +1,39 @@
+{
+  "schema": "ee.release_manifest.v1",
+  "releaseVersion": "0.1.0",
+  "gitCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "gitTag": "v0.1.0",
+  "binaryName": "ee",
+  "artifactCount": 1,
+  "artifacts": [
+    {
+      "schema": "ee.release_artifact.v1",
+      "artifactId": "ee-0.1.0-x86_64-pc-windows-msvc",
+      "releaseVersion": "0.1.0",
+      "fileName": "ee-x86_64-pc-windows-msvc.zip",
+      "targetTriple": "x86_64-pc-windows-msvc",
+      "archiveFormat": "zip",
+      "binaryName": "ee",
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "6666666666666666666666666666666666666666666666666666666666666666"
+      },
+      "signature": null,
+      "provenance": {
+        "sourceCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sourceTag": "v0.1.0",
+        "buildProfile": "release",
+        "releaseChannel": "stable",
+        "dirty": false
+      },
+      "install": {
+        "binaryName": "ee",
+        "executableName": "ee.exe",
+        "installPath": "%LOCALAPPDATA%\\Programs\\ee\\ee.exe"
+      },
+      "minimumOs": ["Windows 10+"],
+      "compatibilityNotes": ["PowerShell installer should place ee.exe on PATH."]
+    }
+  ],
+  "compatibilityNotes": ["Fixture for warning-only signature absence."]
+}

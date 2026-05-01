@@ -1,0 +1,84 @@
+{
+  "schema": "ee.release_manifest.v1",
+  "releaseVersion": "0.1.0",
+  "gitCommit": "0123456789abcdef0123456789abcdef01234567",
+  "gitTag": "v0.1.0",
+  "binaryName": "ee",
+  "artifactCount": 2,
+  "artifacts": [
+    {
+      "schema": "ee.release_artifact.v1",
+      "artifactId": "ee-0.1.0-aarch64-apple-darwin",
+      "releaseVersion": "0.1.0",
+      "fileName": "ee-aarch64-apple-darwin.tar.xz",
+      "targetTriple": "aarch64-apple-darwin",
+      "archiveFormat": "tar_xz",
+      "binaryName": "ee",
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "signature": {
+        "kind": "sigstore",
+        "fileName": "ee-aarch64-apple-darwin.tar.xz.sigstore.json",
+        "checksum": {
+          "algorithm": "sha256",
+          "value": "2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      },
+      "provenance": {
+        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",
+        "sourceTag": "v0.1.0",
+        "buildProfile": "release",
+        "releaseChannel": "stable",
+        "dirty": false
+      },
+      "install": {
+        "binaryName": "ee",
+        "executableName": "ee",
+        "installPath": "~/.local/bin/ee"
+      },
+      "minimumOs": ["macOS 12+"],
+      "compatibilityNotes": []
+    },
+    {
+      "schema": "ee.release_artifact.v1",
+      "artifactId": "ee-0.1.0-x86_64-unknown-linux-gnu",
+      "releaseVersion": "0.1.0",
+      "fileName": "ee-x86_64-unknown-linux-gnu.tar.xz",
+      "targetTriple": "x86_64-unknown-linux-gnu",
+      "archiveFormat": "tar_xz",
+      "binaryName": "ee",
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      "signature": {
+        "kind": "sigstore",
+        "fileName": "ee-x86_64-unknown-linux-gnu.tar.xz.sigstore.json",
+        "checksum": {
+          "algorithm": "sha256",
+          "value": "4444444444444444444444444444444444444444444444444444444444444444"
+        }
+      },
+      "provenance": {
+        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",
+        "sourceTag": "v0.1.0",
+        "buildProfile": "release",
+        "releaseChannel": "stable",
+        "dirty": false
+      },
+      "install": {
+        "binaryName": "ee",
+        "executableName": "ee",
+        "installPath": "~/.local/bin/ee"
+      },
+      "minimumOs": ["Linux kernel 4.19+ with glibc 2.31+"],
+      "compatibilityNotes": []
+    }
+  ],
+  "compatibilityNotes": [
+    "Release indexes are derived assets and are not packaged.",
+    "Installers must verify archive checksums before extraction."
+  ]
+}

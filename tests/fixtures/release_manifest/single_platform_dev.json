@@ -1,0 +1,39 @@
+{
+  "schema": "ee.release_manifest.v1",
+  "releaseVersion": "0.1.0-dev",
+  "gitCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "gitTag": "v0.1.0-dev",
+  "binaryName": "ee",
+  "artifactCount": 1,
+  "artifacts": [
+    {
+      "schema": "ee.release_artifact.v1",
+      "artifactId": "ee-0.1.0-dev-x86_64-unknown-linux-musl",
+      "releaseVersion": "0.1.0-dev",
+      "fileName": "ee-x86_64-unknown-linux-musl.tar.xz",
+      "targetTriple": "x86_64-unknown-linux-musl",
+      "archiveFormat": "tar_xz",
+      "binaryName": "ee",
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      "signature": null,
+      "provenance": {
+        "sourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sourceTag": "v0.1.0-dev",
+        "buildProfile": "release",
+        "releaseChannel": "dev",
+        "dirty": true
+      },
+      "install": {
+        "binaryName": "ee",
+        "executableName": "ee",
+        "installPath": "~/.local/bin/ee"
+      },
+      "minimumOs": ["Linux kernel 4.19+ with musl-compatible userspace"],
+      "compatibilityNotes": ["musl builds avoid host glibc requirements."]
+    }
+  ],
+  "compatibilityNotes": ["Development release fixture; signature may be absent."]
+}

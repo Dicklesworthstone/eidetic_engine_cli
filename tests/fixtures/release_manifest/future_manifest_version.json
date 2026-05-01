@@ -1,0 +1,10 @@
+{
+  "schema": "ee.release_manifest.v99",
+  "releaseVersion": "99.0.0",
+  "gitCommit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "gitTag": "v99.0.0",
+  "binaryName": "ee",
+  "artifactCount": 0,
+  "artifacts": [],
+  "compatibilityNotes": ["Fixture intentionally uses a future manifest schema."]
+}

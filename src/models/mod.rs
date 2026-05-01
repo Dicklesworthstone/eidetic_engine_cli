@@ -19,6 +19,7 @@ pub mod procedure;
 pub mod progress;
 pub mod provenance;
 pub mod recorder;
+pub mod release;
 pub mod repro;
 pub mod revision;
 pub mod rule;
@@ -140,6 +141,18 @@ pub use recorder::{
     REDACTION_STATUS_SCHEMA_V1, RecorderEvent, RecorderEventType, RecorderFieldSchema,
     RecorderObjectSchema, RecorderPayload, RecorderRunMeta, RecorderRunStatus, RedactionStatus,
     RedactionStatusSnapshot, recorder_schema_catalog_json, recorder_schemas,
+};
+pub use release::{
+    RELEASE_ARTIFACT_SCHEMA_V1, RELEASE_BINARY_NAME, RELEASE_MANIFEST_SCHEMA_V1,
+    RELEASE_MANIFEST_VERIFICATION_SCHEMA_V1, RELEASE_SCHEMA_CATALOG_V1, ReleaseArchiveFormat,
+    ReleaseArtifact, ReleaseChecksum, ReleaseChecksumAlgorithm, ReleaseInstallLayout,
+    ReleaseManifest, ReleaseProvenance, ReleaseSignature, ReleaseVerificationCode,
+    ReleaseVerificationFinding, ReleaseVerificationReport, ReleaseVerificationSeverity,
+    ReleaseVerificationStatus, compatibility_notes_for_target, default_archive_format,
+    default_install_path, is_allowed_package_member_path, is_safe_release_artifact_path,
+    is_supported_release_target, minimum_os_assumptions, release_artifact_file_name,
+    release_artifact_id, release_executable_name, release_tag, sha256_hex,
+    verify_release_manifest_json,
 };
 pub use repro::{
     DependencyCategory, ParseDependencyCategoryError, ParseProvenanceEventTypeError,

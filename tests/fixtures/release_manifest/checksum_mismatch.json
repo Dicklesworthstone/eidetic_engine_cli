@@ -1,0 +1,43 @@
+{
+  "schema": "ee.release_manifest.v1",
+  "releaseVersion": "0.1.0",
+  "gitCommit": "cccccccccccccccccccccccccccccccccccccccc",
+  "gitTag": "v0.1.0",
+  "binaryName": "ee",
+  "artifactCount": 1,
+  "artifacts": [
+    {
+      "schema": "ee.release_artifact.v1",
+      "artifactId": "ee-0.1.0-x86_64-unknown-linux-gnu",
+      "releaseVersion": "0.1.0",
+      "fileName": "ee-x86_64-unknown-linux-gnu.tar.xz",
+      "targetTriple": "x86_64-unknown-linux-gnu",
+      "archiveFormat": "tar_xz",
+      "binaryName": "ee",
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "signature": {
+        "kind": "sigstore",
+        "fileName": "ee-x86_64-unknown-linux-gnu.tar.xz.sigstore.json",
+        "checksum": null
+      },
+      "provenance": {
+        "sourceCommit": "cccccccccccccccccccccccccccccccccccccccc",
+        "sourceTag": "v0.1.0",
+        "buildProfile": "release",
+        "releaseChannel": "stable",
+        "dirty": false
+      },
+      "install": {
+        "binaryName": "ee",
+        "executableName": "ee",
+        "installPath": "~/.local/bin/ee"
+      },
+      "minimumOs": ["Linux kernel 4.19+ with glibc 2.31+"],
+      "compatibilityNotes": []
+    }
+  ],
+  "compatibilityNotes": ["Fixture intentionally uses a bad checksum."]
+}
