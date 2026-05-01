@@ -4,9 +4,18 @@
 //! - `get_memory_details`: retrieve a single memory with its tags and metadata
 //! - `revise_memory`: create an immutable revision of an existing memory
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
-use crate::db::{DbConnection, StoredMemory};
+use crate::db::{
+    CreateAuditInput, CreateMemoryInput, CreateSearchIndexJobInput, CreateWorkspaceInput,
+    DbConnection, SearchIndexJobType, StoredMemory, audit_actions, generate_audit_id,
+};
+use crate::models::{
+    DomainError, MemoryContent, MemoryId, MemoryKind, MemoryLevel, ProvenanceUri, Tag, TrustClass,
+    UnitScore, WorkspaceId,
+};
 
 /// A memory with its associated tags for display.
 #[derive(Clone, Debug, PartialEq)]
@@ -15,6 +24,345 @@ pub struct MemoryDetails {
     pub memory: StoredMemory,
     /// Tags associated with this memory.
     pub tags: Vec<String>,
+}
+
+/// Options for creating a manual memory through `ee remember`.
+#[derive(Clone, Debug)]
+pub struct RememberMemoryOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Memory content.
+    pub content: &'a str,
+    /// Memory level.
+    pub level: &'a str,
+    /// Memory kind.
+    pub kind: &'a str,
+    /// Comma-separated tags.
+    pub tags: Option<&'a str>,
+    /// Confidence score.
+    pub confidence: f32,
+    /// Optional source provenance URI.
+    pub source: Option<&'a str>,
+    /// Validate and render the write without mutating storage.
+    pub dry_run: bool,
+}
+
+/// Result of creating a manual memory.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RememberMemoryReport {
+    /// Package version for stable output.
+    pub version: &'static str,
+    /// Created or previewed memory ID.
+    pub memory_id: MemoryId,
+    /// Canonical workspace ID when resolved.
+    pub workspace_id: String,
+    /// Canonical workspace path.
+    pub workspace_path: PathBuf,
+    /// Resolved database path.
+    pub database_path: PathBuf,
+    /// Canonical memory content.
+    pub content: String,
+    /// Canonical memory level.
+    pub level: MemoryLevel,
+    /// Canonical memory kind.
+    pub kind: MemoryKind,
+    /// Validated confidence score.
+    pub confidence: f32,
+    /// Canonical tags.
+    pub tags: Vec<String>,
+    /// Canonical source/provenance URI.
+    pub source: Option<String>,
+    /// Whether this was a dry run.
+    pub dry_run: bool,
+    /// Whether a memory row was persisted.
+    pub persisted: bool,
+    /// Audit entry created for the write.
+    pub audit_id: Option<String>,
+    /// Pending index job created for the memory.
+    pub index_job_id: Option<String>,
+}
+
+/// Create a manual memory and enqueue a single-document index job.
+///
+/// Dry-run mode validates and returns the canonical record shape without
+/// opening or mutating storage.
+pub fn remember_memory(
+    options: &RememberMemoryOptions<'_>,
+) -> Result<RememberMemoryReport, DomainError> {
+    let prepared = prepare_remember_memory(options)?;
+    if options.dry_run {
+        return Ok(RememberMemoryReport {
+            version: env!("CARGO_PKG_VERSION"),
+            memory_id: prepared.memory_id,
+            workspace_id: prepared.workspace_id,
+            workspace_path: prepared.workspace_path,
+            database_path: prepared.database_path,
+            content: prepared.content,
+            level: prepared.level,
+            kind: prepared.kind,
+            confidence: prepared.confidence,
+            tags: prepared.tags,
+            source: prepared.provenance_uri,
+            dry_run: true,
+            persisted: false,
+            audit_id: None,
+            index_job_id: None,
+        });
+    }
+
+    ensure_database_parent_exists(&prepared.database_path)?;
+    let connection =
+        DbConnection::open_file(&prepared.database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+    connection.migrate().map_err(|error| DomainError::Storage {
+        message: format!("Failed to migrate database: {error}"),
+        repair: Some("ee doctor".to_string()),
+    })?;
+    ensure_workspace(
+        &connection,
+        &prepared.workspace_id,
+        &prepared.workspace_path,
+    )?;
+
+    let memory_id = prepared.memory_id.to_string();
+    let audit_id = generate_audit_id();
+    let index_job_id = generate_search_index_job_id();
+    let memory_input = CreateMemoryInput {
+        workspace_id: prepared.workspace_id.clone(),
+        level: prepared.level.as_str().to_owned(),
+        kind: prepared.kind.as_str().to_owned(),
+        content: prepared.content.clone(),
+        confidence: prepared.confidence,
+        utility: UnitScore::neutral().into_inner(),
+        importance: UnitScore::neutral().into_inner(),
+        provenance_uri: prepared.provenance_uri.clone(),
+        trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+        trust_subclass: Some("ee remember".to_owned()),
+        tags: prepared.tags.clone(),
+    };
+    let audit_details = remember_audit_details(&memory_id, &memory_input);
+    let index_input = CreateSearchIndexJobInput {
+        workspace_id: prepared.workspace_id.clone(),
+        job_type: SearchIndexJobType::SingleDocument,
+        document_source: Some("memory".to_owned()),
+        document_id: Some(memory_id.clone()),
+        documents_total: 1,
+    };
+
+    connection
+        .with_transaction(|| {
+            connection.insert_memory(&memory_id, &memory_input)?;
+            connection.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(memory_input.workspace_id.clone()),
+                    actor: Some("ee remember".to_owned()),
+                    action: audit_actions::MEMORY_CREATE.to_owned(),
+                    target_type: Some("memory".to_owned()),
+                    target_id: Some(memory_id.clone()),
+                    details: Some(audit_details.clone()),
+                },
+            )?;
+            connection.insert_search_index_job(&index_job_id, &index_input)
+        })
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to store memory: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+
+    Ok(RememberMemoryReport {
+        version: env!("CARGO_PKG_VERSION"),
+        memory_id: prepared.memory_id,
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path,
+        database_path: prepared.database_path,
+        content: prepared.content,
+        level: prepared.level,
+        kind: prepared.kind,
+        confidence: prepared.confidence,
+        tags: prepared.tags,
+        source: prepared.provenance_uri,
+        dry_run: false,
+        persisted: true,
+        audit_id: Some(audit_id),
+        index_job_id: Some(index_job_id),
+    })
+}
+
+#[derive(Clone, Debug)]
+struct PreparedRememberMemory {
+    memory_id: MemoryId,
+    workspace_id: String,
+    workspace_path: PathBuf,
+    database_path: PathBuf,
+    content: String,
+    level: MemoryLevel,
+    kind: MemoryKind,
+    confidence: f32,
+    tags: Vec<String>,
+    provenance_uri: Option<String>,
+}
+
+fn prepare_remember_memory(
+    options: &RememberMemoryOptions<'_>,
+) -> Result<PreparedRememberMemory, DomainError> {
+    let workspace_path = resolve_workspace_path(options.workspace_path, options.dry_run)?;
+    let database_path = options
+        .database_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    let content = MemoryContent::parse(options.content)
+        .map_err(|error| remember_usage_error(error.to_string()))?
+        .as_str()
+        .to_owned();
+    let level = MemoryLevel::from_str(options.level)
+        .map_err(|error| remember_usage_error(error.to_string()))?;
+    let kind = MemoryKind::from_str(options.kind)
+        .map_err(|error| remember_usage_error(error.to_string()))?;
+    let confidence = UnitScore::parse(options.confidence)
+        .map_err(|error| remember_usage_error(error.to_string()))?
+        .into_inner();
+    let tags = parse_tags(options.tags)?;
+    let provenance_uri = options
+        .source
+        .map(|source| {
+            ProvenanceUri::from_str(source)
+                .map(|uri| uri.to_string())
+                .map_err(|error| remember_usage_error(format!("invalid provenance URI: {error}")))
+        })
+        .transpose()?;
+
+    Ok(PreparedRememberMemory {
+        memory_id: MemoryId::now(),
+        workspace_id: stable_workspace_id(&workspace_path),
+        workspace_path,
+        database_path,
+        content,
+        level,
+        kind,
+        confidence,
+        tags,
+        provenance_uri,
+    })
+}
+
+fn parse_tags(tags: Option<&str>) -> Result<Vec<String>, DomainError> {
+    let mut unique = BTreeSet::new();
+    if let Some(tags) = tags {
+        for raw in tags.split(',').map(str::trim).filter(|tag| !tag.is_empty()) {
+            let tag = Tag::parse(raw).map_err(|error| remember_usage_error(error.to_string()))?;
+            unique.insert(tag.to_string());
+        }
+    }
+    Ok(unique.into_iter().collect())
+}
+
+fn resolve_workspace_path(path: &Path, dry_run: bool) -> Result<PathBuf, DomainError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+
+    match absolute.canonicalize() {
+        Ok(canonical) => Ok(canonical),
+        Err(_error) if dry_run => Ok(absolute),
+        Err(error) => Err(DomainError::Configuration {
+            message: format!(
+                "Failed to resolve workspace {}: {error}",
+                absolute.display()
+            ),
+            repair: Some("ee init --workspace .".to_owned()),
+        }),
+    }
+}
+
+fn ensure_database_parent_exists(database_path: &Path) -> Result<(), DomainError> {
+    let Some(parent) = database_path.parent() else {
+        return Ok(());
+    };
+    if parent.exists() {
+        return Ok(());
+    }
+    Err(DomainError::Storage {
+        message: format!("Database directory not found at {}", parent.display()),
+        repair: Some("ee init --workspace .".to_owned()),
+    })
+}
+
+fn ensure_workspace(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &Path,
+) -> Result<(), DomainError> {
+    let path = workspace_path.to_string_lossy().into_owned();
+    if connection
+        .get_workspace_by_path(&path)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query workspace: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    connection
+        .insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path,
+                name: workspace_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned()),
+            },
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to register workspace: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })
+}
+
+fn stable_workspace_id(path: &Path) -> String {
+    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+}
+
+fn generate_search_index_job_id() -> String {
+    let memory_id = MemoryId::now().to_string();
+    let payload = memory_id.trim_start_matches("mem_");
+    format!("sidx_{payload}")
+}
+
+fn remember_audit_details(memory_id: &str, input: &CreateMemoryInput) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.memory_create.v1",
+        "command": "ee remember",
+        "memoryId": memory_id,
+        "level": input.level,
+        "kind": input.kind,
+        "confidence": input.confidence,
+        "trustClass": input.trust_class,
+        "trustSubclass": input.trust_subclass,
+        "provenanceUri": input.provenance_uri,
+        "tagCount": input.tags.len(),
+    })
+    .to_string()
+}
+
+fn remember_usage_error(message: String) -> DomainError {
+    DomainError::Usage {
+        message,
+        repair: Some("ee remember --help".to_owned()),
+    }
 }
 
 /// Options for retrieving a memory.
@@ -1113,6 +1461,129 @@ mod tests {
     fn memory_show_report_version_matches_package() -> TestResult {
         let report = MemoryShowReport::not_found();
         ensure(report.version, env!("CARGO_PKG_VERSION"), "version")
+    }
+
+    #[test]
+    fn remember_memory_dry_run_does_not_create_database() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let report = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "  Run cargo fmt before release.  ",
+            level: "procedural",
+            kind: "rule",
+            tags: Some("Release,cli,release"),
+            confidence: 0.8,
+            source: Some("file://AGENTS.md#L42"),
+            dry_run: true,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(report.dry_run, true, "dry_run")?;
+        ensure(report.persisted, false, "persisted")?;
+        ensure(report.audit_id.is_none(), true, "audit id absent")?;
+        ensure(report.index_job_id.is_none(), true, "index job absent")?;
+        ensure(
+            report.database_path.exists(),
+            false,
+            "dry run must not create database",
+        )?;
+        ensure(
+            report.tags,
+            vec!["cli".to_string(), "release".to_string()],
+            "canonical tags",
+        )?;
+        ensure(
+            report.source,
+            Some("file://AGENTS.md#L42".to_string()),
+            "canonical source",
+        )
+    }
+
+    #[test]
+    fn remember_memory_persists_memory_audit_and_index_job() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let report = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Store release checks as durable memory.",
+            level: "procedural",
+            kind: "rule",
+            tags: Some("release,checks"),
+            confidence: 0.9,
+            source: Some("file://README.md#L74-L77"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(report.dry_run, false, "dry_run")?;
+        ensure(report.persisted, true, "persisted")?;
+        ensure(report.audit_id.is_some(), true, "audit id present")?;
+        ensure(report.index_job_id.is_some(), true, "index job id present")?;
+        ensure(report.database_path.exists(), true, "database created")?;
+
+        let connection = crate::db::DbConnection::open_file(&report.database_path)
+            .map_err(|error| error.to_string())?;
+        let memory = connection
+            .get_memory(&report.memory_id.to_string())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory should be persisted".to_string())?;
+        ensure(
+            memory.workspace_id,
+            report.workspace_id.clone(),
+            "workspace id",
+        )?;
+        ensure(
+            memory.content,
+            "Store release checks as durable memory.".to_string(),
+            "content",
+        )?;
+        ensure(
+            memory.trust_class,
+            "human_explicit".to_string(),
+            "trust class",
+        )?;
+        ensure(
+            memory.provenance_uri,
+            Some("file://README.md#L74-L77".to_string()),
+            "provenance uri",
+        )?;
+        let tags = connection
+            .get_memory_tags(&report.memory_id.to_string())
+            .map_err(|error| error.to_string())?;
+        ensure(
+            tags,
+            vec!["checks".to_string(), "release".to_string()],
+            "tags",
+        )?;
+        let audit_id = report
+            .audit_id
+            .as_ref()
+            .ok_or_else(|| "audit id missing".to_string())?;
+        let audit = connection
+            .get_audit(audit_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "audit should be persisted".to_string())?;
+        ensure(audit.action, "memory.create".to_string(), "audit action")?;
+        ensure(
+            audit.target_id,
+            Some(report.memory_id.to_string()),
+            "audit target",
+        )?;
+        let jobs = connection
+            .list_search_index_jobs(
+                &report.workspace_id,
+                Some(crate::db::SearchIndexJobStatus::Pending),
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(jobs.len(), 1, "pending index job count")?;
+        ensure(
+            jobs[0].document_id.clone(),
+            Some(report.memory_id.to_string()),
+            "index job document",
+        )
     }
 
     #[test]

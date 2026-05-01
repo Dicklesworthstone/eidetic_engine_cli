@@ -38,7 +38,8 @@ use crate::core::learn::{
 };
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
-    GetMemoryOptions, ListMemoriesOptions, get_memory_details, list_memories,
+    GetMemoryOptions, ListMemoriesOptions, RememberMemoryOptions, RememberMemoryReport,
+    get_memory_details, list_memories, remember_memory,
 };
 use crate::core::outcome::{OutcomeRecordOptions, record_outcome};
 use crate::core::preflight::{
@@ -50,8 +51,7 @@ use crate::core::search::{SearchOptions, run_search};
 use crate::core::situation::{classify_task, explain_situation, show_situation};
 use crate::core::status::StatusReport;
 use crate::core::why::{WhyOptions, explain_memory};
-use crate::models::memory::{MemoryKind, MemoryLevel, MemoryValidationError};
-use crate::models::{DomainError, InstallOperation, MemoryId, ProcessExitCode};
+use crate::models::{DomainError, InstallOperation, ProcessExitCode};
 use crate::output;
 use crate::pack::ContextPackProfile;
 
@@ -2044,12 +2044,8 @@ where
             }
         }
         Some(Command::Certificate(ref cert_cmd)) => match cert_cmd {
-            CertificateCommand::List(args) => {
-                handle_certificate_list(&cli, args, stdout, stderr)
-            }
-            CertificateCommand::Show(args) => {
-                handle_certificate_show(&cli, args, stdout, stderr)
-            }
+            CertificateCommand::List(args) => handle_certificate_list(&cli, args, stdout, stderr),
+            CertificateCommand::Show(args) => handle_certificate_show(&cli, args, stdout, stderr),
             CertificateCommand::Verify(args) => {
                 handle_certificate_verify(&cli, args, stdout, stderr)
             }
@@ -2547,7 +2543,7 @@ where
                 ),
             },
         },
-        Some(Command::Remember(ref args)) => match handle_remember(args, cli.wants_json()) {
+        Some(Command::Remember(ref args)) => match handle_remember(&cli, args) {
             Ok(result) => match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &result.human_output())
@@ -2558,13 +2554,7 @@ where
                 | output::Renderer::Compact
                 | output::Renderer::Hook => write_stdout(stdout, &(result.json_output() + "\n")),
             },
-            Err(error) => {
-                let domain_error = DomainError::Usage {
-                    message: error.to_string(),
-                    repair: Some("ee remember --help".to_string()),
-                };
-                write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
-            }
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
         },
         Some(Command::Review(ReviewCommand::Session(ref args))) => {
             handle_review_session(&cli, args, stdout, stderr)
@@ -5657,20 +5647,7 @@ where
     error.exit_code()
 }
 
-#[derive(Clone, Debug)]
-pub struct RememberResult {
-    pub memory_id: MemoryId,
-    pub content: String,
-    pub level: MemoryLevel,
-    pub kind: MemoryKind,
-    pub confidence: f32,
-    pub tags: Vec<String>,
-    pub source: Option<String>,
-    pub dry_run: bool,
-    pub storage_degraded: bool,
-}
-
-impl RememberResult {
+impl RememberMemoryReport {
     #[must_use]
     pub fn human_output(&self) -> String {
         let mut output = if self.dry_run {
@@ -5690,8 +5667,11 @@ impl RememberResult {
                 self.memory_id
             )
         };
-        if self.storage_degraded {
-            output.push_str("\nNote: Storage is not wired yet. Memory was not persisted.\n");
+        if let Some(audit_id) = &self.audit_id {
+            output.push_str(&format!("  Audit: {audit_id}\n"));
+        }
+        if let Some(index_job_id) = &self.index_job_id {
+            output.push_str(&format!("  Index job: {index_job_id}\n"));
         }
         output
     }
@@ -5730,16 +5710,19 @@ impl RememberResult {
         let provenance_uri_json = self.source.as_ref().map_or(String::new(), |s| {
             format!(",\"provenance_uri\":\"{}\"", escape_json_string(s))
         });
-
-        let degraded = if self.storage_degraded {
-            r#","degraded":[{"code":"storage_not_implemented","severity":"medium","message":"Storage is not wired yet. Memory was not persisted.","repair":"Implement EE-044."}]"#
-        } else {
-            ""
-        };
+        let audit_id_json = self.audit_id.as_ref().map_or("null".to_string(), |id| {
+            format!("\"{}\"", escape_json_string(id))
+        });
+        let index_job_id_json = self.index_job_id.as_ref().map_or("null".to_string(), |id| {
+            format!("\"{}\"", escape_json_string(id))
+        });
 
         let mut json = format!(
-            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","memory_id":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"dry_run":{}}}"#,
+            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"dry_run":{},"persisted":{},"audit_id":{},"index_job_id":{}}}"#,
+            self.version,
             self.memory_id,
+            escape_json_string(&self.workspace_id),
+            escape_json_string(&self.database_path.display().to_string()),
             escape_json_string(&self.content),
             self.level.as_str(),
             self.kind.as_str(),
@@ -5747,55 +5730,28 @@ impl RememberResult {
             tags_json,
             source_json,
             provenance_uri_json,
-            self.dry_run
+            self.dry_run,
+            self.persisted,
+            audit_id_json,
+            index_job_id_json
         );
-        json.push_str(degraded);
         json.push('}');
         json
     }
 }
 
-fn validate_remember_args(
-    args: &RememberArgs,
-) -> Result<(MemoryLevel, MemoryKind), MemoryValidationError> {
-    let level: MemoryLevel = args.level.parse()?;
-    let kind: MemoryKind = args.kind.parse()?;
-    Ok((level, kind))
-}
-
-fn handle_remember(
-    args: &RememberArgs,
-    _wants_json: bool,
-) -> Result<RememberResult, MemoryValidationError> {
-    let (level, kind) = validate_remember_args(args)?;
-
-    // Split on comma, trim whitespace, drop empties so `--tags "a,,b"` and
-    // `--tags " a, , b"` produce ["a","b"] instead of leaking empty entries
-    // into the JSON envelope.
-    let tags: Vec<String> = args
-        .tags
-        .as_ref()
-        .map(|t| {
-            t.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let memory_id = MemoryId::now();
-
-    Ok(RememberResult {
-        memory_id,
-        content: args.content.clone(),
-        level,
-        kind,
+fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberMemoryReport, DomainError> {
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    remember_memory(&RememberMemoryOptions {
+        workspace_path: &workspace_path,
+        database_path: None,
+        content: &args.content,
+        level: &args.level,
+        kind: &args.kind,
+        tags: args.tags.as_deref(),
         confidence: args.confidence,
-        tags,
-        source: args.source.clone(),
+        source: args.source.as_deref(),
         dry_run: args.dry_run,
-        storage_degraded: true,
     })
 }
 
@@ -6273,15 +6229,17 @@ where
         output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &output::render_certificate_list_human(&report))
         }
-        output::Renderer::Toon => {
-            write_stdout(stdout, &(output::render_certificate_list_toon(&report) + "\n"))
-        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_certificate_list_toon(&report) + "\n"),
+        ),
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            write_stdout(stdout, &(output::render_certificate_list_json(&report) + "\n"))
-        }
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_certificate_list_json(&report) + "\n"),
+        ),
     }
 }
 
@@ -6312,15 +6270,17 @@ where
         output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &output::render_certificate_show_human(&report))
         }
-        output::Renderer::Toon => {
-            write_stdout(stdout, &(output::render_certificate_show_toon(&report) + "\n"))
-        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_certificate_show_toon(&report) + "\n"),
+        ),
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            write_stdout(stdout, &(output::render_certificate_show_json(&report) + "\n"))
-        }
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_certificate_show_json(&report) + "\n"),
+        ),
     }
 }
 
@@ -6351,15 +6311,17 @@ where
         output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &output::render_certificate_verify_human(&report))
         }
-        output::Renderer::Toon => {
-            write_stdout(stdout, &(output::render_certificate_verify_toon(&report) + "\n"))
-        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_certificate_verify_toon(&report) + "\n"),
+        ),
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            write_stdout(stdout, &(output::render_certificate_verify_json(&report) + "\n"))
-        }
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_certificate_verify_json(&report) + "\n"),
+        ),
     }
 }
 

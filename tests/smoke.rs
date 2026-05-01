@@ -527,6 +527,156 @@ fn import_jsonl_json_validates_imports_and_skips_duplicates() -> TestResult {
     )
 }
 
+#[cfg(unix)]
+#[test]
+fn remember_persists_and_feeds_search_context_flow() -> TestResult {
+    let workspace = unique_artifact_dir("remember-flow")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+
+    let init = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "init"])?;
+    let init_stderr = String::from_utf8_lossy(&init.stderr);
+    ensure(
+        init.status.success(),
+        format!("init should succeed; stderr: {init_stderr}"),
+    )?;
+    ensure(init.stderr.is_empty(), "init stderr clean")?;
+    let _: serde_json::Value = serde_json::from_slice(&init.stdout)
+        .map_err(|error| format!("init stdout must be JSON: {error}"))?;
+
+    let remember = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "remember",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--tags",
+        "release,checks",
+        "--confidence",
+        "0.9",
+        "--source",
+        "file://README.md#L74-L77",
+        "Store release checks as durable memory.",
+    ])?;
+    let remember_stderr = String::from_utf8_lossy(&remember.stderr);
+    ensure(
+        remember.status.success(),
+        format!("remember should succeed; stderr: {remember_stderr}"),
+    )?;
+    ensure(remember.stderr.is_empty(), "remember stderr clean")?;
+    let remember_stdout = String::from_utf8_lossy(&remember.stdout);
+    ensure(
+        !remember_stdout.contains("storage_not_implemented"),
+        "remember must not report storage_not_implemented after persistence",
+    )?;
+    let remember_json: serde_json::Value = serde_json::from_slice(&remember.stdout)
+        .map_err(|error| format!("remember stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &remember_json["data"]["persisted"],
+        &serde_json::json!(true),
+        "remember persisted flag",
+    )?;
+    let memory_id = remember_json["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "remember memory_id must be a string".to_string())?;
+    let database_path = workspace.join(".ee").join("ee.db");
+    ensure(database_path.exists(), "remember should create database")?;
+
+    let show = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "memory",
+        "show",
+        memory_id,
+    ])?;
+    let show_stderr = String::from_utf8_lossy(&show.stderr);
+    ensure(
+        show.status.success(),
+        format!("memory show should find remembered memory; stderr: {show_stderr}"),
+    )?;
+    ensure(show.stderr.is_empty(), "memory show stderr clean")?;
+    let show_json: serde_json::Value = serde_json::from_slice(&show.stdout)
+        .map_err(|error| format!("memory show stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &show_json["data"]["memory"]["content"],
+        &serde_json::json!("Store release checks as durable memory."),
+        "remembered memory content",
+    )?;
+    ensure_equal(
+        &show_json["data"]["memory"]["trust_class"],
+        &serde_json::json!("human_explicit"),
+        "remembered memory trust class",
+    )?;
+
+    let rebuild = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "index",
+        "rebuild",
+    ])?;
+    let rebuild_stderr = String::from_utf8_lossy(&rebuild.stderr);
+    ensure(
+        rebuild.status.success(),
+        format!("index rebuild should succeed; stderr: {rebuild_stderr}"),
+    )?;
+    ensure(rebuild.stderr.is_empty(), "index rebuild stderr clean")?;
+    let rebuild_json: serde_json::Value = serde_json::from_slice(&rebuild.stdout)
+        .map_err(|error| format!("index rebuild stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &rebuild_json["data"]["memories_indexed"],
+        &serde_json::json!(1),
+        "index rebuild memory count",
+    )?;
+
+    let search = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "search",
+        "release checks",
+    ])?;
+    let search_stderr = String::from_utf8_lossy(&search.stderr);
+    ensure(
+        search.status.success(),
+        format!("search should succeed; stderr: {search_stderr}"),
+    )?;
+    ensure(search.stderr.is_empty(), "search stderr clean")?;
+    let search_json: serde_json::Value = serde_json::from_slice(&search.stdout)
+        .map_err(|error| format!("search stdout must be JSON: {error}"))?;
+    ensure(
+        search_json["data"]["results"]
+            .as_array()
+            .is_some_and(|results| results.iter().any(|hit| hit["doc_id"] == memory_id)),
+        "search results should include remembered memory",
+    )?;
+
+    let context = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "context",
+        "prepare release",
+    ])?;
+    let context_stderr = String::from_utf8_lossy(&context.stderr);
+    ensure(
+        context.status.success(),
+        format!("context should succeed; stderr: {context_stderr}"),
+    )?;
+    ensure(context.stderr.is_empty(), "context stderr clean")?;
+    let context_json: serde_json::Value = serde_json::from_slice(&context.stdout)
+        .map_err(|error| format!("context stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &context_json["schema"],
+        &serde_json::json!("ee.context.v1"),
+        "context schema",
+    )
+}
+
 // =============================================================================
 // Integration Foundation Smoke Tests (EE-313)
 //
