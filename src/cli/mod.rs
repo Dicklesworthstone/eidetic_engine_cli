@@ -35,6 +35,7 @@ use crate::core::learn::{
     LearnAgendaOptions, LearnSummaryOptions, LearnUncertaintyOptions, show_agenda, show_summary,
     show_uncertainty,
 };
+use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
     GetMemoryOptions, ListMemoriesOptions, get_memory_details, list_memories,
@@ -1479,6 +1480,9 @@ pub struct WhyArgs {
 pub enum ImportCommand {
     /// Import sessions and evidence from coding_agent_session_search.
     Cass(CassImportArgs),
+    /// Import memories from an ee JSONL export archive.
+    #[command(name = "jsonl")]
+    Jsonl(JsonlImportArgs),
     /// Inspect legacy Eidetic Engine artifacts without writing storage.
     #[command(name = "eidetic-legacy")]
     EideticLegacy(EideticLegacyImportArgs),
@@ -1502,6 +1506,22 @@ pub struct CassImportArgs {
     /// Skip first-window evidence span capture through `cass view`.
     #[arg(long, action = ArgAction::SetTrue)]
     pub no_spans: bool,
+}
+
+/// Arguments for `ee import jsonl`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct JsonlImportArgs {
+    /// JSONL export file to import.
+    #[arg(long, value_name = "PATH")]
+    pub source: PathBuf,
+
+    /// Database path to write. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Validate and summarize the JSONL archive without writing storage.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `ee import eidetic-legacy`.
@@ -2253,6 +2273,9 @@ where
         Some(Command::Import(ImportCommand::Cass(ref args))) => {
             handle_import_cass(&cli, args, stdout, stderr)
         }
+        Some(Command::Import(ImportCommand::Jsonl(ref args))) => {
+            handle_import_jsonl(&cli, args, stdout, stderr)
+        }
         Some(Command::Import(ImportCommand::EideticLegacy(ref args))) => {
             handle_import_eidetic_legacy(&cli, args, stdout, stderr)
         }
@@ -2801,6 +2824,61 @@ where
                     report.sessions_discovered,
                     report.sessions_imported,
                     report.spans_imported
+                ),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json(),
+                });
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        Err(error) => {
+            let domain_error = DomainError::Import {
+                message: error.to_string(),
+                repair: error.repair_hint().map(str::to_string),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_import_jsonl<W, E>(
+    cli: &Cli,
+    args: &JsonlImportArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = JsonlImportOptions {
+        workspace_path,
+        database_path: args.database.clone(),
+        source_path: args.source.clone(),
+        dry_run: args.dry_run,
+    };
+
+    match import_jsonl_records(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &format!(
+                    "IMPORT_JSONL|{}|{}|{}|{}\n",
+                    report.status,
+                    report.memory_records,
+                    report.memories_imported,
+                    report.memories_skipped_duplicate
                 ),
             ),
             output::Renderer::Json
@@ -6445,7 +6523,7 @@ const DIAG_SUBCOMMANDS: &[&str] = &[
     "streams",
 ];
 const EVAL_SUBCOMMANDS: &[&str] = &["run", "list"];
-const IMPORT_SUBCOMMANDS: &[&str] = &["cass", "eidetic-legacy"];
+const IMPORT_SUBCOMMANDS: &[&str] = &["cass", "jsonl", "eidetic-legacy"];
 const INDEX_SUBCOMMANDS: &[&str] = &["rebuild", "status"];
 const INSTALL_SUBCOMMANDS: &[&str] = &["check", "plan"];
 const MEMORY_SUBCOMMANDS: &[&str] = &["list", "show", "history"];
@@ -6540,6 +6618,7 @@ impl NormalizedInvocation {
                 Command::Init(_) => "init".to_string(),
                 Command::Import(import) => match import {
                     ImportCommand::Cass(_) => "import cass".to_string(),
+                    ImportCommand::Jsonl(_) => "import jsonl".to_string(),
                     ImportCommand::EideticLegacy(_) => "import eidetic-legacy".to_string(),
                 },
                 Command::Install(install) => match install {
@@ -7790,6 +7869,31 @@ mod tests {
     // ========================================================================
     // Legacy Eidetic Import Scanner Tests (EE-270)
     // ========================================================================
+
+    #[test]
+    fn parser_accepts_jsonl_import_dry_run() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "import",
+            "jsonl",
+            "--source",
+            "snapshot.jsonl",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse import jsonl: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Import(ImportCommand::Jsonl(args))) => {
+                ensure_equal(
+                    &args.source,
+                    &std::path::PathBuf::from("snapshot.jsonl"),
+                    "jsonl source path",
+                )?;
+                ensure_equal(&args.dry_run, &true, "jsonl dry-run flag")
+            }
+            other => Err(format!("expected Import::Jsonl, got {other:?}")),
+        }
+    }
 
     #[test]
     fn parser_accepts_eidetic_legacy_import_dry_run() -> TestResult {

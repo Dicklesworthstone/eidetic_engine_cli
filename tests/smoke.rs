@@ -371,6 +371,162 @@ fn import_cass_json_uses_cass_robot_contract_and_is_idempotent() -> TestResult {
     )
 }
 
+#[cfg(unix)]
+#[test]
+fn import_jsonl_json_validates_imports_and_skips_duplicates() -> TestResult {
+    let root = unique_artifact_dir("import-jsonl")?;
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+
+    let database = workspace.join(".ee").join("ee.db");
+    let source = root.join("snapshot.jsonl");
+    fs::write(
+        &source,
+        [
+            r#"{"schema":"ee.export.header.v1","format_version":1,"created_at":"2026-04-30T00:00:00Z","workspace_id":"wsp_01234567890123456789012345","workspace_path":"/source","export_scope":"memories","redaction_level":"none","record_count":3,"ee_version":"0.1.0","hostname":null,"export_id":"exp-001","import_source":"native","trust_level":"validated","checksum":null,"signature":null,"source_schema_version":null}"#,
+            r#"{"schema":"ee.export.memory.v1","memory_id":"mem_01234567890123456789012345","workspace_id":"wsp_01234567890123456789012345","level":"procedural","kind":"rule","content":"Run cargo fmt --check before release.","importance":0.8,"confidence":0.9,"utility":0.7,"created_at":"2026-04-30T00:00:00Z","updated_at":null,"expires_at":null,"source_agent":"MistySalmon","provenance_uri":"ee-export://fixture","superseded_by":null,"supersedes":null,"redacted":false,"redaction_reason":null}"#,
+            r#"{"schema":"ee.export.tag.v1","memory_id":"mem_01234567890123456789012345","tag":"Release","created_at":"2026-04-30T00:00:00Z"}"#,
+            r#"{"schema":"ee.export.footer.v1","export_id":"exp-001","completed_at":"2026-04-30T00:01:00Z","total_records":3,"memory_count":1,"link_count":0,"tag_count":1,"audit_count":0,"checksum":null,"success":true,"error_message":null}"#,
+        ]
+        .join("\n"),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let database_arg = database.to_string_lossy().into_owned();
+    let source_arg = source.to_string_lossy().into_owned();
+
+    let dry_run = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "import",
+        "jsonl",
+        "--source",
+        source_arg.as_str(),
+        "--dry-run",
+    ])?;
+    let dry_stderr = String::from_utf8_lossy(&dry_run.stderr);
+    ensure(
+        dry_run.status.success(),
+        format!("dry-run import should succeed; stderr: {dry_stderr}"),
+    )?;
+    ensure(dry_run.stderr.is_empty(), "dry-run stderr must stay clean")?;
+    let dry_json: serde_json::Value = serde_json::from_slice(&dry_run.stdout)
+        .map_err(|error| format!("dry-run stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &dry_json["data"]["schema"],
+        &serde_json::json!("ee.import.jsonl.v1"),
+        "dry-run data schema",
+    )?;
+    ensure_equal(
+        &dry_json["data"]["status"],
+        &serde_json::json!("dry_run"),
+        "dry-run status",
+    )?;
+    ensure_equal(
+        &dry_json["data"]["memoryRecords"],
+        &serde_json::json!(1),
+        "dry-run memory record count",
+    )?;
+    ensure_equal(
+        &dry_json["data"]["memoriesImported"],
+        &serde_json::json!(0),
+        "dry-run imported count",
+    )?;
+
+    let import_args = [
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "import",
+        "jsonl",
+        "--source",
+        source_arg.as_str(),
+        "--database",
+        database_arg.as_str(),
+    ];
+    let first = run_ee(&import_args)?;
+    let first_stderr = String::from_utf8_lossy(&first.stderr);
+    ensure(
+        first.status.success(),
+        format!("first JSONL import should succeed; stderr: {first_stderr}"),
+    )?;
+    ensure(first.stderr.is_empty(), "first JSONL import stderr clean")?;
+    let first_json: serde_json::Value = serde_json::from_slice(&first.stdout)
+        .map_err(|error| format!("first import stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &first_json["data"]["status"],
+        &serde_json::json!("completed"),
+        "first import status",
+    )?;
+    ensure_equal(
+        &first_json["data"]["memoriesImported"],
+        &serde_json::json!(1),
+        "first imported memory count",
+    )?;
+    ensure_equal(
+        &first_json["data"]["tagsImported"],
+        &serde_json::json!(1),
+        "first imported tag count",
+    )?;
+    ensure(database.exists(), "JSONL import should create the database")?;
+
+    let second = run_ee(&import_args)?;
+    let second_stderr = String::from_utf8_lossy(&second.stderr);
+    ensure(
+        second.status.success(),
+        format!("second JSONL import should succeed; stderr: {second_stderr}"),
+    )?;
+    ensure(second.stderr.is_empty(), "second JSONL import stderr clean")?;
+    let second_json: serde_json::Value = serde_json::from_slice(&second.stdout)
+        .map_err(|error| format!("second import stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &second_json["data"]["memoriesImported"],
+        &serde_json::json!(0),
+        "second imported memory count",
+    )?;
+    ensure_equal(
+        &second_json["data"]["memoriesSkippedDuplicate"],
+        &serde_json::json!(1),
+        "second duplicate skip count",
+    )?;
+
+    let show = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "memory",
+        "show",
+        "mem_01234567890123456789012345",
+        "--database",
+        database_arg.as_str(),
+    ])?;
+    let show_stderr = String::from_utf8_lossy(&show.stderr);
+    ensure(
+        show.status.success(),
+        format!("memory show should find imported memory; stderr: {show_stderr}"),
+    )?;
+    ensure(show.stderr.is_empty(), "memory show stderr clean")?;
+    let show_json: serde_json::Value = serde_json::from_slice(&show.stdout)
+        .map_err(|error| format!("memory show stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &show_json["data"]["memory"]["content"],
+        &serde_json::json!("Run cargo fmt --check before release."),
+        "imported memory content",
+    )?;
+    ensure_equal(
+        &show_json["data"]["memory"]["trust_class"],
+        &serde_json::json!("agent_validated"),
+        "imported memory trust class",
+    )?;
+    ensure_equal(
+        &show_json["data"]["memory"]["tags"][0]["name"],
+        &serde_json::json!("release"),
+        "imported memory tag",
+    )
+}
+
 // =============================================================================
 // Integration Foundation Smoke Tests (EE-313)
 //

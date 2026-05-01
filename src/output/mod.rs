@@ -6893,6 +6893,106 @@ mod tests {
         )
     }
 
+    // EE-336: TOON_DEFAULT_FORMAT precedence tests proving explicit machine
+    // output flags always override the fallback environment variable.
+
+    #[test]
+    fn toon_default_format_json_flag_forces_json() -> TestResult {
+        let ctx = OutputContext::detect_with_environment(
+            true,
+            false,
+            None,
+            false,
+            &OutputEnvironment {
+                toon_default_format: Some("toon".to_string()),
+                ..OutputEnvironment::default()
+            },
+        );
+        ensure_equal(
+            &ctx.renderer,
+            &Renderer::Json,
+            "--json flag must override TOON_DEFAULT_FORMAT",
+        )
+    }
+
+    #[test]
+    fn toon_default_format_robot_flag_forces_json() -> TestResult {
+        let ctx = OutputContext::detect_with_environment(
+            false,
+            true,
+            None,
+            false,
+            &OutputEnvironment {
+                toon_default_format: Some("toon".to_string()),
+                ..OutputEnvironment::default()
+            },
+        );
+        ensure_equal(
+            &ctx.renderer,
+            &Renderer::Json,
+            "--robot flag must override TOON_DEFAULT_FORMAT",
+        )
+    }
+
+    #[test]
+    fn toon_default_format_format_json_override_forces_json() -> TestResult {
+        let ctx = OutputContext::detect_with_environment(
+            false,
+            false,
+            Some(Renderer::Json),
+            false,
+            &OutputEnvironment {
+                toon_default_format: Some("toon".to_string()),
+                ..OutputEnvironment::default()
+            },
+        );
+        ensure_equal(
+            &ctx.renderer,
+            &Renderer::Json,
+            "--format json must override TOON_DEFAULT_FORMAT",
+        )
+    }
+
+    #[test]
+    fn toon_default_format_hook_mode_stays_hook() -> TestResult {
+        let ctx = OutputContext::detect_with_environment(
+            false,
+            false,
+            None,
+            false,
+            &OutputEnvironment {
+                ee_hook_mode: Some("1".to_string()),
+                toon_default_format: Some("toon".to_string()),
+                ..OutputEnvironment::default()
+            },
+        );
+        ensure_equal(
+            &ctx.renderer,
+            &Renderer::Hook,
+            "EE_HOOK_MODE must override TOON_DEFAULT_FORMAT",
+        )
+    }
+
+    #[test]
+    fn toon_default_format_mcp_agent_mode_stays_json() -> TestResult {
+        let ctx = OutputContext::detect_with_environment(
+            false,
+            false,
+            None,
+            false,
+            &OutputEnvironment {
+                ee_agent_mode: Some("1".to_string()),
+                toon_default_format: Some("toon".to_string()),
+                ..OutputEnvironment::default()
+            },
+        );
+        ensure_equal(
+            &ctx.renderer,
+            &Renderer::Json,
+            "EE_AGENT_MODE (MCP) must override TOON_DEFAULT_FORMAT",
+        )
+    }
+
     #[test]
     fn output_context_falsey_env_flags_do_not_force_machine_output() -> TestResult {
         let ctx = output_context_from_env(OutputEnvironment {

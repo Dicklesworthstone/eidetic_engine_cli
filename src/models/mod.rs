@@ -212,6 +212,9 @@ pub const IMPORT_CASS_SCHEMA_V1: &str = "ee.import.cass.v1";
 /// Schema for read-only legacy Eidetic import scans.
 pub const IMPORT_EIDETIC_LEGACY_SCAN_SCHEMA_V1: &str = "ee.import.eidetic_legacy.scan.v1";
 
+/// Schema for JSONL import reports (`ee import jsonl`).
+pub const IMPORT_JSONL_SCHEMA_V1: &str = "ee.import.jsonl.v1";
+
 /// Schema for review session reports (`ee review session --propose`).
 pub const REVIEW_SESSION_SCHEMA_V1: &str = "ee.review.session.v1";
 

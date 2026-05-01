@@ -1791,6 +1791,295 @@ impl CandidateType {
     }
 }
 
+// ============================================================================
+// Harmful Feedback Rate Limiting (EE-FEEDBACK-RATE-001)
+//
+// Guards against adversarial or careless bursts of harmful feedback that
+// could invert procedural rules. Per-source rate limits quarantine excess
+// events until reviewed.
+// ============================================================================
+
+pub const FEEDBACK_RATE_SCHEMA_V1: &str = "ee.curate.feedback_rate.v1";
+pub const FEEDBACK_QUARANTINE_SCHEMA_V1: &str = "ee.curate.feedback_quarantine.v1";
+pub const PROTECTED_RULE_SCHEMA_V1: &str = "ee.curate.protected_rule.v1";
+
+/// Default rate limit: max harmful events per source per hour.
+pub const DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR: u32 = 5;
+
+/// Default burst window in seconds.
+pub const DEFAULT_HARMFUL_BURST_WINDOW_SECONDS: u64 = 3600;
+
+/// Configuration for harmful feedback rate limiting.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeedbackRateConfig {
+    pub harmful_per_source_per_hour: u32,
+    pub harmful_burst_window_seconds: u64,
+    pub require_source_diversity_for_inversion: bool,
+    pub min_distinct_sources_for_inversion: u32,
+}
+
+impl Default for FeedbackRateConfig {
+    fn default() -> Self {
+        Self {
+            harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            require_source_diversity_for_inversion: true,
+            min_distinct_sources_for_inversion: 2,
+        }
+    }
+}
+
+impl FeedbackRateConfig {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"schema\":\"{}\",\"harmfulPerSourcePerHour\":{},\"burstWindowSeconds\":{},\"requireSourceDiversity\":{},\"minDistinctSources\":{}}}",
+            FEEDBACK_RATE_SCHEMA_V1,
+            self.harmful_per_source_per_hour,
+            self.harmful_burst_window_seconds,
+            self.require_source_diversity_for_inversion,
+            self.min_distinct_sources_for_inversion,
+        )
+    }
+}
+
+/// Reason for quarantining a harmful feedback event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuarantineReason {
+    RateLimitExceeded,
+    ProtectedRuleTarget,
+    InsufficientSourceDiversity,
+    SuspiciousBurstPattern,
+}
+
+impl QuarantineReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RateLimitExceeded => "rate_limit_exceeded",
+            Self::ProtectedRuleTarget => "protected_rule_target",
+            Self::InsufficientSourceDiversity => "insufficient_source_diversity",
+            Self::SuspiciousBurstPattern => "suspicious_burst_pattern",
+        }
+    }
+
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::RateLimitExceeded => "Source exceeded harmful feedback rate limit",
+            Self::ProtectedRuleTarget => "Target rule is protected from automated inversion",
+            Self::InsufficientSourceDiversity => "Inversion requires feedback from diverse sources",
+            Self::SuspiciousBurstPattern => "Burst pattern suggests automated or adversarial activity",
+        }
+    }
+}
+
+/// A quarantined harmful feedback event awaiting review.
+#[derive(Clone, Debug)]
+pub struct QuarantinedFeedback {
+    pub id: String,
+    pub source_id: String,
+    pub memory_id: String,
+    pub recorded_at: String,
+    pub reason: QuarantineReason,
+    pub raw_event_hash: String,
+    pub session_id: Option<String>,
+}
+
+impl QuarantinedFeedback {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let session = self
+            .session_id
+            .as_ref()
+            .map(|s| format!(",\"sessionId\":\"{}\"", s))
+            .unwrap_or_default();
+        format!(
+            "{{\"schema\":\"{}\",\"id\":\"{}\",\"sourceId\":\"{}\",\"memoryId\":\"{}\",\"recordedAt\":\"{}\",\"reason\":\"{}\",\"rawEventHash\":\"{}\"{}}}",
+            FEEDBACK_QUARANTINE_SCHEMA_V1,
+            self.id,
+            self.source_id,
+            self.memory_id,
+            self.recorded_at,
+            self.reason.as_str(),
+            self.raw_event_hash,
+            session,
+        )
+    }
+}
+
+/// Tracking state for per-source harmful feedback rate.
+#[derive(Clone, Debug, Default)]
+pub struct FeedbackRateState {
+    pub source_id: String,
+    pub hour_bucket: u64,
+    pub harmful_count: u32,
+    pub last_event_at: Option<String>,
+}
+
+impl FeedbackRateState {
+    #[must_use]
+    pub fn new(source_id: impl Into<String>, hour_bucket: u64) -> Self {
+        Self {
+            source_id: source_id.into(),
+            hour_bucket,
+            harmful_count: 0,
+            last_event_at: None,
+        }
+    }
+
+    pub fn record_harmful_event(&mut self, timestamp: &str) {
+        self.harmful_count = self.harmful_count.saturating_add(1);
+        self.last_event_at = Some(timestamp.to_owned());
+    }
+
+    #[must_use]
+    pub fn exceeds_limit(&self, config: &FeedbackRateConfig) -> bool {
+        self.harmful_count >= config.harmful_per_source_per_hour
+    }
+}
+
+/// Protected rule status for rules resistant to automated inversion.
+#[derive(Clone, Debug)]
+pub struct ProtectedRuleStatus {
+    pub memory_id: String,
+    pub protected: bool,
+    pub protected_at: Option<String>,
+    pub protected_by: Option<String>,
+    pub helpful_count: u32,
+    pub harmful_count: u32,
+}
+
+impl ProtectedRuleStatus {
+    #[must_use]
+    pub fn new(memory_id: impl Into<String>) -> Self {
+        Self {
+            memory_id: memory_id.into(),
+            protected: false,
+            protected_at: None,
+            protected_by: None,
+            helpful_count: 0,
+            harmful_count: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn with_protection(mut self, timestamp: &str, actor: &str) -> Self {
+        self.protected = true;
+        self.protected_at = Some(timestamp.to_owned());
+        self.protected_by = Some(actor.to_owned());
+        self
+    }
+
+    /// Check if inversion is allowed for a protected rule.
+    /// Protected rules require harmful_count >= max(2, helpful_count * 2 + 1).
+    #[must_use]
+    pub fn allows_inversion(&self) -> bool {
+        if !self.protected {
+            return true;
+        }
+        let threshold = 2.max(self.helpful_count.saturating_mul(2).saturating_add(1));
+        self.harmful_count >= threshold
+    }
+
+    #[must_use]
+    pub fn inversion_threshold(&self) -> u32 {
+        if !self.protected {
+            2
+        } else {
+            2.max(self.helpful_count.saturating_mul(2).saturating_add(1))
+        }
+    }
+
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let protected_at = self
+            .protected_at
+            .as_ref()
+            .map(|t| format!(",\"protectedAt\":\"{}\"", t))
+            .unwrap_or_default();
+        let protected_by = self
+            .protected_by
+            .as_ref()
+            .map(|a| format!(",\"protectedBy\":\"{}\"", a))
+            .unwrap_or_default();
+        format!(
+            "{{\"schema\":\"{}\",\"memoryId\":\"{}\",\"protected\":{},\"helpfulCount\":{},\"harmfulCount\":{},\"inversionThreshold\":{}{}{}}}",
+            PROTECTED_RULE_SCHEMA_V1,
+            self.memory_id,
+            self.protected,
+            self.helpful_count,
+            self.harmful_count,
+            self.inversion_threshold(),
+            protected_at,
+            protected_by,
+        )
+    }
+}
+
+/// Result of checking a harmful feedback event against rate limits.
+#[derive(Clone, Debug)]
+pub enum FeedbackCheckResult {
+    /// Event is allowed to proceed.
+    Allowed,
+    /// Event is quarantined for review.
+    Quarantined(QuarantineReason),
+}
+
+impl FeedbackCheckResult {
+    #[must_use]
+    pub const fn is_allowed(&self) -> bool {
+        matches!(self, Self::Allowed)
+    }
+
+    #[must_use]
+    pub const fn is_quarantined(&self) -> bool {
+        matches!(self, Self::Quarantined(_))
+    }
+
+    #[must_use]
+    pub fn quarantine_reason(&self) -> Option<QuarantineReason> {
+        match self {
+            Self::Quarantined(reason) => Some(*reason),
+            Self::Allowed => None,
+        }
+    }
+}
+
+/// Summary of feedback health for status output.
+#[derive(Clone, Debug, Default)]
+pub struct FeedbackHealthSummary {
+    pub quarantine_queue_depth: u32,
+    pub protected_rule_count: u32,
+    pub sources_at_limit: u32,
+    pub last_inversion_at: Option<String>,
+    pub last_quarantine_at: Option<String>,
+}
+
+impl FeedbackHealthSummary {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let last_inversion = self
+            .last_inversion_at
+            .as_ref()
+            .map(|t| format!(",\"lastInversionAt\":\"{}\"", t))
+            .unwrap_or_default();
+        let last_quarantine = self
+            .last_quarantine_at
+            .as_ref()
+            .map(|t| format!(",\"lastQuarantineAt\":\"{}\"", t))
+            .unwrap_or_default();
+        format!(
+            "{{\"quarantineQueueDepth\":{},\"protectedRuleCount\":{},\"sourcesAtLimit\":{}{}{}}}",
+            self.quarantine_queue_depth,
+            self.protected_rule_count,
+            self.sources_at_limit,
+            last_inversion,
+            last_quarantine,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -2512,5 +2801,139 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
         assert!(CandidateType::Retract.irreversibility_score() > 0.6);
         assert!(CandidateType::Promote.irreversibility_score() < 0.3);
         assert!(CandidateType::Deprecate.irreversibility_score() < 0.3);
+    }
+
+    // ========================================================================
+    // Harmful Feedback Rate Limiting Tests (EE-FEEDBACK-RATE-001)
+    // ========================================================================
+
+    use super::{
+        FeedbackRateConfig, FeedbackRateState, ProtectedRuleStatus, QuarantineReason,
+        FeedbackCheckResult, FeedbackHealthSummary, QuarantinedFeedback,
+        DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+        FEEDBACK_RATE_SCHEMA_V1, PROTECTED_RULE_SCHEMA_V1,
+    };
+
+    #[test]
+    fn feedback_rate_config_defaults() {
+        let config = FeedbackRateConfig::default();
+        assert_eq!(config.harmful_per_source_per_hour, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR);
+        assert_eq!(config.harmful_burst_window_seconds, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS);
+        assert!(config.require_source_diversity_for_inversion);
+        assert_eq!(config.min_distinct_sources_for_inversion, 2);
+    }
+
+    #[test]
+    fn feedback_rate_config_to_json() {
+        let config = FeedbackRateConfig::default();
+        let json = config.to_json();
+        assert!(json.contains(FEEDBACK_RATE_SCHEMA_V1));
+        assert!(json.contains("\"harmfulPerSourcePerHour\":5"));
+        assert!(json.contains("\"burstWindowSeconds\":3600"));
+    }
+
+    #[test]
+    fn feedback_rate_state_tracks_harmful_events() {
+        let mut state = FeedbackRateState::new("agent_001", 12345);
+        let config = FeedbackRateConfig::default();
+
+        assert_eq!(state.harmful_count, 0);
+        assert!(!state.exceeds_limit(&config));
+
+        for i in 1..=5 {
+            state.record_harmful_event(&format!("2026-04-30T12:{:02}:00Z", i));
+        }
+
+        assert_eq!(state.harmful_count, 5);
+        assert!(state.exceeds_limit(&config));
+    }
+
+    #[test]
+    fn protected_rule_allows_inversion_only_with_sufficient_harmful() {
+        let mut status = ProtectedRuleStatus::new("mem_test")
+            .with_protection("2026-04-30T12:00:00Z", "user");
+
+        status.helpful_count = 3;
+        status.harmful_count = 1;
+        assert!(!status.allows_inversion());
+        // Threshold: max(2, 3*2+1) = 7
+
+        status.harmful_count = 6;
+        assert!(!status.allows_inversion());
+
+        status.harmful_count = 7;
+        assert!(status.allows_inversion());
+    }
+
+    #[test]
+    fn protected_rule_threshold_calculation() {
+        let mut status = ProtectedRuleStatus::new("mem_test");
+
+        // Unprotected: always threshold 2
+        assert_eq!(status.inversion_threshold(), 2);
+
+        // Protected with no helpful: threshold = max(2, 0*2+1) = 2
+        status.protected = true;
+        assert_eq!(status.inversion_threshold(), 2);
+
+        // Protected with 1 helpful: threshold = max(2, 1*2+1) = 3
+        status.helpful_count = 1;
+        assert_eq!(status.inversion_threshold(), 3);
+
+        // Protected with 5 helpful: threshold = max(2, 5*2+1) = 11
+        status.helpful_count = 5;
+        assert_eq!(status.inversion_threshold(), 11);
+    }
+
+    #[test]
+    fn protected_rule_to_json_includes_schema() {
+        let status = ProtectedRuleStatus::new("mem_test123")
+            .with_protection("2026-04-30T12:00:00Z", "admin");
+        let json = status.to_json();
+
+        assert!(json.contains(PROTECTED_RULE_SCHEMA_V1));
+        assert!(json.contains("\"memoryId\":\"mem_test123\""));
+        assert!(json.contains("\"protected\":true"));
+        assert!(json.contains("\"protectedAt\":\"2026-04-30T12:00:00Z\""));
+        assert!(json.contains("\"protectedBy\":\"admin\""));
+    }
+
+    #[test]
+    fn quarantine_reason_as_str() {
+        assert_eq!(QuarantineReason::RateLimitExceeded.as_str(), "rate_limit_exceeded");
+        assert_eq!(QuarantineReason::ProtectedRuleTarget.as_str(), "protected_rule_target");
+        assert_eq!(QuarantineReason::InsufficientSourceDiversity.as_str(), "insufficient_source_diversity");
+        assert_eq!(QuarantineReason::SuspiciousBurstPattern.as_str(), "suspicious_burst_pattern");
+    }
+
+    #[test]
+    fn feedback_check_result_accessors() {
+        let allowed = FeedbackCheckResult::Allowed;
+        assert!(allowed.is_allowed());
+        assert!(!allowed.is_quarantined());
+        assert!(allowed.quarantine_reason().is_none());
+
+        let quarantined = FeedbackCheckResult::Quarantined(QuarantineReason::RateLimitExceeded);
+        assert!(!quarantined.is_allowed());
+        assert!(quarantined.is_quarantined());
+        assert_eq!(quarantined.quarantine_reason(), Some(QuarantineReason::RateLimitExceeded));
+    }
+
+    #[test]
+    fn feedback_health_summary_to_json() {
+        let summary = FeedbackHealthSummary {
+            quarantine_queue_depth: 3,
+            protected_rule_count: 5,
+            sources_at_limit: 1,
+            last_inversion_at: Some("2026-04-30T10:00:00Z".to_owned()),
+            last_quarantine_at: None,
+        };
+        let json = summary.to_json();
+
+        assert!(json.contains("\"quarantineQueueDepth\":3"));
+        assert!(json.contains("\"protectedRuleCount\":5"));
+        assert!(json.contains("\"sourcesAtLimit\":1"));
+        assert!(json.contains("\"lastInversionAt\":\"2026-04-30T10:00:00Z\""));
+        assert!(!json.contains("lastQuarantineAt"));
     }
 }
