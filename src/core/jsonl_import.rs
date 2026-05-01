@@ -742,6 +742,8 @@ fn prepare_memory(
             trust_class: trust_class.as_str().to_owned(),
             trust_subclass: Some(trust_subclass.to_owned()),
             tags,
+            valid_from: None,
+            valid_to: None,
         },
         details: json!({
             "schema": IMPORT_JSONL_SCHEMA_V1,

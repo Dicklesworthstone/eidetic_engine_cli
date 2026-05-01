@@ -161,6 +161,8 @@ pub fn remember_memory(
         trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
         trust_subclass: Some("ee remember".to_owned()),
         tags: prepared.tags.clone(),
+        valid_from: None,
+        valid_to: None,
     };
     let audit_details = remember_audit_details(&memory_id, &memory_input);
     let index_input = CreateSearchIndexJobInput {

@@ -759,6 +759,8 @@ fn insert_canary_memory(connection: &DbConnection, workspace_id: &str) -> Integr
         trust_class: TrustClass::AgentAssertion.as_str().to_string(),
         trust_subclass: Some("integrity-canary".to_string()),
         tags: vec!["ee-canary".to_string(), "integrity".to_string()],
+        valid_from: None,
+        valid_to: None,
     };
 
     match connection.insert_memory(INTEGRITY_CANARY_MEMORY_ID, &input) {

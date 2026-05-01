@@ -1431,6 +1431,27 @@ CREATE INDEX idx_graph_snapshots_created ON graph_snapshots(created_at);
     "blake3:v015_graph_snapshots_2026_04_30",
 );
 
+/// V016: Add temporal validity windows to memories (EE-TEMPORAL-VALIDITY-001).
+pub const V016_TEMPORAL_VALIDITY: Migration = Migration::new(
+    16,
+    "temporal_validity",
+    r#"
+-- Temporal validity windows for memories (EE-TEMPORAL-VALIDITY-001)
+-- valid_from: when this memory becomes applicable (NULL = immediately)
+-- valid_to: when this memory stops being applicable (NULL = indefinitely)
+ALTER TABLE memories ADD COLUMN valid_from TEXT
+    CHECK (valid_from IS NULL OR length(trim(valid_from)) > 0);
+
+ALTER TABLE memories ADD COLUMN valid_to TEXT
+    CHECK (valid_to IS NULL OR length(trim(valid_to)) > 0);
+
+-- Index for temporal queries (active memories at a given time)
+CREATE INDEX idx_memories_valid_from ON memories(valid_from) WHERE valid_from IS NOT NULL;
+CREATE INDEX idx_memories_valid_to ON memories(valid_to) WHERE valid_to IS NOT NULL;
+"#,
+    "blake3:v016_temporal_validity_2026_04_30",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -1448,6 +1469,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V013_TASK_EPISODES,
     V014_MODEL_REGISTRY,
     V015_GRAPH_SNAPSHOTS,
+    V016_TEMPORAL_VALIDITY,
 ];
 
 /// Result of applying migrations.
@@ -2923,6 +2945,8 @@ pub struct CreateMemoryInput {
     pub trust_class: String,
     pub trust_subclass: Option<String>,
     pub tags: Vec<String>,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
 }
 
 /// A stored memory row.
@@ -2947,6 +2971,8 @@ pub struct StoredMemory {
     pub created_at: String,
     pub updated_at: String,
     pub tombstoned_at: Option<String>,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
 }
 
 struct MemoryProvenanceChainFields<'a> {
@@ -3052,7 +3078,7 @@ impl DbConnection {
 
         self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, created_at, updated_at, valid_from, valid_to) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             &[
                 Value::Text(id.to_string()),
                 Value::Text(input.workspace_id.clone()),
@@ -3070,6 +3096,8 @@ impl DbConnection {
                 Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
                 Value::Text(now.clone()),
                 Value::Text(now),
+                input.valid_from.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                input.valid_to.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
             ],
         )?;
 
@@ -3088,7 +3116,7 @@ impl DbConnection {
     pub fn get_memory(&self, id: &str) -> Result<Option<StoredMemory>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at FROM memories WHERE id = ?1",
+            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE id = ?1",
             &[Value::Text(id.to_string())],
         )?;
 
@@ -3103,7 +3131,7 @@ impl DbConnection {
         include_tombstoned: bool,
     ) -> Result<Vec<StoredMemory>> {
         let mut sql = String::from(
-            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at FROM memories WHERE workspace_id = ?1",
+            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1",
         );
         let mut params: Vec<Value> = vec![Value::Text(workspace_id.to_string())];
 
@@ -3272,7 +3300,7 @@ impl DbConnection {
 
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at FROM memories WHERE workspace_id = ?1 ORDER BY COALESCE(provenance_chain_hash, id) ASC, id ASC LIMIT ?2",
+            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 ORDER BY COALESCE(provenance_chain_hash, id) ASC, id ASC LIMIT ?2",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::BigInt(i64::from(sample_size)),
@@ -3429,6 +3457,8 @@ fn stored_memory_from_row(row: &Row) -> Result<StoredMemory> {
         created_at: required_text(row, 16, DbOperation::Query, "created_at")?.to_string(),
         updated_at: required_text(row, 17, DbOperation::Query, "updated_at")?.to_string(),
         tombstoned_at: optional_text(row, 18)?.map(str::to_string),
+        valid_from: optional_text(row, 19)?.map(str::to_string),
+        valid_to: optional_text(row, 20)?.map(str::to_string),
     })
 }
 
@@ -6614,6 +6644,8 @@ mod tests {
                 trust_class: "cass_evidence".to_string(),
                 trust_subclass: Some("session-span".to_string()),
                 tags: vec!["cass".to_string()],
+                valid_from: None,
+                valid_to: None,
             },
         )?;
 
@@ -7289,6 +7321,8 @@ mod tests {
             trust_class: "human_explicit".to_string(),
             trust_subclass: Some("project-rule".to_string()),
             tags: vec!["cargo".to_string(), "formatting".to_string()],
+            valid_from: None,
+            valid_to: None,
         };
 
         connection.insert_memory("mem_01234567890123456789012345", &input)?;
@@ -7389,6 +7423,8 @@ mod tests {
             trust_class: "human_explicit".to_string(),
             trust_subclass: Some("runbook".to_string()),
             tags: Vec::new(),
+            valid_from: None,
+            valid_to: None,
         };
         connection.insert_memory("mem_01234567890123456789012345", &input)?;
 
@@ -7464,6 +7500,8 @@ mod tests {
                 trust_class: "human_explicit".to_string(),
                 trust_subclass: Some("runbook".to_string()),
                 tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
             };
             connection.insert_memory(id, &input)?;
         }
@@ -7548,6 +7586,8 @@ mod tests {
             trust_class: "agent_assertion".to_string(),
             trust_subclass: None,
             tags: vec![],
+            valid_from: None,
+            valid_to: None,
         };
 
         let fact = super::CreateMemoryInput {
@@ -7562,6 +7602,8 @@ mod tests {
             trust_class: "cass_evidence".to_string(),
             trust_subclass: None,
             tags: vec![],
+            valid_from: None,
+            valid_to: None,
         };
 
         connection.insert_memory("mem_00000000000000000000000001", &rule)?;
@@ -7613,6 +7655,8 @@ mod tests {
             trust_class: "human_explicit".to_string(),
             trust_subclass: None,
             tags: vec![],
+            valid_from: None,
+            valid_to: None,
         };
 
         connection.insert_memory("mem_00000000000000000000000003", &input)?;
@@ -7656,6 +7700,8 @@ mod tests {
             trust_class: "agent_assertion".to_string(),
             trust_subclass: None,
             tags: vec!["initial".to_string()],
+            valid_from: None,
+            valid_to: None,
         };
 
         connection.insert_memory("mem_00000000000000000000000004", &input)?;
@@ -8105,6 +8151,8 @@ mod tests {
                 trust_class: "agent_validated".to_string(),
                 trust_subclass: None,
                 tags: vec!["testing".to_string()],
+                valid_from: None,
+                valid_to: None,
             },
             actor: Some("agent:claude".to_string()),
             details: None,
@@ -8163,6 +8211,8 @@ mod tests {
             trust_class: "cass_evidence".to_string(),
             trust_subclass: None,
             tags: vec![],
+            valid_from: None,
+            valid_to: None,
         };
         connection.insert_memory("mem_tombstone00000000000000001", &memory_input)?;
 
@@ -8238,6 +8288,8 @@ mod tests {
             trust_class: "agent_assertion".to_string(),
             trust_subclass: None,
             tags: vec!["style".to_string()],
+            valid_from: None,
+            valid_to: None,
         };
         connection.insert_memory("mem_tagsaudit00000000000000001", &memory_input)?;
 
@@ -8760,6 +8812,8 @@ mod tests {
             trust_class: "agent_assertion".to_string(),
             trust_subclass: None,
             tags: vec![],
+            valid_from: None,
+            valid_to: None,
         };
 
         connection.insert_memory(id, &input)?;
@@ -9025,6 +9079,8 @@ mod tests {
             trust_class: "agent_assertion".to_string(),
             trust_subclass: None,
             tags: vec!["zebra".to_string(), "apple".to_string()],
+            valid_from: None,
+            valid_to: None,
         };
         let mem2 = super::CreateMemoryInput {
             workspace_id: "wsp_01234567890123456789012345".to_string(),
@@ -9038,6 +9094,8 @@ mod tests {
             trust_class: "agent_assertion".to_string(),
             trust_subclass: None,
             tags: vec!["apple".to_string(), "banana".to_string()],
+            valid_from: None,
+            valid_to: None,
         };
 
         connection.insert_memory("mem_taglist0000000000000000001", &mem1)?;
@@ -9084,6 +9142,8 @@ mod tests {
             trust_class: "agent_assertion".to_string(),
             trust_subclass: None,
             tags: vec!["common".to_string(), "rare".to_string()],
+            valid_from: None,
+            valid_to: None,
         };
         let mem2 = super::CreateMemoryInput {
             workspace_id: "wsp_01234567890123456789012345".to_string(),
@@ -9097,6 +9157,8 @@ mod tests {
             trust_class: "agent_assertion".to_string(),
             trust_subclass: None,
             tags: vec!["common".to_string()],
+            valid_from: None,
+            valid_to: None,
         };
         let mem3 = super::CreateMemoryInput {
             workspace_id: "wsp_01234567890123456789012345".to_string(),
@@ -9110,6 +9172,8 @@ mod tests {
             trust_class: "agent_assertion".to_string(),
             trust_subclass: None,
             tags: vec!["common".to_string()],
+            valid_from: None,
+            valid_to: None,
         };
 
         connection.insert_memory("mem_tagcount000000000000000001", &mem1)?;
@@ -9149,6 +9213,8 @@ mod tests {
             trust_class: "agent_assertion".to_string(),
             trust_subclass: None,
             tags: vec!["target".to_string()],
+            valid_from: None,
+            valid_to: None,
         };
         let mem2 = super::CreateMemoryInput {
             workspace_id: "wsp_01234567890123456789012345".to_string(),
@@ -9162,6 +9228,8 @@ mod tests {
             trust_class: "agent_assertion".to_string(),
             trust_subclass: None,
             tags: vec!["target".to_string(), "extra".to_string()],
+            valid_from: None,
+            valid_to: None,
         };
         let mem3 = super::CreateMemoryInput {
             workspace_id: "wsp_01234567890123456789012345".to_string(),
@@ -9175,6 +9243,8 @@ mod tests {
             trust_class: "agent_assertion".to_string(),
             trust_subclass: None,
             tags: vec!["other".to_string()],
+            valid_from: None,
+            valid_to: None,
         };
 
         connection.insert_memory("mem_bytag000000000000000000001", &mem1)?;
@@ -9222,6 +9292,8 @@ mod tests {
             trust_class: "agent_assertion".to_string(),
             trust_subclass: None,
             tags: vec!["old1".to_string(), "old2".to_string()],
+            valid_from: None,
+            valid_to: None,
         };
 
         connection.insert_memory("mem_settags0000000000000000001", &input)?;
@@ -9613,6 +9685,8 @@ mod tests {
             trust_class: "human_explicit".to_string(),
             trust_subclass: None,
             tags: vec!["cargo".to_string()],
+            valid_from: None,
+            valid_to: None,
         };
         connection.insert_memory("mem_00000000000000000000pack01", &input)?;
         Ok(())

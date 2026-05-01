@@ -887,6 +887,8 @@ mod tests {
                     trust_class: "human_explicit".to_string(),
                     trust_subclass: Some("project-rule".to_string()),
                     tags: vec!["cargo".to_string()],
+                    valid_from: None,
+                    valid_to: None,
                 },
             )
             .map_err(|error| error.to_string())?;

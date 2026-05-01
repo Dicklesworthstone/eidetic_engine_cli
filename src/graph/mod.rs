@@ -1525,6 +1525,8 @@ mod tests {
                     trust_class: "agent_assertion".to_string(),
                     trust_subclass: None,
                     tags: vec![],
+                    valid_from: None,
+                    valid_to: None,
                 },
             )
             .map_err(|error| error.to_string())
