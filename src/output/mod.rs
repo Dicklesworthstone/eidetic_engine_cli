@@ -110,6 +110,59 @@ pub struct OutputContext {
     pub color_enabled: bool,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct OutputEnvironment {
+    ee_json: Option<String>,
+    ee_output_format: Option<String>,
+    ee_format: Option<String>,
+    toon_default_format: Option<String>,
+    ee_agent_mode: Option<String>,
+    ee_hook_mode: Option<String>,
+    no_color: Option<String>,
+    ee_no_color: Option<String>,
+    force_color: Option<String>,
+}
+
+impl OutputEnvironment {
+    fn from_process_env() -> Self {
+        Self {
+            ee_json: env::var("EE_JSON").ok(),
+            ee_output_format: env::var("EE_OUTPUT_FORMAT").ok(),
+            ee_format: env::var("EE_FORMAT").ok(),
+            toon_default_format: env::var("TOON_DEFAULT_FORMAT").ok(),
+            ee_agent_mode: env::var("EE_AGENT_MODE").ok(),
+            ee_hook_mode: env::var("EE_HOOK_MODE").ok(),
+            no_color: env::var("NO_COLOR").ok(),
+            ee_no_color: env::var("EE_NO_COLOR").ok(),
+            force_color: env::var("FORCE_COLOR").ok(),
+        }
+    }
+}
+
+fn env_flag_truthy(value: Option<&str>) -> bool {
+    value.is_some_and(|raw| {
+        let trimmed = raw.trim();
+        !(trimmed.is_empty()
+            || trimmed == "0"
+            || trimmed.eq_ignore_ascii_case("false")
+            || trimmed.eq_ignore_ascii_case("no")
+            || trimmed.eq_ignore_ascii_case("off"))
+    })
+}
+
+fn renderer_from_env_value(value: &str) -> Option<Renderer> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "human" => Some(Renderer::Human),
+        "json" => Some(Renderer::Json),
+        "toon" => Some(Renderer::Toon),
+        "jsonl" => Some(Renderer::Jsonl),
+        "compact" => Some(Renderer::Compact),
+        "hook" => Some(Renderer::Hook),
+        "markdown" | "md" => Some(Renderer::Markdown),
+        _ => None,
+    }
+}
+
 impl OutputContext {
     #[must_use]
     pub fn detect() -> Self {
@@ -123,27 +176,57 @@ impl OutputContext {
         format_override: Option<Renderer>,
     ) -> Self {
         let is_tty = std::io::stdout().is_terminal();
-        let no_color = env::var("NO_COLOR").is_ok();
-        let ee_format = env::var("EE_FORMAT").ok();
+        Self::detect_with_environment(
+            json_flag,
+            robot_flag,
+            format_override,
+            is_tty,
+            &OutputEnvironment::from_process_env(),
+        )
+    }
 
+    fn detect_with_environment(
+        json_flag: bool,
+        robot_flag: bool,
+        format_override: Option<Renderer>,
+        is_tty: bool,
+        environment: &OutputEnvironment,
+    ) -> Self {
+        let no_color = environment.no_color.is_some() || environment.ee_no_color.is_some();
+        let force_color = env_flag_truthy(environment.force_color.as_deref());
         let renderer = if let Some(r) = format_override {
             r
-        } else if json_flag || robot_flag {
+        } else if json_flag
+            || robot_flag
+            || env_flag_truthy(environment.ee_json.as_deref())
+            || env_flag_truthy(environment.ee_agent_mode.as_deref())
+        {
             Renderer::Json
-        } else if let Some(fmt) = ee_format {
-            match fmt.to_lowercase().as_str() {
-                "json" => Renderer::Json,
-                "toon" => Renderer::Toon,
-                "jsonl" => Renderer::Jsonl,
-                "compact" => Renderer::Compact,
-                "hook" => Renderer::Hook,
-                _ => Renderer::Human,
-            }
+        } else if env_flag_truthy(environment.ee_hook_mode.as_deref()) {
+            Renderer::Hook
+        } else if let Some(renderer) = environment
+            .ee_output_format
+            .as_deref()
+            .and_then(renderer_from_env_value)
+        {
+            renderer
+        } else if let Some(renderer) = environment
+            .ee_format
+            .as_deref()
+            .and_then(renderer_from_env_value)
+        {
+            renderer
+        } else if let Some(renderer) = environment
+            .toon_default_format
+            .as_deref()
+            .and_then(renderer_from_env_value)
+        {
+            renderer
         } else {
             Renderer::Human
         };
 
-        let color_enabled = is_tty && !no_color && !renderer.is_machine_readable();
+        let color_enabled = (is_tty || force_color) && !no_color && !renderer.is_machine_readable();
 
         Self {
             renderer,
@@ -5699,9 +5782,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        Degradation, DegradationSeverity, JsonBuilder, OutputContext, Renderer, ResponseEnvelope,
-        SHADOW_RUN_SCHEMA_V1, ShadowRunComparison, ShadowRunReport, error_response_json,
-        escape_json_string, help_text, human_status, render_agent_docs_json,
+        Degradation, DegradationSeverity, JsonBuilder, OutputContext, OutputEnvironment, Renderer,
+        ResponseEnvelope, SHADOW_RUN_SCHEMA_V1, ShadowRunComparison, ShadowRunReport,
+        error_response_json, escape_json_string, help_text, human_status, render_agent_docs_json,
         render_agent_docs_toon, render_context_response_json, render_context_response_toon,
         render_doctor_json, render_doctor_toon, render_health_json, render_health_toon,
         render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
@@ -5761,6 +5844,10 @@ mod tests {
             .map_err(|error| format!("test provenance URI rejected: {error:?}"))?;
         PackProvenance::new(uri, "source evidence")
             .map_err(|error| format!("test provenance rejected: {error:?}"))
+    }
+
+    fn output_context_from_env(environment: OutputEnvironment) -> OutputContext {
+        OutputContext::detect_with_environment(false, false, None, false, &environment)
     }
 
     fn context_response_fixture() -> Result<ContextResponse, String> {
@@ -6154,6 +6241,132 @@ mod tests {
     fn output_context_format_override_takes_precedence() -> TestResult {
         let ctx = OutputContext::detect_with_hints(true, true, Some(Renderer::Toon));
         ensure_equal(&ctx.renderer, &Renderer::Toon, "format override")
+    }
+
+    #[test]
+    fn output_context_ee_json_forces_json_over_toon_default() -> TestResult {
+        let ctx = output_context_from_env(OutputEnvironment {
+            ee_json: Some("1".to_string()),
+            toon_default_format: Some("toon".to_string()),
+            ..OutputEnvironment::default()
+        });
+        ensure_equal(&ctx.renderer, &Renderer::Json, "EE_JSON precedence")
+    }
+
+    #[test]
+    fn output_context_agent_mode_forces_json_over_output_format() -> TestResult {
+        let ctx = output_context_from_env(OutputEnvironment {
+            ee_agent_mode: Some("true".to_string()),
+            ee_output_format: Some("toon".to_string()),
+            ..OutputEnvironment::default()
+        });
+        ensure_equal(&ctx.renderer, &Renderer::Json, "EE_AGENT_MODE precedence")
+    }
+
+    #[test]
+    fn output_context_hook_mode_precedes_toon_default() -> TestResult {
+        let ctx = output_context_from_env(OutputEnvironment {
+            ee_hook_mode: Some("yes".to_string()),
+            toon_default_format: Some("toon".to_string()),
+            ..OutputEnvironment::default()
+        });
+        ensure_equal(&ctx.renderer, &Renderer::Hook, "EE_HOOK_MODE precedence")
+    }
+
+    #[test]
+    fn output_context_ee_output_format_precedes_toon_default() -> TestResult {
+        let ctx = output_context_from_env(OutputEnvironment {
+            ee_output_format: Some("jsonl".to_string()),
+            toon_default_format: Some("toon".to_string()),
+            ..OutputEnvironment::default()
+        });
+        ensure_equal(
+            &ctx.renderer,
+            &Renderer::Jsonl,
+            "EE_OUTPUT_FORMAT precedence",
+        )
+    }
+
+    #[test]
+    fn output_context_legacy_ee_format_precedes_toon_default() -> TestResult {
+        let ctx = output_context_from_env(OutputEnvironment {
+            ee_format: Some("compact".to_string()),
+            toon_default_format: Some("toon".to_string()),
+            ..OutputEnvironment::default()
+        });
+        ensure_equal(&ctx.renderer, &Renderer::Compact, "EE_FORMAT precedence")
+    }
+
+    #[test]
+    fn output_context_toon_default_format_applies_as_fallback() -> TestResult {
+        let ctx = output_context_from_env(OutputEnvironment {
+            toon_default_format: Some("toon".to_string()),
+            ..OutputEnvironment::default()
+        });
+        ensure_equal(
+            &ctx.renderer,
+            &Renderer::Toon,
+            "TOON_DEFAULT_FORMAT fallback",
+        )
+    }
+
+    #[test]
+    fn output_context_falsey_env_flags_do_not_force_machine_output() -> TestResult {
+        let ctx = output_context_from_env(OutputEnvironment {
+            ee_json: Some("0".to_string()),
+            ee_agent_mode: Some("false".to_string()),
+            ee_hook_mode: Some("off".to_string()),
+            ..OutputEnvironment::default()
+        });
+        ensure_equal(&ctx.renderer, &Renderer::Human, "falsey env flags")
+    }
+
+    #[test]
+    fn output_context_no_color_wins_over_force_color() -> TestResult {
+        let ctx = OutputContext::detect_with_environment(
+            false,
+            false,
+            None,
+            false,
+            &OutputEnvironment {
+                no_color: Some("".to_string()),
+                force_color: Some("1".to_string()),
+                ..OutputEnvironment::default()
+            },
+        );
+        ensure(!ctx.color_enabled, "NO_COLOR must disable color")
+    }
+
+    #[test]
+    fn output_context_force_color_enables_human_color_without_tty() -> TestResult {
+        let ctx = OutputContext::detect_with_environment(
+            false,
+            false,
+            None,
+            false,
+            &OutputEnvironment {
+                force_color: Some("1".to_string()),
+                ..OutputEnvironment::default()
+            },
+        );
+        ensure(ctx.color_enabled, "FORCE_COLOR enables human color")
+    }
+
+    #[test]
+    fn output_context_force_color_does_not_color_machine_output() -> TestResult {
+        let ctx = OutputContext::detect_with_environment(
+            false,
+            false,
+            None,
+            false,
+            &OutputEnvironment {
+                ee_output_format: Some("json".to_string()),
+                force_color: Some("1".to_string()),
+                ..OutputEnvironment::default()
+            },
+        );
+        ensure_equal(&ctx.renderer, &Renderer::Json, "machine renderer")?;
+        ensure(!ctx.color_enabled, "machine output stays uncolored")
     }
 
     #[test]
