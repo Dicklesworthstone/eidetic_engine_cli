@@ -1,0 +1,36 @@
+{
+  "crate_version": "0.3.0",
+  "api_version": 1,
+  "contract_version": "1",
+  "documentation_url": "https://github.com/Dicklesworthstone/coding_agent_session_search",
+  "features": [
+    "api_version_command",
+    "content_truncation",
+    "cursor_pagination",
+    "dry_run",
+    "expand_command",
+    "field_selection",
+    "highlight_matches",
+    "introspect_command",
+    "json_output",
+    "jsonl_output",
+    "query_explain",
+    "request_id",
+    "robot_meta",
+    "status_command",
+    "timeout",
+    "view_command"
+  ],
+  "connectors": [
+    "claude_code",
+    "codex",
+    "cursor",
+    "gemini"
+  ],
+  "limits": {
+    "max_limit": 0,
+    "max_content_length": 0,
+    "max_fields": 50,
+    "max_agg_buckets": 10
+  }
+}

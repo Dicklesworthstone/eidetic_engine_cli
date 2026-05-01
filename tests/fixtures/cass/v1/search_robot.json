@@ -1,0 +1,31 @@
+{
+  "query": "format before release",
+  "limit": 2,
+  "offset": 0,
+  "count": 1,
+  "total_matches": 1,
+  "hits": [
+    {
+      "source_path": "/workspace/session-a.jsonl",
+      "line_number": 42,
+      "agent": "codex",
+      "title": "release prep",
+      "score": 1.0,
+      "content": "Run cargo fmt --check before release."
+    }
+  ],
+  "cursor": null,
+  "hits_clamped": false,
+  "request_id": "ee-gate6-search-001",
+  "_meta": {
+    "elapsed_ms": 12,
+    "search_mode": "lexical",
+    "requested_search_mode": "hybrid",
+    "semantic_refinement": "unavailable",
+    "fallback_tier": "lexical",
+    "fallback_reason": "semantic context unavailable in fixture",
+    "max_tokens": 200,
+    "timeout_ms": 30000,
+    "next_cursor": null
+  }
+}

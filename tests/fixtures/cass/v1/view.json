@@ -1,0 +1,23 @@
+{
+  "path": "/workspace/session-a.jsonl",
+  "target_line": 2,
+  "context": 1,
+  "lines": [
+    {
+      "line": 1,
+      "content": "{\"role\":\"user\",\"content\":\"prepare release\"}",
+      "highlighted": false
+    },
+    {
+      "line": 2,
+      "content": "{\"role\":\"assistant\",\"content\":\"run cargo fmt --check\"}",
+      "highlighted": true
+    },
+    {
+      "line": 3,
+      "content": "{\"role\":\"user\",\"content\":\"then cargo clippy\"}",
+      "highlighted": false
+    }
+  ],
+  "total_lines": 3
+}

@@ -1,0 +1,13 @@
+{
+  "sessions": [
+    {
+      "path": "/workspace/session-a.jsonl",
+      "workspace": "/workspace",
+      "agent": "codex",
+      "started_at": "2026-04-30T00:00:00Z",
+      "message_count": 2,
+      "token_count": 42,
+      "content_hash": "hash-session-a"
+    }
+  ]
+}
