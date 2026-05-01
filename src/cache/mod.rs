@@ -424,6 +424,289 @@ impl CacheComparisonReport {
     }
 }
 
+// ============================================================================
+// EE-373: Cache budget, memory-pressure fallback
+// ============================================================================
+
+/// Cache budget configuration (EE-373).
+#[derive(Clone, Copy, Debug)]
+pub struct CacheBudget {
+    /// Maximum number of entries.
+    pub max_entries: usize,
+    /// Maximum memory in bytes (estimated).
+    pub max_bytes: usize,
+    /// High watermark ratio (0.0-1.0) for triggering pressure.
+    pub high_watermark: f64,
+    /// Critical watermark ratio for aggressive eviction.
+    pub critical_watermark: f64,
+}
+
+impl Default for CacheBudget {
+    fn default() -> Self {
+        Self {
+            max_entries: 10_000,
+            max_bytes: 100 * 1024 * 1024, // 100MB
+            high_watermark: 0.80,
+            critical_watermark: 0.95,
+        }
+    }
+}
+
+impl CacheBudget {
+    #[must_use]
+    pub fn new(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            max_entries,
+            max_bytes,
+            ..Default::default()
+        }
+    }
+
+    #[must_use]
+    pub fn with_watermarks(mut self, high: f64, critical: f64) -> Self {
+        self.high_watermark = high.clamp(0.0, 1.0);
+        self.critical_watermark = critical.clamp(high, 1.0);
+        self
+    }
+
+    #[must_use]
+    pub fn high_entry_threshold(&self) -> usize {
+        ((self.max_entries as f64) * self.high_watermark) as usize
+    }
+
+    #[must_use]
+    pub fn critical_entry_threshold(&self) -> usize {
+        ((self.max_entries as f64) * self.critical_watermark) as usize
+    }
+}
+
+/// Memory pressure level.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum MemoryPressure {
+    /// Normal operation.
+    Normal,
+    /// High pressure - start evicting proactively.
+    High,
+    /// Critical pressure - aggressive eviction and fallback.
+    Critical,
+}
+
+impl MemoryPressure {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_pressured(self) -> bool {
+        !matches!(self, Self::Normal)
+    }
+}
+
+/// Assess memory pressure based on current usage.
+#[must_use]
+pub fn assess_pressure(current_entries: usize, budget: &CacheBudget) -> MemoryPressure {
+    if current_entries >= budget.critical_entry_threshold() {
+        MemoryPressure::Critical
+    } else if current_entries >= budget.high_entry_threshold() {
+        MemoryPressure::High
+    } else {
+        MemoryPressure::Normal
+    }
+}
+
+/// Fallback policy for cache degradation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CacheFallbackPolicy {
+    /// Continue with reduced capacity.
+    ReduceCapacity,
+    /// Fall back to no-cache mode.
+    NoCache,
+    /// Fall back to LRU from S3-FIFO.
+    SimplifyPolicy,
+    /// Evict aggressively and continue.
+    AggressiveEvict,
+}
+
+impl CacheFallbackPolicy {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReduceCapacity => "reduce_capacity",
+            Self::NoCache => "no_cache",
+            Self::SimplifyPolicy => "simplify_policy",
+            Self::AggressiveEvict => "aggressive_evict",
+        }
+    }
+}
+
+/// Fallback cache wrapper that handles degradation (EE-373).
+pub struct FallbackCache<K, V>
+where
+    K: Clone + Eq + Hash,
+    V: Clone,
+{
+    /// Primary cache policy.
+    primary: Box<dyn CachePolicy<K, V>>,
+    /// Fallback policy to apply under pressure.
+    fallback_policy: CacheFallbackPolicy,
+    /// Budget configuration.
+    budget: CacheBudget,
+    /// Current pressure level.
+    pressure: MemoryPressure,
+    /// Whether fallback is active.
+    fallback_active: bool,
+    /// Stats for the fallback wrapper.
+    stats: CacheStats,
+    /// Fallback activation count.
+    fallback_activations: u64,
+}
+
+impl<K, V> FallbackCache<K, V>
+where
+    K: Clone + Eq + Hash,
+    V: Clone,
+{
+    pub fn new(
+        primary: Box<dyn CachePolicy<K, V>>,
+        fallback_policy: CacheFallbackPolicy,
+        budget: CacheBudget,
+    ) -> Self {
+        Self {
+            primary,
+            fallback_policy,
+            budget,
+            pressure: MemoryPressure::Normal,
+            fallback_active: false,
+            stats: CacheStats::default(),
+            fallback_activations: 0,
+        }
+    }
+
+    pub fn pressure(&self) -> MemoryPressure {
+        self.pressure
+    }
+
+    pub fn is_fallback_active(&self) -> bool {
+        self.fallback_active
+    }
+
+    pub fn fallback_activations(&self) -> u64 {
+        self.fallback_activations
+    }
+
+    fn update_pressure(&mut self) {
+        let new_pressure = assess_pressure(self.primary.len(), &self.budget);
+        if new_pressure > self.pressure && new_pressure == MemoryPressure::Critical {
+            self.activate_fallback();
+        }
+        self.pressure = new_pressure;
+    }
+
+    fn activate_fallback(&mut self) {
+        if !self.fallback_active {
+            self.fallback_active = true;
+            self.fallback_activations += 1;
+        }
+    }
+}
+
+impl<K, V> CachePolicy<K, V> for FallbackCache<K, V>
+where
+    K: Clone + Eq + Hash,
+    V: Clone,
+{
+    fn get(&mut self, key: &K) -> Option<&V> {
+        let result = self.primary.get(key);
+        if result.is_some() {
+            self.stats.record_hit();
+        } else {
+            self.stats.record_miss();
+        }
+        result
+    }
+
+    fn put(&mut self, key: K, value: V) {
+        self.update_pressure();
+        if self.fallback_active && self.fallback_policy == CacheFallbackPolicy::NoCache {
+            return;
+        }
+        self.primary.put(key, value);
+        self.update_pressure();
+    }
+
+    fn remove(&mut self, key: &K) -> Option<V> {
+        let result = self.primary.remove(key);
+        self.update_pressure();
+        result
+    }
+
+    fn len(&self) -> usize {
+        self.primary.len()
+    }
+
+    fn stats(&self) -> &CacheStats {
+        &self.stats
+    }
+
+    fn name(&self) -> &'static str {
+        if self.fallback_active {
+            "fallback_cache"
+        } else {
+            "primary_cache"
+        }
+    }
+}
+
+/// Degradation report for cache fallback events.
+#[derive(Clone, Debug)]
+pub struct CacheDegradationReport {
+    /// Current pressure level.
+    pub pressure: MemoryPressure,
+    /// Whether fallback is active.
+    pub fallback_active: bool,
+    /// Fallback policy in use.
+    pub fallback_policy: CacheFallbackPolicy,
+    /// Number of times fallback was activated.
+    pub activation_count: u64,
+    /// Current cache size.
+    pub current_size: usize,
+    /// Budget max entries.
+    pub budget_max_entries: usize,
+    /// Usage ratio (0.0-1.0).
+    pub usage_ratio: f64,
+}
+
+impl CacheDegradationReport {
+    #[must_use]
+    pub fn from_fallback_cache<K, V>(cache: &FallbackCache<K, V>) -> Self
+    where
+        K: Clone + Eq + Hash,
+        V: Clone,
+    {
+        let current_size = cache.len();
+        let usage_ratio = if cache.budget.max_entries > 0 {
+            current_size as f64 / cache.budget.max_entries as f64
+        } else {
+            0.0
+        };
+
+        Self {
+            pressure: cache.pressure(),
+            fallback_active: cache.is_fallback_active(),
+            fallback_policy: cache.fallback_policy,
+            activation_count: cache.fallback_activations(),
+            current_size,
+            budget_max_entries: cache.budget.max_entries,
+            usage_ratio,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,5 +849,169 @@ mod tests {
         assert_eq!(cache.remove(&"a"), Some(1));
         assert!(cache.get(&"a").is_none());
         assert_eq!(cache.len(), 1);
+    }
+
+    // ====================================================================
+    // EE-373: Cache budget and fallback tests
+    // ====================================================================
+
+    #[test]
+    fn cache_budget_default_values() {
+        let budget = CacheBudget::default();
+        assert_eq!(budget.max_entries, 10_000);
+        assert_eq!(budget.max_bytes, 100 * 1024 * 1024);
+        assert!((budget.high_watermark - 0.80).abs() < 0.001);
+        assert!((budget.critical_watermark - 0.95).abs() < 0.001);
+    }
+
+    #[test]
+    fn cache_budget_thresholds() {
+        let budget = CacheBudget::new(1000, 1024 * 1024);
+        assert_eq!(budget.high_entry_threshold(), 800);
+        assert_eq!(budget.critical_entry_threshold(), 950);
+    }
+
+    #[test]
+    fn cache_budget_custom_watermarks() {
+        let budget = CacheBudget::new(100, 1024)
+            .with_watermarks(0.70, 0.90);
+        assert_eq!(budget.high_entry_threshold(), 70);
+        assert_eq!(budget.critical_entry_threshold(), 90);
+    }
+
+    #[test]
+    fn memory_pressure_assessment_normal() {
+        let budget = CacheBudget::new(100, 1024);
+        assert_eq!(assess_pressure(50, &budget), MemoryPressure::Normal);
+        assert_eq!(assess_pressure(79, &budget), MemoryPressure::Normal);
+    }
+
+    #[test]
+    fn memory_pressure_assessment_high() {
+        let budget = CacheBudget::new(100, 1024);
+        assert_eq!(assess_pressure(80, &budget), MemoryPressure::High);
+        assert_eq!(assess_pressure(94, &budget), MemoryPressure::High);
+    }
+
+    #[test]
+    fn memory_pressure_assessment_critical() {
+        let budget = CacheBudget::new(100, 1024);
+        assert_eq!(assess_pressure(95, &budget), MemoryPressure::Critical);
+        assert_eq!(assess_pressure(100, &budget), MemoryPressure::Critical);
+    }
+
+    #[test]
+    fn memory_pressure_is_pressured() {
+        assert!(!MemoryPressure::Normal.is_pressured());
+        assert!(MemoryPressure::High.is_pressured());
+        assert!(MemoryPressure::Critical.is_pressured());
+    }
+
+    #[test]
+    fn fallback_policy_strings_are_stable() {
+        assert_eq!(CacheFallbackPolicy::ReduceCapacity.as_str(), "reduce_capacity");
+        assert_eq!(CacheFallbackPolicy::NoCache.as_str(), "no_cache");
+        assert_eq!(CacheFallbackPolicy::SimplifyPolicy.as_str(), "simplify_policy");
+        assert_eq!(CacheFallbackPolicy::AggressiveEvict.as_str(), "aggressive_evict");
+    }
+
+    #[test]
+    fn fallback_cache_normal_operation() {
+        let lru: Box<dyn CachePolicy<String, i32>> = Box::new(LruCache::new(10));
+        let budget = CacheBudget::new(100, 1024);
+        let mut cache = FallbackCache::new(lru, CacheFallbackPolicy::NoCache, budget);
+
+        cache.put("a".to_string(), 1);
+        cache.put("b".to_string(), 2);
+
+        assert_eq!(cache.get(&"a".to_string()), Some(&1));
+        assert_eq!(cache.pressure(), MemoryPressure::Normal);
+        assert!(!cache.is_fallback_active());
+    }
+
+    #[test]
+    fn fallback_cache_activates_under_pressure() {
+        let lru: Box<dyn CachePolicy<String, i32>> = Box::new(LruCache::new(100));
+        let budget = CacheBudget::new(10, 1024); // Small budget triggers pressure
+        let mut cache = FallbackCache::new(lru, CacheFallbackPolicy::NoCache, budget);
+
+        // Fill past critical threshold
+        for i in 0..20 {
+            cache.put(format!("key{}", i), i);
+        }
+
+        assert!(cache.pressure() >= MemoryPressure::High);
+        assert!(cache.fallback_activations() >= 1);
+    }
+
+    #[test]
+    fn fallback_cache_no_cache_mode_skips_puts() {
+        let lru: Box<dyn CachePolicy<String, i32>> = Box::new(LruCache::new(100));
+        let budget = CacheBudget::new(5, 1024);
+        let mut cache = FallbackCache::new(lru, CacheFallbackPolicy::NoCache, budget);
+
+        // Fill to trigger critical
+        for i in 0..10 {
+            cache.put(format!("key{}", i), i);
+        }
+
+        assert!(cache.is_fallback_active());
+
+        // New puts should be skipped in NoCache fallback mode
+        let initial_len = cache.len();
+        cache.put("new_key".to_string(), 999);
+        assert_eq!(cache.len(), initial_len);
+    }
+
+    #[test]
+    fn cache_degradation_report_from_fallback() {
+        let lru: Box<dyn CachePolicy<String, i32>> = Box::new(LruCache::new(100));
+        let budget = CacheBudget::new(10, 1024);
+        let mut cache = FallbackCache::new(lru, CacheFallbackPolicy::ReduceCapacity, budget);
+
+        for i in 0..8 {
+            cache.put(format!("key{}", i), i);
+        }
+
+        let report = CacheDegradationReport::from_fallback_cache(&cache);
+        assert_eq!(report.current_size, 8);
+        assert_eq!(report.budget_max_entries, 10);
+        assert!((report.usage_ratio - 0.8).abs() < 0.001);
+        assert_eq!(report.fallback_policy, CacheFallbackPolicy::ReduceCapacity);
+    }
+
+    #[test]
+    fn cache_policy_fallback_degradation_scenario() {
+        // Simulate a degradation scenario where cache must handle pressure
+        let lru: Box<dyn CachePolicy<String, i32>> = Box::new(LruCache::new(50));
+        let budget = CacheBudget::new(20, 1024).with_watermarks(0.60, 0.80);
+        let mut cache = FallbackCache::new(lru, CacheFallbackPolicy::AggressiveEvict, budget);
+
+        // Phase 1: Normal operation
+        for i in 0..10 {
+            cache.put(format!("phase1_{}", i), i);
+        }
+        assert_eq!(cache.pressure(), MemoryPressure::Normal);
+
+        // Phase 2: Approach high watermark
+        for i in 0..5 {
+            cache.put(format!("phase2_{}", i), i + 100);
+        }
+        // Should be at or above high watermark now
+        assert!(cache.pressure() >= MemoryPressure::High);
+
+        // Phase 3: Push to critical
+        for i in 0..10 {
+            cache.put(format!("phase3_{}", i), i + 200);
+        }
+        assert_eq!(cache.pressure(), MemoryPressure::Critical);
+        assert!(cache.is_fallback_active());
+
+        // Verify degradation was tracked
+        assert!(cache.fallback_activations() >= 1);
+
+        // Cache should still be functional even under pressure
+        let _ = cache.get(&"phase1_0".to_string());
+        assert!(cache.stats().hits + cache.stats().misses > 0);
     }
 }
