@@ -4,6 +4,7 @@
 //! decay sweeps, curation reviews, and health checks. It operates in
 //! CLI-first mode without requiring a daemon.
 
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
@@ -137,7 +138,9 @@ impl FromStr for JobType {
             "backup_export" => Ok(Self::BackupExport),
             "garbage_collection" => Ok(Self::GarbageCollection),
             "custom" => Ok(Self::Custom),
-            _ => Err(ParseJobTypeError { input: s.to_owned() }),
+            _ => Err(ParseJobTypeError {
+                input: s.to_owned(),
+            }),
         }
     }
 }
@@ -174,7 +177,10 @@ impl JobStatus {
 
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled | Self::Skipped)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Skipped
+        )
     }
 
     #[must_use]
@@ -214,17 +220,20 @@ impl FromStr for JobStatus {
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
             "skipped" => Ok(Self::Skipped),
-            _ => Err(ParseJobStatusError { input: s.to_owned() }),
+            _ => Err(ParseJobStatusError {
+                input: s.to_owned(),
+            }),
         }
     }
 }
 
 /// Priority level for job scheduling.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum JobPriority {
     /// Background task, run when idle.
     Low,
     /// Normal priority.
+    #[default]
     Normal,
     /// Higher priority, run before normal jobs.
     High,
@@ -251,12 +260,6 @@ impl JobPriority {
             Self::High => 3,
             Self::Critical => 4,
         }
-    }
-}
-
-impl Default for JobPriority {
-    fn default() -> Self {
-        Self::Normal
     }
 }
 
@@ -479,14 +482,17 @@ impl JobLedger {
     /// List jobs by type.
     #[must_use]
     pub fn list_by_type(&self, job_type: JobType) -> Vec<&Job> {
-        self.jobs.values().filter(|j| j.job_type == job_type).collect()
+        self.jobs
+            .values()
+            .filter(|j| j.job_type == job_type)
+            .collect()
     }
 
     /// Get pending jobs sorted by priority (highest first).
     #[must_use]
     pub fn pending_by_priority(&self) -> Vec<&Job> {
         let mut pending: Vec<_> = self.list_by_status(JobStatus::Pending);
-        pending.sort_by(|a, b| b.priority.numeric().cmp(&a.priority.numeric()));
+        pending.sort_by_key(|job| Reverse(job.priority.numeric()));
         pending
     }
 
@@ -663,7 +669,11 @@ impl ResourceBudget {
     /// Create a new resource budget.
     #[must_use]
     pub const fn new(resource: ResourceType, limit: u64, on_exceed: BudgetExceedAction) -> Self {
-        Self { resource, limit, on_exceed }
+        Self {
+            resource,
+            limit,
+            on_exceed,
+        }
     }
 
     /// Create a hard time limit.
@@ -697,11 +707,12 @@ impl ResourceBudget {
 }
 
 /// Action to take when a budget limit is exceeded.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum BudgetExceedAction {
     /// Log a warning and continue.
     Warn,
     /// Cancel the job immediately.
+    #[default]
     Cancel,
     /// Throttle/slow down execution.
     Throttle,
@@ -718,12 +729,6 @@ impl BudgetExceedAction {
             Self::Throttle => "throttle",
             Self::Checkpoint => "checkpoint",
         }
-    }
-}
-
-impl Default for BudgetExceedAction {
-    fn default() -> Self {
-        Self::Cancel
     }
 }
 
@@ -801,10 +806,7 @@ impl JobBudgetState {
 
     /// Record consumption of a resource.
     pub fn record(&mut self, resource: ResourceType, amount: u64) {
-        self.consumption
-            .entry(resource)
-            .or_default()
-            .add(amount);
+        self.consumption.entry(resource).or_default().add(amount);
     }
 
     /// Check all budgets and return any exceeded actions.
@@ -843,9 +845,7 @@ impl JobBudgetState {
             .iter()
             .find(|b| b.resource == resource)
             .map(|b| {
-                let consumed = self.consumption
-                    .get(&resource)
-                    .map_or(0, |c| c.consumed);
+                let consumed = self.consumption.get(&resource).map_or(0, |c| c.consumed);
                 b.limit.saturating_sub(consumed)
             })
     }
@@ -856,7 +856,8 @@ impl JobBudgetState {
         let mut resources = Vec::new();
 
         for budget in &self.budgets {
-            let consumption = self.consumption
+            let consumption = self
+                .consumption
                 .get(&budget.resource)
                 .cloned()
                 .unwrap_or_default();
@@ -1117,7 +1118,7 @@ impl fmt::Display for RunOutcome {
 }
 
 /// Options for the manual runner.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct RunnerOptions {
     /// Maximum time budget in milliseconds (overrides job default).
     pub time_limit_ms: Option<u64>,
@@ -1129,18 +1130,6 @@ pub struct RunnerOptions {
     pub continue_on_error: bool,
     /// Verbose diagnostics.
     pub verbose: bool,
-}
-
-impl Default for RunnerOptions {
-    fn default() -> Self {
-        Self {
-            time_limit_ms: None,
-            item_limit: None,
-            dry_run: false,
-            continue_on_error: false,
-            verbose: false,
-        }
-    }
 }
 
 impl RunnerOptions {
@@ -1350,7 +1339,12 @@ impl ManualRunner {
     }
 
     /// Schedule a job for execution.
-    pub fn schedule(&mut self, job_type: JobType, priority: JobPriority, context: Option<String>) -> String {
+    pub fn schedule(
+        &mut self,
+        job_type: JobType,
+        priority: JobPriority,
+        context: Option<String>,
+    ) -> String {
         let timestamp = chrono::Utc::now().to_rfc3339();
         create_job(&mut self.ledger, job_type, priority, timestamp, context)
     }
@@ -1403,9 +1397,14 @@ impl ManualRunner {
 
         match outcome {
             RunOutcome::Success => job.complete(&completion_time, items),
-            RunOutcome::Failed => job.fail(&completion_time, error.as_deref().unwrap_or("unknown error")),
+            RunOutcome::Failed => job.fail(
+                &completion_time,
+                error.as_deref().unwrap_or("unknown error"),
+            ),
             RunOutcome::Cancelled => job.cancel(&completion_time),
-            RunOutcome::Skipped => job.skip(&completion_time, error.as_deref().unwrap_or("skipped")),
+            RunOutcome::Skipped => {
+                job.skip(&completion_time, error.as_deref().unwrap_or("skipped"))
+            }
             RunOutcome::TimedOut => job.fail(&completion_time, "timed out"),
         }
 
@@ -1462,7 +1461,8 @@ impl ManualRunner {
         let mut skipped = 0u32;
         let mut was_cancelled = false;
 
-        let pending_ids: Vec<String> = self.ledger
+        let pending_ids: Vec<String> = self
+            .ledger
             .pending_by_priority()
             .iter()
             .map(|j| j.id.clone())
@@ -1742,7 +1742,7 @@ impl JobDiagnosticReport {
         out.push_str("Job Diagnostics\n");
         out.push_str("===============\n\n");
         out.push_str(&format!("Health: {}\n\n", self.health));
-        out.push_str(&format!("Summary:\n"));
+        out.push_str("Summary:\n");
         out.push_str(&format!("  Info:     {}\n", self.summary.info_count));
         out.push_str(&format!("  Warnings: {}\n", self.summary.warning_count));
         out.push_str(&format!("  Errors:   {}\n\n", self.summary.error_count));
@@ -1788,10 +1788,7 @@ pub fn diagnose_ledger(ledger: &JobLedger) -> JobDiagnosticReport {
 
     // Check for failed jobs
     for job in ledger.list_by_status(JobStatus::Failed) {
-        let msg = job
-            .error
-            .as_deref()
-            .unwrap_or("Unknown error");
+        let msg = job.error.as_deref().unwrap_or("Unknown error");
         diagnostics.push(
             JobDiagnostic::new(
                 "STEWARD_JOB_FAILED",
@@ -1809,7 +1806,10 @@ pub fn diagnose_ledger(ledger: &JobLedger) -> JobDiagnosticReport {
             JobDiagnostic::new(
                 "STEWARD_HIGH_PENDING",
                 DiagnosticSeverity::Warning,
-                format!("{} jobs pending - backlog may need attention", stats.pending),
+                format!(
+                    "{} jobs pending - backlog may need attention",
+                    stats.pending
+                ),
             )
             .with_suggestion("Run `ee steward run --all` to process pending jobs"),
         );
@@ -2256,7 +2256,7 @@ mod tests {
         let summary = state.summary();
         assert!(summary.has_violations());
         assert_eq!(summary.violations.len(), 1);
-        assert_eq!(summary.resources[0].exceeded, true);
+        assert!(summary.resources[0].exceeded);
     }
 
     #[test]
@@ -2383,7 +2383,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_runner_schedule_and_run() {
+    fn manual_runner_schedule_and_run() -> TestResult {
         let opts = RunnerOptions::new();
         let mut runner = ManualRunner::new(opts);
 
@@ -2393,22 +2393,26 @@ mod tests {
         let result = runner.run_job(&job_id, "2026-04-30T12:00:00Z");
         assert!(result.is_some());
 
-        let result = result.unwrap();
+        let result = result.ok_or_else(|| "manual runner result missing".to_string())?;
         assert_eq!(result.outcome, RunOutcome::Success);
         assert!(!result.dry_run);
+        Ok(())
     }
 
     #[test]
-    fn manual_runner_dry_run() {
+    fn manual_runner_dry_run() -> TestResult {
         let opts = RunnerOptions::new().with_dry_run(true);
         let mut runner = ManualRunner::new(opts);
 
         let job_id = runner.schedule(JobType::DecaySweep, JobPriority::High, None);
-        let result = runner.run_job(&job_id, "2026-04-30T12:00:00Z").unwrap();
+        let result = runner
+            .run_job(&job_id, "2026-04-30T12:00:00Z")
+            .ok_or_else(|| "manual runner dry-run result missing".to_string())?;
 
         assert_eq!(result.outcome, RunOutcome::Success);
         assert!(result.dry_run);
         assert_eq!(result.duration_ms, 0);
+        Ok(())
     }
 
     #[test]
@@ -2531,7 +2535,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_runner_skip_completed_job() {
+    fn manual_runner_skip_completed_job() -> TestResult {
         let opts = RunnerOptions::new();
         let mut runner = ManualRunner::new(opts);
 
@@ -2541,9 +2545,12 @@ mod tests {
         let _ = runner.run_job(&job_id, "2026-04-30T12:00:00Z");
 
         // Try to run again - should skip
-        let result = runner.run_job(&job_id, "2026-04-30T12:00:01Z").unwrap();
+        let result = runner
+            .run_job(&job_id, "2026-04-30T12:00:01Z")
+            .ok_or_else(|| "manual runner skipped result missing".to_string())?;
         assert_eq!(result.outcome, RunOutcome::Skipped);
         assert!(result.error.is_some());
+        Ok(())
     }
 
     // ========================================================================
@@ -2595,10 +2602,12 @@ mod tests {
 
         assert_eq!(report.health, HealthStatus::Healthy);
         assert_eq!(report.summary.jobs_analyzed, 0);
-        assert!(report
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "STEWARD_LEDGER_EMPTY"));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "STEWARD_LEDGER_EMPTY")
+        );
     }
 
     #[test]
@@ -2612,10 +2621,12 @@ mod tests {
 
         assert_eq!(report.health, HealthStatus::Unhealthy);
         assert_eq!(report.summary.error_count, 1);
-        assert!(report
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "STEWARD_JOB_FAILED"));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "STEWARD_JOB_FAILED")
+        );
     }
 
     #[test]
