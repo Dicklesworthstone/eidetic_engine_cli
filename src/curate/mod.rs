@@ -1869,7 +1869,9 @@ impl QuarantineReason {
             Self::RateLimitExceeded => "Source exceeded harmful feedback rate limit",
             Self::ProtectedRuleTarget => "Target rule is protected from automated inversion",
             Self::InsufficientSourceDiversity => "Inversion requires feedback from diverse sources",
-            Self::SuspiciousBurstPattern => "Burst pattern suggests automated or adversarial activity",
+            Self::SuspiciousBurstPattern => {
+                "Burst pattern suggests automated or adversarial activity"
+            }
         }
     }
 }
@@ -2078,6 +2080,415 @@ impl FeedbackHealthSummary {
             last_quarantine,
         )
     }
+}
+
+// ============================================================================
+// EE-347: Conformal calibration, stratum counts, and abstain policies
+// ============================================================================
+
+/// Schema version for conformal calibration reports.
+pub const CONFORMAL_CALIBRATION_SCHEMA_V1: &str = "ee.curate.conformal_calibration.v1";
+
+/// Conformal prediction interval for curation decisions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConformalInterval {
+    /// Lower bound of the prediction interval.
+    pub lower: f64,
+    /// Point estimate (e.g., median or mean).
+    pub point: f64,
+    /// Upper bound of the prediction interval.
+    pub upper: f64,
+    /// Coverage level (e.g., 0.90 for 90% coverage).
+    pub coverage: f64,
+}
+
+impl ConformalInterval {
+    #[must_use]
+    pub fn new(lower: f64, point: f64, upper: f64, coverage: f64) -> Self {
+        Self {
+            lower,
+            point,
+            upper,
+            coverage,
+        }
+    }
+
+    /// Width of the prediction interval.
+    #[must_use]
+    pub fn width(&self) -> f64 {
+        self.upper - self.lower
+    }
+
+    /// Check if a value falls within the interval.
+    #[must_use]
+    pub fn contains(&self, value: f64) -> bool {
+        value >= self.lower && value <= self.upper
+    }
+
+    /// Check if the interval is well-formed (lower <= point <= upper).
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.lower <= self.point && self.point <= self.upper && self.coverage > 0.0 && self.coverage <= 1.0
+    }
+}
+
+/// Calibration window for conformal prediction.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CalibrationWindow {
+    /// Number of samples in the calibration set.
+    pub sample_count: u32,
+    /// Start timestamp of the window.
+    pub window_start: String,
+    /// End timestamp of the window.
+    pub window_end: String,
+    /// Achieved coverage in the window.
+    pub achieved_coverage: f64,
+    /// Target coverage level.
+    pub target_coverage: f64,
+    /// Whether calibration is sufficient.
+    pub is_calibrated: bool,
+}
+
+impl CalibrationWindow {
+    #[must_use]
+    pub fn new(sample_count: u32, target_coverage: f64) -> Self {
+        Self {
+            sample_count,
+            window_start: String::new(),
+            window_end: String::new(),
+            achieved_coverage: 0.0,
+            target_coverage,
+            is_calibrated: false,
+        }
+    }
+
+    /// Check if coverage is within tolerance of target.
+    #[must_use]
+    pub fn coverage_within_tolerance(&self, tolerance: f64) -> bool {
+        (self.achieved_coverage - self.target_coverage).abs() <= tolerance
+    }
+
+    /// Minimum samples needed for calibration (rule of thumb).
+    #[must_use]
+    pub const fn min_samples_for_coverage(coverage: f64) -> u32 {
+        let n = 1.0 / (1.0 - coverage);
+        (n * 2.0) as u32
+    }
+}
+
+/// Stratum for stratified evaluation of curation decisions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvaluationStratum {
+    /// Stratum identifier.
+    pub id: String,
+    /// Stratum label for display.
+    pub label: String,
+    /// Number of samples in this stratum.
+    pub count: u32,
+    /// Weight for weighted evaluation.
+    pub weight: u32,
+}
+
+impl EvaluationStratum {
+    #[must_use]
+    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            count: 0,
+            weight: 1,
+        }
+    }
+
+    #[must_use]
+    pub fn with_count(mut self, count: u32) -> Self {
+        self.count = count;
+        self
+    }
+
+    #[must_use]
+    pub fn with_weight(mut self, weight: u32) -> Self {
+        self.weight = weight;
+        self
+    }
+}
+
+/// Stratum counts for stratified evaluation.
+#[derive(Clone, Debug, Default)]
+pub struct StratumCounts {
+    /// Strata definitions with counts.
+    pub strata: Vec<EvaluationStratum>,
+    /// Total samples across all strata.
+    pub total_count: u32,
+    /// Samples not assigned to any stratum.
+    pub unassigned_count: u32,
+}
+
+impl StratumCounts {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a stratum to the collection.
+    pub fn add_stratum(&mut self, stratum: EvaluationStratum) {
+        self.total_count += stratum.count;
+        self.strata.push(stratum);
+    }
+
+    /// Get stratum by ID.
+    #[must_use]
+    pub fn get_stratum(&self, id: &str) -> Option<&EvaluationStratum> {
+        self.strata.iter().find(|s| s.id == id)
+    }
+
+    /// Check if stratification is balanced (all strata have similar counts).
+    #[must_use]
+    pub fn is_balanced(&self, tolerance: f64) -> bool {
+        if self.strata.is_empty() {
+            return true;
+        }
+        let avg = self.total_count as f64 / self.strata.len() as f64;
+        self.strata
+            .iter()
+            .all(|s| ((s.count as f64) - avg).abs() / avg <= tolerance)
+    }
+}
+
+/// Abstain policy for low-confidence curation decisions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AbstainPolicy {
+    /// Never abstain, always make a decision.
+    Never,
+    /// Abstain when confidence is below threshold.
+    BelowThreshold,
+    /// Abstain when interval width exceeds threshold.
+    WideInterval,
+    /// Abstain when stratum has insufficient samples.
+    InsufficientSamples,
+    /// Abstain when calibration is not achieved.
+    Uncalibrated,
+    /// Defer to human review.
+    DeferToHuman,
+}
+
+impl AbstainPolicy {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::BelowThreshold => "below_threshold",
+            Self::WideInterval => "wide_interval",
+            Self::InsufficientSamples => "insufficient_samples",
+            Self::Uncalibrated => "uncalibrated",
+            Self::DeferToHuman => "defer_to_human",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 6] {
+        [
+            Self::Never,
+            Self::BelowThreshold,
+            Self::WideInterval,
+            Self::InsufficientSamples,
+            Self::Uncalibrated,
+            Self::DeferToHuman,
+        ]
+    }
+
+    /// Check if this policy requires human intervention.
+    #[must_use]
+    pub const fn requires_human(&self) -> bool {
+        matches!(self, Self::DeferToHuman)
+    }
+}
+
+impl std::fmt::Display for AbstainPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Abstain decision for a curation action.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AbstainDecision {
+    /// Whether to abstain.
+    pub should_abstain: bool,
+    /// Policy that triggered abstention.
+    pub triggered_policy: Option<AbstainPolicy>,
+    /// Confidence at decision time.
+    pub confidence: f64,
+    /// Interval width at decision time (if applicable).
+    pub interval_width: Option<f64>,
+    /// Reason for abstention.
+    pub reason: Option<String>,
+}
+
+impl AbstainDecision {
+    /// Create a decision to proceed (not abstain).
+    #[must_use]
+    pub fn proceed(confidence: f64) -> Self {
+        Self {
+            should_abstain: false,
+            triggered_policy: None,
+            confidence,
+            interval_width: None,
+            reason: None,
+        }
+    }
+
+    /// Create a decision to abstain.
+    #[must_use]
+    pub fn abstain(policy: AbstainPolicy, confidence: f64, reason: impl Into<String>) -> Self {
+        Self {
+            should_abstain: true,
+            triggered_policy: Some(policy),
+            confidence,
+            interval_width: None,
+            reason: Some(reason.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn with_interval_width(mut self, width: f64) -> Self {
+        self.interval_width = Some(width);
+        self
+    }
+}
+
+/// Configuration for abstain evaluation.
+#[derive(Clone, Debug)]
+pub struct AbstainConfig {
+    /// Confidence threshold for BelowThreshold policy.
+    pub confidence_threshold: f64,
+    /// Interval width threshold for WideInterval policy.
+    pub width_threshold: f64,
+    /// Minimum samples for InsufficientSamples policy.
+    pub min_samples: u32,
+    /// Policies to evaluate (in order).
+    pub policies: Vec<AbstainPolicy>,
+}
+
+impl Default for AbstainConfig {
+    fn default() -> Self {
+        Self {
+            confidence_threshold: 0.7,
+            width_threshold: 0.5,
+            min_samples: 30,
+            policies: vec![
+                AbstainPolicy::BelowThreshold,
+                AbstainPolicy::WideInterval,
+                AbstainPolicy::Uncalibrated,
+            ],
+        }
+    }
+}
+
+impl AbstainConfig {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_confidence_threshold(mut self, threshold: f64) -> Self {
+        self.confidence_threshold = threshold;
+        self
+    }
+
+    #[must_use]
+    pub fn with_width_threshold(mut self, threshold: f64) -> Self {
+        self.width_threshold = threshold;
+        self
+    }
+
+    #[must_use]
+    pub fn with_min_samples(mut self, min: u32) -> Self {
+        self.min_samples = min;
+        self
+    }
+}
+
+/// Evaluate abstain policies for a curation decision.
+#[must_use]
+pub fn evaluate_abstain(
+    confidence: f64,
+    interval: Option<&ConformalInterval>,
+    calibration: Option<&CalibrationWindow>,
+    stratum_count: Option<u32>,
+    config: &AbstainConfig,
+) -> AbstainDecision {
+    for policy in &config.policies {
+        match policy {
+            AbstainPolicy::Never => continue,
+            AbstainPolicy::BelowThreshold => {
+                if confidence < config.confidence_threshold {
+                    return AbstainDecision::abstain(
+                        *policy,
+                        confidence,
+                        format!(
+                            "confidence {} below threshold {}",
+                            confidence, config.confidence_threshold
+                        ),
+                    );
+                }
+            }
+            AbstainPolicy::WideInterval => {
+                if let Some(interval) = interval {
+                    if interval.width() > config.width_threshold {
+                        return AbstainDecision::abstain(
+                            *policy,
+                            confidence,
+                            format!(
+                                "interval width {} exceeds threshold {}",
+                                interval.width(),
+                                config.width_threshold
+                            ),
+                        )
+                        .with_interval_width(interval.width());
+                    }
+                }
+            }
+            AbstainPolicy::InsufficientSamples => {
+                if let Some(count) = stratum_count {
+                    if count < config.min_samples {
+                        return AbstainDecision::abstain(
+                            *policy,
+                            confidence,
+                            format!(
+                                "stratum has {} samples, minimum is {}",
+                                count, config.min_samples
+                            ),
+                        );
+                    }
+                }
+            }
+            AbstainPolicy::Uncalibrated => {
+                if let Some(cal) = calibration {
+                    if !cal.is_calibrated {
+                        return AbstainDecision::abstain(
+                            *policy,
+                            confidence,
+                            format!(
+                                "calibration not achieved (coverage {} vs target {})",
+                                cal.achieved_coverage, cal.target_coverage
+                            ),
+                        );
+                    }
+                }
+            }
+            AbstainPolicy::DeferToHuman => {
+                return AbstainDecision::abstain(
+                    *policy,
+                    confidence,
+                    "policy requires human review",
+                );
+            }
+        }
+    }
+
+    AbstainDecision::proceed(confidence)
 }
 
 #[cfg(test)]
@@ -2808,17 +3219,22 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
     // ========================================================================
 
     use super::{
-        FeedbackRateConfig, FeedbackRateState, ProtectedRuleStatus, QuarantineReason,
-        FeedbackCheckResult, FeedbackHealthSummary, QuarantinedFeedback,
-        DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
-        FEEDBACK_RATE_SCHEMA_V1, PROTECTED_RULE_SCHEMA_V1,
+        DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+        FEEDBACK_RATE_SCHEMA_V1, FeedbackCheckResult, FeedbackHealthSummary, FeedbackRateConfig,
+        FeedbackRateState, PROTECTED_RULE_SCHEMA_V1, ProtectedRuleStatus, QuarantineReason,
     };
 
     #[test]
     fn feedback_rate_config_defaults() {
         let config = FeedbackRateConfig::default();
-        assert_eq!(config.harmful_per_source_per_hour, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR);
-        assert_eq!(config.harmful_burst_window_seconds, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS);
+        assert_eq!(
+            config.harmful_per_source_per_hour,
+            DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR
+        );
+        assert_eq!(
+            config.harmful_burst_window_seconds,
+            DEFAULT_HARMFUL_BURST_WINDOW_SECONDS
+        );
         assert!(config.require_source_diversity_for_inversion);
         assert_eq!(config.min_distinct_sources_for_inversion, 2);
     }
@@ -2850,8 +3266,8 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
 
     #[test]
     fn protected_rule_allows_inversion_only_with_sufficient_harmful() {
-        let mut status = ProtectedRuleStatus::new("mem_test")
-            .with_protection("2026-04-30T12:00:00Z", "user");
+        let mut status =
+            ProtectedRuleStatus::new("mem_test").with_protection("2026-04-30T12:00:00Z", "user");
 
         status.helpful_count = 3;
         status.harmful_count = 1;
@@ -2900,10 +3316,22 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
 
     #[test]
     fn quarantine_reason_as_str() {
-        assert_eq!(QuarantineReason::RateLimitExceeded.as_str(), "rate_limit_exceeded");
-        assert_eq!(QuarantineReason::ProtectedRuleTarget.as_str(), "protected_rule_target");
-        assert_eq!(QuarantineReason::InsufficientSourceDiversity.as_str(), "insufficient_source_diversity");
-        assert_eq!(QuarantineReason::SuspiciousBurstPattern.as_str(), "suspicious_burst_pattern");
+        assert_eq!(
+            QuarantineReason::RateLimitExceeded.as_str(),
+            "rate_limit_exceeded"
+        );
+        assert_eq!(
+            QuarantineReason::ProtectedRuleTarget.as_str(),
+            "protected_rule_target"
+        );
+        assert_eq!(
+            QuarantineReason::InsufficientSourceDiversity.as_str(),
+            "insufficient_source_diversity"
+        );
+        assert_eq!(
+            QuarantineReason::SuspiciousBurstPattern.as_str(),
+            "suspicious_burst_pattern"
+        );
     }
 
     #[test]
@@ -2916,7 +3344,10 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
         let quarantined = FeedbackCheckResult::Quarantined(QuarantineReason::RateLimitExceeded);
         assert!(!quarantined.is_allowed());
         assert!(quarantined.is_quarantined());
-        assert_eq!(quarantined.quarantine_reason(), Some(QuarantineReason::RateLimitExceeded));
+        assert_eq!(
+            quarantined.quarantine_reason(),
+            Some(QuarantineReason::RateLimitExceeded)
+        );
     }
 
     #[test]
@@ -2935,5 +3366,182 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
         assert!(json.contains("\"sourcesAtLimit\":1"));
         assert!(json.contains("\"lastInversionAt\":\"2026-04-30T10:00:00Z\""));
         assert!(!json.contains("lastQuarantineAt"));
+    }
+
+    // ========================================================================
+    // EE-347: Conformal calibration, stratum counts, abstain policy tests
+    // ========================================================================
+
+    use super::{
+        AbstainConfig, AbstainPolicy, CalibrationWindow, ConformalInterval, EvaluationStratum,
+        StratumCounts, evaluate_abstain,
+    };
+
+    #[test]
+    fn conformal_interval_basic_properties() {
+        let interval = ConformalInterval::new(0.3, 0.5, 0.7, 0.90);
+        assert!(interval.is_valid());
+        assert!((interval.width() - 0.4).abs() < 1e-10);
+        assert!(interval.contains(0.5));
+        assert!(interval.contains(0.3));
+        assert!(interval.contains(0.7));
+        assert!(!interval.contains(0.2));
+        assert!(!interval.contains(0.8));
+    }
+
+    #[test]
+    fn conformal_interval_invalid_cases() {
+        let reversed = ConformalInterval::new(0.7, 0.5, 0.3, 0.90);
+        assert!(!reversed.is_valid());
+
+        let bad_coverage = ConformalInterval::new(0.3, 0.5, 0.7, 1.5);
+        assert!(!bad_coverage.is_valid());
+
+        let zero_coverage = ConformalInterval::new(0.3, 0.5, 0.7, 0.0);
+        assert!(!zero_coverage.is_valid());
+    }
+
+    #[test]
+    fn calibration_window_coverage_tolerance() {
+        let mut window = CalibrationWindow::new(100, 0.90);
+        window.achieved_coverage = 0.89;
+        assert!(window.coverage_within_tolerance(0.02));
+        assert!(!window.coverage_within_tolerance(0.005));
+
+        window.achieved_coverage = 0.90;
+        assert!(window.coverage_within_tolerance(0.0));
+    }
+
+    #[test]
+    fn calibration_window_min_samples() {
+        assert!(CalibrationWindow::min_samples_for_coverage(0.90) >= 18);
+        assert!(CalibrationWindow::min_samples_for_coverage(0.95) >= 38);
+    }
+
+    #[test]
+    fn evaluation_stratum_builder() {
+        let stratum = EvaluationStratum::new("high_conf", "High Confidence")
+            .with_count(50)
+            .with_weight(2);
+        assert_eq!(stratum.id, "high_conf");
+        assert_eq!(stratum.label, "High Confidence");
+        assert_eq!(stratum.count, 50);
+        assert_eq!(stratum.weight, 2);
+    }
+
+    #[test]
+    fn stratum_counts_add_and_get() {
+        let mut counts = StratumCounts::new();
+        counts.add_stratum(EvaluationStratum::new("low", "Low").with_count(30));
+        counts.add_stratum(EvaluationStratum::new("med", "Medium").with_count(40));
+        counts.add_stratum(EvaluationStratum::new("high", "High").with_count(30));
+
+        assert_eq!(counts.total_count, 100);
+        assert_eq!(counts.strata.len(), 3);
+        assert!(counts.get_stratum("med").is_some());
+        assert!(counts.get_stratum("unknown").is_none());
+    }
+
+    #[test]
+    fn stratum_counts_balance_check() {
+        let mut balanced = StratumCounts::new();
+        balanced.add_stratum(EvaluationStratum::new("a", "A").with_count(33));
+        balanced.add_stratum(EvaluationStratum::new("b", "B").with_count(34));
+        balanced.add_stratum(EvaluationStratum::new("c", "C").with_count(33));
+        assert!(balanced.is_balanced(0.1));
+
+        let mut unbalanced = StratumCounts::new();
+        unbalanced.add_stratum(EvaluationStratum::new("a", "A").with_count(80));
+        unbalanced.add_stratum(EvaluationStratum::new("b", "B").with_count(10));
+        unbalanced.add_stratum(EvaluationStratum::new("c", "C").with_count(10));
+        assert!(!unbalanced.is_balanced(0.1));
+    }
+
+    #[test]
+    fn abstain_policy_strings_are_stable() {
+        assert_eq!(AbstainPolicy::Never.as_str(), "never");
+        assert_eq!(AbstainPolicy::BelowThreshold.as_str(), "below_threshold");
+        assert_eq!(AbstainPolicy::WideInterval.as_str(), "wide_interval");
+        assert_eq!(AbstainPolicy::InsufficientSamples.as_str(), "insufficient_samples");
+        assert_eq!(AbstainPolicy::Uncalibrated.as_str(), "uncalibrated");
+        assert_eq!(AbstainPolicy::DeferToHuman.as_str(), "defer_to_human");
+    }
+
+    #[test]
+    fn abstain_policy_requires_human() {
+        for policy in AbstainPolicy::all() {
+            if matches!(policy, AbstainPolicy::DeferToHuman) {
+                assert!(policy.requires_human());
+            } else {
+                assert!(!policy.requires_human());
+            }
+        }
+    }
+
+    #[test]
+    fn evaluate_abstain_proceeds_above_threshold() {
+        let config = AbstainConfig::default();
+        let decision = evaluate_abstain(0.85, None, None, None, &config);
+        assert!(!decision.should_abstain);
+        assert!(decision.triggered_policy.is_none());
+    }
+
+    #[test]
+    fn evaluate_abstain_triggers_below_threshold() {
+        let config = AbstainConfig::default().with_confidence_threshold(0.8);
+        let decision = evaluate_abstain(0.6, None, None, None, &config);
+        assert!(decision.should_abstain);
+        assert_eq!(decision.triggered_policy, Some(AbstainPolicy::BelowThreshold));
+        assert!(decision.reason.unwrap().contains("below threshold"));
+    }
+
+    #[test]
+    fn evaluate_abstain_triggers_wide_interval() {
+        let config = AbstainConfig::default()
+            .with_confidence_threshold(0.5)
+            .with_width_threshold(0.3);
+        let wide_interval = ConformalInterval::new(0.2, 0.5, 0.9, 0.90);
+        let decision = evaluate_abstain(0.7, Some(&wide_interval), None, None, &config);
+        assert!(decision.should_abstain);
+        assert_eq!(decision.triggered_policy, Some(AbstainPolicy::WideInterval));
+        assert!(decision.interval_width.is_some());
+    }
+
+    #[test]
+    fn evaluate_abstain_triggers_insufficient_samples() {
+        let mut config = AbstainConfig::default();
+        config.policies = vec![AbstainPolicy::InsufficientSamples];
+        config.min_samples = 50;
+
+        let decision = evaluate_abstain(0.9, None, None, Some(25), &config);
+        assert!(decision.should_abstain);
+        assert_eq!(decision.triggered_policy, Some(AbstainPolicy::InsufficientSamples));
+    }
+
+    #[test]
+    fn evaluate_abstain_triggers_uncalibrated() {
+        let mut config = AbstainConfig::default();
+        config.policies = vec![AbstainPolicy::Uncalibrated];
+
+        let mut uncalibrated = CalibrationWindow::new(50, 0.90);
+        uncalibrated.is_calibrated = false;
+        uncalibrated.achieved_coverage = 0.75;
+
+        let decision = evaluate_abstain(0.9, None, Some(&uncalibrated), None, &config);
+        assert!(decision.should_abstain);
+        assert_eq!(decision.triggered_policy, Some(AbstainPolicy::Uncalibrated));
+    }
+
+    #[test]
+    fn evaluate_abstain_passes_when_calibrated() {
+        let mut config = AbstainConfig::default();
+        config.policies = vec![AbstainPolicy::Uncalibrated];
+
+        let mut calibrated = CalibrationWindow::new(100, 0.90);
+        calibrated.is_calibrated = true;
+        calibrated.achieved_coverage = 0.91;
+
+        let decision = evaluate_abstain(0.9, None, Some(&calibrated), None, &config);
+        assert!(!decision.should_abstain);
     }
 }

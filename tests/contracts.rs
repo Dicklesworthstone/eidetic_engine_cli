@@ -24,3 +24,6 @@ mod asupersync_quiescence;
 
 #[path = "contracts/schema_drift.rs"]
 mod schema_drift;
+
+#[path = "contracts/toon_gate12.rs"]
+mod toon_gate12;
