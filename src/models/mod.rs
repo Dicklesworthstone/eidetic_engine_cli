@@ -5,6 +5,7 @@ pub mod certificate;
 pub mod claims;
 pub mod decision;
 pub mod degradation;
+pub mod demo;
 pub mod economy;
 pub mod episode;
 pub mod error_codes;
@@ -59,6 +60,13 @@ pub use decision::{
 pub use degradation::{
     ALL_DEGRADATION_CODES, ActiveDegradation, DegradationCode, DegradationSeverity,
     DegradedSubsystem,
+};
+pub use demo::{
+    DEMO_ARTIFACT_OUTPUT_SCHEMA_V1, DEMO_COMMAND_SCHEMA_V1, DEMO_ENTRY_SCHEMA_V1,
+    DEMO_FILE_SCHEMA_V1, DEMO_RUN_RESULT_SCHEMA_V1, DemoArtifactOutput, DemoCommand,
+    DemoCommandResult, DemoEntry, DemoFile, DemoRunResult, DemoStatus, DemoValidationError,
+    DemoValidationErrorKind, OutputVerification, ParseDemoStatusError,
+    ParseOutputVerificationError, validate_demo_file,
 };
 pub use economy::{
     ATTENTION_COST_SCHEMA_V1, AggregateUtility, AttentionCost, DebtLevel,
