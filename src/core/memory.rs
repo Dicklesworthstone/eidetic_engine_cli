@@ -78,10 +78,22 @@ pub struct RememberMemoryReport {
     pub dry_run: bool,
     /// Whether a memory row was persisted.
     pub persisted: bool,
+    /// First-version revision number for a newly remembered memory.
+    pub revision_number: u32,
+    /// Revision group ID once revision tracking is backed by storage.
+    pub revision_group_id: Option<String>,
     /// Audit entry created for the write.
     pub audit_id: Option<String>,
     /// Pending index job created for the memory.
     pub index_job_id: Option<String>,
+    /// Stable index status for the write.
+    pub index_status: String,
+    /// Effect IDs once command-effect recording is backed by storage.
+    pub effect_ids: Vec<String>,
+    /// Placeholder for future adjacency suggestions.
+    pub suggested_links: Vec<String>,
+    /// Stable redaction/policy status for the accepted content.
+    pub redaction_status: String,
 }
 
 /// Create a manual memory and enqueue a single-document index job.
@@ -107,8 +119,14 @@ pub fn remember_memory(
             source: prepared.provenance_uri,
             dry_run: true,
             persisted: false,
+            revision_number: 1,
+            revision_group_id: None,
             audit_id: None,
             index_job_id: None,
+            index_status: "dry_run_not_queued".to_owned(),
+            effect_ids: Vec::new(),
+            suggested_links: Vec::new(),
+            redaction_status: "checked".to_owned(),
         });
     }
 
@@ -188,8 +206,14 @@ pub fn remember_memory(
         source: prepared.provenance_uri,
         dry_run: false,
         persisted: true,
+        revision_number: 1,
+        revision_group_id: None,
         audit_id: Some(audit_id),
         index_job_id: Some(index_job_id),
+        index_status: "queued".to_owned(),
+        effect_ids: Vec::new(),
+        suggested_links: Vec::new(),
+        redaction_status: "checked".to_owned(),
     })
 }
 
@@ -219,6 +243,7 @@ fn prepare_remember_memory(
         .map_err(|error| remember_usage_error(error.to_string()))?
         .as_str()
         .to_owned();
+    validate_remember_policy(&content)?;
     let level = MemoryLevel::from_str(options.level)
         .map_err(|error| remember_usage_error(error.to_string()))?;
     let kind = MemoryKind::from_str(options.kind)
@@ -259,6 +284,42 @@ fn parse_tags(tags: Option<&str>) -> Result<Vec<String>, DomainError> {
         }
     }
     Ok(unique.into_iter().collect())
+}
+
+const REMEMBER_SECRET_PATTERNS: &[&str] = &[
+    "password",
+    "secret",
+    "api_key",
+    "apikey",
+    "api-key",
+    "token",
+    "bearer",
+    "authorization",
+    "credential",
+    "private_key",
+    "access_key",
+    "secret_key",
+    "database_url",
+    "connection_string",
+    "-----begin",
+];
+
+fn validate_remember_policy(content: &str) -> Result<(), DomainError> {
+    let lowered = content.to_ascii_lowercase();
+    if REMEMBER_SECRET_PATTERNS
+        .iter()
+        .any(|pattern| lowered.contains(pattern))
+    {
+        return Err(DomainError::PolicyDenied {
+            message: "Refusing to persist memory content that looks like it contains a secret."
+                .to_owned(),
+            repair: Some(
+                "Redact the secret and run `ee remember` again with only durable evidence."
+                    .to_owned(),
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn resolve_workspace_path(path: &Path, dry_run: bool) -> Result<PathBuf, DomainError> {
@@ -1481,8 +1542,30 @@ mod tests {
 
         ensure(report.dry_run, true, "dry_run")?;
         ensure(report.persisted, false, "persisted")?;
+        ensure(report.revision_number, 1, "revision number")?;
+        ensure(
+            report.revision_group_id.is_none(),
+            true,
+            "revision group absent",
+        )?;
         ensure(report.audit_id.is_none(), true, "audit id absent")?;
         ensure(report.index_job_id.is_none(), true, "index job absent")?;
+        ensure(
+            report.index_status,
+            "dry_run_not_queued".to_string(),
+            "index status",
+        )?;
+        ensure(report.effect_ids.is_empty(), true, "effect ids empty")?;
+        ensure(
+            report.suggested_links.is_empty(),
+            true,
+            "suggested links empty",
+        )?;
+        ensure(
+            report.redaction_status,
+            "checked".to_string(),
+            "redaction status",
+        )?;
         ensure(
             report.database_path.exists(),
             false,
@@ -1513,15 +1596,33 @@ mod tests {
             kind: "rule",
             tags: Some("release,checks"),
             confidence: 0.9,
-            source: Some("file://README.md#L74-L77"),
+            source: Some("file://README.md#L74-77"),
             dry_run: false,
         })
         .map_err(|error| error.message())?;
 
         ensure(report.dry_run, false, "dry_run")?;
         ensure(report.persisted, true, "persisted")?;
+        ensure(report.revision_number, 1, "revision number")?;
+        ensure(
+            report.revision_group_id.is_none(),
+            true,
+            "revision group absent",
+        )?;
         ensure(report.audit_id.is_some(), true, "audit id present")?;
         ensure(report.index_job_id.is_some(), true, "index job id present")?;
+        ensure(report.index_status, "queued".to_string(), "index status")?;
+        ensure(report.effect_ids.is_empty(), true, "effect ids empty")?;
+        ensure(
+            report.suggested_links.is_empty(),
+            true,
+            "suggested links empty",
+        )?;
+        ensure(
+            report.redaction_status,
+            "checked".to_string(),
+            "redaction status",
+        )?;
         ensure(report.database_path.exists(), true, "database created")?;
 
         let connection = crate::db::DbConnection::open_file(&report.database_path)
@@ -1547,7 +1648,7 @@ mod tests {
         )?;
         ensure(
             memory.provenance_uri,
-            Some("file://README.md#L74-L77".to_string()),
+            Some("file://README.md#L74-77".to_string()),
             "provenance uri",
         )?;
         let tags = connection
@@ -1583,6 +1684,44 @@ mod tests {
             jobs[0].document_id.clone(),
             Some(report.memory_id.to_string()),
             "index job document",
+        )
+    }
+
+    #[test]
+    fn remember_memory_rejects_secret_like_content_before_storage() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let result = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Rotate api_key_secret_123 before release.",
+            level: "procedural",
+            kind: "rule",
+            tags: None,
+            confidence: 0.8,
+            source: None,
+            dry_run: false,
+        });
+
+        match result {
+            Err(DomainError::PolicyDenied { message, repair }) => {
+                ensure(
+                    message.contains("secret"),
+                    true,
+                    "policy error mentions secret",
+                )?;
+                ensure(repair.is_some(), true, "repair is present")?;
+            }
+            Err(error) => return Err(format!("expected policy denial, got {error:?}")),
+            Ok(report) => {
+                return Err(format!(
+                    "secret-like content should not persist, got {report:?}"
+                ));
+            }
+        }
+        ensure(
+            temp.path().join(".ee").join("ee.db").exists(),
+            false,
+            "policy denial must not create database",
         )
     }
 

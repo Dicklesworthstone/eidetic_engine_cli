@@ -335,6 +335,327 @@ impl PrivacyBudgetCertificate {
     }
 }
 
+// ============================================================================
+// Shareable Aggregate Reports (EE-349)
+// ============================================================================
+
+/// Kind of shareable aggregate report.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ShareableAggregateKind {
+    /// Count of items matching criteria.
+    Count,
+    /// Sum of numeric values.
+    Sum,
+    /// Mean/average value.
+    Mean,
+    /// Median value.
+    Median,
+    /// Standard deviation.
+    StdDev,
+    /// Histogram/distribution.
+    Histogram,
+    /// Percentile value.
+    Percentile,
+    /// Top-k items (with k-anonymity).
+    TopK,
+}
+
+impl ShareableAggregateKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Count => "count",
+            Self::Sum => "sum",
+            Self::Mean => "mean",
+            Self::Median => "median",
+            Self::StdDev => "std_dev",
+            Self::Histogram => "histogram",
+            Self::Percentile => "percentile",
+            Self::TopK => "top_k",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 8] {
+        [
+            Self::Count,
+            Self::Sum,
+            Self::Mean,
+            Self::Median,
+            Self::StdDev,
+            Self::Histogram,
+            Self::Percentile,
+            Self::TopK,
+        ]
+    }
+
+    #[must_use]
+    pub const fn sensitivity_class(self) -> &'static str {
+        match self {
+            Self::Count => "bounded",
+            Self::Sum | Self::Mean => "unbounded",
+            Self::Median | Self::Percentile => "bounded",
+            Self::StdDev => "unbounded",
+            Self::Histogram => "bounded",
+            Self::TopK => "k_anonymous",
+        }
+    }
+}
+
+impl fmt::Display for ShareableAggregateKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Error when parsing an invalid shareable aggregate kind.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseShareableAggregateKindError {
+    input: String,
+}
+
+impl ParseShareableAggregateKindError {
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+}
+
+impl fmt::Display for ParseShareableAggregateKindError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unknown shareable aggregate kind `{}`; expected one of count, sum, mean, median, std_dev, histogram, percentile, top_k",
+            self.input
+        )
+    }
+}
+
+impl std::error::Error for ParseShareableAggregateKindError {}
+
+impl FromStr for ShareableAggregateKind {
+    type Err = ParseShareableAggregateKindError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "count" => Ok(Self::Count),
+            "sum" => Ok(Self::Sum),
+            "mean" => Ok(Self::Mean),
+            "median" => Ok(Self::Median),
+            "std_dev" => Ok(Self::StdDev),
+            "histogram" => Ok(Self::Histogram),
+            "percentile" => Ok(Self::Percentile),
+            "top_k" => Ok(Self::TopK),
+            _ => Err(ParseShareableAggregateKindError {
+                input: input.to_owned(),
+            }),
+        }
+    }
+}
+
+/// Constraints for sharing aggregate reports.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrivacyBudgetShareConstraint {
+    /// Minimum k for k-anonymity (records per group).
+    pub k_anonymity_threshold: u32,
+    /// Maximum epsilon for differential privacy.
+    pub max_epsilon: f64,
+    /// Maximum delta for differential privacy.
+    pub max_delta: f64,
+    /// Required noise mechanism (laplace, gaussian, exponential).
+    pub noise_mechanism: String,
+    /// Minimum sample size for statistical validity.
+    pub min_sample_size: u32,
+}
+
+impl PrivacyBudgetShareConstraint {
+    /// Default constraints for shareable aggregates.
+    #[must_use]
+    pub fn default_safe() -> Self {
+        Self {
+            k_anonymity_threshold: 5,
+            max_epsilon: 1.0,
+            max_delta: 1e-5,
+            noise_mechanism: "laplace".to_string(),
+            min_sample_size: 10,
+        }
+    }
+
+    /// Strict constraints for high-sensitivity data.
+    #[must_use]
+    pub fn strict() -> Self {
+        Self {
+            k_anonymity_threshold: 10,
+            max_epsilon: 0.1,
+            max_delta: 1e-7,
+            noise_mechanism: "gaussian".to_string(),
+            min_sample_size: 50,
+        }
+    }
+
+    /// Check if epsilon is within bounds.
+    #[must_use]
+    pub fn epsilon_valid(&self, epsilon: f64) -> bool {
+        epsilon > 0.0 && epsilon <= self.max_epsilon
+    }
+
+    /// Check if delta is within bounds.
+    #[must_use]
+    pub fn delta_valid(&self, delta: f64) -> bool {
+        delta > 0.0 && delta <= self.max_delta
+    }
+}
+
+impl Default for PrivacyBudgetShareConstraint {
+    fn default() -> Self {
+        Self::default_safe()
+    }
+}
+
+/// A shareable aggregate report with privacy guarantees.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShareableAggregateReport {
+    /// Unique report identifier.
+    pub report_id: String,
+    /// Kind of aggregate computed.
+    pub aggregate_kind: ShareableAggregateKind,
+    /// The aggregate value (noised if differential privacy applied).
+    pub value: f64,
+    /// Original sample size before aggregation.
+    pub sample_size: u32,
+    /// Epsilon consumed for this report.
+    pub epsilon_consumed: f64,
+    /// Delta consumed for this report.
+    pub delta_consumed: f64,
+    /// Noise scale applied (if any).
+    pub noise_scale: f64,
+    /// Sensitivity bound used.
+    pub sensitivity: f64,
+    /// Whether the report meets k-anonymity requirements.
+    pub k_anonymity_satisfied: bool,
+    /// Whether the report is safe to share externally.
+    pub shareable: bool,
+    /// Reason if not shareable.
+    pub share_denial_reason: Option<String>,
+    /// Timestamp when report was generated.
+    pub generated_at: String,
+}
+
+impl ShareableAggregateReport {
+    /// Check if the report has valid privacy parameters.
+    #[must_use]
+    pub fn privacy_valid(&self) -> bool {
+        self.epsilon_consumed > 0.0 && self.delta_consumed >= 0.0 && self.noise_scale >= 0.0
+    }
+
+    /// Check if report meets constraint requirements.
+    #[must_use]
+    pub fn meets_constraints(&self, constraint: &PrivacyBudgetShareConstraint) -> bool {
+        self.k_anonymity_satisfied
+            && constraint.epsilon_valid(self.epsilon_consumed)
+            && constraint.delta_valid(self.delta_consumed)
+            && self.sample_size >= constraint.min_sample_size
+    }
+}
+
+/// Certificate proving an aggregate report is safe to share.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrivacyBudgetShareCertificate {
+    /// Budget certificate showing consumption.
+    pub budget: PrivacyBudgetCertificate,
+    /// The aggregate report being certified.
+    pub report: ShareableAggregateReport,
+    /// Constraints used for validation.
+    pub constraints: PrivacyBudgetShareConstraint,
+    /// Whether certificate approves sharing.
+    pub share_approved: bool,
+    /// Validation checks performed.
+    pub validations: Vec<ShareValidationCheck>,
+    /// Certificate generation timestamp.
+    pub certified_at: String,
+}
+
+impl PrivacyBudgetShareCertificate {
+    /// Check if all validations passed.
+    #[must_use]
+    pub fn all_validations_passed(&self) -> bool {
+        self.validations.iter().all(|v| v.passed)
+    }
+
+    /// Get failed validations.
+    #[must_use]
+    pub fn failed_validations(&self) -> Vec<&ShareValidationCheck> {
+        self.validations.iter().filter(|v| !v.passed).collect()
+    }
+
+    /// Count of passed validations.
+    #[must_use]
+    pub fn passed_count(&self) -> usize {
+        self.validations.iter().filter(|v| v.passed).count()
+    }
+
+    /// Count of total validations.
+    #[must_use]
+    pub fn total_count(&self) -> usize {
+        self.validations.len()
+    }
+}
+
+/// A single validation check in a share certificate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShareValidationCheck {
+    /// Check identifier.
+    pub check_id: String,
+    /// Human-readable check name.
+    pub name: String,
+    /// Whether check passed.
+    pub passed: bool,
+    /// Actual value observed.
+    pub actual_value: String,
+    /// Threshold or expected value.
+    pub threshold: String,
+    /// Explanation of result.
+    pub explanation: String,
+}
+
+impl ShareValidationCheck {
+    /// Create a passing check.
+    #[must_use]
+    pub fn pass(
+        check_id: impl Into<String>,
+        name: impl Into<String>,
+        actual: impl Into<String>,
+        threshold: impl Into<String>,
+    ) -> Self {
+        Self {
+            check_id: check_id.into(),
+            name: name.into(),
+            passed: true,
+            actual_value: actual.into(),
+            threshold: threshold.into(),
+            explanation: "Check passed".to_string(),
+        }
+    }
+
+    /// Create a failing check.
+    #[must_use]
+    pub fn fail(
+        check_id: impl Into<String>,
+        name: impl Into<String>,
+        actual: impl Into<String>,
+        threshold: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            check_id: check_id.into(),
+            name: name.into(),
+            passed: false,
+            actual_value: actual.into(),
+            threshold: threshold.into(),
+            explanation: reason.into(),
+        }
+    }
+}
+
 /// Lifecycle event type for lifecycle certificates.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum LifecycleEvent {
@@ -919,7 +1240,9 @@ mod tests {
         CERTIFICATE_SCHEMA_V1, Certificate, CertificateKind, CertificateStatus,
         CurationCertificate, LifecycleCertificate, LifecycleEvent, PackCertificate,
         ParseCertificateKindError, ParseCertificateStatusError, ParseLifecycleEventError,
-        PrivacyBudgetCertificate, TailRiskCertificate,
+        ParseShareableAggregateKindError, PrivacyBudgetCertificate, PrivacyBudgetShareCertificate,
+        PrivacyBudgetShareConstraint, ShareValidationCheck, ShareableAggregateKind,
+        ShareableAggregateReport, TailRiskCertificate,
     };
     use crate::models::DecisionPlaneMetadata;
 
@@ -1164,6 +1487,183 @@ mod tests {
         };
         ensure(exhausted.is_exhausted(), "should be exhausted")?;
         ensure_equal(&exhausted.utilization(), &1.0, "utilization should be 100%")
+    }
+
+    #[test]
+    fn shareable_aggregate_kind_round_trip_for_every_variant() -> TestResult {
+        for kind in ShareableAggregateKind::all() {
+            let rendered = kind.to_string();
+            let parsed = ShareableAggregateKind::from_str(&rendered)
+                .map_err(|e| format!("kind {kind:?} failed to round-trip: {e}"))?;
+            ensure_equal(&parsed, &kind, &format!("round-trip for {kind:?}"))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shareable_aggregate_kind_rejects_unknown_input() -> TestResult {
+        let err = ShareableAggregateKind::from_str("unknown_aggregate");
+        ensure(
+            matches!(err, Err(ParseShareableAggregateKindError { .. })),
+            "should reject unknown aggregate kind",
+        )
+    }
+
+    #[test]
+    fn shareable_aggregate_kind_sensitivity_classes() -> TestResult {
+        ensure_equal(
+            &ShareableAggregateKind::Count.sensitivity_class(),
+            &"bounded",
+            "count sensitivity",
+        )?;
+        ensure_equal(
+            &ShareableAggregateKind::Sum.sensitivity_class(),
+            &"unbounded",
+            "sum sensitivity",
+        )?;
+        ensure_equal(
+            &ShareableAggregateKind::TopK.sensitivity_class(),
+            &"k_anonymous",
+            "top_k sensitivity",
+        )
+    }
+
+    #[test]
+    fn privacy_budget_share_constraint_defaults() -> TestResult {
+        let safe = PrivacyBudgetShareConstraint::default_safe();
+        ensure_equal(&safe.k_anonymity_threshold, &5, "default k-anonymity")?;
+        ensure_equal(&safe.max_epsilon, &1.0, "default max epsilon")?;
+        ensure(safe.epsilon_valid(0.5), "0.5 epsilon should be valid")?;
+        ensure(!safe.epsilon_valid(1.5), "1.5 epsilon should be invalid")?;
+
+        let strict = PrivacyBudgetShareConstraint::strict();
+        ensure_equal(&strict.k_anonymity_threshold, &10, "strict k-anonymity")?;
+        ensure_equal(&strict.max_epsilon, &0.1, "strict max epsilon")?;
+        ensure(
+            !strict.epsilon_valid(0.5),
+            "0.5 epsilon should be invalid for strict",
+        )
+    }
+
+    #[test]
+    fn shareable_aggregate_report_privacy_validation() -> TestResult {
+        let report = ShareableAggregateReport {
+            report_id: "rpt_001".to_string(),
+            aggregate_kind: ShareableAggregateKind::Mean,
+            value: 42.5,
+            sample_size: 100,
+            epsilon_consumed: 0.1,
+            delta_consumed: 1e-6,
+            noise_scale: 0.5,
+            sensitivity: 1.0,
+            k_anonymity_satisfied: true,
+            shareable: true,
+            share_denial_reason: None,
+            generated_at: "2026-04-30T12:00:00Z".to_string(),
+        };
+
+        ensure(
+            report.privacy_valid(),
+            "report should have valid privacy params",
+        )?;
+        ensure(
+            report.meets_constraints(&PrivacyBudgetShareConstraint::default_safe()),
+            "report should meet default constraints",
+        )?;
+
+        let invalid = ShareableAggregateReport {
+            epsilon_consumed: 0.0,
+            ..report.clone()
+        };
+        ensure(!invalid.privacy_valid(), "zero epsilon should be invalid")?;
+
+        let below_min_sample = ShareableAggregateReport {
+            sample_size: 5,
+            ..report
+        };
+        ensure(
+            !below_min_sample.meets_constraints(&PrivacyBudgetShareConstraint::default_safe()),
+            "below min sample should fail constraints",
+        )
+    }
+
+    #[test]
+    fn privacy_budget_share_certificate_validation_checks() -> TestResult {
+        let budget = PrivacyBudgetCertificate {
+            category: "aggregation".to_string(),
+            consumed: 0.1,
+            total_consumed: 0.5,
+            budget_limit: 1.0,
+            remaining: 0.5,
+            operation_allowed: true,
+            resets_at: None,
+        };
+
+        let report = ShareableAggregateReport {
+            report_id: "rpt_001".to_string(),
+            aggregate_kind: ShareableAggregateKind::Count,
+            value: 150.0,
+            sample_size: 200,
+            epsilon_consumed: 0.1,
+            delta_consumed: 1e-6,
+            noise_scale: 1.0,
+            sensitivity: 1.0,
+            k_anonymity_satisfied: true,
+            shareable: true,
+            share_denial_reason: None,
+            generated_at: "2026-04-30T12:00:00Z".to_string(),
+        };
+
+        let cert = PrivacyBudgetShareCertificate {
+            budget,
+            report,
+            constraints: PrivacyBudgetShareConstraint::default_safe(),
+            share_approved: true,
+            validations: vec![
+                ShareValidationCheck::pass("k_anon", "K-Anonymity", "true", "5"),
+                ShareValidationCheck::pass("epsilon", "Epsilon Budget", "0.1", "1.0"),
+                ShareValidationCheck::pass("sample", "Sample Size", "200", "10"),
+            ],
+            certified_at: "2026-04-30T12:00:00Z".to_string(),
+        };
+
+        ensure(cert.all_validations_passed(), "all validations should pass")?;
+        ensure_equal(&cert.passed_count(), &3, "passed count")?;
+        ensure_equal(&cert.total_count(), &3, "total count")?;
+        ensure(
+            cert.failed_validations().is_empty(),
+            "no failed validations",
+        )?;
+
+        let with_failure = PrivacyBudgetShareCertificate {
+            share_approved: false,
+            validations: vec![
+                ShareValidationCheck::pass("k_anon", "K-Anonymity", "true", "5"),
+                ShareValidationCheck::fail(
+                    "epsilon",
+                    "Epsilon Budget",
+                    "1.5",
+                    "1.0",
+                    "Epsilon exceeds maximum allowed",
+                ),
+            ],
+            ..cert
+        };
+
+        ensure(
+            !with_failure.all_validations_passed(),
+            "should have failures",
+        )?;
+        ensure_equal(
+            &with_failure.passed_count(),
+            &1,
+            "passed count with failure",
+        )?;
+        ensure_equal(
+            &with_failure.failed_validations().len(),
+            &1,
+            "failed validation count",
+        )
     }
 
     #[test]
