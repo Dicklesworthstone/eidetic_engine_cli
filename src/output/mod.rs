@@ -6161,7 +6161,10 @@ pub fn render_diag_claims_human(report: &crate::core::claims::DiagClaimsReport) 
     output.push_str("ee diag claims\n\n");
 
     if !report.claims_file_exists {
-        output.push_str(&format!("Claims file not found: {}\n\n", report.claims_file));
+        output.push_str(&format!(
+            "Claims file not found: {}\n\n",
+            report.claims_file
+        ));
         output.push_str("Next:\n");
         for action in &report.repair_actions {
             output.push_str(&format!("  {}\n", action));
