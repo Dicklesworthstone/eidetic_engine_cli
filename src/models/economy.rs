@@ -3,7 +3,7 @@
 //! Treat agent attention as scarce: score utility, cost, false alarms,
 //! maintenance debt, and tail-risk reserves before surfacing or demoting artifacts.
 
-use std::fmt;
+use std::{cmp::Reverse, fmt};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
@@ -812,7 +812,7 @@ impl EconomyReport {
     /// Sort recommendations by adjusted priority (highest first).
     pub fn sort_recommendations(&mut self) {
         self.recommendations
-            .sort_by(|a, b| b.adjusted_priority().cmp(&a.adjusted_priority()));
+            .sort_by_key(|recommendation| Reverse(recommendation.adjusted_priority()));
     }
 
     /// Render as JSON.

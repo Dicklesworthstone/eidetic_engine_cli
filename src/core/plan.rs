@@ -4,6 +4,8 @@
 //! current workspace posture, capabilities, effect metadata, and degraded state.
 //! This is NOT an autonomous executor - it only emits plans for explicit execution.
 
+use std::cmp::Reverse;
+
 use serde_json::{Value as JsonValue, json};
 
 pub const GOAL_PLAN_SCHEMA_V1: &str = "ee.plan.goal.v1";
@@ -118,18 +120,147 @@ pub fn classify_goal(goal: &str) -> GoalClassification {
 
     // Keyword matching with weighted scores
     let keywords: &[(GoalCategory, &[&str], u32)] = &[
-        (GoalCategory::Init, &["init", "initialize", "setup", "first", "new workspace", "create workspace"], 10),
-        (GoalCategory::PreTaskBriefing, &["brief", "context", "prepare", "before task", "pre-task", "starting work", "begin task"], 10),
-        (GoalCategory::InTaskRetrieval, &["search", "find", "retrieve", "look up", "why", "explain", "during task", "working on"], 10),
-        (GoalCategory::DegradedRepair, &["repair", "fix", "degraded", "broken", "error", "doctor", "health", "recover"], 10),
-        (GoalCategory::OutcomeCapture, &["remember", "outcome", "record", "capture", "lesson", "learned", "save", "completed"], 10),
-        (GoalCategory::SessionReview, &["review", "session", "curation", "curate", "history", "past work"], 10),
-        (GoalCategory::Handoff, &["handoff", "hand off", "resume", "continue", "pass", "transition", "switch"], 10),
-        (GoalCategory::SupportBundle, &["support", "bundle", "diagnostic", "debug", "help", "troubleshoot"], 10),
-        (GoalCategory::BackupExport, &["backup", "export", "archive", "save state", "snapshot"], 10),
-        (GoalCategory::Rehearsal, &["rehearse", "rehearsal", "dry run", "test", "simulate", "risky", "practice"], 10),
-        (GoalCategory::AuditInspection, &["audit", "inspect", "timeline", "trace", "history", "log", "what happened"], 10),
-        (GoalCategory::Closeout, &["closeout", "close out", "finish", "complete", "done", "evidence", "wrap up"], 10),
+        (
+            GoalCategory::Init,
+            &[
+                "init",
+                "initialize",
+                "setup",
+                "first",
+                "new workspace",
+                "create workspace",
+            ],
+            10,
+        ),
+        (
+            GoalCategory::PreTaskBriefing,
+            &[
+                "brief",
+                "context",
+                "prepare",
+                "before task",
+                "pre-task",
+                "starting work",
+                "begin task",
+            ],
+            10,
+        ),
+        (
+            GoalCategory::InTaskRetrieval,
+            &[
+                "search",
+                "find",
+                "retrieve",
+                "look up",
+                "why",
+                "explain",
+                "during task",
+                "working on",
+            ],
+            10,
+        ),
+        (
+            GoalCategory::DegradedRepair,
+            &[
+                "repair", "fix", "degraded", "broken", "error", "doctor", "health", "recover",
+            ],
+            10,
+        ),
+        (
+            GoalCategory::OutcomeCapture,
+            &[
+                "remember",
+                "outcome",
+                "record",
+                "capture",
+                "lesson",
+                "learned",
+                "save",
+                "completed",
+            ],
+            10,
+        ),
+        (
+            GoalCategory::SessionReview,
+            &[
+                "review",
+                "session",
+                "curation",
+                "curate",
+                "history",
+                "past work",
+            ],
+            10,
+        ),
+        (
+            GoalCategory::Handoff,
+            &[
+                "handoff",
+                "hand off",
+                "resume",
+                "continue",
+                "pass",
+                "transition",
+                "switch",
+            ],
+            10,
+        ),
+        (
+            GoalCategory::SupportBundle,
+            &[
+                "support",
+                "bundle",
+                "diagnostic",
+                "debug",
+                "help",
+                "troubleshoot",
+            ],
+            10,
+        ),
+        (
+            GoalCategory::BackupExport,
+            &["backup", "export", "archive", "save state", "snapshot"],
+            10,
+        ),
+        (
+            GoalCategory::Rehearsal,
+            &[
+                "rehearse",
+                "rehearsal",
+                "dry run",
+                "test",
+                "simulate",
+                "risky",
+                "practice",
+            ],
+            10,
+        ),
+        (
+            GoalCategory::AuditInspection,
+            &[
+                "audit",
+                "inspect",
+                "timeline",
+                "trace",
+                "history",
+                "log",
+                "what happened",
+            ],
+            10,
+        ),
+        (
+            GoalCategory::Closeout,
+            &[
+                "closeout",
+                "close out",
+                "finish",
+                "complete",
+                "done",
+                "evidence",
+                "wrap up",
+            ],
+            10,
+        ),
     ];
 
     for (category, kws, weight) in keywords {
@@ -144,7 +275,7 @@ pub fn classify_goal(goal: &str) -> GoalClassification {
         }
     }
 
-    scores.sort_by(|a, b| b.1.cmp(&a.1));
+    scores.sort_by_key(|score| Reverse(score.1));
 
     if scores.is_empty() {
         return GoalClassification {
@@ -699,7 +830,10 @@ pub fn get_recipe(id: &str) -> Option<Recipe> {
 #[must_use]
 pub fn recipes_by_category(category: Option<GoalCategory>) -> Vec<Recipe> {
     match category {
-        Some(cat) => builtin_recipes().into_iter().filter(|r| r.category == cat).collect(),
+        Some(cat) => builtin_recipes()
+            .into_iter()
+            .filter(|r| r.category == cat)
+            .collect(),
         None => builtin_recipes(),
     }
 }
@@ -731,12 +865,21 @@ impl PlanProfile {
     }
 
     #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
+        <Self as std::str::FromStr>::from_str(s).ok()
+    }
+}
+
+impl std::str::FromStr for PlanProfile {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "compact" => Some(Self::Compact),
-            "full" => Some(Self::Full),
-            "safe" => Some(Self::Safe),
-            _ => None,
+            "compact" => Ok(Self::Compact),
+            "full" => Ok(Self::Full),
+            "safe" => Ok(Self::Safe),
+            _ => Err(format!("invalid plan profile: {s}")),
         }
     }
 }
@@ -782,11 +925,22 @@ impl GoalPlan {
         });
 
         if include_alternatives && !self.rejected_alternatives.is_empty() {
-            obj["rejectedAlternatives"] = json!(self.rejected_alternatives.iter().map(RejectedAlternative::data_json).collect::<Vec<_>>());
+            obj["rejectedAlternatives"] = json!(
+                self.rejected_alternatives
+                    .iter()
+                    .map(RejectedAlternative::data_json)
+                    .collect::<Vec<_>>()
+            );
         }
 
         if !self.classification.alternatives.is_empty() {
-            obj["classification"]["alternatives"] = json!(self.classification.alternatives.iter().map(|c| c.as_str()).collect::<Vec<_>>());
+            obj["classification"]["alternatives"] = json!(
+                self.classification
+                    .alternatives
+                    .iter()
+                    .map(|c| c.as_str())
+                    .collect::<Vec<_>>()
+            );
         }
 
         obj
@@ -827,7 +981,9 @@ pub fn generate_plan(options: &PlanGoalOptions) -> GoalPlan {
     let recipe = if classification.primary == GoalCategory::Unknown {
         None
     } else {
-        recipes_by_category(Some(classification.primary)).into_iter().next()
+        recipes_by_category(Some(classification.primary))
+            .into_iter()
+            .next()
     };
 
     let (recipe_id, recipe_version, steps, degraded_branches) = match recipe {
@@ -859,12 +1015,13 @@ pub fn generate_plan(options: &PlanGoalOptions) -> GoalPlan {
         .alternatives
         .iter()
         .filter_map(|cat| {
-            recipes_by_category(Some(*cat)).into_iter().next().map(|r| {
-                RejectedAlternative {
+            recipes_by_category(Some(*cat))
+                .into_iter()
+                .next()
+                .map(|r| RejectedAlternative {
                     recipe_id: r.id,
                     reason: format!("Lower confidence match for category '{}'", cat.as_str()),
-                }
-            })
+                })
         })
         .collect();
 
@@ -965,6 +1122,8 @@ pub fn explain_recipe(recipe_id: &str) -> Option<PlanExplanation> {
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), String>;
+
     #[test]
     fn goal_category_roundtrip() {
         for cat in GoalCategory::all() {
@@ -1008,11 +1167,12 @@ mod tests {
     }
 
     #[test]
-    fn get_recipe_by_id() {
+    fn get_recipe_by_id() -> TestResult {
         let recipe = get_recipe("init-workspace");
         assert!(recipe.is_some());
-        let r = recipe.unwrap();
+        let r = recipe.ok_or_else(|| "init-workspace recipe missing".to_string())?;
         assert_eq!(r.category, GoalCategory::Init);
+        Ok(())
     }
 
     #[test]
@@ -1040,11 +1200,12 @@ mod tests {
     }
 
     #[test]
-    fn explain_recipe_exists() {
+    fn explain_recipe_exists() -> TestResult {
         let explanation = explain_recipe("init-workspace");
         assert!(explanation.is_some());
-        let exp = explanation.unwrap();
+        let exp = explanation.ok_or_else(|| "init-workspace explanation missing".to_string())?;
         assert_eq!(exp.recipe_id, "init-workspace");
+        Ok(())
     }
 
     #[test]

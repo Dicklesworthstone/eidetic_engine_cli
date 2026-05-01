@@ -108,7 +108,7 @@ pub fn show_agenda(options: &LearnAgendaOptions) -> Result<LearnAgendaReport, Do
                 && options
                     .topic
                     .as_ref()
-                    .map_or(true, |t| item.topic.contains(t))
+                    .is_none_or(|t| item.topic.contains(t))
         })
         .take(options.limit as usize)
         .collect();
@@ -209,7 +209,7 @@ pub fn show_uncertainty(
         .into_iter()
         .filter(|item| {
             item.uncertainty >= options.min_uncertainty
-                && options.kind.as_ref().map_or(true, |k| &item.kind == k)
+                && options.kind.as_ref().is_none_or(|k| &item.kind == k)
                 && (!options.low_confidence || item.confidence < 0.5)
         })
         .take(options.limit as usize)
@@ -331,20 +331,23 @@ pub fn show_summary(options: &LearnSummaryOptions) -> Result<LearnSummaryReport,
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), String>;
+
     #[test]
-    fn agenda_filters_resolved() {
+    fn agenda_filters_resolved() -> TestResult {
         let options = LearnAgendaOptions {
             limit: 10,
             include_resolved: false,
             ..Default::default()
         };
 
-        let report = show_agenda(&options).unwrap();
+        let report = show_agenda(&options).map_err(|e| e.message())?;
         assert!(report.items.iter().all(|i| i.status != "resolved"));
+        Ok(())
     }
 
     #[test]
-    fn agenda_filters_by_topic() {
+    fn agenda_filters_by_topic() -> TestResult {
         let options = LearnAgendaOptions {
             limit: 10,
             topic: Some("error".to_owned()),
@@ -352,24 +355,26 @@ mod tests {
             ..Default::default()
         };
 
-        let report = show_agenda(&options).unwrap();
+        let report = show_agenda(&options).map_err(|e| e.message())?;
         assert!(report.items.iter().all(|i| i.topic.contains("error")));
+        Ok(())
     }
 
     #[test]
-    fn uncertainty_filters_by_threshold() {
+    fn uncertainty_filters_by_threshold() -> TestResult {
         let options = LearnUncertaintyOptions {
             limit: 10,
             min_uncertainty: 0.5,
             ..Default::default()
         };
 
-        let report = show_uncertainty(&options).unwrap();
+        let report = show_uncertainty(&options).map_err(|e| e.message())?;
         assert!(report.items.iter().all(|i| i.uncertainty >= 0.5));
+        Ok(())
     }
 
     #[test]
-    fn uncertainty_filters_low_confidence() {
+    fn uncertainty_filters_low_confidence() -> TestResult {
         let options = LearnUncertaintyOptions {
             limit: 10,
             min_uncertainty: 0.0,
@@ -377,31 +382,34 @@ mod tests {
             ..Default::default()
         };
 
-        let report = show_uncertainty(&options).unwrap();
+        let report = show_uncertainty(&options).map_err(|e| e.message())?;
         assert!(report.items.iter().all(|i| i.confidence < 0.5));
+        Ok(())
     }
 
     #[test]
-    fn summary_includes_events_when_detailed() {
+    fn summary_includes_events_when_detailed() -> TestResult {
         let options = LearnSummaryOptions {
             period: "week".to_owned(),
             detailed: true,
             ..Default::default()
         };
 
-        let report = show_summary(&options).unwrap();
+        let report = show_summary(&options).map_err(|e| e.message())?;
         assert!(!report.events.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn summary_no_events_when_not_detailed() {
+    fn summary_no_events_when_not_detailed() -> TestResult {
         let options = LearnSummaryOptions {
             period: "week".to_owned(),
             detailed: false,
             ..Default::default()
         };
 
-        let report = show_summary(&options).unwrap();
+        let report = show_summary(&options).map_err(|e| e.message())?;
         assert!(report.events.is_empty());
+        Ok(())
     }
 }

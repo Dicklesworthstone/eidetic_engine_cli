@@ -51,10 +51,7 @@ pub struct InspectReport {
 /// Plan what would be collected without actually creating the bundle.
 pub fn plan_bundle(options: &BundleOptions) -> Result<BundleReport, DomainError> {
     Ok(BundleReport {
-        files_collected: vec![
-            ".ee/config.toml".to_string(),
-            ".ee/db.sqlite".to_string(),
-        ],
+        files_collected: vec![".ee/config.toml".to_string(), ".ee/db.sqlite".to_string()],
         total_size_bytes: 0,
         redaction_applied: options.redacted,
         output_path: None,
@@ -64,16 +61,16 @@ pub fn plan_bundle(options: &BundleOptions) -> Result<BundleReport, DomainError>
 
 /// Create a support bundle.
 pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainError> {
-    let output_dir = options.output_dir.clone().ok_or_else(|| DomainError::Usage {
-        message: "--out is required".to_string(),
-        repair: Some("ee support bundle --out <dir>".to_string()),
-    })?;
+    let output_dir = options
+        .output_dir
+        .clone()
+        .ok_or_else(|| DomainError::Usage {
+            message: "--out is required".to_string(),
+            repair: Some("ee support bundle --out <dir>".to_string()),
+        })?;
 
     Ok(BundleReport {
-        files_collected: vec![
-            ".ee/config.toml".to_string(),
-            ".ee/db.sqlite".to_string(),
-        ],
+        files_collected: vec![".ee/config.toml".to_string(), ".ee/db.sqlite".to_string()],
         total_size_bytes: 0,
         redaction_applied: options.redacted,
         output_path: Some(output_dir.join("support_bundle.tar.gz")),
@@ -112,17 +109,20 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), String>;
+
     #[test]
-    fn plan_bundle_dry_run() {
+    fn plan_bundle_dry_run() -> TestResult {
         let options = BundleOptions {
             workspace: PathBuf::from("."),
             output_dir: None,
             dry_run: true,
             redacted: true,
         };
-        let report = plan_bundle(&options).unwrap();
+        let report = plan_bundle(&options).map_err(|e| e.message())?;
         assert!(report.dry_run);
         assert!(report.redaction_applied);
+        Ok(())
     }
 
     #[test]

@@ -292,11 +292,13 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
                 options,
                 storage,
                 retrieval,
-                is_active,
-                selection_score,
-                above_threshold,
-                None,
-                contradictions,
+                ReportSelectionInputs {
+                    is_active,
+                    selection_score,
+                    above_threshold,
+                    latest_pack_selection: None,
+                    contradictions,
+                },
             );
             return report.with_degradation(WhyDegradation {
                 code: "why_pack_selection_unavailable",
@@ -311,37 +313,46 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
         options,
         storage,
         retrieval,
-        is_active,
-        selection_score,
-        above_threshold,
-        latest_pack_selection,
-        contradictions,
+        ReportSelectionInputs {
+            is_active,
+            selection_score,
+            above_threshold,
+            latest_pack_selection,
+            contradictions,
+        },
     )
+}
+
+struct ReportSelectionInputs {
+    is_active: bool,
+    selection_score: f32,
+    above_threshold: bool,
+    latest_pack_selection: Option<PackSelectionExplanation>,
+    contradictions: Vec<ContradictionMetadata>,
 }
 
 fn build_report(
     options: &WhyOptions<'_>,
     storage: StorageExplanation,
     retrieval: RetrievalExplanation,
-    is_active: bool,
-    selection_score: f32,
-    above_threshold: bool,
-    latest_pack_selection: Option<PackSelectionExplanation>,
-    contradictions: Vec<ContradictionMetadata>,
+    selection_inputs: ReportSelectionInputs,
 ) -> WhyReport {
     let selection = SelectionExplanation {
-        selection_score,
-        above_confidence_threshold: above_threshold,
-        is_active,
+        selection_score: selection_inputs.selection_score,
+        above_confidence_threshold: selection_inputs.above_threshold,
+        is_active: selection_inputs.is_active,
         score_breakdown: format!(
             "selection_score = 0.5 * confidence({:.2}) + 0.3 * utility({:.2}) + 0.2 * importance({:.2}) = {:.2}",
-            retrieval.confidence, retrieval.utility, retrieval.importance, selection_score
+            retrieval.confidence,
+            retrieval.utility,
+            retrieval.importance,
+            selection_inputs.selection_score
         ),
-        latest_pack_selection,
+        latest_pack_selection: selection_inputs.latest_pack_selection,
     };
 
     WhyReport::found(options.memory_id.to_string(), storage, retrieval, selection)
-        .with_contradictions(contradictions)
+        .with_contradictions(selection_inputs.contradictions)
 }
 
 fn determine_origin(trust_class: &str) -> String {
@@ -539,11 +550,13 @@ mod tests {
                 level: "procedural".to_string(),
                 kind: "rule".to_string(),
             },
-            true,
-            0.83,
-            true,
-            Some(selection),
-            Vec::new(),
+            ReportSelectionInputs {
+                is_active: true,
+                selection_score: 0.83,
+                above_threshold: true,
+                latest_pack_selection: Some(selection),
+                contradictions: Vec::new(),
+            },
         );
 
         ensure(report.found, true, "found")?;

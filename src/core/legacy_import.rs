@@ -1078,9 +1078,8 @@ fn map_artifact(artifact: &LegacyArtifact) -> ArtifactMapping {
     let trust_adjustment = if artifact
         .risk_flags
         .contains(&LegacyRiskFlag::SensitiveContent)
+        || artifact.instruction_like.detected
     {
-        TrustAdjustment::Quarantine
-    } else if artifact.instruction_like.detected {
         TrustAdjustment::Quarantine
     } else if !artifact.risk_flags.is_empty() {
         TrustAdjustment::Downgrade
@@ -1430,16 +1429,17 @@ mod tests {
     }
 
     #[test]
-    fn memory_store_has_field_transforms() {
+    fn memory_store_has_field_transforms() -> TestResult {
         let summaries = generate_type_summaries();
         let memory_summary = summaries
             .iter()
             .find(|s| s.source_type == LegacyArtifactType::MemoryStore)
-            .expect("memory store summary");
+            .ok_or_else(|| "memory store summary missing".to_string())?;
 
         assert!(!memory_summary.field_transforms.is_empty());
         assert_eq!(memory_summary.target_table, "memories");
         assert_eq!(memory_summary.target_concept, "memory");
+        Ok(())
     }
 
     #[test]

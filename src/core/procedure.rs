@@ -570,15 +570,13 @@ pub fn verify_procedure(
                 source_id: "fixture_002".to_owned(),
                 source_kind: source_kind.clone(),
                 result: "passed".to_owned(),
-                step_results: vec![
-                    StepVerificationResult {
-                        step_id: "step_1".to_owned(),
-                        sequence: 1,
-                        result: "passed".to_owned(),
-                        expected: Some("build succeeds".to_owned()),
-                        actual: Some("build succeeds".to_owned()),
-                    },
-                ],
+                step_results: vec![StepVerificationResult {
+                    step_id: "step_1".to_owned(),
+                    sequence: 1,
+                    result: "passed".to_owned(),
+                    expected: Some("build succeeds".to_owned()),
+                    actual: Some("build succeeds".to_owned()),
+                }],
                 message: None,
             },
         ]
@@ -671,8 +669,10 @@ fn generate_id() -> String {
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), String>;
+
     #[test]
-    fn propose_creates_candidate() {
+    fn propose_creates_candidate() -> TestResult {
         let options = ProcedureProposeOptions {
             title: "Test procedure".to_owned(),
             summary: Some("A test summary".to_owned()),
@@ -680,14 +680,15 @@ mod tests {
             ..Default::default()
         };
 
-        let report = propose_procedure(&options).unwrap();
+        let report = propose_procedure(&options).map_err(|e| e.message())?;
         assert!(report.procedure_id.starts_with("proc_"));
         assert_eq!(report.status, "candidate");
         assert_eq!(report.source_run_count, 1);
+        Ok(())
     }
 
     #[test]
-    fn show_includes_steps_when_requested() {
+    fn show_includes_steps_when_requested() -> TestResult {
         let options = ProcedureShowOptions {
             procedure_id: "proc_test".to_owned(),
             include_steps: true,
@@ -695,13 +696,14 @@ mod tests {
             ..Default::default()
         };
 
-        let report = show_procedure(&options).unwrap();
+        let report = show_procedure(&options).map_err(|e| e.message())?;
         assert!(!report.steps.is_empty());
         assert!(report.verification.is_none());
+        Ok(())
     }
 
     #[test]
-    fn show_includes_verification_when_requested() {
+    fn show_includes_verification_when_requested() -> TestResult {
         let options = ProcedureShowOptions {
             procedure_id: "proc_test".to_owned(),
             include_steps: false,
@@ -709,50 +711,54 @@ mod tests {
             ..Default::default()
         };
 
-        let report = show_procedure(&options).unwrap();
+        let report = show_procedure(&options).map_err(|e| e.message())?;
         assert!(report.steps.is_empty());
         assert!(report.verification.is_some());
+        Ok(())
     }
 
     #[test]
-    fn list_filters_by_status() {
+    fn list_filters_by_status() -> TestResult {
         let options = ProcedureListOptions {
             status_filter: Some("verified".to_owned()),
             limit: 10,
             ..Default::default()
         };
 
-        let report = list_procedures(&options).unwrap();
+        let report = list_procedures(&options).map_err(|e| e.message())?;
         assert!(report.procedures.iter().all(|p| p.status == "verified"));
+        Ok(())
     }
 
     #[test]
-    fn export_json_format() {
+    fn export_json_format() -> TestResult {
         let options = ProcedureExportOptions {
             procedure_id: "proc_export".to_owned(),
             format: "json".to_owned(),
             ..Default::default()
         };
 
-        let report = export_procedure(&options).unwrap();
+        let report = export_procedure(&options).map_err(|e| e.message())?;
         assert_eq!(report.format, "json");
         assert!(report.content_length > 0);
+        Ok(())
     }
 
     #[test]
-    fn export_markdown_format() {
+    fn export_markdown_format() -> TestResult {
         let options = ProcedureExportOptions {
             procedure_id: "proc_export".to_owned(),
             format: "markdown".to_owned(),
             ..Default::default()
         };
 
-        let report = export_procedure(&options).unwrap();
+        let report = export_procedure(&options).map_err(|e| e.message())?;
         assert_eq!(report.format, "markdown");
+        Ok(())
     }
 
     #[test]
-    fn verify_returns_passed_for_mock_fixtures() {
+    fn verify_returns_passed_for_mock_fixtures() -> TestResult {
         let options = ProcedureVerifyOptions {
             procedure_id: "proc_test".to_owned(),
             source_kind: Some("eval_fixture".to_owned()),
@@ -760,51 +766,57 @@ mod tests {
             ..Default::default()
         };
 
-        let report = verify_procedure(&options).unwrap();
+        let report = verify_procedure(&options).map_err(|e| e.message())?;
         assert!(report.verification_id.starts_with("ver_"));
         assert_eq!(report.overall_result, "passed");
         assert!(report.pass_count > 0);
         assert_eq!(report.fail_count, 0);
+        Ok(())
     }
 
     #[test]
-    fn verify_dry_run_does_not_record() {
+    fn verify_dry_run_does_not_record() -> TestResult {
         let options = ProcedureVerifyOptions {
             procedure_id: "proc_test".to_owned(),
             dry_run: true,
             ..Default::default()
         };
 
-        let report = verify_procedure(&options).unwrap();
+        let report = verify_procedure(&options).map_err(|e| e.message())?;
         assert!(report.dry_run);
+        Ok(())
     }
 
     #[test]
-    fn verify_checks_specified_sources() {
+    fn verify_checks_specified_sources() -> TestResult {
         let options = ProcedureVerifyOptions {
             procedure_id: "proc_test".to_owned(),
             source_ids: vec!["src_001".to_owned(), "src_002".to_owned()],
             ..Default::default()
         };
 
-        let report = verify_procedure(&options).unwrap();
+        let report = verify_procedure(&options).map_err(|e| e.message())?;
         assert_eq!(report.sources_checked.len(), 2);
-        assert!(report
-            .sources_checked
-            .iter()
-            .any(|s| s.source_id == "src_001"));
+        assert!(
+            report
+                .sources_checked
+                .iter()
+                .any(|s| s.source_id == "src_001")
+        );
+        Ok(())
     }
 
     #[test]
-    fn verify_report_has_human_summary() {
+    fn verify_report_has_human_summary() -> TestResult {
         let options = ProcedureVerifyOptions {
             procedure_id: "proc_test".to_owned(),
             ..Default::default()
         };
 
-        let report = verify_procedure(&options).unwrap();
+        let report = verify_procedure(&options).map_err(|e| e.message())?;
         let summary = report.human_summary();
         assert!(summary.contains("Procedure Verification"));
         assert!(summary.contains("proc_test"));
+        Ok(())
     }
 }

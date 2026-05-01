@@ -8,7 +8,6 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::models::DomainError;
 
@@ -68,12 +67,21 @@ impl RehearsalProfile {
     }
 
     #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
+        <Self as std::str::FromStr>::from_str(s).ok()
+    }
+}
+
+impl std::str::FromStr for RehearsalProfile {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "quick" => Some(Self::Quick),
-            "full" => Some(Self::Full),
-            "privacy" => Some(Self::Privacy),
-            _ => None,
+            "quick" => Ok(Self::Quick),
+            "full" => Ok(Self::Full),
+            "privacy" => Ok(Self::Privacy),
+            _ => Err(format!("invalid rehearsal profile: {s}")),
         }
     }
 }
@@ -143,11 +151,17 @@ impl RehearsePlanReport {
                 self.non_rehearsable.len()
             ));
             for cmd in &self.non_rehearsable {
-                out.push_str(&format!("  - {} ({}): {}\n", cmd.command_id, cmd.reason_code, cmd.reason));
+                out.push_str(&format!(
+                    "  - {} ({}): {}\n",
+                    cmd.command_id, cmd.reason_code, cmd.reason
+                ));
             }
         }
 
-        out.push_str(&format!("\nCan proceed: {}\n", if self.can_proceed { "yes" } else { "no" }));
+        out.push_str(&format!(
+            "\nCan proceed: {}\n",
+            if self.can_proceed { "yes" } else { "no" }
+        ));
 
         if !self.next_actions.is_empty() {
             out.push_str("\nNext actions:\n");
@@ -180,7 +194,10 @@ pub fn plan_rehearsal(options: &RehearsePlanOptions) -> Result<RehearsePlanRepor
                 command_id: cmd.id.clone(),
                 command: cmd.command.clone(),
                 reason_code: "external_io".to_string(),
-                reason: format!("Command '{}' requires external I/O or is not supported in rehearsal", cmd.command),
+                reason: format!(
+                    "Command '{}' requires external I/O or is not supported in rehearsal",
+                    cmd.command
+                ),
                 next_action: Some("Use --dry-run flag on the real command instead".to_string()),
             });
         }
@@ -190,7 +207,10 @@ pub fn plan_rehearsal(options: &RehearsePlanOptions) -> Result<RehearsePlanRepor
 
     let mut next_actions = Vec::new();
     if can_proceed {
-        next_actions.push(format!("ee rehearse run --commands <spec> --workspace {}", workspace_id));
+        next_actions.push(format!(
+            "ee rehearse run --commands <spec> --workspace {}",
+            workspace_id
+        ));
     } else {
         next_actions.push("Remove or replace non-rehearsable commands".to_string());
         next_actions.push("Or use --profile quick to skip non-rehearsable commands".to_string());
@@ -289,7 +309,10 @@ impl RehearseRunReport {
         out.push_str(&format!("Result:      {}\n", self.overall_result));
         out.push_str(&format!("Elapsed:     {}ms\n\n", self.elapsed_ms));
 
-        out.push_str(&format!("Commands executed: {}\n", self.command_results.len()));
+        out.push_str(&format!(
+            "Commands executed: {}\n",
+            self.command_results.len()
+        ));
         for result in &self.command_results {
             let status = if result.exit_code == 0 { "✓" } else { "✗" };
             out.push_str(&format!(
@@ -299,7 +322,10 @@ impl RehearseRunReport {
         }
 
         if !self.changed_artifacts.is_empty() {
-            out.push_str(&format!("\nChanged artifacts: {}\n", self.changed_artifacts.len()));
+            out.push_str(&format!(
+                "\nChanged artifacts: {}\n",
+                self.changed_artifacts.len()
+            ));
             for artifact in &self.changed_artifacts {
                 out.push_str(&format!("  - {artifact}\n"));
             }
@@ -374,7 +400,10 @@ pub fn run_rehearsal(options: &RehearseRunOptions) -> Result<RehearseRunReport, 
             command_id: cmd.id.clone(),
             effect_type: cmd.expected_effect.clone(),
             target: format!("{}/*", cmd.command),
-            description: format!("Expected {} effect from {}", cmd.expected_effect, cmd.command),
+            description: format!(
+                "Expected {} effect from {}",
+                cmd.expected_effect, cmd.command
+            ),
         });
 
         if exit_code == 0 {
@@ -382,7 +411,10 @@ pub fn run_rehearsal(options: &RehearseRunOptions) -> Result<RehearseRunReport, 
                 command_id: cmd.id.clone(),
                 effect_type: cmd.expected_effect.clone(),
                 target: format!("{}/*", cmd.command),
-                description: format!("Observed {} effect from {}", cmd.expected_effect, cmd.command),
+                description: format!(
+                    "Observed {} effect from {}",
+                    cmd.expected_effect, cmd.command
+                ),
             });
         }
     }
@@ -398,8 +430,14 @@ pub fn run_rehearsal(options: &RehearseRunOptions) -> Result<RehearseRunReport, 
     };
 
     let mut artifact_paths = HashMap::new();
-    artifact_paths.insert("manifest".to_string(), format!("{}/manifest.json", sandbox_path.display()));
-    artifact_paths.insert("log".to_string(), format!("{}/rehearsal.log", sandbox_path.display()));
+    artifact_paths.insert(
+        "manifest".to_string(),
+        format!("{}/manifest.json", sandbox_path.display()),
+    );
+    artifact_paths.insert(
+        "log".to_string(),
+        format!("{}/rehearsal.log", sandbox_path.display()),
+    );
 
     let mut next_actions = Vec::new();
     next_actions.push(format!("ee rehearse inspect {}", run_id));
@@ -499,14 +537,18 @@ impl RehearseInspectReport {
         out.push_str(&format!("Schema:     {}\n", self.schema_version));
         out.push_str(&format!("Integrity:  {}\n\n", self.integrity_status));
 
-        out.push_str(&format!("Commands: {} total, {} success, {} failed\n",
-            self.command_count, self.success_count, self.failure_count));
+        out.push_str(&format!(
+            "Commands: {} total, {} success, {} failed\n",
+            self.command_count, self.success_count, self.failure_count
+        ));
 
-        out.push_str(&format!("\nEffects: {} read, {} write_memory, {} write_index, {} write_config\n",
+        out.push_str(&format!(
+            "\nEffects: {} read, {} write_memory, {} write_index, {} write_config\n",
             self.effect_summary.read_only,
             self.effect_summary.write_memory,
             self.effect_summary.write_index,
-            self.effect_summary.write_config));
+            self.effect_summary.write_config
+        ));
 
         if !self.warnings.is_empty() {
             out.push_str("\nWarnings:\n");
@@ -519,7 +561,9 @@ impl RehearseInspectReport {
 }
 
 /// Inspect a rehearsal artifact.
-pub fn inspect_rehearsal(options: &RehearseInspectOptions) -> Result<RehearseInspectReport, DomainError> {
+pub fn inspect_rehearsal(
+    options: &RehearseInspectOptions,
+) -> Result<RehearseInspectReport, DomainError> {
     let inspected_at = Utc::now().to_rfc3339();
 
     Ok(RehearseInspectReport {
@@ -611,12 +655,22 @@ impl RehearsePromotePlanReport {
         out.push_str("Rehearsal Promote Plan\n");
         out.push_str("======================\n\n");
         out.push_str(&format!("Artifact: {}\n", self.artifact_id));
-        out.push_str(&format!("Safe:     {}\n\n", if self.is_safe { "yes" } else { "no" }));
+        out.push_str(&format!(
+            "Safe:     {}\n\n",
+            if self.is_safe { "yes" } else { "no" }
+        ));
 
         out.push_str("Preconditions:\n");
         for pre in &self.preconditions {
-            let marker = if pre.required { "[required]" } else { "[optional]" };
-            out.push_str(&format!("  {} {}: {}\n", marker, pre.check, pre.description));
+            let marker = if pre.required {
+                "[required]"
+            } else {
+                "[optional]"
+            };
+            out.push_str(&format!(
+                "  {} {}: {}\n",
+                marker, pre.check, pre.description
+            ));
         }
 
         out.push_str("\nBackup requirements:\n");
@@ -626,7 +680,11 @@ impl RehearsePromotePlanReport {
 
         out.push_str("\nExecution steps:\n");
         for step in &self.plan_steps {
-            let confirm = if step.confirmation_required { " [confirm]" } else { "" };
+            let confirm = if step.confirmation_required {
+                " [confirm]"
+            } else {
+                ""
+            };
             out.push_str(&format!(
                 "  {}. ee {} {}{}\n",
                 step.sequence,
@@ -661,7 +719,11 @@ pub fn promote_plan_rehearsal(
         PromoteStep {
             sequence: 1,
             command: "remember".to_string(),
-            args: vec!["--level".to_string(), "episodic".to_string(), "Example memory".to_string()],
+            args: vec![
+                "--level".to_string(),
+                "episodic".to_string(),
+                "Example memory".to_string(),
+            ],
             expected_effect: "write_memory".to_string(),
             confirmation_required: false,
             rollback_command: None,
@@ -707,12 +769,8 @@ pub fn promote_plan_rehearsal(
         artifact_id: options.artifact_id.clone(),
         plan_steps,
         preconditions,
-        backup_requirements: vec![
-            "ee backup create --workspace .".to_string(),
-        ],
-        audit_checks: vec![
-            "ee audit timeline --last 10 --json".to_string(),
-        ],
+        backup_requirements: vec!["ee backup create --workspace .".to_string()],
+        audit_checks: vec!["ee audit timeline --last 10 --json".to_string()],
         stop_conditions: vec![
             "Any command exits with non-zero status".to_string(),
             "Database lock acquisition fails".to_string(),
@@ -736,9 +794,21 @@ pub fn promote_plan_rehearsal(
 fn is_rehearsable(command: &str) -> bool {
     matches!(
         command,
-        "remember" | "search" | "context" | "why" | "status" | "health"
-            | "capabilities" | "memory" | "index" | "doctor" | "check"
-            | "situation" | "economy" | "procedure" | "preflight"
+        "remember"
+            | "search"
+            | "context"
+            | "why"
+            | "status"
+            | "health"
+            | "capabilities"
+            | "memory"
+            | "index"
+            | "doctor"
+            | "check"
+            | "situation"
+            | "economy"
+            | "procedure"
+            | "preflight"
     )
 }
 
@@ -769,94 +839,95 @@ fn generate_hash_stub() -> u64 {
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), String>;
+
     #[test]
-    fn plan_validates_command_specs() {
+    fn plan_validates_command_specs() -> TestResult {
         let options = RehearsePlanOptions {
-            commands: vec![
-                CommandSpec {
-                    id: "cmd_1".to_string(),
-                    command: "remember".to_string(),
-                    args: vec!["test".to_string()],
-                    expected_effect: "write_memory".to_string(),
-                    stop_on_failure: true,
-                    idempotency_key: None,
-                },
-            ],
+            commands: vec![CommandSpec {
+                id: "cmd_1".to_string(),
+                command: "remember".to_string(),
+                args: vec!["test".to_string()],
+                expected_effect: "write_memory".to_string(),
+                stop_on_failure: true,
+                idempotency_key: None,
+            }],
             ..Default::default()
         };
 
-        let report = plan_rehearsal(&options).unwrap();
+        let report = plan_rehearsal(&options).map_err(|e| e.message())?;
         assert!(report.plan_id.starts_with("rplan_"));
         assert_eq!(report.command_count, 1);
         assert_eq!(report.rehearsable_count, 1);
         assert!(report.can_proceed);
+        Ok(())
     }
 
     #[test]
-    fn plan_identifies_non_rehearsable_commands() {
+    fn plan_identifies_non_rehearsable_commands() -> TestResult {
         let options = RehearsePlanOptions {
-            commands: vec![
-                CommandSpec {
-                    id: "cmd_1".to_string(),
-                    command: "external_api_call".to_string(),
-                    args: vec![],
-                    expected_effect: "external_io".to_string(),
-                    stop_on_failure: true,
-                    idempotency_key: None,
-                },
-            ],
+            commands: vec![CommandSpec {
+                id: "cmd_1".to_string(),
+                command: "external_api_call".to_string(),
+                args: vec![],
+                expected_effect: "external_io".to_string(),
+                stop_on_failure: true,
+                idempotency_key: None,
+            }],
             ..Default::default()
         };
 
-        let report = plan_rehearsal(&options).unwrap();
+        let report = plan_rehearsal(&options).map_err(|e| e.message())?;
         assert_eq!(report.non_rehearsable.len(), 1);
         assert!(!report.can_proceed);
+        Ok(())
     }
 
     #[test]
-    fn run_creates_sandbox_and_executes() {
+    fn run_creates_sandbox_and_executes() -> TestResult {
         let options = RehearseRunOptions {
-            commands: vec![
-                CommandSpec {
-                    id: "cmd_1".to_string(),
-                    command: "remember".to_string(),
-                    args: vec!["test".to_string()],
-                    expected_effect: "write_memory".to_string(),
-                    stop_on_failure: true,
-                    idempotency_key: None,
-                },
-            ],
+            commands: vec![CommandSpec {
+                id: "cmd_1".to_string(),
+                command: "remember".to_string(),
+                args: vec!["test".to_string()],
+                expected_effect: "write_memory".to_string(),
+                stop_on_failure: true,
+                idempotency_key: None,
+            }],
             ..Default::default()
         };
 
-        let report = run_rehearsal(&options).unwrap();
+        let report = run_rehearsal(&options).map_err(|e| e.message())?;
         assert!(report.run_id.starts_with("rrun_"));
         assert_eq!(report.command_results.len(), 1);
         assert_eq!(report.overall_result, "success");
+        Ok(())
     }
 
     #[test]
-    fn inspect_validates_artifact() {
+    fn inspect_validates_artifact() -> TestResult {
         let options = RehearseInspectOptions {
             artifact_id: "rrun_test".to_string(),
             ..Default::default()
         };
 
-        let report = inspect_rehearsal(&options).unwrap();
+        let report = inspect_rehearsal(&options).map_err(|e| e.message())?;
         assert_eq!(report.integrity_status, "valid");
+        Ok(())
     }
 
     #[test]
-    fn promote_plan_generates_steps() {
+    fn promote_plan_generates_steps() -> TestResult {
         let options = RehearsePromotePlanOptions {
             artifact_id: "rrun_test".to_string(),
             ..Default::default()
         };
 
-        let report = promote_plan_rehearsal(&options).unwrap();
+        let report = promote_plan_rehearsal(&options).map_err(|e| e.message())?;
         assert!(!report.plan_steps.is_empty());
         assert!(!report.preconditions.is_empty());
         assert!(report.is_safe);
+        Ok(())
     }
 
     #[test]

@@ -1,6 +1,9 @@
 use std::future::Future;
 
-use crate::models::{ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
+use crate::models::{
+    ERROR_SCHEMA_V1, INSTALL_CHECK_SCHEMA_V1, INSTALL_PLAN_SCHEMA_V1, RESPONSE_SCHEMA_V1,
+    UPDATE_PLAN_SCHEMA_V1,
+};
 
 pub mod agent_detect;
 pub mod agent_docs;
@@ -18,6 +21,7 @@ pub mod handoff;
 pub mod health;
 pub mod index;
 pub mod init;
+pub mod install;
 pub mod lab;
 pub mod learn;
 pub mod legacy_import;
@@ -157,6 +161,9 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         SupportedSchema::new("response", RESPONSE_SCHEMA_V1),
         SupportedSchema::new("error", ERROR_SCHEMA_V1),
         SupportedSchema::new("version_provenance", VERSION_PROVENANCE_SCHEMA_V1),
+        SupportedSchema::new("install_check", INSTALL_CHECK_SCHEMA_V1),
+        SupportedSchema::new("install_plan", INSTALL_PLAN_SCHEMA_V1),
+        SupportedSchema::new("update_plan", UPDATE_PLAN_SCHEMA_V1),
     ]
 }
 

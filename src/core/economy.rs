@@ -233,13 +233,14 @@ mod tests {
     }
 
     #[test]
-    fn score_artifact_includes_breakdown_when_requested() {
+    fn score_artifact_includes_breakdown_when_requested() -> Result<(), String> {
         let options = EconomyScoreOptions {
             artifact_id: "mem_test".to_string(),
             artifact_type: "memory".to_string(),
             breakdown: true,
         };
-        let report = score_artifact(&options).unwrap();
+        let report = score_artifact(&options).map_err(|e| e.message())?;
         assert!(report.breakdown.is_some());
+        Ok(())
     }
 }

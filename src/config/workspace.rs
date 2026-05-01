@@ -1210,7 +1210,10 @@ mod tests {
             .map_err(|e| e.to_string())?;
 
         assert_eq!(result.input_path, project);
-        assert_eq!(result.canonical_path, project.canonicalize().unwrap());
+        assert_eq!(
+            result.canonical_path,
+            project.canonicalize().map_err(|e| e.to_string())?
+        );
         assert!(!result.has_symlinks());
         assert_eq!(result.salted_hash.len(), 24);
         Ok(())

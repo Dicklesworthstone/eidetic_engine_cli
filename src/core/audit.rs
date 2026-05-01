@@ -498,53 +498,59 @@ pub fn verify_audit(_options: &AuditVerifyOptions) -> Result<AuditVerifyReport, 
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), String>;
+
     #[test]
-    fn timeline_limits_entries() {
+    fn timeline_limits_entries() -> TestResult {
         let options = AuditTimelineOptions {
             limit: 2,
             ..Default::default()
         };
 
-        let report = list_timeline(&options).unwrap();
+        let report = list_timeline(&options).map_err(|e| e.message())?;
         assert!(report.entries.len() <= 2);
         assert_eq!(
             report.pagination.returned_count,
             report.entries.len() as u32
         );
+        Ok(())
     }
 
     #[test]
-    fn show_operation_returns_details() {
+    fn show_operation_returns_details() -> TestResult {
         let options = AuditShowOptions {
             operation_id: "op_test".to_owned(),
             ..Default::default()
         };
 
-        let report = show_operation(&options).unwrap();
+        let report = show_operation(&options).map_err(|e| e.message())?;
         assert_eq!(report.operation.operation_id, "op_test");
         assert!(report.operation.effect_match);
+        Ok(())
     }
 
     #[test]
-    fn diff_reports_all_match() {
+    fn diff_reports_all_match() -> TestResult {
         let options = AuditDiffOptions {
             operation_id: "op_test".to_owned(),
             ..Default::default()
         };
 
-        let report = show_diff(&options).unwrap();
+        let report = show_diff(&options).map_err(|e| e.message())?;
         assert!(report.all_match);
         assert!(!report.deltas.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn verify_returns_valid_summary() {
+    fn verify_returns_valid_summary() -> TestResult {
         let options = AuditVerifyOptions::default();
 
-        let report = verify_audit(&options).unwrap();
+        let report = verify_audit(&options).map_err(|e| e.message())?;
         assert!(report.overall_valid);
         assert!(report.summary.hash_chain_valid);
         assert_eq!(report.summary.missing_records, 0);
+        Ok(())
     }
 
     #[test]

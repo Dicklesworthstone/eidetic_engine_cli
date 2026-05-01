@@ -583,7 +583,10 @@ pub fn list_links(options: &RecorderLinksListOptions) -> RecorderLinksListReport
     let sample_links = vec![
         RecorderLink {
             link_id: "link_sample1".to_owned(),
-            run_id: options.run_id.clone().unwrap_or_else(|| "run_sample".to_owned()),
+            run_id: options
+                .run_id
+                .clone()
+                .unwrap_or_else(|| "run_sample".to_owned()),
             link_type: RecorderLinkType::ContextPack,
             artifact_id: "pack_abc123".to_owned(),
             created_at: now.clone(),
@@ -591,7 +594,10 @@ pub fn list_links(options: &RecorderLinksListOptions) -> RecorderLinksListReport
         },
         RecorderLink {
             link_id: "link_sample2".to_owned(),
-            run_id: options.run_id.clone().unwrap_or_else(|| "run_sample".to_owned()),
+            run_id: options
+                .run_id
+                .clone()
+                .unwrap_or_else(|| "run_sample".to_owned()),
             link_type: RecorderLinkType::Outcome,
             artifact_id: "outcome_def456".to_owned(),
             created_at: now,
@@ -604,7 +610,10 @@ pub fn list_links(options: &RecorderLinksListOptions) -> RecorderLinksListReport
         .filter(|l| {
             options.run_id.as_ref().is_none_or(|r| &l.run_id == r)
                 && options.link_type.is_none_or(|t| l.link_type == t)
-                && options.artifact_id.as_ref().is_none_or(|a| &l.artifact_id == a)
+                && options
+                    .artifact_id
+                    .as_ref()
+                    .is_none_or(|a| &l.artifact_id == a)
         })
         .take(options.limit as usize)
         .collect();
@@ -636,7 +645,11 @@ mod tests {
 
     #[test]
     fn start_schema_is_stable() -> TestResult {
-        ensure(RECORDER_START_SCHEMA_V1, "ee.recorder.start.v1", "start schema")
+        ensure(
+            RECORDER_START_SCHEMA_V1,
+            "ee.recorder.start.v1",
+            "start schema",
+        )
     }
 
     #[test]
@@ -650,12 +663,20 @@ mod tests {
 
     #[test]
     fn finish_schema_is_stable() -> TestResult {
-        ensure(RECORDER_FINISH_SCHEMA_V1, "ee.recorder.finish.v1", "finish schema")
+        ensure(
+            RECORDER_FINISH_SCHEMA_V1,
+            "ee.recorder.finish.v1",
+            "finish schema",
+        )
     }
 
     #[test]
     fn tail_schema_is_stable() -> TestResult {
-        ensure(RECORDER_TAIL_SCHEMA_V1, "ee.recorder.tail.v1", "tail schema")
+        ensure(
+            RECORDER_TAIL_SCHEMA_V1,
+            "ee.recorder.tail.v1",
+            "tail schema",
+        )
     }
 
     #[test]
@@ -759,7 +780,11 @@ mod tests {
 
     #[test]
     fn links_schema_is_stable() -> TestResult {
-        ensure(RECORDER_LINKS_SCHEMA_V1, "ee.recorder.links.v1", "links schema")
+        ensure(
+            RECORDER_LINKS_SCHEMA_V1,
+            "ee.recorder.links.v1",
+            "links schema",
+        )
     }
 
     #[test]
@@ -814,9 +839,11 @@ mod tests {
 
         let report = list_links(&options);
 
-        assert!(report
-            .links
-            .iter()
-            .all(|l| l.link_type == RecorderLinkType::ContextPack));
+        assert!(
+            report
+                .links
+                .iter()
+                .all(|l| l.link_type == RecorderLinkType::ContextPack)
+        );
     }
 }

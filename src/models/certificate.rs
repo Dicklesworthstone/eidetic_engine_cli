@@ -552,7 +552,10 @@ impl AutomatonState {
 
     #[must_use]
     pub const fn is_active(self) -> bool {
-        matches!(self, Self::Initializing | Self::Running | Self::Waiting | Self::Rollback)
+        matches!(
+            self,
+            Self::Initializing | Self::Running | Self::Waiting | Self::Rollback
+        )
     }
 
     #[must_use]
@@ -1236,13 +1239,25 @@ mod tests {
         ensure(!AutomatonState::Idle.is_active(), "idle is not active")?;
 
         ensure(AutomatonState::Running.is_active(), "running is active")?;
-        ensure(!AutomatonState::Running.is_terminal(), "running is not terminal")?;
+        ensure(
+            !AutomatonState::Running.is_terminal(),
+            "running is not terminal",
+        )?;
 
-        ensure(AutomatonState::Completed.is_terminal(), "completed is terminal")?;
+        ensure(
+            AutomatonState::Completed.is_terminal(),
+            "completed is terminal",
+        )?;
         ensure(AutomatonState::Failed.is_terminal(), "failed is terminal")?;
-        ensure(AutomatonState::Cancelled.is_terminal(), "cancelled is terminal")?;
+        ensure(
+            AutomatonState::Cancelled.is_terminal(),
+            "cancelled is terminal",
+        )?;
 
-        ensure(!AutomatonState::Completed.is_active(), "completed is not active")?;
+        ensure(
+            !AutomatonState::Completed.is_active(),
+            "completed is not active",
+        )?;
         Ok(())
     }
 
@@ -1252,7 +1267,10 @@ mod tests {
 
         for state in AutomatonState::all() {
             let rendered = state.to_string();
-            ensure(!rendered.is_empty(), &format!("state {:?} should have string", state))?;
+            ensure(
+                !rendered.is_empty(),
+                format!("state {:?} should have string", state),
+            )?;
         }
         Ok(())
     }
@@ -1281,15 +1299,21 @@ mod tests {
 
     #[test]
     fn index_publish_automaton_certificate_generations() -> TestResult {
-        use super::{AutomatonState, IndexPublishAutomatonCertificate};
+        use super::IndexPublishAutomatonCertificate;
 
         let mut cert = IndexPublishAutomatonCertificate::new("fts5");
         cert.db_generation_before = 10;
         cert.db_generation_after = 12;
-        ensure(cert.generations_match(), "generations should match when after >= before")?;
+        ensure(
+            cert.generations_match(),
+            "generations should match when after >= before",
+        )?;
 
         cert.db_generation_after = 8;
-        ensure(!cert.generations_match(), "should not match when after < before")
+        ensure(
+            !cert.generations_match(),
+            "should not match when after < before",
+        )
     }
 
     #[test]

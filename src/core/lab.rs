@@ -15,7 +15,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::models::{
-    DomainError, COUNTERFACTUAL_RUN_ID_PREFIX, EPISODE_ID_PREFIX, REGRET_ENTRY_ID_PREFIX,
+    COUNTERFACTUAL_RUN_ID_PREFIX, DomainError, EPISODE_ID_PREFIX, REGRET_ENTRY_ID_PREFIX,
 };
 
 /// Schema for lab capture report.
@@ -289,7 +289,7 @@ impl InterventionSpec {
             intervention_type: InterventionType::Weaken,
             memory_id: Some(id.into()),
             memory_content: None,
-            strength_delta: Some(delta.abs() * -1.0),
+            strength_delta: Some(-delta.abs()),
             hypothesis: None,
         }
     }
@@ -470,7 +470,9 @@ pub fn replay_episode(options: &ReplayOptions) -> Result<ReplayReport, DomainErr
 }
 
 /// Run counterfactual analysis on an episode.
-pub fn run_counterfactual(options: &CounterfactualOptions) -> Result<CounterfactualReport, DomainError> {
+pub fn run_counterfactual(
+    options: &CounterfactualOptions,
+) -> Result<CounterfactualReport, DomainError> {
     let run_id = format!("{}{}", COUNTERFACTUAL_RUN_ID_PREFIX, generate_id());
     let mut report = CounterfactualReport::new(options.episode_id.clone(), run_id.clone());
     report.dry_run = options.dry_run;
@@ -490,7 +492,11 @@ pub fn run_counterfactual(options: &CounterfactualOptions) -> Result<Counterfact
         if options.generate_regret {
             for (i, intervention) in options.interventions.iter().enumerate() {
                 let regret_id = format!("{}{}", REGRET_ENTRY_ID_PREFIX, generate_id());
-                let mut entry = RegretEntry::new(&regret_id, &options.episode_id, intervention.intervention_type);
+                let mut entry = RegretEntry::new(
+                    &regret_id,
+                    &options.episode_id,
+                    intervention.intervention_type,
+                );
                 entry.memory_id = intervention.memory_id.clone();
                 entry.would_have_changed = true;
                 entry.confidence = 0.75;
@@ -680,22 +686,38 @@ pub fn reconstruct_episode(options: &ReconstructOptions) -> Result<ReconstructRe
     let base_time = Utc::now();
 
     if options.include_user_messages {
-        events.push(ReconstructedEvent::new(1, "user_message", base_time.to_rfc3339()));
+        events.push(ReconstructedEvent::new(
+            1,
+            "user_message",
+            base_time.to_rfc3339(),
+        ));
         message_count += 1;
     }
 
     if options.include_memories {
-        events.push(ReconstructedEvent::new(2, "memory_retrieval", base_time.to_rfc3339()));
+        events.push(ReconstructedEvent::new(
+            2,
+            "memory_retrieval",
+            base_time.to_rfc3339(),
+        ));
         memory_count += 1;
     }
 
     if options.include_tool_calls {
-        events.push(ReconstructedEvent::new(3, "tool_call", base_time.to_rfc3339()));
+        events.push(ReconstructedEvent::new(
+            3,
+            "tool_call",
+            base_time.to_rfc3339(),
+        ));
         tool_call_count += 1;
     }
 
     if options.include_assistant_responses {
-        events.push(ReconstructedEvent::new(4, "assistant_response", base_time.to_rfc3339()));
+        events.push(ReconstructedEvent::new(
+            4,
+            "assistant_response",
+            base_time.to_rfc3339(),
+        ));
         message_count += 1;
     }
 
@@ -756,7 +778,11 @@ mod tests {
 
         ensure(report.dry_run, true, "dry_run")?;
         ensure(report.task_input, "test task".to_string(), "task_input")?;
-        ensure(report.episode_id.starts_with(EPISODE_ID_PREFIX), true, "episode_id prefix")
+        ensure(
+            report.episode_id.starts_with(EPISODE_ID_PREFIX),
+            true,
+            "episode_id prefix",
+        )
     }
 
     #[test]
@@ -768,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn intervention_spec_builders() {
+    fn intervention_spec_builders() -> TestResult {
         let add = InterventionSpec::add_memory("test content");
         assert_eq!(add.intervention_type, InterventionType::Add);
         assert_eq!(add.memory_content, Some("test content".to_string()));
@@ -783,7 +809,11 @@ mod tests {
 
         let weaken = InterventionSpec::weaken_memory("mem_789", 0.3);
         assert_eq!(weaken.intervention_type, InterventionType::Weaken);
-        assert!(weaken.strength_delta.unwrap() < 0.0);
+        let strength_delta = weaken
+            .strength_delta
+            .ok_or_else(|| "weaken strength_delta missing".to_string())?;
+        ensure(strength_delta < 0.0, true, "weaken strength_delta negative")?;
+        Ok(())
     }
 
     #[test]
@@ -910,7 +940,7 @@ mod tests {
         let report = reconstruct_episode(&options).map_err(|e| e.message())?;
 
         ensure(report.status, ReconstructStatus::RunNotFound, "status")?;
-        ensure(report.warnings.len() > 0, true, "has warnings")
+        ensure(!report.warnings.is_empty(), true, "has warnings")
     }
 
     #[test]

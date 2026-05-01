@@ -601,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn planned_action_serializes_correctly() {
+    fn planned_action_serializes_correctly() -> TestResult {
         let action = PlannedAction::new(
             MutationActionType::Create,
             ".ee/config.toml",
@@ -609,10 +609,11 @@ mod tests {
         )
         .with_size_delta(1024);
 
-        let json = serde_json::to_string(&action).unwrap();
+        let json = serde_json::to_string(&action).map_err(|e| e.to_string())?;
         assert!(json.contains("\"action_type\":\"create\""));
         assert!(json.contains("\"status\":\"pending\""));
         assert!(json.contains("\"size_delta_bytes\":1024"));
+        Ok(())
     }
 
     #[test]

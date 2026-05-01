@@ -315,7 +315,11 @@ pub fn capture_pack(options: &CaptureOptions) -> Result<CaptureReport, DomainErr
     });
 
     let pack_path = options.output_dir.join(&pack_name);
-    let mut report = CaptureReport::new(pack_path.clone(), pack_name.clone(), options.version.clone());
+    let mut report = CaptureReport::new(
+        pack_path.clone(),
+        pack_name.clone(),
+        options.version.clone(),
+    );
     report.dry_run = options.dry_run;
 
     if !options.source.exists() {
@@ -428,10 +432,11 @@ pub fn replay_pack(options: &ReplayOptions) -> Result<ReplayReport, DomainError>
     }
 
     let manifest_path = options.pack_path.join("manifest.json");
-    let manifest_json = std::fs::read_to_string(&manifest_path).map_err(|e| DomainError::Storage {
-        message: format!("Failed to read manifest.json: {e}"),
-        repair: Some("Ensure the pack contains a valid manifest.json".to_string()),
-    })?;
+    let manifest_json =
+        std::fs::read_to_string(&manifest_path).map_err(|e| DomainError::Storage {
+            message: format!("Failed to read manifest.json: {e}"),
+            repair: Some("Ensure the pack contains a valid manifest.json".to_string()),
+        })?;
 
     let manifest: serde_json::Value =
         serde_json::from_str(&manifest_json).map_err(|e| DomainError::Import {
@@ -565,12 +570,18 @@ pub fn minimize_pack(options: &MinimizeOptions) -> Result<MinimizeReport, Domain
 /// Create env.json content.
 fn create_env_json(include_vars: bool, timestamp: &str) -> String {
     let mut tool_versions = serde_json::Map::new();
-    tool_versions.insert("ee".to_string(), serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string()));
+    tool_versions.insert(
+        "ee".to_string(),
+        serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string()),
+    );
 
     let mut env_vars = serde_json::Map::new();
     if include_vars {
         if let Ok(rust_version) = std::env::var("RUSTC_VERSION") {
-            env_vars.insert("RUSTC_VERSION".to_string(), serde_json::Value::String(rust_version));
+            env_vars.insert(
+                "RUSTC_VERSION".to_string(),
+                serde_json::Value::String(rust_version),
+            );
         }
     }
 
@@ -648,7 +659,8 @@ mod tests {
 
     #[test]
     fn capture_dry_run_does_not_create_files() -> TestResult {
-        let temp_dir = std::env::temp_dir().join(format!("ee_repro_capture_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("ee_repro_capture_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
 
@@ -690,7 +702,7 @@ mod tests {
             "test".to_string(),
             "1.0.0".to_string(),
         );
-        
+
         report.add_file(CapturedFile {
             path: "file1.txt".to_string(),
             hash: "hash1".to_string(),
@@ -735,10 +747,7 @@ mod tests {
 
     #[test]
     fn minimize_report_tracks_removals() {
-        let mut report = MinimizeReport::new(
-            PathBuf::from("original"),
-            PathBuf::from("minimized"),
-        );
+        let mut report = MinimizeReport::new(PathBuf::from("original"), PathBuf::from("minimized"));
 
         report.add_kept(100);
         report.add_kept(200);

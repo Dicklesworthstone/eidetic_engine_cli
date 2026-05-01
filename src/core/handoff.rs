@@ -11,7 +11,7 @@
 //! - **inspect**: Validate an existing capsule
 //! - **resume**: Render next-agent payload from a capsule
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -64,7 +64,7 @@ impl CapsuleProfile {
     }
 
     #[must_use]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "compact" => Some(Self::Compact),
             "resume" => Some(Self::Resume),
@@ -1003,12 +1003,11 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
                         NextAction::new(1, section_content).with_reason("From handoff capsule."),
                     );
                 }
-                "decisions" => {
+                "decisions"
                     if !section_content.is_empty()
-                        && section_content != "No recent decisions recorded."
-                    {
-                        report.recent_decisions.push(section_content.to_owned());
-                    }
+                        && section_content != "No recent decisions recorded." =>
+                {
+                    report.recent_decisions.push(section_content.to_owned());
                 }
                 _ => {}
             }
@@ -1025,7 +1024,7 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
     Ok(report)
 }
 
-fn find_latest_capsule(workspace: &PathBuf) -> Result<PathBuf, DomainError> {
+fn find_latest_capsule(workspace: &Path) -> Result<PathBuf, DomainError> {
     let ee_dir = workspace.join(".ee");
     if !ee_dir.exists() {
         return Err(DomainError::Storage {
@@ -1109,21 +1108,21 @@ mod tests {
     #[test]
     fn capsule_profile_parses_from_string() -> TestResult {
         ensure_equal(
-            &CapsuleProfile::from_str("compact"),
+            &CapsuleProfile::parse("compact"),
             &Some(CapsuleProfile::Compact),
             "compact",
         )?;
         ensure_equal(
-            &CapsuleProfile::from_str("resume"),
+            &CapsuleProfile::parse("resume"),
             &Some(CapsuleProfile::Resume),
             "resume",
         )?;
         ensure_equal(
-            &CapsuleProfile::from_str("handoff"),
+            &CapsuleProfile::parse("handoff"),
             &Some(CapsuleProfile::Handoff),
             "handoff",
         )?;
-        ensure_equal(&CapsuleProfile::from_str("invalid"), &None, "invalid")
+        ensure_equal(&CapsuleProfile::parse("invalid"), &None, "invalid")
     }
 
     #[test]
@@ -1291,7 +1290,7 @@ mod tests {
         let result = preview_handoff(&options);
         ensure(result.is_ok(), "preview should succeed")?;
 
-        let report = result.unwrap();
+        let report = result.map_err(|e| e.message())?;
         ensure(
             !report.planned_sections.is_empty(),
             "should have planned sections",
