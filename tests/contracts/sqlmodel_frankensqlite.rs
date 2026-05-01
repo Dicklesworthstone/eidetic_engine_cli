@@ -103,8 +103,7 @@ fn inserts_and_fetches_memory_row() -> TestResult {
 
     let fetched = conn.get_memory(TEST_MEMORY_ID).map_err(|e| e.to_string())?;
 
-    ensure(fetched.is_some(), "inserted memory must be fetchable")?;
-    let memory = fetched.unwrap();
+    let memory = fetched.ok_or_else(|| "inserted memory must be fetchable".to_string())?;
     ensure_equal(&memory.id, &TEST_MEMORY_ID.to_string(), "memory id")?;
     ensure_equal(
         &memory.content,

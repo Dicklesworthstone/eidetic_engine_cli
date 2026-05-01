@@ -117,7 +117,6 @@ fn asupersync_budget_cancel_kinds_share_cli_budget_class() -> TestResult {
         CancelReason::cost_budget(),
         CancelReason::deadline(),
     ] {
-        let kind = reason.kind;
         let outcome: Outcome<(), DomainError> = Outcome::cancelled(reason);
         let summary = CliOutcomeSummary::from_outcome(&outcome);
 
@@ -132,10 +131,17 @@ fn asupersync_budget_cancel_kinds_share_cli_budget_class() -> TestResult {
             "budget cancel exit",
         )?;
 
-        match kind {
-            CancelKind::PollQuota | CancelKind::CostBudget | CancelKind::Deadline => {}
-            _ => return Err("unexpected budget cancel kind".to_string()),
-        }
+        ensure_equal(
+            &matches!(
+                outcome,
+                Outcome::Cancelled(CancelReason {
+                    kind: CancelKind::PollQuota | CancelKind::CostBudget | CancelKind::Deadline,
+                    ..
+                })
+            ),
+            &true,
+            "budget cancel kind",
+        )?;
     }
 
     Ok(())

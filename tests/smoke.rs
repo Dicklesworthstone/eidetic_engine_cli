@@ -637,6 +637,14 @@ fn integration_foundation_memory_health_structure() -> TestResult {
     ensure(
         memory_health["activeCount"].is_number(),
         "memoryHealth must have activeCount number",
+    )?;
+    ensure(
+        memory_health.get("healthScore").is_some(),
+        "memoryHealth must include healthScore",
+    )?;
+    ensure(
+        memory_health["scoreComponents"].is_object(),
+        "memoryHealth must include scoreComponents object",
     )
 }
 

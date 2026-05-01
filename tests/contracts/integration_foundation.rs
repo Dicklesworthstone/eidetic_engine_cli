@@ -124,7 +124,10 @@ fn json_flag_produces_parseable_output() -> TestResult {
     ensure(output.status.success(), "ee status --json should succeed")?;
 
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
-    ensure(parsed.is_ok(), format!("output should be valid JSON: {stdout}"))
+    ensure(
+        parsed.is_ok(),
+        format!("output should be valid JSON: {stdout}"),
+    )
 }
 
 #[test]
@@ -132,7 +135,10 @@ fn toon_format_produces_structured_output() -> TestResult {
     let output = run_ee(&["status", "--format", "toon"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(output.status.success(), "ee status --format toon should succeed")?;
+    ensure(
+        output.status.success(),
+        "ee status --format toon should succeed",
+    )?;
     ensure_contains(&stdout, "schema:", "TOON format has schema field")?;
     ensure_contains(&stdout, "ee.response.v1", "TOON format has response schema")
 }

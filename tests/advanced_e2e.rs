@@ -42,7 +42,8 @@ fn stdout_is_json(output: &Output) -> bool {
 fn stdout_has_schema(output: &Output, expected: &str) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-        json.get("schema").map_or(false, |s| s.as_str() == Some(expected))
+        json.get("schema")
+            .is_some_and(|s| s.as_str() == Some(expected))
     } else {
         false
     }
@@ -68,7 +69,14 @@ fn stdout_is_clean(output: &Output) -> bool {
 
 #[test]
 fn recorder_start_dry_run_returns_valid_json() -> TestResult {
-    let output = run_ee(&["recorder", "start", "--agent-id", "test-agent", "--dry-run", "--json"])?;
+    let output = run_ee(&[
+        "recorder",
+        "start",
+        "--agent-id",
+        "test-agent",
+        "--dry-run",
+        "--json",
+    ])?;
     ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(
@@ -85,7 +93,10 @@ fn recorder_start_creates_run_id() -> TestResult {
     let output = run_ee(&["recorder", "start", "--agent-id", "test-agent", "--json"])?;
     ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
-    ensure(stdout_contains(&output, "run_"), "runId must start with run_")
+    ensure(
+        stdout_contains(&output, "run_"),
+        "runId must start with run_",
+    )
 }
 
 #[test]
@@ -105,7 +116,10 @@ fn recorder_event_requires_run_id() -> TestResult {
         "must have recorder event schema",
     )?;
     ensure(stdout_contains(&output, "eventId"), "must contain eventId")?;
-    ensure(stdout_contains(&output, "sequence"), "must contain sequence")
+    ensure(
+        stdout_contains(&output, "sequence"),
+        "must contain sequence",
+    )
 }
 
 #[test]
@@ -139,7 +153,11 @@ fn recorder_event_validates_event_type() -> TestResult {
         "invalid_type",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(1), "exit code for invalid event type")
+    ensure_equal(
+        &output.status.code(),
+        &Some(1),
+        "exit code for invalid event type",
+    )
 }
 
 #[test]
@@ -172,12 +190,23 @@ fn recorder_finish_validates_status() -> TestResult {
         "invalid_status",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(1), "exit code for invalid status")
+    ensure_equal(
+        &output.status.code(),
+        &Some(1),
+        "exit code for invalid status",
+    )
 }
 
 #[test]
 fn recorder_tail_returns_valid_json() -> TestResult {
-    let output = run_ee(&["recorder", "tail", "run_test_123", "--limit", "10", "--json"])?;
+    let output = run_ee(&[
+        "recorder",
+        "tail",
+        "run_test_123",
+        "--limit",
+        "10",
+        "--json",
+    ])?;
     ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(
@@ -264,8 +293,22 @@ fn preflight_show_returns_valid_json() -> TestResult {
 #[test]
 fn all_recorder_commands_produce_stdout_only_data() -> TestResult {
     let commands = [
-        vec!["recorder", "start", "--agent-id", "test", "--dry-run", "--json"],
-        vec!["recorder", "event", "run_1", "--event-type", "tool_call", "--json"],
+        vec![
+            "recorder",
+            "start",
+            "--agent-id",
+            "test",
+            "--dry-run",
+            "--json",
+        ],
+        vec![
+            "recorder",
+            "event",
+            "run_1",
+            "--event-type",
+            "tool_call",
+            "--json",
+        ],
         vec!["recorder", "finish", "run_1", "--dry-run", "--json"],
         vec!["recorder", "tail", "run_1", "--json"],
     ];
