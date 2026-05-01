@@ -52,6 +52,25 @@ pub struct MemoryHealthReport {
     pub average_confidence: Option<f32>,
     /// Percentage of memories with provenance attached.
     pub provenance_coverage: Option<f32>,
+    /// Conservative aggregate health score (0.0-1.0), None if unavailable.
+    pub health_score: Option<f32>,
+    /// Component scores used to compute the conservative health score.
+    pub score_components: Option<MemoryHealthScoreComponents>,
+}
+
+/// Deterministic component scores for memory health.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MemoryHealthScoreComponents {
+    /// Ratio of non-tombstoned memories to total memories.
+    pub active_ratio: f32,
+    /// Freshness score after accounting for stale active memories.
+    pub freshness_score: f32,
+    /// Average confidence normalized to 0.0-1.0.
+    pub confidence_score: f32,
+    /// Provenance coverage normalized to 0.0-1.0.
+    pub provenance_score: f32,
+    /// Tombstoned-memory penalty normalized to 0.0-1.0.
+    pub tombstone_penalty: f32,
 }
 
 impl MemoryHealthReport {
@@ -66,7 +85,44 @@ impl MemoryHealthReport {
             stale_count: 0,
             average_confidence: None,
             provenance_coverage: None,
+            health_score: None,
+            score_components: None,
         }
+    }
+
+    /// Recompute conservative score fields from the current metrics.
+    #[must_use]
+    pub fn with_conservative_score(mut self) -> Self {
+        self.score_components = self.conservative_score_components();
+        self.health_score = self
+            .score_components
+            .map(MemoryHealthScoreComponents::health_score);
+        self
+    }
+
+    fn conservative_score_components(&self) -> Option<MemoryHealthScoreComponents> {
+        if self.total_count == 0 {
+            return None;
+        }
+
+        let active_ratio = bounded_ratio(self.active_count, self.total_count);
+        let stale_ratio = if self.active_count == 0 {
+            1.0
+        } else {
+            bounded_ratio(self.stale_count.min(self.active_count), self.active_count)
+        };
+        let freshness_score = 1.0 - stale_ratio;
+        let confidence_score = bounded_score(self.average_confidence);
+        let provenance_score = bounded_score(self.provenance_coverage);
+        let tombstone_penalty = bounded_ratio(self.tombstoned_count, self.total_count);
+
+        Some(MemoryHealthScoreComponents {
+            active_ratio,
+            freshness_score,
+            confidence_score,
+            provenance_score,
+            tombstone_penalty,
+        })
     }
 
     /// Create a healthy report for testing.
@@ -80,8 +136,40 @@ impl MemoryHealthReport {
             stale_count: 10,
             average_confidence: Some(0.85),
             provenance_coverage: Some(0.92),
+            health_score: None,
+            score_components: None,
         }
+        .with_conservative_score()
     }
+}
+
+impl MemoryHealthScoreComponents {
+    /// Conservative aggregate score. Weak components dominate instead of
+    /// averaging away missing evidence.
+    #[must_use]
+    pub fn health_score(self) -> f32 {
+        let base_score = self
+            .active_ratio
+            .min(self.freshness_score)
+            .min(self.confidence_score)
+            .min(self.provenance_score);
+        (base_score * (1.0 - self.tombstone_penalty)).clamp(0.0, 1.0)
+    }
+}
+
+fn bounded_ratio(count: u32, total: u32) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+
+    (count.min(total) as f32 / total as f32).clamp(0.0, 1.0)
+}
+
+fn bounded_score(score: Option<f32>) -> f32 {
+    score
+        .filter(|score| score.is_finite())
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0)
 }
 
 /// Derived asset freshness classification.
@@ -426,6 +514,92 @@ mod tests {
         )?;
 
         Ok(())
+    }
+
+    #[test]
+    fn memory_health_score_components_are_conservative() -> TestResult {
+        let report = MemoryHealthReport::healthy_fixture();
+        let components = report
+            .score_components
+            .ok_or_else(|| "healthy fixture should have score components".to_string())?;
+
+        ensure(components.active_ratio > 0.94, true, "active ratio")?;
+        ensure(
+            (0.89..0.90).contains(&components.freshness_score),
+            true,
+            "freshness score",
+        )?;
+        ensure(components.confidence_score, 0.85, "confidence component")?;
+        ensure(components.provenance_score, 0.92, "provenance component")?;
+        ensure(
+            (0.80..0.81).contains(
+                &report
+                    .health_score
+                    .ok_or_else(|| "healthy fixture should have health score".to_string())?,
+            ),
+            true,
+            "aggregate health score",
+        )
+    }
+
+    #[test]
+    fn memory_health_score_treats_missing_evidence_as_zero() -> TestResult {
+        let report = MemoryHealthReport {
+            status: MemoryHealthStatus::Degraded,
+            total_count: 12,
+            active_count: 12,
+            tombstoned_count: 0,
+            stale_count: 0,
+            average_confidence: None,
+            provenance_coverage: None,
+            health_score: None,
+            score_components: None,
+        }
+        .with_conservative_score();
+
+        ensure(report.health_score, Some(0.0), "missing evidence score")
+    }
+
+    #[test]
+    fn memory_health_score_treats_invalid_evidence_as_zero() -> TestResult {
+        let report = MemoryHealthReport {
+            status: MemoryHealthStatus::Degraded,
+            total_count: 12,
+            active_count: 12,
+            tombstoned_count: 0,
+            stale_count: 0,
+            average_confidence: Some(f32::NAN),
+            provenance_coverage: Some(f32::INFINITY),
+            health_score: None,
+            score_components: None,
+        }
+        .with_conservative_score();
+
+        let components = report
+            .score_components
+            .ok_or_else(|| "non-empty report should have score components".to_string())?;
+        ensure(components.confidence_score, 0.0, "invalid confidence")?;
+        ensure(components.provenance_score, 0.0, "invalid provenance")?;
+        ensure(report.health_score, Some(0.0), "invalid evidence score")
+    }
+
+    #[test]
+    fn empty_memory_health_has_no_score() -> TestResult {
+        let report = MemoryHealthReport {
+            status: MemoryHealthStatus::Empty,
+            total_count: 0,
+            active_count: 0,
+            tombstoned_count: 0,
+            stale_count: 0,
+            average_confidence: None,
+            provenance_coverage: None,
+            health_score: None,
+            score_components: None,
+        }
+        .with_conservative_score();
+
+        ensure(report.health_score, None, "empty health score")?;
+        ensure(report.score_components, None, "empty score components")
     }
 
     #[test]
