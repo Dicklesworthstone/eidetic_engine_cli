@@ -941,6 +941,395 @@ pub fn tail_risk_stress_fixtures() -> Vec<TailRiskStressFixture> {
     ]
 }
 
+// ============================================================================
+// Hostile Interleaving Replay Fixtures (EE-351)
+// ============================================================================
+
+/// Schema version for hostile interleaving fixtures.
+pub const HOSTILE_INTERLEAVING_SCHEMA_V1: &str = "ee.eval.hostile_interleaving.v1";
+
+/// Kind of interleaving scenario for stress testing.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum InterleavingKind {
+    /// Events arrive out of temporal order.
+    OutOfOrder,
+    /// Concurrent operations race against each other.
+    RaceCondition,
+    /// Partial failure mid-operation leaves inconsistent state.
+    PartialFailure,
+    /// Repeated/duplicate events arrive.
+    DuplicateEvent,
+    /// Operation interrupted mid-execution.
+    Interruption,
+    /// Phantom event references nonexistent entity.
+    PhantomReference,
+    /// Stale event references outdated state.
+    StaleReference,
+    /// Cyclic dependency in event ordering.
+    CyclicDependency,
+}
+
+impl InterleavingKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OutOfOrder => "out_of_order",
+            Self::RaceCondition => "race_condition",
+            Self::PartialFailure => "partial_failure",
+            Self::DuplicateEvent => "duplicate_event",
+            Self::Interruption => "interruption",
+            Self::PhantomReference => "phantom_reference",
+            Self::StaleReference => "stale_reference",
+            Self::CyclicDependency => "cyclic_dependency",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 8] {
+        [
+            Self::OutOfOrder,
+            Self::RaceCondition,
+            Self::PartialFailure,
+            Self::DuplicateEvent,
+            Self::Interruption,
+            Self::PhantomReference,
+            Self::StaleReference,
+            Self::CyclicDependency,
+        ]
+    }
+
+    /// Whether this kind of interleaving should be detected.
+    #[must_use]
+    pub const fn is_detectable(self) -> bool {
+        matches!(
+            self,
+            Self::OutOfOrder
+                | Self::DuplicateEvent
+                | Self::PhantomReference
+                | Self::CyclicDependency
+        )
+    }
+
+    /// Whether this kind of interleaving is recoverable.
+    #[must_use]
+    pub const fn is_recoverable(self) -> bool {
+        matches!(
+            self,
+            Self::OutOfOrder | Self::DuplicateEvent | Self::StaleReference
+        )
+    }
+}
+
+impl std::fmt::Display for InterleavingKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A single interleaved event in a replay fixture.
+#[derive(Clone, Debug)]
+pub struct InterleavedEvent {
+    /// Event sequence number in original ordering.
+    pub original_seq: u32,
+    /// Event sequence number in hostile ordering.
+    pub hostile_seq: u32,
+    /// Event type identifier.
+    pub event_type: String,
+    /// Entity ID this event affects.
+    pub entity_id: Option<String>,
+    /// Whether event should be skipped in hostile replay.
+    pub skip: bool,
+    /// Whether event should be duplicated in hostile replay.
+    pub duplicate: bool,
+}
+
+impl InterleavedEvent {
+    #[must_use]
+    pub fn new(original_seq: u32, event_type: impl Into<String>) -> Self {
+        Self {
+            original_seq,
+            hostile_seq: original_seq,
+            event_type: event_type.into(),
+            entity_id: None,
+            skip: false,
+            duplicate: false,
+        }
+    }
+
+    #[must_use]
+    pub fn reorder_to(mut self, hostile_seq: u32) -> Self {
+        self.hostile_seq = hostile_seq;
+        self
+    }
+
+    #[must_use]
+    pub fn affecting(mut self, entity_id: impl Into<String>) -> Self {
+        self.entity_id = Some(entity_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn mark_skip(mut self) -> Self {
+        self.skip = true;
+        self
+    }
+
+    #[must_use]
+    pub fn mark_duplicate(mut self) -> Self {
+        self.duplicate = true;
+        self
+    }
+
+    /// Whether this event is reordered from its original position.
+    #[must_use]
+    pub fn is_reordered(&self) -> bool {
+        self.original_seq != self.hostile_seq
+    }
+}
+
+/// Expected outcome of a hostile interleaving test.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterleavingOutcome {
+    /// System detects the hostile pattern and recovers.
+    DetectedAndRecovered,
+    /// System detects the hostile pattern but fails gracefully.
+    DetectedAndFailed,
+    /// System does not detect the hostile pattern (vulnerability).
+    Undetected,
+    /// System crashes or produces undefined behavior.
+    Undefined,
+}
+
+impl InterleavingOutcome {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DetectedAndRecovered => "detected_and_recovered",
+            Self::DetectedAndFailed => "detected_and_failed",
+            Self::Undetected => "undetected",
+            Self::Undefined => "undefined",
+        }
+    }
+
+    /// Whether this outcome is acceptable for a robust system.
+    #[must_use]
+    pub const fn is_acceptable(self) -> bool {
+        matches!(self, Self::DetectedAndRecovered | Self::DetectedAndFailed)
+    }
+}
+
+impl std::fmt::Display for InterleavingOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Hostile interleaving replay fixture for lifecycle automata testing.
+#[derive(Clone, Debug)]
+pub struct HostileInterleavingFixture {
+    pub name: String,
+    pub description: String,
+    pub kind: InterleavingKind,
+    pub events: Vec<InterleavedEvent>,
+    pub expected_outcome: InterleavingOutcome,
+    pub recovery_hint: Option<String>,
+}
+
+impl HostileInterleavingFixture {
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        kind: InterleavingKind,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            kind,
+            events: Vec::new(),
+            expected_outcome: InterleavingOutcome::DetectedAndRecovered,
+            recovery_hint: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_event(mut self, event: InterleavedEvent) -> Self {
+        self.events.push(event);
+        self
+    }
+
+    #[must_use]
+    pub fn expect_outcome(mut self, outcome: InterleavingOutcome) -> Self {
+        self.expected_outcome = outcome;
+        self
+    }
+
+    #[must_use]
+    pub fn with_recovery_hint(mut self, hint: impl Into<String>) -> Self {
+        self.recovery_hint = Some(hint.into());
+        self
+    }
+
+    /// Count of reordered events.
+    #[must_use]
+    pub fn reordered_count(&self) -> usize {
+        self.events.iter().filter(|e| e.is_reordered()).count()
+    }
+
+    /// Count of skipped events.
+    #[must_use]
+    pub fn skipped_count(&self) -> usize {
+        self.events.iter().filter(|e| e.skip).count()
+    }
+
+    /// Count of duplicated events.
+    #[must_use]
+    pub fn duplicated_count(&self) -> usize {
+        self.events.iter().filter(|e| e.duplicate).count()
+    }
+
+    /// Generate the hostile event sequence.
+    #[must_use]
+    pub fn hostile_sequence(&self) -> Vec<&InterleavedEvent> {
+        let mut events: Vec<_> = self.events.iter().filter(|e| !e.skip).collect();
+        events.sort_by_key(|e| e.hostile_seq);
+
+        let mut result = Vec::with_capacity(events.len() + self.duplicated_count());
+        for event in events {
+            result.push(event);
+            if event.duplicate {
+                result.push(event);
+            }
+        }
+        result
+    }
+}
+
+/// Standard hostile interleaving fixtures for lifecycle testing.
+#[must_use]
+pub fn hostile_interleaving_fixtures() -> Vec<HostileInterleavingFixture> {
+    vec![
+        HostileInterleavingFixture::new(
+            "out_of_order_create_update",
+            "Update arrives before create event",
+            InterleavingKind::OutOfOrder,
+        )
+        .with_event(
+            InterleavedEvent::new(1, "create")
+                .affecting("mem_001")
+                .reorder_to(2),
+        )
+        .with_event(
+            InterleavedEvent::new(2, "update")
+                .affecting("mem_001")
+                .reorder_to(1),
+        )
+        .expect_outcome(InterleavingOutcome::DetectedAndRecovered)
+        .with_recovery_hint("Buffer update until create arrives"),
+        HostileInterleavingFixture::new(
+            "race_concurrent_updates",
+            "Two updates to same entity arrive simultaneously",
+            InterleavingKind::RaceCondition,
+        )
+        .with_event(InterleavedEvent::new(1, "update_a").affecting("mem_002"))
+        .with_event(InterleavedEvent::new(1, "update_b").affecting("mem_002"))
+        .expect_outcome(InterleavingOutcome::DetectedAndFailed)
+        .with_recovery_hint("Use optimistic locking with version vectors"),
+        HostileInterleavingFixture::new(
+            "partial_failure_mid_batch",
+            "Batch operation fails halfway through",
+            InterleavingKind::PartialFailure,
+        )
+        .with_event(InterleavedEvent::new(1, "batch_start"))
+        .with_event(InterleavedEvent::new(2, "item_1_commit"))
+        .with_event(InterleavedEvent::new(3, "item_2_fail").mark_skip())
+        .with_event(InterleavedEvent::new(4, "batch_end").mark_skip())
+        .expect_outcome(InterleavingOutcome::DetectedAndFailed)
+        .with_recovery_hint("Use atomic batch transactions"),
+        HostileInterleavingFixture::new(
+            "duplicate_create",
+            "Same create event arrives twice",
+            InterleavingKind::DuplicateEvent,
+        )
+        .with_event(
+            InterleavedEvent::new(1, "create")
+                .affecting("mem_003")
+                .mark_duplicate(),
+        )
+        .expect_outcome(InterleavingOutcome::DetectedAndRecovered)
+        .with_recovery_hint("Idempotent create using content hash"),
+        HostileInterleavingFixture::new(
+            "interruption_mid_write",
+            "Write operation interrupted before commit",
+            InterleavingKind::Interruption,
+        )
+        .with_event(InterleavedEvent::new(1, "write_start").affecting("mem_004"))
+        .with_event(InterleavedEvent::new(2, "write_data").affecting("mem_004"))
+        .with_event(
+            InterleavedEvent::new(3, "write_commit")
+                .affecting("mem_004")
+                .mark_skip(),
+        )
+        .expect_outcome(InterleavingOutcome::DetectedAndFailed)
+        .with_recovery_hint("Use write-ahead logging"),
+        HostileInterleavingFixture::new(
+            "phantom_update",
+            "Update references entity that was never created",
+            InterleavingKind::PhantomReference,
+        )
+        .with_event(InterleavedEvent::new(1, "update").affecting("mem_ghost"))
+        .expect_outcome(InterleavingOutcome::DetectedAndFailed)
+        .with_recovery_hint("Validate entity existence before update"),
+        HostileInterleavingFixture::new(
+            "stale_delete",
+            "Delete references outdated version of entity",
+            InterleavingKind::StaleReference,
+        )
+        .with_event(InterleavedEvent::new(1, "create").affecting("mem_005"))
+        .with_event(InterleavedEvent::new(2, "update").affecting("mem_005"))
+        .with_event(InterleavedEvent::new(3, "delete_v1").affecting("mem_005"))
+        .expect_outcome(InterleavingOutcome::DetectedAndRecovered)
+        .with_recovery_hint("Version-check before destructive operations"),
+        HostileInterleavingFixture::new(
+            "cyclic_dependency",
+            "Events form circular dependency chain",
+            InterleavingKind::CyclicDependency,
+        )
+        .with_event(InterleavedEvent::new(1, "link_a_to_b").affecting("mem_006"))
+        .with_event(InterleavedEvent::new(2, "link_b_to_c").affecting("mem_007"))
+        .with_event(InterleavedEvent::new(3, "link_c_to_a").affecting("mem_008"))
+        .expect_outcome(InterleavingOutcome::DetectedAndFailed)
+        .with_recovery_hint("Detect cycles during link creation"),
+        HostileInterleavingFixture::new(
+            "triple_concurrent_write",
+            "Three writes to same entity in single tick",
+            InterleavingKind::RaceCondition,
+        )
+        .with_event(InterleavedEvent::new(1, "write_1").affecting("mem_009"))
+        .with_event(InterleavedEvent::new(1, "write_2").affecting("mem_009"))
+        .with_event(InterleavedEvent::new(1, "write_3").affecting("mem_009"))
+        .expect_outcome(InterleavingOutcome::DetectedAndFailed),
+        HostileInterleavingFixture::new(
+            "out_of_order_tombstone",
+            "Tombstone arrives before final update",
+            InterleavingKind::OutOfOrder,
+        )
+        .with_event(InterleavedEvent::new(1, "create").affecting("mem_010"))
+        .with_event(
+            InterleavedEvent::new(2, "update")
+                .affecting("mem_010")
+                .reorder_to(3),
+        )
+        .with_event(
+            InterleavedEvent::new(3, "tombstone")
+                .affecting("mem_010")
+                .reorder_to(2),
+        )
+        .expect_outcome(InterleavingOutcome::DetectedAndRecovered)
+        .with_recovery_hint("Sequence number ordering"),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1532,6 +1921,257 @@ mod tests {
             TAIL_BUDGET_CONFIG_SCHEMA_V1,
             "ee.eval.tail_budget_config.v1",
             "tail budget config schema",
+        )
+    }
+
+    // ========================================================================
+    // Hostile Interleaving Tests (EE-351)
+    // ========================================================================
+
+    #[test]
+    fn hostile_interleaving_schema_version_is_stable() -> TestResult {
+        ensure(
+            HOSTILE_INTERLEAVING_SCHEMA_V1,
+            "ee.eval.hostile_interleaving.v1",
+            "hostile interleaving schema",
+        )
+    }
+
+    #[test]
+    fn interleaving_kind_strings_are_stable() -> TestResult {
+        ensure(
+            InterleavingKind::OutOfOrder.as_str(),
+            "out_of_order",
+            "out_of_order",
+        )?;
+        ensure(
+            InterleavingKind::RaceCondition.as_str(),
+            "race_condition",
+            "race_condition",
+        )?;
+        ensure(
+            InterleavingKind::PartialFailure.as_str(),
+            "partial_failure",
+            "partial_failure",
+        )?;
+        ensure(
+            InterleavingKind::DuplicateEvent.as_str(),
+            "duplicate_event",
+            "duplicate_event",
+        )?;
+        ensure(
+            InterleavingKind::Interruption.as_str(),
+            "interruption",
+            "interruption",
+        )?;
+        ensure(
+            InterleavingKind::PhantomReference.as_str(),
+            "phantom_reference",
+            "phantom_reference",
+        )?;
+        ensure(
+            InterleavingKind::StaleReference.as_str(),
+            "stale_reference",
+            "stale_reference",
+        )?;
+        ensure(
+            InterleavingKind::CyclicDependency.as_str(),
+            "cyclic_dependency",
+            "cyclic_dependency",
+        )
+    }
+
+    #[test]
+    fn interleaving_kind_all_returns_eight_variants() -> TestResult {
+        ensure(InterleavingKind::all().len(), 8, "all variants count")
+    }
+
+    #[test]
+    fn interleaving_kind_detectable_and_recoverable() -> TestResult {
+        ensure(
+            InterleavingKind::OutOfOrder.is_detectable(),
+            true,
+            "out_of_order detectable",
+        )?;
+        ensure(
+            InterleavingKind::OutOfOrder.is_recoverable(),
+            true,
+            "out_of_order recoverable",
+        )?;
+        ensure(
+            InterleavingKind::RaceCondition.is_detectable(),
+            false,
+            "race_condition not detectable",
+        )?;
+        ensure(
+            InterleavingKind::PartialFailure.is_recoverable(),
+            false,
+            "partial_failure not recoverable",
+        )
+    }
+
+    #[test]
+    fn interleaving_outcome_strings_are_stable() -> TestResult {
+        ensure(
+            InterleavingOutcome::DetectedAndRecovered.as_str(),
+            "detected_and_recovered",
+            "detected_and_recovered",
+        )?;
+        ensure(
+            InterleavingOutcome::DetectedAndFailed.as_str(),
+            "detected_and_failed",
+            "detected_and_failed",
+        )?;
+        ensure(
+            InterleavingOutcome::Undetected.as_str(),
+            "undetected",
+            "undetected",
+        )?;
+        ensure(
+            InterleavingOutcome::Undefined.as_str(),
+            "undefined",
+            "undefined",
+        )
+    }
+
+    #[test]
+    fn interleaving_outcome_acceptability() -> TestResult {
+        ensure(
+            InterleavingOutcome::DetectedAndRecovered.is_acceptable(),
+            true,
+            "recovered acceptable",
+        )?;
+        ensure(
+            InterleavingOutcome::DetectedAndFailed.is_acceptable(),
+            true,
+            "failed acceptable",
+        )?;
+        ensure(
+            InterleavingOutcome::Undetected.is_acceptable(),
+            false,
+            "undetected not acceptable",
+        )?;
+        ensure(
+            InterleavingOutcome::Undefined.is_acceptable(),
+            false,
+            "undefined not acceptable",
+        )
+    }
+
+    #[test]
+    fn interleaved_event_reorder_detection() -> TestResult {
+        let normal = InterleavedEvent::new(1, "create");
+        ensure(normal.is_reordered(), false, "normal not reordered")?;
+
+        let reordered = InterleavedEvent::new(1, "create").reorder_to(3);
+        ensure(reordered.is_reordered(), true, "reordered is reordered")
+    }
+
+    #[test]
+    fn hostile_fixture_counts() -> TestResult {
+        let fixture = HostileInterleavingFixture::new("test", "test", InterleavingKind::OutOfOrder)
+            .with_event(InterleavedEvent::new(1, "a").reorder_to(2))
+            .with_event(InterleavedEvent::new(2, "b").mark_skip())
+            .with_event(InterleavedEvent::new(3, "c").mark_duplicate());
+
+        ensure(fixture.reordered_count(), 1, "reordered count")?;
+        ensure(fixture.skipped_count(), 1, "skipped count")?;
+        ensure(fixture.duplicated_count(), 1, "duplicated count")
+    }
+
+    #[test]
+    fn hostile_fixture_hostile_sequence_ordering() -> TestResult {
+        let fixture = HostileInterleavingFixture::new("test", "test", InterleavingKind::OutOfOrder)
+            .with_event(InterleavedEvent::new(1, "first").reorder_to(2))
+            .with_event(InterleavedEvent::new(2, "second").reorder_to(1));
+
+        let sequence = fixture.hostile_sequence();
+        ensure(sequence.len(), 2, "sequence length")?;
+        ensure(
+            sequence[0].event_type.as_str(),
+            "second",
+            "first in hostile order",
+        )?;
+        ensure(
+            sequence[1].event_type.as_str(),
+            "first",
+            "second in hostile order",
+        )
+    }
+
+    #[test]
+    fn hostile_fixture_duplicate_expansion() -> TestResult {
+        let fixture =
+            HostileInterleavingFixture::new("test", "test", InterleavingKind::DuplicateEvent)
+                .with_event(InterleavedEvent::new(1, "event").mark_duplicate());
+
+        let sequence = fixture.hostile_sequence();
+        ensure(sequence.len(), 2, "duplicated event appears twice")
+    }
+
+    #[test]
+    fn hostile_interleaving_fixtures_are_non_empty() -> TestResult {
+        let fixtures = hostile_interleaving_fixtures();
+        ensure(fixtures.len() >= 8, true, "at least 8 fixtures")
+    }
+
+    #[test]
+    fn hostile_interleaving_fixtures_have_acceptable_outcomes() -> TestResult {
+        let fixtures = hostile_interleaving_fixtures();
+        for fixture in &fixtures {
+            ensure(
+                fixture.expected_outcome.is_acceptable(),
+                true,
+                format!("fixture '{}' has acceptable outcome", fixture.name).as_str(),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn hostile_interleaving_fixtures_cover_all_kinds() -> TestResult {
+        let fixtures = hostile_interleaving_fixtures();
+        let kinds: std::collections::HashSet<_> = fixtures.iter().map(|f| f.kind).collect();
+
+        ensure(
+            kinds.contains(&InterleavingKind::OutOfOrder),
+            true,
+            "covers out_of_order",
+        )?;
+        ensure(
+            kinds.contains(&InterleavingKind::RaceCondition),
+            true,
+            "covers race_condition",
+        )?;
+        ensure(
+            kinds.contains(&InterleavingKind::PartialFailure),
+            true,
+            "covers partial_failure",
+        )?;
+        ensure(
+            kinds.contains(&InterleavingKind::DuplicateEvent),
+            true,
+            "covers duplicate_event",
+        )?;
+        ensure(
+            kinds.contains(&InterleavingKind::Interruption),
+            true,
+            "covers interruption",
+        )?;
+        ensure(
+            kinds.contains(&InterleavingKind::PhantomReference),
+            true,
+            "covers phantom_reference",
+        )?;
+        ensure(
+            kinds.contains(&InterleavingKind::StaleReference),
+            true,
+            "covers stale_reference",
+        )?;
+        ensure(
+            kinds.contains(&InterleavingKind::CyclicDependency),
+            true,
+            "covers cyclic_dependency",
         )
     }
 }

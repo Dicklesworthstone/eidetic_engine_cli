@@ -309,6 +309,54 @@ pub struct RecorderTailOptions {
     pub limit: u32,
     /// Starting sequence number.
     pub from_sequence: Option<u64>,
+    /// Follow mode: continuously poll for new events.
+    pub follow: bool,
+}
+
+/// A single follow event emitted in JSONL format.
+#[derive(Clone, Debug)]
+pub struct RecorderTailFollowEvent {
+    pub schema: &'static str,
+    pub run_id: String,
+    pub event_id: String,
+    pub sequence: u64,
+    pub event_type: RecorderEventType,
+    pub timestamp: String,
+    pub redacted: bool,
+    pub payload_preview: Option<String>,
+}
+
+impl RecorderTailFollowEvent {
+    /// Render as a single JSONL line (no trailing newline).
+    #[must_use]
+    pub fn to_jsonl(&self) -> String {
+        let mut obj = json!({
+            "schema": self.schema,
+            "runId": self.run_id,
+            "eventId": self.event_id,
+            "sequence": self.sequence,
+            "eventType": self.event_type.as_str(),
+            "timestamp": self.timestamp,
+            "redacted": self.redacted,
+        });
+        if let Some(ref preview) = self.payload_preview {
+            obj["payloadPreview"] = json!(preview);
+        }
+        obj.to_string()
+    }
+}
+
+/// Result from follow mode iteration.
+#[derive(Clone, Debug)]
+pub enum TailFollowResult {
+    /// New events available.
+    Events(Vec<RecorderTailFollowEvent>),
+    /// Run has completed, no more events expected.
+    RunCompleted { final_sequence: u64 },
+    /// Run not found.
+    RunNotFound,
+    /// No new events, still active.
+    Waiting { last_sequence: u64 },
 }
 
 /// Report from tailing a recording session.
@@ -388,6 +436,76 @@ pub fn tail_recording(options: &RecorderTailOptions) -> RecorderTailReport {
         events: Vec::new(),
         total_events: 0,
         has_more: false,
+    }
+}
+
+// ============================================================================
+// Follow Mode (EE-RECORDER-FOLLOW-001)
+// ============================================================================
+
+/// Configuration for follow mode polling.
+#[derive(Clone, Debug)]
+pub struct FollowConfig {
+    /// Minimum poll interval in milliseconds.
+    pub poll_interval_ms: u64,
+    /// Maximum backoff interval in milliseconds.
+    pub max_backoff_ms: u64,
+    /// Current backoff multiplier.
+    pub backoff_multiplier: f64,
+}
+
+impl Default for FollowConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_ms: 250,
+            max_backoff_ms: 2000,
+            backoff_multiplier: 1.5,
+        }
+    }
+}
+
+/// Poll for new events in follow mode.
+#[must_use]
+pub fn poll_follow_events(run_id: &str, from_sequence: u64, _limit: u32) -> TailFollowResult {
+    // Stub: simulate looking up run state.
+    // In a real implementation, this queries the recorder store.
+
+    // Check if run exists (stub: runs starting with "run_notfound" don't exist).
+    if run_id.starts_with("run_notfound") {
+        return TailFollowResult::RunNotFound;
+    }
+
+    // Check if run is completed (stub: runs starting with "run_completed" are done).
+    if run_id.starts_with("run_completed") {
+        return TailFollowResult::RunCompleted {
+            final_sequence: from_sequence.saturating_sub(1).max(0),
+        };
+    }
+
+    // Stub: no new events in test mode, waiting.
+    TailFollowResult::Waiting {
+        last_sequence: from_sequence,
+    }
+}
+
+/// Generate a follow mode diagnostic message for stderr.
+#[must_use]
+pub fn follow_diagnostic(result: &TailFollowResult) -> Option<String> {
+    match result {
+        TailFollowResult::Events(events) => {
+            if events.is_empty() {
+                None
+            } else {
+                Some(format!("received {} event(s)", events.len()))
+            }
+        }
+        TailFollowResult::RunCompleted { final_sequence } => {
+            Some(format!("run completed at sequence {final_sequence}"))
+        }
+        TailFollowResult::RunNotFound => Some("run not found".to_string()),
+        TailFollowResult::Waiting { last_sequence } => {
+            Some(format!("waiting (last seq: {last_sequence})"))
+        }
     }
 }
 
@@ -772,6 +890,7 @@ mod tests {
             run_id: "run_test".to_string(),
             limit: 10,
             from_sequence: None,
+            follow: false,
         };
 
         let report = tail_recording(&options);
@@ -779,6 +898,115 @@ mod tests {
         assert_eq!(report.run_id, "run_test");
         assert!(report.events.is_empty());
         assert_eq!(report.total_events, 0);
+    }
+
+    #[test]
+    fn follow_event_schema_is_stable() -> TestResult {
+        ensure(
+            RECORDER_TAIL_FOLLOW_EVENT_SCHEMA_V1,
+            "ee.recorder.tail_follow_event.v1",
+            "follow event schema",
+        )
+    }
+
+    #[test]
+    fn follow_event_to_jsonl_has_required_fields() {
+        let event = RecorderTailFollowEvent {
+            schema: RECORDER_TAIL_FOLLOW_EVENT_SCHEMA_V1,
+            run_id: "run_abc".to_string(),
+            event_id: "evt_123".to_string(),
+            sequence: 5,
+            event_type: RecorderEventType::ToolCall,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            redacted: false,
+            payload_preview: Some("preview".to_string()),
+        };
+
+        let jsonl = event.to_jsonl();
+
+        assert!(jsonl.contains("\"schema\":\"ee.recorder.tail_follow_event.v1\""));
+        assert!(jsonl.contains("\"runId\":\"run_abc\""));
+        assert!(jsonl.contains("\"eventId\":\"evt_123\""));
+        assert!(jsonl.contains("\"sequence\":5"));
+        assert!(jsonl.contains("\"eventType\":\"tool_call\""));
+        assert!(jsonl.contains("\"payloadPreview\":\"preview\""));
+    }
+
+    #[test]
+    fn follow_event_to_jsonl_omits_null_preview() {
+        let event = RecorderTailFollowEvent {
+            schema: RECORDER_TAIL_FOLLOW_EVENT_SCHEMA_V1,
+            run_id: "run_abc".to_string(),
+            event_id: "evt_123".to_string(),
+            sequence: 1,
+            event_type: RecorderEventType::UserMessage,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            redacted: true,
+            payload_preview: None,
+        };
+
+        let jsonl = event.to_jsonl();
+
+        assert!(!jsonl.contains("payloadPreview"));
+        assert!(jsonl.contains("\"redacted\":true"));
+    }
+
+    #[test]
+    fn poll_follow_events_returns_not_found_for_missing_run() {
+        let result = poll_follow_events("run_notfound_xyz", 0, 10);
+
+        assert!(matches!(result, TailFollowResult::RunNotFound));
+    }
+
+    #[test]
+    fn poll_follow_events_returns_completed_for_finished_run() {
+        let result = poll_follow_events("run_completed_abc", 5, 10);
+
+        assert!(matches!(
+            result,
+            TailFollowResult::RunCompleted { final_sequence: _ }
+        ));
+    }
+
+    #[test]
+    fn poll_follow_events_returns_waiting_for_active_run() {
+        let result = poll_follow_events("run_active_123", 0, 10);
+
+        assert!(matches!(
+            result,
+            TailFollowResult::Waiting { last_sequence: 0 }
+        ));
+    }
+
+    #[test]
+    fn follow_config_default_values() {
+        let config = FollowConfig::default();
+
+        assert_eq!(config.poll_interval_ms, 250);
+        assert_eq!(config.max_backoff_ms, 2000);
+        assert!((config.backoff_multiplier - 1.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn follow_diagnostic_returns_message_for_each_result() {
+        let waiting = TailFollowResult::Waiting { last_sequence: 10 };
+        let completed = TailFollowResult::RunCompleted { final_sequence: 5 };
+        let not_found = TailFollowResult::RunNotFound;
+        let events = TailFollowResult::Events(vec![RecorderTailFollowEvent {
+            schema: RECORDER_TAIL_FOLLOW_EVENT_SCHEMA_V1,
+            run_id: "run".to_string(),
+            event_id: "evt".to_string(),
+            sequence: 1,
+            event_type: RecorderEventType::ToolCall,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            redacted: false,
+            payload_preview: None,
+        }]);
+
+        assert!(follow_diagnostic(&waiting).unwrap().contains("waiting"));
+        assert!(follow_diagnostic(&completed).unwrap().contains("completed"));
+        assert!(follow_diagnostic(&not_found).unwrap().contains("not found"));
+        assert!(follow_diagnostic(&events).unwrap().contains("1 event"));
     }
 
     #[test]

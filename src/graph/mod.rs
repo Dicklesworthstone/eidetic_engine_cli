@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::models::{CapabilityStatus, GRAPH_MODULE_SCHEMA_V1};
 
 #[cfg(feature = "graph")]
@@ -245,6 +247,282 @@ pub const fn module_readiness() -> GraphModuleReadiness {
         graph_engine: REQUIRED_GRAPH_ENGINE,
         capabilities: &GRAPH_CAPABILITIES,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Autolink Candidate Generation (EE-168)
+// ---------------------------------------------------------------------------
+
+/// A memory summary used by deterministic autolink candidate generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutolinkMemoryInput {
+    pub memory_id: String,
+    pub tags: Vec<String>,
+    pub evidence_count: u32,
+}
+
+/// An existing memory edge used to suppress duplicate autolink suggestions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutolinkExistingEdge {
+    pub src_memory_id: String,
+    pub dst_memory_id: String,
+    pub relation: String,
+}
+
+/// Options for tag co-occurrence autolink candidate generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutolinkCandidateOptions {
+    pub min_shared_tags: usize,
+    pub common_tag_max_count: u32,
+    pub max_candidates: Option<usize>,
+}
+
+impl Default for AutolinkCandidateOptions {
+    fn default() -> Self {
+        Self {
+            min_shared_tags: 2,
+            common_tag_max_count: 8,
+            max_candidates: None,
+        }
+    }
+}
+
+/// A dry-run candidate memory link proposed from explainable graph features.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutolinkCandidate {
+    pub src_memory_id: String,
+    pub dst_memory_id: String,
+    pub relation: String,
+    pub source: String,
+    pub directed: bool,
+    pub weight: f64,
+    pub confidence: f64,
+    pub shared_tags: Vec<String>,
+    pub evidence_count: u32,
+    pub metadata_json: String,
+}
+
+/// Generate deterministic dry-run `co_tag` memory link candidates.
+///
+/// This function does not write to storage. Callers that later apply candidates
+/// must do so through an explicit audited maintenance path.
+#[must_use]
+pub fn generate_autolink_candidates(
+    memories: &[AutolinkMemoryInput],
+    existing_edges: &[AutolinkExistingEdge],
+    options: &AutolinkCandidateOptions,
+) -> Vec<AutolinkCandidate> {
+    let mut normalized_memories: Vec<_> = memories
+        .iter()
+        .map(NormalizedAutolinkMemory::from_input)
+        .filter(|memory| !memory.tags.is_empty())
+        .collect();
+    normalized_memories.sort_by(|left, right| left.memory_id.cmp(right.memory_id));
+
+    let tag_counts = tag_frequencies(&normalized_memories);
+    let existing_pairs = existing_cotag_pairs(existing_edges);
+    let mut candidates = Vec::new();
+
+    for (left_index, left) in normalized_memories.iter().enumerate() {
+        for right in normalized_memories.iter().skip(left_index + 1) {
+            if left.memory_id == right.memory_id {
+                continue;
+            }
+
+            let (src_memory_id, dst_memory_id) =
+                canonical_memory_pair(left.memory_id, right.memory_id);
+            if existing_pairs.contains(&(src_memory_id.to_owned(), dst_memory_id.to_owned())) {
+                continue;
+            }
+
+            let shared_tags: Vec<String> = left.tags.intersection(&right.tags).cloned().collect();
+            if shared_tags.len() < options.min_shared_tags {
+                continue;
+            }
+
+            let specificity = tag_specificity(&shared_tags, &tag_counts);
+            let common_tag_count =
+                count_common_tags(&shared_tags, &tag_counts, options.common_tag_max_count);
+            let evidence_count = left.evidence_count.saturating_add(right.evidence_count);
+            let weight = autolink_score(
+                shared_tags.len(),
+                specificity,
+                common_tag_count,
+                evidence_count,
+            );
+            let confidence = round_score((0.45 + weight * 0.5).clamp(0.0, 0.95));
+            let tag_frequency_metadata = shared_tag_frequency_metadata(&shared_tags, &tag_counts);
+
+            candidates.push(AutolinkCandidate {
+                src_memory_id: src_memory_id.to_owned(),
+                dst_memory_id: dst_memory_id.to_owned(),
+                relation: "co_tag".to_owned(),
+                source: "auto".to_owned(),
+                directed: false,
+                weight,
+                confidence,
+                evidence_count,
+                metadata_json: serde_json::json!({
+                    "strategy": "tag_cooccurrence",
+                    "dryRun": true,
+                    "sharedTags": shared_tags,
+                    "tagFrequencies": tag_frequency_metadata,
+                    "commonTagMaxCount": options.common_tag_max_count,
+                    "commonTagCount": common_tag_count,
+                })
+                .to_string(),
+                shared_tags,
+            });
+        }
+    }
+
+    candidates.sort_by(compare_autolink_candidates);
+    if let Some(limit) = options.max_candidates {
+        candidates.truncate(limit);
+    }
+    candidates
+}
+
+#[derive(Clone, Debug)]
+struct NormalizedAutolinkMemory<'a> {
+    memory_id: &'a str,
+    tags: BTreeSet<String>,
+    evidence_count: u32,
+}
+
+impl<'a> NormalizedAutolinkMemory<'a> {
+    fn from_input(input: &'a AutolinkMemoryInput) -> Self {
+        Self {
+            memory_id: input.memory_id.as_str(),
+            tags: input
+                .tags
+                .iter()
+                .filter_map(|tag| normalize_autolink_tag(tag))
+                .collect(),
+            evidence_count: input.evidence_count,
+        }
+    }
+}
+
+fn normalize_autolink_tag(tag: &str) -> Option<String> {
+    let normalized = tag
+        .trim()
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-");
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn tag_frequencies(memories: &[NormalizedAutolinkMemory<'_>]) -> BTreeMap<String, u32> {
+    let mut counts = BTreeMap::new();
+    for memory in memories {
+        for tag in &memory.tags {
+            let count = counts.entry(tag.clone()).or_insert(0);
+            *count += 1;
+        }
+    }
+    counts
+}
+
+fn existing_cotag_pairs(existing_edges: &[AutolinkExistingEdge]) -> BTreeSet<(String, String)> {
+    existing_edges
+        .iter()
+        .filter(|edge| edge.relation == "co_tag")
+        .map(|edge| {
+            let (src, dst) = canonical_memory_pair(&edge.src_memory_id, &edge.dst_memory_id);
+            (src.to_owned(), dst.to_owned())
+        })
+        .collect()
+}
+
+fn canonical_memory_pair<'a>(left: &'a str, right: &'a str) -> (&'a str, &'a str) {
+    if left <= right {
+        (left, right)
+    } else {
+        (right, left)
+    }
+}
+
+fn tag_specificity(shared_tags: &[String], tag_counts: &BTreeMap<String, u32>) -> f64 {
+    shared_tags
+        .iter()
+        .map(|tag| {
+            tag_counts
+                .get(tag)
+                .copied()
+                .filter(|count| *count > 0)
+                .map_or(0.0, |count| 1.0 / f64::from(count))
+        })
+        .sum()
+}
+
+fn count_common_tags(
+    shared_tags: &[String],
+    tag_counts: &BTreeMap<String, u32>,
+    common_tag_max_count: u32,
+) -> usize {
+    shared_tags
+        .iter()
+        .filter(|tag| {
+            tag_counts
+                .get(*tag)
+                .copied()
+                .is_some_and(|count| count > common_tag_max_count)
+        })
+        .count()
+}
+
+fn shared_tag_frequency_metadata(
+    shared_tags: &[String],
+    tag_counts: &BTreeMap<String, u32>,
+) -> BTreeMap<String, u32> {
+    shared_tags
+        .iter()
+        .map(|tag| (tag.clone(), tag_counts.get(tag).copied().unwrap_or(0)))
+        .collect()
+}
+
+fn autolink_score(
+    shared_tag_count: usize,
+    specificity: f64,
+    common_tag_count: usize,
+    evidence_count: u32,
+) -> f64 {
+    let shared_count = u32::try_from(shared_tag_count).unwrap_or(u32::MAX);
+    let common_count = u32::try_from(common_tag_count).unwrap_or(u32::MAX);
+    let shared_component = (f64::from(shared_count) * 0.25).min(0.6);
+    let specificity_component = (specificity * 0.15).min(0.3);
+    let evidence_component = (f64::from(evidence_count.min(10)) * 0.01).min(0.1);
+    let common_penalty = f64::from(common_count) * 0.05;
+    round_score(
+        (shared_component + specificity_component + evidence_component - common_penalty)
+            .clamp(0.05, 0.99),
+    )
+}
+
+fn round_score(value: f64) -> f64 {
+    if value.is_finite() {
+        (value * 1000.0).round() / 1000.0
+    } else {
+        0.0
+    }
+}
+
+fn compare_autolink_candidates(
+    left: &AutolinkCandidate,
+    right: &AutolinkCandidate,
+) -> std::cmp::Ordering {
+    right
+        .weight
+        .total_cmp(&left.weight)
+        .then_with(|| right.shared_tags.len().cmp(&left.shared_tags.len()))
+        .then_with(|| left.src_memory_id.cmp(&right.src_memory_id))
+        .then_with(|| left.dst_memory_id.cmp(&right.dst_memory_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -955,15 +1233,31 @@ mod tests {
 
     #[cfg(feature = "graph")]
     const WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
-    #[cfg(feature = "graph")]
     const MEMORY_A: &str = "mem_00000000000000000000000011";
-    #[cfg(feature = "graph")]
     const MEMORY_B: &str = "mem_00000000000000000000000012";
-    #[cfg(feature = "graph")]
     const MEMORY_C: &str = "mem_00000000000000000000000013";
 
-    #[cfg(feature = "graph")]
     type TestResult = Result<(), String>;
+
+    fn autolink_memory(
+        memory_id: &str,
+        tags: &[&str],
+        evidence_count: u32,
+    ) -> super::AutolinkMemoryInput {
+        super::AutolinkMemoryInput {
+            memory_id: memory_id.to_owned(),
+            tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            evidence_count,
+        }
+    }
+
+    fn existing_cotag(src_memory_id: &str, dst_memory_id: &str) -> super::AutolinkExistingEdge {
+        super::AutolinkExistingEdge {
+            src_memory_id: src_memory_id.to_owned(),
+            dst_memory_id: dst_memory_id.to_owned(),
+            relation: "co_tag".to_owned(),
+        }
+    }
 
     #[test]
     fn subsystem_name_is_stable() {
@@ -1038,6 +1332,90 @@ mod tests {
                 "query",
             ]
         );
+    }
+
+    #[test]
+    fn autolink_candidates_require_two_normalized_shared_tags() -> TestResult {
+        let candidates = super::generate_autolink_candidates(
+            &[
+                autolink_memory(MEMORY_A, &[" Rust ", "CLI Design", "single"], 3),
+                autolink_memory(MEMORY_B, &["rust", "cli design"], 4),
+                autolink_memory(MEMORY_C, &["rust", "docs"], 2),
+            ],
+            &[],
+            &super::AutolinkCandidateOptions::default(),
+        );
+
+        assert_eq!(candidates.len(), 1);
+        let candidate = candidates
+            .first()
+            .ok_or_else(|| "candidate should exist".to_owned())?;
+        assert_eq!(candidate.src_memory_id, MEMORY_A);
+        assert_eq!(candidate.dst_memory_id, MEMORY_B);
+        assert_eq!(candidate.relation, "co_tag");
+        assert_eq!(candidate.source, "auto");
+        assert!(!candidate.directed);
+        assert_eq!(candidate.shared_tags, vec!["cli-design", "rust"]);
+        assert!(candidate.metadata_json.contains("\"dryRun\":true"));
+        Ok(())
+    }
+
+    #[test]
+    fn autolink_candidates_dedupe_existing_cotag_edges_symmetrically() {
+        let candidates = super::generate_autolink_candidates(
+            &[
+                autolink_memory(MEMORY_A, &["rust", "cli"], 1),
+                autolink_memory(MEMORY_B, &["rust", "cli"], 1),
+            ],
+            &[existing_cotag(MEMORY_B, MEMORY_A)],
+            &super::AutolinkCandidateOptions::default(),
+        );
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn autolink_candidates_penalize_common_tags() {
+        let rare_score = super::autolink_score(2, 1.0, 0, 2);
+        let broad_score = super::autolink_score(2, 0.5, 2, 2);
+
+        assert!(
+            rare_score > broad_score,
+            "specific shared tags should outrank common broad tags"
+        );
+    }
+
+    #[test]
+    fn autolink_candidates_are_stably_ordered_and_limited() -> TestResult {
+        let candidates = super::generate_autolink_candidates(
+            &[
+                autolink_memory(MEMORY_C, &["rust", "cli", "testing"], 1),
+                autolink_memory(MEMORY_A, &["rust", "cli", "testing"], 1),
+                autolink_memory(MEMORY_B, &["rust", "cli", "testing"], 1),
+            ],
+            &[],
+            &super::AutolinkCandidateOptions {
+                max_candidates: Some(2),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(candidates.len(), 2);
+        let first = candidates
+            .first()
+            .ok_or_else(|| "first candidate should exist".to_owned())?;
+        let second = candidates
+            .get(1)
+            .ok_or_else(|| "second candidate should exist".to_owned())?;
+        assert_eq!(
+            (first.src_memory_id.as_str(), first.dst_memory_id.as_str()),
+            (MEMORY_A, MEMORY_B)
+        );
+        assert_eq!(
+            (second.src_memory_id.as_str(), second.dst_memory_id.as_str()),
+            (MEMORY_A, MEMORY_C)
+        );
+        Ok(())
     }
 
     #[cfg(not(feature = "graph"))]
