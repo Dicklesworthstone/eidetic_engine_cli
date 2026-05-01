@@ -304,6 +304,124 @@ impl Default for CardMath {
     }
 }
 
+/// Create a selection score math card showing the weighted combination formula.
+#[must_use]
+pub fn selection_score_card(confidence: f32, utility: f32, importance: f32, score: f32) -> Card {
+    let formula = "score = α·confidence + β·utility + γ·importance";
+    let computation = format!(
+        "score = 0.40×{confidence:.2} + 0.35×{utility:.2} + 0.25×{importance:.2} = {score:.3}"
+    );
+    Card::new("card_selection_score", CardKind::Certificate, "Selection Score Computation")
+        .with_summary(computation)
+        .with_math(
+            CardMath::new()
+                .with_formula(formula)
+                .with_value(score as f64)
+                .with_confidence(confidence as f64),
+        )
+}
+
+/// Create a relevance score math card showing semantic/lexical fusion.
+#[must_use]
+pub fn relevance_score_card(
+    semantic: f32,
+    lexical: f32,
+    fused: f32,
+    rank: u32,
+    rrf_k: u32,
+) -> Card {
+    let rrf_formula = format!("RRF(d) = Σ(1 / (k + rank(d))), k={rrf_k}");
+    Card::new("card_relevance_score", CardKind::Certificate, "Relevance Score (RRF Fusion)")
+        .with_summary(format!(
+            "Rank {rank}: semantic={semantic:.3}, lexical={lexical:.3} → fused={fused:.4}"
+        ))
+        .with_math(
+            CardMath::new()
+                .with_formula(rrf_formula)
+                .with_value(fused as f64),
+        )
+}
+
+/// Create a utility decay math card showing temporal decay computation.
+#[must_use]
+pub fn utility_decay_card(base_utility: f32, age_days: u32, decay_rate: f32, current_utility: f32) -> Card {
+    let formula = "utility(t) = base · exp(-λ·t)";
+    let computation = format!(
+        "utility = {base_utility:.3} × exp(-{decay_rate:.4} × {age_days}) = {current_utility:.3}"
+    );
+    Card::new("card_utility_decay", CardKind::Certificate, "Utility Temporal Decay")
+        .with_summary(computation)
+        .with_math(
+            CardMath::new()
+                .with_formula(formula)
+                .with_value(current_utility as f64)
+                .with_unit("utility units".to_string()),
+        )
+}
+
+/// Create a trust score math card showing weighted trust class contribution.
+#[must_use]
+pub fn trust_score_card(trust_class: &str, trust_weight: f32, confidence: f32, combined: f32) -> Card {
+    let formula = "trust = class_weight × confidence";
+    let computation = format!(
+        "trust({trust_class}) = {trust_weight:.2} × {confidence:.2} = {combined:.3}"
+    );
+    Card::new("card_trust_score", CardKind::Certificate, "Trust Score Computation")
+        .with_summary(computation)
+        .with_math(
+            CardMath::new()
+                .with_formula(formula)
+                .with_value(combined as f64)
+                .with_confidence(confidence as f64),
+        )
+}
+
+/// Create a pack budget math card showing token budget utilization.
+#[must_use]
+pub fn pack_budget_card(
+    used_tokens: u32,
+    max_tokens: u32,
+    item_count: u32,
+    omitted_count: u32,
+) -> Card {
+    let utilization = (used_tokens as f64 / max_tokens as f64) * 100.0;
+    let formula = "utilization = used_tokens / max_tokens";
+    let summary = format!(
+        "{used_tokens}/{max_tokens} tokens ({utilization:.1}%), \
+         {item_count} items packed, {omitted_count} omitted"
+    );
+    Card::new("card_pack_budget", CardKind::Audit, "Pack Token Budget")
+        .with_summary(summary)
+        .with_math(
+            CardMath::new()
+                .with_formula(formula)
+                .with_value(utilization)
+                .with_unit("%".to_string()),
+        )
+}
+
+/// Create a diversity penalty math card showing MMR-style diversity score.
+#[must_use]
+pub fn diversity_penalty_card(
+    base_score: f32,
+    diversity_penalty: f32,
+    final_score: f32,
+    similar_items: u32,
+) -> Card {
+    let formula = "final = base - λ·max_sim(selected)";
+    let computation = format!(
+        "final = {base_score:.3} - {diversity_penalty:.3} = {final_score:.3} \
+         ({similar_items} similar items penalized)"
+    );
+    Card::new("card_diversity_penalty", CardKind::Certificate, "Diversity Penalty (MMR)")
+        .with_summary(computation)
+        .with_math(
+            CardMath::new()
+                .with_formula(formula)
+                .with_value(final_score as f64),
+        )
+}
+
 /// Render a cards array for JSON output.
 #[must_use]
 pub fn render_cards_json(cards: &[Card], profile: CardsProfile) -> String {
@@ -8932,7 +9050,11 @@ mod tests {
     // Cards Output Tests (EE-341)
     // ========================================================================
 
-    use super::{Card, CardKind, CardMath, CardsProfile, render_cards_json};
+    use super::{
+        Card, CardKind, CardMath, CardsProfile, diversity_penalty_card, pack_budget_card,
+        relevance_score_card, render_cards_json, selection_score_card, trust_score_card,
+        utility_decay_card,
+    };
 
     #[test]
     fn cards_profile_none_excludes_all_cards() -> TestResult {
@@ -9089,5 +9211,81 @@ mod tests {
         ensure_contains(&json, "\"value\":0.123456", "value")?;
         ensure_contains(&json, "\"confidence\":0.9999", "confidence")?;
         ensure_contains(&json, "\"unit\":\"joules\"", "unit")
+    }
+
+    #[test]
+    fn selection_score_card_computes_weighted_combination() -> TestResult {
+        let card = selection_score_card(0.9, 0.8, 0.7, 0.835);
+        ensure(card.id == "card_selection_score", "card id matches")?;
+        ensure_equal(&card.kind, &CardKind::Certificate, "card kind")?;
+        ensure(card.summary.is_some(), "summary present")?;
+        ensure(card.math.is_some(), "math present")?;
+        let math = card.math.unwrap();
+        ensure(math.formula.is_some(), "formula present")?;
+        ensure_contains(
+            math.formula.as_ref().unwrap(),
+            "score =",
+            "formula has expected form",
+        )
+    }
+
+    #[test]
+    fn relevance_score_card_shows_rrf_fusion() -> TestResult {
+        let card = relevance_score_card(0.95, 0.8, 0.875, 3, 60);
+        ensure(card.id == "card_relevance_score", "card id matches")?;
+        ensure(card.summary.is_some(), "summary present")?;
+        let summary = card.summary.unwrap();
+        ensure_contains(&summary, "Rank 3", "shows rank")?;
+        ensure_contains(&summary, "semantic=0.950", "shows semantic score")
+    }
+
+    #[test]
+    fn utility_decay_card_shows_exponential_decay() -> TestResult {
+        let card = utility_decay_card(0.9, 30, 0.01, 0.67);
+        ensure(card.id == "card_utility_decay", "card id matches")?;
+        ensure(card.math.is_some(), "math present")?;
+        let math = card.math.unwrap();
+        ensure_contains(
+            math.formula.as_ref().unwrap(),
+            "exp(",
+            "formula shows exponential decay",
+        )
+    }
+
+    #[test]
+    fn trust_score_card_shows_weighted_computation() -> TestResult {
+        let card = trust_score_card("human_explicit", 1.0, 0.95, 0.95);
+        ensure(card.id == "card_trust_score", "card id matches")?;
+        ensure(card.summary.is_some(), "summary present")?;
+        ensure_contains(
+            card.summary.as_ref().unwrap(),
+            "human_explicit",
+            "shows trust class",
+        )
+    }
+
+    #[test]
+    fn pack_budget_card_shows_utilization() -> TestResult {
+        let card = pack_budget_card(3500, 4000, 12, 3);
+        ensure(card.id == "card_pack_budget", "card id matches")?;
+        ensure_equal(&card.kind, &CardKind::Audit, "card kind is audit")?;
+        ensure(card.summary.is_some(), "summary present")?;
+        let summary = card.summary.unwrap();
+        ensure_contains(&summary, "3500/4000", "shows token usage")?;
+        ensure_contains(&summary, "12 items", "shows item count")?;
+        ensure_contains(&summary, "3 omitted", "shows omitted count")
+    }
+
+    #[test]
+    fn diversity_penalty_card_shows_mmr_computation() -> TestResult {
+        let card = diversity_penalty_card(0.95, 0.15, 0.80, 2);
+        ensure(card.id == "card_diversity_penalty", "card id matches")?;
+        ensure(card.math.is_some(), "math present")?;
+        let math = card.math.unwrap();
+        ensure_contains(
+            math.formula.as_ref().unwrap(),
+            "max_sim",
+            "formula references similarity",
+        )
     }
 }
