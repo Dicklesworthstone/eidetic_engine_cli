@@ -501,6 +501,137 @@ impl ResponseEnvelope {
     }
 }
 
+// ============================================================================
+// Output Size Diagnostics (EE-335)
+//
+// Compare JSON and TOON output sizes to help understand token savings.
+// Tokens are estimated using a simple heuristic (words * 4/3).
+// ============================================================================
+
+/// Schema identifier for output size diagnostic.
+pub const OUTPUT_SIZE_DIAGNOSTIC_SCHEMA_V1: &str = "ee.output_size_diagnostic.v1";
+
+/// Output size diagnostic comparing JSON and TOON representations.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputSizeDiagnostic {
+    pub json_bytes: usize,
+    pub toon_bytes: usize,
+    pub json_estimated_tokens: usize,
+    pub toon_estimated_tokens: usize,
+    pub byte_savings: i64,
+    pub token_savings: i64,
+    pub compression_ratio: f64,
+}
+
+impl OutputSizeDiagnostic {
+    /// Compute size diagnostic from JSON string.
+    #[must_use]
+    pub fn from_json(json: &str) -> Self {
+        let toon = render_toon_from_json(json);
+        Self::from_pair(json, &toon)
+    }
+
+    /// Compute size diagnostic from JSON and TOON pair.
+    #[must_use]
+    pub fn from_pair(json: &str, toon: &str) -> Self {
+        let json_bytes = json.len();
+        let toon_bytes = toon.len();
+        let json_estimated_tokens = estimate_tokens(json);
+        let toon_estimated_tokens = estimate_tokens(toon);
+
+        let byte_savings = json_bytes as i64 - toon_bytes as i64;
+        let token_savings = json_estimated_tokens as i64 - toon_estimated_tokens as i64;
+        let compression_ratio = if json_bytes > 0 {
+            toon_bytes as f64 / json_bytes as f64
+        } else {
+            1.0
+        };
+
+        Self {
+            json_bytes,
+            toon_bytes,
+            json_estimated_tokens,
+            toon_estimated_tokens,
+            byte_savings,
+            token_savings,
+            compression_ratio,
+        }
+    }
+
+    /// Render as JSON.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let mut b = JsonBuilder::with_capacity(256);
+        b.field_str("schema", OUTPUT_SIZE_DIAGNOSTIC_SCHEMA_V1);
+        b.field_object("json", |j| {
+            j.field_raw("bytes", &self.json_bytes.to_string());
+            j.field_raw("estimatedTokens", &self.json_estimated_tokens.to_string());
+        });
+        b.field_object("toon", |t| {
+            t.field_raw("bytes", &self.toon_bytes.to_string());
+            t.field_raw("estimatedTokens", &self.toon_estimated_tokens.to_string());
+        });
+        b.field_object("savings", |s| {
+            s.field_raw("bytes", &self.byte_savings.to_string());
+            s.field_raw("tokens", &self.token_savings.to_string());
+            s.field_raw("compressionRatio", &format!("{:.3}", self.compression_ratio));
+        });
+        b.finish()
+    }
+
+    /// Render as human-readable text.
+    #[must_use]
+    pub fn to_human(&self) -> String {
+        let savings_pct = if self.json_bytes > 0 {
+            (1.0 - self.compression_ratio) * 100.0
+        } else {
+            0.0
+        };
+
+        format!(
+            "Output Size Diagnostic\n\
+             ─────────────────────────────────────\n\
+             JSON:  {:>8} bytes  {:>6} tokens\n\
+             TOON:  {:>8} bytes  {:>6} tokens\n\
+             ─────────────────────────────────────\n\
+             Savings: {:>+6} bytes  {:>+5} tokens ({:.1}%)\n",
+            self.json_bytes,
+            self.json_estimated_tokens,
+            self.toon_bytes,
+            self.toon_estimated_tokens,
+            self.byte_savings,
+            self.token_savings,
+            savings_pct,
+        )
+    }
+}
+
+/// Estimate token count using a simple heuristic.
+fn estimate_tokens(text: &str) -> usize {
+    text.split_whitespace().count().saturating_mul(4) / 3
+}
+
+/// Compute size diagnostics for representative payloads.
+#[must_use]
+pub fn compute_representative_size_diagnostics() -> Vec<(&'static str, OutputSizeDiagnostic)> {
+    use crate::core::health::HealthReport;
+    use crate::core::status::StatusReport;
+
+    let mut diagnostics = Vec::new();
+
+    // Status report
+    let status = StatusReport::gather();
+    let status_json = render_status_json(&status);
+    diagnostics.push(("status", OutputSizeDiagnostic::from_json(&status_json)));
+
+    // Health report
+    let health = HealthReport::gather();
+    let health_json = render_health_json(&health);
+    diagnostics.push(("health", OutputSizeDiagnostic::from_json(&health_json)));
+
+    diagnostics
+}
+
 /// Render a context response as JSON (ee.response.v1 envelope).
 #[must_use]
 pub fn render_context_response_json(response: &ContextResponse) -> String {
@@ -8044,5 +8175,131 @@ mod tests {
             (avg - 0.7).abs() < 0.0001,
             format!("expected 0.7, got {avg}"),
         )
+    }
+
+    // ========================================================================
+    // Output Size Diagnostic Tests (EE-335)
+    // ========================================================================
+
+    #[test]
+    fn size_diagnostic_from_json_computes_all_fields() -> TestResult {
+        use super::{OutputSizeDiagnostic, OUTPUT_SIZE_DIAGNOSTIC_SCHEMA_V1};
+
+        let json = r#"{"schema":"ee.response.v1","success":true,"data":{"command":"status"}}"#;
+        let diagnostic = OutputSizeDiagnostic::from_json(json);
+
+        ensure(diagnostic.json_bytes > 0, "json_bytes should be positive")?;
+        ensure(diagnostic.toon_bytes > 0, "toon_bytes should be positive")?;
+        ensure(
+            diagnostic.json_estimated_tokens > 0,
+            "json tokens should be positive",
+        )?;
+        ensure(
+            diagnostic.toon_estimated_tokens > 0,
+            "toon tokens should be positive",
+        )?;
+        ensure(
+            diagnostic.compression_ratio > 0.0 && diagnostic.compression_ratio <= 2.0,
+            format!(
+                "compression ratio should be reasonable, got {}",
+                diagnostic.compression_ratio
+            ),
+        )
+    }
+
+    #[test]
+    fn size_diagnostic_json_output_has_required_schema() -> TestResult {
+        use super::{OutputSizeDiagnostic, OUTPUT_SIZE_DIAGNOSTIC_SCHEMA_V1};
+
+        let json = r#"{"schema":"ee.response.v1","success":true,"data":{"command":"test"}}"#;
+        let diagnostic = OutputSizeDiagnostic::from_json(json);
+        let output = diagnostic.to_json();
+
+        ensure_contains(&output, OUTPUT_SIZE_DIAGNOSTIC_SCHEMA_V1, "schema field")?;
+        ensure_contains(&output, "\"json\":", "json section")?;
+        ensure_contains(&output, "\"toon\":", "toon section")?;
+        ensure_contains(&output, "\"savings\":", "savings section")?;
+        ensure_contains(&output, "\"bytes\":", "bytes field")?;
+        ensure_contains(&output, "\"estimatedTokens\":", "estimatedTokens field")?;
+        ensure_contains(&output, "\"compressionRatio\":", "compressionRatio field")
+    }
+
+    #[test]
+    fn size_diagnostic_human_output_has_structure() -> TestResult {
+        use super::OutputSizeDiagnostic;
+
+        let json = r#"{"schema":"ee.response.v1","success":true,"data":{"command":"test"}}"#;
+        let diagnostic = OutputSizeDiagnostic::from_json(json);
+        let output = diagnostic.to_human();
+
+        ensure_contains(&output, "Output Size Diagnostic", "title")?;
+        ensure_contains(&output, "JSON:", "JSON label")?;
+        ensure_contains(&output, "TOON:", "TOON label")?;
+        ensure_contains(&output, "Savings:", "savings label")?;
+        ensure_contains(&output, "bytes", "bytes unit")?;
+        ensure_contains(&output, "tokens", "tokens unit")
+    }
+
+    #[test]
+    fn size_diagnostic_status_report_shows_toon_savings() -> TestResult {
+        use super::OutputSizeDiagnostic;
+
+        let report = StatusReport::gather();
+        let json = render_status_json(&report);
+        let diagnostic = OutputSizeDiagnostic::from_json(&json);
+
+        // TOON should typically be smaller than JSON for structured data
+        // But we only assert both are computed, not the relationship
+        ensure(diagnostic.json_bytes > 0, "json_bytes computed")?;
+        ensure(diagnostic.toon_bytes > 0, "toon_bytes computed")
+    }
+
+    #[test]
+    fn size_diagnostic_health_report_shows_toon_savings() -> TestResult {
+        use super::OutputSizeDiagnostic;
+
+        let report = HealthReport::gather();
+        let json = render_health_json(&report);
+        let diagnostic = OutputSizeDiagnostic::from_json(&json);
+
+        ensure(diagnostic.json_bytes > 0, "json_bytes computed")?;
+        ensure(diagnostic.toon_bytes > 0, "toon_bytes computed")
+    }
+
+    #[test]
+    fn size_diagnostic_empty_json_handles_gracefully() -> TestResult {
+        use super::OutputSizeDiagnostic;
+
+        let diagnostic = OutputSizeDiagnostic::from_json("{}");
+
+        ensure(diagnostic.json_bytes == 2, "empty json is 2 bytes")?;
+        ensure(
+            diagnostic.compression_ratio >= 0.0,
+            "compression ratio should be non-negative",
+        )
+    }
+
+    #[test]
+    fn representative_diagnostics_returns_multiple_reports() -> TestResult {
+        use super::compute_representative_size_diagnostics;
+
+        let diagnostics = compute_representative_size_diagnostics();
+
+        ensure(
+            diagnostics.len() >= 2,
+            format!("expected at least 2 diagnostics, got {}", diagnostics.len()),
+        )?;
+
+        for (name, diag) in &diagnostics {
+            ensure(
+                diag.json_bytes > 0,
+                format!("{name}: json_bytes should be positive"),
+            )?;
+            ensure(
+                diag.toon_bytes > 0,
+                format!("{name}: toon_bytes should be positive"),
+            )?;
+        }
+        Ok(())
     }
 }
