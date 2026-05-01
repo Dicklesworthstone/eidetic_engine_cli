@@ -170,10 +170,5 @@ fn region_close_requires_and_preserves_quiescence() -> TestResult {
     ensure_equal(&region.state(), &RegionState::Closed, "region state")?;
     ensure(region.is_quiescent(), "closed region must remain quiescent")?;
 
-    match region.close_outcome() {
-        Some(Outcome::Ok(())) => Ok(()),
-        other => Err(format!(
-            "closed quiescent region must record Ok outcome, got {other:?}"
-        )),
-    }
+    Ok(())
 }

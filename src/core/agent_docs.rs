@@ -555,6 +555,82 @@ pub const CONTRACT_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     },
 ];
 
+// ============================================================================
+// EE-DIST-005: Install/Update Recipe Failure Branches
+// ============================================================================
+
+pub const INSTALL_CHECK_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "binary checksum does not match expected",
+        jq: r#".data.checks[]? | select(.code == "checksum_mismatch") | {expected: .expected, actual: .actual, repair}"#,
+        next_action: "Re-download the binary from the official release URL and verify the checksum before replacing.",
+    },
+    FailureBranchEntry {
+        condition: "binary not found at expected path",
+        jq: r#".data.checks[]? | select(.code == "binary_not_found") | {path, repair}"#,
+        next_action: "Run `ee install --json` to install the binary or update PATH to include the install directory.",
+    },
+    FailureBranchEntry {
+        condition: "multiple ee binaries found in PATH",
+        jq: r#".data.checks[]? | select(.code == "duplicate_binary") | {paths, primary, repair}"#,
+        next_action: "Remove or rename duplicate binaries, keeping only the primary installation.",
+    },
+    FailureBranchEntry {
+        condition: "binary version is outdated",
+        jq: r#".data.checks[]? | select(.code == "version_stale") | {current: .current, latest: .latest, repair}"#,
+        next_action: "Run `ee update --json` to upgrade to the latest version.",
+    },
+];
+
+pub const UPDATE_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "network unavailable for update check",
+        jq: r#".data.degraded[]? | select(.code == "network_unavailable") | {message, offlineAction: .repair}"#,
+        next_action: "Defer update until network is available or use `ee update --offline` to apply a cached update.",
+    },
+    FailureBranchEntry {
+        condition: "update download failed",
+        jq: r#".error | select(.code == "download_failed") | {url, reason: .message, repair}"#,
+        next_action: "Retry the download or manually fetch from the release URL and run `ee update --from-file`.",
+    },
+    FailureBranchEntry {
+        condition: "update would break pinned version",
+        jq: r#".data.checks[]? | select(.code == "pinned_version") | {pinnedVersion: .pinned, targetVersion: .target, repair}"#,
+        next_action: "Remove the version pin with `ee config unset version-pin` or use `--force` to override.",
+    },
+    FailureBranchEntry {
+        condition: "post-update migration required",
+        jq: r#".data.postUpdate[]? | select(.action == "migrate") | {command, reason}"#,
+        next_action: "Run the listed migration command before using new features.",
+    },
+];
+
+pub const PIN_VERSION_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "specified version does not exist",
+        jq: r#".error | select(.code == "version_not_found") | {requestedVersion: .details.version, available: .details.availableVersions}"#,
+        next_action: "Choose a version from the available list or use `latest` for the most recent stable release.",
+    },
+    FailureBranchEntry {
+        condition: "version pin already set",
+        jq: r#".data | select(.existingPin) | {existingPin, requestedPin: .newPin}"#,
+        next_action: "Use `--force` to override the existing pin or run `ee config unset version-pin` first.",
+    },
+];
+
+pub const SUPPORT_BUNDLE_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "bundle creation failed due to permissions",
+        jq: r#".error | select(.code == "permission_denied") | {path, reason: .message}"#,
+        next_action: "Ensure write permissions for the output directory or specify an alternate path with `--output`.",
+    },
+    FailureBranchEntry {
+        condition: "bundle exceeds size limit",
+        jq: r#".data | select(.truncated) | {actualSize: .sizeBytes, limit: .limitBytes, excludedPaths: .excluded}"#,
+        next_action: "Use `--max-size` to increase the limit or `--exclude` to remove large artifacts.",
+    },
+];
+
 pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
     AgentDocsRecipeEntry {
         id: "pre-task-context",
@@ -605,6 +681,77 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         jq: r#".data.contracts[] | {name, schema, stability}"#,
         success_check: r#".schema == "ee.response.v1" and .success == true"#,
         failure_branches: CONTRACT_RECIPE_FAILURES,
+    },
+    // EE-DIST-005: Install/Update/Recovery Recipes
+    AgentDocsRecipeEntry {
+        id: "install-check",
+        title: "Verify ee installation integrity",
+        description: "Check binary presence, checksum, version currency, and PATH conflicts before relying on ee.",
+        category: "distribution",
+        command: "ee install check --json",
+        jq: r#"{binaryPath: .data.binaryPath, version: .data.version, checksum: .data.checksumValid, pathConflicts: (.data.duplicates // [])}"#,
+        success_check: r#".schema == "ee.response.v1" and .success == true and .data.checksumValid == true"#,
+        failure_branches: INSTALL_CHECK_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "update-dry-run",
+        title: "Preview update before applying",
+        description: "Show what an update would change without modifying the installed binary.",
+        category: "distribution",
+        command: "ee update --dry-run --json",
+        jq: r#"{currentVersion: .data.current, targetVersion: .data.target, changes: .data.changelog, postUpdateActions: (.data.postUpdate // [])}"#,
+        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        failure_branches: UPDATE_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "version-pin",
+        title: "Pin ee to a specific version",
+        description: "Lock the installation to a known version to prevent automatic updates.",
+        category: "distribution",
+        command: "ee config set version-pin <version> --json",
+        jq: r#"{pinnedVersion: .data.version, pinnedAt: .data.pinnedAt, expiresAt: .data.expiresAt}"#,
+        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        failure_branches: PIN_VERSION_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "checksum-recovery",
+        title: "Recover from checksum mismatch",
+        description: "Re-verify and reinstall ee binary when checksum validation fails.",
+        category: "distribution",
+        command: "ee install --force --verify-checksum --json",
+        jq: r#"{reinstalled: .data.installed, newChecksum: .data.checksum, previousChecksum: .data.previousChecksum}"#,
+        success_check: r#".schema == "ee.response.v1" and .success == true and .data.checksumValid == true"#,
+        failure_branches: INSTALL_CHECK_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "duplicate-binary-fix",
+        title: "Resolve duplicate ee binaries in PATH",
+        description: "Identify and remove conflicting ee installations when multiple binaries are found.",
+        category: "distribution",
+        command: "ee install diagnose --json",
+        jq: r#"{primaryPath: .data.primary, duplicates: [.data.duplicates[]? | {path, version, recommendation}], repairCommands: .data.repairCommands}"#,
+        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        failure_branches: INSTALL_CHECK_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "offline-update-posture",
+        title: "Check offline update readiness",
+        description: "Verify cached update availability when network is unavailable.",
+        category: "distribution",
+        command: "ee update --offline --check --json",
+        jq: r#"{offlineReady: .data.cachedUpdateAvailable, cachedVersion: .data.cachedVersion, cacheAge: .data.cacheAgeHours, degraded: (.data.degraded // [])}"#,
+        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        failure_branches: UPDATE_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "update-failure-bundle",
+        title: "Collect support bundle for failed update",
+        description: "Gather diagnostic evidence when an install or update fails for support handoff.",
+        category: "distribution",
+        command: "ee support-bundle --scope update --json",
+        jq: r#"{bundlePath: .data.path, sizeBytes: .data.sizeBytes, includes: .data.artifacts, binaryProvenance: .data.provenance}"#,
+        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        failure_branches: SUPPORT_BUNDLE_RECIPE_FAILURES,
     },
 ];
 
