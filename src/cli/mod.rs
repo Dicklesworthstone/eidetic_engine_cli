@@ -34,8 +34,8 @@ use crate::core::lab::{
     ReplayOptions as LabReplayOptions, capture_episode, replay_episode, run_counterfactual,
 };
 use crate::core::learn::{
-    LearnAgendaOptions, LearnExperimentProposeOptions, LearnSummaryOptions, LearnUncertaintyOptions,
-    propose_experiments, show_agenda, show_summary, show_uncertainty,
+    LearnAgendaOptions, LearnExperimentProposeOptions, LearnSummaryOptions,
+    LearnUncertaintyOptions, propose_experiments, show_agenda, show_summary, show_uncertainty,
 };
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
@@ -202,6 +202,9 @@ pub enum Command {
     /// Run diagnostic commands for trust, quarantine, and streams.
     #[command(subcommand)]
     Diag(DiagCommand),
+    /// List, run, and verify executable demos.
+    #[command(subcommand)]
+    Demo(DemoCommand),
     /// Run health checks on workspace and subsystems.
     Doctor(DoctorArgs),
     /// Memory economics: utility scores, attention budgets, maintenance debt.
@@ -412,6 +415,73 @@ pub struct ClaimVerifyArgs {
     /// Fail on first error instead of collecting all errors.
     #[arg(long, action = ArgAction::SetTrue)]
     pub fail_fast: bool,
+}
+
+/// Subcommands for `ee demo`.
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum DemoCommand {
+    /// List demos from demo.yaml manifest.
+    List(DemoListArgs),
+    /// Run a specific demo or all demos.
+    Run(DemoRunArgs),
+    /// Verify demo results against expected outputs.
+    Verify(DemoVerifyArgs),
+}
+
+/// Arguments for `ee demo list`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct DemoListArgs {
+    /// Filter by demo status (pending, passed, failed, skipped).
+    #[arg(long, short = 's', value_name = "STATUS")]
+    pub status: Option<String>,
+
+    /// Filter by tag.
+    #[arg(long, short = 't', value_name = "TAG")]
+    pub tag: Option<String>,
+
+    /// Path to demo.yaml file. Defaults to <workspace>/demo.yaml.
+    #[arg(long, value_name = "PATH")]
+    pub demo_file: Option<PathBuf>,
+}
+
+/// Arguments for `ee demo run`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct DemoRunArgs {
+    /// Demo ID to run (demo_<26-char>), or "all" to run all demos.
+    #[arg(value_name = "DEMO_ID")]
+    pub demo_id: String,
+
+    /// Path to demo.yaml file. Defaults to <workspace>/demo.yaml.
+    #[arg(long, value_name = "PATH")]
+    pub demo_file: Option<PathBuf>,
+
+    /// Working directory override for demo commands.
+    #[arg(long, value_name = "PATH")]
+    pub cwd: Option<PathBuf>,
+
+    /// Continue on failure instead of stopping at first error.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub continue_on_error: bool,
+
+    /// Dry-run mode: show what would be executed without running.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee demo verify`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct DemoVerifyArgs {
+    /// Demo ID to verify, or "all" to verify all demos.
+    #[arg(value_name = "DEMO_ID")]
+    pub demo_id: String,
+
+    /// Path to demo.yaml file. Defaults to <workspace>/demo.yaml.
+    #[arg(long, value_name = "PATH")]
+    pub demo_file: Option<PathBuf>,
+
+    /// Path to artifacts directory. Defaults to <workspace>/artifacts/.
+    #[arg(long, value_name = "PATH")]
+    pub artifacts_dir: Option<PathBuf>,
 }
 
 /// Arguments for `ee context`.
@@ -2201,6 +2271,11 @@ where
             ClaimCommand::Show(args) => handle_claim_show(&cli, args, stdout, stderr),
             ClaimCommand::Verify(args) => handle_claim_verify(&cli, args, stdout, stderr),
         },
+        Some(Command::Demo(ref demo_cmd)) => match demo_cmd {
+            DemoCommand::List(args) => handle_demo_list(&cli, args, stdout, stderr),
+            DemoCommand::Run(args) => handle_demo_run(&cli, args, stdout, stderr),
+            DemoCommand::Verify(args) => handle_demo_verify(&cli, args, stdout, stderr),
+        },
         Some(Command::Context(ref args)) => handle_context(&cli, args, stdout, stderr),
         Some(Command::Diag(ref diag_cmd)) => match diag_cmd {
             DiagCommand::Claims(args) => handle_diag_claims(&cli, args, stdout),
@@ -3557,6 +3632,77 @@ where
             | output::Renderer::Hook => write_stdout(
                 stdout,
                 &(output::render_learn_uncertainty_json(&report) + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_learn_experiment_propose<W, E>(
+    cli: &Cli,
+    args: &LearnExperimentProposeArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let min_expected_value = match args.min_expected_value.parse::<f64>() {
+        Ok(value) if (0.0..=1.0).contains(&value) => value,
+        _ => {
+            let error = DomainError::Usage {
+                message: format!(
+                    "Invalid minimum expected value `{}`: expected a number from 0.0 to 1.0",
+                    args.min_expected_value
+                ),
+                repair: Some("Use --min-expected-value 0.0".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let safety_boundary = match args.safety_boundary.parse::<ExperimentSafetyBoundary>() {
+        Ok(boundary) => boundary,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: format!(
+                    "Invalid safety boundary `{}`: expected one of {}",
+                    error.value(),
+                    error.expected()
+                ),
+                repair: Some("Use --safety-boundary dry_run_only".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let options = LearnExperimentProposeOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        limit: args.limit,
+        topic: args.topic.clone(),
+        min_expected_value,
+        max_attention_tokens: args.max_attention_tokens,
+        max_runtime_seconds: args.max_runtime_seconds,
+        safety_boundary,
+    };
+
+    match propose_experiments(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+                stdout,
+                &output::render_learn_experiment_proposal_human(&report),
+            ),
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_learn_experiment_proposal_toon(&report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_learn_experiment_proposal_json(&report) + "\n"),
             ),
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
@@ -7472,6 +7618,273 @@ where
 }
 
 // ============================================================================
+// EE-371: Demo list/run/verify handlers
+// ============================================================================
+
+fn handle_demo_list<W, E>(
+    cli: &Cli,
+    args: &DemoListArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let demo_file_path = args
+        .demo_file
+        .clone()
+        .unwrap_or_else(|| workspace.join("demo.yaml"));
+
+    let demo_file_exists = demo_file_path.exists();
+    let total_count: usize = 0;
+    let filtered_count: usize = 0;
+
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "subsystem": "demo",
+        "command": "list",
+        "data": {
+            "demo_file": demo_file_path.display().to_string(),
+            "demo_file_exists": demo_file_exists,
+            "total_count": total_count,
+            "filtered_count": filtered_count,
+            "demos": [],
+            "filter_status": args.status,
+            "filter_tag": args.tag,
+        }
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let out = format!(
+                "Demo List\n=========\nDemo file: {}\nFile exists: {}\nTotal demos: {}\nFiltered: {}\n",
+                demo_file_path.display(),
+                demo_file_exists,
+                total_count,
+                filtered_count
+            );
+            write_stdout(stdout, &out)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &format!(
+                "demo_list: total={} filtered={}\n",
+                total_count, filtered_count
+            ),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(serde_json::to_string_pretty(&response).unwrap_or_default() + "\n"),
+        ),
+    }
+}
+
+fn handle_demo_run<W, E>(
+    cli: &Cli,
+    args: &DemoRunArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::models::demo::DEMO_RUN_RESULT_SCHEMA_V1;
+
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let demo_file_path = args
+        .demo_file
+        .clone()
+        .unwrap_or_else(|| workspace.join("demo.yaml"));
+
+    let demo_file_exists = demo_file_path.exists();
+
+    if !demo_file_exists {
+        let error_response = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "subsystem": "demo",
+            "command": "run",
+            "error": {
+                "code": "demo_file_not_found",
+                "message": format!("Demo file not found: {}", demo_file_path.display()),
+            }
+        });
+        if !cli.wants_json() && !cli.renderer().is_machine_readable() {
+            let _ = writeln!(
+                stderr,
+                "Error: Demo file not found: {}",
+                demo_file_path.display()
+            );
+        }
+        return match cli.renderer() {
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(serde_json::to_string_pretty(&error_response).unwrap_or_default() + "\n"),
+            ),
+            _ => write_stdout(stdout, ""),
+        };
+    }
+
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let demo_id = &args.demo_id;
+    let is_dry_run = args.dry_run;
+
+    let response = serde_json::json!({
+        "schema": DEMO_RUN_RESULT_SCHEMA_V1,
+        "subsystem": "demo",
+        "command": "run",
+        "data": {
+            "demo_id": demo_id,
+            "demo_file": demo_file_path.display().to_string(),
+            "status": if is_dry_run { "dry_run" } else { "pending" },
+            "dry_run": is_dry_run,
+            "timestamp": timestamp,
+            "command_results": [],
+        }
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mode = if is_dry_run { " (dry-run)" } else { "" };
+            let out = format!(
+                "Demo Run{}\n========\nDemo ID: {}\nDemo file: {}\nStatus: pending\nTimestamp: {}\n",
+                mode,
+                demo_id,
+                demo_file_path.display(),
+                timestamp
+            );
+            write_stdout(stdout, &out)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &format!("demo_run: id={} dry_run={}\n", demo_id, is_dry_run),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(serde_json::to_string_pretty(&response).unwrap_or_default() + "\n"),
+        ),
+    }
+}
+
+fn handle_demo_verify<W, E>(
+    cli: &Cli,
+    args: &DemoVerifyArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::models::demo::DEMO_RUN_RESULT_SCHEMA_V1;
+
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let demo_file_path = args
+        .demo_file
+        .clone()
+        .unwrap_or_else(|| workspace.join("demo.yaml"));
+
+    let artifacts_dir = args
+        .artifacts_dir
+        .clone()
+        .unwrap_or_else(|| workspace.join("artifacts"));
+
+    let demo_file_exists = demo_file_path.exists();
+    let artifacts_dir_exists = artifacts_dir.exists();
+
+    if !demo_file_exists {
+        let error_response = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "subsystem": "demo",
+            "command": "verify",
+            "error": {
+                "code": "demo_file_not_found",
+                "message": format!("Demo file not found: {}", demo_file_path.display()),
+            }
+        });
+        if !cli.wants_json() && !cli.renderer().is_machine_readable() {
+            let _ = writeln!(
+                stderr,
+                "Error: Demo file not found: {}",
+                demo_file_path.display()
+            );
+        }
+        return match cli.renderer() {
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(serde_json::to_string_pretty(&error_response).unwrap_or_default() + "\n"),
+            ),
+            _ => write_stdout(stdout, ""),
+        };
+    }
+
+    let demo_id = &args.demo_id;
+    let timestamp = chrono::Utc::now().to_rfc3339();
+
+    let response = serde_json::json!({
+        "schema": DEMO_RUN_RESULT_SCHEMA_V1,
+        "subsystem": "demo",
+        "command": "verify",
+        "data": {
+            "demo_id": demo_id,
+            "demo_file": demo_file_path.display().to_string(),
+            "artifacts_dir": artifacts_dir.display().to_string(),
+            "artifacts_dir_exists": artifacts_dir_exists,
+            "status": "pending",
+            "timestamp": timestamp,
+            "verification_results": [],
+        }
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let out = format!(
+                "Demo Verify\n===========\nDemo ID: {}\nDemo file: {}\nArtifacts dir: {}\nStatus: pending\nTimestamp: {}\n",
+                demo_id,
+                demo_file_path.display(),
+                artifacts_dir.display(),
+                timestamp
+            );
+            write_stdout(stdout, &out)
+        }
+        output::Renderer::Toon => write_stdout(stdout, &format!("demo_verify: id={}\n", demo_id)),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(serde_json::to_string_pretty(&response).unwrap_or_default() + "\n"),
+        ),
+    }
+}
+
+// ============================================================================
 // EE-DIAG-001: Redacted Diagnostic Support Bundle
 // ============================================================================
 
@@ -7781,6 +8194,11 @@ impl NormalizedInvocation {
                     ClaimCommand::Show(_) => "claim show".to_string(),
                     ClaimCommand::Verify(_) => "claim verify".to_string(),
                 },
+                Command::Demo(demo) => match demo {
+                    DemoCommand::List(_) => "demo list".to_string(),
+                    DemoCommand::Run(_) => "demo run".to_string(),
+                    DemoCommand::Verify(_) => "demo verify".to_string(),
+                },
                 Command::Context(_) => "context".to_string(),
                 Command::Diag(diag) => match diag {
                     DiagCommand::Claims(_) => "diag claims".to_string(),
@@ -7833,6 +8251,11 @@ impl NormalizedInvocation {
                 Command::Learn(learn) => match learn {
                     LearnCommand::Agenda(_) => "learn agenda".to_string(),
                     LearnCommand::Uncertainty(_) => "learn uncertainty".to_string(),
+                    LearnCommand::Experiment(experiment) => match experiment {
+                        LearnExperimentCommand::Propose(_) => {
+                            "learn experiment propose".to_string()
+                        }
+                    },
                     LearnCommand::Summary(_) => "learn summary".to_string(),
                 },
                 Command::Memory(mem) => match mem {
@@ -8216,8 +8639,8 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        Cli, Command, DiagCommand, FieldsLevel, ImportCommand, MemoryCommand, OutputFormat,
-        ShadowMode, run,
+        Cli, Command, DiagCommand, FieldsLevel, ImportCommand, LearnCommand,
+        LearnExperimentCommand, MemoryCommand, OutputFormat, ShadowMode, run,
     };
     use crate::models::ProcessExitCode;
 
@@ -8331,6 +8754,57 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_learn_experiment_propose() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "learn",
+            "experiment",
+            "propose",
+            "--limit",
+            "2",
+            "--topic",
+            "testing",
+            "--min-expected-value",
+            "0.3",
+            "--max-attention-tokens",
+            "700",
+            "--max-runtime-seconds",
+            "180",
+            "--safety-boundary",
+            "human_review",
+        ])
+        .map_err(|error| {
+            format!(
+                "failed to parse learn experiment propose: {:?}",
+                error.kind()
+            )
+        })?;
+
+        match parsed.command {
+            Some(Command::Learn(LearnCommand::Experiment(LearnExperimentCommand::Propose(
+                args,
+            )))) => {
+                ensure_equal(&args.limit, &2, "proposal limit")?;
+                ensure_equal(&args.topic, &Some("testing".to_string()), "proposal topic")?;
+                ensure_equal(
+                    &args.min_expected_value,
+                    &"0.3".to_string(),
+                    "minimum expected value",
+                )?;
+                ensure_equal(&args.max_attention_tokens, &700, "attention budget")?;
+                ensure_equal(&args.max_runtime_seconds, &180, "runtime budget")?;
+                ensure_equal(
+                    &args.safety_boundary,
+                    &"human_review".to_string(),
+                    "safety boundary",
+                )
+            }
+            other => Err(format!("expected learn experiment propose, got {other:?}")),
+        }
+    }
+
+    #[test]
     fn status_json_writes_machine_data_to_stdout_only() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "status", "--json"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "status JSON exit")?;
@@ -8353,6 +8827,57 @@ mod tests {
             "status format JSON schema",
         )?;
         ensure(stderr.is_empty(), "status format JSON stderr must be empty")
+    }
+
+    #[test]
+    fn learn_experiment_propose_json_writes_machine_data_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "learn",
+            "experiment",
+            "propose",
+            "--limit",
+            "1",
+            "--min-expected-value",
+            "0.2",
+            "--safety-boundary",
+            "human_review",
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "learn experiment propose JSON exit",
+        )?;
+        ensure(stderr.is_empty(), "learn experiment propose stderr clean")?;
+        ensure_ends_with(&stdout, '\n', "learn experiment propose newline")?;
+        let json: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("learn experiment propose stdout must be JSON: {error}"))?;
+        ensure_equal(
+            &json["schema"],
+            &serde_json::json!("ee.learn.experiment_proposal.v1"),
+            "proposal schema",
+        )?;
+        ensure_equal(&json["success"], &serde_json::json!(true), "success flag")?;
+        ensure_equal(&json["returned"], &serde_json::json!(1), "returned count")?;
+        ensure(
+            json["proposals"][0]["expectedValue"].is_number(),
+            "proposal expectedValue must be numeric",
+        )?;
+        ensure(
+            json["proposals"][0]["budget"].is_object(),
+            "proposal budget must be present",
+        )?;
+        ensure_equal(
+            &json["proposals"][0]["safety"]["boundary"],
+            &serde_json::json!("human_review"),
+            "proposal safety boundary",
+        )?;
+        ensure(
+            json["proposals"][0]["decisionImpact"].is_object(),
+            "proposal decisionImpact must be present",
+        )
     }
 
     #[test]

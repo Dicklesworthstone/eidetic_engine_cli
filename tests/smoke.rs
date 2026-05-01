@@ -879,6 +879,82 @@ fn pack_query_file_unsupported_version_uses_stable_machine_error() -> TestResult
     )
 }
 
+#[test]
+fn learn_experiment_propose_json_exposes_decision_ready_fields() -> TestResult {
+    let output = run_ee(&[
+        "--json",
+        "learn",
+        "experiment",
+        "propose",
+        "--limit",
+        "1",
+        "--min-expected-value",
+        "0.2",
+        "--max-attention-tokens",
+        "650",
+        "--max-runtime-seconds",
+        "180",
+        "--safety-boundary",
+        "human_review",
+    ])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        output.status.success(),
+        format!("learn experiment propose should succeed; stderr: {stderr}"),
+    )?;
+    ensure(
+        output.stderr.is_empty(),
+        "learn experiment propose stderr clean",
+    )?;
+    ensure_no_ansi(&stdout, "learn experiment propose JSON stdout")?;
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("learn experiment propose stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.learn.experiment_proposal.v1"),
+        "learn experiment proposal schema",
+    )?;
+    ensure_equal(&json["success"], &serde_json::json!(true), "success flag")?;
+    ensure_equal(&json["returned"], &serde_json::json!(1), "returned count")?;
+    ensure(
+        json["proposals"]
+            .as_array()
+            .is_some_and(|proposals| proposals.len() == 1),
+        "learn experiment propose should return one proposal",
+    )?;
+    let proposal = &json["proposals"][0];
+    ensure(
+        proposal["expectedValue"].is_number(),
+        "proposal expectedValue must be numeric",
+    )?;
+    ensure_equal(
+        &proposal["budget"]["attentionTokens"],
+        &serde_json::json!(650),
+        "proposal attention budget",
+    )?;
+    ensure_equal(
+        &proposal["budget"]["maxRuntimeSeconds"],
+        &serde_json::json!(180),
+        "proposal runtime budget",
+    )?;
+    ensure_equal(
+        &proposal["safety"]["boundary"],
+        &serde_json::json!("human_review"),
+        "proposal safety boundary",
+    )?;
+    ensure_equal(
+        &proposal["safety"]["mutationAllowed"],
+        &serde_json::json!(false),
+        "proposal must not allow mutation",
+    )?;
+    ensure(
+        proposal["decisionImpact"]["decisionId"].is_string(),
+        "proposal decision impact must identify the affected decision",
+    )
+}
+
 // =============================================================================
 // Integration Foundation Smoke Tests (EE-313)
 //
@@ -1370,7 +1446,7 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         "--confidence",
         "0.95",
         "--source",
-        "file://AGENTS.md#compiler-checks",
+        "file://AGENTS.md#L164-L173",
         "Run cargo fmt --check before every release.",
     ])?;
     let remember1_stdout = String::from_utf8_lossy(&remember1.stdout);

@@ -75,7 +75,11 @@ impl PolicyDomain {
 
     #[must_use]
     pub const fn all() -> [Self; 3] {
-        [Self::PackSelection, Self::CurationFilter, Self::CacheAdmission]
+        [
+            Self::PackSelection,
+            Self::CurationFilter,
+            Self::CacheAdmission,
+        ]
     }
 }
 
@@ -353,10 +357,8 @@ pub mod pack {
         candidate: &PackShadowOutput,
         config: &ShadowGateConfig,
     ) -> (ShadowVerdict, ShadowMetrics) {
-        let incumbent_set: std::collections::BTreeSet<_> =
-            incumbent.selected_ids.iter().collect();
-        let candidate_set: std::collections::BTreeSet<_> =
-            candidate.selected_ids.iter().collect();
+        let incumbent_set: std::collections::BTreeSet<_> = incumbent.selected_ids.iter().collect();
+        let candidate_set: std::collections::BTreeSet<_> = candidate.selected_ids.iter().collect();
 
         let intersection = incumbent_set.intersection(&candidate_set).count();
         let union = incumbent_set.union(&candidate_set).count();
@@ -405,10 +407,8 @@ pub mod curation {
         candidate: &CurationShadowOutput,
         config: &ShadowGateConfig,
     ) -> (ShadowVerdict, ShadowMetrics) {
-        let incumbent_set: std::collections::BTreeSet<_> =
-            incumbent.accepted_ids.iter().collect();
-        let candidate_set: std::collections::BTreeSet<_> =
-            candidate.accepted_ids.iter().collect();
+        let incumbent_set: std::collections::BTreeSet<_> = incumbent.accepted_ids.iter().collect();
+        let candidate_set: std::collections::BTreeSet<_> = candidate.accepted_ids.iter().collect();
 
         let intersection = incumbent_set.intersection(&candidate_set).count();
         let union = incumbent_set.union(&candidate_set).count();
