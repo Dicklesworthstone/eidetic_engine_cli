@@ -292,6 +292,22 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             expected_command: Some("diag dependencies"),
         },
         ContractCase {
+            name: "diag_integrity_json",
+            args: &[
+                "diag",
+                "integrity",
+                "--database",
+                "tests/fixtures/missing-ee-workspace/.ee/ee.db",
+                "--json",
+            ],
+            category: "dependencies",
+            golden_name: "diag_integrity",
+            format: ContractFormat::Json,
+            expected_success: true,
+            expected_schema: Some("ee.response.v1"),
+            expected_command: Some("diag integrity"),
+        },
+        ContractCase {
             name: "capabilities_json",
             args: &["capabilities", "--json"],
             category: "capabilities",
@@ -804,6 +820,50 @@ fn diag_dependencies_json_matches_golden() -> TestResult {
     )?;
 
     assert_golden("dependencies", "diag_dependencies", &stdout)
+}
+
+#[test]
+fn diag_integrity_json_matches_golden() -> TestResult {
+    let output = run_ee(&[
+        "diag",
+        "integrity",
+        "--database",
+        "tests/fixtures/missing-ee-workspace/.ee/ee.db",
+        "--json",
+    ])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        output.status.success(),
+        format!("diag integrity --json should succeed; stderr: {stderr}"),
+    )?;
+    ensure(
+        stderr.is_empty(),
+        "diag integrity --json stderr must be empty",
+    )?;
+    ensure_starts_with(
+        &stdout,
+        "{\"schema\":\"ee.response.v1\"",
+        "integrity diagnostics JSON schema",
+    )?;
+    ensure_contains(
+        &stdout,
+        "\"command\":\"diag integrity\"",
+        "integrity diagnostics command",
+    )?;
+    ensure_contains(
+        &stdout,
+        "\"schema\":\"ee.diag.integrity.v1\"",
+        "integrity diagnostics data schema",
+    )?;
+    ensure_contains(
+        &stdout,
+        "\"integrity_database_missing\"",
+        "missing database degradation",
+    )?;
+
+    assert_golden("dependencies", "diag_integrity", &stdout)
 }
 
 // =============================================================================

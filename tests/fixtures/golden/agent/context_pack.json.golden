@@ -22,6 +22,23 @@
         "maxTokens": 4000,
         "usedTokens": 11
       },
+      "advisoryBanner": {
+        "status": "degraded",
+        "summary": "Context includes 1 degraded signal; validate advisory memory and repair degraded sources before relying on this pack.",
+        "authoritativeCount": 1,
+        "advisoryCount": 0,
+        "legacyCount": 0,
+        "degradationCount": 1,
+        "notes": [
+          {
+            "code": "degraded_context",
+            "severity": "low",
+            "message": "1 degraded context signal present; inspect degraded[] repairs before relying on omitted or fallback sources.",
+            "memoryIds": [],
+            "action": "inspect_degraded_repairs"
+          }
+        ]
+      },
       "quality": {
         "itemCount": 1,
         "omittedCount": 0,
@@ -102,6 +119,11 @@
           "scores": {
             "relevance": 0.408205,
             "utility": 0.8
+          },
+          "trust": {
+            "class": "human_explicit",
+            "subclass": "project-rule",
+            "posture": "authoritative"
           },
           "provenance": [
             {

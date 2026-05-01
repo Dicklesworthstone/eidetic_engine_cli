@@ -6,14 +6,24 @@
 //! The `--fix-plan` flag (EE-241) outputs a structured repair plan that
 //! agents can execute step-by-step.
 
+use std::path::PathBuf;
+
+use crate::db::{
+    CreateMemoryInput, DbConnection, ForeignKeyCheckResult, IntegrityCheckResult,
+    ProvenanceSampleVerificationReport,
+};
+use crate::models::TrustClass;
 use crate::models::error_codes::{self, ErrorCode};
 
 pub const DEPENDENCY_DIAGNOSTICS_SCHEMA_V1: &str = "ee.diag.dependencies.v1";
 pub const FRANKEN_HEALTH_SCHEMA_V1: &str = "ee.doctor.franken_health.v1";
+pub const INTEGRITY_DIAGNOSTICS_SCHEMA_V1: &str = "ee.diag.integrity.v1";
 pub const DEPENDENCY_MATRIX_REVISION: u32 = 1;
 pub const DEPENDENCY_MATRIX_SOURCE_BEAD: &str = "eidetic_engine_cli-ilcq";
 pub const DEPENDENCY_MATRIX_SOURCE_PLAN_ITEM: &str = "EE-307";
 pub const DEPENDENCY_MATRIX_DEFAULT_FEATURE_PROFILE: &str = "default";
+pub const INTEGRITY_CANARY_MEMORY_ID: &str = "mem_integritycanary00000000000";
+const INTEGRITY_CANARY_CONTENT: &str = "EE integrity canary memory. Safe to ignore; verifies memory table write/read/provenance chain.";
 
 pub const FORBIDDEN_CRATES: &[&str] = &[
     "tokio",
@@ -188,6 +198,587 @@ pub struct FixStep {
     pub issue: String,
     pub error_code: Option<ErrorCode>,
     pub command: &'static str,
+}
+
+/// Options for `ee diag integrity`.
+#[derive(Clone, Debug)]
+pub struct IntegrityDiagnosticsOptions {
+    pub workspace_path: PathBuf,
+    pub database_path: Option<PathBuf>,
+    pub workspace_id: String,
+    pub sample_size: u32,
+    pub create_canary: bool,
+    pub dry_run: bool,
+}
+
+impl IntegrityDiagnosticsOptions {
+    #[must_use]
+    pub fn resolved_database_path(&self) -> PathBuf {
+        self.database_path
+            .clone()
+            .unwrap_or_else(|| self.workspace_path.join(".ee").join("ee.db"))
+    }
+}
+
+/// Overall integrity diagnostic posture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntegrityDiagnosticsStatus {
+    Ok,
+    Degraded,
+    Failed,
+}
+
+impl IntegrityDiagnosticsStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Degraded => "degraded",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Severity for an integrity diagnostic check.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntegrityDiagnosticSeverity {
+    Ok,
+    Warning,
+    Error,
+}
+
+impl IntegrityDiagnosticSeverity {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// A single integrity check.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegrityDiagnosticCheck {
+    pub name: &'static str,
+    pub severity: IntegrityDiagnosticSeverity,
+    pub message: String,
+    pub repair: Option<&'static str>,
+}
+
+impl IntegrityDiagnosticCheck {
+    #[must_use]
+    pub fn ok(name: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            name,
+            severity: IntegrityDiagnosticSeverity::Ok,
+            message: message.into(),
+            repair: None,
+        }
+    }
+
+    #[must_use]
+    pub fn warning(
+        name: &'static str,
+        message: impl Into<String>,
+        repair: Option<&'static str>,
+    ) -> Self {
+        Self {
+            name,
+            severity: IntegrityDiagnosticSeverity::Warning,
+            message: message.into(),
+            repair,
+        }
+    }
+
+    #[must_use]
+    pub fn error(
+        name: &'static str,
+        message: impl Into<String>,
+        repair: Option<&'static str>,
+    ) -> Self {
+        Self {
+            name,
+            severity: IntegrityDiagnosticSeverity::Error,
+            message: message.into(),
+            repair,
+        }
+    }
+}
+
+/// Explicit canary-memory mutation posture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntegrityCanaryStatus {
+    NotRequested,
+    DryRun,
+    Created,
+    AlreadyExists,
+    Skipped,
+    Failed,
+}
+
+impl IntegrityCanaryStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequested => "not_requested",
+            Self::DryRun => "dry_run",
+            Self::Created => "created",
+            Self::AlreadyExists => "already_exists",
+            Self::Skipped => "skipped",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Canary-memory creation result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegrityCanaryReport {
+    pub requested: bool,
+    pub dry_run: bool,
+    pub memory_id: &'static str,
+    pub status: IntegrityCanaryStatus,
+    pub message: String,
+    pub repair: Option<&'static str>,
+}
+
+impl IntegrityCanaryReport {
+    #[must_use]
+    pub fn not_requested() -> Self {
+        Self {
+            requested: false,
+            dry_run: false,
+            memory_id: INTEGRITY_CANARY_MEMORY_ID,
+            status: IntegrityCanaryStatus::NotRequested,
+            message: "Canary memory creation was not requested.".to_string(),
+            repair: Some("Use `ee diag integrity --create-canary --json` to write one."),
+        }
+    }
+}
+
+/// Non-fatal integrity diagnostic degradation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegrityDiagnosticDegradation {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub message: String,
+    pub repair: Option<&'static str>,
+}
+
+/// Full `ee diag integrity` report.
+#[derive(Clone, Debug)]
+pub struct IntegrityDiagnosticsReport {
+    pub version: &'static str,
+    pub schema: &'static str,
+    pub status: IntegrityDiagnosticsStatus,
+    pub workspace_id: String,
+    pub database_path: PathBuf,
+    pub sample_size: u32,
+    pub checks: Vec<IntegrityDiagnosticCheck>,
+    pub provenance_sample: Option<ProvenanceSampleVerificationReport>,
+    pub canary: IntegrityCanaryReport,
+    pub degraded: Vec<IntegrityDiagnosticDegradation>,
+}
+
+impl IntegrityDiagnosticsReport {
+    #[must_use]
+    pub fn gather(options: &IntegrityDiagnosticsOptions) -> Self {
+        let database_path = options.resolved_database_path();
+        let mut checks = Vec::new();
+        let mut degraded = Vec::new();
+        let mut provenance_sample = None;
+
+        if !database_path.exists() {
+            checks.push(IntegrityDiagnosticCheck::warning(
+                "database_exists",
+                format!("Database not found at {}.", database_path.display()),
+                Some("ee init --workspace ."),
+            ));
+            degraded.push(IntegrityDiagnosticDegradation {
+                code: "integrity_database_missing",
+                severity: "medium",
+                message: "Integrity checks require an initialized ee database.".to_string(),
+                repair: Some("ee init --workspace ."),
+            });
+            let canary = canary_for_missing_database(options);
+            return Self::finalize(
+                options,
+                database_path,
+                checks,
+                provenance_sample,
+                canary,
+                degraded,
+            );
+        }
+
+        checks.push(IntegrityDiagnosticCheck::ok(
+            "database_exists",
+            format!("Database found at {}.", database_path.display()),
+        ));
+
+        let connection = match DbConnection::open_file(&database_path) {
+            Ok(connection) => connection,
+            Err(error) => {
+                checks.push(IntegrityDiagnosticCheck::error(
+                    "database_open",
+                    format!("Failed to open database: {error}"),
+                    Some("ee doctor --json"),
+                ));
+                degraded.push(IntegrityDiagnosticDegradation {
+                    code: "integrity_database_open_failed",
+                    severity: "high",
+                    message: "The database exists but could not be opened.".to_string(),
+                    repair: Some("ee doctor --json"),
+                });
+                let canary = canary_for_open_failure(options);
+                return Self::finalize(
+                    options,
+                    database_path,
+                    checks,
+                    provenance_sample,
+                    canary,
+                    degraded,
+                );
+            }
+        };
+
+        checks.push(IntegrityDiagnosticCheck::ok(
+            "database_open",
+            "Database opened through FrankenSQLite/SQLModel.",
+        ));
+
+        checks.push(check_sqlite_integrity(&connection));
+        checks.push(check_foreign_keys(&connection));
+
+        match connection.needs_migration() {
+            Ok(false) => checks.push(IntegrityDiagnosticCheck::ok(
+                "schema_current",
+                "Database schema is current.",
+            )),
+            Ok(true) => {
+                checks.push(IntegrityDiagnosticCheck::warning(
+                    "schema_current",
+                    "Database schema has pending migrations.",
+                    Some("ee init --workspace ."),
+                ));
+                degraded.push(IntegrityDiagnosticDegradation {
+                    code: "integrity_schema_migration_required",
+                    severity: "medium",
+                    message: "Integrity diagnostics require the current ee schema before sampling provenance or writing the canary."
+                        .to_string(),
+                    repair: Some("ee init --workspace ."),
+                });
+                let canary = canary_for_pending_migration(options);
+                return Self::finalize(
+                    options,
+                    database_path,
+                    checks,
+                    provenance_sample,
+                    canary,
+                    degraded,
+                );
+            }
+            Err(error) => {
+                checks.push(IntegrityDiagnosticCheck::warning(
+                    "schema_current",
+                    format!("Could not inspect migration state: {error}"),
+                    Some("ee doctor --json"),
+                ));
+                degraded.push(IntegrityDiagnosticDegradation {
+                    code: "integrity_schema_check_unavailable",
+                    severity: "medium",
+                    message: "The database migration state could not be inspected.".to_string(),
+                    repair: Some("ee doctor --json"),
+                });
+                let canary = canary_for_pending_migration(options);
+                return Self::finalize(
+                    options,
+                    database_path,
+                    checks,
+                    provenance_sample,
+                    canary,
+                    degraded,
+                );
+            }
+        }
+
+        match connection
+            .inspect_sampled_memory_provenance(&options.workspace_id, options.sample_size)
+        {
+            Ok(report) => {
+                checks.push(check_provenance_sample(&report));
+                provenance_sample = Some(report);
+            }
+            Err(error) => {
+                checks.push(IntegrityDiagnosticCheck::warning(
+                    "provenance_sample",
+                    format!("Could not inspect sampled provenance chains: {error}"),
+                    Some("ee diag integrity --json"),
+                ));
+                degraded.push(IntegrityDiagnosticDegradation {
+                    code: "integrity_provenance_sample_unavailable",
+                    severity: "medium",
+                    message: "The provenance-chain sample could not be inspected.".to_string(),
+                    repair: Some("ee diag integrity --json"),
+                });
+            }
+        }
+
+        let canary = maybe_create_canary(&connection, options);
+        if canary.status == IntegrityCanaryStatus::Failed {
+            checks.push(IntegrityDiagnosticCheck::warning(
+                "canary_memory",
+                canary.message.clone(),
+                canary.repair,
+            ));
+        }
+
+        Self::finalize(
+            options,
+            database_path,
+            checks,
+            provenance_sample,
+            canary,
+            degraded,
+        )
+    }
+
+    #[must_use]
+    pub fn success(&self) -> bool {
+        self.status != IntegrityDiagnosticsStatus::Failed
+    }
+
+    fn finalize(
+        options: &IntegrityDiagnosticsOptions,
+        database_path: PathBuf,
+        checks: Vec<IntegrityDiagnosticCheck>,
+        provenance_sample: Option<ProvenanceSampleVerificationReport>,
+        canary: IntegrityCanaryReport,
+        degraded: Vec<IntegrityDiagnosticDegradation>,
+    ) -> Self {
+        let status = if checks
+            .iter()
+            .any(|check| check.severity == IntegrityDiagnosticSeverity::Error)
+        {
+            IntegrityDiagnosticsStatus::Failed
+        } else if !degraded.is_empty()
+            || checks
+                .iter()
+                .any(|check| check.severity == IntegrityDiagnosticSeverity::Warning)
+        {
+            IntegrityDiagnosticsStatus::Degraded
+        } else {
+            IntegrityDiagnosticsStatus::Ok
+        };
+
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            schema: INTEGRITY_DIAGNOSTICS_SCHEMA_V1,
+            status,
+            workspace_id: options.workspace_id.clone(),
+            database_path,
+            sample_size: options.sample_size,
+            checks,
+            provenance_sample,
+            canary,
+            degraded,
+        }
+    }
+}
+
+fn canary_for_missing_database(options: &IntegrityDiagnosticsOptions) -> IntegrityCanaryReport {
+    if !options.create_canary {
+        return IntegrityCanaryReport::not_requested();
+    }
+
+    if options.dry_run {
+        return IntegrityCanaryReport {
+            requested: true,
+            dry_run: true,
+            memory_id: INTEGRITY_CANARY_MEMORY_ID,
+            status: IntegrityCanaryStatus::DryRun,
+            message: "Would create the integrity canary after the database exists.".to_string(),
+            repair: Some("ee init --workspace ."),
+        };
+    }
+
+    IntegrityCanaryReport {
+        requested: true,
+        dry_run: false,
+        memory_id: INTEGRITY_CANARY_MEMORY_ID,
+        status: IntegrityCanaryStatus::Skipped,
+        message: "Canary creation skipped because the database is missing.".to_string(),
+        repair: Some("ee init --workspace ."),
+    }
+}
+
+fn canary_for_open_failure(options: &IntegrityDiagnosticsOptions) -> IntegrityCanaryReport {
+    if !options.create_canary {
+        return IntegrityCanaryReport::not_requested();
+    }
+
+    IntegrityCanaryReport {
+        requested: true,
+        dry_run: options.dry_run,
+        memory_id: INTEGRITY_CANARY_MEMORY_ID,
+        status: IntegrityCanaryStatus::Skipped,
+        message: "Canary creation skipped because the database could not be opened.".to_string(),
+        repair: Some("ee doctor --json"),
+    }
+}
+
+fn canary_for_pending_migration(options: &IntegrityDiagnosticsOptions) -> IntegrityCanaryReport {
+    if !options.create_canary {
+        return IntegrityCanaryReport::not_requested();
+    }
+
+    IntegrityCanaryReport {
+        requested: true,
+        dry_run: options.dry_run,
+        memory_id: INTEGRITY_CANARY_MEMORY_ID,
+        status: IntegrityCanaryStatus::Skipped,
+        message: "Canary creation skipped until database migrations are current.".to_string(),
+        repair: Some("ee init --workspace ."),
+    }
+}
+
+fn check_sqlite_integrity(connection: &DbConnection) -> IntegrityDiagnosticCheck {
+    match connection.check_integrity() {
+        Ok(IntegrityCheckResult { passed: true, .. }) => {
+            IntegrityDiagnosticCheck::ok("sqlite_integrity", "SQLite integrity_check returned ok.")
+        }
+        Ok(IntegrityCheckResult { issues, .. }) => IntegrityDiagnosticCheck::error(
+            "sqlite_integrity",
+            format!("SQLite integrity_check reported {} issue(s).", issues.len()),
+            Some("Restore from backup or inspect with sqlite integrity_check."),
+        ),
+        Err(error) => IntegrityDiagnosticCheck::error(
+            "sqlite_integrity",
+            format!("Failed to run SQLite integrity_check: {error}"),
+            Some("ee doctor --json"),
+        ),
+    }
+}
+
+fn check_foreign_keys(connection: &DbConnection) -> IntegrityDiagnosticCheck {
+    match connection.check_foreign_keys() {
+        Ok(ForeignKeyCheckResult { passed: true, .. }) => IntegrityDiagnosticCheck::ok(
+            "foreign_keys",
+            "SQLite foreign_key_check returned no violations.",
+        ),
+        Ok(ForeignKeyCheckResult { violations, .. }) => IntegrityDiagnosticCheck::error(
+            "foreign_keys",
+            format!(
+                "SQLite foreign_key_check reported {} violation(s).",
+                violations.len()
+            ),
+            Some("Inspect foreign_key_check output before further writes."),
+        ),
+        Err(error) => IntegrityDiagnosticCheck::error(
+            "foreign_keys",
+            format!("Failed to run SQLite foreign_key_check: {error}"),
+            Some("ee doctor --json"),
+        ),
+    }
+}
+
+fn check_provenance_sample(
+    report: &ProvenanceSampleVerificationReport,
+) -> IntegrityDiagnosticCheck {
+    if report.is_clean() {
+        IntegrityDiagnosticCheck::ok(
+            "provenance_sample",
+            format!(
+                "Sampled {} memory provenance chain(s); all matched.",
+                report.checked_count
+            ),
+        )
+    } else {
+        IntegrityDiagnosticCheck::warning(
+            "provenance_sample",
+            format!(
+                "Sampled provenance found {} missing and {} mismatched chain hash(es).",
+                report.missing_count, report.mismatch_count
+            ),
+            Some("ee diag integrity --create-canary --json"),
+        )
+    }
+}
+
+fn maybe_create_canary(
+    connection: &DbConnection,
+    options: &IntegrityDiagnosticsOptions,
+) -> IntegrityCanaryReport {
+    if !options.create_canary {
+        return IntegrityCanaryReport::not_requested();
+    }
+
+    if options.dry_run {
+        return IntegrityCanaryReport {
+            requested: true,
+            dry_run: true,
+            memory_id: INTEGRITY_CANARY_MEMORY_ID,
+            status: IntegrityCanaryStatus::DryRun,
+            message: "Would create the integrity canary memory.".to_string(),
+            repair: None,
+        };
+    }
+
+    match connection.get_memory(INTEGRITY_CANARY_MEMORY_ID) {
+        Ok(Some(_)) => IntegrityCanaryReport {
+            requested: true,
+            dry_run: false,
+            memory_id: INTEGRITY_CANARY_MEMORY_ID,
+            status: IntegrityCanaryStatus::AlreadyExists,
+            message: "Integrity canary memory already exists.".to_string(),
+            repair: None,
+        },
+        Ok(None) => insert_canary_memory(connection, &options.workspace_id),
+        Err(error) => IntegrityCanaryReport {
+            requested: true,
+            dry_run: false,
+            memory_id: INTEGRITY_CANARY_MEMORY_ID,
+            status: IntegrityCanaryStatus::Failed,
+            message: format!("Could not check for existing canary memory: {error}"),
+            repair: Some("ee diag integrity --json"),
+        },
+    }
+}
+
+fn insert_canary_memory(connection: &DbConnection, workspace_id: &str) -> IntegrityCanaryReport {
+    let input = CreateMemoryInput {
+        workspace_id: workspace_id.to_string(),
+        level: "semantic".to_string(),
+        kind: "fact".to_string(),
+        content: INTEGRITY_CANARY_CONTENT.to_string(),
+        confidence: TrustClass::AgentAssertion.initial_confidence(),
+        utility: 0.0,
+        importance: 0.0,
+        provenance_uri: Some("ee://diag/integrity/canary/v1".to_string()),
+        trust_class: TrustClass::AgentAssertion.as_str().to_string(),
+        trust_subclass: Some("integrity-canary".to_string()),
+        tags: vec!["ee-canary".to_string(), "integrity".to_string()],
+    };
+
+    match connection.insert_memory(INTEGRITY_CANARY_MEMORY_ID, &input) {
+        Ok(()) => IntegrityCanaryReport {
+            requested: true,
+            dry_run: false,
+            memory_id: INTEGRITY_CANARY_MEMORY_ID,
+            status: IntegrityCanaryStatus::Created,
+            message: "Created integrity canary memory.".to_string(),
+            repair: None,
+        },
+        Err(error) => IntegrityCanaryReport {
+            requested: true,
+            dry_run: false,
+            memory_id: INTEGRITY_CANARY_MEMORY_ID,
+            status: IntegrityCanaryStatus::Failed,
+            message: format!("Failed to create integrity canary memory: {error}"),
+            repair: Some("ee diag integrity --json"),
+        },
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -801,6 +1392,7 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), String>;
+    const TEST_WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
 
     fn ensure<T: std::fmt::Debug + PartialEq>(actual: T, expected: T, ctx: &str) -> TestResult {
         if actual == expected {
@@ -932,6 +1524,177 @@ mod tests {
         ensure(plan.is_empty(), true, "plan is empty when all healthy")?;
         ensure(plan.total_issues, 0, "no total issues")?;
         ensure(plan.fixable_issues, 0, "no fixable issues")
+    }
+
+    #[test]
+    fn integrity_diagnostics_missing_database_degrades_without_creating_file() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("missing-ee.db");
+
+        let report = IntegrityDiagnosticsReport::gather(&IntegrityDiagnosticsOptions {
+            workspace_path: temp.path().to_path_buf(),
+            database_path: Some(database_path.clone()),
+            workspace_id: "default".to_string(),
+            sample_size: 8,
+            create_canary: false,
+            dry_run: false,
+        });
+
+        ensure(
+            report.status,
+            IntegrityDiagnosticsStatus::Degraded,
+            "missing db degrades",
+        )?;
+        ensure(database_path.exists(), false, "missing db was not created")?;
+        ensure(
+            report.canary.status,
+            IntegrityCanaryStatus::NotRequested,
+            "canary not requested",
+        )?;
+        ensure(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "integrity_database_missing"),
+            true,
+            "missing database degradation present",
+        )
+    }
+
+    #[test]
+    fn integrity_diagnostics_canary_dry_run_does_not_write_memory() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                TEST_WORKSPACE_ID,
+                &crate::db::CreateWorkspaceInput {
+                    path: temp.path().to_string_lossy().into_owned(),
+                    name: Some("integrity-test".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = IntegrityDiagnosticsReport::gather(&IntegrityDiagnosticsOptions {
+            workspace_path: temp.path().to_path_buf(),
+            database_path: Some(database_path.clone()),
+            workspace_id: TEST_WORKSPACE_ID.to_string(),
+            sample_size: 8,
+            create_canary: true,
+            dry_run: true,
+        });
+
+        ensure(
+            report.canary.status,
+            IntegrityCanaryStatus::DryRun,
+            "dry-run canary status",
+        )?;
+
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .get_memory(INTEGRITY_CANARY_MEMORY_ID)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            true,
+            "dry run did not write canary",
+        )
+    }
+
+    #[test]
+    fn integrity_diagnostics_create_canary_is_idempotent() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                TEST_WORKSPACE_ID,
+                &crate::db::CreateWorkspaceInput {
+                    path: temp.path().to_string_lossy().into_owned(),
+                    name: Some("integrity-test".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let options = IntegrityDiagnosticsOptions {
+            workspace_path: temp.path().to_path_buf(),
+            database_path: Some(database_path.clone()),
+            workspace_id: TEST_WORKSPACE_ID.to_string(),
+            sample_size: 8,
+            create_canary: true,
+            dry_run: false,
+        };
+
+        let first = IntegrityDiagnosticsReport::gather(&options);
+        ensure(
+            first.canary.status,
+            IntegrityCanaryStatus::Created,
+            "first run creates canary",
+        )?;
+
+        let second = IntegrityDiagnosticsReport::gather(&options);
+        ensure(
+            second.canary.status,
+            IntegrityCanaryStatus::AlreadyExists,
+            "second run is idempotent",
+        )?;
+
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| error.to_string())?;
+        let memory = connection
+            .get_memory(INTEGRITY_CANARY_MEMORY_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "canary memory should exist".to_string())?;
+        ensure(
+            memory.trust_class,
+            TrustClass::AgentAssertion.as_str().to_string(),
+            "canary trust class",
+        )
+    }
+
+    #[test]
+    fn integrity_diagnostics_unmigrated_database_skips_canary() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = IntegrityDiagnosticsReport::gather(&IntegrityDiagnosticsOptions {
+            workspace_path: temp.path().to_path_buf(),
+            database_path: Some(database_path),
+            workspace_id: "default".to_string(),
+            sample_size: 8,
+            create_canary: true,
+            dry_run: false,
+        });
+
+        ensure(
+            report.status,
+            IntegrityDiagnosticsStatus::Degraded,
+            "unmigrated db degrades",
+        )?;
+        ensure(
+            report.canary.status,
+            IntegrityCanaryStatus::Skipped,
+            "unmigrated db skips canary",
+        )?;
+        ensure(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "integrity_schema_migration_required"),
+            true,
+            "schema migration degradation present",
+        )
     }
 
     #[test]

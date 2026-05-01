@@ -6,7 +6,8 @@ use crate::core::check::CheckReport;
 use crate::core::doctor::{
     DependencyBlockedFeature, DependencyContractEntry, DependencyDiagnosticsReport,
     DependencyFeatureProfile, DependencyOptionalFeatureProfile, DependencySource, DoctorReport,
-    FixPlan, FrankenDependencyHealth, FrankenHealthReport,
+    FixPlan, FrankenDependencyHealth, FrankenHealthReport, IntegrityCanaryReport,
+    IntegrityDiagnosticCheck, IntegrityDiagnosticDegradation, IntegrityDiagnosticsReport,
 };
 use crate::core::health::HealthReport;
 use crate::core::memory::{MemoryDetails, MemoryHistoryReport, MemoryListReport, MemoryShowReport};
@@ -15,10 +16,13 @@ use crate::core::status::StatusReport;
 use crate::core::{VERSION_PROVENANCE_SCHEMA_V1, VersionReport};
 use crate::eval::{EvaluationReport, EvaluationStatus, ScenarioValidationResult};
 use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
-use crate::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
+use crate::models::{
+    DomainError, ERROR_SCHEMA_V1, InstallCheckReport, InstallPlanReport, RESPONSE_SCHEMA_V1,
+};
 use crate::pack::{
-    ContextResponse, PackDraftItem, PackItemProvenance, PackOmissionMetrics, PackQualityMetrics,
-    PackSectionMetric, PackSelectionCertificate, PackSelectionStep, RenderedPackProvenance,
+    ContextResponse, PackAdvisoryBanner, PackAdvisoryNote, PackDraftItem, PackItemProvenance,
+    PackOmissionMetrics, PackQualityMetrics, PackSectionMetric, PackSelectionCertificate,
+    PackSelectionStep, RenderedPackProvenance,
 };
 
 pub mod jsonl_export;
@@ -526,6 +530,10 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
                 budget.field_u32("maxTokens", response.data.pack.budget.max_tokens());
                 budget.field_u32("usedTokens", response.data.pack.used_tokens);
             });
+            let advisory_banner = response.data.advisory_banner();
+            pack.field_object("advisoryBanner", |banner| {
+                build_pack_advisory_banner(banner, &advisory_banner);
+            });
             let quality_metrics = response.data.pack.quality_metrics();
             pack.field_object("quality", |quality| {
                 build_pack_quality_metrics(quality, &quality_metrics);
@@ -545,6 +553,14 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
                 obj.field_object("scores", |scores| {
                     scores.field_raw("relevance", &score_json(item.relevance.into_inner()));
                     scores.field_raw("utility", &score_json(item.utility.into_inner()));
+                });
+                obj.field_object("trust", |trust| {
+                    trust.field_str("class", item.trust.class.as_str());
+                    match item.trust.subclass.as_deref() {
+                        Some(subclass) => trust.field_str("subclass", subclass),
+                        None => trust.field_raw("subclass", "null"),
+                    };
+                    trust.field_str("posture", item.trust.posture().as_str());
                 });
                 let provenance = item.rendered_provenance();
                 obj.field_array_of_objects("provenance", &provenance, build_rendered_provenance);
@@ -595,6 +611,25 @@ pub fn render_context_response_human(response: &ContextResponse) -> String {
         response.data.pack.used_tokens,
         response.data.pack.budget.max_tokens()
     ));
+
+    let advisory_banner = response.data.advisory_banner();
+    output.push_str(&format!(
+        "Advisory: {} — {}\n\n",
+        advisory_banner.status.as_str(),
+        advisory_banner.summary
+    ));
+    if !advisory_banner.notes.is_empty() {
+        output.push_str("Advisory notes:\n");
+        for note in &advisory_banner.notes {
+            output.push_str(&format!(
+                "  [{}] {}: {}\n",
+                note.severity.as_str(),
+                note.code,
+                note.message
+            ));
+        }
+        output.push('\n');
+    }
 
     if response.data.pack.items.is_empty() {
         output.push_str("No items in pack.\n");
@@ -654,6 +689,27 @@ pub fn render_context_response_markdown(response: &ContextResponse) -> String {
         response.data.pack.budget.max_tokens()
     ));
 
+    let advisory_banner = response.data.advisory_banner();
+    output.push_str("## Advisory Memory Banner\n\n");
+    output.push_str(&format!(
+        "**Status:** `{}`\n\n",
+        advisory_banner.status.as_str()
+    ));
+    output.push_str(&advisory_banner.summary);
+    output.push_str("\n\n");
+    if !advisory_banner.notes.is_empty() {
+        for note in &advisory_banner.notes {
+            output.push_str(&format!(
+                "- **{}** `[{}]` {} Action: `{}`\n",
+                note.severity.as_str(),
+                note.code,
+                note.message,
+                note.action
+            ));
+        }
+        output.push('\n');
+    }
+
     if response.data.pack.items.is_empty() {
         output.push_str("*No items in pack.*\n\n");
     } else {
@@ -685,6 +741,12 @@ pub fn render_context_response_markdown(response: &ContextResponse) -> String {
                 if !item.why.is_empty() {
                     output.push_str(&format!("**Why:** {}\n\n", item.why));
                 }
+
+                output.push_str(&format!(
+                    "**Trust:** `{}` / `{}`\n\n",
+                    item.trust.class.as_str(),
+                    item.trust.posture().as_str()
+                ));
 
                 if !item.provenance.is_empty() {
                     output.push_str("**Provenance:**\n");
@@ -737,6 +799,30 @@ fn section_display_name(section: &str) -> &str {
         "example" => "Example",
         other => other,
     }
+}
+
+fn build_pack_advisory_banner(obj: &mut JsonBuilder, banner: &PackAdvisoryBanner) {
+    obj.field_str("status", banner.status.as_str());
+    obj.field_str("summary", &banner.summary);
+    obj.field_raw(
+        "authoritativeCount",
+        &banner.authoritative_count.to_string(),
+    );
+    obj.field_raw("advisoryCount", &banner.advisory_count.to_string());
+    obj.field_raw("legacyCount", &banner.legacy_count.to_string());
+    obj.field_raw("degradationCount", &banner.degradation_count.to_string());
+    obj.field_array_of_objects("notes", &banner.notes, build_pack_advisory_note);
+}
+
+fn build_pack_advisory_note(obj: &mut JsonBuilder, note: &PackAdvisoryNote) {
+    obj.field_str("code", note.code);
+    obj.field_str("severity", note.severity.as_str());
+    obj.field_str("message", &note.message);
+    obj.field_raw(
+        "memoryIds",
+        &string_array_json(note.memory_ids.iter().map(String::as_str)),
+    );
+    obj.field_str("action", note.action);
 }
 
 fn build_pack_quality_metrics(obj: &mut JsonBuilder, metrics: &PackQualityMetrics) {
@@ -892,6 +978,7 @@ fn render_memory_health_json(
         h.field_u32("activeCount", health.active_count);
         h.field_u32("tombstonedCount", health.tombstoned_count);
         h.field_u32("staleCount", health.stale_count);
+        field_optional_score(h, "healthScore", health.health_score);
         match health.average_confidence {
             Some(c) => h.field_raw("averageConfidence", &format!("{c:.2}")),
             None => h.field_raw("averageConfidence", "null"),
@@ -900,7 +987,33 @@ fn render_memory_health_json(
             Some(c) => h.field_raw("provenanceCoverage", &format!("{c:.2}")),
             None => h.field_raw("provenanceCoverage", "null"),
         };
+        h.field_object("scoreComponents", |components| {
+            if let Some(score) = health.score_components {
+                field_optional_score(components, "activeRatio", Some(score.active_ratio));
+                field_optional_score(components, "freshnessScore", Some(score.freshness_score));
+                field_optional_score(components, "confidenceScore", Some(score.confidence_score));
+                field_optional_score(components, "provenanceScore", Some(score.provenance_score));
+                field_optional_score(
+                    components,
+                    "tombstonePenalty",
+                    Some(score.tombstone_penalty),
+                );
+            } else {
+                field_optional_score(components, "activeRatio", None);
+                field_optional_score(components, "freshnessScore", None);
+                field_optional_score(components, "confidenceScore", None);
+                field_optional_score(components, "provenanceScore", None);
+                field_optional_score(components, "tombstonePenalty", None);
+            }
+        });
     });
+}
+
+fn field_optional_score(builder: &mut JsonBuilder, key: &str, score: Option<f32>) {
+    match score {
+        Some(score) => builder.field_raw(key, &format!("{score:.2}")),
+        None => builder.field_raw(key, "null"),
+    };
 }
 
 fn render_derived_assets_json(
@@ -1188,6 +1301,142 @@ pub fn render_dependency_diagnostics_human(report: &DependencyDiagnosticsReport)
 #[must_use]
 pub fn render_dependency_diagnostics_toon(report: &DependencyDiagnosticsReport) -> String {
     render_toon_from_json(&render_dependency_diagnostics_json(report))
+}
+
+/// Render integrity diagnostics as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_integrity_diagnostics_json(report: &IntegrityDiagnosticsReport) -> String {
+    let mut b = JsonBuilder::with_capacity(2048);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", report.success());
+    b.field_object("data", |d| {
+        d.field_str("command", "diag integrity");
+        d.field_str("version", report.version);
+        d.field_str("schema", report.schema);
+        d.field_str("status", report.status.as_str());
+        d.field_str("workspaceId", &report.workspace_id);
+        d.field_str("databasePath", &report.database_path.to_string_lossy());
+        d.field_u32("sampleSize", report.sample_size);
+        d.field_array_of_objects("checks", &report.checks, build_integrity_check);
+        d.field_object("provenanceSample", |sample| {
+            match report.provenance_sample.as_ref() {
+                Some(provenance) => build_provenance_sample(sample, provenance),
+                None => {
+                    let empty_records: &[crate::db::ProvenanceVerificationRecord] = &[];
+                    sample.field_str("workspaceId", &report.workspace_id);
+                    sample.field_u32("requestedSampleSize", report.sample_size);
+                    sample.field_u32("checkedCount", 0);
+                    sample.field_u32("verifiedCount", 0);
+                    sample.field_u32("missingCount", 0);
+                    sample.field_u32("mismatchCount", 0);
+                    sample.field_array_of_objects(
+                        "records",
+                        empty_records,
+                        build_provenance_record,
+                    );
+                }
+            }
+        });
+        d.field_object("canary", |canary| {
+            build_integrity_canary(canary, &report.canary)
+        });
+        d.field_array_of_objects("degraded", &report.degraded, build_integrity_degradation);
+    });
+    b.finish()
+}
+
+fn build_integrity_check(obj: &mut JsonBuilder, check: &IntegrityDiagnosticCheck) {
+    obj.field_str("name", check.name);
+    obj.field_str("severity", check.severity.as_str());
+    obj.field_str("message", &check.message);
+    field_optional_str(obj, "repair", check.repair);
+}
+
+fn build_provenance_sample(
+    obj: &mut JsonBuilder,
+    report: &crate::db::ProvenanceSampleVerificationReport,
+) {
+    obj.field_str("workspaceId", &report.workspace_id);
+    obj.field_u32("requestedSampleSize", report.requested_sample_size);
+    obj.field_u32("checkedCount", report.checked_count);
+    obj.field_u32("verifiedCount", report.verified_count);
+    obj.field_u32("missingCount", report.missing_count);
+    obj.field_u32("mismatchCount", report.mismatch_count);
+    obj.field_array_of_objects("records", &report.records, build_provenance_record);
+}
+
+fn build_provenance_record(
+    obj: &mut JsonBuilder,
+    record: &crate::db::ProvenanceVerificationRecord,
+) {
+    obj.field_str("memoryId", &record.memory_id);
+    field_optional_str(obj, "storedHash", record.stored_hash.as_deref());
+    obj.field_str("expectedHash", &record.expected_hash);
+    obj.field_str("status", &record.status);
+    obj.field_str("verifiedAt", &record.verified_at);
+    obj.field_str("note", &record.note);
+}
+
+fn build_integrity_canary(obj: &mut JsonBuilder, canary: &IntegrityCanaryReport) {
+    obj.field_bool("requested", canary.requested);
+    obj.field_bool("dryRun", canary.dry_run);
+    obj.field_str("memoryId", canary.memory_id);
+    obj.field_str("status", canary.status.as_str());
+    obj.field_str("message", &canary.message);
+    field_optional_str(obj, "repair", canary.repair);
+}
+
+fn build_integrity_degradation(obj: &mut JsonBuilder, degraded: &IntegrityDiagnosticDegradation) {
+    obj.field_str("code", degraded.code);
+    obj.field_str("severity", degraded.severity);
+    obj.field_str("message", &degraded.message);
+    field_optional_str(obj, "repair", degraded.repair);
+}
+
+/// Render integrity diagnostics as human-readable text.
+#[must_use]
+pub fn render_integrity_diagnostics_human(report: &IntegrityDiagnosticsReport) -> String {
+    let mut output = format!(
+        "ee diag integrity (v{})\n\nStatus: {}\nDatabase: {}\n\n",
+        report.version,
+        report.status.as_str(),
+        report.database_path.display()
+    );
+
+    output.push_str("Checks:\n");
+    for check in &report.checks {
+        output.push_str(&format!(
+            "  [{}] {}: {}\n",
+            check.severity.as_str(),
+            check.name,
+            check.message
+        ));
+    }
+
+    output.push_str(&format!(
+        "\nCanary: {} ({})\n",
+        report.canary.status.as_str(),
+        report.canary.memory_id
+    ));
+
+    if let Some(sample) = report.provenance_sample.as_ref() {
+        output.push_str(&format!(
+            "Provenance sample: {} checked, {} verified, {} missing, {} mismatched\n",
+            sample.checked_count,
+            sample.verified_count,
+            sample.missing_count,
+            sample.mismatch_count
+        ));
+    }
+
+    output.push_str("\nNext:\n  ee diag integrity --json\n");
+    output
+}
+
+/// Render integrity diagnostics as TOON.
+#[must_use]
+pub fn render_integrity_diagnostics_toon(report: &IntegrityDiagnosticsReport) -> String {
+    render_toon_from_json(&render_integrity_diagnostics_json(report))
 }
 
 /// Render franken-stack doctor health as JSON (ee.response.v1 envelope).
@@ -2133,6 +2382,74 @@ pub fn render_version_json(report: &VersionReport) -> String {
 #[must_use]
 pub fn render_version_toon(report: &VersionReport) -> String {
     render_toon_from_json(&render_version_json(report))
+}
+
+/// Render `ee install check` as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_install_check_json(report: &InstallCheckReport) -> String {
+    let raw = serde_json::to_string(report).unwrap_or_else(|_| "{}".to_owned());
+    ResponseEnvelope::success().data_raw(&raw).finish()
+}
+
+#[must_use]
+pub fn render_install_check_human(report: &InstallCheckReport) -> String {
+    let mut output = format!(
+        "ee install check ({})\n\nStatus: {}\nTarget: {}\nInstall path: {}\n",
+        report.version,
+        report.status().as_str(),
+        report.target.target_triple,
+        report.target.install_path
+    );
+    output.push_str(&format!("PATH: {}\n", report.path.status.as_str()));
+    for finding in &report.findings {
+        output.push_str(&format!(
+            "- {}: {} Next: {}\n",
+            finding.code, finding.message, finding.next_action
+        ));
+    }
+    output
+}
+
+#[must_use]
+pub fn render_install_check_toon(report: &InstallCheckReport) -> String {
+    render_toon_from_json(&render_install_check_json(report))
+}
+
+/// Render install/update dry-run plans as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_install_plan_json(report: &InstallPlanReport) -> String {
+    let raw = serde_json::to_string(report).unwrap_or_else(|_| "{}".to_owned());
+    ResponseEnvelope::success().data_raw(&raw).finish()
+}
+
+#[must_use]
+pub fn render_install_plan_human(report: &InstallPlanReport) -> String {
+    let mut output = format!(
+        "ee {} plan ({})\n\nStatus: {}\nTarget: {}\nInstall path: {}\n",
+        report.operation.as_str(),
+        report.version,
+        report.status.as_str(),
+        report.target.target_triple,
+        report.target.install_path
+    );
+    if let Some(version) = &report.target_version {
+        output.push_str(&format!("Target version: {version}\n"));
+    }
+    if let Some(artifact) = &report.artifact {
+        output.push_str(&format!("Artifact: {}\n", artifact.file_name));
+    }
+    for finding in &report.findings {
+        output.push_str(&format!(
+            "- {}: {} Next: {}\n",
+            finding.code, finding.message, finding.next_action
+        ));
+    }
+    output
+}
+
+#[must_use]
+pub fn render_install_plan_toon(report: &InstallPlanReport) -> String {
+    render_toon_from_json(&render_install_plan_json(report))
 }
 
 fn field_optional_str(builder: &mut JsonBuilder, key: &str, value: Option<&str>) {
@@ -5800,11 +6117,12 @@ mod tests {
     };
     use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
     use crate::models::{
-        DomainError, ERROR_SCHEMA_V1, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, UnitScore,
+        DomainError, ERROR_SCHEMA_V1, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass,
+        UnitScore,
     };
     use crate::pack::{
         ContextRequest, ContextResponse, PackCandidate, PackCandidateInput, PackProvenance,
-        PackSection, TokenBudget, assemble_draft,
+        PackSection, PackTrustSignal, TokenBudget, assemble_draft,
     };
 
     type TestResult = Result<(), String>;
@@ -5864,6 +6182,12 @@ mod tests {
             utility: score(0.6)?,
             provenance: vec![pack_provenance("file://AGENTS.md#L42")?],
             why: "selected because release checks match the task".to_string(),
+        })
+        .map(|candidate| {
+            candidate.with_trust_signal(PackTrustSignal::new(
+                TrustClass::HumanExplicit,
+                Some("project-rule".to_string()),
+            ))
         })
         .map_err(|error| format!("candidate rejected: {error:?}"))?;
         let draft = assemble_draft(&request.query, budget, vec![candidate])
@@ -6422,6 +6746,16 @@ mod tests {
             &json,
             "\"provenanceFooter\":{\"memoryCount\":1,\"sourceCount\":1,\"schemes\":[\"file\"],\"entries\":[",
             "provenance footer",
+        )?;
+        ensure_contains(
+            &json,
+            "\"advisoryBanner\":{\"status\":\"clear\"",
+            "advisory banner",
+        )?;
+        ensure_contains(
+            &json,
+            "\"trust\":{\"class\":\"human_explicit\",\"subclass\":\"project-rule\",\"posture\":\"authoritative\"}",
+            "item trust posture",
         )?;
         ensure_contains(&json, "\"relevance\":0.800000", "stable relevance")
     }

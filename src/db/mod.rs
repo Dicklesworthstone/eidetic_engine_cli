@@ -1391,6 +1391,44 @@ CREATE INDEX idx_model_registry_status ON model_registry(status);
     "blake3:v014_model_registry_2026_04_30",
 );
 
+/// V015: Add graph_snapshots table for versioned graph analytics (EE-163).
+pub const V015_GRAPH_SNAPSHOTS: Migration = Migration::new(
+    15,
+    "graph_snapshots",
+    r#"
+-- Graph snapshots table (EE-163)
+-- Versioned snapshots of FrankenNetworkX graph analytics for validation and replay.
+-- Graph metrics are derived features; this table captures point-in-time state.
+CREATE TABLE graph_snapshots (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'gsnap_*' AND length(id) = 31),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    snapshot_version INTEGER NOT NULL CHECK (snapshot_version > 0),
+    schema_version TEXT NOT NULL CHECK (length(trim(schema_version)) > 0),
+    graph_type TEXT NOT NULL CHECK (graph_type IN (
+        'memory_links', 'session_graph', 'procedure_graph', 'evidence_graph', 'composite'
+    )),
+    node_count INTEGER NOT NULL CHECK (node_count >= 0),
+    edge_count INTEGER NOT NULL CHECK (edge_count >= 0),
+    metrics_json TEXT NOT NULL CHECK (json_valid(metrics_json)),
+    content_hash TEXT NOT NULL CHECK (content_hash GLOB 'blake3:*'),
+    source_generation INTEGER NOT NULL CHECK (source_generation >= 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    expires_at TEXT CHECK (expires_at IS NULL OR length(trim(expires_at)) > 0),
+    status TEXT NOT NULL DEFAULT 'valid' CHECK (status IN (
+        'valid', 'stale', 'invalid', 'archived'
+    )),
+    UNIQUE (workspace_id, graph_type, snapshot_version)
+);
+
+CREATE INDEX idx_graph_snapshots_workspace ON graph_snapshots(workspace_id);
+CREATE INDEX idx_graph_snapshots_type ON graph_snapshots(graph_type);
+CREATE INDEX idx_graph_snapshots_version ON graph_snapshots(snapshot_version);
+CREATE INDEX idx_graph_snapshots_status ON graph_snapshots(status);
+CREATE INDEX idx_graph_snapshots_created ON graph_snapshots(created_at);
+"#,
+    "blake3:v015_graph_snapshots_2026_04_30",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -1407,6 +1445,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V012_PROVENANCE_CHAIN_HASH,
     V013_TASK_EPISODES,
     V014_MODEL_REGISTRY,
+    V015_GRAPH_SNAPSHOTS,
 ];
 
 /// Result of applying migrations.
@@ -3190,6 +3229,20 @@ impl DbConnection {
         Ok(())
     }
 
+    /// Inspect a deterministic sample of memory provenance chain hashes without
+    /// mutating verification status fields.
+    ///
+    /// This intentionally uses a stable sample order so repeated integrity runs
+    /// over the same database inspect the same rows until later callers choose a
+    /// different limit or add explicit rotation.
+    pub fn inspect_sampled_memory_provenance(
+        &self,
+        workspace_id: &str,
+        sample_size: u32,
+    ) -> Result<ProvenanceSampleVerificationReport> {
+        self.sampled_memory_provenance(workspace_id, sample_size, false)
+    }
+
     /// Verify a deterministic sample of memory provenance chain hashes.
     ///
     /// This intentionally uses a stable sample order so repeated integrity runs
@@ -3199,6 +3252,15 @@ impl DbConnection {
         &self,
         workspace_id: &str,
         sample_size: u32,
+    ) -> Result<ProvenanceSampleVerificationReport> {
+        self.sampled_memory_provenance(workspace_id, sample_size, true)
+    }
+
+    fn sampled_memory_provenance(
+        &self,
+        workspace_id: &str,
+        sample_size: u32,
+        persist_status: bool,
     ) -> Result<ProvenanceSampleVerificationReport> {
         let mut report =
             ProvenanceSampleVerificationReport::new(workspace_id.to_string(), sample_size);
@@ -3228,16 +3290,18 @@ impl DbConnection {
                 None => PROVENANCE_STATUS_MISSING,
             };
             let note = provenance_verification_note(status);
-            self.execute_for(
-                DbOperation::Execute,
-                "UPDATE memories SET provenance_verification_status = ?1, provenance_verified_at = ?2, provenance_verification_note = ?3 WHERE id = ?4",
-                &[
-                    Value::Text(status.to_string()),
-                    Value::Text(verified_at.clone()),
-                    Value::Text(note.to_string()),
-                    Value::Text(memory.id.clone()),
-                ],
-            )?;
+            if persist_status {
+                self.execute_for(
+                    DbOperation::Execute,
+                    "UPDATE memories SET provenance_verification_status = ?1, provenance_verified_at = ?2, provenance_verification_note = ?3 WHERE id = ?4",
+                    &[
+                        Value::Text(status.to_string()),
+                        Value::Text(verified_at.clone()),
+                        Value::Text(note.to_string()),
+                        Value::Text(memory.id.clone()),
+                    ],
+                )?;
+            }
 
             report.push(ProvenanceVerificationRecord {
                 memory_id: memory.id,
@@ -5072,6 +5136,272 @@ fn stored_task_episode_from_row(row: &Row) -> Result<StoredTaskEpisode> {
         agent: optional_text(row, 12)?.map(str::to_string),
         episode_hash: optional_text(row, 13)?.map(str::to_string),
         created_at: required_text(row, 14, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
+// ============================================================================
+// Graph Snapshots (EE-163)
+// ============================================================================
+
+/// Graph type for snapshots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphSnapshotType {
+    MemoryLinks,
+    SessionGraph,
+    ProcedureGraph,
+    EvidenceGraph,
+    Composite,
+}
+
+impl GraphSnapshotType {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MemoryLinks => "memory_links",
+            Self::SessionGraph => "session_graph",
+            Self::ProcedureGraph => "procedure_graph",
+            Self::EvidenceGraph => "evidence_graph",
+            Self::Composite => "composite",
+        }
+    }
+}
+
+impl std::fmt::Display for GraphSnapshotType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for GraphSnapshotType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "memory_links" => Ok(Self::MemoryLinks),
+            "session_graph" => Ok(Self::SessionGraph),
+            "procedure_graph" => Ok(Self::ProcedureGraph),
+            "evidence_graph" => Ok(Self::EvidenceGraph),
+            "composite" => Ok(Self::Composite),
+            other => Err(format!("unknown graph snapshot type: {other}")),
+        }
+    }
+}
+
+/// Status of a graph snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphSnapshotStatus {
+    Valid,
+    Stale,
+    Invalid,
+    Archived,
+}
+
+impl GraphSnapshotStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Stale => "stale",
+            Self::Invalid => "invalid",
+            Self::Archived => "archived",
+        }
+    }
+}
+
+impl std::fmt::Display for GraphSnapshotStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for GraphSnapshotStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "valid" => Ok(Self::Valid),
+            "stale" => Ok(Self::Stale),
+            "invalid" => Ok(Self::Invalid),
+            "archived" => Ok(Self::Archived),
+            other => Err(format!("unknown graph snapshot status: {other}")),
+        }
+    }
+}
+
+/// A stored graph snapshot row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredGraphSnapshot {
+    pub id: String,
+    pub workspace_id: String,
+    pub snapshot_version: u32,
+    pub schema_version: String,
+    pub graph_type: GraphSnapshotType,
+    pub node_count: u32,
+    pub edge_count: u32,
+    pub metrics_json: String,
+    pub content_hash: String,
+    pub source_generation: u32,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+    pub status: GraphSnapshotStatus,
+}
+
+/// Input for creating a new graph snapshot.
+#[derive(Debug, Clone)]
+pub struct CreateGraphSnapshotInput {
+    pub workspace_id: String,
+    pub snapshot_version: u32,
+    pub schema_version: String,
+    pub graph_type: GraphSnapshotType,
+    pub node_count: u32,
+    pub edge_count: u32,
+    pub metrics_json: String,
+    pub content_hash: String,
+    pub source_generation: u32,
+    pub expires_at: Option<String>,
+}
+
+impl DbConnection {
+    /// Insert a new graph snapshot.
+    pub fn insert_graph_snapshot(&self, id: &str, input: &CreateGraphSnapshotInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO graph_snapshots (id, workspace_id, snapshot_version, schema_version, graph_type, node_count, edge_count, metrics_json, content_hash, source_generation, created_at, expires_at, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'valid')",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::from_u64_clamped(u64::from(input.snapshot_version)),
+                Value::Text(input.schema_version.clone()),
+                Value::Text(input.graph_type.as_str().to_string()),
+                Value::from_u64_clamped(u64::from(input.node_count)),
+                Value::from_u64_clamped(u64::from(input.edge_count)),
+                Value::Text(input.metrics_json.clone()),
+                Value::Text(input.content_hash.clone()),
+                Value::from_u64_clamped(u64::from(input.source_generation)),
+                Value::Text(now),
+                input.expires_at.as_ref().map_or(Value::Null, |t| Value::Text(t.clone())),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get a graph snapshot by ID.
+    pub fn get_graph_snapshot(&self, id: &str) -> Result<Option<StoredGraphSnapshot>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, snapshot_version, schema_version, graph_type, node_count, edge_count, metrics_json, content_hash, source_generation, created_at, expires_at, status FROM graph_snapshots WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        stored_graph_snapshot_from_row(&rows[0]).map(Some)
+    }
+
+    /// Get the latest graph snapshot for a workspace and type.
+    pub fn get_latest_graph_snapshot(
+        &self,
+        workspace_id: &str,
+        graph_type: GraphSnapshotType,
+    ) -> Result<Option<StoredGraphSnapshot>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, snapshot_version, schema_version, graph_type, node_count, edge_count, metrics_json, content_hash, source_generation, created_at, expires_at, status FROM graph_snapshots WHERE workspace_id = ?1 AND graph_type = ?2 ORDER BY snapshot_version DESC LIMIT 1",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(graph_type.as_str().to_string()),
+            ],
+        )?;
+
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        stored_graph_snapshot_from_row(&rows[0]).map(Some)
+    }
+
+    /// List graph snapshots for a workspace.
+    pub fn list_graph_snapshots(
+        &self,
+        workspace_id: &str,
+        graph_type: Option<GraphSnapshotType>,
+        limit: u32,
+    ) -> Result<Vec<StoredGraphSnapshot>> {
+        let rows = if let Some(gt) = graph_type {
+            self.query_for(
+                DbOperation::Query,
+                "SELECT id, workspace_id, snapshot_version, schema_version, graph_type, node_count, edge_count, metrics_json, content_hash, source_generation, created_at, expires_at, status FROM graph_snapshots WHERE workspace_id = ?1 AND graph_type = ?2 ORDER BY snapshot_version DESC LIMIT ?3",
+                &[
+                    Value::Text(workspace_id.to_string()),
+                    Value::Text(gt.as_str().to_string()),
+                    Value::from_u64_clamped(u64::from(limit)),
+                ],
+            )?
+        } else {
+            self.query_for(
+                DbOperation::Query,
+                "SELECT id, workspace_id, snapshot_version, schema_version, graph_type, node_count, edge_count, metrics_json, content_hash, source_generation, created_at, expires_at, status FROM graph_snapshots WHERE workspace_id = ?1 ORDER BY snapshot_version DESC LIMIT ?2",
+                &[
+                    Value::Text(workspace_id.to_string()),
+                    Value::from_u64_clamped(u64::from(limit)),
+                ],
+            )?
+        };
+
+        rows.iter().map(stored_graph_snapshot_from_row).collect()
+    }
+
+    /// Update the status of a graph snapshot.
+    pub fn update_graph_snapshot_status(
+        &self,
+        id: &str,
+        status: GraphSnapshotStatus,
+    ) -> Result<bool> {
+        let rows = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE graph_snapshots SET status = ?1 WHERE id = ?2",
+            &[
+                Value::Text(status.as_str().to_string()),
+                Value::Text(id.to_string()),
+            ],
+        )?;
+        Ok(rows > 0)
+    }
+}
+
+fn stored_graph_snapshot_from_row(row: &Row) -> Result<StoredGraphSnapshot> {
+    let graph_type_str = required_text(row, 4, DbOperation::Query, "graph_type")?;
+    let graph_type =
+        GraphSnapshotType::from_str(graph_type_str).map_err(|e| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: e,
+        })?;
+
+    let status_str = required_text(row, 12, DbOperation::Query, "status")?;
+    let status = GraphSnapshotStatus::from_str(status_str).map_err(|e| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: e,
+    })?;
+
+    Ok(StoredGraphSnapshot {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        snapshot_version: required_u32(row, 2, DbOperation::Query, "snapshot_version")?,
+        schema_version: required_text(row, 3, DbOperation::Query, "schema_version")?.to_string(),
+        graph_type,
+        node_count: required_u32(row, 5, DbOperation::Query, "node_count")?,
+        edge_count: required_u32(row, 6, DbOperation::Query, "edge_count")?,
+        metrics_json: required_text(row, 7, DbOperation::Query, "metrics_json")?.to_string(),
+        content_hash: required_text(row, 8, DbOperation::Query, "content_hash")?.to_string(),
+        source_generation: required_u32(row, 9, DbOperation::Query, "source_generation")?,
+        created_at: required_text(row, 10, DbOperation::Query, "created_at")?.to_string(),
+        expires_at: optional_text(row, 11)?.map(str::to_string),
+        status,
     })
 }
 

@@ -8,6 +8,7 @@ pub mod economy;
 pub mod episode;
 pub mod error_codes;
 pub mod id;
+pub mod install;
 pub mod jsonl;
 pub mod learn;
 pub mod memory;
@@ -72,6 +73,14 @@ pub use id::{
     ExecutableIdKind, Id, IdJsonSchema, IdKind, MemoryId, MemoryLinkId, ModelId, PackId,
     ParseExecutableIdKindError, ParseIdError, PolicyId, RuleId, SessionId, TraceId, WorkspaceId,
     executable_id_schema_catalog_json, executable_id_schemas,
+};
+pub use install::{
+    CurrentBinary, INSTALL_CHECK_SCHEMA_V1, INSTALL_PLAN_SCHEMA_V1, InstallArtifactSelection,
+    InstallCheckReport, InstallFinding, InstallFindingCode, InstallFindingSeverity,
+    InstallOperation, InstallPathAnalysis, InstallPathStatus, InstallPermissionCheck,
+    InstallPermissionStatus, InstallPlanReport, InstallPlanStatus, InstallTarget,
+    InstallVerificationPlan, PathBinary, PlannedInstallOperation, UPDATE_PLAN_SCHEMA_V1,
+    UpdateSourcePosture, compare_versions, findings_status, is_safe_install_path,
 };
 pub use jsonl::{
     ALL_EXPORT_SCHEMAS, EXPORT_AGENT_SCHEMA_V1, EXPORT_AUDIT_SCHEMA_V1, EXPORT_FOOTER_SCHEMA_V1,

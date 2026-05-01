@@ -29,11 +29,12 @@ use crate::config::WorkspaceLocation;
 use crate::core::budget::RequestBudget;
 use crate::core::search::{SearchError, SearchOptions, SearchStatus, run_search};
 use crate::db::{DbConnection, StoredMemory};
-use crate::models::{MemoryId, ProvenanceUri, UnitScore};
+use crate::models::{MemoryId, ProvenanceUri, TrustClass, UnitScore};
 use crate::pack::{
     ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
     ContextResponseDegradation, ContextResponseSeverity, PackCandidate, PackCandidateInput,
-    PackProvenance, PackSection, TokenBudget, assemble_draft_with_profile, estimate_tokens_default,
+    PackProvenance, PackSection, PackTrustSignal, TokenBudget, assemble_draft_with_profile,
+    estimate_tokens_default,
 };
 
 /// Per-subsystem permission level. `None < Read < Write` under the
@@ -432,7 +433,35 @@ fn candidate_from_hit(
     })
     .ok()?;
 
-    Some(candidate.with_diversity_key(diversity_key_for_memory(&memory, &tags)))
+    Some(
+        candidate
+            .with_diversity_key(diversity_key_for_memory(&memory, &tags))
+            .with_trust_signal(trust_signal_for_memory(&memory, memory_id, degraded)),
+    )
+}
+
+fn trust_signal_for_memory(
+    memory: &StoredMemory,
+    memory_id: MemoryId,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> PackTrustSignal {
+    let trust_class = match TrustClass::from_str(&memory.trust_class) {
+        Ok(class) => class,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_invalid_trust_class",
+                ContextResponseSeverity::Medium,
+                format!(
+                    "Memory {} has invalid trust class `{}`: {error}",
+                    memory.id, memory.trust_class
+                ),
+                Some(format!("ee memory show {memory_id} --json")),
+            );
+            TrustClass::AgentAssertion
+        }
+    };
+    PackTrustSignal::new(trust_class, memory.trust_subclass.clone())
 }
 
 fn provenance_for_memory(

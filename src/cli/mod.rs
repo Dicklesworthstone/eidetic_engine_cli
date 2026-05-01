@@ -12,7 +12,10 @@ use crate::core::agent_docs::{AgentDocsReport, AgentDocsTopic};
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
 use crate::core::context::{ContextPackError, ContextPackOptions, run_context_pack};
-use crate::core::doctor::{DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport};
+use crate::core::doctor::{
+    DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport, IntegrityDiagnosticsOptions,
+    IntegrityDiagnosticsReport,
+};
 use crate::core::handoff::{
     CapsuleProfile, CreateOptions as HandoffCreateOptions, InspectOptions as HandoffInspectOptions,
     PreviewOptions as HandoffPreviewOptions, ResumeOptions as HandoffResumeOptions, create_handoff,
@@ -23,6 +26,7 @@ use crate::core::index::{
     IndexRebuildOptions, IndexStatusOptions, get_index_status, rebuild_index,
 };
 use crate::core::init::{InitOptions, init_workspace};
+use crate::core::install::{InstallCheckOptions, InstallPlanOptions, check_install, plan_install};
 use crate::core::lab::{
     CaptureOptions as LabCaptureOptions, CounterfactualOptions as LabCounterfactualOptions,
     ReplayOptions as LabReplayOptions, capture_episode, replay_episode, run_counterfactual,
@@ -46,7 +50,7 @@ use crate::core::situation::{classify_task, explain_situation, show_situation};
 use crate::core::status::StatusReport;
 use crate::core::why::{WhyOptions, explain_memory};
 use crate::models::memory::{MemoryKind, MemoryLevel, MemoryValidationError};
-use crate::models::{DomainError, MemoryId, ProcessExitCode};
+use crate::models::{DomainError, InstallOperation, MemoryId, ProcessExitCode};
 use crate::output;
 use crate::pack::ContextPackProfile;
 
@@ -180,6 +184,9 @@ pub enum Command {
     /// Import memories and evidence from external sources.
     #[command(subcommand)]
     Import(ImportCommand),
+    /// Agent-safe installation checks and dry-run plans.
+    #[command(subcommand)]
+    Install(InstallCommand),
     /// Introspect ee's command, schema, and error maps.
     Introspect,
     /// Manage search indexes.
@@ -231,6 +238,8 @@ pub enum Command {
     Support(SupportCommand),
     /// Print the ee version.
     Version,
+    /// Plan an update without mutating the installation.
+    Update(UpdateArgs),
     /// Explain why a memory was stored, retrieved, or selected.
     Why(WhyArgs),
 }
@@ -396,10 +405,32 @@ pub enum DiagCommand {
     Dependencies,
     /// Report graph module readiness, capabilities, and metrics.
     Graph,
+    /// Verify database, provenance-chain, and canary-memory integrity.
+    Integrity(DiagIntegrityArgs),
     /// Report quarantine status for import sources.
     Quarantine,
     /// Verify stdout/stderr stream separation is correct.
     Streams,
+}
+
+/// Arguments for `ee diag integrity`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagIntegrityArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Number of memories to sample for provenance-chain verification.
+    #[arg(long, default_value_t = 16)]
+    pub sample_size: u32,
+
+    /// Explicitly create the integrity canary memory if it is missing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub create_canary: bool,
+
+    /// Plan the canary write without mutating the database.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
@@ -466,6 +497,127 @@ pub struct IndexStatusArgs {
     /// Index output directory. Defaults to <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
+}
+
+/// Subcommands for `ee install`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum InstallCommand {
+    /// Inspect current installation posture without mutating anything.
+    Check(InstallCheckArgs),
+    /// Plan an install from a release manifest without mutating anything.
+    Plan(InstallPlanArgs),
+}
+
+/// Arguments for `ee install check`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct InstallCheckArgs {
+    /// Install directory to inspect. Defaults to the platform user bin directory.
+    #[arg(long, value_name = "PATH")]
+    pub install_dir: Option<PathBuf>,
+
+    /// Override the current binary path for deterministic checks.
+    #[arg(long, value_name = "PATH")]
+    pub current_binary: Option<PathBuf>,
+
+    /// Override PATH value to inspect.
+    #[arg(long, value_name = "PATHS")]
+    pub path: Option<OsString>,
+
+    /// Target triple to inspect. Defaults to build metadata or platform inference.
+    #[arg(long, value_name = "TRIPLE")]
+    pub target: Option<String>,
+
+    /// Local release manifest used as the update source.
+    #[arg(long, value_name = "PATH")]
+    pub manifest: Option<PathBuf>,
+
+    /// Do not assume network update lookup is available.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub offline: bool,
+}
+
+/// Arguments for `ee install plan`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct InstallPlanArgs {
+    /// Release manifest to plan from.
+    #[arg(long, value_name = "PATH")]
+    pub manifest: Option<PathBuf>,
+
+    /// Directory containing release artifacts referenced by the manifest.
+    #[arg(long, value_name = "PATH")]
+    pub artifact_root: Option<PathBuf>,
+
+    /// Install directory to plan for. Defaults to the platform user bin directory.
+    #[arg(long, value_name = "PATH")]
+    pub install_dir: Option<PathBuf>,
+
+    /// Override the current binary path for deterministic overwrite checks.
+    #[arg(long, value_name = "PATH")]
+    pub current_binary: Option<PathBuf>,
+
+    /// Target triple to select from the manifest.
+    #[arg(long, value_name = "TRIPLE")]
+    pub target: Option<String>,
+
+    /// Target version to plan for.
+    #[arg(long, value_name = "VERSION")]
+    pub target_version: Option<String>,
+
+    /// Pin the exact version being installed.
+    #[arg(long, value_name = "VERSION")]
+    pub pin: Option<String>,
+
+    /// Permit a planned downgrade when paired with an explicit pin.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub allow_downgrade: bool,
+
+    /// Do not assume network update lookup is available.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub offline: bool,
+}
+
+/// Arguments for `ee update`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct UpdateArgs {
+    /// Only report what would happen. Apply mode is intentionally unsupported in this slice.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Release manifest to plan from.
+    #[arg(long, value_name = "PATH")]
+    pub manifest: Option<PathBuf>,
+
+    /// Directory containing release artifacts referenced by the manifest.
+    #[arg(long, value_name = "PATH")]
+    pub artifact_root: Option<PathBuf>,
+
+    /// Install directory to plan for. Defaults to the platform user bin directory.
+    #[arg(long, value_name = "PATH")]
+    pub install_dir: Option<PathBuf>,
+
+    /// Override the current binary path for deterministic overwrite checks.
+    #[arg(long, value_name = "PATH")]
+    pub current_binary: Option<PathBuf>,
+
+    /// Target triple to select from the manifest.
+    #[arg(long, value_name = "TRIPLE")]
+    pub target: Option<String>,
+
+    /// Target version to plan for.
+    #[arg(long, value_name = "VERSION")]
+    pub target_version: Option<String>,
+
+    /// Pin the exact version being installed.
+    #[arg(long, value_name = "VERSION")]
+    pub pin: Option<String>,
+
+    /// Permit a planned downgrade when paired with an explicit pin.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub allow_downgrade: bool,
+
+    /// Do not assume network update lookup is available.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub offline: bool,
 }
 
 /// Subcommands for `ee handoff`.
@@ -1774,6 +1926,7 @@ where
                 }
             }
             DiagCommand::Graph => handle_diag_graph(&cli, stdout),
+            DiagCommand::Integrity(args) => handle_diag_integrity(&cli, args, stdout),
             DiagCommand::Quarantine => {
                 let report = QuarantineReport::gather();
                 let profile = cli.fields_level().to_field_profile();
@@ -2084,6 +2237,12 @@ where
         Some(Command::Import(ImportCommand::EideticLegacy(ref args))) => {
             handle_import_eidetic_legacy(&cli, args, stdout, stderr)
         }
+        Some(Command::Install(InstallCommand::Check(ref args))) => {
+            handle_install_check(&cli, args, stdout)
+        }
+        Some(Command::Install(InstallCommand::Plan(ref args))) => {
+            handle_install_plan(&cli, args, stdout)
+        }
         Some(Command::Introspect) => match cli.renderer() {
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_introspect_human())
@@ -2313,7 +2472,115 @@ where
                 }
             }
         }
+        Some(Command::Update(ref args)) => handle_update(&cli, args, stdout, stderr),
         Some(Command::Why(ref args)) => handle_why(&cli, args, stdout, stderr),
+    }
+}
+
+fn handle_install_check<W>(cli: &Cli, args: &InstallCheckArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let options = InstallCheckOptions {
+        install_dir: args.install_dir.clone(),
+        current_binary: args.current_binary.clone(),
+        path_env: args.path.clone(),
+        target_triple: args.target.clone(),
+        manifest: args.manifest.clone(),
+        offline: args.offline,
+    };
+    let report = check_install(&options);
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_install_check_human(&report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_install_check_toon(&report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_install_check_json(&report) + "\n"))
+        }
+    }
+}
+
+fn handle_install_plan<W>(cli: &Cli, args: &InstallPlanArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let options = InstallPlanOptions {
+        operation: InstallOperation::Install,
+        manifest: args.manifest.clone(),
+        artifact_root: args.artifact_root.clone(),
+        install_dir: args.install_dir.clone(),
+        current_binary: args.current_binary.clone(),
+        target_triple: args.target.clone(),
+        target_version: args.target_version.clone(),
+        pinned_version: args.pin.clone(),
+        allow_downgrade: args.allow_downgrade,
+        offline: args.offline,
+    };
+    let report = plan_install(&options);
+    render_install_plan(cli, &report, stdout)
+}
+
+fn handle_update<W, E>(
+    cli: &Cli,
+    args: &UpdateArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !args.dry_run {
+        let error = DomainError::PolicyDenied {
+            message: "ee update apply is not implemented; use --dry-run for an agent-safe plan"
+                .to_owned(),
+            repair: Some("ee update --dry-run --json --manifest <path>".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    let options = InstallPlanOptions {
+        operation: InstallOperation::Update,
+        manifest: args.manifest.clone(),
+        artifact_root: args.artifact_root.clone(),
+        install_dir: args.install_dir.clone(),
+        current_binary: args.current_binary.clone(),
+        target_triple: args.target.clone(),
+        target_version: args.target_version.clone(),
+        pinned_version: args.pin.clone(),
+        allow_downgrade: args.allow_downgrade,
+        offline: args.offline,
+    };
+    let report = plan_install(&options);
+    render_install_plan(cli, &report, stdout)
+}
+
+fn render_install_plan<W>(
+    cli: &Cli,
+    report: &crate::models::InstallPlanReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_install_plan_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_install_plan_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_install_plan_json(report) + "\n"))
+        }
     }
 }
 
@@ -4037,8 +4304,8 @@ where
     E: Write,
 {
     let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let profile = crate::core::rehearse::RehearsalProfile::from_str(&args.profile)
-        .unwrap_or_default();
+    let profile =
+        crate::core::rehearse::RehearsalProfile::from_str(&args.profile).unwrap_or_default();
 
     let commands = parse_command_specs(args.commands.as_ref(), args.commands_json.as_ref());
 
@@ -4085,8 +4352,8 @@ where
     E: Write,
 {
     let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let profile = crate::core::rehearse::RehearsalProfile::from_str(&args.profile)
-        .unwrap_or_default();
+    let profile =
+        crate::core::rehearse::RehearsalProfile::from_str(&args.profile).unwrap_or_default();
 
     let commands = parse_command_specs(args.commands.as_ref(), args.commands_json.as_ref());
 
@@ -4221,22 +4488,54 @@ fn parse_command_specs(
             .and_then(|content| serde_json::from_str(&content).ok())
             .unwrap_or_default()
     } else {
-        vec![
-            crate::core::rehearse::CommandSpec {
-                id: "cmd_1".to_string(),
-                command: "status".to_string(),
-                args: vec!["--json".to_string()],
-                expected_effect: "read_only".to_string(),
-                stop_on_failure: false,
-                idempotency_key: None,
-            },
-        ]
+        vec![crate::core::rehearse::CommandSpec {
+            id: "cmd_1".to_string(),
+            command: "status".to_string(),
+            args: vec!["--json".to_string()],
+            expected_effect: "read_only".to_string(),
+            stop_on_failure: false,
+            idempotency_key: None,
+        }]
     }
 }
 
 // ============================================================================
 // EE-243: Graph Diagnostic Output
 // ============================================================================
+
+fn handle_diag_integrity<W>(cli: &Cli, args: &DiagIntegrityArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
+    let report = IntegrityDiagnosticsReport::gather(&IntegrityDiagnosticsOptions {
+        workspace_path,
+        database_path: args.database.clone(),
+        workspace_id: "default".to_string(),
+        sample_size: args.sample_size,
+        create_canary: args.create_canary,
+        dry_run: args.dry_run,
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_integrity_diagnostics_human(&report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_integrity_diagnostics_toon(&report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_integrity_diagnostics_json(&report) + "\n"),
+        ),
+    }
+}
 
 fn handle_diag_graph<W>(cli: &Cli, stdout: &mut W) -> ProcessExitCode
 where
@@ -6068,6 +6367,7 @@ const COMMAND_NAMES: &[&str] = &[
     "init",
     "import",
     "index",
+    "install",
     "introspect",
     "memory",
     "outcome",
@@ -6078,6 +6378,7 @@ const COMMAND_NAMES: &[&str] = &[
     "situation",
     "status",
     "support",
+    "update",
     "version",
     "why",
 ];
@@ -6085,10 +6386,17 @@ const COMMAND_NAMES: &[&str] = &[
 /// Subcommand names for nested commands.
 const AGENT_SUBCOMMANDS: &[&str] = &["detect", "sources", "scan"];
 const CLAIM_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
-const DIAG_SUBCOMMANDS: &[&str] = &["dependencies", "graph", "quarantine", "streams"];
+const DIAG_SUBCOMMANDS: &[&str] = &[
+    "dependencies",
+    "graph",
+    "integrity",
+    "quarantine",
+    "streams",
+];
 const EVAL_SUBCOMMANDS: &[&str] = &["run", "list"];
 const IMPORT_SUBCOMMANDS: &[&str] = &["cass", "eidetic-legacy"];
 const INDEX_SUBCOMMANDS: &[&str] = &["rebuild", "status"];
+const INSTALL_SUBCOMMANDS: &[&str] = &["check", "plan"];
 const MEMORY_SUBCOMMANDS: &[&str] = &["list", "show", "history"];
 const REVIEW_SUBCOMMANDS: &[&str] = &["session"];
 const SCHEMA_SUBCOMMANDS: &[&str] = &["list", "export"];
@@ -6156,6 +6464,7 @@ impl NormalizedInvocation {
                 Command::Diag(diag) => match diag {
                     DiagCommand::Dependencies => "diag dependencies".to_string(),
                     DiagCommand::Graph => "diag graph".to_string(),
+                    DiagCommand::Integrity(_) => "diag integrity".to_string(),
                     DiagCommand::Quarantine => "diag quarantine".to_string(),
                     DiagCommand::Streams => "diag streams".to_string(),
                 },
@@ -6180,6 +6489,10 @@ impl NormalizedInvocation {
                 Command::Import(import) => match import {
                     ImportCommand::Cass(_) => "import cass".to_string(),
                     ImportCommand::EideticLegacy(_) => "import eidetic-legacy".to_string(),
+                },
+                Command::Install(install) => match install {
+                    InstallCommand::Check(_) => "install check".to_string(),
+                    InstallCommand::Plan(_) => "install plan".to_string(),
                 },
                 Command::Graph(graph) => match graph {
                     GraphCommand::CentralityRefresh(_) => "graph centrality-refresh".to_string(),
@@ -6258,6 +6571,7 @@ impl NormalizedInvocation {
                     SupportCommand::Bundle(_) => "support bundle".to_string(),
                     SupportCommand::Inspect(_) => "support inspect".to_string(),
                 },
+                Command::Update(_) => "update".to_string(),
                 Command::Version => "version".to_string(),
                 Command::Why(_) => "why".to_string(),
             },
@@ -6316,6 +6630,7 @@ pub fn did_you_mean(input: &str, parent_command: Option<&str>) -> Option<String>
         Some("eval") => EVAL_SUBCOMMANDS,
         Some("import") => IMPORT_SUBCOMMANDS,
         Some("index") => INDEX_SUBCOMMANDS,
+        Some("install") => INSTALL_SUBCOMMANDS,
         Some("memory") => MEMORY_SUBCOMMANDS,
         Some("review") => REVIEW_SUBCOMMANDS,
         Some("schema") => SCHEMA_SUBCOMMANDS,
@@ -6361,6 +6676,7 @@ fn extract_invalid_subcommand(args: &[OsString]) -> Option<(String, Option<Strin
                         "eval" => Some(EVAL_SUBCOMMANDS),
                         "import" => Some(IMPORT_SUBCOMMANDS),
                         "index" => Some(INDEX_SUBCOMMANDS),
+                        "install" => Some(INSTALL_SUBCOMMANDS),
                         "memory" => Some(MEMORY_SUBCOMMANDS),
                         "review" => Some(REVIEW_SUBCOMMANDS),
                         "schema" => Some(SCHEMA_SUBCOMMANDS),
@@ -7284,6 +7600,36 @@ mod tests {
     }
 
     #[test]
+    fn diag_integrity_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "diag",
+            "integrity",
+            "--database",
+            "/tmp/ee.db",
+            "--sample-size",
+            "3",
+            "--create-canary",
+            "--dry-run",
+        ])
+        .map_err(|e| format!("failed to parse diag integrity: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::Integrity(args))) => {
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("/tmp/ee.db")),
+                    "database path",
+                )?;
+                ensure_equal(&args.sample_size, &3, "sample size")?;
+                ensure_equal(&args.create_canary, &true, "create canary")?;
+                ensure_equal(&args.dry_run, &true, "dry run")
+            }
+            _ => Err("expected diag integrity command".to_string()),
+        }
+    }
+
+    #[test]
     fn diag_dependencies_json_output_has_contract_matrix() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "diag", "dependencies", "--json"]);
         ensure_equal(
@@ -7304,6 +7650,35 @@ mod tests {
         ensure_contains(&stdout, "\"forbiddenCrates\":[", "forbidden crates array")?;
         ensure_contains(&stdout, "\"entries\":[", "dependency entries array")?;
         ensure(stderr.is_empty(), "diag dependencies json stderr empty")
+    }
+
+    #[test]
+    fn diag_integrity_json_output_reports_missing_database() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "diag",
+            "integrity",
+            "--database",
+            "tests/fixtures/missing-ee-workspace/.ee/ee.db",
+            "--json",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "diag integrity json exit")?;
+        ensure_contains(
+            &stdout,
+            "\"command\":\"diag integrity\"",
+            "integrity diagnostics command",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"schema\":\"ee.diag.integrity.v1\"",
+            "integrity diagnostics schema",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"code\":\"integrity_database_missing\"",
+            "missing database degradation",
+        )?;
+        ensure(stderr.is_empty(), "diag integrity json stderr empty")
     }
 
     // ========================================================================

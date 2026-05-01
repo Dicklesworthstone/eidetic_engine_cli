@@ -2,6 +2,14 @@
 
 **Profile:** compact | **Budget:** 11/4000 tokens
 
+## Advisory Memory Banner
+
+**Status:** `degraded`
+
+Context includes 1 degraded signal; validate advisory memory and repair degraded sources before relying on this pack.
+
+- **low** `[degraded_context]` 1 degraded context signal present; inspect degraded[] repairs before relying on omitted or fallback sources. Action: `inspect_degraded_repairs`
+
 ## procedural_rules
 
 ### 1. mem_00000000000000000000000001 (11 tokens)
@@ -11,6 +19,8 @@ Run cargo fmt --check before release.
 ```
 
 **Why:** Selected for query `format before release` from semantic_fast search result with score 0.4082 and utility 0.8000.
+
+**Trust:** `human_explicit` / `authoritative`
 
 **Provenance:**
 - ee-mem://mem_00000000000000000000000001 (ee-mem)

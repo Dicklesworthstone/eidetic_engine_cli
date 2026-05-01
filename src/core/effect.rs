@@ -243,6 +243,8 @@ impl EffectManifest {
             CommandEffect::read_only("help", "Print help"),
             CommandEffect::read_only("import list", "List import sources"),
             CommandEffect::read_only("index status", "Show index status"),
+            CommandEffect::read_only("install check", "Inspect install posture"),
+            CommandEffect::read_only("install plan", "Plan install without mutation"),
             CommandEffect::read_only("introspect", "Introspect ee metadata"),
             CommandEffect::read_only("memory history", "Show memory revision history"),
             CommandEffect::read_only("memory list", "List memories"),
@@ -253,6 +255,7 @@ impl EffectManifest {
             CommandEffect::read_only("schema show", "Show schema definition"),
             CommandEffect::read_only("search", "Search memories"),
             CommandEffect::read_only("status", "Report workspace status"),
+            CommandEffect::read_only("update", "Plan update without mutation"),
             CommandEffect::read_only("version", "Print version"),
             CommandEffect::read_only("why", "Explain memory selection"),
         ]
