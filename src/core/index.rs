@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::db::{DbConnection, DbError};
 use crate::search::{
@@ -9,6 +9,9 @@ use crate::search::{
 };
 
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
+const INDEX_METADATA_FILE: &str = "meta.json";
+const INDEX_STAGING_PREFIX: &str = ".publish-";
+const INDEX_RETAINED_SUFFIX: &str = ".previous";
 
 #[derive(Clone, Debug)]
 pub struct IndexRebuildOptions {
@@ -175,6 +178,7 @@ pub fn rebuild_index(
     let index_dir = options.resolve_index_dir();
 
     let db = DbConnection::open_file(&database_path)?;
+    let (_, _, db_generation) = get_db_stats(&db)?;
 
     let workspace_id = get_default_workspace_id(&db)?;
 
@@ -218,8 +222,8 @@ pub fn rebuild_index(
         });
     }
 
-    std::fs::create_dir_all(&index_dir)
-        .map_err(|e| IndexRebuildError::Index(format!("Failed to create index directory: {e}")))?;
+    let _recovery_action = recover_interrupted_publish(&index_dir)?;
+    let staging_dir = create_publish_staging_dir(&index_dir)?;
 
     let indexable_docs: Vec<_> = memory_docs
         .into_iter()
@@ -232,25 +236,31 @@ pub fn rebuild_index(
         Arc::new(HashEmbedder::default_384()) as Arc<dyn crate::search::Embedder>;
     let stack = EmbedderStack::from_parts(fast_embedder, Some(quality_embedder));
 
-    let build_result = build_index_sync(&index_dir, stack, indexable_docs);
+    let build_result = build_index_sync(&staging_dir, stack, indexable_docs);
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     match build_result {
-        Ok(stats) => Ok(IndexRebuildReport {
-            status: IndexRebuildStatus::Success,
-            memories_indexed,
-            sessions_indexed,
-            documents_total,
-            index_dir,
-            elapsed_ms,
-            dry_run: false,
-            errors: stats
-                .errors
-                .iter()
-                .map(|(id, e)| format!("{id}: {e}"))
-                .collect(),
-        }),
+        Ok(stats) => {
+            let published_generation = db_generation.unwrap_or_else(|| u64::from(documents_total));
+            write_index_metadata(&staging_dir, published_generation, documents_total)?;
+            publish_staged_index(&index_dir, &staging_dir)?;
+
+            Ok(IndexRebuildReport {
+                status: IndexRebuildStatus::Success,
+                memories_indexed,
+                sessions_indexed,
+                documents_total,
+                index_dir,
+                elapsed_ms,
+                dry_run: false,
+                errors: stats
+                    .errors
+                    .iter()
+                    .map(|(id, e)| format!("{id}: {e}"))
+                    .collect(),
+            })
+        }
         Err(e) => Ok(IndexRebuildReport {
             status: IndexRebuildStatus::IndexError,
             memories_indexed,
@@ -262,6 +272,209 @@ pub fn rebuild_index(
             errors: vec![e],
         }),
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IndexPublishRecoveryAction {
+    ActivePresent,
+    RetainedGenerationRestored,
+    StagedGenerationPromoted,
+    NoRecoverableGeneration,
+}
+
+fn recover_interrupted_publish(
+    index_dir: &Path,
+) -> Result<IndexPublishRecoveryAction, IndexRebuildError> {
+    if index_dir.exists() {
+        return Ok(IndexPublishRecoveryAction::ActivePresent);
+    }
+
+    let retained_dir = retained_index_dir(index_dir)?;
+    if retained_dir.exists() {
+        rename_index_dir(
+            &retained_dir,
+            index_dir,
+            "restore retained index generation",
+        )?;
+        return Ok(IndexPublishRecoveryAction::RetainedGenerationRestored);
+    }
+
+    if let Some(staging_dir) = find_complete_staging_dir(index_dir)? {
+        rename_index_dir(&staging_dir, index_dir, "promote staged index generation")?;
+        return Ok(IndexPublishRecoveryAction::StagedGenerationPromoted);
+    }
+
+    Ok(IndexPublishRecoveryAction::NoRecoverableGeneration)
+}
+
+fn create_publish_staging_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuildError> {
+    let parent = index_parent(index_dir);
+    std::fs::create_dir_all(parent).map_err(|e| {
+        IndexRebuildError::Index(format!("Failed to create index parent directory: {e}"))
+    })?;
+
+    let base = index_base_name(index_dir)?;
+    let stamp = monotonicish_stamp();
+    for sequence in 0_u32..1000 {
+        let candidate = parent.join(format!(
+            ".{base}{INDEX_STAGING_PREFIX}{stamp}-{sequence:03}"
+        ));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(IndexRebuildError::Index(format!(
+                    "Failed to create index staging directory: {error}"
+                )));
+            }
+        }
+    }
+
+    Err(IndexRebuildError::Index(
+        "Failed to allocate a unique index staging directory".to_string(),
+    ))
+}
+
+fn publish_staged_index(index_dir: &Path, staging_dir: &Path) -> Result<(), IndexRebuildError> {
+    if !staging_dir.exists() {
+        return Err(IndexRebuildError::Index(format!(
+            "Index staging directory does not exist: {}",
+            staging_dir.display()
+        )));
+    }
+
+    let retained_dir = if index_dir.exists() {
+        let retained = allocate_retained_index_dir(index_dir)?;
+        rename_index_dir(index_dir, &retained, "retain previous index generation")?;
+        Some(retained)
+    } else {
+        None
+    };
+
+    if let Err(error) = rename_index_dir(staging_dir, index_dir, "publish staged index generation")
+    {
+        if let Some(retained) = retained_dir
+            && !index_dir.exists()
+        {
+            let _ = rename_index_dir(&retained, index_dir, "restore previous index generation");
+        }
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+fn write_index_metadata(
+    index_dir: &Path,
+    generation: u64,
+    documents_total: u32,
+) -> Result<(), IndexRebuildError> {
+    let timestamp = current_timestamp_rfc3339();
+    let metadata = serde_json::json!({
+        "schema": "ee.index_metadata.v1",
+        "generation": generation,
+        "lastRebuildAt": timestamp,
+        "documentCount": documents_total,
+    });
+    let serialized = serde_json::to_vec_pretty(&metadata).map_err(|e| {
+        IndexRebuildError::Index(format!("Failed to serialize index metadata: {e}"))
+    })?;
+    std::fs::write(index_dir.join(INDEX_METADATA_FILE), serialized)
+        .map_err(|e| IndexRebuildError::Index(format!("Failed to write index metadata: {e}")))
+}
+
+fn find_complete_staging_dir(index_dir: &Path) -> Result<Option<PathBuf>, IndexRebuildError> {
+    let parent = index_parent(index_dir);
+    if !parent.exists() {
+        return Ok(None);
+    }
+
+    let base = index_base_name(index_dir)?;
+    let prefix = format!(".{base}{INDEX_STAGING_PREFIX}");
+    let mut candidates = Vec::new();
+    for entry in std::fs::read_dir(parent).map_err(|e| {
+        IndexRebuildError::Index(format!("Failed to inspect index parent directory: {e}"))
+    })? {
+        let entry = entry.map_err(|e| {
+            IndexRebuildError::Index(format!("Failed to inspect index staging entry: {e}"))
+        })?;
+        if !entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) && entry.path().join(INDEX_METADATA_FILE).is_file() {
+            candidates.push(entry.path());
+        }
+    }
+    candidates.sort();
+    Ok(candidates.pop())
+}
+
+fn retained_index_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuildError> {
+    let parent = index_parent(index_dir);
+    let base = index_base_name(index_dir)?;
+    Ok(parent.join(format!("{base}{INDEX_RETAINED_SUFFIX}")))
+}
+
+fn allocate_retained_index_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuildError> {
+    let parent = index_parent(index_dir);
+    let base = index_base_name(index_dir)?;
+    for sequence in 0_u32..1000 {
+        let candidate = if sequence == 0 {
+            parent.join(format!("{base}{INDEX_RETAINED_SUFFIX}"))
+        } else {
+            parent.join(format!("{base}{INDEX_RETAINED_SUFFIX}.{sequence:03}"))
+        };
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(IndexRebuildError::Index(
+        "Failed to allocate retained index generation directory".to_string(),
+    ))
+}
+
+fn index_parent(index_dir: &Path) -> &Path {
+    index_dir
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn index_base_name(index_dir: &Path) -> Result<String, IndexRebuildError> {
+    index_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            IndexRebuildError::Index(format!(
+                "Index directory must have a final path component: {}",
+                index_dir.display()
+            ))
+        })
+}
+
+fn rename_index_dir(from: &Path, to: &Path, action: &str) -> Result<(), IndexRebuildError> {
+    std::fs::rename(from, to).map_err(|e| {
+        IndexRebuildError::Index(format!(
+            "Failed to {action} from {} to {}: {e}",
+            from.display(),
+            to.display()
+        ))
+    })
+}
+
+fn monotonicish_stamp() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos())
+}
+
+fn current_timestamp_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 fn get_default_workspace_id(db: &DbConnection) -> Result<String, IndexRebuildError> {
@@ -688,6 +901,33 @@ fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), String>;
+
+    fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
+        if condition {
+            Ok(())
+        } else {
+            Err(message.into())
+        }
+    }
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ee-index-{label}-{}-{}",
+            std::process::id(),
+            monotonicish_stamp()
+        ))
+    }
+
+    fn write_marker(dir: &Path, file: &str, body: &str) -> TestResult {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join(file), body).map_err(|e| e.to_string())
+    }
+
+    fn read_marker(dir: &Path, file: &str) -> Result<String, String> {
+        std::fs::read_to_string(dir.join(file)).map_err(|e| e.to_string())
+    }
+
     #[test]
     fn index_rebuild_status_as_str_is_stable() {
         assert_eq!(IndexRebuildStatus::Success.as_str(), "success");
@@ -976,5 +1216,130 @@ mod tests {
             io_err.repair_hint(),
             Some("Check workspace path permissions")
         );
+    }
+
+    #[test]
+    fn publish_staged_index_retains_previous_generation() -> TestResult {
+        let root = unique_test_dir("publish-retains-previous");
+        let index_dir = root.join("index");
+        let staging_dir = root.join(".index.publish-test");
+        write_marker(&index_dir, "generation.txt", "old")?;
+        write_marker(&staging_dir, "generation.txt", "new")?;
+        write_index_metadata(&staging_dir, 2, 1).map_err(|e| e.to_string())?;
+
+        publish_staged_index(&index_dir, &staging_dir).map_err(|e| e.to_string())?;
+
+        let retained_dir = root.join("index.previous");
+        ensure(
+            index_dir.is_dir(),
+            "active index should exist after publish",
+        )?;
+        ensure(
+            retained_dir.is_dir(),
+            "previous active index should be retained",
+        )?;
+        ensure(
+            !staging_dir.exists(),
+            "staging path should have moved into active index",
+        )?;
+        ensure(
+            read_marker(&index_dir, "generation.txt")? == "new",
+            "active index should contain staged generation",
+        )?;
+        ensure(
+            read_marker(&retained_dir, "generation.txt")? == "old",
+            "retained index should contain previous generation",
+        )
+    }
+
+    #[test]
+    fn recover_interrupted_publish_restores_retained_generation() -> TestResult {
+        let root = unique_test_dir("recover-retained");
+        let index_dir = root.join("index");
+        let retained_dir = root.join("index.previous");
+        write_marker(&retained_dir, "generation.txt", "old")?;
+
+        let action = recover_interrupted_publish(&index_dir).map_err(|e| e.to_string())?;
+
+        ensure(
+            action == IndexPublishRecoveryAction::RetainedGenerationRestored,
+            format!("unexpected recovery action: {action:?}"),
+        )?;
+        ensure(index_dir.is_dir(), "active index should be restored")?;
+        ensure(
+            !retained_dir.exists(),
+            "retained path should have moved back to active index",
+        )?;
+        ensure(
+            read_marker(&index_dir, "generation.txt")? == "old",
+            "restored active index should contain retained generation",
+        )
+    }
+
+    #[test]
+    fn recover_interrupted_publish_promotes_complete_staging_generation() -> TestResult {
+        let root = unique_test_dir("recover-staging");
+        let index_dir = root.join("index");
+        let staging_dir = root.join(".index.publish-20260501-000");
+        write_marker(&staging_dir, "generation.txt", "new")?;
+        write_index_metadata(&staging_dir, 3, 1).map_err(|e| e.to_string())?;
+
+        let action = recover_interrupted_publish(&index_dir).map_err(|e| e.to_string())?;
+
+        ensure(
+            action == IndexPublishRecoveryAction::StagedGenerationPromoted,
+            format!("unexpected recovery action: {action:?}"),
+        )?;
+        ensure(index_dir.is_dir(), "complete staging should become active")?;
+        ensure(
+            !staging_dir.exists(),
+            "staging path should have moved into active index",
+        )?;
+        ensure(
+            read_marker(&index_dir, "generation.txt")? == "new",
+            "active index should contain completed staged generation",
+        )
+    }
+
+    #[test]
+    fn recover_interrupted_publish_leaves_incomplete_staging_generation() -> TestResult {
+        let root = unique_test_dir("recover-incomplete");
+        let index_dir = root.join("index");
+        let staging_dir = root.join(".index.publish-20260501-000");
+        write_marker(&staging_dir, "generation.txt", "partial")?;
+
+        let action = recover_interrupted_publish(&index_dir).map_err(|e| e.to_string())?;
+
+        ensure(
+            action == IndexPublishRecoveryAction::NoRecoverableGeneration,
+            format!("unexpected recovery action: {action:?}"),
+        )?;
+        ensure(
+            !index_dir.exists(),
+            "incomplete staging should not be promoted",
+        )?;
+        ensure(
+            staging_dir.is_dir(),
+            "incomplete staging should be left intact",
+        )
+    }
+
+    #[test]
+    fn write_index_metadata_is_read_by_status_metadata_reader() -> TestResult {
+        let root = unique_test_dir("metadata-roundtrip");
+        let index_dir = root.join("index");
+        std::fs::create_dir_all(&index_dir).map_err(|e| e.to_string())?;
+
+        write_index_metadata(&index_dir, 42, 7).map_err(|e| e.to_string())?;
+        let (generation, rebuilt_at) = read_index_metadata(&index_dir);
+
+        ensure(
+            generation == Some(42),
+            "metadata generation should round-trip",
+        )?;
+        ensure(
+            rebuilt_at.is_some(),
+            "metadata should include last rebuild timestamp",
+        )
     }
 }
