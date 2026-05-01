@@ -971,8 +971,64 @@ fn agent_docs_flag_matches_golden() -> TestResult {
         "agent-docs primary workflow",
     )?;
     ensure_contains(&stdout, "\"coreCommands\":[", "agent-docs core commands")?;
+    ensure_contains(
+        &stdout,
+        "\"recipeCatalogCommand\":\"ee agent-docs recipes --json\"",
+        "agent-docs recipe catalog command",
+    )?;
+    ensure_contains(&stdout, "\"jqExamples\":[", "agent-docs jq examples")?;
 
     assert_golden("agent_docs", "agent_docs_json", &stdout)
+}
+
+#[test]
+fn agent_docs_recipes_topic_exposes_machine_readable_branches() -> TestResult {
+    let output = run_ee(&["agent-docs", "recipes", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(output.status.success(), "agent-docs recipes should succeed")?;
+    ensure(stderr.is_empty(), "agent-docs recipes stderr must be empty")?;
+    ensure_starts_with(
+        &stdout,
+        "{\"schema\":\"ee.response.v1\"",
+        "agent-docs recipes JSON schema",
+    )?;
+    ensure_contains(&stdout, "\"topic\":\"recipes\"", "recipes topic")?;
+    ensure_contains(&stdout, "\"recipes\":[", "recipes array")?;
+    ensure_contains(&stdout, "\"jq\":", "recipes jq fields")?;
+    ensure_contains(&stdout, "\"failureBranches\":[", "recipes failure branches")?;
+    ensure_contains(&stdout, "\"nextAction\":", "recipes next actions")?;
+
+    let json: Value =
+        serde_json::from_str(&stdout).map_err(|e| format!("recipes JSON should parse: {e}"))?;
+    let data = json
+        .get("data")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "recipes response data must be an object".to_string())?;
+    let recipes = data
+        .get("recipes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "recipes must be an array".to_string())?;
+    ensure(recipes.len() >= 5, "at least five recipes are documented")?;
+    for recipe in recipes {
+        let command = recipe
+            .get("command")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "recipe command must be a string".to_string())?;
+        ensure(command.starts_with("ee "), "recipe command starts with ee")?;
+        ensure(
+            recipe.get("jq").and_then(Value::as_str).is_some(),
+            "recipe jq must be present",
+        )?;
+        let branches = recipe
+            .get("failureBranches")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "recipe failureBranches must be an array".to_string())?;
+        ensure(!branches.is_empty(), "recipe has failure branches")?;
+    }
+
+    Ok(())
 }
 
 // =============================================================================

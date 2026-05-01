@@ -13,6 +13,7 @@ pub enum AgentDocsTopic {
     Errors,
     Formats,
     Examples,
+    Recipes,
 }
 
 impl AgentDocsTopic {
@@ -30,6 +31,7 @@ impl AgentDocsTopic {
             Self::Errors => "errors",
             Self::Formats => "formats",
             Self::Examples => "examples",
+            Self::Recipes => "recipes",
         }
     }
 
@@ -47,6 +49,7 @@ impl AgentDocsTopic {
             Self::Errors => "Error codes, categories, and repair suggestions",
             Self::Formats => "Output format options (json, toon, human, etc.)",
             Self::Examples => "Common workflows and command examples for agents",
+            Self::Recipes => "Machine-readable workflows with jq selectors and failure branches",
         }
     }
 
@@ -63,6 +66,7 @@ impl AgentDocsTopic {
             "errors" => Some(Self::Errors),
             "formats" => Some(Self::Formats),
             "examples" => Some(Self::Examples),
+            "recipes" => Some(Self::Recipes),
             _ => None,
         }
     }
@@ -81,6 +85,7 @@ impl AgentDocsTopic {
             Self::Errors,
             Self::Formats,
             Self::Examples,
+            Self::Recipes,
         ]
     }
 }
@@ -466,13 +471,150 @@ pub const EXAMPLES: &[ExampleEntry] = &[
     },
 ];
 
+#[derive(Clone, Debug)]
+pub struct FailureBranchEntry {
+    pub condition: &'static str,
+    pub jq: &'static str,
+    pub next_action: &'static str,
+}
+
+#[derive(Clone, Debug)]
+pub struct AgentDocsRecipeEntry {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub category: &'static str,
+    pub command: &'static str,
+    pub jq: &'static str,
+    pub success_check: &'static str,
+    pub failure_branches: &'static [FailureBranchEntry],
+}
+
+pub const CONTEXT_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "context pack command returns an error envelope",
+        jq: r#".error | {code, message, repair}"#,
+        next_action: "Run the repair command when present, then retry with the same workspace and query.",
+    },
+    FailureBranchEntry {
+        condition: "semantic retrieval is degraded",
+        jq: r#".data.degraded[]? | select(.code == "semantic_unavailable")"#,
+        next_action: "Continue with lexical results when acceptable, or run `ee index reembed --workspace .`.",
+    },
+];
+
+pub const STATUS_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "database migration is required",
+        jq: r#".. | objects | select(.code? == "migration_required")"#,
+        next_action: "Run `ee db migrate --workspace . --json` before mutating memory state.",
+    },
+    FailureBranchEntry {
+        condition: "storage or index capability is unavailable",
+        jq: r#".data.degraded[]? | select(.code | test("storage|index"))"#,
+        next_action: "Use the reported repair field or run `ee doctor --json` for a full repair plan.",
+    },
+];
+
+pub const DOCTOR_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "one or more checks failed",
+        jq: r#".data.checks[]? | select(.status != "ok") | {name, status, code, repair}"#,
+        next_action: "Apply failing check repairs in order and rerun `ee doctor --json`.",
+    },
+    FailureBranchEntry {
+        condition: "doctor command itself returns an error envelope",
+        jq: r#".error | {code, message, repair}"#,
+        next_action: "Treat the error code as the stable branch key and avoid parsing stderr for automation.",
+    },
+];
+
+pub const PLAN_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "goal cannot be classified confidently",
+        jq: r#".data.degradedBranches[]? | select(.condition | test("unknown|ambiguous"))"#,
+        next_action: "Run `ee plan recipe list --json` and select a recipe explicitly.",
+    },
+    FailureBranchEntry {
+        condition: "selected recipe includes degraded branches",
+        jq: r#".data.degradedBranches[]? | {condition, command, reason}"#,
+        next_action: "Resolve the listed precondition before applying the real command sequence.",
+    },
+];
+
+pub const CONTRACT_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "expected schema is absent",
+        jq: r#".data.contracts[]? | select(.schema == "ee.response.v1")"#,
+        next_action: "Pin automation to the published schema list and stop if the expected schema is missing.",
+    },
+    FailureBranchEntry {
+        condition: "agent-docs topic is misspelled",
+        jq: r#".error | select(.code == "usage") | {message, repair}"#,
+        next_action: "Run `ee agent-docs --json` and select a topic from `.data.topics[].name`.",
+    },
+];
+
+pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
+    AgentDocsRecipeEntry {
+        id: "pre-task-context",
+        title: "Fetch task context before editing",
+        description: "Retrieve a compact, provenance-bearing context pack for the current task.",
+        category: "context",
+        command: "ee context \"<task>\" --workspace . --max-tokens 4000 --json",
+        jq: r#".data.pack.items[]? | {memoryId, section, why}"#,
+        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        failure_branches: CONTEXT_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "workspace-health",
+        title: "Check workspace health",
+        description: "Inspect storage, index, and degraded capability state before relying on memory output.",
+        category: "diagnostics",
+        command: "ee status --workspace . --json",
+        jq: r#"{database: .data.database, index: .data.index, degraded: (.data.degraded // [])}"#,
+        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        failure_branches: STATUS_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "repair-plan",
+        title: "Collect repair actions",
+        description: "Use doctor output as the stable source of repair commands for automation.",
+        category: "diagnostics",
+        command: "ee doctor --json",
+        jq: r#".data.checks[]? | select(.status != "ok") | {name, code, repair}"#,
+        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        failure_branches: DOCTOR_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "goal-to-recipe",
+        title: "Resolve an agent goal to commands",
+        description: "Map a natural-language goal to a deterministic recipe before running a workflow.",
+        category: "planning",
+        command: "ee plan goal \"<goal>\" --json",
+        jq: r#"{recipeId: .data.recipeId, steps: [.data.steps[]?.command], degraded: (.data.degradedBranches // [])}"#,
+        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        failure_branches: PLAN_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "contract-discovery",
+        title: "Discover machine contracts",
+        description: "List stable response contracts before writing or updating agent parsers.",
+        category: "contracts",
+        command: "ee agent-docs contracts --json",
+        jq: r#".data.contracts[] | {name, schema, stability}"#,
+        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        failure_branches: CONTRACT_RECIPE_FAILURES,
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Debug;
 
     use super::{
-        AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, ENV_VARS, EXAMPLES, EXIT_CODES, FIELD_LEVELS,
-        GUIDE_SECTIONS, OUTPUT_FORMATS,
+        AGENT_DOC_RECIPES, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, ENV_VARS, EXAMPLES,
+        EXIT_CODES, FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS,
     };
 
     type TestResult = Result<(), String>;
@@ -499,8 +641,12 @@ mod tests {
     #[test]
     fn topic_all_returns_complete_list() -> TestResult {
         let topics = AgentDocsTopic::all();
-        ensure_equal(&topics.len(), &11, "topic count")?;
-        ensure_equal(&topics[0], &AgentDocsTopic::Guide, "first topic")
+        ensure_equal(&topics.len(), &12, "topic count")?;
+        ensure_equal(
+            &topics.first(),
+            &Some(&AgentDocsTopic::Guide),
+            "first topic",
+        )
     }
 
     #[test]
@@ -603,6 +749,36 @@ mod tests {
                 example.command.starts_with("ee "),
                 "example command starts with ee",
             )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recipes_include_jq_and_failure_branches() -> TestResult {
+        ensure(!AGENT_DOC_RECIPES.is_empty(), "agent recipes exist")?;
+        for recipe in AGENT_DOC_RECIPES {
+            ensure(!recipe.id.is_empty(), "recipe id non-empty")?;
+            ensure(
+                recipe.command.starts_with("ee "),
+                "recipe command starts with ee",
+            )?;
+            ensure(!recipe.jq.is_empty(), "recipe jq non-empty")?;
+            ensure(
+                !recipe.success_check.is_empty(),
+                "recipe success check non-empty",
+            )?;
+            ensure(
+                !recipe.failure_branches.is_empty(),
+                "recipe failure branches exist",
+            )?;
+            for branch in recipe.failure_branches {
+                ensure(!branch.condition.is_empty(), "failure condition non-empty")?;
+                ensure(!branch.jq.is_empty(), "failure jq non-empty")?;
+                ensure(
+                    !branch.next_action.is_empty(),
+                    "failure next action non-empty",
+                )?;
+            }
         }
         Ok(())
     }

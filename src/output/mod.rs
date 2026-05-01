@@ -3068,10 +3068,8 @@ const ERROR_CODES: &[ErrorCodeEntry] = &[
 
 #[must_use]
 pub fn agent_docs() -> String {
-    format!(
-        "{{\"schema\":\"{}\",\"success\":true,\"data\":{{\"command\":\"agent-docs\",\"description\":\"Durable, local-first, explainable memory for coding agents.\",\"primaryWorkflow\":\"ee context \\\"<task>\\\" --workspace . --max-tokens 4000 --json\",\"coreCommands\":[\"init\",\"remember\",\"search\",\"context\",\"why\",\"status\"]}}}}",
-        RESPONSE_SCHEMA_V1
-    )
+    let report = crate::core::agent_docs::AgentDocsReport::gather(None);
+    render_agent_docs_json(&report)
 }
 
 use crate::core::agent_detect::InstalledAgentDetectionReport;
@@ -3143,13 +3141,13 @@ pub fn render_agent_detect_toon(report: &InstalledAgentDetectionReport) -> Strin
 }
 
 use crate::core::agent_docs::{
-    AgentDocsReport, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, ENV_VARS, EXAMPLES, EXIT_CODES,
-    FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS,
+    AGENT_DOC_RECIPES, AgentDocsReport, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, ENV_VARS,
+    EXAMPLES, EXIT_CODES, FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS,
 };
 
 #[must_use]
 pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
-    let mut b = JsonBuilder::with_capacity(4096);
+    let mut b = JsonBuilder::with_capacity(8192);
     b.field_str("schema", RESPONSE_SCHEMA_V1);
     b.field_bool("success", true);
     b.field_object("data", |d| {
@@ -3168,6 +3166,19 @@ pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
             d.field_str(
                 "primaryWorkflow",
                 "ee context \"<task>\" --workspace . --max-tokens 4000 --json",
+            );
+            d.field_array_of_strs(
+                "coreCommands",
+                &["init", "remember", "search", "context", "why", "status"],
+            );
+            d.field_str("recipeCatalogCommand", "ee agent-docs recipes --json");
+            d.field_raw("recipeCount", &AGENT_DOC_RECIPES.len().to_string());
+            d.field_array_of_strs(
+                "jqExamples",
+                &[
+                    ".data.topics[] | {name, description}",
+                    ".data.recipes[] | {id, command, jq}",
+                ],
             );
             d.field_array_of_objects("topics", AgentDocsTopic::all(), |obj, topic| {
                 obj.field_str("name", topic.as_str());
@@ -3285,6 +3296,26 @@ fn render_agent_docs_topic_json(d: &mut JsonBuilder, topic: AgentDocsTopic) {
                 obj.field_str("category", example.category);
             });
         }
+        AgentDocsTopic::Recipes => {
+            d.field_array_of_objects("recipes", AGENT_DOC_RECIPES, |obj, recipe| {
+                obj.field_str("id", recipe.id);
+                obj.field_str("title", recipe.title);
+                obj.field_str("description", recipe.description);
+                obj.field_str("category", recipe.category);
+                obj.field_str("command", recipe.command);
+                obj.field_str("jq", recipe.jq);
+                obj.field_str("successCheck", recipe.success_check);
+                obj.field_array_of_objects(
+                    "failureBranches",
+                    recipe.failure_branches,
+                    |b, branch| {
+                        b.field_str("condition", branch.condition);
+                        b.field_str("jq", branch.jq);
+                        b.field_str("nextAction", branch.next_action);
+                    },
+                );
+            });
+        }
     }
 }
 
@@ -3307,6 +3338,7 @@ pub fn render_agent_docs_human(report: &AgentDocsReport) -> String {
         output.push_str(
             "Primary workflow:\n  ee context \"<task>\" --workspace . --max-tokens 4000 --json\n\n",
         );
+        output.push_str("Recipe catalog:\n  ee agent-docs recipes --json\n\n");
         output.push_str("Available topics:\n");
         for t in AgentDocsTopic::all() {
             output.push_str(&format!("  {:12} {}\n", t.as_str(), t.description()));
@@ -3425,6 +3457,21 @@ fn render_agent_docs_topic_human(output: &mut String, topic: AgentDocsTopic) {
                 output.push_str(&format!("\n  {} [{}]\n", example.title, example.category));
                 output.push_str(&format!("    {}\n", example.description));
                 output.push_str(&format!("    $ {}\n", example.command));
+            }
+        }
+        AgentDocsTopic::Recipes => {
+            output.push_str("\nMachine-readable recipes:\n");
+            for recipe in AGENT_DOC_RECIPES {
+                output.push_str(&format!("\n  {} [{}]\n", recipe.id, recipe.category));
+                output.push_str(&format!("    {}\n", recipe.description));
+                output.push_str(&format!("    $ {}\n", recipe.command));
+                output.push_str(&format!("    jq: {}\n", recipe.jq));
+                output.push_str("    Failure branches:\n");
+                for branch in recipe.failure_branches {
+                    output.push_str(&format!("      - {}\n", branch.condition));
+                    output.push_str(&format!("        jq: {}\n", branch.jq));
+                    output.push_str(&format!("        next: {}\n", branch.next_action));
+                }
             }
         }
     }
