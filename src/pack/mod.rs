@@ -1908,6 +1908,206 @@ impl fmt::Display for PackValidationError {
 
 impl std::error::Error for PackValidationError {}
 
+// ============================================================================
+// Rate-Distortion Token Budget Reports (EE-345)
+//
+// Rate-distortion theory measures the tradeoff between compression (rate, i.e.
+// tokens used) and quality (distortion, i.e. information loss). These reports
+// help users understand how their token budget affects context pack quality.
+// ============================================================================
+
+pub const RATE_DISTORTION_SCHEMA_V1: &str = "ee.pack.rate_distortion.v1";
+
+/// Rate-distortion report for token budget analysis.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RateDistortionReport {
+    pub budget_tokens: u32,
+    pub used_tokens: u32,
+    pub rate: f64,
+    pub distortion: f64,
+    pub efficiency: f64,
+    pub omitted_candidates: u32,
+    pub included_candidates: u32,
+    pub quality_score: f64,
+    pub sections: Vec<SectionBudgetReport>,
+}
+
+impl RateDistortionReport {
+    #[must_use]
+    pub fn new(budget_tokens: u32, used_tokens: u32) -> Self {
+        let rate = if budget_tokens > 0 {
+            used_tokens as f64 / budget_tokens as f64
+        } else {
+            0.0
+        };
+        Self {
+            budget_tokens,
+            used_tokens,
+            rate,
+            distortion: 0.0,
+            efficiency: rate,
+            omitted_candidates: 0,
+            included_candidates: 0,
+            quality_score: 1.0,
+            sections: Vec::new(),
+        }
+    }
+
+    pub fn with_candidates(mut self, included: u32, omitted: u32) -> Self {
+        self.included_candidates = included;
+        self.omitted_candidates = omitted;
+        if included + omitted > 0 {
+            self.quality_score = included as f64 / (included + omitted) as f64;
+            self.distortion = omitted as f64 / (included + omitted) as f64;
+        }
+        self
+    }
+
+    pub fn add_section(&mut self, section: SectionBudgetReport) {
+        self.sections.push(section);
+    }
+
+    #[must_use]
+    pub fn slack(&self) -> u32 {
+        self.budget_tokens.saturating_sub(self.used_tokens)
+    }
+
+    #[must_use]
+    pub fn utilization_percent(&self) -> f64 {
+        self.rate * 100.0
+    }
+
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let mut sections_json = String::from("[");
+        for (i, section) in self.sections.iter().enumerate() {
+            if i > 0 {
+                sections_json.push(',');
+            }
+            sections_json.push_str(&section.to_json());
+        }
+        sections_json.push(']');
+
+        format!(
+            "{{\"schema\":\"{}\",\"budgetTokens\":{},\"usedTokens\":{},\"slackTokens\":{},\"rate\":{:.4},\"distortion\":{:.4},\"efficiency\":{:.4},\"omittedCandidates\":{},\"includedCandidates\":{},\"qualityScore\":{:.4},\"utilizationPercent\":{:.2},\"sections\":{}}}",
+            RATE_DISTORTION_SCHEMA_V1,
+            self.budget_tokens,
+            self.used_tokens,
+            self.slack(),
+            self.rate,
+            self.distortion,
+            self.efficiency,
+            self.omitted_candidates,
+            self.included_candidates,
+            self.quality_score,
+            self.utilization_percent(),
+            sections_json,
+        )
+    }
+
+    #[must_use]
+    pub fn to_human(&self) -> String {
+        let mut result = String::from("Rate-Distortion Budget Report\n");
+        result.push_str("═══════════════════════════════════════\n\n");
+        result.push_str(&format!(
+            "Budget:      {:>6} tokens\n",
+            self.budget_tokens
+        ));
+        result.push_str(&format!("Used:        {:>6} tokens\n", self.used_tokens));
+        result.push_str(&format!("Slack:       {:>6} tokens\n", self.slack()));
+        result.push_str(&format!(
+            "Utilization: {:>5.1}%\n\n",
+            self.utilization_percent()
+        ));
+        result.push_str("Candidates:\n");
+        result.push_str(&format!(
+            "  Included:  {:>6}\n",
+            self.included_candidates
+        ));
+        result.push_str(&format!("  Omitted:   {:>6}\n", self.omitted_candidates));
+        result.push_str(&format!(
+            "  Quality:   {:>5.1}%\n\n",
+            self.quality_score * 100.0
+        ));
+        result.push_str("Rate-Distortion Metrics:\n");
+        result.push_str(&format!("  Rate (R):       {:>6.4}\n", self.rate));
+        result.push_str(&format!("  Distortion (D): {:>6.4}\n", self.distortion));
+        result.push_str(&format!("  Efficiency:     {:>6.4}\n\n", self.efficiency));
+
+        if !self.sections.is_empty() {
+            result.push_str("Section Breakdown:\n");
+            for section in &self.sections {
+                result.push_str(&format!(
+                    "  {:<15} {:>5} tokens ({:>4.1}%)\n",
+                    section.name,
+                    section.used_tokens,
+                    section.utilization_percent()
+                ));
+            }
+        }
+        result
+    }
+}
+
+/// Budget report for a single pack section.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SectionBudgetReport {
+    pub name: String,
+    pub quota_tokens: u32,
+    pub used_tokens: u32,
+    pub candidate_count: u32,
+}
+
+impl SectionBudgetReport {
+    #[must_use]
+    pub fn new(name: impl Into<String>, quota_tokens: u32, used_tokens: u32) -> Self {
+        Self {
+            name: name.into(),
+            quota_tokens,
+            used_tokens,
+            candidate_count: 0,
+        }
+    }
+
+    pub fn with_candidates(mut self, count: u32) -> Self {
+        self.candidate_count = count;
+        self
+    }
+
+    #[must_use]
+    pub fn slack(&self) -> u32 {
+        self.quota_tokens.saturating_sub(self.used_tokens)
+    }
+
+    #[must_use]
+    pub fn utilization_percent(&self) -> f64 {
+        if self.quota_tokens > 0 {
+            (self.used_tokens as f64 / self.quota_tokens as f64) * 100.0
+        } else {
+            0.0
+        }
+    }
+
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"name\":\"{}\",\"quotaTokens\":{},\"usedTokens\":{},\"slackTokens\":{},\"candidateCount\":{},\"utilizationPercent\":{:.2}}}",
+            self.name,
+            self.quota_tokens,
+            self.used_tokens,
+            self.slack(),
+            self.candidate_count,
+            self.utilization_percent(),
+        )
+    }
+}
+
+/// Compute a rate-distortion report from context response data.
+#[must_use]
+pub fn compute_rate_distortion(budget: u32, used: u32, included: u32, omitted: u32) -> RateDistortionReport {
+    RateDistortionReport::new(budget, used).with_candidates(included, omitted)
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -3489,5 +3689,154 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    // ========================================================================
+    // Rate-Distortion Tests (EE-345)
+    // ========================================================================
+
+    use super::{RateDistortionReport, SectionBudgetReport, compute_rate_distortion, RATE_DISTORTION_SCHEMA_V1};
+
+    #[test]
+    fn rate_distortion_report_computes_rate() -> TestResult {
+        let report = RateDistortionReport::new(4000, 3200);
+        ensure(
+            (report.rate - 0.8).abs() < 0.0001,
+            format!("expected rate 0.8, got {}", report.rate),
+        )
+    }
+
+    #[test]
+    fn rate_distortion_report_computes_slack() -> TestResult {
+        let report = RateDistortionReport::new(4000, 3200);
+        ensure(
+            report.slack() == 800,
+            format!("expected slack 800, got {}", report.slack()),
+        )
+    }
+
+    #[test]
+    fn rate_distortion_report_computes_utilization() -> TestResult {
+        let report = RateDistortionReport::new(4000, 3200);
+        ensure(
+            (report.utilization_percent() - 80.0).abs() < 0.01,
+            format!(
+                "expected utilization 80%, got {}%",
+                report.utilization_percent()
+            ),
+        )
+    }
+
+    #[test]
+    fn rate_distortion_report_with_candidates() -> TestResult {
+        let report = RateDistortionReport::new(4000, 3200).with_candidates(10, 5);
+        ensure(
+            report.included_candidates == 10,
+            format!("expected 10 included, got {}", report.included_candidates),
+        )?;
+        ensure(
+            report.omitted_candidates == 5,
+            format!("expected 5 omitted, got {}", report.omitted_candidates),
+        )?;
+        ensure(
+            (report.quality_score - 0.6667).abs() < 0.001,
+            format!("expected quality ~0.667, got {}", report.quality_score),
+        )?;
+        ensure(
+            (report.distortion - 0.3333).abs() < 0.001,
+            format!("expected distortion ~0.333, got {}", report.distortion),
+        )
+    }
+
+    #[test]
+    fn rate_distortion_report_to_json() -> TestResult {
+        let mut report = RateDistortionReport::new(4000, 3200).with_candidates(10, 5);
+        report.add_section(SectionBudgetReport::new("procedural", 1200, 1000).with_candidates(4));
+        let json = report.to_json();
+
+        ensure_contains(&json, RATE_DISTORTION_SCHEMA_V1, "schema")?;
+        ensure_contains(&json, "\"budgetTokens\":4000", "budget")?;
+        ensure_contains(&json, "\"usedTokens\":3200", "used")?;
+        ensure_contains(&json, "\"slackTokens\":800", "slack")?;
+        ensure_contains(&json, "\"rate\":0.8", "rate")?;
+        ensure_contains(&json, "\"includedCandidates\":10", "included")?;
+        ensure_contains(&json, "\"omittedCandidates\":5", "omitted")?;
+        ensure_contains(&json, "\"sections\":[", "sections array")
+    }
+
+    #[test]
+    fn rate_distortion_report_to_human() -> TestResult {
+        let report = RateDistortionReport::new(4000, 3200).with_candidates(10, 5);
+        let human = report.to_human();
+
+        ensure_contains(&human, "Rate-Distortion Budget Report", "title")?;
+        ensure_contains(&human, "Budget:", "budget label")?;
+        ensure_contains(&human, "Used:", "used label")?;
+        ensure_contains(&human, "Slack:", "slack label")?;
+        ensure_contains(&human, "Utilization:", "utilization label")?;
+        ensure_contains(&human, "Rate (R):", "rate label")?;
+        ensure_contains(&human, "Distortion (D):", "distortion label")
+    }
+
+    #[test]
+    fn section_budget_report_computes_utilization() -> TestResult {
+        let section = SectionBudgetReport::new("procedural", 1200, 900);
+        ensure(
+            (section.utilization_percent() - 75.0).abs() < 0.01,
+            format!(
+                "expected 75% utilization, got {}%",
+                section.utilization_percent()
+            ),
+        )?;
+        ensure(
+            section.slack() == 300,
+            format!("expected slack 300, got {}", section.slack()),
+        )
+    }
+
+    #[test]
+    fn section_budget_report_to_json() -> TestResult {
+        let section = SectionBudgetReport::new("decisions", 800, 600).with_candidates(5);
+        let json = section.to_json();
+
+        ensure_contains(&json, "\"name\":\"decisions\"", "name")?;
+        ensure_contains(&json, "\"quotaTokens\":800", "quota")?;
+        ensure_contains(&json, "\"usedTokens\":600", "used")?;
+        ensure_contains(&json, "\"slackTokens\":200", "slack")?;
+        ensure_contains(&json, "\"candidateCount\":5", "candidates")
+    }
+
+    #[test]
+    fn compute_rate_distortion_helper() -> TestResult {
+        let report = compute_rate_distortion(4000, 3500, 15, 3);
+        ensure(
+            report.budget_tokens == 4000,
+            format!("expected budget 4000, got {}", report.budget_tokens),
+        )?;
+        ensure(
+            report.used_tokens == 3500,
+            format!("expected used 3500, got {}", report.used_tokens),
+        )?;
+        ensure(
+            report.included_candidates == 15,
+            format!("expected 15 included, got {}", report.included_candidates),
+        )?;
+        ensure(
+            report.omitted_candidates == 3,
+            format!("expected 3 omitted, got {}", report.omitted_candidates),
+        )
+    }
+
+    #[test]
+    fn rate_distortion_zero_budget_handles_gracefully() -> TestResult {
+        let report = RateDistortionReport::new(0, 0);
+        ensure(
+            report.rate == 0.0,
+            format!("expected rate 0 for zero budget, got {}", report.rate),
+        )?;
+        ensure(
+            report.slack() == 0,
+            format!("expected slack 0, got {}", report.slack()),
+        )
     }
 }
