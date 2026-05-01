@@ -3575,7 +3575,10 @@ mod tests {
 
         ensure(
             greedy_used <= section_quota,
-            format!("greedy should respect section quota: {} ≤ {}", greedy_used, section_quota),
+            format!(
+                "greedy should respect section quota: {} ≤ {}",
+                greedy_used, section_quota
+            ),
         )?;
 
         let mut best_brute_force = 0.0_f32;
@@ -3584,10 +3587,10 @@ mod tests {
         for mask in 0_u8..8_u8 {
             let mut selected: Vec<u128> = Vec::new();
             let mut total_tokens = 0_u32;
-            for bit in 0..3 {
+            for (bit, token_cost) in token_costs.iter().copied().enumerate() {
                 if (mask >> bit) & 1 == 1 {
                     selected.push((bit + 1) as u128);
-                    total_tokens += token_costs[bit];
+                    total_tokens += token_cost;
                 }
             }
             // Brute force also respects section quota

@@ -566,10 +566,10 @@ mod tests {
             "context schemas must include ee.query.v1 (EE-QUERY-SCHEMA-VERIFY-001)",
         )?;
 
-        let entry = CONTEXT_SCHEMAS.iter().find(|s| s.version == "ee.query.v1");
-        ensure(entry.is_some(), "ee.query.v1 entry must exist")?;
-
-        let entry = entry.unwrap();
+        let entry = match CONTEXT_SCHEMAS.iter().find(|s| s.version == "ee.query.v1") {
+            Some(entry) => entry,
+            None => return Err("ee.query.v1 entry must exist".to_owned()),
+        };
         ensure_equal(&entry.name, &"query", "schema name")?;
         ensure_equal(&entry.category, &SchemaCategory::Context, "schema category")
     }

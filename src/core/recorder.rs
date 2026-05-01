@@ -19,6 +19,9 @@ pub const RECORDER_FINISH_SCHEMA_V1: &str = "ee.recorder.finish.v1";
 /// Schema for recorder tail response.
 pub const RECORDER_TAIL_SCHEMA_V1: &str = "ee.recorder.tail.v1";
 
+/// Schema for recorder tail follow event (JSONL).
+pub const RECORDER_TAIL_FOLLOW_EVENT_SCHEMA_V1: &str = "ee.recorder.tail_follow_event.v1";
+
 // ============================================================================
 // Start Recording
 // ============================================================================

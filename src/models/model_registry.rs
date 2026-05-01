@@ -1765,8 +1765,15 @@ mod tests {
         budget.max_dimension = 0;
 
         let error =
-            SemanticModelAdmissibilityReport::evaluate(&admissible_hash_candidate(), &budget)
-                .expect_err("zero dimension budget must be rejected");
+            match SemanticModelAdmissibilityReport::evaluate(&admissible_hash_candidate(), &budget)
+            {
+                Ok(report) => {
+                    return Err(test_failure(format!(
+                        "zero dimension budget must be rejected, got {report:?}"
+                    )));
+                }
+                Err(error) => error,
+            };
 
         assert_eq!(
             error.to_string(),

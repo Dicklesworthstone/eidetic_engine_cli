@@ -871,7 +871,8 @@ pub fn validate_snapshot(
         return Ok(SnapshotValidationReport::not_found(options));
     };
 
-    let generation_delta = i64::from(options.current_generation) - i64::from(snapshot.source_generation);
+    let generation_delta =
+        i64::from(options.current_generation) - i64::from(snapshot.source_generation);
 
     let schema_compatible = snapshot.schema_version == options.expected_schema_version
         || snapshot.schema_version.starts_with("ee.graph.");
@@ -890,21 +891,17 @@ pub fn validate_snapshot(
 
     let repair_hint = match result {
         SnapshotValidationResult::Valid => None,
-        SnapshotValidationResult::Stale => {
-            Some(format!(
-                "Snapshot is {} generations behind. Run `ee graph centrality-refresh`.",
-                generation_delta
-            ))
-        }
+        SnapshotValidationResult::Stale => Some(format!(
+            "Snapshot is {} generations behind. Run `ee graph centrality-refresh`.",
+            generation_delta
+        )),
         SnapshotValidationResult::HashMismatch => {
             Some("Snapshot hash mismatch. Run `ee graph centrality-refresh --force`.".to_owned())
         }
-        SnapshotValidationResult::SchemaIncompatible => {
-            Some(format!(
-                "Snapshot schema {} is incompatible with {}. Migrate or rebuild.",
-                snapshot.schema_version, options.expected_schema_version
-            ))
-        }
+        SnapshotValidationResult::SchemaIncompatible => Some(format!(
+            "Snapshot schema {} is incompatible with {}. Migrate or rebuild.",
+            snapshot.schema_version, options.expected_schema_version
+        )),
         SnapshotValidationResult::NotFound => {
             Some("Run `ee graph centrality-refresh` to create a snapshot.".to_owned())
         }
@@ -925,7 +922,11 @@ pub fn validate_snapshot(
         current_generation: options.current_generation,
         generation_delta: Some(generation_delta),
         schema_compatible,
-        hash_verified: if options.verify_hash { Some(true) } else { None },
+        hash_verified: if options.verify_hash {
+            Some(true)
+        } else {
+            None
+        },
         repair_hint,
     })
 }
@@ -1567,10 +1568,19 @@ mod tests {
         use super::SnapshotValidationResult;
         assert_eq!(SnapshotValidationResult::Valid.as_str(), "valid");
         assert_eq!(SnapshotValidationResult::Stale.as_str(), "stale");
-        assert_eq!(SnapshotValidationResult::HashMismatch.as_str(), "hash_mismatch");
-        assert_eq!(SnapshotValidationResult::SchemaIncompatible.as_str(), "schema_incompatible");
+        assert_eq!(
+            SnapshotValidationResult::HashMismatch.as_str(),
+            "hash_mismatch"
+        );
+        assert_eq!(
+            SnapshotValidationResult::SchemaIncompatible.as_str(),
+            "schema_incompatible"
+        );
         assert_eq!(SnapshotValidationResult::NotFound.as_str(), "not_found");
-        assert_eq!(SnapshotValidationResult::Invalidated.as_str(), "invalidated");
+        assert_eq!(
+            SnapshotValidationResult::Invalidated.as_str(),
+            "invalidated"
+        );
     }
 
     #[test]
@@ -1615,7 +1625,12 @@ mod tests {
 
         assert_eq!(report.result, super::SnapshotValidationResult::NotFound);
         assert!(report.repair_hint.is_some());
-        assert!(report.repair_hint.unwrap().contains("centrality-refresh"));
+        assert!(
+            report
+                .repair_hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("centrality-refresh"))
+        );
     }
 
     #[cfg(feature = "graph")]

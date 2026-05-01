@@ -735,14 +735,26 @@ mod tests {
         let report = WhyReport::not_found("mem_test".to_string()).with_links(links);
 
         ensure(report.links.len(), 2, "link count")?;
-        ensure(report.links[0].relation.clone(), "supports".to_string(), "first link relation")?;
-        ensure(report.links[1].relation.clone(), "contradicts".to_string(), "second link relation")
+        ensure(
+            report.links[0].relation.clone(),
+            "supports".to_string(),
+            "first link relation",
+        )?;
+        ensure(
+            report.links[1].relation.clone(),
+            "contradicts".to_string(),
+            "second link relation",
+        )
     }
 
     #[test]
     fn why_report_links_default_empty() -> TestResult {
         let report = WhyReport::not_found("mem_test".to_string());
-        ensure(report.links.is_empty(), true, "links should be empty by default")
+        ensure(
+            report.links.is_empty(),
+            true,
+            "links should be empty by default",
+        )
     }
 
     #[test]

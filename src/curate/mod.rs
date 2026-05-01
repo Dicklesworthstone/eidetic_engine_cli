@@ -2128,7 +2128,10 @@ impl ConformalInterval {
     /// Check if the interval is well-formed (lower <= point <= upper).
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        self.lower <= self.point && self.point <= self.upper && self.coverage > 0.0 && self.coverage <= 1.0
+        self.lower <= self.point
+            && self.point <= self.upper
+            && self.coverage > 0.0
+            && self.coverage <= 1.0
     }
 }
 
@@ -3462,7 +3465,10 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
         assert_eq!(AbstainPolicy::Never.as_str(), "never");
         assert_eq!(AbstainPolicy::BelowThreshold.as_str(), "below_threshold");
         assert_eq!(AbstainPolicy::WideInterval.as_str(), "wide_interval");
-        assert_eq!(AbstainPolicy::InsufficientSamples.as_str(), "insufficient_samples");
+        assert_eq!(
+            AbstainPolicy::InsufficientSamples.as_str(),
+            "insufficient_samples"
+        );
         assert_eq!(AbstainPolicy::Uncalibrated.as_str(), "uncalibrated");
         assert_eq!(AbstainPolicy::DeferToHuman.as_str(), "defer_to_human");
     }
@@ -3491,8 +3497,16 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
         let config = AbstainConfig::default().with_confidence_threshold(0.8);
         let decision = evaluate_abstain(0.6, None, None, None, &config);
         assert!(decision.should_abstain);
-        assert_eq!(decision.triggered_policy, Some(AbstainPolicy::BelowThreshold));
-        assert!(decision.reason.unwrap().contains("below threshold"));
+        assert_eq!(
+            decision.triggered_policy,
+            Some(AbstainPolicy::BelowThreshold)
+        );
+        assert!(
+            decision
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("below threshold"))
+        );
     }
 
     #[test]
@@ -3509,19 +3523,26 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
 
     #[test]
     fn evaluate_abstain_triggers_insufficient_samples() {
-        let mut config = AbstainConfig::default();
-        config.policies = vec![AbstainPolicy::InsufficientSamples];
-        config.min_samples = 50;
+        let config = AbstainConfig {
+            policies: vec![AbstainPolicy::InsufficientSamples],
+            min_samples: 50,
+            ..Default::default()
+        };
 
         let decision = evaluate_abstain(0.9, None, None, Some(25), &config);
         assert!(decision.should_abstain);
-        assert_eq!(decision.triggered_policy, Some(AbstainPolicy::InsufficientSamples));
+        assert_eq!(
+            decision.triggered_policy,
+            Some(AbstainPolicy::InsufficientSamples)
+        );
     }
 
     #[test]
     fn evaluate_abstain_triggers_uncalibrated() {
-        let mut config = AbstainConfig::default();
-        config.policies = vec![AbstainPolicy::Uncalibrated];
+        let config = AbstainConfig {
+            policies: vec![AbstainPolicy::Uncalibrated],
+            ..Default::default()
+        };
 
         let mut uncalibrated = CalibrationWindow::new(50, 0.90);
         uncalibrated.is_calibrated = false;
@@ -3534,8 +3555,10 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
 
     #[test]
     fn evaluate_abstain_passes_when_calibrated() {
-        let mut config = AbstainConfig::default();
-        config.policies = vec![AbstainPolicy::Uncalibrated];
+        let config = AbstainConfig {
+            policies: vec![AbstainPolicy::Uncalibrated],
+            ..Default::default()
+        };
 
         let mut calibrated = CalibrationWindow::new(100, 0.90);
         calibrated.is_calibrated = true;

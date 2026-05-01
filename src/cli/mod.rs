@@ -5751,9 +5751,15 @@ impl RememberMemoryReport {
         let index_job_id_json = self.index_job_id.as_ref().map_or("null".to_string(), |id| {
             format!("\"{}\"", escape_json_string(id))
         });
+        let revision_group_id_json = self
+            .revision_group_id
+            .as_ref()
+            .map_or("null".to_string(), |id| {
+                format!("\"{}\"", escape_json_string(id))
+            });
 
         let mut json = format!(
-            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"dry_run":{},"persisted":{},"audit_id":{},"index_job_id":{}}}"#,
+            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":[],"redaction_status":"{}"}}"#,
             self.version,
             self.memory_id,
             escape_json_string(&self.workspace_id),
@@ -5767,8 +5773,12 @@ impl RememberMemoryReport {
             provenance_uri_json,
             self.dry_run,
             self.persisted,
+            self.revision_number,
+            revision_group_id_json,
             audit_id_json,
-            index_job_id_json
+            index_job_id_json,
+            escape_json_string(&self.index_status),
+            escape_json_string(&self.redaction_status)
         );
         json.push('}');
         json
@@ -8659,6 +8669,7 @@ mod tests {
             "Test memory",
             "--source",
             "file:///path/to/file.rs#L42",
+            "--dry-run",
             "--json",
         ]);
         ensure_equal(
@@ -8681,7 +8692,8 @@ mod tests {
 
     #[test]
     fn remember_json_omits_provenance_uri_when_no_source() -> TestResult {
-        let (exit, stdout, stderr) = invoke(&["ee", "remember", "Test memory", "--json"]);
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "remember", "Test memory", "--dry-run", "--json"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "remember exit")?;
         ensure_contains(
             &stdout,

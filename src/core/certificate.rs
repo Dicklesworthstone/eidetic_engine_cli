@@ -529,7 +529,10 @@ mod tests {
         let options = CertificateListOptions::new();
         let report = list_certificates(&options);
         ensure(!report.is_empty(), "should have certificates")?;
-        ensure(report.total_count >= 4, "should have at least 4 certificates")
+        ensure(
+            report.total_count >= 4,
+            "should have at least 4 certificates",
+        )
     }
 
     #[test]
@@ -578,12 +581,11 @@ mod tests {
 
     #[test]
     fn list_certificates_respects_limit() -> TestResult {
-        let options = CertificateListOptions::new().with_limit(2).include_expired();
+        let options = CertificateListOptions::new()
+            .with_limit(2)
+            .include_expired();
         let report = list_certificates(&options);
-        ensure(
-            report.certificates.len() <= 2,
-            "should respect limit",
-        )
+        ensure(report.certificates.len() <= 2, "should respect limit")
     }
 
     #[test]

@@ -5882,7 +5882,9 @@ pub fn render_procedure_export_toon(report: &ProcedureExportReport) -> String {
 // EE-441: Learn Output Rendering
 // ============================================================================
 
-use crate::core::learn::{LearnAgendaReport, LearnSummaryReport, LearnUncertaintyReport};
+use crate::core::learn::{
+    LearnAgendaReport, LearnExperimentProposalReport, LearnSummaryReport, LearnUncertaintyReport,
+};
 
 /// Render a learn agenda report as JSON.
 #[must_use]
@@ -6057,6 +6059,72 @@ pub fn render_learn_summary_toon(report: &LearnSummaryReport) -> String {
         report.summary.period,
         report.summary.net_knowledge_delta,
         report.events.len()
+    )
+}
+
+/// Render a learn experiment proposal report as JSON.
+#[must_use]
+pub fn render_learn_experiment_proposal_json(report: &LearnExperimentProposalReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "success": true,
+        "totalCandidates": report.total_candidates,
+        "returned": report.returned,
+        "minExpectedValue": report.min_expected_value,
+        "maxAttentionTokens": report.max_attention_tokens,
+        "maxRuntimeSeconds": report.max_runtime_seconds,
+        "proposals": report.proposals,
+        "generatedAt": report.generated_at,
+    })
+    .to_string()
+}
+
+/// Render a learn experiment proposal report as human-readable text.
+#[must_use]
+pub fn render_learn_experiment_proposal_human(report: &LearnExperimentProposalReport) -> String {
+    let mut out = String::with_capacity(1536);
+    out.push_str("Learning Experiment Proposals\n\n");
+    out.push_str(&format!(
+        "Returned {} of {} candidates (min expected value: {:.2})\n\n",
+        report.returned, report.total_candidates, report.min_expected_value
+    ));
+
+    for proposal in &report.proposals {
+        out.push_str(&format!(
+            "[{}] {} (expected value: {:.2})\n",
+            proposal.experiment_id, proposal.title, proposal.expected_value
+        ));
+        out.push_str(&format!("    Topic: {}\n", proposal.topic));
+        out.push_str(&format!("    Hypothesis: {}\n", proposal.hypothesis));
+        out.push_str(&format!(
+            "    Budget: {} tokens, {}s runtime ({})\n",
+            proposal.budget.attention_tokens,
+            proposal.budget.max_runtime_seconds,
+            proposal.budget.budget_class
+        ));
+        out.push_str(&format!(
+            "    Safety: {} | dry-run-first: {} | review-required: {}\n",
+            proposal.safety.boundary,
+            proposal.safety.dry_run_first,
+            proposal.safety.review_required
+        ));
+        out.push_str(&format!(
+            "    Decision impact: {} -> {}\n",
+            proposal.decision_impact.current_decision, proposal.decision_impact.possible_change
+        ));
+        out.push_str(&format!("    Next: {}\n\n", proposal.next_command));
+    }
+
+    out.push_str("Next:\n  ee learn experiment run --dry-run --json\n");
+    out
+}
+
+/// Render a learn experiment proposal report as TOON.
+#[must_use]
+pub fn render_learn_experiment_proposal_toon(report: &LearnExperimentProposalReport) -> String {
+    format!(
+        "LEARN_EXPERIMENT_PROPOSAL|returned={}|candidates={}|min_ev={:.2}",
+        report.returned, report.total_candidates, report.min_expected_value
     )
 }
 
@@ -6759,12 +6827,15 @@ mod tests {
         error_response_json, escape_json_string, help_text, human_status, render_agent_docs_json,
         render_agent_docs_toon, render_context_response_json, render_context_response_toon,
         render_doctor_json, render_doctor_toon, render_health_json, render_health_toon,
-        render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
-        render_status_json, render_status_toon, render_version_json, status_response_json,
+        render_learn_experiment_proposal_human, render_learn_experiment_proposal_json,
+        render_learn_experiment_proposal_toon, render_shadow_run_human, render_shadow_run_json,
+        render_shadow_run_toon, render_status_json, render_status_toon, render_version_json,
+        status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::doctor::DoctorReport;
     use crate::core::health::HealthReport;
+    use crate::core::learn::{LearnExperimentProposeOptions, propose_experiments};
     use crate::core::status::StatusReport;
     use crate::core::{
         BUILD_TIMESTAMP_POLICY, BuildFeature, BuildInfo, BuildProvenanceDegradation,
@@ -6849,6 +6920,52 @@ mod tests {
             .map_err(|error| format!("draft rejected: {error:?}"))?;
         ContextResponse::new(request, draft, Vec::new())
             .map_err(|error| format!("response rejected: {error:?}"))
+    }
+
+    #[test]
+    fn learn_experiment_proposal_json_exposes_ev_budget_safety_and_decision() -> TestResult {
+        let report = propose_experiments(&LearnExperimentProposeOptions::default())
+            .map_err(|error| error.message())?;
+        let json = render_learn_experiment_proposal_json(&report);
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        ensure_contains(&json, "\"expectedValue\"", "expected value field")?;
+        ensure_contains(&json, "\"budget\"", "budget field")?;
+        ensure_contains(&json, "\"safety\"", "safety field")?;
+        ensure_contains(&json, "\"decisionImpact\"", "decision impact field")?;
+        ensure(
+            value.get("success").and_then(serde_json::Value::as_bool) == Some(true),
+            "proposal JSON must be successful",
+        )?;
+        ensure(
+            value
+                .get("proposals")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| !items.is_empty()),
+            "proposal JSON must include proposals",
+        )
+    }
+
+    #[test]
+    fn learn_experiment_proposal_human_and_toon_are_stable() -> TestResult {
+        let report = propose_experiments(&LearnExperimentProposeOptions {
+            limit: 1,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        let human = render_learn_experiment_proposal_human(&report);
+        ensure_contains(&human, "Learning Experiment Proposals", "human title")?;
+        ensure_contains(&human, "Decision impact:", "human decision impact")?;
+        ensure_contains(&human, "ee learn experiment run --dry-run", "human next")?;
+
+        let toon = render_learn_experiment_proposal_toon(&report);
+        ensure_starts_with(
+            &toon,
+            "LEARN_EXPERIMENT_PROPOSAL|returned=1|candidates=3",
+            "toon prefix",
+        )
     }
 
     fn version_report_fixture(

@@ -48,9 +48,7 @@ fn ensure<T: std::fmt::Debug + PartialEq>(actual: T, expected: T, context: &str)
     if actual == expected {
         Ok(())
     } else {
-        Err(format!(
-            "{context}: expected {expected:?}, got {actual:?}"
-        ))
+        Err(format!("{context}: expected {expected:?}, got {actual:?}"))
     }
 }
 
@@ -207,8 +205,8 @@ fn json_escapes_special_characters_in_error_message() -> TestResult {
     let json = error_response_json(&error);
 
     // Should be valid JSON
-    let _: serde_json::Value = serde_json::from_str(&json)
-        .map_err(|e| format!("should be valid JSON: {e}"))?;
+    let _: serde_json::Value =
+        serde_json::from_str(&json).map_err(|e| format!("should be valid JSON: {e}"))?;
 
     // Should contain escaped characters
     ensure_contains(&json, "\\\"foo", "escaped quote")?;
@@ -237,8 +235,8 @@ fn json_handles_unicode_in_error_message() -> TestResult {
     let json = error_response_json(&error);
 
     // Should be valid JSON
-    let _: serde_json::Value = serde_json::from_str(&json)
-        .map_err(|e| format!("should be valid JSON: {e}"))?;
+    let _: serde_json::Value =
+        serde_json::from_str(&json).map_err(|e| format!("should be valid JSON: {e}"))?;
 
     Ok(())
 }
@@ -252,8 +250,8 @@ fn json_handles_empty_error_message() -> TestResult {
     let json = error_response_json(&error);
 
     // Should be valid JSON
-    let _: serde_json::Value = serde_json::from_str(&json)
-        .map_err(|e| format!("should be valid JSON: {e}"))?;
+    let _: serde_json::Value =
+        serde_json::from_str(&json).map_err(|e| format!("should be valid JSON: {e}"))?;
 
     ensure_contains(&json, "\"message\":\"\"", "empty message")
 }
@@ -268,11 +266,12 @@ fn json_handles_very_long_error_message() -> TestResult {
     let json = error_response_json(&error);
 
     // Should be valid JSON
-    let parsed: serde_json::Value = serde_json::from_str(&json)
-        .map_err(|e| format!("should be valid JSON: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&json).map_err(|e| format!("should be valid JSON: {e}"))?;
 
     // Message should be preserved
-    let msg = parsed["error"]["message"].as_str()
+    let msg = parsed["error"]["message"]
+        .as_str()
         .ok_or("message should be string")?;
     ensure(msg.len(), long_message.len(), "message length preserved")
 }
@@ -289,8 +288,16 @@ fn unavailable_feature_produces_degradation_code() -> TestResult {
     };
     let json = error_response_json(&error);
 
-    ensure_contains(&json, "\"code\":\"unsatisfied_degraded_mode\"", "error code")?;
-    ensure_contains(&json, "\"repair\":\"ee search --lexical-only\"", "repair hint")
+    ensure_contains(
+        &json,
+        "\"code\":\"unsatisfied_degraded_mode\"",
+        "error code",
+    )?;
+    ensure_contains(
+        &json,
+        "\"repair\":\"ee search --lexical-only\"",
+        "repair hint",
+    )
 }
 
 #[test]
@@ -342,7 +349,11 @@ fn error_json_has_required_envelope_fields() -> TestResult {
     };
     let json = error_response_json(&error);
 
-    ensure_starts_with(&json, &format!("{{\"schema\":\"{ERROR_SCHEMA_V1}\""), "schema field first")?;
+    ensure_starts_with(
+        &json,
+        &format!("{{\"schema\":\"{ERROR_SCHEMA_V1}\""),
+        "schema field first",
+    )?;
     ensure_contains(&json, "\"error\":{", "error object")?;
     ensure_contains(&json, "\"code\":\"storage\"", "code field")?;
     ensure_contains(&json, "\"message\":\"Test error\"", "message field")?;
@@ -478,7 +489,11 @@ fn all_domain_error_variants_produce_valid_toon() -> TestResult {
     for error in &errors {
         let toon = error_response_toon(error);
         ensure_contains(&toon, "schema:", &format!("{}: has schema", error.code()))?;
-        ensure_contains(&toon, "error:", &format!("{}: has error section", error.code()))?;
+        ensure_contains(
+            &toon,
+            "error:",
+            &format!("{}: has error section", error.code()),
+        )?;
         ensure_contains(
             &toon,
             &format!("code: {}", error.code()),
@@ -496,36 +511,84 @@ fn all_domain_error_variants_produce_valid_toon() -> TestResult {
 fn field_profile_minimal_excludes_arrays() -> TestResult {
     let profile = FieldProfile::Minimal;
     ensure(!profile.include_arrays(), true, "minimal excludes arrays")?;
-    ensure(!profile.include_summary_metrics(), true, "minimal excludes metrics")?;
-    ensure(!profile.include_verbose_details(), true, "minimal excludes verbose")?;
-    ensure(!profile.include_provenance(), true, "minimal excludes provenance")
+    ensure(
+        !profile.include_summary_metrics(),
+        true,
+        "minimal excludes metrics",
+    )?;
+    ensure(
+        !profile.include_verbose_details(),
+        true,
+        "minimal excludes verbose",
+    )?;
+    ensure(
+        !profile.include_provenance(),
+        true,
+        "minimal excludes provenance",
+    )
 }
 
 #[test]
 fn field_profile_summary_includes_metrics_only() -> TestResult {
     let profile = FieldProfile::Summary;
     ensure(!profile.include_arrays(), true, "summary excludes arrays")?;
-    ensure(profile.include_summary_metrics(), true, "summary includes metrics")?;
-    ensure(!profile.include_verbose_details(), true, "summary excludes verbose")?;
-    ensure(!profile.include_provenance(), true, "summary excludes provenance")
+    ensure(
+        profile.include_summary_metrics(),
+        true,
+        "summary includes metrics",
+    )?;
+    ensure(
+        !profile.include_verbose_details(),
+        true,
+        "summary excludes verbose",
+    )?;
+    ensure(
+        !profile.include_provenance(),
+        true,
+        "summary excludes provenance",
+    )
 }
 
 #[test]
 fn field_profile_standard_includes_arrays() -> TestResult {
     let profile = FieldProfile::Standard;
     ensure(profile.include_arrays(), true, "standard includes arrays")?;
-    ensure(profile.include_summary_metrics(), true, "standard includes metrics")?;
-    ensure(!profile.include_verbose_details(), true, "standard excludes verbose")?;
-    ensure(!profile.include_provenance(), true, "standard excludes provenance")
+    ensure(
+        profile.include_summary_metrics(),
+        true,
+        "standard includes metrics",
+    )?;
+    ensure(
+        !profile.include_verbose_details(),
+        true,
+        "standard excludes verbose",
+    )?;
+    ensure(
+        !profile.include_provenance(),
+        true,
+        "standard excludes provenance",
+    )
 }
 
 #[test]
 fn field_profile_full_includes_everything() -> TestResult {
     let profile = FieldProfile::Full;
     ensure(profile.include_arrays(), true, "full includes arrays")?;
-    ensure(profile.include_summary_metrics(), true, "full includes metrics")?;
-    ensure(profile.include_verbose_details(), true, "full includes verbose")?;
-    ensure(profile.include_provenance(), true, "full includes provenance")
+    ensure(
+        profile.include_summary_metrics(),
+        true,
+        "full includes metrics",
+    )?;
+    ensure(
+        profile.include_verbose_details(),
+        true,
+        "full includes verbose",
+    )?;
+    ensure(
+        profile.include_provenance(),
+        true,
+        "full includes provenance",
+    )
 }
 
 #[test]
@@ -555,7 +618,11 @@ fn response_envelope_success_has_correct_structure() -> TestResult {
         })
         .finish();
 
-    ensure_starts_with(&json, &format!("{{\"schema\":\"{RESPONSE_SCHEMA_V1}\""), "schema first")?;
+    ensure_starts_with(
+        &json,
+        &format!("{{\"schema\":\"{RESPONSE_SCHEMA_V1}\""),
+        "schema first",
+    )?;
     ensure_contains(&json, "\"success\":true", "success flag")?;
     ensure_contains(&json, "\"data\":{", "data object")
 }
@@ -568,7 +635,11 @@ fn response_envelope_failure_has_correct_structure() -> TestResult {
         })
         .finish();
 
-    ensure_starts_with(&json, &format!("{{\"schema\":\"{RESPONSE_SCHEMA_V1}\""), "schema first")?;
+    ensure_starts_with(
+        &json,
+        &format!("{{\"schema\":\"{RESPONSE_SCHEMA_V1}\""),
+        "schema first",
+    )?;
     ensure_contains(&json, "\"success\":false", "success flag")?;
     ensure_contains(&json, "\"data\":{", "data object")
 }

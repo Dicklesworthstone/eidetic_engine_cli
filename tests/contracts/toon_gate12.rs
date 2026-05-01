@@ -94,7 +94,10 @@ fn toon_format_has_schema_field() -> TestResult {
     let output = run_ee(&["status", "--format", "toon"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(output.status.success(), "ee status --format toon should succeed")?;
+    ensure(
+        output.status.success(),
+        "ee status --format toon should succeed",
+    )?;
     ensure_contains(&stdout, "schema:", "TOON must have schema field")
 }
 
@@ -103,8 +106,15 @@ fn toon_format_uses_colon_key_value_syntax() -> TestResult {
     let output = run_ee(&["status", "--format", "toon"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(output.status.success(), "ee status --format toon should succeed")?;
-    ensure_contains(&stdout, "schema: ee.response.v1", "schema uses colon syntax")?;
+    ensure(
+        output.status.success(),
+        "ee status --format toon should succeed",
+    )?;
+    ensure_contains(
+        &stdout,
+        "schema: ee.response.v1",
+        "schema uses colon syntax",
+    )?;
     ensure_contains(&stdout, "success: true", "success uses colon syntax")
 }
 
@@ -113,7 +123,10 @@ fn toon_format_uses_indentation_for_nesting() -> TestResult {
     let output = run_ee(&["status", "--format", "toon"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(output.status.success(), "ee status --format toon should succeed")?;
+    ensure(
+        output.status.success(),
+        "ee status --format toon should succeed",
+    )?;
     ensure_contains(&stdout, "data:", "has data section")?;
     ensure_contains(&stdout, "  command:", "nested fields use indentation")
 }
@@ -123,7 +136,10 @@ fn toon_format_does_not_use_json_braces() -> TestResult {
     let output = run_ee(&["status", "--format", "toon"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(output.status.success(), "ee status --format toon should succeed")?;
+    ensure(
+        output.status.success(),
+        "ee status --format toon should succeed",
+    )?;
     ensure_not_contains(&stdout, "\"schema\"", "TOON should not have quoted keys")?;
     ensure(
         !stdout.starts_with('{'),
@@ -136,7 +152,10 @@ fn toon_format_uses_bracket_notation_for_arrays() -> TestResult {
     let output = run_ee(&["status", "--format", "toon"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(output.status.success(), "ee status --format toon should succeed")?;
+    ensure(
+        output.status.success(),
+        "ee status --format toon should succeed",
+    )?;
     ensure_contains(&stdout, "[", "TOON uses brackets for array headers")
 }
 
@@ -177,7 +196,9 @@ fn toon_removes_json_syntax_overhead_for_doctor() -> TestResult {
 
     ensure(
         toon_quotes < json_quotes,
-        format!("TOON ({toon_quotes} quotes) should have fewer quotes than JSON ({json_quotes} quotes)"),
+        format!(
+            "TOON ({toon_quotes} quotes) should have fewer quotes than JSON ({json_quotes} quotes)"
+        ),
     )
 }
 
@@ -197,7 +218,9 @@ fn toon_removes_json_syntax_overhead_for_capabilities() -> TestResult {
 
     ensure(
         toon_braces < json_braces,
-        format!("TOON ({toon_braces} braces) should have fewer braces than JSON ({json_braces} braces)"),
+        format!(
+            "TOON ({toon_braces} braces) should have fewer braces than JSON ({json_braces} braces)"
+        ),
     )
 }
 
@@ -208,7 +231,10 @@ fn toon_removes_json_syntax_overhead_for_capabilities() -> TestResult {
 #[test]
 fn status_toon_matches_golden() -> TestResult {
     let output = run_ee(&["status", "--format", "toon"])?;
-    ensure(output.status.success(), "ee status --format toon should succeed")?;
+    ensure(
+        output.status.success(),
+        "ee status --format toon should succeed",
+    )?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_golden("status", &stdout)
 }
@@ -218,7 +244,10 @@ fn doctor_toon_has_expected_structure() -> TestResult {
     let output = run_ee(&["doctor", "--format", "toon"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(output.status.success(), "ee doctor --format toon should succeed")?;
+    ensure(
+        output.status.success(),
+        "ee doctor --format toon should succeed",
+    )?;
     ensure_contains(&stdout, "schema: ee.response.v1", "response schema")?;
     ensure_contains(&stdout, "command: doctor", "command field")?;
     ensure_contains(&stdout, "healthy:", "healthy field")
@@ -229,7 +258,10 @@ fn check_toon_has_expected_structure() -> TestResult {
     let output = run_ee(&["check", "--format", "toon"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(output.status.success(), "ee check --format toon should succeed")?;
+    ensure(
+        output.status.success(),
+        "ee check --format toon should succeed",
+    )?;
     ensure_contains(&stdout, "schema: ee.response.v1", "response schema")?;
     ensure_contains(&stdout, "command: check", "command field")?;
     ensure_contains(&stdout, "posture:", "posture field")
@@ -240,7 +272,10 @@ fn health_toon_has_expected_structure() -> TestResult {
     let output = run_ee(&["health", "--format", "toon"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(output.status.success(), "ee health --format toon should succeed")?;
+    ensure(
+        output.status.success(),
+        "ee health --format toon should succeed",
+    )?;
     ensure_contains(&stdout, "schema: ee.response.v1", "response schema")?;
     ensure_contains(&stdout, "command: health", "command field")
 }
@@ -250,7 +285,10 @@ fn capabilities_toon_has_expected_structure() -> TestResult {
     let output = run_ee(&["capabilities", "--format", "toon"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(output.status.success(), "ee capabilities --format toon should succeed")?;
+    ensure(
+        output.status.success(),
+        "ee capabilities --format toon should succeed",
+    )?;
     ensure_contains(&stdout, "schema: ee.response.v1", "response schema")?;
     ensure_contains(&stdout, "command: capabilities", "command field")?;
     ensure_contains(&stdout, "subsystems", "subsystems field")
@@ -261,7 +299,10 @@ fn version_toon_has_expected_structure() -> TestResult {
     let output = run_ee(&["version", "--format", "toon"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(output.status.success(), "ee version --format toon should succeed")?;
+    ensure(
+        output.status.success(),
+        "ee version --format toon should succeed",
+    )?;
     ensure_contains(&stdout, "schema:", "schema field")?;
     ensure_contains(&stdout, "version:", "version field")
 }
@@ -271,7 +312,10 @@ fn introspect_toon_has_expected_structure() -> TestResult {
     let output = run_ee(&["introspect", "--format", "toon"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(output.status.success(), "ee introspect --format toon should succeed")?;
+    ensure(
+        output.status.success(),
+        "ee introspect --format toon should succeed",
+    )?;
     ensure_contains(&stdout, "schema: ee.response.v1", "response schema")?;
     ensure_contains(&stdout, "commands", "commands field")
 }
@@ -285,7 +329,10 @@ fn toon_output_ends_with_newline() -> TestResult {
     let output = run_ee(&["status", "--format", "toon"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(output.status.success(), "ee status --format toon should succeed")?;
+    ensure(
+        output.status.success(),
+        "ee status --format toon should succeed",
+    )?;
     ensure(
         stdout.ends_with('\n'),
         "TOON output must end with newline for shell compatibility",
@@ -297,7 +344,10 @@ fn toon_stderr_is_empty_for_successful_commands() -> TestResult {
     let output = run_ee(&["status", "--format", "toon"])?;
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    ensure(output.status.success(), "ee status --format toon should succeed")?;
+    ensure(
+        output.status.success(),
+        "ee status --format toon should succeed",
+    )?;
     ensure(
         stderr.is_empty(),
         format!("stderr must be empty for successful commands, got: {stderr}"),
@@ -313,7 +363,10 @@ fn toon_handles_null_values_gracefully() -> TestResult {
     let output = run_ee(&["status", "--format", "toon"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(output.status.success(), "ee status --format toon should succeed")?;
+    ensure(
+        output.status.success(),
+        "ee status --format toon should succeed",
+    )?;
     ensure_contains(&stdout, "null", "TOON renders null values")
 }
 
@@ -456,7 +509,11 @@ mod unit_tests {
 
         ensure(
             toon.len() < json.len(),
-            format!("TOON ({} bytes) should be shorter than JSON ({} bytes)", toon.len(), json.len()),
+            format!(
+                "TOON ({} bytes) should be shorter than JSON ({} bytes)",
+                toon.len(),
+                json.len()
+            ),
         )
     }
 }

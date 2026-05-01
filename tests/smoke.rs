@@ -579,6 +579,31 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
         &serde_json::json!(true),
         "remember persisted flag",
     )?;
+    ensure_equal(
+        &remember_json["data"]["revision_number"],
+        &serde_json::json!(1),
+        "remember revision number",
+    )?;
+    ensure_equal(
+        &remember_json["data"]["index_status"],
+        &serde_json::json!("queued"),
+        "remember index status",
+    )?;
+    ensure_equal(
+        &remember_json["data"]["effect_ids"],
+        &serde_json::json!([]),
+        "remember effect ids placeholder",
+    )?;
+    ensure_equal(
+        &remember_json["data"]["suggested_links"],
+        &serde_json::json!([]),
+        "remember suggested links placeholder",
+    )?;
+    ensure_equal(
+        &remember_json["data"]["redaction_status"],
+        &serde_json::json!("checked"),
+        "remember redaction status",
+    )?;
     let memory_id = remember_json["data"]["memory_id"]
         .as_str()
         .ok_or_else(|| "remember memory_id must be a string".to_string())?;
