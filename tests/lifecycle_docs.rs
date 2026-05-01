@@ -1,3 +1,4 @@
+use ee::models::trust::{LOCAL_SIGNING_KEY_POLICY_SCHEMA_V1, LocalSigningKeyPosture};
 use ee::models::{ERROR_SCHEMA_V1, LifecycleEvent, RESPONSE_SCHEMA_V1, RuleMaturity, TrustClass};
 
 type TestResult = Result<(), String>;
@@ -64,6 +65,41 @@ fn trust_model_mentions_rule_maturity_states() -> TestResult {
         "promotion, demotion, quarantine",
         "curation lifecycle coverage",
     )
+}
+
+#[test]
+fn trust_model_mentions_local_signing_key_policy() -> TestResult {
+    ensure_contains(
+        TRUST_MODEL,
+        LOCAL_SIGNING_KEY_POLICY_SCHEMA_V1,
+        "local signing policy schema coverage",
+    )?;
+    for posture in LocalSigningKeyPosture::all() {
+        ensure_contains(
+            TRUST_MODEL,
+            posture.as_str(),
+            "local signing policy posture coverage",
+        )?;
+    }
+    for code in [
+        "local_signing_key_required",
+        "local_signing_key_recommended",
+        "local_signing_key_not_required",
+        "local_signing_key_satisfied",
+    ] {
+        ensure_contains(TRUST_MODEL, code, "local signing policy code coverage")?;
+    }
+    for phrase in [
+        "does not generate keys",
+        "mutate memories",
+        "silently promote",
+        "trust; it only reports",
+        "stays out of authoritative",
+        "procedural sections until signed",
+    ] {
+        ensure_contains(TRUST_MODEL, phrase, "local signing policy safety coverage")?;
+    }
+    Ok(())
 }
 
 #[test]

@@ -98,6 +98,25 @@ and `maintenance`. These certificates prove that long-running lifecycle events
 completed or failed with an idempotency key, duration, item count, and error
 posture where applicable.
 
+## Local Signing Key Policy
+
+High-trust procedural memory needs an extra local proof before it becomes
+authoritative advice. A validated procedural memory in `human_explicit` or
+`agent_validated` trust must carry a local signature; otherwise the policy emits
+`local_signing_key_required` and the memory stays out of authoritative
+procedural sections until signed.
+
+Draft or candidate high-trust procedural memories emit
+`local_signing_key_recommended` so curation can attach a signature before
+promotion. Non-procedural memories, lower-trust memories, deprecated memories,
+and superseded memories emit `local_signing_key_not_required`. A signed
+high-trust procedural memory emits `local_signing_key_satisfied`.
+
+Machine consumers use `ee.local_signing_key_policy.v1` and the stable posture
+values `not_required`, `recommended`, `required`, and `satisfied`. The policy is
+deterministic and does not generate keys, mutate memories, or silently promote
+trust; it only reports whether local signing is required for authoritative use.
+
 ## Command Integration
 
 - `ee context "<task>" --json` must include selected memories, provenance,
