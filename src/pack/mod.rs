@@ -1586,7 +1586,7 @@ fn assemble_facility_location_draft(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct CandidateSignature {
+pub(crate) struct CandidateSignature {
     memory_id: MemoryId,
     diversity_key: Option<String>,
     normalized_content: String,
@@ -1704,7 +1704,7 @@ fn facility_location_marginal_gain(
     facility_location_value(&with_candidate, universe) - current
 }
 
-fn facility_location_value(selected: &[CandidateSignature], universe: &[PackCandidate]) -> f32 {
+pub(crate) fn facility_location_value(selected: &[CandidateSignature], universe: &[PackCandidate]) -> f32 {
     if selected.is_empty() {
         return 0.0;
     }
@@ -3133,5 +3133,361 @@ mod tests {
             matches!(draft, Err(PackValidationError::EmptyQuery)),
             "empty query must be rejected",
         )
+    }
+
+    // ========================================================================
+    // EE-344: Sampled submodularity, monotonicity, and tiny-fixture audits
+    // ========================================================================
+
+    fn test_facility_value(selected_seeds: &[u128], candidates: &[PackCandidate]) -> f32 {
+        use super::{CandidateSignature, facility_location_value};
+        let signatures: Vec<CandidateSignature> = selected_seeds
+            .iter()
+            .filter_map(|&seed| {
+                candidates
+                    .iter()
+                    .find(|c| c.memory_id == memory_id(seed))
+                    .map(CandidateSignature::from)
+            })
+            .collect();
+        facility_location_value(&signatures, candidates)
+    }
+
+    #[test]
+    fn facility_location_monotonicity_adding_element_never_decreases_value() -> TestResult {
+        let candidates = vec![
+            candidate_with_content(1, 0.9, 0.7, 10, "Alpha formatting rule")?,
+            candidate_with_content(2, 0.85, 0.6, 10, "Beta linting rule")?,
+            candidate_with_content(3, 0.75, 0.8, 10, "Gamma testing rule")?,
+            candidate_with_content(4, 0.65, 0.5, 10, "Delta deployment rule")?,
+        ];
+
+        let f_empty = test_facility_value(&[], &candidates);
+        let f_1 = test_facility_value(&[1], &candidates);
+        let f_12 = test_facility_value(&[1, 2], &candidates);
+        let f_123 = test_facility_value(&[1, 2, 3], &candidates);
+        let f_1234 = test_facility_value(&[1, 2, 3, 4], &candidates);
+
+        ensure(f_empty <= f_1, "f(∅) ≤ f({1})")?;
+        ensure(f_1 <= f_12, "f({1}) ≤ f({1,2})")?;
+        ensure(f_12 <= f_123, "f({1,2}) ≤ f({1,2,3})")?;
+        ensure(f_123 <= f_1234, "f({1,2,3}) ≤ f({1,2,3,4})")?;
+
+        let f_2 = test_facility_value(&[2], &candidates);
+        let f_23 = test_facility_value(&[2, 3], &candidates);
+        ensure(f_2 <= f_23, "f({2}) ≤ f({2,3})")?;
+
+        let f_3 = test_facility_value(&[3], &candidates);
+        let f_34 = test_facility_value(&[3, 4], &candidates);
+        ensure(f_3 <= f_34, "f({3}) ≤ f({3,4})")?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn facility_location_submodularity_diminishing_marginal_returns() -> TestResult {
+        let candidates = vec![
+            candidate_with_content(1, 0.9, 0.7, 10, "Alpha formatting rule")?,
+            candidate_with_content(2, 0.85, 0.6, 10, "Beta linting rule")?,
+            candidate_with_content(3, 0.75, 0.8, 10, "Gamma testing rule")?,
+            candidate_with_content(4, 0.65, 0.5, 10, "Delta deployment rule")?,
+        ];
+
+        let f_1 = test_facility_value(&[1], &candidates);
+        let f_empty = test_facility_value(&[], &candidates);
+        let f_12 = test_facility_value(&[1, 2], &candidates);
+        let f_2 = test_facility_value(&[2], &candidates);
+
+        let marginal_add_1_to_empty = f_1 - f_empty;
+        let marginal_add_1_to_2 = f_12 - f_2;
+        ensure(
+            marginal_add_1_to_2 <= marginal_add_1_to_empty + 0.000_001,
+            format!(
+                "submodularity: f({{1}}) - f(∅) ≥ f({{1,2}}) - f({{2}}): {} ≥ {}",
+                marginal_add_1_to_empty, marginal_add_1_to_2
+            ),
+        )?;
+
+        let f_123 = test_facility_value(&[1, 2, 3], &candidates);
+        let f_23 = test_facility_value(&[2, 3], &candidates);
+        let marginal_add_1_to_23 = f_123 - f_23;
+        ensure(
+            marginal_add_1_to_23 <= marginal_add_1_to_empty + 0.000_001,
+            format!(
+                "submodularity: f({{1}}) - f(∅) ≥ f({{1,2,3}}) - f({{2,3}}): {} ≥ {}",
+                marginal_add_1_to_empty, marginal_add_1_to_23
+            ),
+        )?;
+
+        let f_3 = test_facility_value(&[3], &candidates);
+        let marginal_add_3_to_empty = f_3 - f_empty;
+        let marginal_add_3_to_12 = f_123 - f_12;
+        ensure(
+            marginal_add_3_to_12 <= marginal_add_3_to_empty + 0.000_001,
+            format!(
+                "submodularity: f({{3}}) - f(∅) ≥ f({{1,2,3}}) - f({{1,2}}): {} ≥ {}",
+                marginal_add_3_to_empty, marginal_add_3_to_12
+            ),
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn facility_location_submodularity_union_intersection_inequality() -> TestResult {
+        let candidates = vec![
+            candidate_with_content(1, 0.9, 0.7, 10, "Alpha formatting rule")?,
+            candidate_with_content(2, 0.85, 0.6, 10, "Beta linting rule")?,
+            candidate_with_content(3, 0.75, 0.8, 10, "Gamma testing rule")?,
+            candidate_with_content(4, 0.65, 0.5, 10, "Delta deployment rule")?,
+        ];
+
+        let a = [1_u128, 2];
+        let b = [2_u128, 3];
+        let union = [1_u128, 2, 3];
+        let intersection = [2_u128];
+
+        let f_a = test_facility_value(&a, &candidates);
+        let f_b = test_facility_value(&b, &candidates);
+        let f_union = test_facility_value(&union, &candidates);
+        let f_intersection = test_facility_value(&intersection, &candidates);
+
+        ensure(
+            f_union + f_intersection <= f_a + f_b + 0.000_001,
+            format!(
+                "submodularity: f(A ∪ B) + f(A ∩ B) ≤ f(A) + f(B): {} + {} ≤ {} + {}",
+                f_union, f_intersection, f_a, f_b
+            ),
+        )?;
+
+        let a2 = [1_u128, 3];
+        let b2 = [2_u128, 4];
+        let union2 = [1_u128, 2, 3, 4];
+        let intersection2: [u128; 0] = [];
+
+        let f_a2 = test_facility_value(&a2, &candidates);
+        let f_b2 = test_facility_value(&b2, &candidates);
+        let f_union2 = test_facility_value(&union2, &candidates);
+        let f_intersection2 = test_facility_value(&intersection2, &candidates);
+
+        ensure(
+            f_union2 + f_intersection2 <= f_a2 + f_b2 + 0.000_001,
+            format!(
+                "submodularity (disjoint): f(A ∪ B) + f(∅) ≤ f(A) + f(B): {} + {} ≤ {} + {}",
+                f_union2, f_intersection2, f_a2, f_b2
+            ),
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn tiny_fixture_greedy_matches_brute_force_for_uniform_budget() -> TestResult {
+        let candidates = vec![
+            candidate_with_content(1, 0.9, 0.6, 10, "Alpha rule one")?,
+            candidate_with_content(2, 0.7, 0.5, 10, "Beta rule two")?,
+            candidate_with_content(3, 0.5, 0.4, 10, "Gamma rule three")?,
+        ];
+
+        let budget = TokenBudget::new(20).map_err(|e| format!("budget: {e:?}"))?;
+        let greedy_draft = assemble_draft_with_profile(
+            ContextPackProfile::Submodular,
+            "tiny fixture",
+            budget,
+            candidates.clone(),
+        )
+        .map_err(|e| format!("greedy draft: {e:?}"))?;
+
+        let greedy_value = greedy_draft.selection_certificate.total_objective_value;
+        let greedy_ids: Vec<u128> = greedy_draft
+            .items
+            .iter()
+            .map(|item| item.memory_id.to_string().parse::<u128>().ok())
+            .flatten()
+            .collect();
+
+        let mut best_brute_force = 0.0_f32;
+        let mut best_combination: Vec<u128> = Vec::new();
+
+        for mask in 0_u8..8_u8 {
+            let mut selected: Vec<u128> = Vec::new();
+            let mut total_tokens = 0_u32;
+            for bit in 0..3 {
+                if (mask >> bit) & 1 == 1 {
+                    selected.push((bit + 1) as u128);
+                    total_tokens += 10;
+                }
+            }
+            if total_tokens <= 20 {
+                let value = test_facility_value(&selected, &candidates);
+                if value > best_brute_force {
+                    best_brute_force = value;
+                    best_combination = selected;
+                }
+            }
+        }
+
+        ensure(
+            greedy_value >= best_brute_force * 0.63 - 0.000_001,
+            format!(
+                "greedy ({:?}, value={}) should be ≥63% of brute-force ({:?}, value={})",
+                greedy_ids, greedy_value, best_combination, best_brute_force
+            ),
+        )?;
+
+        ensure(
+            (greedy_value - best_brute_force).abs() < 0.000_001,
+            format!(
+                "tiny fixture: greedy ({}) should match brute-force optimum ({})",
+                greedy_value, best_brute_force
+            ),
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn tiny_fixture_greedy_handles_non_uniform_token_costs() -> TestResult {
+        let candidates = vec![
+            candidate_with_content(1, 0.9, 0.6, 5, "Small alpha")?,
+            candidate_with_content(2, 0.8, 0.7, 15, "Large beta")?,
+            candidate_with_content(3, 0.6, 0.5, 8, "Medium gamma")?,
+        ];
+
+        let budget = TokenBudget::new(15).map_err(|e| format!("budget: {e:?}"))?;
+        let greedy_draft = assemble_draft_with_profile(
+            ContextPackProfile::Submodular,
+            "non-uniform tokens",
+            budget,
+            candidates.clone(),
+        )
+        .map_err(|e| format!("greedy draft: {e:?}"))?;
+
+        let greedy_value = greedy_draft.selection_certificate.total_objective_value;
+        let greedy_used = greedy_draft.used_tokens;
+
+        ensure(
+            greedy_used <= 15,
+            format!("greedy should respect budget: {} ≤ 15", greedy_used),
+        )?;
+
+        let mut best_brute_force = 0.0_f32;
+        let token_costs = [5_u32, 15, 8];
+
+        for mask in 0_u8..8_u8 {
+            let mut selected: Vec<u128> = Vec::new();
+            let mut total_tokens = 0_u32;
+            for bit in 0..3 {
+                if (mask >> bit) & 1 == 1 {
+                    selected.push((bit + 1) as u128);
+                    total_tokens += token_costs[bit];
+                }
+            }
+            if total_tokens <= 15 {
+                let value = test_facility_value(&selected, &candidates);
+                if value > best_brute_force {
+                    best_brute_force = value;
+                }
+            }
+        }
+
+        ensure(
+            greedy_value >= best_brute_force * 0.63 - 0.000_001,
+            format!(
+                "greedy ({}) should achieve at least 63% of brute-force optimum ({})",
+                greedy_value, best_brute_force
+            ),
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn sampled_random_subsets_satisfy_monotonicity() -> TestResult {
+        let candidates = vec![
+            candidate_with_content(1, 0.95, 0.8, 10, "Rule one about formatting")?,
+            candidate_with_content(2, 0.90, 0.7, 10, "Rule two about linting")?,
+            candidate_with_content(3, 0.80, 0.6, 10, "Rule three about testing")?,
+            candidate_with_content(4, 0.70, 0.5, 10, "Rule four about docs")?,
+            candidate_with_content(5, 0.60, 0.4, 10, "Rule five about CI")?,
+        ];
+
+        let test_cases: &[(&[u128], &[u128])] = &[
+            (&[], &[1]),
+            (&[1], &[1, 2]),
+            (&[2], &[1, 2]),
+            (&[1, 3], &[1, 2, 3]),
+            (&[2, 4], &[1, 2, 4]),
+            (&[1, 2, 3], &[1, 2, 3, 4]),
+            (&[1, 3, 5], &[1, 2, 3, 5]),
+            (&[], &[1, 2, 3, 4, 5]),
+        ];
+
+        for (subset, superset) in test_cases {
+            let f_subset = test_facility_value(subset, &candidates);
+            let f_superset = test_facility_value(superset, &candidates);
+            ensure(
+                f_subset <= f_superset + 0.000_001,
+                format!(
+                    "monotonicity: f({:?}) ≤ f({:?}): {} ≤ {}",
+                    subset, superset, f_subset, f_superset
+                ),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn sampled_submodularity_across_diverse_content() -> TestResult {
+        let candidates = vec![
+            candidate_with_content(1, 0.9, 0.7, 10, "Run cargo fmt before commits")?
+                .with_diversity_key("formatting"),
+            candidate_with_content(2, 0.85, 0.6, 10, "Run cargo clippy for lints")?
+                .with_diversity_key("linting"),
+            candidate_with_content(3, 0.8, 0.8, 10, "Run cargo test before push")?
+                .with_diversity_key("testing"),
+            candidate_with_content(4, 0.75, 0.5, 10, "Use git pull --rebase")?
+                .with_diversity_key("git"),
+            candidate_with_content(5, 0.7, 0.6, 10, "Keep PR scope small")?
+                .with_diversity_key("process"),
+        ];
+
+        let pairs: &[(&[u128], &[u128], u128)] = &[
+            (&[], &[1], 2),
+            (&[1], &[1, 3], 2),
+            (&[2], &[1, 2, 3], 4),
+            (&[1, 2], &[1, 2, 3, 4], 5),
+        ];
+
+        for (smaller, larger, element) in pairs {
+            let f_smaller = test_facility_value(smaller, &candidates);
+            let f_larger = test_facility_value(larger, &candidates);
+
+            let mut with_element_small: Vec<u128> = smaller.to_vec();
+            if !with_element_small.contains(element) {
+                with_element_small.push(*element);
+            }
+            let f_smaller_plus = test_facility_value(&with_element_small, &candidates);
+
+            let mut with_element_large: Vec<u128> = larger.to_vec();
+            if !with_element_large.contains(element) {
+                with_element_large.push(*element);
+            }
+            let f_larger_plus = test_facility_value(&with_element_large, &candidates);
+
+            let marginal_small = f_smaller_plus - f_smaller;
+            let marginal_large = f_larger_plus - f_larger;
+
+            ensure(
+                marginal_large <= marginal_small + 0.000_001,
+                format!(
+                    "submodularity: adding {} to {:?} gives {} gain, to {:?} gives {} gain (should be ≤)",
+                    element, smaller, marginal_small, larger, marginal_large
+                ),
+            )?;
+        }
+
+        Ok(())
     }
 }

@@ -10,6 +10,7 @@ pub mod agent_docs;
 pub mod audit;
 pub mod budget;
 pub mod capabilities;
+pub mod certificate;
 pub mod check;
 pub mod claims;
 pub mod context;
@@ -465,7 +466,7 @@ mod tests {
             "path metadata must be redacted",
         )?;
         ensure_equal(
-            &clean_build_metadata(Some("TOKEN=value")),
+            &clean_build_metadata(Some("BUILD_META=value")),
             &None,
             "assignment metadata must be redacted",
         )

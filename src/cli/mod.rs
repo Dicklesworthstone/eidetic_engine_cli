@@ -6833,6 +6833,11 @@ impl NormalizedInvocation {
                 },
                 Command::Capabilities => "capabilities".to_string(),
                 Command::Check => "check".to_string(),
+                Command::Certificate(cert) => match cert {
+                    CertificateCommand::List(_) => "certificate list".to_string(),
+                    CertificateCommand::Show(_) => "certificate show".to_string(),
+                    CertificateCommand::Verify(_) => "certificate verify".to_string(),
+                },
                 Command::Claim(claim) => match claim {
                     ClaimCommand::List(_) => "claim list".to_string(),
                     ClaimCommand::Show(_) => "claim show".to_string(),
