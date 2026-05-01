@@ -558,16 +558,16 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
         "--confidence",
         "0.9",
         "--source",
-        "file://README.md#L74-L77",
+        "file://README.md#L74-77",
         "Store release checks as durable memory.",
     ])?;
+    let remember_stdout = String::from_utf8_lossy(&remember.stdout);
     let remember_stderr = String::from_utf8_lossy(&remember.stderr);
     ensure(
         remember.status.success(),
-        format!("remember should succeed; stderr: {remember_stderr}"),
+        format!("remember should succeed; stdout: {remember_stdout}; stderr: {remember_stderr}"),
     )?;
     ensure(remember.stderr.is_empty(), "remember stderr clean")?;
-    let remember_stdout = String::from_utf8_lossy(&remember.stdout);
     ensure(
         !remember_stdout.contains("storage_not_implemented"),
         "remember must not report storage_not_implemented after persistence",

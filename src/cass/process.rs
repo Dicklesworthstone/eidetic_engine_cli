@@ -464,8 +464,6 @@ impl CassOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassExitClass, CassInvocation, CassOutcome};
-
     #[cfg(unix)]
     use std::fs;
     #[cfg(unix)]
@@ -476,6 +474,8 @@ mod tests {
     use std::time::Duration;
     #[cfg(unix)]
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassExitClass, CassInvocation, CassOutcome};
 
     fn invocation() -> CassInvocation {
         CassInvocation::new("cass", ["health", "--json"])

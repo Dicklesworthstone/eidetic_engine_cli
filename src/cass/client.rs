@@ -392,12 +392,12 @@ impl Default for CassClient {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{
         CassClient, DEFAULT_BINARY, DiscoveredBinary, DiscoverySource, STABLE_ENV_OVERRIDES,
         discover, discover_with_override,
     };
-
-    use std::path::Path;
 
     type TestResult = Result<(), String>;
 

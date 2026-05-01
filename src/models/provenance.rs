@@ -32,8 +32,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use super::id::MemoryId;
-use super::id::ParseIdError;
+use super::id::{MemoryId, ParseIdError};
 
 /// Inclusive line range used by `cass-session://` and `file://` URIs.
 ///

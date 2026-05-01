@@ -19,9 +19,8 @@
 //! deliberately small so consumers can pattern-match exhaustively.
 
 use std::error::Error;
-use std::fmt;
-use std::io;
 use std::path::PathBuf;
+use std::{fmt, io};
 
 /// Stable categorical taxonomy for CASS adapter failures.
 ///
@@ -174,9 +173,9 @@ impl From<io::Error> for CassError {
 
 #[cfg(test)]
 mod tests {
-    use super::CassError;
-
     use std::path::PathBuf;
+
+    use super::CassError;
 
     #[test]
     fn kind_strings_are_stable_identifiers() {

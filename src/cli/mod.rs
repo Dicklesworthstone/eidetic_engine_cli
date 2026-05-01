@@ -109,6 +109,14 @@ pub struct Cli {
     #[arg(long, global = true, action = ArgAction::SetTrue)]
     pub meta: bool,
 
+    /// Shadow mode for decision plane tracking (off/compare/record).
+    #[arg(long, global = true, value_enum, default_value_t = ShadowMode::Off)]
+    pub shadow: ShadowMode,
+
+    /// Policy ID to use for decision plane operations.
+    #[arg(long, global = true, value_name = "POLICY_ID")]
+    pub policy: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -146,6 +154,21 @@ impl Cli {
     #[must_use]
     pub const fn wants_meta(&self) -> bool {
         self.meta
+    }
+
+    #[must_use]
+    pub const fn shadow_mode(&self) -> ShadowMode {
+        self.shadow
+    }
+
+    #[must_use]
+    pub fn policy_id(&self) -> Option<&str> {
+        self.policy.as_deref()
+    }
+
+    #[must_use]
+    pub const fn has_shadow_tracking(&self) -> bool {
+        self.shadow.is_active()
     }
 }
 
@@ -1879,6 +1902,48 @@ impl OutputFormat {
             Self::Hook => output::Renderer::Hook,
             Self::Markdown => output::Renderer::Markdown,
         }
+    }
+}
+
+/// Shadow mode for decision plane tracking.
+///
+/// - `Off`: No shadow tracking (default).
+/// - `Compare`: Run both incumbent and shadow policies, report differences.
+/// - `Record`: Record shadow decisions for later replay/analysis.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum ShadowMode {
+    /// No shadow tracking.
+    #[default]
+    Off,
+    /// Run both incumbent and shadow policies, compare outcomes.
+    Compare,
+    /// Record shadow decisions without comparison.
+    Record,
+}
+
+impl ShadowMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Compare => "compare",
+            Self::Record => "record",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_active(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    #[must_use]
+    pub const fn should_compare(self) -> bool {
+        matches!(self, Self::Compare)
+    }
+
+    #[must_use]
+    pub const fn should_record(self) -> bool {
+        matches!(self, Self::Compare | Self::Record)
     }
 }
 
@@ -7393,7 +7458,8 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        Cli, Command, DiagCommand, FieldsLevel, ImportCommand, MemoryCommand, OutputFormat, run,
+        Cli, Command, DiagCommand, FieldsLevel, ImportCommand, MemoryCommand, OutputFormat,
+        ShadowMode, run,
     };
     use crate::models::ProcessExitCode;
 
@@ -9221,5 +9287,114 @@ mod tests {
         ensure(hint.is_some(), "should detect --WORKSPACE")?;
         let hint = hint.ok_or_else(|| "missing workspace case hint".to_string())?;
         ensure_contains(&hint, "--workspace", "should suggest --workspace")
+    }
+
+    // ========================================================================
+    // EE-366: Shadow Mode Tests
+    // ========================================================================
+
+    #[test]
+    fn shadow_mode_default_is_off() {
+        assert_eq!(ShadowMode::default(), ShadowMode::Off);
+    }
+
+    #[test]
+    fn shadow_mode_as_str() {
+        assert_eq!(ShadowMode::Off.as_str(), "off");
+        assert_eq!(ShadowMode::Compare.as_str(), "compare");
+        assert_eq!(ShadowMode::Record.as_str(), "record");
+    }
+
+    #[test]
+    fn shadow_mode_is_active() {
+        assert!(!ShadowMode::Off.is_active());
+        assert!(ShadowMode::Compare.is_active());
+        assert!(ShadowMode::Record.is_active());
+    }
+
+    #[test]
+    fn shadow_mode_should_compare() {
+        assert!(!ShadowMode::Off.should_compare());
+        assert!(ShadowMode::Compare.should_compare());
+        assert!(!ShadowMode::Record.should_compare());
+    }
+
+    #[test]
+    fn shadow_mode_should_record() {
+        assert!(!ShadowMode::Off.should_record());
+        assert!(ShadowMode::Compare.should_record());
+        assert!(ShadowMode::Record.should_record());
+    }
+
+    #[test]
+    fn shadow_flag_parses_off() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "--shadow", "off", "status"])
+            .map_err(|e| format!("failed to parse --shadow off: {:?}", e.kind()))?;
+        ensure_equal(&parsed.shadow, &ShadowMode::Off, "shadow off")
+    }
+
+    #[test]
+    fn shadow_flag_parses_compare() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "--shadow", "compare", "status"])
+            .map_err(|e| format!("failed to parse --shadow compare: {:?}", e.kind()))?;
+        ensure_equal(&parsed.shadow, &ShadowMode::Compare, "shadow compare")
+    }
+
+    #[test]
+    fn shadow_flag_parses_record() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "--shadow", "record", "status"])
+            .map_err(|e| format!("failed to parse --shadow record: {:?}", e.kind()))?;
+        ensure_equal(&parsed.shadow, &ShadowMode::Record, "shadow record")
+    }
+
+    #[test]
+    fn policy_flag_parses() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "--policy", "my-policy-123", "status"])
+            .map_err(|e| format!("failed to parse --policy: {:?}", e.kind()))?;
+        ensure_equal(
+            &parsed.policy,
+            &Some("my-policy-123".to_string()),
+            "policy id",
+        )
+    }
+
+    #[test]
+    fn shadow_and_policy_together() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--shadow",
+            "compare",
+            "--policy",
+            "test-policy",
+            "status",
+        ])
+        .map_err(|e| format!("failed to parse shadow+policy: {:?}", e.kind()))?;
+        ensure_equal(&parsed.shadow, &ShadowMode::Compare, "shadow")?;
+        ensure_equal(&parsed.policy, &Some("test-policy".to_string()), "policy")
+    }
+
+    #[test]
+    fn cli_has_shadow_tracking_accessor() -> TestResult {
+        let off = Cli::try_parse_from(["ee", "status"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        ensure(!off.has_shadow_tracking(), "off should not have tracking")?;
+
+        let compare = Cli::try_parse_from(["ee", "--shadow", "compare", "status"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        ensure(
+            compare.has_shadow_tracking(),
+            "compare should have tracking",
+        )
+    }
+
+    #[test]
+    fn cli_policy_id_accessor() -> TestResult {
+        let without = Cli::try_parse_from(["ee", "status"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        ensure(without.policy_id().is_none(), "no policy by default")?;
+
+        let with = Cli::try_parse_from(["ee", "--policy", "p1", "status"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        ensure_equal(&with.policy_id(), &Some("p1"), "policy accessor")
     }
 }

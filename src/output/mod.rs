@@ -3427,6 +3427,18 @@ const GLOBAL_OPTIONS: &[GlobalOption] = &[
         description: "Include additional metadata in response",
         opt_type: "flag",
     },
+    GlobalOption {
+        name: "--shadow",
+        short: "",
+        description: "Shadow mode for decision plane tracking (off|compare|record)",
+        opt_type: "enum",
+    },
+    GlobalOption {
+        name: "--policy",
+        short: "",
+        description: "Policy ID to use for decision plane operations",
+        opt_type: "string",
+    },
 ];
 
 struct CommandArg {

@@ -1225,11 +1225,11 @@ mod tests {
         CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
         MemoryLinkRelation, MemoryLinkSource,
     };
-    use crate::models::CapabilityStatus;
 
     use super::{
         GraphCapabilityName, GraphSurface, REQUIRED_GRAPH_ENGINE, module_readiness, subsystem_name,
     };
+    use crate::models::CapabilityStatus;
 
     #[cfg(feature = "graph")]
     const WORKSPACE_ID: &str = "wsp_01234567890123456789012345";

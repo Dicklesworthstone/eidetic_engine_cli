@@ -1,15 +1,17 @@
-use crate::models::{
-    EMBEDDING_METADATA_SCHEMA_V1, EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider,
-    ModelPurpose, ModelRegistryStatus,
-};
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use sqlmodel_core::{IsolationLevel, Row, Value};
-use sqlmodel_frankensqlite::FrankenConnection;
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use sqlmodel_core::{IsolationLevel, Row, Value};
+use sqlmodel_frankensqlite::FrankenConnection;
+
+use crate::models::{
+    EMBEDDING_METADATA_SCHEMA_V1, EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider,
+    ModelPurpose, ModelRegistryStatus,
+};
 
 pub const SUBSYSTEM: &str = "db";
 pub const MIGRATION_TABLE_NAME: &str = "ee_schema_migrations";
@@ -5411,6 +5413,8 @@ mod tests {
     use std::fmt;
     use std::path::PathBuf;
 
+    use sqlmodel_core::{Row, Value};
+
     use super::{
         DatabaseConfig, DatabaseLocation, DatabaseOpenMode, DbConnection, DbError, DbOperation,
         MIGRATION_TABLE_NAME, MigrationRecord, MigrationTableColumn, subsystem_name,
@@ -5419,8 +5423,6 @@ mod tests {
         EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose,
         ModelRegistryStatus,
     };
-    use sqlmodel_core::Row;
-    use sqlmodel_core::Value;
 
     type TestResult = std::result::Result<(), TestFailure>;
 

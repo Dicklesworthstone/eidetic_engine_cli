@@ -983,12 +983,11 @@ impl Default for IndexManifest {
 
 #[cfg(test)]
 mod tests {
-    use crate::models::CapabilityStatus;
-
     use super::{
         CanonicalSearchDocument, DocumentSource, Embedder, HashEmbedder, REQUIRED_RETRIEVAL_ENGINE,
         SearchCapabilityName, SearchSurface, module_readiness, subsystem_name,
     };
+    use crate::models::CapabilityStatus;
 
     #[test]
     fn subsystem_name_is_stable() {
