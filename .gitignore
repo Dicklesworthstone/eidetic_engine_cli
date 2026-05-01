@@ -21,10 +21,75 @@ MODE_OUTPUT_*.md
 
 # Editor / OS junk
 .DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.directory
+.Trashes
+.Spotlight-V100
 *.swp
 *.swo
+*~
 .idea/
 .vscode/
+.fleet/
+.zed/
+.helix/
+
+# Generic temp / backup / merge-conflict artifacts
+*.bak
+*.tmp
+*.orig
+*.rej
+*.log
+*.pid
+*.lock.tmp
+*.partial
+.tmp/
+.cache/
+scratch/
+scratch.*
+**/*.bak
+
+# Rust profiling / coverage / nextest local outputs
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+lcov.info
+coverage/
+tarpaulin-report.*
+.tarpaulin/
+nextest.toml.local
+**/*.rs.orig
+Cargo.lock.bak
+
+# Local env / direnv (real .env should be checked in only if intentional)
+.env.local
+.env.*.local
+.envrc.local
+
+# Agent / tool runtime scratch (not authoritative state)
+.agent-mail/
+.cass/
+.rch/
+.claude/
+.codex/
+.cursor/
+
+# Python tooling caches (some helper scripts may run python)
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Node tooling caches (only if used by helper scripts)
+node_modules/
 
 # bv (beads viewer) local config and caches
 .bv/
