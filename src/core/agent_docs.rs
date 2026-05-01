@@ -360,7 +360,7 @@ pub const OUTPUT_FORMATS: &[FormatEntry] = &[
     FormatEntry {
         name: "toon",
         flag: "--format toon",
-        description: "Compact hierarchical key-value notation",
+        description: "Token-efficient hierarchical notation for LLM context; 20-40% fewer tokens than JSON; decode-compatible but not for storage/hooks/MCP",
         machine_readable: false,
     },
     FormatEntry {
@@ -468,6 +468,18 @@ pub const EXAMPLES: &[ExampleEntry] = &[
         description: "Get actionable repair steps for issues",
         command: "ee doctor --fix-plan --json",
         category: "diagnostics",
+    },
+    ExampleEntry {
+        title: "Token-efficient status",
+        description: "Use TOON format for LLM context windows",
+        command: "ee status --format toon",
+        category: "formats",
+    },
+    ExampleEntry {
+        title: "TOON context pack",
+        description: "Get context with 20-40% fewer tokens than JSON",
+        command: "ee context \"task\" --workspace . --format toon",
+        category: "formats",
     },
 ];
 
