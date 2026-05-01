@@ -4,10 +4,7 @@
 //! Certificates are typed verification artifacts that make "alien artifact
 //! math" inspectable and auditable.
 
-use crate::models::{
-    Certificate, CertificateKind, CertificateStatus, CERTIFICATE_SCHEMA_V1,
-    DecisionPlaneMetadata,
-};
+use crate::models::{Certificate, CertificateKind, CertificateStatus, DecisionPlaneMetadata};
 
 /// Schema version for certificate list responses.
 pub const CERTIFICATE_LIST_SCHEMA_V1: &str = "ee.certificate.list.v1";

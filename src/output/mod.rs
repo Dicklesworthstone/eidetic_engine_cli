@@ -8848,7 +8848,7 @@ mod tests {
         // Summary excluded in None profile
         ensure(
             !json.contains("summary"),
-            "summary should be excluded in None profile".into(),
+            "summary should be excluded in None profile",
         )
     }
 
@@ -8862,7 +8862,7 @@ mod tests {
         ensure_contains(&json, "\"summary\":\"Risk summary\"", "summary included")?;
         ensure(
             !json.contains("math"),
-            "math should be excluded in Summary profile".into(),
+            "math should be excluded in Summary profile",
         )
     }
 
@@ -8884,7 +8884,7 @@ mod tests {
         ensure_contains(&json, "\"formula\":\"f(x) = x^2\"", "formula in math")?;
         ensure(
             !json.contains("provenance"),
-            "provenance should be excluded in Math profile".into(),
+            "provenance should be excluded in Math profile",
         )
     }
 
@@ -8930,11 +8930,11 @@ mod tests {
 
     #[test]
     fn card_kind_as_str_covers_all_variants() -> TestResult {
-        ensure(CardKind::Certificate.as_str() == "certificate", true, "certificate")?;
-        ensure(CardKind::Artifact.as_str() == "artifact", true, "artifact")?;
-        ensure(CardKind::Audit.as_str() == "audit", true, "audit")?;
-        ensure(CardKind::Risk.as_str() == "risk", true, "risk")?;
-        ensure(CardKind::Lifecycle.as_str() == "lifecycle", true, "lifecycle")
+        ensure(CardKind::Certificate.as_str() == "certificate", "certificate")?;
+        ensure(CardKind::Artifact.as_str() == "artifact", "artifact")?;
+        ensure(CardKind::Audit.as_str() == "audit", "audit")?;
+        ensure(CardKind::Risk.as_str() == "risk", "risk")?;
+        ensure(CardKind::Lifecycle.as_str() == "lifecycle", "lifecycle")
     }
 
     #[test]
