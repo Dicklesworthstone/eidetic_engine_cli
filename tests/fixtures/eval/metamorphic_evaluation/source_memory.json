@@ -1,0 +1,231 @@
+{
+  "schema": "ee.eval_source_memory.v1",
+  "fixture_id": "fx.metamorphic_evaluation.v1",
+  "source_kind": "synthetic",
+  "fixed_clock": "2026-04-29T12:50:00Z",
+  "memories": [
+    {
+      "id": "mem_release_verification_rule",
+      "level": "procedural",
+      "kind": "rule",
+      "trust_class": "verified",
+      "content": "Before release work, run cargo fmt --check, cargo clippy --all-targets -- -D warnings, and the relevant test subset through RCH."
+    },
+    {
+      "id": "mem_release_feedback_success",
+      "level": "feedback",
+      "kind": "positive_outcome",
+      "trust_class": "verified",
+      "content": "Following the release verification rule caught a formatting drift before the release workflow ran."
+    },
+    {
+      "id": "mem_skip_verification_counterclaim",
+      "level": "episodic",
+      "kind": "claim",
+      "trust_class": "untrusted",
+      "content": "If a change only edits documentation, skip cargo fmt and clippy before release."
+    },
+    {
+      "id": "mem_release_procedure_old",
+      "level": "procedural",
+      "kind": "procedure",
+      "trust_class": "verified",
+      "content": "Old release procedure: run cargo test before publishing."
+    },
+    {
+      "id": "mem_release_procedure_latest",
+      "level": "procedural",
+      "kind": "procedure",
+      "trust_class": "verified",
+      "supersedes": "mem_release_procedure_old",
+      "content": "Current release procedure: run cargo fmt --check, cargo clippy --all-targets -- -D warnings, cargo test, and release asset verification before publishing."
+    },
+    {
+      "id": "mem_release_background_detail",
+      "level": "episodic",
+      "kind": "note",
+      "trust_class": "observed",
+      "content": "Background detail: release note drafting works best after collecting merged commit summaries."
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "base_rule_only",
+      "semantic_mode": "semantic",
+      "max_tokens": 1200,
+      "selected_memory_ids": [
+        "mem_release_verification_rule"
+      ],
+      "excluded_memory_ids": [],
+      "degradation_codes": [],
+      "review_codes": [],
+      "metamorphic_codes": [],
+      "scores": {
+        "rule_confidence": 52,
+        "contradiction_risk": 0,
+        "selected_tokens": 180
+      }
+    },
+    {
+      "case_id": "positive_feedback_added",
+      "semantic_mode": "semantic",
+      "max_tokens": 1200,
+      "selected_memory_ids": [
+        "mem_release_verification_rule",
+        "mem_release_feedback_success"
+      ],
+      "excluded_memory_ids": [],
+      "degradation_codes": [],
+      "review_codes": [],
+      "metamorphic_codes": [
+        "positive_feedback_reinforces_rule"
+      ],
+      "scores": {
+        "rule_confidence": 82,
+        "contradiction_risk": 0,
+        "selected_tokens": 310
+      }
+    },
+    {
+      "case_id": "contradictory_evidence_added",
+      "semantic_mode": "semantic",
+      "max_tokens": 1200,
+      "selected_memory_ids": [
+        "mem_release_verification_rule"
+      ],
+      "excluded_memory_ids": [
+        "mem_skip_verification_counterclaim"
+      ],
+      "degradation_codes": [],
+      "review_codes": [
+        "contradiction_detected",
+        "contradiction_requires_review"
+      ],
+      "metamorphic_codes": [
+        "contradiction_requires_review"
+      ],
+      "scores": {
+        "rule_confidence": 52,
+        "contradiction_risk": 91,
+        "selected_tokens": 180
+      }
+    },
+    {
+      "case_id": "supersession_chain_added",
+      "semantic_mode": "semantic",
+      "max_tokens": 1200,
+      "selected_memory_ids": [
+        "mem_release_verification_rule",
+        "mem_release_procedure_latest"
+      ],
+      "excluded_memory_ids": [
+        "mem_release_procedure_old"
+      ],
+      "degradation_codes": [],
+      "review_codes": [],
+      "metamorphic_codes": [
+        "supersession_prefers_latest"
+      ],
+      "scores": {
+        "rule_confidence": 82,
+        "contradiction_risk": 0,
+        "selected_tokens": 520
+      }
+    },
+    {
+      "case_id": "budget_full",
+      "semantic_mode": "semantic",
+      "max_tokens": 1200,
+      "selected_memory_ids": [
+        "mem_release_verification_rule",
+        "mem_release_procedure_latest",
+        "mem_release_background_detail"
+      ],
+      "excluded_memory_ids": [
+        "mem_release_procedure_old"
+      ],
+      "degradation_codes": [],
+      "review_codes": [],
+      "metamorphic_codes": [],
+      "scores": {
+        "rule_confidence": 82,
+        "contradiction_risk": 0,
+        "selected_tokens": 920
+      }
+    },
+    {
+      "case_id": "budget_tight",
+      "semantic_mode": "semantic",
+      "max_tokens": 360,
+      "selected_memory_ids": [
+        "mem_release_verification_rule"
+      ],
+      "excluded_memory_ids": [
+        "mem_release_background_detail",
+        "mem_release_procedure_old"
+      ],
+      "degradation_codes": [
+        "token_budget_exhausted"
+      ],
+      "review_codes": [],
+      "metamorphic_codes": [
+        "lower_priority_context_trimmed"
+      ],
+      "scores": {
+        "rule_confidence": 82,
+        "contradiction_risk": 0,
+        "selected_tokens": 180
+      }
+    },
+    {
+      "case_id": "semantic_available",
+      "semantic_mode": "semantic",
+      "max_tokens": 1200,
+      "selected_memory_ids": [
+        "mem_release_verification_rule",
+        "mem_release_procedure_latest"
+      ],
+      "excluded_memory_ids": [],
+      "degradation_codes": [],
+      "review_codes": [],
+      "metamorphic_codes": [],
+      "scores": {
+        "rule_confidence": 82,
+        "contradiction_risk": 0,
+        "selected_tokens": 520
+      }
+    },
+    {
+      "case_id": "semantic_disabled_fallback",
+      "semantic_mode": "lexical_fallback",
+      "max_tokens": 1200,
+      "selected_memory_ids": [
+        "mem_release_verification_rule",
+        "mem_release_procedure_latest"
+      ],
+      "excluded_memory_ids": [],
+      "degradation_codes": [
+        "semantic_disabled"
+      ],
+      "review_codes": [],
+      "metamorphic_codes": [
+        "lexical_fallback_preserves_top_results"
+      ],
+      "scores": {
+        "rule_confidence": 82,
+        "contradiction_risk": 0,
+        "selected_tokens": 520
+      }
+    }
+  ],
+  "secret_policy": {
+    "synthetic_secret_policy": "none",
+    "secret_like_values_present": false,
+    "blocked_classes": [
+      "api_token",
+      "github_token",
+      "cloud_access_key",
+      "private_key"
+    ]
+  }
+}

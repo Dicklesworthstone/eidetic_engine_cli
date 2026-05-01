@@ -1,0 +1,317 @@
+{
+  "schema": "ee.eval_fixture.v1",
+  "fixture_id": "fx.metamorphic_evaluation.v1",
+  "scenario_ids": [
+    "usr_eval_metamorphic_memory_regressions"
+  ],
+  "fixture_family": "metamorphic_evaluation",
+  "coverage_state": "implemented",
+  "journey": "Evaluation fixtures compare paired memory states so feedback, contradiction, supersession, budget pressure, and semantic fallback behavior remain stable across regressions.",
+  "owning_bead_ids": [
+    "eidetic_engine_cli-e46v"
+  ],
+  "owning_gate_ids": [
+    "gate.4.frankensearch_contract",
+    "gate.13.trust_policy",
+    "gate.14.executable_claims"
+  ],
+  "deterministic": {
+    "fixed_clock": "2026-04-29T12:50:00Z",
+    "deterministic_seed": "seed.metamorphic_evaluation.v1",
+    "stable_ids": [
+      "mem_release_verification_rule",
+      "mem_release_feedback_success",
+      "mem_skip_verification_counterclaim",
+      "mem_release_procedure_old",
+      "mem_release_procedure_latest",
+      "mem_release_background_detail",
+      "pack_metamorphic_full",
+      "pack_metamorphic_tight"
+    ],
+    "workspace_fingerprints": [
+      "workspace.metamorphic_evaluation.v1"
+    ]
+  },
+  "source": {
+    "kind": "synthetic",
+    "path": "tests/fixtures/eval/metamorphic_evaluation/source_memory.json",
+    "source_hash": "staged:eidetic_engine_cli-e46v",
+    "synthetic_secret_policy": "none"
+  },
+  "redaction": {
+    "classes_expected": [],
+    "secret_leak_assertions": [
+      "stdout does not contain token-like prefixes",
+      "stderr does not contain token-like prefixes",
+      "artifacts contain no synthetic secrets"
+    ]
+  },
+  "metamorphic_relations": [
+    {
+      "relation_id": "mr_feedback_strengthens_rule",
+      "axis": "feedback",
+      "base_case_id": "base_rule_only",
+      "variant_case_id": "positive_feedback_added",
+      "assertion": "Adding positive feedback for the same rule must keep the rule selected and increase rule confidence.",
+      "required_codes": [
+        "positive_feedback_reinforces_rule"
+      ],
+      "must_hold": true
+    },
+    {
+      "relation_id": "mr_contradiction_requires_review",
+      "axis": "contradiction",
+      "base_case_id": "base_rule_only",
+      "variant_case_id": "contradictory_evidence_added",
+      "assertion": "Adding a conflicting counterclaim must raise contradiction risk and mark the counterclaim for review rather than authoritative packing.",
+      "required_codes": [
+        "contradiction_detected",
+        "contradiction_requires_review"
+      ],
+      "must_hold": true
+    },
+    {
+      "relation_id": "mr_supersession_prefers_latest",
+      "axis": "supersession",
+      "base_case_id": "base_rule_only",
+      "variant_case_id": "supersession_chain_added",
+      "assertion": "Adding a supersession link must prefer the latest procedure and exclude the superseded procedure from authoritative context.",
+      "required_codes": [
+        "supersession_prefers_latest"
+      ],
+      "must_hold": true
+    },
+    {
+      "relation_id": "mr_budget_shrink_preserves_priority",
+      "axis": "budget",
+      "base_case_id": "budget_full",
+      "variant_case_id": "budget_tight",
+      "assertion": "Shrinking the token budget must lower selected tokens while preserving the highest-priority release rule.",
+      "required_codes": [
+        "token_budget_exhausted",
+        "lower_priority_context_trimmed"
+      ],
+      "must_hold": true
+    },
+    {
+      "relation_id": "mr_semantic_fallback_preserves_lexical",
+      "axis": "semantic_fallback",
+      "base_case_id": "semantic_available",
+      "variant_case_id": "semantic_disabled_fallback",
+      "assertion": "Disabling semantic retrieval must emit semantic_disabled while preserving the lexical top result set for the same query.",
+      "required_codes": [
+        "semantic_disabled",
+        "lexical_fallback_preserves_top_results"
+      ],
+      "must_hold": true
+    }
+  ],
+  "command_sequence": [
+    {
+      "step": 1,
+      "argv": [
+        "ee",
+        "init",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/01-init.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/01-init.stderr.txt"
+    },
+    {
+      "step": 2,
+      "argv": [
+        "ee",
+        "eval",
+        "run",
+        "usr_eval_metamorphic_memory_regressions",
+        "--fixture-dir",
+        "tests/fixtures/eval/metamorphic_evaluation",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/02-eval-run.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/02-eval-run.stderr.txt"
+    },
+    {
+      "step": 3,
+      "argv": [
+        "ee",
+        "context",
+        "prepare release",
+        "--workspace",
+        "<workspace>",
+        "--max-tokens",
+        "1200",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/03-context-full.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/03-context-full.stderr.txt"
+    },
+    {
+      "step": 4,
+      "argv": [
+        "ee",
+        "context",
+        "prepare release",
+        "--workspace",
+        "<workspace>",
+        "--max-tokens",
+        "360",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/04-context-tight.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/04-context-tight.stderr.txt"
+    },
+    {
+      "step": 5,
+      "argv": [
+        "ee",
+        "search",
+        "release verification",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/05-search-semantic.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/05-search-semantic.stderr.txt"
+    },
+    {
+      "step": 6,
+      "argv": [
+        "ee",
+        "search",
+        "release verification",
+        "--workspace",
+        "<workspace>",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/06-search-lexical-fallback.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/06-search-lexical-fallback.stderr.txt"
+    }
+  ],
+  "expected_outputs": [
+    {
+      "step": 1,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.workspace"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 2,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.status",
+        "data.results"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 3,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.pack.items",
+        "data.pack.hash"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 4,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.pack.items",
+        "data.pack.truncation"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 5,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.results",
+        "data.retrieval.semanticMode"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    },
+    {
+      "step": 6,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.results",
+        "data.degraded"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    }
+  ],
+  "degraded_branches": [
+    {
+      "code": "semantic_disabled",
+      "description": "Semantic retrieval is disabled; lexical fallback preserves the top release-verification memories for the same query.",
+      "repair_action": "ee index rebuild --workspace <workspace>",
+      "preserves_success_signal": true
+    },
+    {
+      "code": "token_budget_exhausted",
+      "description": "Context budget is tight; lower-priority background is trimmed while the highest-priority rule remains selected.",
+      "repair_action": "raise --max-tokens or request a narrower task specific context pack",
+      "preserves_success_signal": true
+    },
+    {
+      "code": "contradiction_requires_review",
+      "description": "Contradictory evidence is present; candidate promotion abstains until a curator or feedback path resolves the conflict.",
+      "repair_action": "ee curate review --workspace <workspace> --json",
+      "preserves_success_signal": true
+    }
+  ],
+  "agent_success_signal": "A fresh agent can trust metamorphic evaluation results: helpful feedback strengthens rules, contradictions abstain, supersession prefers latest evidence, budget pressure trims safely, and semantic fallback remains honest."
+}

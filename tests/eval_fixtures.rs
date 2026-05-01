@@ -43,6 +43,13 @@ const SEMANTIC_MODEL_ADMISSIBILITY_SOURCE: &str =
 const SEMANTIC_MODEL_ADMISSIBILITY_README: &str =
     include_str!("fixtures/eval/semantic_model_admissibility/README.md");
 
+const METAMORPHIC_EVALUATION_SCENARIO: &str =
+    include_str!("fixtures/eval/metamorphic_evaluation/scenario.json");
+const METAMORPHIC_EVALUATION_SOURCE: &str =
+    include_str!("fixtures/eval/metamorphic_evaluation/source_memory.json");
+const METAMORPHIC_EVALUATION_README: &str =
+    include_str!("fixtures/eval/metamorphic_evaluation/README.md");
+
 type TestResult = Result<(), String>;
 
 fn parse_json(source: &str, label: &str) -> Result<Value, String> {
@@ -104,6 +111,27 @@ fn bool_field(value: &Value, name: &str) -> Result<bool, String> {
     field(value, name)?
         .as_bool()
         .ok_or_else(|| format!("field `{name}` must be a boolean"))
+}
+
+fn string_array_field<'a>(value: &'a Value, name: &str) -> Result<Vec<&'a str>, String> {
+    array_field(value, name)?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .ok_or_else(|| format!("field `{name}` must contain only strings"))
+        })
+        .collect()
+}
+
+fn case_by_id<'a>(cases: &'a [Value], case_id: &str) -> Result<&'a Value, String> {
+    cases
+        .iter()
+        .find(|case| case.get("case_id").and_then(Value::as_str) == Some(case_id))
+        .ok_or_else(|| format!("missing case `{case_id}`"))
+}
+
+fn score_field(value: &Value, name: &str) -> Result<u64, String> {
+    u64_field(field(value, "scores")?, name)
 }
 
 #[test]
@@ -1994,5 +2022,369 @@ fn semantic_model_admissibility_source_maps_to_domain_reports() -> TestResult {
             "rejected",
         ],
         "mode coverage",
+    )
+}
+
+#[test]
+fn metamorphic_evaluation_scenario_contract_is_complete() -> TestResult {
+    let scenario = parse_json(
+        METAMORPHIC_EVALUATION_SCENARIO,
+        "metamorphic_evaluation scenario",
+    )?;
+
+    ensure_equal(
+        string_field(&scenario, "schema")?,
+        EVAL_FIXTURE_SCHEMA_V1,
+        "scenario schema",
+    )?;
+    ensure_equal(
+        string_field(&scenario, "fixture_id")?,
+        "fx.metamorphic_evaluation.v1",
+        "fixture id",
+    )?;
+    ensure_equal(
+        string_field(&scenario, "fixture_family")?,
+        "metamorphic_evaluation",
+        "fixture family",
+    )?;
+    ensure_equal(
+        string_field(&scenario, "coverage_state")?,
+        "implemented",
+        "coverage state",
+    )?;
+    ensure(
+        array_contains_string(
+            array_field(&scenario, "owning_bead_ids")?,
+            "eidetic_engine_cli-e46v",
+        ),
+        "fixture must be owned by EE-316",
+    )?;
+    ensure(
+        array_contains_string(
+            array_field(&scenario, "scenario_ids")?,
+            "usr_eval_metamorphic_memory_regressions",
+        ),
+        "fixture must cover usr_eval_metamorphic_memory_regressions",
+    )?;
+
+    let commands = array_field(&scenario, "command_sequence")?;
+    ensure_equal(commands.len(), 6, "command count")?;
+    for (index, command) in commands.iter().enumerate() {
+        ensure_equal(
+            field(command, "step")?.as_u64(),
+            Some(u64::try_from(index + 1).map_err(|error| error.to_string())?),
+            "step ordering",
+        )?;
+        ensure_equal(
+            string_field(command, "stdout_schema")?,
+            "ee.response.v1",
+            "stdout schema",
+        )?;
+        ensure_equal(
+            string_field(command, "stderr_policy")?,
+            "diagnostics_only",
+            "stderr policy",
+        )?;
+        ensure(
+            string_field(command, "stdout_artifact_path")?
+                .starts_with("target/ee-e2e/metamorphic_evaluation/"),
+            "stdout artifact path must use fixture root",
+        )?;
+    }
+
+    let relation_ids: Vec<&str> = array_field(&scenario, "metamorphic_relations")?
+        .iter()
+        .map(|relation| string_field(relation, "relation_id"))
+        .collect::<Result<Vec<_>, _>>()?;
+    for required in [
+        "mr_feedback_strengthens_rule",
+        "mr_contradiction_requires_review",
+        "mr_supersession_prefers_latest",
+        "mr_budget_shrink_preserves_priority",
+        "mr_semantic_fallback_preserves_lexical",
+    ] {
+        ensure(
+            relation_ids.contains(&required),
+            &format!("metamorphic relation `{required}` must be present"),
+        )?;
+    }
+    for relation in array_field(&scenario, "metamorphic_relations")? {
+        ensure_equal(
+            bool_field(relation, "must_hold")?,
+            true,
+            "metamorphic relation must hold",
+        )?;
+        ensure(
+            !array_field(relation, "required_codes")?.is_empty(),
+            "metamorphic relation must declare required codes",
+        )?;
+    }
+
+    let degraded_codes: Vec<&str> = array_field(&scenario, "degraded_branches")?
+        .iter()
+        .filter_map(|branch| branch.get("code").and_then(Value::as_str))
+        .collect();
+    for required in [
+        "semantic_disabled",
+        "token_budget_exhausted",
+        "contradiction_requires_review",
+    ] {
+        ensure(
+            degraded_codes.contains(&required),
+            &format!("degraded branch must contain `{required}`"),
+        )?;
+    }
+
+    let all_fixture_text = format!(
+        "{METAMORPHIC_EVALUATION_SCENARIO}\n{METAMORPHIC_EVALUATION_SOURCE}\n{METAMORPHIC_EVALUATION_README}"
+    );
+    for forbidden in ["sk-", "ghp_", "AKIA", "-----BEGIN PRIVATE KEY-----"] {
+        ensure(
+            !all_fixture_text.contains(forbidden),
+            &format!("fixture files must not contain secret marker `{forbidden}`"),
+        )?;
+    }
+
+    ensure(
+        METAMORPHIC_EVALUATION_README.contains("fx.metamorphic_evaluation.v1"),
+        "README must name fixture ID",
+    )?;
+    ensure(
+        METAMORPHIC_EVALUATION_README.contains("usr_eval_metamorphic_memory_regressions"),
+        "README must name scenario ID",
+    )
+}
+
+#[test]
+fn metamorphic_evaluation_source_relations_are_self_consistent() -> TestResult {
+    let source = parse_json(
+        METAMORPHIC_EVALUATION_SOURCE,
+        "metamorphic_evaluation source",
+    )?;
+
+    ensure_equal(
+        string_field(&source, "schema")?,
+        "ee.eval_source_memory.v1",
+        "source schema",
+    )?;
+    ensure_equal(
+        string_field(&source, "fixture_id")?,
+        "fx.metamorphic_evaluation.v1",
+        "source fixture id",
+    )?;
+
+    let cases = array_field(&source, "cases")?;
+    ensure_equal(cases.len(), 8, "case count")?;
+
+    let base = case_by_id(cases, "base_rule_only")?;
+    let feedback = case_by_id(cases, "positive_feedback_added")?;
+    ensure(
+        string_array_field(base, "selected_memory_ids")?.contains(&"mem_release_verification_rule"),
+        "baseline selects the release verification rule",
+    )?;
+    ensure(
+        string_array_field(feedback, "selected_memory_ids")?
+            .contains(&"mem_release_verification_rule"),
+        "feedback variant preserves the release verification rule",
+    )?;
+    ensure(
+        score_field(feedback, "rule_confidence")? > score_field(base, "rule_confidence")?,
+        "positive feedback must increase rule confidence",
+    )?;
+    ensure(
+        string_array_field(feedback, "metamorphic_codes")?
+            .contains(&"positive_feedback_reinforces_rule"),
+        "feedback variant records reinforcement code",
+    )?;
+
+    let contradiction = case_by_id(cases, "contradictory_evidence_added")?;
+    ensure(
+        string_array_field(contradiction, "review_codes")?.contains(&"contradiction_detected"),
+        "contradiction variant requires review",
+    )?;
+    ensure(
+        score_field(contradiction, "contradiction_risk")?
+            > score_field(base, "contradiction_risk")?,
+        "contradiction risk must increase",
+    )?;
+    ensure(
+        string_array_field(contradiction, "excluded_memory_ids")?
+            .contains(&"mem_skip_verification_counterclaim"),
+        "unsafe counterclaim is not packed as authoritative context",
+    )?;
+
+    let supersession = case_by_id(cases, "supersession_chain_added")?;
+    ensure(
+        string_array_field(supersession, "selected_memory_ids")?
+            .contains(&"mem_release_procedure_latest"),
+        "supersession variant selects latest procedure",
+    )?;
+    ensure(
+        string_array_field(supersession, "excluded_memory_ids")?
+            .contains(&"mem_release_procedure_old"),
+        "supersession variant excludes older procedure",
+    )?;
+    ensure(
+        string_array_field(supersession, "metamorphic_codes")?
+            .contains(&"supersession_prefers_latest"),
+        "supersession variant records latest-wins code",
+    )?;
+
+    let full_budget = case_by_id(cases, "budget_full")?;
+    let tight_budget = case_by_id(cases, "budget_tight")?;
+    ensure(
+        score_field(tight_budget, "selected_tokens")? <= u64_field(tight_budget, "max_tokens")?,
+        "tight budget must respect max token budget",
+    )?;
+    ensure(
+        score_field(tight_budget, "selected_tokens")?
+            <= score_field(full_budget, "selected_tokens")?,
+        "tight budget must not use more tokens than full budget",
+    )?;
+    ensure(
+        string_array_field(tight_budget, "selected_memory_ids")?
+            .contains(&"mem_release_verification_rule"),
+        "tight budget preserves the highest-priority release rule",
+    )?;
+    ensure(
+        string_array_field(tight_budget, "excluded_memory_ids")?
+            .contains(&"mem_release_background_detail"),
+        "tight budget drops lower-priority background detail",
+    )?;
+
+    let semantic = case_by_id(cases, "semantic_available")?;
+    let fallback = case_by_id(cases, "semantic_disabled_fallback")?;
+    ensure_equal(
+        string_array_field(fallback, "selected_memory_ids")?,
+        string_array_field(semantic, "selected_memory_ids")?,
+        "lexical fallback preserves selected memory IDs",
+    )?;
+    ensure(
+        string_array_field(fallback, "degradation_codes")?.contains(&"semantic_disabled"),
+        "fallback records semantic_disabled degradation",
+    )?;
+    ensure_equal(
+        string_field(fallback, "semantic_mode")?,
+        "lexical_fallback",
+        "fallback semantic mode",
+    )
+}
+
+#[test]
+fn metamorphic_evaluation_json_fixture_maps_to_eval_domain_types() -> TestResult {
+    let raw = parse_json(
+        METAMORPHIC_EVALUATION_SCENARIO,
+        "metamorphic_evaluation scenario",
+    )?;
+    let scenario_id = array_field(&raw, "scenario_ids")?
+        .first()
+        .and_then(Value::as_str)
+        .ok_or_else(|| "scenario_ids must contain a string".to_string())?;
+    let mut builder = EvaluationScenario::builder(scenario_id)
+        .journey(string_field(&raw, "journey")?)
+        .fixture_family(string_field(&raw, "fixture_family")?)
+        .agent_success_signal(string_field(&raw, "agent_success_signal")?);
+
+    for bead in array_field(&raw, "owning_bead_ids")? {
+        builder = builder.owning_bead(
+            bead.as_str()
+                .ok_or_else(|| "owning bead must be a string".to_string())?,
+        );
+    }
+
+    for gate in array_field(&raw, "owning_gate_ids")? {
+        builder = builder.owning_gate(
+            gate.as_str()
+                .ok_or_else(|| "owning gate must be a string".to_string())?,
+        );
+    }
+
+    for command in array_field(&raw, "command_sequence")? {
+        let step = field(command, "step")?
+            .as_u64()
+            .ok_or_else(|| "command step must be an integer".to_string())?;
+        let argv = array_field(command, "argv")?
+            .iter()
+            .map(|part| {
+                part.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "argv part must be a string".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let command_step = CommandStep::new(
+            u32::try_from(step).map_err(|error| error.to_string())?,
+            argv.join(" "),
+        )
+        .with_exit_code(
+            i32::try_from(
+                field(command, "expected_exit_code")?
+                    .as_i64()
+                    .ok_or_else(|| "expected exit code must be an integer".to_string())?,
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .with_schema(string_field(command, "stdout_schema")?);
+        builder = builder.command(command_step);
+    }
+
+    for output in array_field(&raw, "expected_outputs")? {
+        let step = field(output, "step")?
+            .as_u64()
+            .ok_or_else(|| "output step must be an integer".to_string())?;
+        let mut expected = ExpectedOutput::new(
+            u32::try_from(step).map_err(|error| error.to_string())?,
+            string_field(output, "schema")?,
+        );
+        for required in array_field(output, "required_fields")? {
+            expected = expected.require_field(
+                required
+                    .as_str()
+                    .ok_or_else(|| "required field must be a string".to_string())?,
+            );
+        }
+        for absent in array_field(output, "absent_fields")? {
+            expected = expected.absent_field(
+                absent
+                    .as_str()
+                    .ok_or_else(|| "absent field must be a string".to_string())?,
+            );
+        }
+        builder = builder.expected_output(expected);
+    }
+
+    for branch in array_field(&raw, "degraded_branches")? {
+        let mut degraded = DegradedBranch::new(
+            string_field(branch, "code")?,
+            string_field(branch, "description")?,
+        );
+        if let Some(repair) = branch.get("repair_action").and_then(Value::as_str) {
+            degraded = degraded.with_repair(repair);
+        }
+        if branch
+            .get("preserves_success_signal")
+            .and_then(Value::as_bool)
+            == Some(false)
+        {
+            degraded = degraded.signal_not_preserved();
+        }
+        builder = builder.degraded_branch(degraded);
+    }
+
+    let scenario = builder.build();
+    ensure_equal(
+        scenario.scenario_id,
+        "usr_eval_metamorphic_memory_regressions".to_string(),
+        "domain scenario id",
+    )?;
+    ensure_equal(scenario.command_sequence.len(), 6, "domain commands")?;
+    ensure_equal(scenario.expected_outputs.len(), 6, "domain outputs")?;
+    ensure_equal(
+        scenario.degraded_branches.len(),
+        3,
+        "domain degraded branches",
+    )?;
+    ensure(
+        scenario.agent_success_signal.contains("metamorphic"),
+        "success signal remains agent-facing",
     )
 }
