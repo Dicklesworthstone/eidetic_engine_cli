@@ -27,6 +27,7 @@ use crate::core::index::{
 };
 use crate::core::init::{InitOptions, init_workspace};
 use crate::core::install::{InstallCheckOptions, InstallPlanOptions, check_install, plan_install};
+use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use crate::core::lab::{
     CaptureOptions as LabCaptureOptions, CounterfactualOptions as LabCounterfactualOptions,
     ReplayOptions as LabReplayOptions, capture_episode, replay_episode, run_counterfactual,
@@ -35,7 +36,6 @@ use crate::core::learn::{
     LearnAgendaOptions, LearnSummaryOptions, LearnUncertaintyOptions, show_agenda, show_summary,
     show_uncertainty,
 };
-use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
     GetMemoryOptions, ListMemoriesOptions, get_memory_details, list_memories,
@@ -4663,14 +4663,13 @@ where
     let workspace_path = cli.workspace.clone().unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
     });
-    let report = crate::core::claims::DiagClaimsReport::gather(
-        &crate::core::claims::DiagClaimsOptions {
+    let report =
+        crate::core::claims::DiagClaimsReport::gather(&crate::core::claims::DiagClaimsOptions {
             workspace_path,
             claims_file: args.claims_file.clone(),
             staleness_threshold_days: args.staleness_threshold,
             include_verified: args.include_verified,
-        },
-    );
+        });
 
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {

@@ -22,10 +22,10 @@ pub mod health;
 pub mod index;
 pub mod init;
 pub mod install;
+pub mod jsonl_import;
 pub mod lab;
 pub mod learn;
 pub mod legacy_import;
-pub mod jsonl_import;
 pub mod memory;
 pub mod outcome;
 pub mod plan;
@@ -460,7 +460,7 @@ mod tests {
             "plain metadata",
         )?;
         ensure_equal(
-            &clean_build_metadata(Some("/tmp/build/secret")),
+            &clean_build_metadata(Some("/tmp/build/path-like-value")),
             &None,
             "path metadata must be redacted",
         )?;

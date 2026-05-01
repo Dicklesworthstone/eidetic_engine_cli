@@ -197,10 +197,7 @@ impl DiagClaimsReport {
         let mut repair_actions = Vec::new();
 
         if !claims_file_exists {
-            repair_actions.push(format!(
-                "Create claims file at {}",
-                claims_file_str
-            ));
+            repair_actions.push(format!("Create claims file at {}", claims_file_str));
             return Self {
                 schema: DIAG_CLAIMS_SCHEMA_V1,
                 claims_file: claims_file_str,
@@ -214,9 +211,17 @@ impl DiagClaimsReport {
         }
 
         let postures = [
-            (ClaimPosture::Unverified, "claim-001", "Example unverified claim"),
+            (
+                ClaimPosture::Unverified,
+                "claim-001",
+                "Example unverified claim",
+            ),
             (ClaimPosture::Stale, "claim-002", "Example stale claim"),
-            (ClaimPosture::Verified, "claim-003", "Example verified claim"),
+            (
+                ClaimPosture::Verified,
+                "claim-003",
+                "Example verified claim",
+            ),
         ];
 
         for (posture, id, title) in postures {
@@ -335,20 +340,56 @@ mod tests {
 
     #[test]
     fn claim_posture_as_str_is_stable() -> TestResult {
-        ensure_equal(&ClaimPosture::Verified.as_str(), &"verified", "verified posture")?;
-        ensure_equal(&ClaimPosture::Unverified.as_str(), &"unverified", "unverified posture")?;
+        ensure_equal(
+            &ClaimPosture::Verified.as_str(),
+            &"verified",
+            "verified posture",
+        )?;
+        ensure_equal(
+            &ClaimPosture::Unverified.as_str(),
+            &"unverified",
+            "unverified posture",
+        )?;
         ensure_equal(&ClaimPosture::Stale.as_str(), &"stale", "stale posture")?;
-        ensure_equal(&ClaimPosture::Regressed.as_str(), &"regressed", "regressed posture")?;
-        ensure_equal(&ClaimPosture::Unknown.as_str(), &"unknown", "unknown posture")
+        ensure_equal(
+            &ClaimPosture::Regressed.as_str(),
+            &"regressed",
+            "regressed posture",
+        )?;
+        ensure_equal(
+            &ClaimPosture::Unknown.as_str(),
+            &"unknown",
+            "unknown posture",
+        )
     }
 
     #[test]
     fn claim_posture_severity_reflects_urgency() -> TestResult {
-        ensure_equal(&ClaimPosture::Verified.severity(), &"ok", "verified severity")?;
-        ensure_equal(&ClaimPosture::Unverified.severity(), &"warning", "unverified severity")?;
-        ensure_equal(&ClaimPosture::Stale.severity(), &"warning", "stale severity")?;
-        ensure_equal(&ClaimPosture::Regressed.severity(), &"error", "regressed severity")?;
-        ensure_equal(&ClaimPosture::Unknown.severity(), &"info", "unknown severity")
+        ensure_equal(
+            &ClaimPosture::Verified.severity(),
+            &"ok",
+            "verified severity",
+        )?;
+        ensure_equal(
+            &ClaimPosture::Unverified.severity(),
+            &"warning",
+            "unverified severity",
+        )?;
+        ensure_equal(
+            &ClaimPosture::Stale.severity(),
+            &"warning",
+            "stale severity",
+        )?;
+        ensure_equal(
+            &ClaimPosture::Regressed.severity(),
+            &"error",
+            "regressed severity",
+        )?;
+        ensure_equal(
+            &ClaimPosture::Unknown.severity(),
+            &"info",
+            "unknown severity",
+        )
     }
 
     #[test]
@@ -362,7 +403,11 @@ mod tests {
         let report = DiagClaimsReport::gather(&options);
         ensure_equal(&report.claims_file_exists, &false, "file exists")?;
         ensure_equal(&report.health_status, &"degraded", "health status")?;
-        ensure_equal(&report.repair_actions.is_empty(), &false, "has repair actions")
+        ensure_equal(
+            &report.repair_actions.is_empty(),
+            &false,
+            "has repair actions",
+        )
     }
 
     #[test]

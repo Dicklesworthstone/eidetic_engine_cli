@@ -365,9 +365,9 @@ pub fn import_jsonl_records(
     report.status = "completed".to_owned();
     report.memories_imported = saturating_len(to_insert.len());
     report.memories_skipped_duplicate = skipped_duplicate;
-    report.tags_imported = to_insert
-        .iter()
-        .fold(0_u32, |total, memory| total.saturating_add(memory.tag_count));
+    report.tags_imported = to_insert.iter().fold(0_u32, |total, memory| {
+        total.saturating_add(memory.tag_count)
+    });
     report.imported_memory_ids = to_insert.into_iter().map(|memory| memory.id).collect();
     Ok(report)
 }
@@ -404,10 +404,9 @@ fn report_from_parsed(
             .map(JsonlImportFooterSummary::from_footer),
         records_total: parsed.records_total,
         memory_records: saturating_len(parsed.memories.len()),
-        tag_records: parsed
-            .tags_by_memory
-            .values()
-            .fold(0_u32, |total, tags| total.saturating_add(saturating_len(tags.len()))),
+        tag_records: parsed.tags_by_memory.values().fold(0_u32, |total, tags| {
+            total.saturating_add(saturating_len(tags.len()))
+        }),
         ignored_records: parsed.ignored_records,
         memories_imported: 0,
         memories_skipped_duplicate: 0,
@@ -578,17 +577,17 @@ fn parse_footer_record(parsed: &mut ParsedJsonlImport, line_number: u32, value: 
     }
 }
 
-fn validate_header_and_footer(
-    parsed: &mut ParsedJsonlImport,
-    first_schema: Option<(u32, String)>,
-) {
+fn validate_header_and_footer(parsed: &mut ParsedJsonlImport, first_schema: Option<(u32, String)>) {
     match &parsed.header {
         Some(header) => {
             if header.format_version != crate::models::EXPORT_FORMAT_VERSION {
                 parsed.issues.push(JsonlImportIssue::error(
                     None,
                     "unsupported_format_version",
-                    format!("unsupported JSONL export format version {}", header.format_version),
+                    format!(
+                        "unsupported JSONL export format version {}",
+                        header.format_version
+                    ),
                 ));
             }
         }
@@ -695,15 +694,14 @@ fn prepare_memory(
             format!("memory `{}` has invalid content: {error}", memory.memory_id),
         )
     })?;
-    let confidence = score_or_default(memory.confidence, trust_class.initial_confidence()).map_err(
-        |message| {
+    let confidence = score_or_default(memory.confidence, trust_class.initial_confidence())
+        .map_err(|message| {
             JsonlImportIssue::error(
                 None,
                 "invalid_memory_confidence",
                 format!("memory `{}` {message}", memory.memory_id),
             )
-        },
-    )?;
+        })?;
     let utility = score_or_default(memory.utility, 0.5).map_err(|message| {
         JsonlImportIssue::error(
             None,
