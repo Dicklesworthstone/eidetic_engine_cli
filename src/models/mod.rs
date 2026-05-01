@@ -526,4 +526,27 @@ mod tests {
         ensure_equal(&err.message(), &"Database locked".to_string(), "message")?;
         ensure_equal(&err.repair(), &Some("ee db unlock"), "repair")
     }
+
+    #[test]
+    fn query_schema_version_is_stable() -> TestResult {
+        ensure_equal(
+            &super::QUERY_SCHEMA_V1,
+            &"ee.query.v1",
+            "query schema version",
+        )
+    }
+
+    #[test]
+    fn release_gate_and_tail_budget_schema_versions_are_stable() -> TestResult {
+        ensure_equal(
+            &super::RELEASE_GATE_SCHEMA_V1,
+            &"ee.eval.release_gate.v1",
+            "release gate schema",
+        )?;
+        ensure_equal(
+            &super::TAIL_BUDGET_CONFIG_SCHEMA_V1,
+            &"ee.eval.tail_budget_config.v1",
+            "tail budget config schema",
+        )
+    }
 }

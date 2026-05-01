@@ -559,6 +559,31 @@ mod tests {
     }
 
     #[test]
+    fn query_schema_closure_is_verified() -> TestResult {
+        let versions: Vec<&str> = CONTEXT_SCHEMAS.iter().map(|s| s.version).collect();
+        ensure(
+            versions.contains(&"ee.query.v1"),
+            "context schemas must include ee.query.v1 (EE-QUERY-SCHEMA-VERIFY-001)",
+        )?;
+
+        let entry = CONTEXT_SCHEMAS.iter().find(|s| s.version == "ee.query.v1");
+        ensure(entry.is_some(), "ee.query.v1 entry must exist")?;
+
+        let entry = entry.unwrap();
+        ensure_equal(&entry.name, &"query", "schema name")?;
+        ensure_equal(&entry.category, &SchemaCategory::Context, "schema category")
+    }
+
+    #[test]
+    fn query_schema_version_matches_constant() -> TestResult {
+        ensure_equal(
+            &"ee.query.v1",
+            &"ee.query.v1",
+            "query schema version literal",
+        )
+    }
+
+    #[test]
     fn schema_category_strings_are_stable() -> TestResult {
         ensure_equal(&SchemaCategory::Response.as_str(), &"response", "response")?;
         ensure_equal(&SchemaCategory::Error.as_str(), &"error", "error")?;
