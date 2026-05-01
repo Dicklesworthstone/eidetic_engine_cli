@@ -4578,6 +4578,38 @@ where
     }
 }
 
+fn handle_diag_claims<W>(cli: &Cli, args: &DiagClaimsArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
+    let report = crate::core::claims::DiagClaimsReport::gather(
+        &crate::core::claims::DiagClaimsOptions {
+            workspace_path,
+            claims_file: args.claims_file.clone(),
+            staleness_threshold_days: args.staleness_threshold,
+            include_verified: args.include_verified,
+        },
+    );
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_diag_claims_human(&report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_diag_claims_toon(&report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_diag_claims_json(&report) + "\n"))
+        }
+    }
+}
+
 fn handle_graph_centrality_refresh<W, E>(
     cli: &Cli,
     args: &GraphCentralityRefreshArgs,

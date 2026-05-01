@@ -6092,6 +6092,118 @@ pub fn render_handoff_resume_toon(report: &HandoffResumeReport) -> String {
     )
 }
 
+// ============================================================================
+// EE-363: Claim Diagnostics Output
+// ============================================================================
+
+/// Render a claims diagnostic report as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_diag_claims_json(report: &crate::core::claims::DiagClaimsReport) -> String {
+    let mut b = JsonBuilder::with_capacity(1024);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", report.health_status == "healthy");
+    b.field_object("data", |d| {
+        d.field_str("command", "diag claims");
+        d.field_str("reportSchema", report.schema);
+        d.field_str("claimsFile", &report.claims_file);
+        d.field_bool("claimsFileExists", report.claims_file_exists);
+        d.field_raw(
+            "stalenessThresholdDays",
+            &report.staleness_threshold_days.to_string(),
+        );
+        d.field_str("healthStatus", report.health_status);
+        d.field_object("counts", |c| {
+            c.field_raw("total", &report.counts.total.to_string());
+            c.field_raw("verified", &report.counts.verified.to_string());
+            c.field_raw("unverified", &report.counts.unverified.to_string());
+            c.field_raw("stale", &report.counts.stale.to_string());
+            c.field_raw("regressed", &report.counts.regressed.to_string());
+            c.field_raw("unknown", &report.counts.unknown.to_string());
+        });
+        d.field_array_of_objects("entries", &report.entries, |obj, entry| {
+            obj.field_str("id", &entry.id);
+            obj.field_str("title", &entry.title);
+            obj.field_str("posture", entry.posture.as_str());
+            obj.field_str("severity", entry.posture.severity());
+            if let Some(ref verified_at) = entry.last_verified_at {
+                obj.field_str("lastVerifiedAt", verified_at);
+            }
+            if let Some(days) = entry.staleness_days {
+                obj.field_raw("stalenessDays", &days.to_string());
+            }
+            obj.field_raw("evidenceCount", &entry.evidence_count.to_string());
+            obj.field_raw("demoCount", &entry.demo_count.to_string());
+            obj.field_str("frequency", entry.frequency.as_str());
+        });
+        d.field_array_of_strings("repairActions", &report.repair_actions);
+    });
+    b.finish()
+}
+
+/// Render a claims diagnostic report as human-readable text.
+#[must_use]
+pub fn render_diag_claims_human(report: &crate::core::claims::DiagClaimsReport) -> String {
+    let mut output = String::with_capacity(1024);
+
+    output.push_str("ee diag claims\n\n");
+
+    if !report.claims_file_exists {
+        output.push_str(&format!("Claims file not found: {}\n\n", report.claims_file));
+        output.push_str("Next:\n");
+        for action in &report.repair_actions {
+            output.push_str(&format!("  {}\n", action));
+        }
+        return output;
+    }
+
+    output.push_str(&format!("Claims file: {}\n", report.claims_file));
+    output.push_str(&format!("Health: {}\n", report.health_status));
+    output.push_str(&format!(
+        "Staleness threshold: {} days\n\n",
+        report.staleness_threshold_days
+    ));
+
+    output.push_str("Summary:\n");
+    output.push_str(&format!("  Total:      {}\n", report.counts.total));
+    output.push_str(&format!("  Verified:   {}\n", report.counts.verified));
+    output.push_str(&format!("  Unverified: {}\n", report.counts.unverified));
+    output.push_str(&format!("  Stale:      {}\n", report.counts.stale));
+    output.push_str(&format!("  Regressed:  {}\n", report.counts.regressed));
+
+    if !report.entries.is_empty() {
+        output.push_str("\nClaims requiring attention:\n");
+        for entry in &report.entries {
+            let severity_marker = match entry.posture.severity() {
+                "error" => "✗",
+                "warning" => "⚠",
+                _ => "·",
+            };
+            output.push_str(&format!(
+                "  {} [{}] {} — {}\n",
+                severity_marker,
+                entry.posture.as_str(),
+                entry.id,
+                entry.title
+            ));
+        }
+    }
+
+    if !report.repair_actions.is_empty() {
+        output.push_str("\nNext:\n");
+        for action in &report.repair_actions {
+            output.push_str(&format!("  {}\n", action));
+        }
+    }
+
+    output
+}
+
+/// Render a claims diagnostic report as TOON.
+#[must_use]
+pub fn render_diag_claims_toon(report: &crate::core::claims::DiagClaimsReport) -> String {
+    render_toon_from_json(&render_diag_claims_json(report))
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
