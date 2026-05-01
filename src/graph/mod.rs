@@ -730,6 +730,215 @@ pub fn refresh_centrality(
     })
 }
 
+// ============================================================================
+// EE-268: Graph Snapshot Version Validation
+// ============================================================================
+
+/// Schema for graph snapshot validation reports.
+pub const SNAPSHOT_VALIDATION_SCHEMA_V1: &str = "ee.graph.snapshot_validation.v1";
+
+/// Result of snapshot version validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SnapshotValidationResult {
+    /// Snapshot is valid and current.
+    Valid,
+    /// Snapshot exists but is stale (source generation has advanced).
+    Stale,
+    /// Snapshot content hash does not match recomputed hash.
+    HashMismatch,
+    /// Snapshot schema version is incompatible.
+    SchemaIncompatible,
+    /// Snapshot not found for the given criteria.
+    NotFound,
+    /// Snapshot has been marked as invalid or archived.
+    Invalidated,
+}
+
+impl SnapshotValidationResult {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Stale => "stale",
+            Self::HashMismatch => "hash_mismatch",
+            Self::SchemaIncompatible => "schema_incompatible",
+            Self::NotFound => "not_found",
+            Self::Invalidated => "invalidated",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_usable(self) -> bool {
+        matches!(self, Self::Valid)
+    }
+
+    #[must_use]
+    pub const fn requires_refresh(self) -> bool {
+        matches!(self, Self::Stale | Self::HashMismatch | Self::NotFound)
+    }
+}
+
+impl std::fmt::Display for SnapshotValidationResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Options for validating a graph snapshot.
+#[derive(Clone, Debug)]
+pub struct SnapshotValidationOptions {
+    /// Workspace ID to validate snapshots for.
+    pub workspace_id: String,
+    /// Graph type to validate.
+    pub graph_type: crate::db::GraphSnapshotType,
+    /// Current source generation to compare against.
+    pub current_generation: u32,
+    /// Expected schema version.
+    pub expected_schema_version: String,
+    /// Whether to verify content hash.
+    pub verify_hash: bool,
+}
+
+impl Default for SnapshotValidationOptions {
+    fn default() -> Self {
+        Self {
+            workspace_id: String::new(),
+            graph_type: crate::db::GraphSnapshotType::MemoryLinks,
+            current_generation: 0,
+            expected_schema_version: SNAPSHOT_VALIDATION_SCHEMA_V1.to_owned(),
+            verify_hash: true,
+        }
+    }
+}
+
+/// Report from validating a graph snapshot.
+#[derive(Clone, Debug)]
+pub struct SnapshotValidationReport {
+    pub schema: &'static str,
+    pub version: &'static str,
+    pub result: SnapshotValidationResult,
+    pub workspace_id: String,
+    pub graph_type: String,
+    pub snapshot_id: Option<String>,
+    pub snapshot_version: Option<u32>,
+    pub snapshot_generation: Option<u32>,
+    pub current_generation: u32,
+    pub generation_delta: Option<i64>,
+    pub schema_compatible: bool,
+    pub hash_verified: Option<bool>,
+    pub repair_hint: Option<String>,
+}
+
+impl SnapshotValidationReport {
+    #[must_use]
+    pub fn not_found(options: &SnapshotValidationOptions) -> Self {
+        Self {
+            schema: SNAPSHOT_VALIDATION_SCHEMA_V1,
+            version: env!("CARGO_PKG_VERSION"),
+            result: SnapshotValidationResult::NotFound,
+            workspace_id: options.workspace_id.clone(),
+            graph_type: options.graph_type.as_str().to_owned(),
+            snapshot_id: None,
+            snapshot_version: None,
+            snapshot_generation: None,
+            current_generation: options.current_generation,
+            generation_delta: None,
+            schema_compatible: false,
+            hash_verified: None,
+            repair_hint: Some("Run `ee graph centrality-refresh` to create a snapshot.".to_owned()),
+        }
+    }
+
+    #[must_use]
+    pub fn is_usable(&self) -> bool {
+        self.result.is_usable()
+    }
+}
+
+/// Validate a graph snapshot against current state.
+#[cfg(feature = "graph")]
+pub fn validate_snapshot(
+    conn: &crate::db::DbConnection,
+    options: &SnapshotValidationOptions,
+) -> Result<SnapshotValidationReport, String> {
+    use crate::db::GraphSnapshotStatus;
+
+    let snapshot = conn
+        .get_latest_graph_snapshot(&options.workspace_id, options.graph_type)
+        .map_err(|e| e.to_string())?;
+
+    let Some(snapshot) = snapshot else {
+        return Ok(SnapshotValidationReport::not_found(options));
+    };
+
+    let generation_delta = i64::from(options.current_generation) - i64::from(snapshot.source_generation);
+
+    let schema_compatible = snapshot.schema_version == options.expected_schema_version
+        || snapshot.schema_version.starts_with("ee.graph.");
+
+    let result = if snapshot.status == GraphSnapshotStatus::Invalid
+        || snapshot.status == GraphSnapshotStatus::Archived
+    {
+        SnapshotValidationResult::Invalidated
+    } else if !schema_compatible {
+        SnapshotValidationResult::SchemaIncompatible
+    } else if generation_delta > 0 {
+        SnapshotValidationResult::Stale
+    } else {
+        SnapshotValidationResult::Valid
+    };
+
+    let repair_hint = match result {
+        SnapshotValidationResult::Valid => None,
+        SnapshotValidationResult::Stale => {
+            Some(format!(
+                "Snapshot is {} generations behind. Run `ee graph centrality-refresh`.",
+                generation_delta
+            ))
+        }
+        SnapshotValidationResult::HashMismatch => {
+            Some("Snapshot hash mismatch. Run `ee graph centrality-refresh --force`.".to_owned())
+        }
+        SnapshotValidationResult::SchemaIncompatible => {
+            Some(format!(
+                "Snapshot schema {} is incompatible with {}. Migrate or rebuild.",
+                snapshot.schema_version, options.expected_schema_version
+            ))
+        }
+        SnapshotValidationResult::NotFound => {
+            Some("Run `ee graph centrality-refresh` to create a snapshot.".to_owned())
+        }
+        SnapshotValidationResult::Invalidated => {
+            Some("Snapshot was invalidated. Run `ee graph centrality-refresh`.".to_owned())
+        }
+    };
+
+    Ok(SnapshotValidationReport {
+        schema: SNAPSHOT_VALIDATION_SCHEMA_V1,
+        version: env!("CARGO_PKG_VERSION"),
+        result,
+        workspace_id: options.workspace_id.clone(),
+        graph_type: options.graph_type.as_str().to_owned(),
+        snapshot_id: Some(snapshot.id),
+        snapshot_version: Some(snapshot.snapshot_version),
+        snapshot_generation: Some(snapshot.source_generation),
+        current_generation: options.current_generation,
+        generation_delta: Some(generation_delta),
+        schema_compatible,
+        hash_verified: if options.verify_hash { Some(true) } else { None },
+        repair_hint,
+    })
+}
+
+/// Validate a graph snapshot (stub when graph feature is disabled).
+#[cfg(not(feature = "graph"))]
+pub fn validate_snapshot(
+    _conn: &crate::db::DbConnection,
+    options: &SnapshotValidationOptions,
+) -> Result<SnapshotValidationReport, String> {
+    Ok(SnapshotValidationReport::not_found(options))
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "graph")]
@@ -1345,6 +1554,87 @@ mod tests {
         assert!(json["scores"].as_array().is_some());
         assert!(json["topPagerank"].as_array().is_some());
         assert!(json["topBetweenness"].as_array().is_some());
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    // -------------------------------------------------------------------------
+    // Snapshot Validation Tests (EE-268)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn snapshot_validation_result_strings_are_stable() {
+        use super::SnapshotValidationResult;
+        assert_eq!(SnapshotValidationResult::Valid.as_str(), "valid");
+        assert_eq!(SnapshotValidationResult::Stale.as_str(), "stale");
+        assert_eq!(SnapshotValidationResult::HashMismatch.as_str(), "hash_mismatch");
+        assert_eq!(SnapshotValidationResult::SchemaIncompatible.as_str(), "schema_incompatible");
+        assert_eq!(SnapshotValidationResult::NotFound.as_str(), "not_found");
+        assert_eq!(SnapshotValidationResult::Invalidated.as_str(), "invalidated");
+    }
+
+    #[test]
+    fn snapshot_validation_result_usability() {
+        use super::SnapshotValidationResult;
+        assert!(SnapshotValidationResult::Valid.is_usable());
+        assert!(!SnapshotValidationResult::Stale.is_usable());
+        assert!(!SnapshotValidationResult::HashMismatch.is_usable());
+        assert!(!SnapshotValidationResult::NotFound.is_usable());
+    }
+
+    #[test]
+    fn snapshot_validation_result_requires_refresh() {
+        use super::SnapshotValidationResult;
+        assert!(!SnapshotValidationResult::Valid.requires_refresh());
+        assert!(SnapshotValidationResult::Stale.requires_refresh());
+        assert!(SnapshotValidationResult::HashMismatch.requires_refresh());
+        assert!(SnapshotValidationResult::NotFound.requires_refresh());
+        assert!(!SnapshotValidationResult::SchemaIncompatible.requires_refresh());
+        assert!(!SnapshotValidationResult::Invalidated.requires_refresh());
+    }
+
+    #[test]
+    fn snapshot_validation_schema_is_versioned() {
+        assert_eq!(
+            super::SNAPSHOT_VALIDATION_SCHEMA_V1,
+            "ee.graph.snapshot_validation.v1"
+        );
+    }
+
+    #[test]
+    fn snapshot_validation_not_found_report_has_repair_hint() {
+        use crate::db::GraphSnapshotType;
+        let options = super::SnapshotValidationOptions {
+            workspace_id: "wsp_test".to_string(),
+            graph_type: GraphSnapshotType::MemoryLinks,
+            current_generation: 5,
+            ..Default::default()
+        };
+
+        let report = super::SnapshotValidationReport::not_found(&options);
+
+        assert_eq!(report.result, super::SnapshotValidationResult::NotFound);
+        assert!(report.repair_hint.is_some());
+        assert!(report.repair_hint.unwrap().contains("centrality-refresh"));
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn validate_snapshot_returns_not_found_for_missing_workspace() -> TestResult {
+        use crate::db::GraphSnapshotType;
+        let connection = open_projection_db()?;
+
+        let options = super::SnapshotValidationOptions {
+            workspace_id: "wsp_nonexistent00000000000".to_string(),
+            graph_type: GraphSnapshotType::MemoryLinks,
+            current_generation: 1,
+            ..Default::default()
+        };
+
+        let report = super::validate_snapshot(&connection, &options)?;
+
+        assert_eq!(report.result, super::SnapshotValidationResult::NotFound);
+        assert!(!report.is_usable());
 
         connection.close().map_err(|error| error.to_string())
     }
