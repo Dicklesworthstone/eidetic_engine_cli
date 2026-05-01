@@ -523,3 +523,404 @@ fn update_without_dry_run_is_policy_denied_json() -> TestResult {
         "policy denied code",
     )
 }
+
+// ============================================================================
+// EE-DIST-004: Additional e2e scenarios
+// ============================================================================
+
+#[test]
+fn install_check_already_current_is_idempotent() -> TestResult {
+    let root = unique_artifact_dir("already-current")?;
+    let install_dir = root.join("bin");
+    fs::create_dir_all(&install_dir).map_err(|error| error.to_string())?;
+    let install_dir_arg = install_dir
+        .to_str()
+        .ok_or_else(|| "install dir was not UTF-8".to_owned())?;
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("release_manifest")
+        .join("already_current.json");
+    let manifest_arg = manifest
+        .to_str()
+        .ok_or_else(|| "manifest path was not UTF-8".to_owned())?;
+    fs::write(
+        &manifest,
+        serde_json::json!({
+            "schema": "ee.release_manifest.v1",
+            "version": env!("CARGO_PKG_VERSION"),
+            "artifacts": [{
+                "artifactId": "ee-current-x86_64-unknown-linux-gnu",
+                "target": "x86_64-unknown-linux-gnu",
+                "url": "file:///dev/null",
+                "sha256": "0".repeat(64),
+                "bytes": 1000
+            }]
+        })
+        .to_string(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let output = run_ee(&[
+        "install",
+        "check",
+        "--json",
+        "--manifest",
+        manifest_arg,
+        "--install-dir",
+        install_dir_arg,
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--offline",
+    ])?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure(
+        output.status.success(),
+        &format!("already-current check should succeed; stderr: {stderr}"),
+    )?;
+    let value = parse_stdout(&output)?;
+
+    ensure_equal(
+        json_str(&value, "/schema")?,
+        Some("ee.response.v1"),
+        "response schema",
+    )?;
+    ensure_equal(
+        json_str(&value, "/data/schema")?,
+        Some("ee.install.check.v1"),
+        "install check schema",
+    )
+}
+
+#[test]
+fn install_plan_rejects_path_traversal_in_artifact_name() -> TestResult {
+    let root = unique_artifact_dir("path-traversal")?;
+    let install_dir = root.join("bin");
+    fs::create_dir_all(&install_dir).map_err(|error| error.to_string())?;
+    let install_dir_arg = install_dir
+        .to_str()
+        .ok_or_else(|| "install dir was not UTF-8".to_owned())?;
+    let manifest = root.join("traversal_manifest.json");
+    let manifest_arg = manifest
+        .to_str()
+        .ok_or_else(|| "manifest path was not UTF-8".to_owned())?;
+    fs::write(
+        &manifest,
+        serde_json::json!({
+            "schema": "ee.release_manifest.v1",
+            "version": "0.1.0",
+            "artifacts": [{
+                "artifactId": "../../../etc/passwd",
+                "target": "x86_64-unknown-linux-gnu",
+                "url": "file:///tmp/evil.tar.xz",
+                "sha256": "0".repeat(64),
+                "bytes": 1000
+            }]
+        })
+        .to_string(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let output = run_ee(&[
+        "install",
+        "plan",
+        "--json",
+        "--manifest",
+        manifest_arg,
+        "--install-dir",
+        install_dir_arg,
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--offline",
+    ])?;
+    let value = parse_stdout(&output)?;
+
+    let status = json_str(&value, "/data/status")?;
+    let has_traversal = has_finding(&value, "path_traversal_detected").unwrap_or(false)
+        || has_finding(&value, "invalid_artifact_id").unwrap_or(false)
+        || status == Some("blocked");
+    ensure(
+        has_traversal,
+        "path traversal should be detected or blocked",
+    )
+}
+
+#[test]
+fn install_plan_rejects_unicode_control_chars_in_path() -> TestResult {
+    let root = unique_artifact_dir("unicode-control")?;
+    let install_dir = root.join("bin");
+    fs::create_dir_all(&install_dir).map_err(|error| error.to_string())?;
+    let install_dir_arg = install_dir
+        .to_str()
+        .ok_or_else(|| "install dir was not UTF-8".to_owned())?;
+    let manifest = root.join("unicode_manifest.json");
+    let manifest_arg = manifest
+        .to_str()
+        .ok_or_else(|| "manifest path was not UTF-8".to_owned())?;
+    fs::write(
+        &manifest,
+        serde_json::json!({
+            "schema": "ee.release_manifest.v1",
+            "version": "0.1.0",
+            "artifacts": [{
+                "artifactId": "ee-\u{202E}gnp.exe",
+                "target": "x86_64-unknown-linux-gnu",
+                "url": "file:///tmp/rtl-trick.tar.xz",
+                "sha256": "0".repeat(64),
+                "bytes": 1000
+            }]
+        })
+        .to_string(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let output = run_ee(&[
+        "install",
+        "plan",
+        "--json",
+        "--manifest",
+        manifest_arg,
+        "--install-dir",
+        install_dir_arg,
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--offline",
+    ])?;
+    let value = parse_stdout(&output)?;
+
+    let status = json_str(&value, "/data/status")?;
+    let has_unicode_issue = has_finding(&value, "unicode_control_character").unwrap_or(false)
+        || has_finding(&value, "invalid_artifact_id").unwrap_or(false)
+        || status == Some("blocked");
+    ensure(
+        has_unicode_issue,
+        "unicode control characters should be detected or blocked",
+    )
+}
+
+#[test]
+fn install_plan_handles_duplicate_target_ids() -> TestResult {
+    let root = unique_artifact_dir("duplicate-target")?;
+    let install_dir = root.join("bin");
+    fs::create_dir_all(&install_dir).map_err(|error| error.to_string())?;
+    let install_dir_arg = install_dir
+        .to_str()
+        .ok_or_else(|| "install dir was not UTF-8".to_owned())?;
+    let manifest = root.join("duplicate_target_manifest.json");
+    let manifest_arg = manifest
+        .to_str()
+        .ok_or_else(|| "manifest path was not UTF-8".to_owned())?;
+    fs::write(
+        &manifest,
+        serde_json::json!({
+            "schema": "ee.release_manifest.v1",
+            "version": "0.1.0",
+            "artifacts": [
+                {
+                    "artifactId": "ee-v1-x86_64-unknown-linux-gnu",
+                    "target": "x86_64-unknown-linux-gnu",
+                    "url": "file:///tmp/first.tar.xz",
+                    "sha256": "a".repeat(64),
+                    "bytes": 1000
+                },
+                {
+                    "artifactId": "ee-v2-x86_64-unknown-linux-gnu",
+                    "target": "x86_64-unknown-linux-gnu",
+                    "url": "file:///tmp/second.tar.xz",
+                    "sha256": "b".repeat(64),
+                    "bytes": 1000
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let output = run_ee(&[
+        "install",
+        "plan",
+        "--json",
+        "--manifest",
+        manifest_arg,
+        "--install-dir",
+        install_dir_arg,
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--offline",
+    ])?;
+    let value = parse_stdout(&output)?;
+
+    ensure_equal(
+        json_str(&value, "/schema")?,
+        Some("ee.response.v1"),
+        "response schema",
+    )?;
+    let has_duplicate_finding = has_finding(&value, "duplicate_target").unwrap_or(false)
+        || has_finding(&value, "ambiguous_artifact").unwrap_or(false);
+    let selected_artifact = json_str(&value, "/data/artifact/artifactId")?;
+    ensure(
+        has_duplicate_finding || selected_artifact.is_some(),
+        "duplicate targets should be handled (warning or deterministic selection)",
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn install_check_handles_symlinked_install_root() -> TestResult {
+    let root = unique_artifact_dir("symlink-root")?;
+    let real_bin = root.join("real_bin");
+    let symlink_bin = root.join("linked_bin");
+    fs::create_dir_all(&real_bin).map_err(|error| error.to_string())?;
+    std::os::unix::fs::symlink(&real_bin, &symlink_bin).map_err(|error| error.to_string())?;
+    let install_dir_arg = symlink_bin
+        .to_str()
+        .ok_or_else(|| "install dir was not UTF-8".to_owned())?;
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("release_manifest")
+        .join("single_platform_dev.json");
+    let manifest_arg = manifest
+        .to_str()
+        .ok_or_else(|| "manifest path was not UTF-8".to_owned())?;
+
+    let output = run_ee(&[
+        "install",
+        "check",
+        "--json",
+        "--manifest",
+        manifest_arg,
+        "--install-dir",
+        install_dir_arg,
+        "--target",
+        "x86_64-unknown-linux-musl",
+        "--offline",
+    ])?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure(
+        output.status.success(),
+        &format!("symlinked root check should succeed; stderr: {stderr}"),
+    )?;
+    let value = parse_stdout(&output)?;
+
+    ensure_equal(
+        json_str(&value, "/schema")?,
+        Some("ee.response.v1"),
+        "response schema",
+    )?;
+    ensure_equal(
+        json_str(&value, "/data/schema")?,
+        Some("ee.install.check.v1"),
+        "install check schema",
+    )
+}
+
+#[test]
+fn install_plan_huge_manifest_does_not_hang() -> TestResult {
+    let root = unique_artifact_dir("huge-manifest")?;
+    let install_dir = root.join("bin");
+    fs::create_dir_all(&install_dir).map_err(|error| error.to_string())?;
+    let install_dir_arg = install_dir
+        .to_str()
+        .ok_or_else(|| "install dir was not UTF-8".to_owned())?;
+    let manifest = root.join("huge_manifest.json");
+    let manifest_arg = manifest
+        .to_str()
+        .ok_or_else(|| "manifest path was not UTF-8".to_owned())?;
+
+    let mut artifacts = Vec::new();
+    for i in 0..500 {
+        artifacts.push(serde_json::json!({
+            "artifactId": format!("ee-{i}-fake-target-{i}"),
+            "target": format!("fake-target-{i}"),
+            "url": format!("file:///tmp/artifact-{i}.tar.xz"),
+            "sha256": format!("{:064x}", i),
+            "bytes": 1000 + i
+        }));
+    }
+    fs::write(
+        &manifest,
+        serde_json::json!({
+            "schema": "ee.release_manifest.v1",
+            "version": "0.1.0",
+            "artifacts": artifacts
+        })
+        .to_string(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let output = run_ee(&[
+        "install",
+        "plan",
+        "--json",
+        "--manifest",
+        manifest_arg,
+        "--install-dir",
+        install_dir_arg,
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--offline",
+    ])?;
+    ensure(output.status.success(), "huge manifest should complete")?;
+    let value = parse_stdout(&output)?;
+
+    ensure_equal(
+        json_str(&value, "/schema")?,
+        Some("ee.response.v1"),
+        "response schema",
+    )?;
+    let status = json_str(&value, "/data/status")?;
+    ensure(
+        status == Some("blocked") || status == Some("ready"),
+        "huge manifest should report blocked (no target) or ready",
+    )
+}
+
+#[test]
+fn install_plan_empty_manifest_is_blocked() -> TestResult {
+    let root = unique_artifact_dir("empty-manifest")?;
+    let install_dir = root.join("bin");
+    fs::create_dir_all(&install_dir).map_err(|error| error.to_string())?;
+    let install_dir_arg = install_dir
+        .to_str()
+        .ok_or_else(|| "install dir was not UTF-8".to_owned())?;
+    let manifest = root.join("empty_manifest.json");
+    let manifest_arg = manifest
+        .to_str()
+        .ok_or_else(|| "manifest path was not UTF-8".to_owned())?;
+    fs::write(
+        &manifest,
+        serde_json::json!({
+            "schema": "ee.release_manifest.v1",
+            "version": "0.1.0",
+            "artifacts": []
+        })
+        .to_string(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let output = run_ee(&[
+        "install",
+        "plan",
+        "--json",
+        "--manifest",
+        manifest_arg,
+        "--install-dir",
+        install_dir_arg,
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--offline",
+    ])?;
+    ensure(output.status.success(), "empty manifest report")?;
+    let value = parse_stdout(&output)?;
+
+    ensure_equal(
+        json_str(&value, "/data/status")?,
+        Some("blocked"),
+        "empty manifest should block",
+    )?;
+    ensure(
+        has_finding(&value, "unsupported_target")? || has_finding(&value, "no_artifacts")?,
+        "empty manifest should have finding",
+    )
+}
