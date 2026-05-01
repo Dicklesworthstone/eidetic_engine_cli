@@ -1091,78 +1091,298 @@ impl CausalObjectSchema {
 const CAUSAL_EXPOSURE_FIELDS: &[CausalFieldSchema] = &[
     CausalFieldSchema::new("schema", "string", true, "Schema identifier."),
     CausalFieldSchema::new("exposureId", "string", true, "Stable exposure identifier."),
-    CausalFieldSchema::new("artifactId", "string", true, "Exposed memory or artifact identifier."),
+    CausalFieldSchema::new(
+        "artifactId",
+        "string",
+        true,
+        "Exposed memory or artifact identifier.",
+    ),
     CausalFieldSchema::new("artifactKind", "string", true, "Exposed artifact category."),
-    CausalFieldSchema::new("decisionId", "string", true, "Decision that received the exposure."),
+    CausalFieldSchema::new(
+        "decisionId",
+        "string",
+        true,
+        "Decision that received the exposure.",
+    ),
     CausalFieldSchema::new("channel", "string", true, "Exposure channel."),
     CausalFieldSchema::new("exposedAt", "string", true, "RFC 3339 exposure timestamp."),
-    CausalFieldSchema::new("rank", "integer|null", false, "Rank or slot when exposure was ordered."),
-    CausalFieldSchema::new("policyId", "string|null", false, "Policy active when exposed."),
-    CausalFieldSchema::new("contextPackId", "string|null", false, "Context pack containing the exposure."),
-    CausalFieldSchema::new("traceId", "string|null", false, "Trace linking related decisions."),
-    CausalFieldSchema::new("evidenceIds", "array<string>", true, "Evidence supporting exposure capture."),
+    CausalFieldSchema::new(
+        "rank",
+        "integer|null",
+        false,
+        "Rank or slot when exposure was ordered.",
+    ),
+    CausalFieldSchema::new(
+        "policyId",
+        "string|null",
+        false,
+        "Policy active when exposed.",
+    ),
+    CausalFieldSchema::new(
+        "contextPackId",
+        "string|null",
+        false,
+        "Context pack containing the exposure.",
+    ),
+    CausalFieldSchema::new(
+        "traceId",
+        "string|null",
+        false,
+        "Trace linking related decisions.",
+    ),
+    CausalFieldSchema::new(
+        "evidenceIds",
+        "array<string>",
+        true,
+        "Evidence supporting exposure capture.",
+    ),
 ];
 
 const DECISION_TRACE_FIELDS: &[CausalFieldSchema] = &[
     CausalFieldSchema::new("schema", "string", true, "Schema identifier."),
     CausalFieldSchema::new("decisionId", "string", true, "Stable decision identifier."),
-    CausalFieldSchema::new("traceId", "string", true, "Trace linking exposures and outcomes."),
+    CausalFieldSchema::new(
+        "traceId",
+        "string",
+        true,
+        "Trace linking exposures and outcomes.",
+    ),
     CausalFieldSchema::new("plane", "string", true, "Decision plane."),
     CausalFieldSchema::new("decidedAt", "string", true, "RFC 3339 decision timestamp."),
-    CausalFieldSchema::new("outcome", "string", true, "How the decision treated exposed evidence."),
-    CausalFieldSchema::new("agent", "string", true, "Agent, harness, or tool that made the decision."),
-    CausalFieldSchema::new("taskId", "string|null", false, "Task or run associated with the decision."),
-    CausalFieldSchema::new("policyId", "string|null", false, "Policy that governed the decision."),
-    CausalFieldSchema::new("exposedArtifactIds", "array<string>", true, "Artifacts available to the decision."),
-    CausalFieldSchema::new("selectedArtifactIds", "array<string>", true, "Artifacts actually used."),
-    CausalFieldSchema::new("rejectedArtifactIds", "array<string>", true, "Artifacts rejected or ignored."),
-    CausalFieldSchema::new("rationale", "string", true, "Decision rationale or explanation."),
-    CausalFieldSchema::new("evidenceIds", "array<string>", true, "Evidence supporting the trace."),
+    CausalFieldSchema::new(
+        "outcome",
+        "string",
+        true,
+        "How the decision treated exposed evidence.",
+    ),
+    CausalFieldSchema::new(
+        "agent",
+        "string",
+        true,
+        "Agent, harness, or tool that made the decision.",
+    ),
+    CausalFieldSchema::new(
+        "taskId",
+        "string|null",
+        false,
+        "Task or run associated with the decision.",
+    ),
+    CausalFieldSchema::new(
+        "policyId",
+        "string|null",
+        false,
+        "Policy that governed the decision.",
+    ),
+    CausalFieldSchema::new(
+        "exposedArtifactIds",
+        "array<string>",
+        true,
+        "Artifacts available to the decision.",
+    ),
+    CausalFieldSchema::new(
+        "selectedArtifactIds",
+        "array<string>",
+        true,
+        "Artifacts actually used.",
+    ),
+    CausalFieldSchema::new(
+        "rejectedArtifactIds",
+        "array<string>",
+        true,
+        "Artifacts rejected or ignored.",
+    ),
+    CausalFieldSchema::new(
+        "rationale",
+        "string",
+        true,
+        "Decision rationale or explanation.",
+    ),
+    CausalFieldSchema::new(
+        "evidenceIds",
+        "array<string>",
+        true,
+        "Evidence supporting the trace.",
+    ),
 ];
 
 const UPLIFT_ESTIMATE_FIELDS: &[CausalFieldSchema] = &[
     CausalFieldSchema::new("schema", "string", true, "Schema identifier."),
-    CausalFieldSchema::new("estimateId", "string", true, "Stable uplift estimate identifier."),
-    CausalFieldSchema::new("artifactId", "string", true, "Artifact whose influence is estimated."),
-    CausalFieldSchema::new("decisionId", "string", true, "Decision or decision class being estimated."),
-    CausalFieldSchema::new("baselineSuccessRate", "number", true, "Baseline outcome rate from 0.0 to 1.0."),
-    CausalFieldSchema::new("observedSuccessRate", "number", true, "Observed outcome rate from 0.0 to 1.0."),
-    CausalFieldSchema::new("uplift", "number", true, "Observed minus baseline rate from -1.0 to 1.0."),
-    CausalFieldSchema::new("direction", "string", true, "Direction of the uplift estimate."),
+    CausalFieldSchema::new(
+        "estimateId",
+        "string",
+        true,
+        "Stable uplift estimate identifier.",
+    ),
+    CausalFieldSchema::new(
+        "artifactId",
+        "string",
+        true,
+        "Artifact whose influence is estimated.",
+    ),
+    CausalFieldSchema::new(
+        "decisionId",
+        "string",
+        true,
+        "Decision or decision class being estimated.",
+    ),
+    CausalFieldSchema::new(
+        "baselineSuccessRate",
+        "number",
+        true,
+        "Baseline outcome rate from 0.0 to 1.0.",
+    ),
+    CausalFieldSchema::new(
+        "observedSuccessRate",
+        "number",
+        true,
+        "Observed outcome rate from 0.0 to 1.0.",
+    ),
+    CausalFieldSchema::new(
+        "uplift",
+        "number",
+        true,
+        "Observed minus baseline rate from -1.0 to 1.0.",
+    ),
+    CausalFieldSchema::new(
+        "direction",
+        "string",
+        true,
+        "Direction of the uplift estimate.",
+    ),
     CausalFieldSchema::new("confidence", "number", true, "Confidence from 0.0 to 1.0."),
-    CausalFieldSchema::new("sampleSize", "integer", true, "Number of observations used."),
-    CausalFieldSchema::new("evidenceStrength", "string", true, "Strength of causal evidence."),
+    CausalFieldSchema::new(
+        "sampleSize",
+        "integer",
+        true,
+        "Number of observations used.",
+    ),
+    CausalFieldSchema::new(
+        "evidenceStrength",
+        "string",
+        true,
+        "Strength of causal evidence.",
+    ),
     CausalFieldSchema::new("method", "string", true, "Deterministic estimation method."),
-    CausalFieldSchema::new("exposureIds", "array<string>", true, "Exposure records used by the estimate."),
-    CausalFieldSchema::new("confounderIds", "array<string>", true, "Known confounders considered."),
-    CausalFieldSchema::new("estimatedAt", "string", true, "RFC 3339 estimate timestamp."),
+    CausalFieldSchema::new(
+        "exposureIds",
+        "array<string>",
+        true,
+        "Exposure records used by the estimate.",
+    ),
+    CausalFieldSchema::new(
+        "confounderIds",
+        "array<string>",
+        true,
+        "Known confounders considered.",
+    ),
+    CausalFieldSchema::new(
+        "estimatedAt",
+        "string",
+        true,
+        "RFC 3339 estimate timestamp.",
+    ),
 ];
 
 const CONFOUNDER_FIELDS: &[CausalFieldSchema] = &[
     CausalFieldSchema::new("schema", "string", true, "Schema identifier."),
-    CausalFieldSchema::new("confounderId", "string", true, "Stable confounder identifier."),
+    CausalFieldSchema::new(
+        "confounderId",
+        "string",
+        true,
+        "Stable confounder identifier.",
+    ),
     CausalFieldSchema::new("kind", "string", true, "Confounder class."),
-    CausalFieldSchema::new("description", "string", true, "Why this can explain apparent uplift."),
+    CausalFieldSchema::new(
+        "description",
+        "string",
+        true,
+        "Why this can explain apparent uplift.",
+    ),
     CausalFieldSchema::new("severity", "number", true, "Severity from 0.0 to 1.0."),
-    CausalFieldSchema::new("mitigation", "string", true, "How to control or account for the confounder."),
-    CausalFieldSchema::new("affectedArtifactIds", "array<string>", true, "Artifacts affected by this confounder."),
-    CausalFieldSchema::new("affectedDecisionIds", "array<string>", true, "Decisions affected by this confounder."),
-    CausalFieldSchema::new("evidenceIds", "array<string>", true, "Evidence supporting the confounder."),
+    CausalFieldSchema::new(
+        "mitigation",
+        "string",
+        true,
+        "How to control or account for the confounder.",
+    ),
+    CausalFieldSchema::new(
+        "affectedArtifactIds",
+        "array<string>",
+        true,
+        "Artifacts affected by this confounder.",
+    ),
+    CausalFieldSchema::new(
+        "affectedDecisionIds",
+        "array<string>",
+        true,
+        "Decisions affected by this confounder.",
+    ),
+    CausalFieldSchema::new(
+        "evidenceIds",
+        "array<string>",
+        true,
+        "Evidence supporting the confounder.",
+    ),
 ];
 
 const PROMOTION_PLAN_FIELDS: &[CausalFieldSchema] = &[
     CausalFieldSchema::new("schema", "string", true, "Schema identifier."),
-    CausalFieldSchema::new("planId", "string", true, "Stable promotion plan identifier."),
-    CausalFieldSchema::new("artifactId", "string", true, "Artifact targeted by the plan."),
+    CausalFieldSchema::new(
+        "planId",
+        "string",
+        true,
+        "Stable promotion plan identifier.",
+    ),
+    CausalFieldSchema::new(
+        "artifactId",
+        "string",
+        true,
+        "Artifact targeted by the plan.",
+    ),
     CausalFieldSchema::new("action", "string", true, "Planned memory posture action."),
     CausalFieldSchema::new("status", "string", true, "Promotion plan lifecycle status."),
-    CausalFieldSchema::new("evidenceStrength", "string", true, "Evidence strength required by the plan."),
-    CausalFieldSchema::new("minimumUplift", "number", true, "Minimum uplift threshold from -1.0 to 1.0."),
-    CausalFieldSchema::new("estimatedUplift", "number", true, "Current estimated uplift from -1.0 to 1.0."),
-    CausalFieldSchema::new("requiredEvidenceIds", "array<string>", true, "Evidence required before applying the plan."),
-    CausalFieldSchema::new("blockingConfounderIds", "array<string>", true, "Confounders blocking promotion."),
-    CausalFieldSchema::new("dryRunFirst", "boolean", true, "Whether dry-run verification is required before mutation."),
-    CausalFieldSchema::new("auditIds", "array<string>", true, "Audit records attached to the plan."),
+    CausalFieldSchema::new(
+        "evidenceStrength",
+        "string",
+        true,
+        "Evidence strength required by the plan.",
+    ),
+    CausalFieldSchema::new(
+        "minimumUplift",
+        "number",
+        true,
+        "Minimum uplift threshold from -1.0 to 1.0.",
+    ),
+    CausalFieldSchema::new(
+        "estimatedUplift",
+        "number",
+        true,
+        "Current estimated uplift from -1.0 to 1.0.",
+    ),
+    CausalFieldSchema::new(
+        "requiredEvidenceIds",
+        "array<string>",
+        true,
+        "Evidence required before applying the plan.",
+    ),
+    CausalFieldSchema::new(
+        "blockingConfounderIds",
+        "array<string>",
+        true,
+        "Confounders blocking promotion.",
+    ),
+    CausalFieldSchema::new(
+        "dryRunFirst",
+        "boolean",
+        true,
+        "Whether dry-run verification is required before mutation.",
+    ),
+    CausalFieldSchema::new(
+        "auditIds",
+        "array<string>",
+        true,
+        "Audit records attached to the plan.",
+    ),
     CausalFieldSchema::new("createdAt", "string", true, "RFC 3339 creation timestamp."),
 ];
 
@@ -1317,7 +1537,11 @@ mod tests {
 
     #[test]
     fn causal_schema_constants_are_stable() -> TestResult {
-        ensure(CAUSAL_EXPOSURE_SCHEMA_V1, "ee.causal.exposure.v1", "exposure")?;
+        ensure(
+            CAUSAL_EXPOSURE_SCHEMA_V1,
+            "ee.causal.exposure.v1",
+            "exposure",
+        )?;
         ensure(
             DECISION_TRACE_SCHEMA_V1,
             "ee.causal.decision_trace.v1",
@@ -1328,7 +1552,11 @@ mod tests {
             "ee.causal.uplift_estimate.v1",
             "uplift",
         )?;
-        ensure(CONFOUNDER_SCHEMA_V1, "ee.causal.confounder.v1", "confounder")?;
+        ensure(
+            CONFOUNDER_SCHEMA_V1,
+            "ee.causal.confounder.v1",
+            "confounder",
+        )?;
         ensure(
             PROMOTION_PLAN_SCHEMA_V1,
             "ee.causal.promotion_plan.v1",
@@ -1340,10 +1568,18 @@ mod tests {
     #[test]
     fn stable_wire_enums_round_trip() -> TestResult {
         for channel in CausalExposureChannel::all() {
-            ensure(CausalExposureChannel::from_str(channel.as_str()), Ok(channel), "channel")?;
+            ensure(
+                CausalExposureChannel::from_str(channel.as_str()),
+                Ok(channel),
+                "channel",
+            )?;
         }
         for outcome in DecisionTraceOutcome::all() {
-            ensure(DecisionTraceOutcome::from_str(outcome.as_str()), Ok(outcome), "outcome")?;
+            ensure(
+                DecisionTraceOutcome::from_str(outcome.as_str()),
+                Ok(outcome),
+                "outcome",
+            )?;
         }
         for strength in CausalEvidenceStrength::all() {
             ensure(
@@ -1360,10 +1596,18 @@ mod tests {
             )?;
         }
         for kind in ConfounderKind::all() {
-            ensure(ConfounderKind::from_str(kind.as_str()), Ok(kind), "confounder kind")?;
+            ensure(
+                ConfounderKind::from_str(kind.as_str()),
+                Ok(kind),
+                "confounder kind",
+            )?;
         }
         for action in PromotionAction::all() {
-            ensure(PromotionAction::from_str(action.as_str()), Ok(action), "action")?;
+            ensure(
+                PromotionAction::from_str(action.as_str()),
+                Ok(action),
+                "action",
+            )?;
         }
         for status in PromotionPlanStatus::all() {
             ensure(
@@ -1394,7 +1638,11 @@ mod tests {
         .with_context_pack("pack-001")
         .with_trace("trace-001")
         .with_evidence("ev-001");
-        ensure(exposure.schema, CAUSAL_EXPOSURE_SCHEMA_V1, "exposure schema")?;
+        ensure(
+            exposure.schema,
+            CAUSAL_EXPOSURE_SCHEMA_V1,
+            "exposure schema",
+        )?;
         ensure(exposure.rank, Some(2), "rank")?;
 
         let trace = CausalDecisionTrace::new(
@@ -1428,7 +1676,11 @@ mod tests {
         .with_evidence_strength(CausalEvidenceStrength::ReplaySupported)
         .with_exposure("cxp-001")
         .with_confounder("conf-001");
-        ensure(estimate.schema, UPLIFT_ESTIMATE_SCHEMA_V1, "estimate schema")?;
+        ensure(
+            estimate.schema,
+            UPLIFT_ESTIMATE_SCHEMA_V1,
+            "estimate schema",
+        )?;
         ensure(estimate.confidence, 1.0, "confidence clamp")?;
         ensure(estimate.uplift, 0.44999999999999996, "uplift")?;
         ensure(estimate.direction, UpliftDirection::Positive, "direction")?;
@@ -1505,7 +1757,11 @@ mod tests {
     fn causal_schema_catalog_order_is_stable() -> TestResult {
         let schemas = causal_schemas();
         ensure(schemas.len(), 5, "schema count")?;
-        ensure(schemas[0].schema_name, CAUSAL_EXPOSURE_SCHEMA_V1, "exposure")?;
+        ensure(
+            schemas[0].schema_name,
+            CAUSAL_EXPOSURE_SCHEMA_V1,
+            "exposure",
+        )?;
         ensure(
             schemas[1].schema_name,
             DECISION_TRACE_SCHEMA_V1,
