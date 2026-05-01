@@ -4,6 +4,7 @@
 //! - How a memory was stored (provenance, trust class)
 //! - How it would be retrieved (scoring factors)
 //! - How it would be selected for packs (relevance, utility, importance)
+//! - Related memory links (supports, contradicts, derived_from, etc.)
 //!
 //! This makes the system explainable and auditable.
 
@@ -103,6 +104,30 @@ pub struct ContradictionMetadata {
     pub applied: bool,
 }
 
+/// Summary of a memory link for why output (EE-LINK-USAGE-001).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemoryLinkSummary {
+    /// Link ID.
+    pub link_id: String,
+    /// The related memory ID (the "other" side of the link).
+    pub linked_memory_id: String,
+    /// Relation type (supports, contradicts, derived_from, etc.).
+    pub relation: String,
+    /// Direction relative to the queried memory: "outgoing" (this memory -> linked),
+    /// "incoming" (linked -> this memory), or "undirected".
+    pub direction: String,
+    /// Confidence score for this link (0.0-1.0).
+    pub confidence: f32,
+    /// Weight of the link edge.
+    pub weight: f32,
+    /// Number of evidence instances supporting this link.
+    pub evidence_count: u32,
+    /// Source that created the link (agent, auto, import, human).
+    pub source: String,
+    /// When the link was created.
+    pub created_at: String,
+}
+
 /// Non-fatal limitations in the why explanation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WhyDegradation {
@@ -133,6 +158,8 @@ pub struct WhyReport {
     pub selection: Option<SelectionExplanation>,
     /// Contradiction feedback recorded against this memory (EE-263).
     pub contradictions: Vec<ContradictionMetadata>,
+    /// Memory links: supports, contradicts, derived_from, etc. (EE-LINK-USAGE-001).
+    pub links: Vec<MemoryLinkSummary>,
     /// Non-fatal degradation notices.
     pub degraded: Vec<WhyDegradation>,
     /// Error message if query failed.
@@ -156,6 +183,7 @@ impl WhyReport {
             retrieval: Some(retrieval),
             selection: Some(selection),
             contradictions: Vec::new(),
+            links: Vec::new(),
             degraded: Vec::new(),
             error: None,
         }
@@ -172,6 +200,7 @@ impl WhyReport {
             retrieval: None,
             selection: None,
             contradictions: Vec::new(),
+            links: Vec::new(),
             degraded: Vec::new(),
             error: None,
         }
@@ -188,6 +217,7 @@ impl WhyReport {
             retrieval: None,
             selection: None,
             contradictions: Vec::new(),
+            links: Vec::new(),
             degraded: Vec::new(),
             error: Some(message),
         }
@@ -204,6 +234,13 @@ impl WhyReport {
     #[must_use]
     pub fn with_contradictions(mut self, contradictions: Vec<ContradictionMetadata>) -> Self {
         self.contradictions = contradictions;
+        self
+    }
+
+    /// Add memory link summaries to the report (EE-LINK-USAGE-001).
+    #[must_use]
+    pub fn with_links(mut self, links: Vec<MemoryLinkSummary>) -> Self {
+        self.links = links;
         self
     }
 }
@@ -263,6 +300,9 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     // Fetch contradiction feedback events (EE-263)
     let contradictions = fetch_contradictions(&conn, options.memory_id);
 
+    // Fetch memory links (EE-LINK-USAGE-001)
+    let links = fetch_links(&conn, options.memory_id);
+
     let storage = StorageExplanation {
         origin: determine_origin(&memory.trust_class),
         trust_class: memory.trust_class.clone(),
@@ -298,6 +338,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
                     above_threshold,
                     latest_pack_selection: None,
                     contradictions,
+                    links,
                 },
             );
             return report.with_degradation(WhyDegradation {
@@ -319,6 +360,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
             above_threshold,
             latest_pack_selection,
             contradictions,
+            links,
         },
     )
 }
@@ -329,6 +371,7 @@ struct ReportSelectionInputs {
     above_threshold: bool,
     latest_pack_selection: Option<PackSelectionExplanation>,
     contradictions: Vec<ContradictionMetadata>,
+    links: Vec<MemoryLinkSummary>,
 }
 
 fn build_report(
@@ -353,6 +396,7 @@ fn build_report(
 
     WhyReport::found(options.memory_id.to_string(), storage, retrieval, selection)
         .with_contradictions(selection_inputs.contradictions)
+        .with_links(selection_inputs.links)
 }
 
 fn determine_origin(trust_class: &str) -> String {
@@ -445,6 +489,45 @@ fn fetch_contradictions(conn: &DbConnection, memory_id: &str) -> Vec<Contradicti
             reason: e.reason,
             created_at: e.created_at,
             applied: e.applied_at.is_some(),
+        })
+        .collect()
+}
+
+/// Fetch memory links for a memory (EE-LINK-USAGE-001).
+fn fetch_links(conn: &DbConnection, memory_id: &str) -> Vec<MemoryLinkSummary> {
+    let stored_links = match conn.list_memory_links_for_memory(memory_id, None) {
+        Ok(links) => links,
+        Err(_) => return Vec::new(),
+    };
+
+    stored_links
+        .into_iter()
+        .map(|link| {
+            let direction = if !link.directed {
+                "undirected".to_string()
+            } else if link.src_memory_id == memory_id {
+                "outgoing".to_string()
+            } else {
+                "incoming".to_string()
+            };
+
+            let linked_memory_id = if link.src_memory_id == memory_id {
+                link.dst_memory_id.clone()
+            } else {
+                link.src_memory_id.clone()
+            };
+
+            MemoryLinkSummary {
+                link_id: link.id,
+                linked_memory_id,
+                relation: link.relation,
+                direction,
+                confidence: link.confidence,
+                weight: link.weight,
+                evidence_count: link.evidence_count,
+                source: link.source,
+                created_at: link.created_at,
+            }
         })
         .collect()
 }
@@ -556,6 +639,7 @@ mod tests {
                 above_threshold: true,
                 latest_pack_selection: Some(selection),
                 contradictions: Vec::new(),
+                links: Vec::new(),
             },
         );
 
@@ -568,5 +652,146 @@ mod tests {
             Some(1),
             "pack rank",
         )
+    }
+
+    #[test]
+    fn memory_link_summary_direction_outgoing() -> TestResult {
+        let link = MemoryLinkSummary {
+            link_id: "link_test".to_string(),
+            linked_memory_id: "mem_other".to_string(),
+            relation: "supports".to_string(),
+            direction: "outgoing".to_string(),
+            confidence: 0.9,
+            weight: 1.0,
+            evidence_count: 3,
+            source: "agent".to_string(),
+            created_at: "2026-04-30T12:00:00Z".to_string(),
+        };
+        ensure(link.direction, "outgoing".to_string(), "direction")?;
+        ensure(link.relation, "supports".to_string(), "relation")
+    }
+
+    #[test]
+    fn memory_link_summary_direction_incoming() -> TestResult {
+        let link = MemoryLinkSummary {
+            link_id: "link_test".to_string(),
+            linked_memory_id: "mem_source".to_string(),
+            relation: "contradicts".to_string(),
+            direction: "incoming".to_string(),
+            confidence: 0.85,
+            weight: 0.8,
+            evidence_count: 1,
+            source: "human".to_string(),
+            created_at: "2026-04-30T12:00:00Z".to_string(),
+        };
+        ensure(link.direction, "incoming".to_string(), "direction")?;
+        ensure(link.relation, "contradicts".to_string(), "relation")
+    }
+
+    #[test]
+    fn memory_link_summary_undirected() -> TestResult {
+        let link = MemoryLinkSummary {
+            link_id: "link_test".to_string(),
+            linked_memory_id: "mem_related".to_string(),
+            relation: "related".to_string(),
+            direction: "undirected".to_string(),
+            confidence: 0.7,
+            weight: 0.5,
+            evidence_count: 2,
+            source: "auto".to_string(),
+            created_at: "2026-04-30T12:00:00Z".to_string(),
+        };
+        ensure(link.direction, "undirected".to_string(), "direction")?;
+        ensure(link.relation, "related".to_string(), "relation")
+    }
+
+    #[test]
+    fn why_report_with_links() -> TestResult {
+        let links = vec![
+            MemoryLinkSummary {
+                link_id: "link_01".to_string(),
+                linked_memory_id: "mem_support".to_string(),
+                relation: "supports".to_string(),
+                direction: "outgoing".to_string(),
+                confidence: 0.9,
+                weight: 1.0,
+                evidence_count: 2,
+                source: "agent".to_string(),
+                created_at: "2026-04-30T12:00:00Z".to_string(),
+            },
+            MemoryLinkSummary {
+                link_id: "link_02".to_string(),
+                linked_memory_id: "mem_contradict".to_string(),
+                relation: "contradicts".to_string(),
+                direction: "incoming".to_string(),
+                confidence: 0.8,
+                weight: 0.5,
+                evidence_count: 1,
+                source: "human".to_string(),
+                created_at: "2026-04-30T12:01:00Z".to_string(),
+            },
+        ];
+
+        let report = WhyReport::not_found("mem_test".to_string()).with_links(links);
+
+        ensure(report.links.len(), 2, "link count")?;
+        ensure(report.links[0].relation.clone(), "supports".to_string(), "first link relation")?;
+        ensure(report.links[1].relation.clone(), "contradicts".to_string(), "second link relation")
+    }
+
+    #[test]
+    fn why_report_links_default_empty() -> TestResult {
+        let report = WhyReport::not_found("mem_test".to_string());
+        ensure(report.links.is_empty(), true, "links should be empty by default")
+    }
+
+    #[test]
+    fn all_link_relation_types_supported() -> TestResult {
+        let relations = [
+            "supports",
+            "contradicts",
+            "derived_from",
+            "supersedes",
+            "related",
+            "co_tag",
+            "co_mention",
+        ];
+
+        for relation in &relations {
+            let link = MemoryLinkSummary {
+                link_id: format!("link_{relation}"),
+                linked_memory_id: "mem_other".to_string(),
+                relation: relation.to_string(),
+                direction: "outgoing".to_string(),
+                confidence: 0.9,
+                weight: 1.0,
+                evidence_count: 1,
+                source: "agent".to_string(),
+                created_at: "2026-04-30T12:00:00Z".to_string(),
+            };
+            ensure(link.relation, relation.to_string(), "relation type")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn all_link_sources_supported() -> TestResult {
+        let sources = ["agent", "auto", "import", "maintenance", "human"];
+
+        for source in &sources {
+            let link = MemoryLinkSummary {
+                link_id: format!("link_{source}"),
+                linked_memory_id: "mem_other".to_string(),
+                relation: "supports".to_string(),
+                direction: "outgoing".to_string(),
+                confidence: 0.9,
+                weight: 1.0,
+                evidence_count: 1,
+                source: source.to_string(),
+                created_at: "2026-04-30T12:00:00Z".to_string(),
+            };
+            ensure(link.source, source.to_string(), "source type")?;
+        }
+        Ok(())
     }
 }

@@ -5602,6 +5602,39 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
         })
         .collect();
 
+    let contradictions: Vec<serde_json::Value> = report
+        .contradictions
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "eventId": c.event_id,
+                "weight": score_json_value(c.weight),
+                "sourceType": c.source_type,
+                "reason": c.reason,
+                "createdAt": c.created_at,
+                "applied": c.applied,
+            })
+        })
+        .collect();
+
+    let links: Vec<serde_json::Value> = report
+        .links
+        .iter()
+        .map(|link| {
+            serde_json::json!({
+                "linkId": link.link_id,
+                "linkedMemoryId": link.linked_memory_id,
+                "relation": link.relation,
+                "direction": link.direction,
+                "confidence": score_json_value(link.confidence),
+                "weight": score_json_value(link.weight),
+                "evidenceCount": link.evidence_count,
+                "source": link.source,
+                "createdAt": link.created_at,
+            })
+        })
+        .collect();
+
     let json = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
         "success": true,
@@ -5613,6 +5646,8 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "storage": storage,
             "retrieval": retrieval,
             "selection": selection,
+            "contradictions": contradictions,
+            "links": links,
             "degraded": degraded,
         }
     });
