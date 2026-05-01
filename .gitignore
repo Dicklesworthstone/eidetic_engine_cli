@@ -1,5 +1,7 @@
 # Rust build artifacts
 /target
+/target_rch_gate1
+/target_rch_*
 **/*.rs.bk
 
 # The project has a real Rust module at src/core. Some developer machines have
