@@ -27,3 +27,6 @@ mod schema_drift;
 
 #[path = "contracts/toon_gate12.rs"]
 mod toon_gate12;
+
+#[path = "contracts/counterfactual_gate15.rs"]
+mod counterfactual_gate15;

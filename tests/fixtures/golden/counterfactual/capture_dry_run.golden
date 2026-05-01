@@ -1,0 +1,12 @@
+{
+  "schema": "ee.lab.capture.v1",
+  "episode_id": "ep_NORMALIZED",
+  "workspace": "/test/workspace",
+  "session_id": "session_golden",
+  "task_input": "fix the bug",
+  "memories_captured": 0,
+  "actions_captured": 0,
+  "episode_hash": null,
+  "dry_run": true,
+  "captured_at": "TIMESTAMP"
+}

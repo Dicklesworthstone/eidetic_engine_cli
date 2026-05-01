@@ -904,6 +904,329 @@ impl RegretSummary {
     }
 }
 
+/// Schema version for counterfactual claims.
+pub const COUNTERFACTUAL_CLAIM_SCHEMA_V1: &str = "ee.counterfactual_claim.v1";
+
+/// Schema version for regret delta.
+pub const REGRET_DELTA_SCHEMA_V1: &str = "ee.regret_delta.v1";
+
+/// ID prefix for counterfactual claims.
+pub const COUNTERFACTUAL_CLAIM_ID_PREFIX: &str = "cfc_";
+
+/// Type of counterfactual claim.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CounterfactualClaimType {
+    /// Memory would have been surfaced if retrieval parameters differed.
+    WouldHaveSurfaced,
+    /// Quantified difference in outcome between actual and hypothetical runs.
+    RegretDelta,
+    /// Memory existed but was not retrieved for the task.
+    MissedRetrieval,
+    /// Memory was retrieved but with insufficient rank/score.
+    InsufficientRank,
+}
+
+impl CounterfactualClaimType {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WouldHaveSurfaced => "would_have_surfaced",
+            Self::RegretDelta => "regret_delta",
+            Self::MissedRetrieval => "missed_retrieval",
+            Self::InsufficientRank => "insufficient_rank",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 4] {
+        [
+            Self::WouldHaveSurfaced,
+            Self::RegretDelta,
+            Self::MissedRetrieval,
+            Self::InsufficientRank,
+        ]
+    }
+}
+
+impl fmt::Display for CounterfactualClaimType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseCounterfactualClaimTypeError {
+    input: String,
+}
+
+impl ParseCounterfactualClaimTypeError {
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+}
+
+impl fmt::Display for ParseCounterfactualClaimTypeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unknown counterfactual claim type `{}`; expected would_have_surfaced, regret_delta, missed_retrieval, or insufficient_rank",
+            self.input
+        )
+    }
+}
+
+impl std::error::Error for ParseCounterfactualClaimTypeError {}
+
+impl FromStr for CounterfactualClaimType {
+    type Err = ParseCounterfactualClaimTypeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "would_have_surfaced" => Ok(Self::WouldHaveSurfaced),
+            "regret_delta" => Ok(Self::RegretDelta),
+            "missed_retrieval" => Ok(Self::MissedRetrieval),
+            "insufficient_rank" => Ok(Self::InsufficientRank),
+            other => Err(ParseCounterfactualClaimTypeError {
+                input: other.to_owned(),
+            }),
+        }
+    }
+}
+
+/// A claim about what would have happened under counterfactual conditions.
+///
+/// These claims connect counterfactual replay analysis to actionable
+/// evidence about memory system improvements.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CounterfactualClaim {
+    /// Schema identifier.
+    pub schema: &'static str,
+    /// Unique claim ID.
+    pub id: String,
+    /// Type of counterfactual claim.
+    pub claim_type: CounterfactualClaimType,
+    /// Episode this claim is about.
+    pub episode_id: String,
+    /// Counterfactual run that generated this claim.
+    pub counterfactual_run_id: String,
+    /// Memory ID involved in the claim (if applicable).
+    pub memory_id: Option<String>,
+    /// Human-readable description of the claim.
+    pub description: String,
+    /// Confidence that the claim is valid (0.0-1.0).
+    pub confidence: f64,
+    /// Evidence supporting this claim.
+    pub evidence: Vec<String>,
+    /// Suggested action based on this claim.
+    pub suggested_action: Option<String>,
+    /// When this claim was generated (RFC 3339).
+    pub created_at: String,
+}
+
+impl CounterfactualClaim {
+    /// Create a new counterfactual claim.
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        claim_type: CounterfactualClaimType,
+        episode_id: impl Into<String>,
+        counterfactual_run_id: impl Into<String>,
+        description: impl Into<String>,
+        confidence: f64,
+        created_at: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema: COUNTERFACTUAL_CLAIM_SCHEMA_V1,
+            id: id.into(),
+            claim_type,
+            episode_id: episode_id.into(),
+            counterfactual_run_id: counterfactual_run_id.into(),
+            memory_id: None,
+            description: description.into(),
+            confidence,
+            evidence: Vec::new(),
+            suggested_action: None,
+            created_at: created_at.into(),
+        }
+    }
+
+    /// Create a "would have surfaced" claim.
+    #[must_use]
+    pub fn would_have_surfaced(
+        id: impl Into<String>,
+        episode_id: impl Into<String>,
+        counterfactual_run_id: impl Into<String>,
+        memory_id: impl Into<String>,
+        confidence: f64,
+        created_at: impl Into<String>,
+    ) -> Self {
+        let memory_id_str = memory_id.into();
+        Self {
+            schema: COUNTERFACTUAL_CLAIM_SCHEMA_V1,
+            id: id.into(),
+            claim_type: CounterfactualClaimType::WouldHaveSurfaced,
+            episode_id: episode_id.into(),
+            counterfactual_run_id: counterfactual_run_id.into(),
+            memory_id: Some(memory_id_str.clone()),
+            description: format!(
+                "Memory {} would have been surfaced under alternate retrieval parameters",
+                memory_id_str
+            ),
+            confidence,
+            evidence: Vec::new(),
+            suggested_action: Some(format!(
+                "Consider adjusting retrieval parameters to surface memory {}",
+                memory_id_str
+            )),
+            created_at: created_at.into(),
+        }
+    }
+
+    /// Create a "regret delta" claim.
+    #[must_use]
+    pub fn regret_delta(
+        id: impl Into<String>,
+        episode_id: impl Into<String>,
+        counterfactual_run_id: impl Into<String>,
+        delta: &RegretDelta,
+        created_at: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema: COUNTERFACTUAL_CLAIM_SCHEMA_V1,
+            id: id.into(),
+            claim_type: CounterfactualClaimType::RegretDelta,
+            episode_id: episode_id.into(),
+            counterfactual_run_id: counterfactual_run_id.into(),
+            memory_id: None,
+            description: format!(
+                "Outcome would have changed from {} to {} with regret delta {:.3}",
+                delta.actual_outcome, delta.hypothetical_outcome, delta.delta_score
+            ),
+            confidence: delta.confidence,
+            evidence: Vec::new(),
+            suggested_action: if delta.delta_score > 0.5 {
+                Some("High-impact improvement opportunity identified".to_owned())
+            } else {
+                None
+            },
+            created_at: created_at.into(),
+        }
+    }
+
+    /// Set memory ID.
+    #[must_use]
+    pub fn with_memory_id(mut self, memory_id: impl Into<String>) -> Self {
+        self.memory_id = Some(memory_id.into());
+        self
+    }
+
+    /// Add evidence.
+    pub fn add_evidence(&mut self, evidence: impl Into<String>) {
+        self.evidence.push(evidence.into());
+    }
+
+    /// Set suggested action.
+    #[must_use]
+    pub fn with_suggested_action(mut self, action: impl Into<String>) -> Self {
+        self.suggested_action = Some(action.into());
+        self
+    }
+}
+
+/// Quantified difference between actual and hypothetical outcomes.
+///
+/// The delta measures how much better or worse the outcome would have
+/// been under different memory retrieval conditions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegretDelta {
+    /// Schema identifier.
+    pub schema: &'static str,
+    /// Unique delta ID.
+    pub id: String,
+    /// Episode being analyzed.
+    pub episode_id: String,
+    /// Counterfactual run that generated this delta.
+    pub counterfactual_run_id: String,
+    /// Actual outcome of the episode.
+    pub actual_outcome: EpisodeOutcome,
+    /// Hypothetical outcome under intervention.
+    pub hypothetical_outcome: EpisodeOutcome,
+    /// Normalized delta score (-1.0 to 1.0, positive = improvement).
+    pub delta_score: f64,
+    /// Confidence in the delta estimate (0.0-1.0).
+    pub confidence: f64,
+    /// Breakdown of contributing factors.
+    pub contributing_factors: Vec<String>,
+    /// When this delta was computed (RFC 3339).
+    pub computed_at: String,
+}
+
+impl RegretDelta {
+    /// Create a new regret delta.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: impl Into<String>,
+        episode_id: impl Into<String>,
+        counterfactual_run_id: impl Into<String>,
+        actual_outcome: EpisodeOutcome,
+        hypothetical_outcome: EpisodeOutcome,
+        delta_score: f64,
+        confidence: f64,
+        computed_at: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema: REGRET_DELTA_SCHEMA_V1,
+            id: id.into(),
+            episode_id: episode_id.into(),
+            counterfactual_run_id: counterfactual_run_id.into(),
+            actual_outcome,
+            hypothetical_outcome,
+            delta_score,
+            confidence,
+            contributing_factors: Vec::new(),
+            computed_at: computed_at.into(),
+        }
+    }
+
+    /// Compute delta score from outcome transition.
+    #[must_use]
+    pub fn compute_score(actual: EpisodeOutcome, hypothetical: EpisodeOutcome) -> f64 {
+        let actual_value = Self::outcome_value(actual);
+        let hypothetical_value = Self::outcome_value(hypothetical);
+        hypothetical_value - actual_value
+    }
+
+    /// Get numerical value for outcome (higher = better).
+    #[must_use]
+    pub const fn outcome_value(outcome: EpisodeOutcome) -> f64 {
+        match outcome {
+            EpisodeOutcome::Success => 1.0,
+            EpisodeOutcome::Cancelled => 0.3,
+            EpisodeOutcome::Timeout => 0.2,
+            EpisodeOutcome::Unknown => 0.0,
+            EpisodeOutcome::Failure => -0.5,
+        }
+    }
+
+    /// Add a contributing factor.
+    pub fn add_contributing_factor(&mut self, factor: impl Into<String>) {
+        self.contributing_factors.push(factor.into());
+    }
+
+    /// Check if this delta represents an improvement.
+    #[must_use]
+    pub fn is_improvement(&self) -> bool {
+        self.delta_score > 0.0
+    }
+
+    /// Check if this delta is significant (above threshold).
+    #[must_use]
+    pub fn is_significant(&self, threshold: f64) -> bool {
+        self.delta_score.abs() >= threshold && self.confidence >= 0.5
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1237,5 +1560,204 @@ mod tests {
         ensure(summary.total_entries, 100, "total")?;
         ensure(summary.promoted_count, 25, "promoted")?;
         ensure(summary.by_category.len(), 2, "categories")
+    }
+
+    #[test]
+    fn counterfactual_claim_schema_versions_are_stable() -> TestResult {
+        ensure(
+            COUNTERFACTUAL_CLAIM_SCHEMA_V1,
+            "ee.counterfactual_claim.v1",
+            "claim",
+        )?;
+        ensure(REGRET_DELTA_SCHEMA_V1, "ee.regret_delta.v1", "delta")
+    }
+
+    #[test]
+    fn counterfactual_claim_type_strings_are_stable() -> TestResult {
+        ensure(
+            CounterfactualClaimType::WouldHaveSurfaced.as_str(),
+            "would_have_surfaced",
+            "surfaced",
+        )?;
+        ensure(
+            CounterfactualClaimType::RegretDelta.as_str(),
+            "regret_delta",
+            "delta",
+        )?;
+        ensure(
+            CounterfactualClaimType::MissedRetrieval.as_str(),
+            "missed_retrieval",
+            "missed",
+        )?;
+        ensure(
+            CounterfactualClaimType::InsufficientRank.as_str(),
+            "insufficient_rank",
+            "rank",
+        )
+    }
+
+    #[test]
+    fn counterfactual_claim_type_round_trip() -> TestResult {
+        for ct in CounterfactualClaimType::all() {
+            let parsed = CounterfactualClaimType::from_str(ct.as_str());
+            ensure(parsed, Ok(ct), ct.as_str())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn counterfactual_claim_would_have_surfaced() -> TestResult {
+        let claim = CounterfactualClaim::would_have_surfaced(
+            "cfc_001",
+            "ep_001",
+            "cfr_001",
+            "mem_001",
+            0.85,
+            "2026-04-30T12:00:00Z",
+        );
+
+        ensure(claim.schema, COUNTERFACTUAL_CLAIM_SCHEMA_V1, "schema")?;
+        ensure(
+            claim.claim_type,
+            CounterfactualClaimType::WouldHaveSurfaced,
+            "type",
+        )?;
+        ensure(claim.memory_id, Some("mem_001".to_string()), "memory")?;
+        ensure(claim.confidence, 0.85, "confidence")?;
+        ensure(claim.suggested_action.is_some(), true, "has action")
+    }
+
+    #[test]
+    fn counterfactual_claim_regret_delta() -> TestResult {
+        let delta = RegretDelta::new(
+            "rd_001",
+            "ep_001",
+            "cfr_001",
+            EpisodeOutcome::Failure,
+            EpisodeOutcome::Success,
+            1.5,
+            0.9,
+            "2026-04-30T12:00:00Z",
+        );
+
+        let claim = CounterfactualClaim::regret_delta(
+            "cfc_002",
+            "ep_001",
+            "cfr_001",
+            &delta,
+            "2026-04-30T12:00:00Z",
+        );
+
+        ensure(claim.schema, COUNTERFACTUAL_CLAIM_SCHEMA_V1, "schema")?;
+        ensure(
+            claim.claim_type,
+            CounterfactualClaimType::RegretDelta,
+            "type",
+        )?;
+        ensure(claim.confidence, 0.9, "confidence")?;
+        ensure(
+            claim.suggested_action.is_some(),
+            true,
+            "has action for high delta",
+        )
+    }
+
+    #[test]
+    fn regret_delta_compute_score() -> TestResult {
+        let failure_to_success =
+            RegretDelta::compute_score(EpisodeOutcome::Failure, EpisodeOutcome::Success);
+        ensure(failure_to_success, 1.5, "failure->success")?;
+
+        let success_to_failure =
+            RegretDelta::compute_score(EpisodeOutcome::Success, EpisodeOutcome::Failure);
+        ensure(success_to_failure, -1.5, "success->failure")?;
+
+        let no_change =
+            RegretDelta::compute_score(EpisodeOutcome::Success, EpisodeOutcome::Success);
+        ensure(no_change, 0.0, "no change")
+    }
+
+    #[test]
+    fn regret_delta_is_improvement() -> TestResult {
+        let mut delta = RegretDelta::new(
+            "rd_001",
+            "ep_001",
+            "cfr_001",
+            EpisodeOutcome::Failure,
+            EpisodeOutcome::Success,
+            1.5,
+            0.9,
+            "2026-04-30T12:00:00Z",
+        );
+        ensure(delta.is_improvement(), true, "positive is improvement")?;
+
+        delta.delta_score = -0.5;
+        ensure(delta.is_improvement(), false, "negative is not improvement")?;
+
+        delta.delta_score = 0.0;
+        ensure(delta.is_improvement(), false, "zero is not improvement")
+    }
+
+    #[test]
+    fn regret_delta_is_significant() -> TestResult {
+        let mut delta = RegretDelta::new(
+            "rd_001",
+            "ep_001",
+            "cfr_001",
+            EpisodeOutcome::Failure,
+            EpisodeOutcome::Success,
+            0.8,
+            0.7,
+            "2026-04-30T12:00:00Z",
+        );
+        ensure(delta.is_significant(0.5), true, "high delta high conf")?;
+
+        delta.confidence = 0.3;
+        ensure(delta.is_significant(0.5), false, "low confidence")?;
+
+        delta.confidence = 0.7;
+        delta.delta_score = 0.2;
+        ensure(delta.is_significant(0.5), false, "low delta")
+    }
+
+    #[test]
+    fn regret_delta_builder() -> TestResult {
+        let mut delta = RegretDelta::new(
+            "rd_001",
+            "ep_001",
+            "cfr_001",
+            EpisodeOutcome::Failure,
+            EpisodeOutcome::Success,
+            1.0,
+            0.85,
+            "2026-04-30T12:00:00Z",
+        );
+
+        delta.add_contributing_factor("Memory boost");
+        delta.add_contributing_factor("Better context");
+
+        ensure(delta.schema, REGRET_DELTA_SCHEMA_V1, "schema")?;
+        ensure(delta.contributing_factors.len(), 2, "factors")
+    }
+
+    #[test]
+    fn counterfactual_claim_builder() -> TestResult {
+        let mut claim = CounterfactualClaim::new(
+            "cfc_001",
+            CounterfactualClaimType::MissedRetrieval,
+            "ep_001",
+            "cfr_001",
+            "Memory was not retrieved",
+            0.75,
+            "2026-04-30T12:00:00Z",
+        )
+        .with_memory_id("mem_001")
+        .with_suggested_action("Adjust retrieval threshold");
+
+        claim.add_evidence("Memory existed in index");
+        claim.add_evidence("Query matched memory");
+
+        ensure(claim.schema, COUNTERFACTUAL_CLAIM_SCHEMA_V1, "schema")?;
+        ensure(claim.evidence.len(), 2, "evidence count")
     }
 }

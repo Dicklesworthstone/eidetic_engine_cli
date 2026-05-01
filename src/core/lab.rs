@@ -491,7 +491,7 @@ pub fn run_counterfactual(
 
         if options.generate_regret {
             for (i, intervention) in options.interventions.iter().enumerate() {
-                let regret_id = format!("{}{}", REGRET_ENTRY_ID_PREFIX, generate_id());
+                let regret_id = format!("{}{}_{}", REGRET_ENTRY_ID_PREFIX, generate_id(), i);
                 let mut entry = RegretEntry::new(
                     &regret_id,
                     &options.episode_id,

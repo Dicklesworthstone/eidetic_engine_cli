@@ -77,13 +77,15 @@ pub use economy::{
     economy_schema_catalog_json, economy_schemas,
 };
 pub use episode::{
-    ActionType, COUNTERFACTUAL_RUN_ID_PREFIX, COUNTERFACTUAL_RUN_SCHEMA_V1, CounterfactualMethod,
-    CounterfactualRun, EPISODE_ID_PREFIX, EpisodeAction, EpisodeOutcome, INTERVENTION_ID_PREFIX,
-    INTERVENTION_SCHEMA_V1, Intervention, InterventionType, ParseActionTypeError,
+    ActionType, COUNTERFACTUAL_CLAIM_ID_PREFIX, COUNTERFACTUAL_CLAIM_SCHEMA_V1,
+    COUNTERFACTUAL_RUN_ID_PREFIX, COUNTERFACTUAL_RUN_SCHEMA_V1, CounterfactualClaim,
+    CounterfactualClaimType, CounterfactualMethod, CounterfactualRun, EPISODE_ID_PREFIX,
+    EpisodeAction, EpisodeOutcome, INTERVENTION_ID_PREFIX, INTERVENTION_SCHEMA_V1, Intervention,
+    InterventionType, ParseActionTypeError, ParseCounterfactualClaimTypeError,
     ParseCounterfactualMethodError, ParseEpisodeOutcomeError, ParseInterventionTypeError,
-    ParseRegretCategoryError, REGRET_ENTRY_ID_PREFIX, REGRET_ENTRY_SCHEMA_V1,
-    REGRET_LEDGER_SCHEMA_V1, RegretCategory, RegretEntry, RegretLedger, RegretSummary,
-    TASK_EPISODE_SCHEMA_V1, TaskEpisode,
+    ParseRegretCategoryError, REGRET_DELTA_SCHEMA_V1, REGRET_ENTRY_ID_PREFIX,
+    REGRET_ENTRY_SCHEMA_V1, REGRET_LEDGER_SCHEMA_V1, RegretCategory, RegretDelta, RegretEntry,
+    RegretLedger, RegretSummary, TASK_EPISODE_SCHEMA_V1, TaskEpisode,
 };
 pub use id::{
     AuditId, BackupId, CandidateId, ClaimId, DemoId, EXECUTABLE_ID_SCHEMA_V1, EvidenceId,

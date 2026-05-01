@@ -1,0 +1,48 @@
+{
+  "schema": "ee.lab.reconstruct.v1",
+  "episode_id": "ep_NORMALIZED",
+  "run_id": "run_NORMALIZED",
+  "status": "reconstructed",
+  "events": [
+    {
+      "sequence": 1,
+      "event_type": "user_message",
+      "timestamp": "TIMESTAMP",
+      "payload_hash": null,
+      "redacted": false
+    },
+    {
+      "sequence": 2,
+      "event_type": "memory_retrieval",
+      "timestamp": "TIMESTAMP",
+      "payload_hash": null,
+      "redacted": false
+    },
+    {
+      "sequence": 3,
+      "event_type": "tool_call",
+      "timestamp": "TIMESTAMP",
+      "payload_hash": null,
+      "redacted": false
+    },
+    {
+      "sequence": 4,
+      "event_type": "assistant_response",
+      "timestamp": "TIMESTAMP",
+      "payload_hash": null,
+      "redacted": false
+    }
+  ],
+  "event_count": 4,
+  "memory_events": 1,
+  "tool_call_events": 1,
+  "message_events": 2,
+  "episode_hash": "blake3:NORMALIZED",
+  "original_agent_id": "reconstructed_agent",
+  "original_session_id": null,
+  "run_started_at": null,
+  "run_ended_at": null,
+  "dry_run": false,
+  "reconstructed_at": "TIMESTAMP",
+  "warnings": []
+}
