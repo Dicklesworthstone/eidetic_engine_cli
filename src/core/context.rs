@@ -28,8 +28,10 @@ use std::str::FromStr;
 use crate::config::WorkspaceLocation;
 use crate::core::budget::RequestBudget;
 use crate::core::search::{SearchError, SearchOptions, SearchStatus, run_search};
-use crate::db::{DbConnection, StoredMemory};
-use crate::models::{MemoryId, ProvenanceUri, TrustClass, UnitScore};
+use crate::db::{
+    CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DbConnection, StoredMemory,
+};
+use crate::models::{MemoryId, PackId, ProvenanceUri, TrustClass, UnitScore};
 use crate::pack::{
     ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
     ContextResponseDegradation, ContextResponseSeverity, PackCandidate, PackCandidateInput,
@@ -356,8 +358,95 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
         assemble_draft_with_profile(request.profile, request.query.clone(), budget, candidates)
             .map_err(|error| ContextPackError::Pack(error.to_string()))?;
 
-    ContextResponse::new(request, draft, degraded)
+    let mut response_degraded = degraded;
+
+    if let Err(persist_error) =
+        persist_pack_record(&connection, &options.workspace_path, &request, &draft)
+    {
+        push_degradation(
+            &mut response_degraded,
+            "context_pack_persist_failed",
+            ContextResponseSeverity::Medium,
+            format!("Pack assembled but persistence failed: {persist_error}"),
+            Some("ee status --json".to_string()),
+        );
+    }
+
+    ContextResponse::new(request, draft, response_degraded)
         .map_err(|error| ContextPackError::Pack(error.to_string()))
+}
+
+fn persist_pack_record(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    request: &ContextRequest,
+    draft: &crate::pack::PackDraft,
+) -> Result<(), String> {
+    let workspace = connection
+        .get_workspace_by_path(&workspace_path.display().to_string())
+        .map_err(|e| format!("workspace lookup failed: {e}"))?
+        .ok_or_else(|| "workspace not found".to_string())?;
+
+    let pack_id = PackId::now();
+    let pack_hash = compute_pack_hash(request, draft);
+
+    let input = CreatePackRecordInput {
+        workspace_id: workspace.id.clone(),
+        query: request.query.clone(),
+        profile: request.profile.as_str().to_string(),
+        max_tokens: request.budget.max_tokens(),
+        used_tokens: draft.used_tokens,
+        item_count: draft.items.len() as u32,
+        omitted_count: draft.omitted.len() as u32,
+        pack_hash,
+        degraded_json: None,
+        created_by: Some("ee context".to_string()),
+    };
+
+    let items: Vec<CreatePackItemInput> = draft
+        .items
+        .iter()
+        .map(|item| CreatePackItemInput {
+            pack_id: pack_id.to_string(),
+            memory_id: item.memory_id.to_string(),
+            rank: item.rank,
+            section: item.section.as_str().to_string(),
+            estimated_tokens: item.estimated_tokens,
+            relevance: item.relevance.into_inner(),
+            utility: item.utility.into_inner(),
+            why: item.why.clone(),
+            diversity_key: item.diversity_key.clone(),
+        })
+        .collect();
+
+    let omissions: Vec<CreatePackOmissionInput> = draft
+        .omitted
+        .iter()
+        .map(|omission| CreatePackOmissionInput {
+            pack_id: pack_id.to_string(),
+            memory_id: omission.memory_id.to_string(),
+            estimated_tokens: omission.estimated_tokens,
+            reason: omission.reason.as_str().to_string(),
+        })
+        .collect();
+
+    connection
+        .insert_pack_record(&pack_id.to_string(), &input, &items, &omissions)
+        .map_err(|e| format!("insert failed: {e}"))
+}
+
+fn compute_pack_hash(request: &ContextRequest, draft: &crate::pack::PackDraft) -> String {
+    use blake3::Hasher;
+    let mut hasher = Hasher::new();
+    hasher.update(request.query.as_bytes());
+    hasher.update(request.profile.as_str().as_bytes());
+    hasher.update(&request.budget.max_tokens().to_le_bytes());
+    hasher.update(&draft.used_tokens.to_le_bytes());
+    for item in &draft.items {
+        hasher.update(item.memory_id.to_string().as_bytes());
+        hasher.update(&item.rank.to_le_bytes());
+    }
+    format!("blake3:{}", hasher.finalize().to_hex())
 }
 
 fn candidates_from_search(
