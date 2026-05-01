@@ -2780,6 +2780,12 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             description: "Learning question, uncertainty, experiment, observation, and outcome schemas",
             category: "domain",
         },
+        SchemaEntry {
+            id: "ee.causal.schemas.v1",
+            version: "1",
+            description: "Causal exposure, decision trace, uplift, confounder, and promotion-plan schemas",
+            category: "domain",
+        },
     ]
 }
 
@@ -2841,6 +2847,7 @@ fn render_single_schema_export(schema_id: &str) -> String {
         "ee.procedure.schemas.v1" => crate::models::procedure_schema_catalog_json(),
         "ee.economy.schemas.v1" => crate::models::economy_schema_catalog_json(),
         "ee.learning.schemas.v1" => crate::models::learning_schema_catalog_json(),
+        "ee.causal.schemas.v1" => crate::models::causal_schema_catalog_json(),
         _ => {
             let mut b = JsonBuilder::with_capacity(256);
             b.field_str("schema", ERROR_SCHEMA_V1);
@@ -2863,14 +2870,15 @@ fn render_all_schemas_export() -> String {
         d.field_raw(
             "schemas",
             &format!(
-                "[{},{},{},{},{},{},{}]",
+                "[{},{},{},{},{},{},{},{}]",
                 response_schema_definition(),
                 error_schema_definition(),
                 certificate_schema_definition(),
                 crate::models::executable_id_schema_catalog_json(),
                 crate::models::procedure_schema_catalog_json(),
                 crate::models::economy_schema_catalog_json(),
-                crate::models::learning_schema_catalog_json()
+                crate::models::learning_schema_catalog_json(),
+                crate::models::causal_schema_catalog_json()
             ),
         );
     });
@@ -2906,7 +2914,7 @@ pub fn render_schema_export_toon(schema_id: Option<&str>) -> String {
     render_toon_from_json(&render_schema_export_json(schema_id))
 }
 
-pub(crate) fn render_toon_from_json(json: &str) -> String {
+pub fn render_toon_from_json(json: &str) -> String {
     toon::json_to_toon(json).unwrap_or_else(|error| {
         let message = escape_toon_quoted_string(&format!("TOON encoding failed: {error}"));
         format!(
@@ -3901,6 +3909,11 @@ pub fn error_response_json(error: &DomainError) -> String {
             )
         }
     }
+}
+
+#[must_use]
+pub fn error_response_toon(error: &DomainError) -> String {
+    render_toon_from_json(&error_response_json(error))
 }
 
 pub fn escape_json_string(s: &str) -> String {

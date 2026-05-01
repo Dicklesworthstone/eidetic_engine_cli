@@ -1,6 +1,7 @@
 use std::process::ExitCode;
 
 pub mod certificate;
+pub mod causal;
 pub mod claims;
 pub mod decision;
 pub mod degradation;
@@ -33,6 +34,14 @@ pub use certificate::{
     LifecycleCertificate, LifecycleEvent, PackCertificate, ParseCertificateKindError,
     ParseCertificateStatusError, ParseLifecycleEventError, PrivacyBudgetCertificate,
     TailRiskCertificate,
+};
+pub use causal::{
+    CAUSAL_EXPOSURE_SCHEMA_V1, CAUSAL_SCHEMA_CATALOG_V1, CONFOUNDER_SCHEMA_V1, CausalConfounder,
+    CausalDecisionTrace, CausalEvidenceStrength, CausalExposure, CausalExposureChannel,
+    CausalFieldSchema, CausalObjectSchema, ConfounderKind, DECISION_TRACE_SCHEMA_V1,
+    DecisionTraceOutcome, PROMOTION_PLAN_SCHEMA_V1, ParseCausalValueError, PromotionAction,
+    PromotionPlan, PromotionPlanStatus, UPLIFT_ESTIMATE_SCHEMA_V1, UpliftDirection,
+    UpliftEstimate, causal_schema_catalog_json, causal_schemas,
 };
 pub use claims::{
     ArtifactType, BLAKE3_HEX_LEN, CLAIM_ENTRY_SCHEMA_V1, CLAIM_MANIFEST_SCHEMA_V1,
