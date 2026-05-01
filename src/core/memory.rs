@@ -527,6 +527,8 @@ pub fn get_memory_details(options: &GetMemoryOptions<'_>) -> MemoryShowReport {
 pub struct ListMemoriesOptions<'a> {
     /// Database path.
     pub database_path: &'a Path,
+    /// Workspace path (used to derive workspace_id).
+    pub workspace_path: &'a Path,
     /// Filter by memory level.
     pub level: Option<&'a str>,
     /// Filter by tag.
@@ -642,12 +644,17 @@ pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
         include_tombstoned: options.include_tombstoned,
     };
 
-    // Get workspace ID - for now use default
-    let workspace_id = "default";
+    // Match `remember`'s workspace-ID derivation so absolute paths,
+    // relative paths, and symlinked paths all address the same records.
+    let workspace_path = options
+        .workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| options.workspace_path.to_path_buf());
+    let workspace_id = stable_workspace_id(&workspace_path);
 
     // If filtering by tag, get memory IDs first
     let memory_ids: Option<Vec<String>> = if let Some(tag) = options.tag {
-        match conn.list_memories_by_tag(workspace_id, tag) {
+        match conn.list_memories_by_tag(&workspace_id, tag) {
             Ok(ids) => Some(ids),
             Err(e) => return MemoryListReport::error(format!("Failed to query by tag: {e}")),
         }
@@ -656,7 +663,8 @@ pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
     };
 
     // Get memories
-    let stored = match conn.list_memories(workspace_id, options.level, options.include_tombstoned) {
+    let stored = match conn.list_memories(&workspace_id, options.level, options.include_tombstoned)
+    {
         Ok(m) => m,
         Err(e) => return MemoryListReport::error(format!("Failed to list memories: {e}")),
     };

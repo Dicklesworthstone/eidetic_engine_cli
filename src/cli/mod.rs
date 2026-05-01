@@ -5278,6 +5278,7 @@ where
 
     let options = ListMemoriesOptions {
         database_path: &database_path,
+        workspace_path: &workspace,
         level: args.level.as_deref(),
         tag: args.tag.as_deref(),
         limit: args.limit,

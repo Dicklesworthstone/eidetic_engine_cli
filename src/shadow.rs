@@ -229,6 +229,7 @@ pub struct ShadowReport {
 
 impl ShadowReport {
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: &str,
         domain: PolicyDomain,

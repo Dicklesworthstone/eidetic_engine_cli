@@ -873,8 +873,7 @@ mod tests {
 
     #[test]
     fn cache_budget_custom_watermarks() {
-        let budget = CacheBudget::new(100, 1024)
-            .with_watermarks(0.70, 0.90);
+        let budget = CacheBudget::new(100, 1024).with_watermarks(0.70, 0.90);
         assert_eq!(budget.high_entry_threshold(), 70);
         assert_eq!(budget.critical_entry_threshold(), 90);
     }
@@ -909,10 +908,19 @@ mod tests {
 
     #[test]
     fn fallback_policy_strings_are_stable() {
-        assert_eq!(CacheFallbackPolicy::ReduceCapacity.as_str(), "reduce_capacity");
+        assert_eq!(
+            CacheFallbackPolicy::ReduceCapacity.as_str(),
+            "reduce_capacity"
+        );
         assert_eq!(CacheFallbackPolicy::NoCache.as_str(), "no_cache");
-        assert_eq!(CacheFallbackPolicy::SimplifyPolicy.as_str(), "simplify_policy");
-        assert_eq!(CacheFallbackPolicy::AggressiveEvict.as_str(), "aggressive_evict");
+        assert_eq!(
+            CacheFallbackPolicy::SimplifyPolicy.as_str(),
+            "simplify_policy"
+        );
+        assert_eq!(
+            CacheFallbackPolicy::AggressiveEvict.as_str(),
+            "aggressive_evict"
+        );
     }
 
     #[test]

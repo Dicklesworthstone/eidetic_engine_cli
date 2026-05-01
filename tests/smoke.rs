@@ -1446,7 +1446,7 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         "--confidence",
         "0.95",
         "--source",
-        "file://AGENTS.md#L164-L173",
+        "file://AGENTS.md#L164-173",
         "Run cargo fmt --check before every release.",
     ])?;
     let remember1_stdout = String::from_utf8_lossy(&remember1.stdout);

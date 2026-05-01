@@ -264,7 +264,7 @@ mod tests {
                     confidence: 0.92,
                     utility: 0.8,
                     importance: 0.7,
-                    provenance_uri: Some("file://AGENTS.md#compiler-checks".to_string()),
+                    provenance_uri: Some("file://AGENTS.md#L164-173".to_string()),
                     trust_class: "human_explicit".to_string(),
                     trust_subclass: Some("project-rule".to_string()),
                     valid_from: None,
