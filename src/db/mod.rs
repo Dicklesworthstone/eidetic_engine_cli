@@ -24,14 +24,24 @@ pub const PROVENANCE_STATUS_SKIPPED: &str = "skipped";
 
 /// Standard audit action types for memory operations (EE-070).
 pub mod audit_actions {
+    pub const ARTIFACT_REGISTER: &str = "artifact.register";
     pub const FEEDBACK_RECORD: &str = "feedback.record";
     pub const MEMORY_CREATE: &str = "memory.create";
+    pub const MEMORY_SCORE_DECAY: &str = "memory.score_decay";
     pub const MEMORY_UPDATE: &str = "memory.update";
     pub const MEMORY_TOMBSTONE: &str = "memory.tombstone";
     pub const MEMORY_TAG_ADD: &str = "memory.tag.add";
     pub const MEMORY_TAG_REMOVE: &str = "memory.tag.remove";
     pub const MEMORY_TAG_SET: &str = "memory.tag.set";
     pub const MEMORY_LINK_CREATE: &str = "memory.link.create";
+    pub const CURATION_CANDIDATE_VALIDATE: &str = "curation_candidate.validate";
+    pub const CURATION_CANDIDATE_APPLY: &str = "curation_candidate.apply";
+    pub const CURATION_CANDIDATE_ACCEPT: &str = "curation_candidate.accept";
+    pub const CURATION_CANDIDATE_REJECT: &str = "curation_candidate.reject";
+    pub const CURATION_CANDIDATE_SNOOZE: &str = "curation_candidate.snooze";
+    pub const CURATION_CANDIDATE_MERGE: &str = "curation_candidate.merge";
+    pub const CURATION_CANDIDATE_DISPOSITION: &str = "curation_candidate.disposition";
+    pub const RULE_CREATE: &str = "rule.create";
 }
 
 const MIGRATION_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS ee_schema_migrations (
@@ -738,12 +748,51 @@ fn required_i64(row: &Row, index: usize, operation: DbOperation, column: &str) -
         })
 }
 
+fn optional_i64(
+    row: &Row,
+    index: usize,
+    operation: DbOperation,
+    column: &str,
+) -> Result<Option<i64>> {
+    match required_value(row, index, operation, column)? {
+        Value::Null => Ok(None),
+        value => value.as_i64().map(Some).ok_or_else(|| DbError::MalformedRow {
+            operation,
+            message: format!("{column} column at index {index} is not an integer"),
+        }),
+    }
+}
+
 fn required_u32(row: &Row, index: usize, operation: DbOperation, column: &str) -> Result<u32> {
     let value = required_i64(row, index, operation, column)?;
     u32::try_from(value).map_err(|_| DbError::MalformedRow {
         operation,
         message: format!("{column} column at index {index} must fit u32"),
     })
+}
+
+fn required_u64(row: &Row, index: usize, operation: DbOperation, column: &str) -> Result<u64> {
+    let value = required_i64(row, index, operation, column)?;
+    u64::try_from(value).map_err(|_| DbError::MalformedRow {
+        operation,
+        message: format!("{column} column at index {index} must fit u64"),
+    })
+}
+
+fn optional_u64(
+    row: &Row,
+    index: usize,
+    operation: DbOperation,
+    column: &str,
+) -> Result<Option<u64>> {
+    optional_i64(row, index, operation, column)?
+        .map(|value| {
+            u64::try_from(value).map_err(|_| DbError::MalformedRow {
+                operation,
+                message: format!("{column} column at index {index} must fit u64"),
+            })
+        })
+        .transpose()
 }
 
 fn required_text<'a>(
@@ -1452,6 +1501,272 @@ CREATE INDEX idx_memories_valid_to ON memories(valid_to) WHERE valid_to IS NOT N
     "blake3:v016_temporal_validity_2026_04_30",
 );
 
+/// V017: Add agent installation and history source inventory tables (EE-094).
+pub const V017_AGENT_DETECTION_REPOSITORIES: Migration = Migration::new(
+    17,
+    "agent_detection_repositories",
+    r#"
+-- Agent installation inventory (EE-094)
+-- Accretive records from franken-agent-detection. CASS remains the primary
+-- raw session-history source; this table only records local tool posture.
+CREATE TABLE agent_installations (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'agi_*' AND length(id) = 30),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    slug TEXT NOT NULL CHECK (length(trim(slug)) > 0),
+    detected INTEGER NOT NULL CHECK (detected IN (0, 1)),
+    detection_format_version INTEGER NOT NULL CHECK (detection_format_version > 0),
+    evidence_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(evidence_json)),
+    root_paths_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(root_paths_json)),
+    metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+    first_seen_at TEXT NOT NULL CHECK (length(trim(first_seen_at)) > 0),
+    last_seen_at TEXT NOT NULL CHECK (length(trim(last_seen_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    UNIQUE (workspace_id, slug)
+);
+
+CREATE INDEX idx_agent_installations_workspace ON agent_installations(workspace_id);
+CREATE INDEX idx_agent_installations_slug ON agent_installations(slug);
+CREATE INDEX idx_agent_installations_detected ON agent_installations(detected);
+
+-- Agent history source inventory.
+-- These are source roots/probe paths, not duplicated CASS session stores.
+CREATE TABLE agent_history_sources (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'ahs_*' AND length(id) = 30),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    installation_id TEXT REFERENCES agent_installations(id) ON DELETE SET NULL,
+    agent_slug TEXT NOT NULL CHECK (length(trim(agent_slug)) > 0),
+    source_kind TEXT NOT NULL CHECK (length(trim(source_kind)) > 0),
+    source_path TEXT NOT NULL CHECK (length(trim(source_path)) > 0),
+    path_exists INTEGER NOT NULL CHECK (path_exists IN (0, 1)),
+    metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+    first_seen_at TEXT NOT NULL CHECK (length(trim(first_seen_at)) > 0),
+    last_seen_at TEXT NOT NULL CHECK (length(trim(last_seen_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    UNIQUE (workspace_id, agent_slug, source_kind, source_path)
+);
+
+CREATE INDEX idx_agent_history_sources_workspace ON agent_history_sources(workspace_id);
+CREATE INDEX idx_agent_history_sources_agent ON agent_history_sources(agent_slug);
+CREATE INDEX idx_agent_history_sources_kind ON agent_history_sources(source_kind);
+CREATE INDEX idx_agent_history_sources_exists ON agent_history_sources(path_exists);
+"#,
+    "blake3:v017_agent_detection_repositories_2026_05_01",
+);
+
+/// V018: Add monorepo/subproject scope fields to workspaces (EE-289).
+pub const V018_WORKSPACE_SCOPE_FIELDS: Migration = Migration::new(
+    18,
+    "workspace_scope_fields",
+    r#"
+-- Monorepo/subproject scope metadata for workspace identity.
+-- The workspace row remains the durable source of truth for aliases and local
+-- identity; repository-relative scope lets agents distinguish a whole repo
+-- from a subproject inside the same monorepo.
+ALTER TABLE workspaces ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'standalone'
+    CHECK (scope_kind IN ('standalone', 'repository', 'subproject'));
+
+ALTER TABLE workspaces ADD COLUMN repository_root TEXT
+    CHECK (repository_root IS NULL OR length(trim(repository_root)) > 0);
+
+ALTER TABLE workspaces ADD COLUMN repository_fingerprint TEXT
+    CHECK (repository_fingerprint IS NULL OR repository_fingerprint GLOB 'repo:*');
+
+ALTER TABLE workspaces ADD COLUMN subproject_path TEXT
+    CHECK (subproject_path IS NULL OR length(trim(subproject_path)) > 0);
+
+CREATE INDEX idx_workspaces_scope_kind ON workspaces(scope_kind);
+CREATE INDEX idx_workspaces_repository_fingerprint
+    ON workspaces(repository_fingerprint)
+    WHERE repository_fingerprint IS NOT NULL;
+"#,
+    "blake3:v018_workspace_scope_fields_2026_05_01",
+);
+
+/// V019: Add narrow coding artifact registry (EE-ARTIFACT-REGISTRY-001).
+pub const V019_ARTIFACT_REGISTRY: Migration = Migration::new(
+    19,
+    "artifact_registry",
+    r#"
+-- Narrow coding-artifact registry.
+-- Raw artifact bytes remain external. Durable state is metadata, hashes,
+-- redaction posture, optional safe snippets, provenance, and explicit links.
+CREATE TABLE artifacts (
+    id TEXT PRIMARY KEY CHECK (
+        id GLOB 'art_[0-9a-f]*' AND length(id) = 30
+    ),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('file', 'external')),
+    artifact_type TEXT NOT NULL CHECK (length(trim(artifact_type)) > 0),
+    original_path TEXT CHECK (original_path IS NULL OR length(trim(original_path)) > 0),
+    canonical_path TEXT CHECK (canonical_path IS NULL OR length(trim(canonical_path)) > 0),
+    external_ref TEXT CHECK (external_ref IS NULL OR length(trim(external_ref)) > 0),
+    content_hash TEXT NOT NULL CHECK (
+        content_hash GLOB 'blake3:[0-9a-f]*' AND length(content_hash) = 71
+    ),
+    media_type TEXT NOT NULL CHECK (length(trim(media_type)) > 0),
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    redaction_status TEXT NOT NULL CHECK (
+        redaction_status IN ('checked', 'redacted', 'not_text', 'external_reference')
+    ),
+    snippet TEXT CHECK (snippet IS NULL OR length(snippet) > 0),
+    snippet_hash TEXT CHECK (
+        snippet_hash IS NULL
+        OR (snippet_hash GLOB 'blake3:[0-9a-f]*' AND length(snippet_hash) = 71)
+    ),
+    provenance_uri TEXT CHECK (provenance_uri IS NULL OR length(trim(provenance_uri)) > 0),
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    CHECK (
+        (source_kind = 'file' AND canonical_path IS NOT NULL AND external_ref IS NULL)
+        OR (source_kind = 'external' AND external_ref IS NOT NULL)
+    )
+);
+
+CREATE INDEX idx_artifacts_workspace ON artifacts(workspace_id);
+CREATE INDEX idx_artifacts_source_kind ON artifacts(source_kind);
+CREATE INDEX idx_artifacts_type ON artifacts(artifact_type);
+CREATE INDEX idx_artifacts_hash ON artifacts(content_hash);
+CREATE INDEX idx_artifacts_redaction ON artifacts(redaction_status);
+CREATE INDEX idx_artifacts_canonical_path
+    ON artifacts(workspace_id, canonical_path)
+    WHERE canonical_path IS NOT NULL;
+CREATE INDEX idx_artifacts_external_ref
+    ON artifacts(workspace_id, external_ref)
+    WHERE external_ref IS NOT NULL;
+
+CREATE TABLE artifact_links (
+    artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+    target_type TEXT NOT NULL CHECK (target_type IN (
+        'memory', 'pack', 'recorder', 'support_bundle', 'context_pack', 'other'
+    )),
+    target_id TEXT NOT NULL CHECK (length(trim(target_id)) > 0),
+    relation TEXT NOT NULL CHECK (length(trim(relation)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+    PRIMARY KEY (artifact_id, target_type, target_id, relation)
+);
+
+CREATE INDEX idx_artifact_links_artifact ON artifact_links(artifact_id);
+CREATE INDEX idx_artifact_links_target ON artifact_links(target_type, target_id);
+"#,
+    "blake3:v019_artifact_registry_2026_05_02",
+);
+
+/// V020: Add explicit review queue metadata for curation candidates (EE-302).
+pub const V020_CURATION_REVIEW_STATE: Migration = Migration::new(
+    20,
+    "curation_review_state",
+    r#"
+-- Review queue metadata for explicit accept/reject/snooze/merge commands.
+ALTER TABLE curation_candidates ADD COLUMN review_state TEXT NOT NULL DEFAULT 'new'
+    CHECK (review_state IN (
+        'new', 'needs_evidence', 'needs_scope', 'duplicate', 'snoozed',
+        'accepted', 'rejected', 'merged', 'superseded', 'expired', 'applied'
+    ));
+
+ALTER TABLE curation_candidates ADD COLUMN snoozed_until TEXT
+    CHECK (snoozed_until IS NULL OR length(trim(snoozed_until)) > 0);
+
+ALTER TABLE curation_candidates ADD COLUMN merged_into_candidate_id TEXT
+    CHECK (merged_into_candidate_id IS NULL OR (
+        merged_into_candidate_id GLOB 'curate_*' AND length(merged_into_candidate_id) = 33
+    ));
+
+UPDATE curation_candidates
+SET review_state = CASE status
+    WHEN 'pending' THEN 'new'
+    WHEN 'approved' THEN 'accepted'
+    WHEN 'rejected' THEN 'rejected'
+    WHEN 'expired' THEN 'expired'
+    WHEN 'applied' THEN 'applied'
+    ELSE 'new'
+END
+WHERE review_state = 'new';
+
+CREATE INDEX idx_curation_candidates_review_state ON curation_candidates(review_state);
+CREATE INDEX idx_curation_candidates_snoozed_until
+    ON curation_candidates(snoozed_until)
+    WHERE snoozed_until IS NOT NULL;
+CREATE INDEX idx_curation_candidates_merged_into
+    ON curation_candidates(merged_into_candidate_id)
+    WHERE merged_into_candidate_id IS NOT NULL;
+"#,
+    "blake3:v020_curation_review_state_2026_05_02",
+);
+
+/// V021: Add curation TTL policy and state timestamps (EE-CURATE-TTL-001).
+pub const V021_CURATION_TTL_POLICY: Migration = Migration::new(
+    21,
+    "curation_ttl_policy",
+    r#"
+-- Deterministic curation TTL policy and state-entry metadata.
+ALTER TABLE curation_candidates ADD COLUMN state_entered_at TEXT
+    CHECK (state_entered_at IS NULL OR length(trim(state_entered_at)) > 0);
+
+ALTER TABLE curation_candidates ADD COLUMN last_action_at TEXT
+    CHECK (last_action_at IS NULL OR length(trim(last_action_at)) > 0);
+
+ALTER TABLE curation_candidates ADD COLUMN ttl_policy_id TEXT
+    CHECK (ttl_policy_id IS NULL OR length(trim(ttl_policy_id)) > 0);
+
+UPDATE curation_candidates
+SET state_entered_at = COALESCE(applied_at, reviewed_at, created_at),
+    last_action_at = COALESCE(applied_at, reviewed_at, created_at),
+    ttl_policy_id = CASE review_state
+        WHEN 'accepted' THEN 'curation.validated.default'
+        WHEN 'snoozed' THEN 'curation.snoozed.default'
+        WHEN 'rejected' THEN 'curation.harmful.default'
+        ELSE 'curation.proposed.default'
+    END
+WHERE state_entered_at IS NULL
+   OR last_action_at IS NULL
+   OR ttl_policy_id IS NULL;
+
+CREATE TABLE curation_ttl_policies (
+    id TEXT PRIMARY KEY CHECK (length(trim(id)) > 0),
+    review_state TEXT NOT NULL CHECK (length(trim(review_state)) > 0),
+    threshold_seconds INTEGER NOT NULL CHECK (threshold_seconds >= 0),
+    action TEXT NOT NULL CHECK (action IN (
+        'snooze', 'prompt_promote', 'retire_with_audit', 'escalate'
+    )),
+    requires_evidence_count INTEGER NOT NULL DEFAULT 0 CHECK (requires_evidence_count >= 0),
+    requires_distinct_sessions INTEGER NOT NULL DEFAULT 0 CHECK (requires_distinct_sessions >= 0),
+    requires_no_harmful_within_seconds INTEGER
+        CHECK (requires_no_harmful_within_seconds IS NULL OR requires_no_harmful_within_seconds >= 0),
+    auto_promote_enabled INTEGER NOT NULL DEFAULT 0 CHECK (auto_promote_enabled IN (0, 1)),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0)
+);
+
+INSERT INTO curation_ttl_policies (
+    id, review_state, threshold_seconds, action, created_at
+) VALUES
+    ('curation.proposed.default', 'new', 1209600, 'snooze', '2026-05-02T00:00:00Z'),
+    ('curation.validated.default', 'accepted', 2592000, 'prompt_promote', '2026-05-02T00:00:00Z'),
+    ('curation.snoozed.default', 'snoozed', 7776000, 'retire_with_audit', '2026-05-02T00:00:00Z'),
+    ('curation.harmful.default', 'rejected', 604800, 'escalate', '2026-05-02T00:00:00Z');
+
+UPDATE curation_ttl_policies
+SET requires_evidence_count = 2,
+    requires_distinct_sessions = 2,
+    requires_no_harmful_within_seconds = 5184000,
+    auto_promote_enabled = 0
+WHERE id = 'curation.validated.default';
+
+CREATE INDEX idx_curation_candidates_state_entered
+    ON curation_candidates(state_entered_at)
+    WHERE state_entered_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_last_action
+    ON curation_candidates(last_action_at)
+    WHERE last_action_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_ttl_policy
+    ON curation_candidates(ttl_policy_id)
+    WHERE ttl_policy_id IS NOT NULL;
+CREATE INDEX idx_curation_ttl_policies_state ON curation_ttl_policies(review_state);
+"#,
+    "blake3:v021_curation_ttl_policy_2026_05_02",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -1470,6 +1785,11 @@ pub const MIGRATIONS: &[Migration] = &[
     V014_MODEL_REGISTRY,
     V015_GRAPH_SNAPSHOTS,
     V016_TEMPORAL_VALIDITY,
+    V017_AGENT_DETECTION_REPOSITORIES,
+    V018_WORKSPACE_SCOPE_FIELDS,
+    V019_ARTIFACT_REGISTRY,
+    V020_CURATION_REVIEW_STATE,
+    V021_CURATION_TTL_POLICY,
 ];
 
 /// Result of applying migrations.
@@ -1552,12 +1872,37 @@ pub struct CreateWorkspaceInput {
     pub name: Option<String>,
 }
 
+/// Optional monorepo/subproject scope fields for a workspace row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceScopeFields {
+    pub scope_kind: String,
+    pub repository_root: Option<String>,
+    pub repository_fingerprint: Option<String>,
+    pub subproject_path: Option<String>,
+}
+
+impl WorkspaceScopeFields {
+    #[must_use]
+    pub fn standalone() -> Self {
+        Self {
+            scope_kind: "standalone".to_string(),
+            repository_root: None,
+            repository_fingerprint: None,
+            subproject_path: None,
+        }
+    }
+}
+
 /// A stored workspace row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredWorkspace {
     pub id: String,
     pub path: String,
     pub name: Option<String>,
+    pub scope_kind: String,
+    pub repository_root: Option<String>,
+    pub repository_fingerprint: Option<String>,
+    pub subproject_path: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1565,15 +1910,38 @@ pub struct StoredWorkspace {
 impl DbConnection {
     /// Insert a new workspace.
     pub fn insert_workspace(&self, id: &str, input: &CreateWorkspaceInput) -> Result<()> {
+        self.insert_workspace_with_scope(id, input, &WorkspaceScopeFields::standalone())
+    }
+
+    /// Insert a new workspace with explicit scope metadata.
+    pub fn insert_workspace_with_scope(
+        &self,
+        id: &str,
+        input: &CreateWorkspaceInput,
+        scope: &WorkspaceScopeFields,
+    ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
 
         self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO workspaces (id, path, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO workspaces (id, path, name, scope_kind, repository_root, repository_fingerprint, subproject_path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             &[
                 Value::Text(id.to_string()),
                 Value::Text(input.path.clone()),
                 input.name.as_ref().map_or(Value::Null, |n| Value::Text(n.clone())),
+                Value::Text(scope.scope_kind.clone()),
+                scope
+                    .repository_root
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                scope
+                    .repository_fingerprint
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                scope
+                    .subproject_path
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
                 Value::Text(now.clone()),
                 Value::Text(now),
             ],
@@ -1586,7 +1954,7 @@ impl DbConnection {
     pub fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, path, name, created_at, updated_at FROM workspaces WHERE id = ?1",
+            "SELECT id, path, name, scope_kind, repository_root, repository_fingerprint, subproject_path, created_at, updated_at FROM workspaces WHERE id = ?1",
             &[Value::Text(id.to_string())],
         )?;
 
@@ -1597,7 +1965,7 @@ impl DbConnection {
     pub fn get_workspace_by_path(&self, path: &str) -> Result<Option<StoredWorkspace>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, path, name, created_at, updated_at FROM workspaces WHERE path = ?1",
+            "SELECT id, path, name, scope_kind, repository_root, repository_fingerprint, subproject_path, created_at, updated_at FROM workspaces WHERE path = ?1",
             &[Value::Text(path.to_string())],
         )?;
 
@@ -1608,7 +1976,7 @@ impl DbConnection {
     pub fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, path, name, created_at, updated_at FROM workspaces ORDER BY path ASC",
+            "SELECT id, path, name, scope_kind, repository_root, repository_fingerprint, subproject_path, created_at, updated_at FROM workspaces ORDER BY path ASC",
             &[],
         )?;
 
@@ -1636,8 +2004,548 @@ fn stored_workspace_from_row(row: &Row) -> Result<StoredWorkspace> {
         id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
         path: required_text(row, 1, DbOperation::Query, "path")?.to_string(),
         name: optional_text(row, 2)?.map(str::to_string),
-        created_at: required_text(row, 3, DbOperation::Query, "created_at")?.to_string(),
-        updated_at: required_text(row, 4, DbOperation::Query, "updated_at")?.to_string(),
+        scope_kind: required_text(row, 3, DbOperation::Query, "scope_kind")?.to_string(),
+        repository_root: optional_text(row, 4)?.map(str::to_string),
+        repository_fingerprint: optional_text(row, 5)?.map(str::to_string),
+        subproject_path: optional_text(row, 6)?.map(str::to_string),
+        created_at: required_text(row, 7, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 8, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
+/// Input for creating or updating a coding artifact registry row.
+#[derive(Debug, Clone)]
+pub struct CreateArtifactInput {
+    pub workspace_id: String,
+    pub source_kind: String,
+    pub artifact_type: String,
+    pub original_path: Option<String>,
+    pub canonical_path: Option<String>,
+    pub external_ref: Option<String>,
+    pub content_hash: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub redaction_status: String,
+    pub snippet: Option<String>,
+    pub snippet_hash: Option<String>,
+    pub provenance_uri: Option<String>,
+    pub metadata_json: Option<String>,
+}
+
+/// Stored coding artifact metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredArtifact {
+    pub id: String,
+    pub workspace_id: String,
+    pub source_kind: String,
+    pub artifact_type: String,
+    pub original_path: Option<String>,
+    pub canonical_path: Option<String>,
+    pub external_ref: Option<String>,
+    pub content_hash: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub redaction_status: String,
+    pub snippet: Option<String>,
+    pub snippet_hash: Option<String>,
+    pub provenance_uri: Option<String>,
+    pub metadata_json: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Input for linking an artifact to a durable ee target.
+#[derive(Debug, Clone)]
+pub struct CreateArtifactLinkInput {
+    pub artifact_id: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub relation: String,
+    pub metadata_json: Option<String>,
+}
+
+/// Stored artifact link row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredArtifactLink {
+    pub artifact_id: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub relation: String,
+    pub created_at: String,
+    pub metadata_json: Option<String>,
+}
+
+impl DbConnection {
+    /// Insert or update an artifact registry row.
+    pub fn upsert_artifact(&self, id: &str, input: &CreateArtifactInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let size_bytes = i64::try_from(input.size_bytes).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: format!(
+                "artifact size {} exceeds SQLite integer storage",
+                input.size_bytes
+            ),
+        })?;
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO artifacts (id, workspace_id, source_kind, artifact_type, original_path, canonical_path, external_ref, content_hash, media_type, size_bytes, redaction_status, snippet, snippet_hash, provenance_uri, metadata_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+             ON CONFLICT(id) DO UPDATE SET
+                artifact_type = excluded.artifact_type,
+                original_path = excluded.original_path,
+                canonical_path = excluded.canonical_path,
+                external_ref = excluded.external_ref,
+                content_hash = excluded.content_hash,
+                media_type = excluded.media_type,
+                size_bytes = excluded.size_bytes,
+                redaction_status = excluded.redaction_status,
+                snippet = excluded.snippet,
+                snippet_hash = excluded.snippet_hash,
+                provenance_uri = excluded.provenance_uri,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.source_kind.clone()),
+                Value::Text(input.artifact_type.clone()),
+                input
+                    .original_path
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .canonical_path
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .external_ref
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(input.content_hash.clone()),
+                Value::Text(input.media_type.clone()),
+                Value::BigInt(size_bytes),
+                Value::Text(input.redaction_status.clone()),
+                input
+                    .snippet
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .snippet_hash
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .provenance_uri
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(
+                    input
+                        .metadata_json
+                        .clone()
+                        .unwrap_or_else(|| "{}".to_string()),
+                ),
+                Value::Text(now.clone()),
+                Value::Text(now),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get one artifact by ID.
+    pub fn get_artifact(&self, id: &str) -> Result<Option<StoredArtifact>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, source_kind, artifact_type, original_path, canonical_path, external_ref, content_hash, media_type, size_bytes, redaction_status, snippet, snippet_hash, provenance_uri, metadata_json, created_at, updated_at FROM artifacts WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first().map(stored_artifact_from_row).transpose()
+    }
+
+    /// List artifacts for a workspace in stable newest-first order.
+    pub fn list_artifacts(
+        &self,
+        workspace_id: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<StoredArtifact>> {
+        let mut sql = String::from(
+            "SELECT id, workspace_id, source_kind, artifact_type, original_path, canonical_path, external_ref, content_hash, media_type, size_bytes, redaction_status, snippet, snippet_hash, provenance_uri, metadata_json, created_at, updated_at FROM artifacts WHERE workspace_id = ?1 ORDER BY created_at DESC, id ASC",
+        );
+        let mut params = vec![Value::Text(workspace_id.to_string())];
+        if let Some(limit) = limit {
+            sql.push_str(" LIMIT ?2");
+            params.push(Value::BigInt(i64::from(limit)));
+        }
+
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter().map(stored_artifact_from_row).collect()
+    }
+
+    /// Count artifacts for a workspace.
+    pub fn count_artifacts(&self, workspace_id: &str) -> Result<u32> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT COUNT(*) FROM artifacts WHERE workspace_id = ?1",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+        let count = rows.first().map_or(Ok(0_i64), |row| {
+            required_i64(row, 0, DbOperation::Query, "artifact_count")
+        })?;
+        u32::try_from(count).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: format!("artifact_count {count} must fit u32"),
+        })
+    }
+
+    /// Insert an artifact link idempotently.
+    pub fn insert_artifact_link(&self, input: &CreateArtifactLinkInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT OR IGNORE INTO artifact_links (artifact_id, target_type, target_id, relation, created_at, metadata_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            &[
+                Value::Text(input.artifact_id.clone()),
+                Value::Text(input.target_type.clone()),
+                Value::Text(input.target_id.clone()),
+                Value::Text(input.relation.clone()),
+                Value::Text(now),
+                input
+                    .metadata_json
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List links for one artifact.
+    pub fn list_artifact_links(&self, artifact_id: &str) -> Result<Vec<StoredArtifactLink>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT artifact_id, target_type, target_id, relation, created_at, metadata_json FROM artifact_links WHERE artifact_id = ?1 ORDER BY target_type ASC, target_id ASC, relation ASC",
+            &[Value::Text(artifact_id.to_string())],
+        )?;
+        rows.iter().map(stored_artifact_link_from_row).collect()
+    }
+}
+
+fn stored_artifact_from_row(row: &Row) -> Result<StoredArtifact> {
+    let size_raw = required_i64(row, 9, DbOperation::Query, "size_bytes")?;
+    let size_bytes = u64::try_from(size_raw).map_err(|_| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("size_bytes column at index 9 must be non-negative, got {size_raw}"),
+    })?;
+
+    Ok(StoredArtifact {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        source_kind: required_text(row, 2, DbOperation::Query, "source_kind")?.to_string(),
+        artifact_type: required_text(row, 3, DbOperation::Query, "artifact_type")?.to_string(),
+        original_path: optional_text(row, 4)?.map(str::to_string),
+        canonical_path: optional_text(row, 5)?.map(str::to_string),
+        external_ref: optional_text(row, 6)?.map(str::to_string),
+        content_hash: required_text(row, 7, DbOperation::Query, "content_hash")?.to_string(),
+        media_type: required_text(row, 8, DbOperation::Query, "media_type")?.to_string(),
+        size_bytes,
+        redaction_status: required_text(row, 10, DbOperation::Query, "redaction_status")?
+            .to_string(),
+        snippet: optional_text(row, 11)?.map(str::to_string),
+        snippet_hash: optional_text(row, 12)?.map(str::to_string),
+        provenance_uri: optional_text(row, 13)?.map(str::to_string),
+        metadata_json: required_text(row, 14, DbOperation::Query, "metadata_json")?.to_string(),
+        created_at: required_text(row, 15, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 16, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
+fn stored_artifact_link_from_row(row: &Row) -> Result<StoredArtifactLink> {
+    Ok(StoredArtifactLink {
+        artifact_id: required_text(row, 0, DbOperation::Query, "artifact_id")?.to_string(),
+        target_type: required_text(row, 1, DbOperation::Query, "target_type")?.to_string(),
+        target_id: required_text(row, 2, DbOperation::Query, "target_id")?.to_string(),
+        relation: required_text(row, 3, DbOperation::Query, "relation")?.to_string(),
+        created_at: required_text(row, 4, DbOperation::Query, "created_at")?.to_string(),
+        metadata_json: optional_text(row, 5)?.map(str::to_string),
+    })
+}
+
+/// Input for creating or updating an agent installation inventory row.
+#[derive(Debug, Clone)]
+pub struct CreateAgentInstallationInput {
+    pub workspace_id: String,
+    pub slug: String,
+    pub detected: bool,
+    pub detection_format_version: u32,
+    pub evidence: Vec<String>,
+    pub root_paths: Vec<String>,
+    pub observed_at: String,
+    pub metadata_json: Option<String>,
+}
+
+/// A stored agent installation inventory row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAgentInstallation {
+    pub id: String,
+    pub workspace_id: String,
+    pub slug: String,
+    pub detected: bool,
+    pub detection_format_version: u32,
+    pub evidence: Vec<String>,
+    pub root_paths: Vec<String>,
+    pub metadata_json: Option<String>,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub updated_at: String,
+}
+
+/// Input for creating or updating an agent history source inventory row.
+#[derive(Debug, Clone)]
+pub struct CreateAgentHistorySourceInput {
+    pub workspace_id: String,
+    pub installation_id: Option<String>,
+    pub agent_slug: String,
+    pub source_kind: String,
+    pub source_path: String,
+    pub path_exists: bool,
+    pub observed_at: String,
+    pub metadata_json: Option<String>,
+}
+
+/// A stored agent history source inventory row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAgentHistorySource {
+    pub id: String,
+    pub workspace_id: String,
+    pub installation_id: Option<String>,
+    pub agent_slug: String,
+    pub source_kind: String,
+    pub source_path: String,
+    pub path_exists: bool,
+    pub metadata_json: Option<String>,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub updated_at: String,
+}
+
+impl DbConnection {
+    /// Insert or update an agent installation inventory row.
+    pub fn upsert_agent_installation(
+        &self,
+        id: &str,
+        input: &CreateAgentInstallationInput,
+    ) -> Result<()> {
+        let evidence_json = json_string_vec(&input.evidence, "agent_installation.evidence")?;
+        let root_paths_json = json_string_vec(&input.root_paths, "agent_installation.root_paths")?;
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO agent_installations (id, workspace_id, slug, detected, detection_format_version, evidence_json, root_paths_json, metadata_json, first_seen_at, last_seen_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(workspace_id, slug) DO UPDATE SET
+                detected = excluded.detected,
+                detection_format_version = excluded.detection_format_version,
+                evidence_json = excluded.evidence_json,
+                root_paths_json = excluded.root_paths_json,
+                metadata_json = excluded.metadata_json,
+                last_seen_at = excluded.last_seen_at,
+                updated_at = excluded.updated_at",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.slug.clone()),
+                bool_value(input.detected),
+                Value::BigInt(i64::from(input.detection_format_version)),
+                Value::Text(evidence_json),
+                Value::Text(root_paths_json),
+                input
+                    .metadata_json
+                    .as_ref()
+                    .map_or(Value::Null, |metadata| Value::Text(metadata.clone())),
+                Value::Text(input.observed_at.clone()),
+                Value::Text(input.observed_at.clone()),
+                Value::Text(now),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get an agent installation by its internal inventory ID.
+    pub fn get_agent_installation(&self, id: &str) -> Result<Option<StoredAgentInstallation>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, slug, detected, detection_format_version, evidence_json, root_paths_json, metadata_json, first_seen_at, last_seen_at, updated_at FROM agent_installations WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first()
+            .map(stored_agent_installation_from_row)
+            .transpose()
+    }
+
+    /// Get an agent installation by stable workspace/connector slug.
+    pub fn get_agent_installation_by_slug(
+        &self,
+        workspace_id: &str,
+        slug: &str,
+    ) -> Result<Option<StoredAgentInstallation>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, slug, detected, detection_format_version, evidence_json, root_paths_json, metadata_json, first_seen_at, last_seen_at, updated_at FROM agent_installations WHERE workspace_id = ?1 AND slug = ?2",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(slug.to_string()),
+            ],
+        )?;
+
+        rows.first()
+            .map(stored_agent_installation_from_row)
+            .transpose()
+    }
+
+    /// List agent installations for a workspace in deterministic connector order.
+    pub fn list_agent_installations(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredAgentInstallation>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, slug, detected, detection_format_version, evidence_json, root_paths_json, metadata_json, first_seen_at, last_seen_at, updated_at FROM agent_installations WHERE workspace_id = ?1 ORDER BY slug ASC, id ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+
+        rows.iter()
+            .map(stored_agent_installation_from_row)
+            .collect()
+    }
+
+    /// Insert or update an agent history source inventory row.
+    pub fn upsert_agent_history_source(
+        &self,
+        id: &str,
+        input: &CreateAgentHistorySourceInput,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO agent_history_sources (id, workspace_id, installation_id, agent_slug, source_kind, source_path, path_exists, metadata_json, first_seen_at, last_seen_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(workspace_id, agent_slug, source_kind, source_path) DO UPDATE SET
+                installation_id = excluded.installation_id,
+                path_exists = excluded.path_exists,
+                metadata_json = excluded.metadata_json,
+                last_seen_at = excluded.last_seen_at,
+                updated_at = excluded.updated_at",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                input
+                    .installation_id
+                    .as_ref()
+                    .map_or(Value::Null, |installation_id| {
+                        Value::Text(installation_id.clone())
+                    }),
+                Value::Text(input.agent_slug.clone()),
+                Value::Text(input.source_kind.clone()),
+                Value::Text(input.source_path.clone()),
+                bool_value(input.path_exists),
+                input
+                    .metadata_json
+                    .as_ref()
+                    .map_or(Value::Null, |metadata| Value::Text(metadata.clone())),
+                Value::Text(input.observed_at.clone()),
+                Value::Text(input.observed_at.clone()),
+                Value::Text(now),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get an agent history source by its internal inventory ID.
+    pub fn get_agent_history_source(&self, id: &str) -> Result<Option<StoredAgentHistorySource>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, installation_id, agent_slug, source_kind, source_path, path_exists, metadata_json, first_seen_at, last_seen_at, updated_at FROM agent_history_sources WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first()
+            .map(stored_agent_history_source_from_row)
+            .transpose()
+    }
+
+    /// List agent history sources for a workspace in deterministic source order.
+    pub fn list_agent_history_sources(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredAgentHistorySource>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, installation_id, agent_slug, source_kind, source_path, path_exists, metadata_json, first_seen_at, last_seen_at, updated_at FROM agent_history_sources WHERE workspace_id = ?1 ORDER BY agent_slug ASC, source_kind ASC, source_path ASC, id ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+
+        rows.iter()
+            .map(stored_agent_history_source_from_row)
+            .collect()
+    }
+
+    /// List agent history sources for one connector in deterministic source order.
+    pub fn list_agent_history_sources_for_agent(
+        &self,
+        workspace_id: &str,
+        agent_slug: &str,
+    ) -> Result<Vec<StoredAgentHistorySource>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, installation_id, agent_slug, source_kind, source_path, path_exists, metadata_json, first_seen_at, last_seen_at, updated_at FROM agent_history_sources WHERE workspace_id = ?1 AND agent_slug = ?2 ORDER BY source_kind ASC, source_path ASC, id ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(agent_slug.to_string()),
+            ],
+        )?;
+
+        rows.iter()
+            .map(stored_agent_history_source_from_row)
+            .collect()
+    }
+}
+
+fn stored_agent_installation_from_row(row: &Row) -> Result<StoredAgentInstallation> {
+    Ok(StoredAgentInstallation {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        slug: required_text(row, 2, DbOperation::Query, "slug")?.to_string(),
+        detected: required_bool(row, 3, DbOperation::Query, "detected")?,
+        detection_format_version: required_u32(
+            row,
+            4,
+            DbOperation::Query,
+            "detection_format_version",
+        )?,
+        evidence: required_json_string_vec(row, 5, "evidence_json")?,
+        root_paths: required_json_string_vec(row, 6, "root_paths_json")?,
+        metadata_json: optional_text(row, 7)?.map(str::to_string),
+        first_seen_at: required_text(row, 8, DbOperation::Query, "first_seen_at")?.to_string(),
+        last_seen_at: required_text(row, 9, DbOperation::Query, "last_seen_at")?.to_string(),
+        updated_at: required_text(row, 10, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
+fn stored_agent_history_source_from_row(row: &Row) -> Result<StoredAgentHistorySource> {
+    Ok(StoredAgentHistorySource {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        installation_id: optional_text(row, 2)?.map(str::to_string),
+        agent_slug: required_text(row, 3, DbOperation::Query, "agent_slug")?.to_string(),
+        source_kind: required_text(row, 4, DbOperation::Query, "source_kind")?.to_string(),
+        source_path: required_text(row, 5, DbOperation::Query, "source_path")?.to_string(),
+        path_exists: required_bool(row, 6, DbOperation::Query, "path_exists")?,
+        metadata_json: optional_text(row, 7)?.map(str::to_string),
+        first_seen_at: required_text(row, 8, DbOperation::Query, "first_seen_at")?.to_string(),
+        last_seen_at: required_text(row, 9, DbOperation::Query, "last_seen_at")?.to_string(),
+        updated_at: required_text(row, 10, DbOperation::Query, "updated_at")?.to_string(),
     })
 }
 
@@ -2632,10 +3540,18 @@ impl DbConnection {
     /// Mark a feedback event as applied.
     pub fn apply_feedback_event(&self, id: &str) -> Result<bool> {
         let now = Utc::now().to_rfc3339();
+        self.apply_feedback_event_at(id, &now)
+    }
+
+    /// Mark a feedback event as applied at a caller-supplied timestamp.
+    pub fn apply_feedback_event_at(&self, id: &str, applied_at: &str) -> Result<bool> {
         let affected = self.execute_for(
             DbOperation::Execute,
             "UPDATE feedback_events SET applied_at = ?1 WHERE id = ?2 AND applied_at IS NULL",
-            &[Value::Text(now), Value::Text(id.to_string())],
+            &[
+                Value::Text(applied_at.to_string()),
+                Value::Text(id.to_string()),
+            ],
         )?;
 
         Ok(affected > 0)
@@ -2745,6 +3661,9 @@ impl DbConnection {
 
 /// Feedback scoring constants (EE-081).
 pub mod feedback_scoring {
+    /// Helpful feedback half-life in days.
+    pub const HELPFUL_HALF_LIFE_DAYS: u32 = 90;
+
     /// Base weight for human-explicit feedback signals.
     pub const WEIGHT_HUMAN_EXPLICIT: f32 = 2.0;
     /// Base weight for agent-validated feedback signals.
@@ -2760,12 +3679,19 @@ pub mod feedback_scoring {
     /// Base weight for decay-trigger feedback signals.
     pub const WEIGHT_DECAY_TRIGGER: f32 = 0.3;
 
-    /// Multiplier applied to negative signals (harmful effects outweigh helpful ones).
-    pub const NEGATIVE_MULTIPLIER: f32 = 1.5;
+    /// Multiplier applied to harmful signals.
+    pub const HARMFUL_MULTIPLIER: f32 = 4.0;
+    /// Generic negative feedback weighting used by harmful and inaccurate signals.
+    pub const NEGATIVE_MULTIPLIER: f32 = HARMFUL_MULTIPLIER;
     /// Multiplier applied to contradiction signals.
-    pub const CONTRADICTION_MULTIPLIER: f32 = 2.0;
+    pub const CONTRADICTION_MULTIPLIER: f32 = 5.0;
     /// Multiplier applied to decay signals (stale/outdated).
     pub const DECAY_MULTIPLIER: f32 = 0.5;
+
+    /// Minimum harmful feedback events before a rule may be considered for inversion.
+    pub const AUTO_INVERT_MIN_HARMFUL: u32 = 3;
+    /// Minimum harmful/helpful ratio before inversion may be considered.
+    pub const AUTO_INVERT_RATIO: f32 = 2.0;
 
     /// Minimum feedback events before confidence adjustment applies.
     pub const MIN_FEEDBACK_FOR_ADJUSTMENT: u32 = 2;
@@ -2785,6 +3711,17 @@ pub mod feedback_scoring {
     /// Maximum confidence ceiling.
     pub const CONFIDENCE_CEILING: f32 = 1.0;
 
+    /// Utility multiplier for candidate rules.
+    pub const MATURITY_MULTIPLIER_CANDIDATE: f32 = 0.5;
+    /// Utility multiplier for established rules.
+    pub const MATURITY_MULTIPLIER_ESTABLISHED: f32 = 1.0;
+    /// Utility multiplier for proven rules.
+    pub const MATURITY_MULTIPLIER_PROVEN: f32 = 1.5;
+    /// Utility multiplier for deprecated rules.
+    pub const MATURITY_MULTIPLIER_DEPRECATED: f32 = 0.0;
+    /// Utility multiplier for retired rules.
+    pub const MATURITY_MULTIPLIER_RETIRED: f32 = 0.0;
+
     /// Returns the base weight for a given source type.
     #[must_use]
     pub fn source_weight(source_type: &str) -> f32 {
@@ -2798,6 +3735,30 @@ pub mod feedback_scoring {
             "decay_trigger" => WEIGHT_DECAY_TRIGGER,
             _ => 1.0,
         }
+    }
+
+    /// Returns the utility multiplier for a procedural rule maturity label.
+    #[must_use]
+    pub fn maturity_multiplier(maturity: &str) -> f32 {
+        match maturity {
+            "candidate" | "draft" => MATURITY_MULTIPLIER_CANDIDATE,
+            "established" => MATURITY_MULTIPLIER_ESTABLISHED,
+            "proven" | "validated" => MATURITY_MULTIPLIER_PROVEN,
+            "deprecated" => MATURITY_MULTIPLIER_DEPRECATED,
+            "retired" | "superseded" => MATURITY_MULTIPLIER_RETIRED,
+            _ => MATURITY_MULTIPLIER_ESTABLISHED,
+        }
+    }
+
+    /// Returns the remaining helpful-evidence weight after age-based confidence decay.
+    #[must_use]
+    pub fn helpful_decay_factor(age_days: u32) -> f32 {
+        if age_days == 0 {
+            return 1.0;
+        }
+
+        let half_lives = age_days as f32 / HELPFUL_HALF_LIFE_DAYS as f32;
+        0.5_f32.powf(half_lives).clamp(CONFIDENCE_FLOOR, 1.0)
     }
 
     /// Returns the signal multiplier for a given signal type.
@@ -2838,13 +3799,21 @@ impl FeedbackCounts {
     /// Returns a value to add to current confidence (may be negative).
     #[must_use]
     pub fn confidence_adjustment(&self) -> f32 {
+        self.confidence_adjustment_at_age(0)
+    }
+
+    /// Calculate confidence adjustment with helpful-evidence decay (EE-082).
+    /// Harmful and contradiction-derived feedback remains fully weighted.
+    #[must_use]
+    pub fn confidence_adjustment_at_age(&self, age_days: u32) -> f32 {
         use feedback_scoring::*;
 
         if self.total_count() < MIN_FEEDBACK_FOR_ADJUSTMENT {
             return 0.0;
         }
 
-        let positive_effect = (self.positive_weight / 10.0).min(MAX_CONFIDENCE_BOOST);
+        let decayed_positive = self.positive_weight * helpful_decay_factor(age_days);
+        let positive_effect = (decayed_positive / 10.0).min(MAX_CONFIDENCE_BOOST);
         let negative_effect =
             (self.negative_weight * NEGATIVE_MULTIPLIER / 10.0).min(MAX_CONFIDENCE_PENALTY);
         let decay_effect = self.decay_weight * DECAY_MULTIPLIER / 20.0;
@@ -2856,9 +3825,15 @@ impl FeedbackCounts {
     /// Apply confidence adjustment to a base confidence value (EE-081).
     #[must_use]
     pub fn apply_to_confidence(&self, base_confidence: f32) -> f32 {
+        self.apply_to_confidence_at_age(base_confidence, 0)
+    }
+
+    /// Apply age-aware confidence adjustment to a base confidence value (EE-082).
+    #[must_use]
+    pub fn apply_to_confidence_at_age(&self, base_confidence: f32, age_days: u32) -> f32 {
         use feedback_scoring::*;
 
-        let adjusted = base_confidence + self.confidence_adjustment();
+        let adjusted = base_confidence + self.confidence_adjustment_at_age(age_days);
         adjusted.clamp(CONFIDENCE_FLOOR, CONFIDENCE_CEILING)
     }
 
@@ -3462,6 +4437,18 @@ fn stored_memory_from_row(row: &Row) -> Result<StoredMemory> {
     })
 }
 
+fn score_fields_changed(
+    existing: &StoredMemory,
+    confidence: f32,
+    utility: f32,
+    importance: f32,
+) -> bool {
+    const EPSILON: f32 = 0.000_001;
+    (existing.confidence - confidence).abs() > EPSILON
+        || (existing.utility - utility).abs() > EPSILON
+        || (existing.importance - importance).abs() > EPSILON
+}
+
 fn required_f64(row: &Row, index: usize, operation: DbOperation, column: &str) -> Result<f64> {
     required_value(row, index, operation, column)?
         .as_f64()
@@ -3469,6 +4456,57 @@ fn required_f64(row: &Row, index: usize, operation: DbOperation, column: &str) -
             operation,
             message: format!("{column} column at index {index} is not a float"),
         })
+}
+
+fn optional_f32(
+    row: &Row,
+    index: usize,
+    operation: DbOperation,
+    column: &str,
+) -> Result<Option<f32>> {
+    let Some(value) = row.get(index) else {
+        return Ok(None);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(None);
+    }
+    value
+        .as_f64()
+        .map(|value| Some(value as f32))
+        .ok_or_else(|| DbError::MalformedRow {
+            operation,
+            message: format!("{column} column at index {index} is not a float"),
+        })
+}
+
+fn bool_value(value: bool) -> Value {
+    Value::BigInt(if value { 1 } else { 0 })
+}
+
+fn required_bool(row: &Row, index: usize, operation: DbOperation, column: &str) -> Result<bool> {
+    match required_i64(row, index, operation, column)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        value => Err(DbError::MalformedRow {
+            operation,
+            message: format!("{column} column at index {index} must be 0 or 1, got {value}"),
+        }),
+    }
+}
+
+fn json_string_vec(values: &[String], context: &str) -> Result<String> {
+    serde_json::to_string(values).map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message: format!("{context} could not be serialized as JSON: {error}"),
+    })
+}
+
+fn required_json_string_vec(row: &Row, index: usize, column: &str) -> Result<Vec<String>> {
+    let raw = required_text(row, index, DbOperation::Query, column)?;
+    serde_json::from_str(raw).map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("{column} column at index {index} is not a string array: {error}"),
+    })
 }
 
 fn optional_text(row: &Row, index: usize) -> Result<Option<&str>> {
@@ -3500,6 +4538,653 @@ fn optional_u32(
             operation,
             message: format!("{column} column at index {index} must fit u32"),
         })
+}
+
+/// Input for creating a procedural rule row.
+#[derive(Debug, Clone)]
+pub struct CreateProceduralRuleInput {
+    pub workspace_id: String,
+    pub content: String,
+    pub confidence: f32,
+    pub utility: f32,
+    pub importance: f32,
+    pub trust_class: String,
+    pub scope: String,
+    pub scope_pattern: Option<String>,
+    pub maturity: String,
+    pub source_memory_ids: Vec<String>,
+    pub tags: Vec<String>,
+}
+
+/// A stored procedural rule row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredProceduralRule {
+    pub id: String,
+    pub workspace_id: String,
+    pub content: String,
+    pub confidence: f32,
+    pub utility: f32,
+    pub importance: f32,
+    pub trust_class: String,
+    pub scope: String,
+    pub scope_pattern: Option<String>,
+    pub maturity: String,
+    pub positive_feedback_count: u32,
+    pub negative_feedback_count: u32,
+    pub last_applied_at: Option<String>,
+    pub last_validated_at: Option<String>,
+    pub superseded_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub tombstoned_at: Option<String>,
+}
+
+/// Input for creating a curation candidate row.
+#[derive(Debug, Clone)]
+pub struct CreateCurationCandidateInput {
+    pub workspace_id: String,
+    pub candidate_type: String,
+    pub target_memory_id: String,
+    pub proposed_content: Option<String>,
+    pub proposed_confidence: Option<f32>,
+    pub proposed_trust_class: Option<String>,
+    pub source_type: String,
+    pub source_id: Option<String>,
+    pub reason: String,
+    pub confidence: f32,
+    pub status: Option<String>,
+    pub created_at: Option<String>,
+    pub ttl_expires_at: Option<String>,
+}
+
+/// A stored curation candidate row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredCurationCandidate {
+    pub id: String,
+    pub workspace_id: String,
+    pub candidate_type: String,
+    pub target_memory_id: String,
+    pub proposed_content: Option<String>,
+    pub proposed_confidence: Option<f32>,
+    pub proposed_trust_class: Option<String>,
+    pub source_type: String,
+    pub source_id: Option<String>,
+    pub reason: String,
+    pub confidence: f32,
+    pub status: String,
+    pub created_at: String,
+    pub reviewed_at: Option<String>,
+    pub reviewed_by: Option<String>,
+    pub applied_at: Option<String>,
+    pub ttl_expires_at: Option<String>,
+    pub review_state: String,
+    pub snoozed_until: Option<String>,
+    pub merged_into_candidate_id: Option<String>,
+    pub state_entered_at: Option<String>,
+    pub last_action_at: Option<String>,
+    pub ttl_policy_id: Option<String>,
+}
+
+/// Explicit review-state mutation for one curation candidate.
+#[derive(Clone, Copy, Debug)]
+pub struct CurationCandidateReviewUpdate<'a> {
+    pub status: &'a str,
+    pub review_state: &'a str,
+    pub reviewed_at: &'a str,
+    pub reviewed_by: &'a str,
+    pub snoozed_until: Option<&'a str>,
+    pub merged_into_candidate_id: Option<&'a str>,
+    pub ttl_policy_id: Option<&'a str>,
+}
+
+/// Deterministic TTL policy row for the curation review queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCurationTtlPolicy {
+    pub id: String,
+    pub review_state: String,
+    pub threshold_seconds: u64,
+    pub action: String,
+    pub requires_evidence_count: u32,
+    pub requires_distinct_sessions: u32,
+    pub requires_no_harmful_within_seconds: Option<u64>,
+    pub auto_promote_enabled: bool,
+    pub created_at: String,
+}
+
+/// Complete memory values after applying a curation candidate.
+#[derive(Debug, Clone)]
+pub struct ApplyMemoryCurationInput {
+    pub workspace_id: String,
+    pub content: String,
+    pub confidence: f32,
+    pub trust_class: String,
+}
+
+/// Complete score values after applying an explicit maintenance update.
+#[derive(Debug, Clone)]
+pub struct ApplyMemoryScoreUpdateInput {
+    pub workspace_id: String,
+    pub confidence: f32,
+    pub utility: f32,
+    pub importance: f32,
+    pub updated_at: String,
+    pub actor: Option<String>,
+    pub details: String,
+    pub feedback_event_ids: Vec<String>,
+}
+
+fn default_curation_ttl_policy_id_for_status(status: &str) -> &'static str {
+    match status {
+        "approved" => "curation.validated.default",
+        "rejected" => "curation.harmful.default",
+        "pending" | "expired" | "applied" => "curation.proposed.default",
+        _ => "curation.proposed.default",
+    }
+}
+
+pub fn default_curation_ttl_policy_id_for_review_state(review_state: &str) -> &'static str {
+    match review_state {
+        "accepted" => "curation.validated.default",
+        "snoozed" => "curation.snoozed.default",
+        "rejected" => "curation.harmful.default",
+        "new" | "needs_evidence" | "needs_scope" | "duplicate" | "merged" | "superseded"
+        | "expired" | "applied" => "curation.proposed.default",
+        _ => "curation.proposed.default",
+    }
+}
+
+impl DbConnection {
+    /// Insert a curation candidate proposal.
+    pub fn insert_curation_candidate(
+        &self,
+        id: &str,
+        input: &CreateCurationCandidateInput,
+    ) -> Result<()> {
+        let created_at = input
+            .created_at
+            .clone()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        let status = input.status.clone().unwrap_or_else(|| "pending".to_owned());
+        let ttl_policy_id = default_curation_ttl_policy_id_for_status(&status);
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO curation_candidates (id, workspace_id, candidate_type, target_memory_id, proposed_content, proposed_confidence, proposed_trust_class, source_type, source_id, reason, confidence, status, created_at, ttl_expires_at, state_entered_at, last_action_at, ttl_policy_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.candidate_type.clone()),
+                Value::Text(input.target_memory_id.clone()),
+                input
+                    .proposed_content
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .proposed_confidence
+                    .map_or(Value::Null, Value::Float),
+                input
+                    .proposed_trust_class
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(input.source_type.clone()),
+                input
+                    .source_id
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(input.reason.clone()),
+                Value::Float(input.confidence),
+                Value::Text(status),
+                Value::Text(created_at.clone()),
+                input
+                    .ttl_expires_at
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(created_at.clone()),
+                Value::Text(created_at),
+                Value::Text(ttl_policy_id.to_owned()),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// List curation candidates in stable review order.
+    pub fn list_curation_candidates(
+        &self,
+        workspace_id: &str,
+        candidate_type: Option<&str>,
+        status: Option<&str>,
+        target_memory_id: Option<&str>,
+    ) -> Result<Vec<StoredCurationCandidate>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, candidate_type, target_memory_id, proposed_content, proposed_confidence, proposed_trust_class, source_type, source_id, reason, confidence, status, created_at, reviewed_at, reviewed_by, applied_at, ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id, state_entered_at, last_action_at, ttl_policy_id FROM curation_candidates WHERE workspace_id = ?1 AND (?2 IS NULL OR candidate_type = ?2) AND (?3 IS NULL OR status = ?3) AND (?4 IS NULL OR target_memory_id = ?4) ORDER BY created_at DESC, id ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                candidate_type.map_or(Value::Null, |value| Value::Text(value.to_string())),
+                status.map_or(Value::Null, |value| Value::Text(value.to_string())),
+                target_memory_id.map_or(Value::Null, |value| Value::Text(value.to_string())),
+            ],
+        )?;
+
+        rows.iter()
+            .map(stored_curation_candidate_from_row)
+            .collect()
+    }
+
+    /// Get one curation candidate by ID within a workspace.
+    pub fn get_curation_candidate(
+        &self,
+        workspace_id: &str,
+        candidate_id: &str,
+    ) -> Result<Option<StoredCurationCandidate>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, candidate_type, target_memory_id, proposed_content, proposed_confidence, proposed_trust_class, source_type, source_id, reason, confidence, status, created_at, reviewed_at, reviewed_by, applied_at, ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id, state_entered_at, last_action_at, ttl_policy_id FROM curation_candidates WHERE workspace_id = ?1 AND id = ?2",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(candidate_id.to_string()),
+            ],
+        )?;
+
+        rows.first()
+            .map(stored_curation_candidate_from_row)
+            .transpose()
+    }
+
+    /// Record a validation review decision for a curation candidate.
+    pub fn update_curation_candidate_review(
+        &self,
+        workspace_id: &str,
+        candidate_id: &str,
+        update: CurationCandidateReviewUpdate<'_>,
+    ) -> Result<bool> {
+        let ttl_policy_id = update
+            .ttl_policy_id
+            .unwrap_or_else(|| default_curation_ttl_policy_id_for_review_state(update.review_state));
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE curation_candidates SET status = ?1, review_state = ?2, reviewed_at = ?3, reviewed_by = ?4, snoozed_until = ?5, merged_into_candidate_id = ?6, state_entered_at = ?3, last_action_at = ?3, ttl_policy_id = ?7 WHERE workspace_id = ?8 AND id = ?9",
+            &[
+                Value::Text(update.status.to_string()),
+                Value::Text(update.review_state.to_string()),
+                Value::Text(update.reviewed_at.to_string()),
+                Value::Text(update.reviewed_by.to_string()),
+                update
+                    .snoozed_until
+                    .map_or(Value::Null, |value| Value::Text(value.to_string())),
+                update
+                    .merged_into_candidate_id
+                    .map_or(Value::Null, |value| Value::Text(value.to_string())),
+                Value::Text(ttl_policy_id.to_string()),
+                Value::Text(workspace_id.to_string()),
+                Value::Text(candidate_id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// List deterministic curation TTL policies in stable policy-id order.
+    pub fn list_curation_ttl_policies(&self) -> Result<Vec<StoredCurationTtlPolicy>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, review_state, threshold_seconds, action, requires_evidence_count, requires_distinct_sessions, requires_no_harmful_within_seconds, auto_promote_enabled, created_at FROM curation_ttl_policies ORDER BY id ASC",
+            &[],
+        )?;
+
+        rows.iter().map(stored_curation_ttl_policy_from_row).collect()
+    }
+
+    /// Apply an approved curation candidate to a memory's mutable scored fields.
+    pub fn apply_memory_curation_update(
+        &self,
+        memory_id: &str,
+        input: &ApplyMemoryCurationInput,
+    ) -> Result<bool> {
+        let Some(existing) = self.get_memory(memory_id)? else {
+            return Ok(false);
+        };
+        if existing.workspace_id != input.workspace_id || existing.tombstoned_at.is_some() {
+            return Ok(false);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let provenance_chain_hash =
+            compute_memory_provenance_chain_hash_fields(&MemoryProvenanceChainFields {
+                id: memory_id,
+                workspace_id: &input.workspace_id,
+                level: &existing.level,
+                kind: &existing.kind,
+                content: &input.content,
+                confidence: input.confidence,
+                utility: existing.utility,
+                importance: existing.importance,
+                provenance_uri: existing.provenance_uri.as_deref(),
+                trust_class: &input.trust_class,
+                trust_subclass: existing.trust_subclass.as_deref(),
+                created_at: &existing.created_at,
+            });
+
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET content = ?1, confidence = ?2, trust_class = ?3, updated_at = ?4, provenance_chain_hash = ?5, provenance_chain_hash_version = ?6, provenance_verification_status = ?7, provenance_verified_at = NULL, provenance_verification_note = NULL WHERE id = ?8 AND workspace_id = ?9 AND tombstoned_at IS NULL",
+            &[
+                Value::Text(input.content.clone()),
+                Value::Float(input.confidence),
+                Value::Text(input.trust_class.clone()),
+                Value::Text(now),
+                Value::Text(provenance_chain_hash),
+                Value::Text(PROVENANCE_CHAIN_HASH_VERSION.to_string()),
+                Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
+                Value::Text(memory_id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Mark an approved curation candidate as applied.
+    pub fn mark_curation_candidate_applied(
+        &self,
+        workspace_id: &str,
+        candidate_id: &str,
+        applied_at: &str,
+    ) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE curation_candidates SET status = 'applied', review_state = 'applied', applied_at = ?1, state_entered_at = ?1, last_action_at = ?1, ttl_policy_id = ?4 WHERE workspace_id = ?2 AND id = ?3 AND status = 'approved'",
+            &[
+                Value::Text(applied_at.to_string()),
+                Value::Text(workspace_id.to_string()),
+                Value::Text(candidate_id.to_string()),
+                Value::Text(default_curation_ttl_policy_id_for_review_state("applied").to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Apply a maintenance score update to a memory and record an audit entry.
+    pub fn apply_memory_score_update_audited(
+        &self,
+        memory_id: &str,
+        input: &ApplyMemoryScoreUpdateInput,
+    ) -> Result<Option<String>> {
+        self.begin()?;
+
+        match self.apply_memory_score_update_audited_inner(memory_id, input) {
+            Ok(audit_id) => {
+                self.commit()?;
+                Ok(audit_id)
+            }
+            Err(err) => {
+                let _ = self.rollback();
+                Err(err)
+            }
+        }
+    }
+
+    fn apply_memory_score_update_audited_inner(
+        &self,
+        memory_id: &str,
+        input: &ApplyMemoryScoreUpdateInput,
+    ) -> Result<Option<String>> {
+        let Some(existing) = self.get_memory(memory_id)? else {
+            return Ok(None);
+        };
+        if existing.workspace_id != input.workspace_id || existing.tombstoned_at.is_some() {
+            return Ok(None);
+        }
+        if !score_fields_changed(&existing, input.confidence, input.utility, input.importance) {
+            return Ok(None);
+        }
+
+        let mut updated = existing.clone();
+        updated.confidence = input.confidence;
+        updated.utility = input.utility;
+        updated.importance = input.importance;
+        let provenance_chain_hash = compute_memory_provenance_chain_hash(&updated);
+
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET confidence = ?1, utility = ?2, importance = ?3, updated_at = ?4, provenance_chain_hash = ?5, provenance_chain_hash_version = ?6, provenance_verification_status = ?7, provenance_verified_at = NULL, provenance_verification_note = NULL WHERE id = ?8 AND workspace_id = ?9 AND tombstoned_at IS NULL",
+            &[
+                Value::Float(input.confidence),
+                Value::Float(input.utility),
+                Value::Float(input.importance),
+                Value::Text(input.updated_at.clone()),
+                Value::Text(provenance_chain_hash),
+                Value::Text(PROVENANCE_CHAIN_HASH_VERSION.to_string()),
+                Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
+                Value::Text(memory_id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+            ],
+        )?;
+        if affected == 0 {
+            return Ok(None);
+        }
+
+        for event_id in &input.feedback_event_ids {
+            self.apply_feedback_event_at(event_id, &input.updated_at)?;
+        }
+
+        let audit_id = generate_audit_id();
+        self.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(input.workspace_id.clone()),
+                actor: input.actor.clone(),
+                action: audit_actions::MEMORY_SCORE_DECAY.to_string(),
+                target_type: Some("memory".to_string()),
+                target_id: Some(memory_id.to_string()),
+                details: Some(input.details.clone()),
+            },
+        )?;
+
+        Ok(Some(audit_id))
+    }
+
+    /// Insert a procedural rule and its evidence/tag junction rows.
+    pub fn insert_procedural_rule(
+        &self,
+        id: &str,
+        input: &CreateProceduralRuleInput,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO procedural_rules (id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.content.clone()),
+                Value::Float(input.confidence),
+                Value::Float(input.utility),
+                Value::Float(input.importance),
+                Value::Text(input.trust_class.clone()),
+                Value::Text(input.scope.clone()),
+                input
+                    .scope_pattern
+                    .as_ref()
+                    .map_or(Value::Null, |pattern| Value::Text(pattern.clone())),
+                Value::Text(input.maturity.clone()),
+                Value::Text(now.clone()),
+                Value::Text(now),
+            ],
+        )?;
+
+        for memory_id in &input.source_memory_ids {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO rule_source_memories (rule_id, memory_id) VALUES (?1, ?2)",
+                &[Value::Text(id.to_string()), Value::Text(memory_id.clone())],
+            )?;
+        }
+
+        for tag in &input.tags {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO rule_tags (rule_id, tag) VALUES (?1, ?2)",
+                &[Value::Text(id.to_string()), Value::Text(tag.clone())],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Get a procedural rule by ID.
+    pub fn get_procedural_rule(&self, id: &str) -> Result<Option<StoredProceduralRule>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, positive_feedback_count, negative_feedback_count, last_applied_at, last_validated_at, superseded_by, created_at, updated_at, tombstoned_at FROM procedural_rules WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first()
+            .map(stored_procedural_rule_from_row)
+            .transpose()
+    }
+
+    /// List procedural rules in stable order, optionally filtering by maturity,
+    /// scope, and tombstone status.
+    pub fn list_procedural_rules(
+        &self,
+        workspace_id: &str,
+        maturity: Option<&str>,
+        scope: Option<&str>,
+        include_tombstoned: bool,
+    ) -> Result<Vec<StoredProceduralRule>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, positive_feedback_count, negative_feedback_count, last_applied_at, last_validated_at, superseded_by, created_at, updated_at, tombstoned_at FROM procedural_rules WHERE workspace_id = ?1 AND (?2 IS NULL OR maturity = ?2) AND (?3 IS NULL OR scope = ?3) AND (?4 = 1 OR tombstoned_at IS NULL) ORDER BY updated_at DESC, id ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                maturity.map_or(Value::Null, |value| Value::Text(value.to_string())),
+                scope.map_or(Value::Null, |value| Value::Text(value.to_string())),
+                Value::Int(if include_tombstoned { 1 } else { 0 }),
+            ],
+        )?;
+
+        rows.iter().map(stored_procedural_rule_from_row).collect()
+    }
+
+    /// Get tags for a procedural rule in stable order.
+    pub fn get_rule_tags(&self, rule_id: &str) -> Result<Vec<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT tag FROM rule_tags WHERE rule_id = ?1 ORDER BY tag ASC",
+            &[Value::Text(rule_id.to_string())],
+        )?;
+
+        rows.iter()
+            .map(|row| required_text(row, 0, DbOperation::Query, "tag").map(str::to_string))
+            .collect()
+    }
+
+    /// Get source memory IDs for a procedural rule in stable order.
+    pub fn get_rule_source_memory_ids(&self, rule_id: &str) -> Result<Vec<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT memory_id FROM rule_source_memories WHERE rule_id = ?1 ORDER BY memory_id ASC",
+            &[Value::Text(rule_id.to_string())],
+        )?;
+
+        rows.iter()
+            .map(|row| required_text(row, 0, DbOperation::Query, "memory_id").map(str::to_string))
+            .collect()
+    }
+}
+
+fn stored_procedural_rule_from_row(row: &Row) -> Result<StoredProceduralRule> {
+    Ok(StoredProceduralRule {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        content: required_text(row, 2, DbOperation::Query, "content")?.to_string(),
+        confidence: required_f64(row, 3, DbOperation::Query, "confidence")? as f32,
+        utility: required_f64(row, 4, DbOperation::Query, "utility")? as f32,
+        importance: required_f64(row, 5, DbOperation::Query, "importance")? as f32,
+        trust_class: required_text(row, 6, DbOperation::Query, "trust_class")?.to_string(),
+        scope: required_text(row, 7, DbOperation::Query, "scope")?.to_string(),
+        scope_pattern: optional_text(row, 8)?.map(str::to_string),
+        maturity: required_text(row, 9, DbOperation::Query, "maturity")?.to_string(),
+        positive_feedback_count: required_u32(
+            row,
+            10,
+            DbOperation::Query,
+            "positive_feedback_count",
+        )?,
+        negative_feedback_count: required_u32(
+            row,
+            11,
+            DbOperation::Query,
+            "negative_feedback_count",
+        )?,
+        last_applied_at: optional_text(row, 12)?.map(str::to_string),
+        last_validated_at: optional_text(row, 13)?.map(str::to_string),
+        superseded_by: optional_text(row, 14)?.map(str::to_string),
+        created_at: required_text(row, 15, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 16, DbOperation::Query, "updated_at")?.to_string(),
+        tombstoned_at: optional_text(row, 17)?.map(str::to_string),
+    })
+}
+
+fn stored_curation_candidate_from_row(row: &Row) -> Result<StoredCurationCandidate> {
+    Ok(StoredCurationCandidate {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        candidate_type: required_text(row, 2, DbOperation::Query, "candidate_type")?.to_string(),
+        target_memory_id: required_text(row, 3, DbOperation::Query, "target_memory_id")?
+            .to_string(),
+        proposed_content: optional_text(row, 4)?.map(str::to_string),
+        proposed_confidence: optional_f32(row, 5, DbOperation::Query, "proposed_confidence")?,
+        proposed_trust_class: optional_text(row, 6)?.map(str::to_string),
+        source_type: required_text(row, 7, DbOperation::Query, "source_type")?.to_string(),
+        source_id: optional_text(row, 8)?.map(str::to_string),
+        reason: required_text(row, 9, DbOperation::Query, "reason")?.to_string(),
+        confidence: required_f64(row, 10, DbOperation::Query, "confidence")? as f32,
+        status: required_text(row, 11, DbOperation::Query, "status")?.to_string(),
+        created_at: required_text(row, 12, DbOperation::Query, "created_at")?.to_string(),
+        reviewed_at: optional_text(row, 13)?.map(str::to_string),
+        reviewed_by: optional_text(row, 14)?.map(str::to_string),
+        applied_at: optional_text(row, 15)?.map(str::to_string),
+        ttl_expires_at: optional_text(row, 16)?.map(str::to_string),
+        review_state: optional_text(row, 17)?.unwrap_or("new").to_string(),
+        snoozed_until: optional_text(row, 18)?.map(str::to_string),
+        merged_into_candidate_id: optional_text(row, 19)?.map(str::to_string),
+        state_entered_at: optional_text(row, 20)?.map(str::to_string),
+        last_action_at: optional_text(row, 21)?.map(str::to_string),
+        ttl_policy_id: optional_text(row, 22)?.map(str::to_string),
+    })
+}
+
+fn stored_curation_ttl_policy_from_row(row: &Row) -> Result<StoredCurationTtlPolicy> {
+    Ok(StoredCurationTtlPolicy {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        review_state: required_text(row, 1, DbOperation::Query, "review_state")?.to_string(),
+        threshold_seconds: required_u64(row, 2, DbOperation::Query, "threshold_seconds")?,
+        action: required_text(row, 3, DbOperation::Query, "action")?.to_string(),
+        requires_evidence_count: required_u32(
+            row,
+            4,
+            DbOperation::Query,
+            "requires_evidence_count",
+        )?,
+        requires_distinct_sessions: required_u32(
+            row,
+            5,
+            DbOperation::Query,
+            "requires_distinct_sessions",
+        )?,
+        requires_no_harmful_within_seconds: optional_u64(
+            row,
+            6,
+            DbOperation::Query,
+            "requires_no_harmful_within_seconds",
+        )?,
+        auto_promote_enabled: required_i64(row, 7, DbOperation::Query, "auto_promote_enabled")?
+            != 0,
+        created_at: required_text(row, 8, DbOperation::Query, "created_at")?.to_string(),
+    })
 }
 
 /// Input for creating a new audit log entry.
@@ -4034,6 +5719,29 @@ impl DbConnection {
         rows.iter().map(stored_search_index_job_from_row).collect()
     }
 
+    /// List pending search index jobs for processing in stable FIFO order.
+    pub fn list_pending_search_index_jobs(
+        &self,
+        workspace_id: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<StoredSearchIndexJob>> {
+        let mut sql = String::from(
+            "SELECT id, workspace_id, job_type, document_source, document_id, status, documents_total, documents_indexed, error_message, created_at, started_at, completed_at FROM search_index_jobs WHERE workspace_id = ?1 AND status = ?2 ORDER BY created_at ASC, id ASC",
+        );
+        let mut params: Vec<Value> = vec![
+            Value::Text(workspace_id.to_string()),
+            Value::Text(SearchIndexJobStatus::Pending.as_str().to_string()),
+        ];
+
+        if let Some(limit) = limit {
+            sql.push_str(" LIMIT ?3");
+            params.push(Value::BigInt(i64::from(limit)));
+        }
+
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter().map(stored_search_index_job_from_row).collect()
+    }
+
     /// Start a search index job (set status to running).
     pub fn start_search_index_job(&self, id: &str) -> Result<bool> {
         let now = Utc::now().to_rfc3339();
@@ -4061,6 +5769,20 @@ impl DbConnection {
             "UPDATE search_index_jobs SET documents_indexed = ?1 WHERE id = ?2 AND status = ?3",
             &[
                 Value::BigInt(i64::from(documents_indexed)),
+                Value::Text(id.to_string()),
+                Value::Text(SearchIndexJobStatus::Running.as_str().to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Update the planned total for a running search index job.
+    pub fn update_search_index_job_total(&self, id: &str, documents_total: u32) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE search_index_jobs SET documents_total = ?1 WHERE id = ?2 AND status = ?3",
+            &[
+                Value::BigInt(i64::from(documents_total)),
                 Value::Text(id.to_string()),
                 Value::Text(SearchIndexJobStatus::Running.as_str().to_string()),
             ],
@@ -5446,7 +7168,8 @@ mod tests {
     use sqlmodel_core::{Row, Value};
 
     use super::{
-        DatabaseConfig, DatabaseLocation, DatabaseOpenMode, DbConnection, DbError, DbOperation,
+        CreateArtifactInput, CreateArtifactLinkInput, CreateWorkspaceInput, DatabaseConfig,
+        DatabaseLocation, DatabaseOpenMode, DbConnection, DbError, DbOperation,
         MIGRATION_TABLE_NAME, MigrationRecord, MigrationTableColumn, subsystem_name,
     };
     use crate::models::{
@@ -5530,6 +7253,13 @@ mod tests {
                     column.primary_key_position(),
                 )
             })
+            .collect()
+    }
+
+    fn migration_versions() -> Vec<u32> {
+        super::MIGRATIONS
+            .iter()
+            .map(super::Migration::version)
             .collect()
     }
 
@@ -5801,8 +7531,8 @@ mod tests {
 
         ensure_equal(
             &result.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-            "V001-V014 must be applied",
+            &migration_versions(),
+            "all migrations must be applied",
         )?;
         ensure_equal(&result.skipped().len(), &0, "no migrations skipped")?;
 
@@ -5880,6 +7610,26 @@ mod tests {
             table_names.contains(&"model_registry"),
             "model_registry table must exist",
         )?;
+        ensure(
+            table_names.contains(&"graph_snapshots"),
+            "graph_snapshots table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"agent_installations"),
+            "agent_installations table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"agent_history_sources"),
+            "agent_history_sources table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"artifacts"),
+            "artifacts table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"artifact_links"),
+            "artifact_links table must exist",
+        )?;
 
         connection.close()?;
         Ok(())
@@ -5892,17 +7642,89 @@ mod tests {
         let first = connection.migrate()?;
         ensure_equal(
             &first.applied().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-            "first run applies V001-V014",
+            &migration_versions(),
+            "first run applies all migrations",
         )?;
 
         let second = connection.migrate()?;
         ensure_equal(&second.applied().len(), &0, "second run applies nothing")?;
         ensure_equal(
             &second.skipped().to_vec(),
-            &vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-            "second run skips V001-V014",
+            &migration_versions(),
+            "second run skips all migrations",
         )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_registry_upserts_lists_and_links_rows() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_0123456789abcdef0123456789";
+        let artifact_id = "art_0123456789abcdef0123456789";
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/workspace/project".to_string(),
+                name: Some("project".to_string()),
+            },
+        )?;
+
+        let input = CreateArtifactInput {
+            workspace_id: workspace_id.to_string(),
+            source_kind: "file".to_string(),
+            artifact_type: "log".to_string(),
+            original_path: Some("logs/build.log".to_string()),
+            canonical_path: Some("/workspace/project/logs/build.log".to_string()),
+            external_ref: None,
+            content_hash: "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            media_type: "text/plain".to_string(),
+            size_bytes: 42,
+            redaction_status: "checked".to_string(),
+            snippet: Some("build ok".to_string()),
+            snippet_hash: Some(
+                "blake3:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    .to_string(),
+            ),
+            provenance_uri: Some("file:///workspace/project/logs/build.log".to_string()),
+            metadata_json: Some(r#"{"title":"build log"}"#.to_string()),
+        };
+        connection.upsert_artifact(artifact_id, &input)?;
+        connection.upsert_artifact(artifact_id, &input)?;
+        connection.insert_artifact_link(&CreateArtifactLinkInput {
+            artifact_id: artifact_id.to_string(),
+            target_type: "memory".to_string(),
+            target_id: "mem_0123456789abcdef0123456789".to_string(),
+            relation: "evidence_for".to_string(),
+            metadata_json: None,
+        })?;
+
+        let artifact = connection
+            .get_artifact(artifact_id)?
+            .ok_or_else(|| TestFailure::new("artifact row missing"))?;
+        ensure_equal(&artifact.id.as_str(), &artifact_id, "artifact id")?;
+        ensure_equal(
+            &artifact.workspace_id.as_str(),
+            &workspace_id,
+            "workspace id",
+        )?;
+        ensure_equal(&artifact.redaction_status.as_str(), &"checked", "redaction")?;
+        ensure_equal(
+            &connection.count_artifacts(workspace_id)?,
+            &1,
+            "artifact count",
+        )?;
+        ensure_equal(
+            &connection.list_artifacts(workspace_id, Some(10))?.len(),
+            &1,
+            "artifact list length",
+        )?;
+        let links = connection.list_artifact_links(artifact_id)?;
+        ensure_equal(&links.len(), &1, "artifact link count")?;
+        ensure_equal(&links[0].target_type.as_str(), &"memory", "link target")?;
 
         connection.close()?;
         Ok(())
@@ -5942,8 +7764,8 @@ mod tests {
 
         ensure_equal(
             &connection.schema_version()?,
-            &Some(14),
-            "after migrations, schema version is 14",
+            &migration_versions().last().copied(),
+            "after migrations, schema version is latest migration",
         )?;
 
         connection.close()?;
@@ -7757,6 +9579,65 @@ mod tests {
             "path",
         )?;
         ensure_equal(&workspace.name, &Some("Test Project".to_string()), "name")?;
+        ensure_equal(
+            &workspace.scope_kind.as_str(),
+            &"standalone",
+            "default scope kind",
+        )?;
+        ensure(
+            workspace.repository_root.is_none(),
+            "default repository root is absent",
+        )?;
+        ensure(
+            workspace.repository_fingerprint.is_none(),
+            "default repository fingerprint is absent",
+        )?;
+        ensure(
+            workspace.subproject_path.is_none(),
+            "default subproject path is absent",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_workspace_with_scope_persists_monorepo_fields() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let input = super::CreateWorkspaceInput {
+            path: "/repo/crates/api".to_string(),
+            name: Some("api".to_string()),
+        };
+        let scope = super::WorkspaceScopeFields {
+            scope_kind: "subproject".to_string(),
+            repository_root: Some("/repo".to_string()),
+            repository_fingerprint: Some("repo:0123456789abcdef01234567".to_string()),
+            subproject_path: Some("crates/api".to_string()),
+        };
+
+        connection.insert_workspace_with_scope("wsp_scope000000000000000000000", &input, &scope)?;
+
+        let workspace = connection
+            .get_workspace("wsp_scope000000000000000000000")?
+            .ok_or_else(|| TestFailure::new("workspace should exist"))?;
+        ensure_equal(&workspace.scope_kind.as_str(), &"subproject", "scope kind")?;
+        ensure_equal(
+            &workspace.repository_root,
+            &Some("/repo".to_string()),
+            "repository root",
+        )?;
+        ensure_equal(
+            &workspace.repository_fingerprint,
+            &Some("repo:0123456789abcdef01234567".to_string()),
+            "repository fingerprint",
+        )?;
+        ensure_equal(
+            &workspace.subproject_path,
+            &Some("crates/api".to_string()),
+            "subproject path",
+        )?;
 
         connection.close()?;
         Ok(())
@@ -7820,6 +9701,253 @@ mod tests {
             &workspaces[1].path.as_str(),
             &"/z/last",
             "second by path order",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn upsert_agent_installation_preserves_identity_and_updates_scan_state() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        connection.insert_workspace(
+            "wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &super::CreateWorkspaceInput {
+                path: "/tmp/agent-installations".to_string(),
+                name: Some("agent installation workspace".to_string()),
+            },
+        )?;
+
+        let first = super::CreateAgentInstallationInput {
+            workspace_id: "wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            slug: "codex".to_string(),
+            detected: true,
+            detection_format_version: 1,
+            evidence: vec!["root_exists".to_string()],
+            root_paths: vec!["/home/user/.codex/sessions".to_string()],
+            observed_at: "2026-01-01T00:00:00Z".to_string(),
+            metadata_json: Some(r#"{"source":"franken_agent_detection"}"#.to_string()),
+        };
+        connection.upsert_agent_installation("agi_aaaaaaaaaaaaaaaaaaaaaaaaaa", &first)?;
+
+        let second = super::CreateAgentInstallationInput {
+            detected: false,
+            evidence: vec!["root_missing".to_string()],
+            root_paths: vec![],
+            observed_at: "2026-01-02T00:00:00Z".to_string(),
+            ..first
+        };
+        connection.upsert_agent_installation("agi_bbbbbbbbbbbbbbbbbbbbbbbbbb", &second)?;
+
+        let fetched = connection
+            .get_agent_installation_by_slug("wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa", "codex")?
+            .ok_or_else(|| TestFailure::new("codex installation should exist"))?;
+
+        ensure_equal(
+            &fetched.id.as_str(),
+            &"agi_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "upsert preserves original id",
+        )?;
+        ensure(!fetched.detected, "second scan updates detected state")?;
+        ensure_equal(
+            &fetched.evidence,
+            &vec!["root_missing".to_string()],
+            "evidence updates",
+        )?;
+        ensure(fetched.root_paths.is_empty(), "root paths update")?;
+        ensure_equal(
+            &fetched.first_seen_at.as_str(),
+            &"2026-01-01T00:00:00Z",
+            "first_seen_at preserved",
+        )?;
+        ensure_equal(
+            &fetched.last_seen_at.as_str(),
+            &"2026-01-02T00:00:00Z",
+            "last_seen_at updated",
+        )?;
+
+        let by_id = connection.get_agent_installation("agi_aaaaaaaaaaaaaaaaaaaaaaaaaa")?;
+        ensure(by_id.is_some(), "installation fetchable by id")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_agent_installations_filters_workspace_and_sorts_by_slug() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        connection.insert_workspace(
+            "wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &super::CreateWorkspaceInput {
+                path: "/tmp/agent-sort-a".to_string(),
+                name: None,
+            },
+        )?;
+        connection.insert_workspace(
+            "wsp_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+            &super::CreateWorkspaceInput {
+                path: "/tmp/agent-sort-b".to_string(),
+                name: None,
+            },
+        )?;
+
+        for (id, workspace_id, slug) in [
+            (
+                "agi_cccccccccccccccccccccccccc",
+                "wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "gemini",
+            ),
+            (
+                "agi_dddddddddddddddddddddddddd",
+                "wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "codex",
+            ),
+            (
+                "agi_eeeeeeeeeeeeeeeeeeeeeeeeee",
+                "wsp_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "claude",
+            ),
+        ] {
+            connection.upsert_agent_installation(
+                id,
+                &super::CreateAgentInstallationInput {
+                    workspace_id: workspace_id.to_string(),
+                    slug: slug.to_string(),
+                    detected: true,
+                    detection_format_version: 1,
+                    evidence: vec![format!("{slug}_evidence")],
+                    root_paths: vec![format!("/tmp/{slug}")],
+                    observed_at: "2026-01-01T00:00:00Z".to_string(),
+                    metadata_json: None,
+                },
+            )?;
+        }
+
+        let installations =
+            connection.list_agent_installations("wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa")?;
+        let slugs: Vec<&str> = installations
+            .iter()
+            .map(|installation| installation.slug.as_str())
+            .collect();
+
+        ensure_equal(&slugs, &vec!["codex", "gemini"], "sorted workspace slugs")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn upsert_agent_history_source_preserves_identity_and_filters_by_agent() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        connection.insert_workspace(
+            "wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &super::CreateWorkspaceInput {
+                path: "/tmp/history-sources".to_string(),
+                name: None,
+            },
+        )?;
+
+        connection.upsert_agent_installation(
+            "agi_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &super::CreateAgentInstallationInput {
+                workspace_id: "wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                slug: "codex".to_string(),
+                detected: true,
+                detection_format_version: 1,
+                evidence: vec!["root_exists".to_string()],
+                root_paths: vec!["/home/user/.codex/sessions".to_string()],
+                observed_at: "2026-01-01T00:00:00Z".to_string(),
+                metadata_json: None,
+            },
+        )?;
+
+        let first = super::CreateAgentHistorySourceInput {
+            workspace_id: "wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            installation_id: Some("agi_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            agent_slug: "codex".to_string(),
+            source_kind: "probe_path".to_string(),
+            source_path: "~/.codex/sessions".to_string(),
+            path_exists: false,
+            observed_at: "2026-01-01T00:00:00Z".to_string(),
+            metadata_json: None,
+        };
+        connection.upsert_agent_history_source("ahs_aaaaaaaaaaaaaaaaaaaaaaaaaa", &first)?;
+
+        let second = super::CreateAgentHistorySourceInput {
+            path_exists: true,
+            observed_at: "2026-01-03T00:00:00Z".to_string(),
+            metadata_json: Some(r#"{"scan":"second"}"#.to_string()),
+            ..first
+        };
+        connection.upsert_agent_history_source("ahs_bbbbbbbbbbbbbbbbbbbbbbbbbb", &second)?;
+
+        connection.upsert_agent_history_source(
+            "ahs_cccccccccccccccccccccccccc",
+            &super::CreateAgentHistorySourceInput {
+                workspace_id: "wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                installation_id: None,
+                agent_slug: "claude".to_string(),
+                source_kind: "probe_path".to_string(),
+                source_path: "~/.claude/projects".to_string(),
+                path_exists: true,
+                observed_at: "2026-01-02T00:00:00Z".to_string(),
+                metadata_json: None,
+            },
+        )?;
+
+        let source = connection
+            .get_agent_history_source("ahs_aaaaaaaaaaaaaaaaaaaaaaaaaa")?
+            .ok_or_else(|| TestFailure::new("history source should exist"))?;
+        ensure_equal(
+            &source.id.as_str(),
+            &"ahs_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "upsert preserves source id",
+        )?;
+        ensure(source.path_exists, "second scan updates existence")?;
+        ensure_equal(
+            &source.metadata_json,
+            &Some(r#"{"scan":"second"}"#.to_string()),
+            "metadata updates",
+        )?;
+        ensure_equal(
+            &source.first_seen_at.as_str(),
+            &"2026-01-01T00:00:00Z",
+            "source first_seen_at preserved",
+        )?;
+        ensure_equal(
+            &source.last_seen_at.as_str(),
+            &"2026-01-03T00:00:00Z",
+            "source last_seen_at updated",
+        )?;
+
+        let codex_sources = connection
+            .list_agent_history_sources_for_agent("wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa", "codex")?;
+        ensure_equal(&codex_sources.len(), &1_usize, "one codex source")?;
+        let codex_source = codex_sources
+            .first()
+            .ok_or_else(|| TestFailure::new("codex source should exist after count check"))?;
+        ensure_equal(
+            &codex_source.source_path.as_str(),
+            &"~/.codex/sessions",
+            "codex source path",
+        )?;
+
+        let all_sources =
+            connection.list_agent_history_sources("wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa")?;
+        let slugs: Vec<&str> = all_sources
+            .iter()
+            .map(|source| source.agent_slug.as_str())
+            .collect();
+        ensure_equal(
+            &slugs,
+            &vec!["claude", "codex"],
+            "workspace sources sorted by agent slug",
         )?;
 
         connection.close()?;
@@ -9042,7 +11170,11 @@ mod tests {
         ensure(report.integrity_check.passed, "integrity passed")?;
         ensure(report.foreign_key_check.passed, "foreign keys passed")?;
         ensure(!report.needs_migration, "no migration needed")?;
-        ensure_equal(&report.schema_version, &Some(14), "schema version is 14")?;
+        ensure_equal(
+            &report.schema_version,
+            &migration_versions().last().copied(),
+            "schema version is latest migration",
+        )?;
 
         connection.close()?;
         Ok(())
@@ -9621,6 +11753,175 @@ mod tests {
         ensure((0.0..=1.0).contains(&low), "trust score in [0,1]")?;
         ensure(high > 0.5, "positive feedback yields high trust")?;
         ensure(low < 0.5, "negative feedback yields low trust")
+    }
+
+    #[test]
+    fn feedback_scoring_plan_constants_are_stable() -> TestResult {
+        use super::feedback_scoring::*;
+
+        ensure_equal(&HELPFUL_HALF_LIFE_DAYS, &90, "helpful half-life")?;
+        ensure_equal(&HARMFUL_MULTIPLIER, &4.0, "harmful multiplier")?;
+        ensure_equal(
+            &AUTO_INVERT_MIN_HARMFUL,
+            &3,
+            "auto-invert minimum harmful feedback",
+        )?;
+        ensure_equal(&AUTO_INVERT_RATIO, &2.0, "auto-invert ratio")?;
+        ensure_equal(&MATURITY_MULTIPLIER_CANDIDATE, &0.5, "candidate multiplier")?;
+        ensure_equal(
+            &MATURITY_MULTIPLIER_ESTABLISHED,
+            &1.0,
+            "established multiplier",
+        )?;
+        ensure_equal(&MATURITY_MULTIPLIER_PROVEN, &1.5, "proven multiplier")?;
+        ensure_equal(
+            &MATURITY_MULTIPLIER_DEPRECATED,
+            &0.0,
+            "deprecated multiplier",
+        )?;
+        ensure_equal(&MATURITY_MULTIPLIER_RETIRED, &0.0, "retired multiplier")
+    }
+
+    #[test]
+    fn feedback_scoring_maturity_multiplier_maps_plan_and_domain_labels() -> TestResult {
+        use super::feedback_scoring::*;
+
+        ensure_equal(
+            &maturity_multiplier("candidate"),
+            &MATURITY_MULTIPLIER_CANDIDATE,
+            "candidate",
+        )?;
+        ensure_equal(
+            &maturity_multiplier("draft"),
+            &MATURITY_MULTIPLIER_CANDIDATE,
+            "draft maps to candidate",
+        )?;
+        ensure_equal(
+            &maturity_multiplier("established"),
+            &MATURITY_MULTIPLIER_ESTABLISHED,
+            "established",
+        )?;
+        ensure_equal(
+            &maturity_multiplier("proven"),
+            &MATURITY_MULTIPLIER_PROVEN,
+            "proven",
+        )?;
+        ensure_equal(
+            &maturity_multiplier("validated"),
+            &MATURITY_MULTIPLIER_PROVEN,
+            "validated maps to proven",
+        )?;
+        ensure_equal(
+            &maturity_multiplier("deprecated"),
+            &MATURITY_MULTIPLIER_DEPRECATED,
+            "deprecated",
+        )?;
+        ensure_equal(
+            &maturity_multiplier("retired"),
+            &MATURITY_MULTIPLIER_RETIRED,
+            "retired",
+        )?;
+        ensure_equal(
+            &maturity_multiplier("superseded"),
+            &MATURITY_MULTIPLIER_RETIRED,
+            "superseded maps to retired",
+        )?;
+        ensure_equal(
+            &maturity_multiplier("unexpected"),
+            &MATURITY_MULTIPLIER_ESTABLISHED,
+            "unknown maturity defaults to established",
+        )
+    }
+
+    #[test]
+    fn feedback_scoring_helpful_decay_factor_uses_half_life() -> TestResult {
+        use super::feedback_scoring::*;
+
+        let fresh = helpful_decay_factor(0);
+        let half_life = helpful_decay_factor(HELPFUL_HALF_LIFE_DAYS);
+        let two_half_lives = helpful_decay_factor(HELPFUL_HALF_LIFE_DAYS * 2);
+        let ancient = helpful_decay_factor(10_000);
+
+        ensure_equal(&fresh, &1.0, "fresh helpful evidence keeps full weight")?;
+        ensure(
+            (half_life - 0.5).abs() < 0.0001,
+            "one half-life leaves half weight",
+        )?;
+        ensure(
+            (two_half_lives - 0.25).abs() < 0.0001,
+            "two half-lives leave quarter weight",
+        )?;
+        ensure_equal(
+            &ancient,
+            &CONFIDENCE_FLOOR,
+            "decay factor respects confidence floor",
+        )
+    }
+
+    #[test]
+    fn feedback_counts_confidence_adjustment_at_age_decays_helpful_evidence() -> TestResult {
+        let counts = super::FeedbackCounts {
+            positive_weight: 3.0,
+            positive_count: 3,
+            ..Default::default()
+        };
+
+        let fresh = counts.confidence_adjustment_at_age(0);
+        let aged =
+            counts.confidence_adjustment_at_age(super::feedback_scoring::HELPFUL_HALF_LIFE_DAYS);
+
+        ensure(fresh > aged, "fresh helpful feedback has larger boost")?;
+        ensure(
+            aged > 0.0,
+            "aged helpful feedback still contributes above floor",
+        )?;
+        ensure(
+            fresh <= super::feedback_scoring::MAX_CONFIDENCE_BOOST,
+            "fresh boost remains capped",
+        )
+    }
+
+    #[test]
+    fn feedback_counts_confidence_adjustment_at_age_preserves_harmful_weight() -> TestResult {
+        let counts = super::FeedbackCounts {
+            negative_weight: 1.0,
+            negative_count: 2,
+            ..Default::default()
+        };
+
+        ensure_equal(
+            &counts.confidence_adjustment_at_age(0),
+            &counts.confidence_adjustment_at_age(365),
+            "harmful feedback does not decay with helpful half-life",
+        )
+    }
+
+    #[test]
+    fn feedback_counts_apply_to_confidence_at_age_clamps_bounds() -> TestResult {
+        let strong_positive = super::FeedbackCounts {
+            positive_weight: 100.0,
+            positive_count: 10,
+            ..Default::default()
+        };
+        let strong_negative = super::FeedbackCounts {
+            negative_weight: 100.0,
+            negative_count: 10,
+            ..Default::default()
+        };
+
+        let boosted = strong_positive.apply_to_confidence_at_age(0.95, 0);
+        let penalized = strong_negative.apply_to_confidence_at_age(0.01, 365);
+
+        ensure_equal(
+            &boosted,
+            &super::feedback_scoring::CONFIDENCE_CEILING,
+            "boosted confidence clamps to ceiling",
+        )?;
+        ensure_equal(
+            &penalized,
+            &super::feedback_scoring::CONFIDENCE_FLOOR,
+            "penalized confidence clamps to floor",
+        )
     }
 
     #[test]
