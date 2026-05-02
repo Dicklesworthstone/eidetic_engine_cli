@@ -391,6 +391,23 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
             expected_exit_code: 0,
             expect_clean_stderr: true,
         },
+        StepSpec {
+            subsystem: "causal",
+            name: "causal_estimate_dry_run",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace.display().to_string(),
+                "--json".to_owned(),
+                "causal".to_owned(),
+                "estimate".to_owned(),
+                "--artifact-id".to_owned(),
+                "art-001".to_owned(),
+                "--dry-run".to_owned(),
+            ],
+            expected_schema_contains: "ee.causal.estimate",
+            expected_exit_code: 0,
+            expect_clean_stderr: true,
+        },
     ];
 
     let mut command_logs = Vec::with_capacity(steps.len());
@@ -481,7 +498,7 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
     )?;
     ensure_equal(
         &parsed_summary["command_count"],
-        &serde_json::json!(6),
+        &serde_json::json!(7),
         "summary command count",
     )?;
     ensure(
