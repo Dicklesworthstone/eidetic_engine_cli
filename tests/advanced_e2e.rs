@@ -1604,6 +1604,50 @@ fn preflight_close_dry_run_records_feedback_shape() -> TestResult {
 }
 
 #[test]
+fn preflight_close_without_cleared_infers_false_alarm_for_success() -> TestResult {
+    let output = run_ee(&[
+        "preflight",
+        "close",
+        "pf_gate16_contract",
+        "--reason",
+        "advanced e2e inferred feedback check",
+        "--task-outcome",
+        "success",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
+    ensure(
+        output.stderr.is_empty(),
+        "json command must keep diagnostics off stderr",
+    )?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "preflight close response schema",
+    )?;
+    ensure_equal(
+        &json["data"]["new_status"],
+        &serde_json::json!("cancelled"),
+        "uncleared preflight close status",
+    )?;
+    ensure_equal(
+        &json["data"]["feedback"]["feedback_kind"],
+        &serde_json::json!("false_alarm"),
+        "inferred feedback kind",
+    )?;
+    ensure_equal(
+        &json["data"]["feedback"]["signal"],
+        &serde_json::json!("inaccurate"),
+        "inferred feedback signal",
+    )
+}
+
+#[test]
 fn preflight_show_rejects_invalid_run_id_with_usage_error() -> TestResult {
     let output = run_ee(&["preflight", "show", "invalid", "--json"])?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
