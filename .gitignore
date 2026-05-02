@@ -78,6 +78,12 @@ Cargo.lock.bak
 .claude/
 .codex/
 .cursor/
+!tests/fixtures/agent_detect/remote_mirror/
+!tests/fixtures/agent_detect/remote_mirror/**
+!tests/fixtures/agent_detect/remote_mirror/**/.claude/
+!tests/fixtures/agent_detect/remote_mirror/**/.claude/**
+!tests/fixtures/agent_detect/remote_mirror/**/.codex/
+!tests/fixtures/agent_detect/remote_mirror/**/.codex/**
 
 # Python tooling caches (some helper scripts may run python)
 __pycache__/

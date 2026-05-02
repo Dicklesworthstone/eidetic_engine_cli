@@ -10,6 +10,8 @@ Each subdirectory simulates a detected agent installation:
 - `gemini/tmp/` - Simulates Gemini CLI installation  
 - `claude/projects/` - Simulates Claude Code installation
 - `cursor/.cursor/` - Simulates Cursor IDE installation
+- `remote_mirror/ssh-csd/home/agent/.codex/sessions/` - Simulates a Codex root mirrored from `/home/agent/.codex/sessions` on host `csd`
+- `remote_mirror/ssh-csd/home/agent/.claude/projects/` - Simulates a Claude root mirrored from `/home/agent/.claude/projects` on host `csd`
 
 ## Usage
 
@@ -36,3 +38,7 @@ let opts = AgentDetectOptions {
 ```
 
 This enables deterministic tests that don't depend on actual system state.
+
+Remote mirror fixtures are intentionally plain directories. `ee` uses them to
+publish deterministic origin metadata and path rewrite rules without enabling
+connector-backed history readers in the default dependency profile.
