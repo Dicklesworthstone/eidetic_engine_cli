@@ -294,6 +294,10 @@ impl DbConnection {
         Ok(IntegrityReport {
             integrity_check: integrity,
             foreign_key_check: foreign_keys,
+            reference_check: ReferenceIntegrityReport {
+                issue_count: 0,
+                issues: Vec::new(),
+            },
             schema_version,
             needs_migration,
         })
@@ -622,6 +626,7 @@ pub struct ForeignKeyCheckResult {
 pub struct IntegrityReport {
     pub integrity_check: IntegrityCheckResult,
     pub foreign_key_check: ForeignKeyCheckResult,
+    pub reference_check: ReferenceIntegrityReport,
     pub schema_version: Option<u32>,
     pub needs_migration: bool,
 }
@@ -629,7 +634,81 @@ pub struct IntegrityReport {
 impl IntegrityReport {
     /// Returns true if the database passes all integrity checks.
     pub fn is_healthy(&self) -> bool {
-        self.integrity_check.passed && self.foreign_key_check.passed && !self.needs_migration
+        self.integrity_check.passed
+            && self.foreign_key_check.passed
+            && self.reference_check.is_clean()
+            && !self.needs_migration
+    }
+}
+
+/// Logical reference domains that require integrity checks beyond SQLite
+/// foreign keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceIntegrityScope {
+    MemoryLink,
+    PackItem,
+    PackOmission,
+    PackRecord,
+}
+
+impl ReferenceIntegrityScope {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MemoryLink => "memory_link",
+            Self::PackItem => "pack_item",
+            Self::PackOmission => "pack_omission",
+            Self::PackRecord => "pack_record",
+        }
+    }
+}
+
+/// Stable issue codes for reference integrity findings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceIntegrityCode {
+    CrossWorkspaceMemoryLink,
+    CrossWorkspacePackItem,
+    CrossWorkspacePackOmission,
+    PackItemCountMismatch,
+    PackOmissionCountMismatch,
+}
+
+impl ReferenceIntegrityCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CrossWorkspaceMemoryLink => "cross_workspace_memory_link",
+            Self::CrossWorkspacePackItem => "cross_workspace_pack_item",
+            Self::CrossWorkspacePackOmission => "cross_workspace_pack_omission",
+            Self::PackItemCountMismatch => "pack_item_count_mismatch",
+            Self::PackOmissionCountMismatch => "pack_omission_count_mismatch",
+        }
+    }
+}
+
+/// One detected integrity issue for links or pack references.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceIntegrityIssue {
+    pub scope: ReferenceIntegrityScope,
+    pub code: ReferenceIntegrityCode,
+    pub owner_id: String,
+    pub referenced_id: Option<String>,
+    pub expected: Option<String>,
+    pub actual: Option<String>,
+    pub detail: String,
+}
+
+/// Aggregate report for logical link and pack-reference integrity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceIntegrityReport {
+    pub issue_count: u32,
+    pub issues: Vec<ReferenceIntegrityIssue>,
+}
+
+impl ReferenceIntegrityReport {
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.issue_count == 0
     }
 }
 
@@ -756,10 +835,13 @@ fn optional_i64(
 ) -> Result<Option<i64>> {
     match required_value(row, index, operation, column)? {
         Value::Null => Ok(None),
-        value => value.as_i64().map(Some).ok_or_else(|| DbError::MalformedRow {
-            operation,
-            message: format!("{column} column at index {index} is not an integer"),
-        }),
+        value => value
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| DbError::MalformedRow {
+                operation,
+                message: format!("{column} column at index {index} is not an integer"),
+            }),
     }
 }
 
@@ -4799,9 +4881,9 @@ impl DbConnection {
         candidate_id: &str,
         update: CurationCandidateReviewUpdate<'_>,
     ) -> Result<bool> {
-        let ttl_policy_id = update
-            .ttl_policy_id
-            .unwrap_or_else(|| default_curation_ttl_policy_id_for_review_state(update.review_state));
+        let ttl_policy_id = update.ttl_policy_id.unwrap_or_else(|| {
+            default_curation_ttl_policy_id_for_review_state(update.review_state)
+        });
         let affected = self.execute_for(
             DbOperation::Execute,
             "UPDATE curation_candidates SET status = ?1, review_state = ?2, reviewed_at = ?3, reviewed_by = ?4, snoozed_until = ?5, merged_into_candidate_id = ?6, state_entered_at = ?3, last_action_at = ?3, ttl_policy_id = ?7 WHERE workspace_id = ?8 AND id = ?9",
@@ -4832,7 +4914,9 @@ impl DbConnection {
             &[],
         )?;
 
-        rows.iter().map(stored_curation_ttl_policy_from_row).collect()
+        rows.iter()
+            .map(stored_curation_ttl_policy_from_row)
+            .collect()
     }
 
     /// Apply an approved curation candidate to a memory's mutable scored fields.

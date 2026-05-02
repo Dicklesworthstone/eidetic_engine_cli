@@ -4,7 +4,10 @@
 //! the output layer renders as JSON or human-readable text.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::hint::black_box;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
@@ -14,7 +17,7 @@ use crate::config::{
     resolve_workspace,
 };
 use crate::db::{
-    DbConnection, StoredCurationCandidate, StoredCurationTtlPolicy,
+    CreateCurationCandidateInput, DbConnection, StoredCurationCandidate, StoredCurationTtlPolicy,
     default_curation_ttl_policy_id_for_review_state,
 };
 use crate::models::CapabilityStatus;
@@ -776,8 +779,7 @@ fn curation_health_from_rows(
             candidate.reviewed_at.as_deref(),
         ) && let Ok(reviewed) = DateTime::parse_from_rfc3339(reviewed)
         {
-            reviewed_latencies
-                .push(reviewed.signed_duration_since(created).num_days().max(0));
+            reviewed_latencies.push(reviewed.signed_duration_since(created).num_days().max(0));
         }
 
         if pending_count > 0
@@ -787,9 +789,8 @@ fn curation_health_from_rows(
                 .signed_duration_since(created.with_timezone(&Utc))
                 .num_days()
                 .max(0);
-            oldest_pending_age_days = Some(oldest_pending_age_days.map_or(age, |oldest| {
-                std::cmp::max(oldest, age)
-            }));
+            oldest_pending_age_days =
+                Some(oldest_pending_age_days.map_or(age, |oldest| std::cmp::max(oldest, age)));
         }
 
         let policy_id = candidate
@@ -913,6 +914,260 @@ fn capped_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+/// Canonical Criterion group name for the status benchmark.
+pub const STATUS_BENCH_GROUP_NAME: &str = "ee_status";
+/// Hard p50 ceiling (ms) from plan section 28 for `ee status`.
+pub const STATUS_BENCH_HARD_CEILING_MS: f64 = 100.0;
+/// Quick benchmark iteration count used by regression tests.
+pub const STATUS_BENCH_QUICK_ITERATIONS: u32 = 5;
+
+/// Input scale for status benchmarking.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StatusBenchScale {
+    pub name: &'static str,
+    pub candidate_count: usize,
+}
+
+/// Required scale set for `ee status` benchmark runs.
+pub const STATUS_BENCH_SCALES: [StatusBenchScale; 3] = [
+    StatusBenchScale {
+        name: "empty",
+        candidate_count: 0,
+    },
+    StatusBenchScale {
+        name: "candidate_100",
+        candidate_count: 100,
+    },
+    StatusBenchScale {
+        name: "candidate_5000",
+        candidate_count: 5_000,
+    },
+];
+
+/// Prepared workspace fixture for one status benchmark scale.
+#[derive(Clone, Debug)]
+pub struct StatusBenchFixture {
+    scale: StatusBenchScale,
+    workspace_path: PathBuf,
+}
+
+impl StatusBenchFixture {
+    /// Build a deterministic local workspace fixture and seed curation rows.
+    pub fn prepare(scale: StatusBenchScale) -> Result<Self, String> {
+        let workspace_path = status_bench_workspace_path(scale);
+        let ee_dir = workspace_path.join(".ee");
+        fs::create_dir_all(&ee_dir).map_err(|error| {
+            format!(
+                "failed to create benchmark workspace directory {}: {error}",
+                ee_dir.display()
+            )
+        })?;
+
+        let database_path = ee_dir.join("ee.db");
+        let connection = DbConnection::open_file(&database_path)
+            .map_err(|error| format!("failed to open benchmark database: {error}"))?;
+        connection
+            .migrate()
+            .map_err(|error| format!("failed to migrate benchmark database: {error}"))?;
+
+        let canonical_workspace = workspace_path
+            .canonicalize()
+            .unwrap_or_else(|_| workspace_path.clone());
+        let workspace_id = stable_workspace_id(&canonical_workspace);
+        seed_status_bench_candidates(&connection, &workspace_id, scale.candidate_count)?;
+
+        Ok(Self {
+            scale,
+            workspace_path,
+        })
+    }
+
+    #[must_use]
+    pub const fn scale(&self) -> StatusBenchScale {
+        self.scale
+    }
+
+    #[must_use]
+    pub fn workspace_path(&self) -> &Path {
+        &self.workspace_path
+    }
+
+    /// Measure one `ee status` report generation against this fixture.
+    pub fn measure_once(&self) -> Result<Duration, String> {
+        let started_at = Instant::now();
+        let report = StatusReport::gather_for_workspace(&self.workspace_path);
+        let elapsed = started_at.elapsed();
+
+        let expected = capped_u32(self.scale.candidate_count);
+        if report.curation_health.total_count != expected {
+            return Err(format!(
+                "status benchmark expected {} curation candidates for scale `{}`, got {}",
+                expected, self.scale.name, report.curation_health.total_count
+            ));
+        }
+
+        black_box(report);
+        Ok(elapsed)
+    }
+
+    /// Run repeated measurements and return deterministic summary stats.
+    pub fn run_iterations(&self, iterations: u32) -> Result<StatusBenchSample, String> {
+        if iterations == 0 {
+            return Err("status benchmark iterations must be greater than zero".to_owned());
+        }
+
+        let mut samples_ms = Vec::with_capacity(iterations as usize);
+        for _ in 0..iterations {
+            let elapsed = self.measure_once()?;
+            samples_ms.push(duration_ms(elapsed));
+        }
+
+        let p50_ms = percentile_ms(&samples_ms, 0.50);
+        let max_ms = samples_ms.iter().copied().fold(0.0_f64, f64::max);
+
+        Ok(StatusBenchSample {
+            scale_name: self.scale.name,
+            candidate_count: self.scale.candidate_count,
+            iterations,
+            p50_ms,
+            max_ms,
+            hard_ceiling_ms: STATUS_BENCH_HARD_CEILING_MS,
+            samples_ms,
+        })
+    }
+}
+
+/// Benchmark sample summary for one scale.
+#[derive(Clone, Debug)]
+pub struct StatusBenchSample {
+    pub scale_name: &'static str,
+    pub candidate_count: usize,
+    pub iterations: u32,
+    pub p50_ms: f64,
+    pub max_ms: f64,
+    pub hard_ceiling_ms: f64,
+    pub samples_ms: Vec<f64>,
+}
+
+/// Complete benchmark report for `ee status`.
+#[derive(Clone, Debug)]
+pub struct StatusBenchReport {
+    pub operation: &'static str,
+    pub iterations_per_scale: u32,
+    pub aggregate_p50_ms: f64,
+    pub hard_ceiling_ms: f64,
+    pub scales: Vec<StatusBenchSample>,
+}
+
+/// Run the full status benchmark for the required scale set.
+pub fn run_status_bench_report(iterations_per_scale: u32) -> Result<StatusBenchReport, String> {
+    let mut scales = Vec::with_capacity(STATUS_BENCH_SCALES.len());
+    for scale in STATUS_BENCH_SCALES {
+        let fixture = StatusBenchFixture::prepare(scale)?;
+        let sample = fixture.run_iterations(iterations_per_scale)?;
+        scales.push(sample);
+    }
+
+    let mut aggregate_samples = Vec::new();
+    for scale in &scales {
+        aggregate_samples.extend(scale.samples_ms.iter().copied());
+    }
+
+    let aggregate_p50_ms = percentile_ms(&aggregate_samples, 0.50);
+
+    Ok(StatusBenchReport {
+        operation: STATUS_BENCH_GROUP_NAME,
+        iterations_per_scale,
+        aggregate_p50_ms,
+        hard_ceiling_ms: STATUS_BENCH_HARD_CEILING_MS,
+        scales,
+    })
+}
+
+/// Run the quick-mode status benchmark.
+pub fn run_status_bench_quick() -> Result<StatusBenchReport, String> {
+    run_status_bench_report(STATUS_BENCH_QUICK_ITERATIONS)
+}
+
+/// Returns true when any measured p50 exceeds the configured hard ceiling.
+#[must_use]
+pub fn status_bench_exceeds_hard_ceiling(report: &StatusBenchReport) -> bool {
+    if report.aggregate_p50_ms > STATUS_BENCH_HARD_CEILING_MS {
+        return true;
+    }
+
+    report
+        .scales
+        .iter()
+        .any(|sample| sample.p50_ms > sample.hard_ceiling_ms)
+}
+
+fn status_bench_workspace_path(scale: StatusBenchScale) -> PathBuf {
+    let mut path = std::env::temp_dir();
+    let token = uuid::Uuid::now_v7();
+    path.push(format!(
+        "ee_status_bench_{}_{}_{}",
+        std::process::id(),
+        scale.candidate_count,
+        token
+    ));
+    path
+}
+
+fn seed_status_bench_candidates(
+    connection: &DbConnection,
+    workspace_id: &str,
+    candidate_count: usize,
+) -> Result<(), String> {
+    let base_time = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+        .map_err(|error| format!("invalid benchmark timestamp literal: {error}"))?
+        .with_timezone(&Utc);
+
+    for index in 0..candidate_count {
+        let created_at = (base_time + chrono::Duration::seconds(index as i64)).to_rfc3339();
+        let candidate_id = format!("cand_bench_{candidate_count}_{index:05}");
+        let memory_id = format!("mem_bench_{candidate_count}_{index:05}");
+        let input = CreateCurationCandidateInput {
+            workspace_id: workspace_id.to_owned(),
+            candidate_type: "promote".to_owned(),
+            target_memory_id: memory_id,
+            proposed_content: Some("Status benchmark fixture candidate".to_owned()),
+            proposed_confidence: Some(0.60),
+            proposed_trust_class: Some("agent_assertion".to_owned()),
+            source_type: "benchmark".to_owned(),
+            source_id: Some("ee_status_bench".to_owned()),
+            reason: "status benchmark fixture".to_owned(),
+            confidence: 0.60,
+            status: Some("pending".to_owned()),
+            created_at: Some(created_at),
+            ttl_expires_at: None,
+        };
+        connection
+            .insert_curation_candidate(&candidate_id, &input)
+            .map_err(|error| {
+                format!("failed to insert benchmark candidate {candidate_id}: {error}")
+            })?;
+    }
+
+    Ok(())
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
+}
+
+fn percentile_ms(samples: &[f64], percentile: f64) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|left, right| left.total_cmp(right));
+    let last_index = sorted.len() - 1;
+    let rank = (percentile.clamp(0.0, 1.0) * last_index as f64).floor() as usize;
+    sorted[rank]
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -928,6 +1183,12 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn parse_ts(s: &str) -> Result<DateTime<Utc>, String> {
+        DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| format!("invalid timestamp '{s}': {e}"))
     }
 
     #[test]
@@ -1183,5 +1444,446 @@ mod tests {
             None,
             "no asset watermark without workspace",
         )
+    }
+
+    fn make_ttl_policy(
+        id: &str,
+        review_state: &str,
+        threshold_seconds: u64,
+        action: &str,
+        auto_promote_enabled: bool,
+    ) -> StoredCurationTtlPolicy {
+        StoredCurationTtlPolicy {
+            id: id.to_owned(),
+            review_state: review_state.to_owned(),
+            threshold_seconds,
+            action: action.to_owned(),
+            requires_evidence_count: 0,
+            requires_distinct_sessions: 0,
+            requires_no_harmful_within_seconds: None,
+            auto_promote_enabled,
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+        }
+    }
+
+    fn make_candidate(
+        id: &str,
+        review_state: &str,
+        created_at: &str,
+        state_entered_at: Option<&str>,
+        ttl_policy_id: Option<&str>,
+        reviewed_at: Option<&str>,
+    ) -> StoredCurationCandidate {
+        StoredCurationCandidate {
+            id: id.to_owned(),
+            workspace_id: "wsp_test".to_owned(),
+            candidate_type: "promote".to_owned(),
+            target_memory_id: "mem_test".to_owned(),
+            proposed_content: None,
+            proposed_confidence: Some(0.8),
+            proposed_trust_class: None,
+            source_type: "feedback_event".to_owned(),
+            source_id: None,
+            reason: "Test candidate".to_owned(),
+            confidence: 0.7,
+            status: "pending".to_owned(),
+            created_at: created_at.to_owned(),
+            reviewed_at: reviewed_at.map(|s| s.to_owned()),
+            reviewed_by: None,
+            applied_at: None,
+            ttl_expires_at: None,
+            review_state: review_state.to_owned(),
+            snoozed_until: None,
+            merged_into_candidate_id: None,
+            state_entered_at: state_entered_at.map(|s| s.to_owned()),
+            last_action_at: None,
+            ttl_policy_id: ttl_policy_id.map(|s| s.to_owned()),
+        }
+    }
+
+    #[test]
+    fn curation_health_empty_candidates_returns_empty_status() -> TestResult {
+        let policies = vec![make_ttl_policy(
+            "policy_new",
+            "new",
+            1209600,
+            "snooze",
+            false,
+        )];
+        let now = chrono::Utc::now();
+
+        let report = curation_health_from_rows(&[], &policies, now);
+
+        ensure(report.status, CurationHealthStatus::Empty, "empty status")?;
+        ensure(report.total_count, 0, "total count")?;
+        ensure(report.policy_count, 1, "policy count")
+    }
+
+    #[test]
+    fn curation_health_healthy_when_all_within_ttl() -> TestResult {
+        let now = parse_ts("2026-05-01T12:00:00Z")?;
+        let policies = vec![make_ttl_policy(
+            "policy_new",
+            "new",
+            1209600,
+            "snooze",
+            false,
+        )];
+        let candidates = vec![make_candidate(
+            "curate_1",
+            "new",
+            "2026-04-25T12:00:00Z",
+            Some("2026-04-25T12:00:00Z"),
+            Some("policy_new"),
+            None,
+        )];
+
+        let report = curation_health_from_rows(&candidates, &policies, now);
+
+        ensure(
+            report.status,
+            CurationHealthStatus::Healthy,
+            "healthy status",
+        )?;
+        ensure(report.due_count, 0, "no due candidates")?;
+        ensure(report.pending_count, 1, "one pending")?;
+        ensure(
+            report.next_scheduled_at.is_some(),
+            true,
+            "next scheduled should be set",
+        )
+    }
+
+    #[test]
+    fn curation_health_due_when_past_ttl_threshold() -> TestResult {
+        let now = parse_ts("2026-05-20T12:00:00Z")?;
+        let policies = vec![make_ttl_policy(
+            "policy_new",
+            "new",
+            1209600,
+            "snooze",
+            false,
+        )];
+        let candidates = vec![make_candidate(
+            "curate_1",
+            "new",
+            "2026-04-01T12:00:00Z",
+            Some("2026-04-01T12:00:00Z"),
+            Some("policy_new"),
+            None,
+        )];
+
+        let report = curation_health_from_rows(&candidates, &policies, now);
+
+        ensure(report.status, CurationHealthStatus::Due, "due status")?;
+        ensure(report.due_count, 1, "one due candidate")
+    }
+
+    #[test]
+    fn curation_health_boundary_ttl_minus_one_second_not_due() -> TestResult {
+        let state_entered = parse_ts("2026-04-01T12:00:00Z")?;
+        let ttl_seconds = 1209600_u64;
+        let now = state_entered
+            + chrono::Duration::seconds(i64::try_from(ttl_seconds).map_err(|e| e.to_string())? - 1);
+        let policies = vec![make_ttl_policy(
+            "policy_new",
+            "new",
+            ttl_seconds,
+            "snooze",
+            false,
+        )];
+        let candidates = vec![make_candidate(
+            "curate_1",
+            "new",
+            "2026-04-01T12:00:00Z",
+            Some("2026-04-01T12:00:00Z"),
+            Some("policy_new"),
+            None,
+        )];
+
+        let report = curation_health_from_rows(&candidates, &policies, now);
+
+        ensure(report.status, CurationHealthStatus::Healthy, "not due yet")?;
+        ensure(report.due_count, 0, "zero due at TTL-1s")
+    }
+
+    #[test]
+    fn curation_health_boundary_ttl_exactly_is_due() -> TestResult {
+        let state_entered = parse_ts("2026-04-01T12:00:00Z")?;
+        let ttl_seconds = 1209600_u64;
+        let now = state_entered
+            + chrono::Duration::seconds(i64::try_from(ttl_seconds).map_err(|e| e.to_string())?);
+        let policies = vec![make_ttl_policy(
+            "policy_new",
+            "new",
+            ttl_seconds,
+            "snooze",
+            false,
+        )];
+        let candidates = vec![make_candidate(
+            "curate_1",
+            "new",
+            "2026-04-01T12:00:00Z",
+            Some("2026-04-01T12:00:00Z"),
+            Some("policy_new"),
+            None,
+        )];
+
+        let report = curation_health_from_rows(&candidates, &policies, now);
+
+        ensure(report.status, CurationHealthStatus::Due, "due at exact TTL")?;
+        ensure(report.due_count, 1, "one due at TTL exactly")
+    }
+
+    #[test]
+    fn curation_health_boundary_ttl_plus_one_second_is_due() -> TestResult {
+        let state_entered = parse_ts("2026-04-01T12:00:00Z")?;
+        let ttl_seconds = 1209600_u64;
+        let now = state_entered
+            + chrono::Duration::seconds(i64::try_from(ttl_seconds).map_err(|e| e.to_string())? + 1);
+        let policies = vec![make_ttl_policy(
+            "policy_new",
+            "new",
+            ttl_seconds,
+            "snooze",
+            false,
+        )];
+        let candidates = vec![make_candidate(
+            "curate_1",
+            "new",
+            "2026-04-01T12:00:00Z",
+            Some("2026-04-01T12:00:00Z"),
+            Some("policy_new"),
+            None,
+        )];
+
+        let report = curation_health_from_rows(&candidates, &policies, now);
+
+        ensure(report.status, CurationHealthStatus::Due, "due past TTL")?;
+        ensure(report.due_count, 1, "one due at TTL+1s")
+    }
+
+    #[test]
+    fn curation_health_legacy_candidate_without_state_entered_at_falls_back() -> TestResult {
+        let now = parse_ts("2026-05-20T12:00:00Z")?;
+        let policies = vec![make_ttl_policy(
+            "policy_new",
+            "new",
+            1209600,
+            "snooze",
+            false,
+        )];
+        let candidates = vec![make_candidate(
+            "curate_1",
+            "new",
+            "2026-04-01T12:00:00Z",
+            None,
+            Some("policy_new"),
+            None,
+        )];
+
+        let report = curation_health_from_rows(&candidates, &policies, now);
+
+        ensure(
+            report.status,
+            CurationHealthStatus::Due,
+            "due using created_at fallback",
+        )?;
+        ensure(report.due_count, 1, "one due from fallback")
+    }
+
+    #[test]
+    fn curation_health_escalated_when_escalate_action_fires() -> TestResult {
+        let now = parse_ts("2026-05-20T12:00:00Z")?;
+        let policies = vec![make_ttl_policy(
+            "policy_harmful",
+            "rejected",
+            604800,
+            "escalate",
+            false,
+        )];
+        let candidates = vec![make_candidate(
+            "curate_1",
+            "rejected",
+            "2026-04-01T12:00:00Z",
+            Some("2026-04-01T12:00:00Z"),
+            Some("policy_harmful"),
+            Some("2026-04-01T12:00:00Z"),
+        )];
+
+        let report = curation_health_from_rows(&candidates, &policies, now);
+
+        ensure(report.status, CurationHealthStatus::Escalated, "escalated")?;
+        ensure(report.escalation_count, 1, "one escalation")
+    }
+
+    #[test]
+    fn curation_health_blocked_when_policy_missing() -> TestResult {
+        let now = parse_ts("2026-05-01T12:00:00Z")?;
+        let policies = vec![];
+        let candidates = vec![make_candidate(
+            "curate_1",
+            "new",
+            "2026-04-01T12:00:00Z",
+            Some("2026-04-01T12:00:00Z"),
+            Some("nonexistent_policy"),
+            None,
+        )];
+
+        let report = curation_health_from_rows(&candidates, &policies, now);
+
+        ensure(report.status, CurationHealthStatus::Degraded, "degraded")?;
+        ensure(report.blocked_count, 1, "one blocked")
+    }
+
+    #[test]
+    fn curation_health_counts_auto_promote_enabled_policies() -> TestResult {
+        let now = chrono::Utc::now();
+        let policies = vec![
+            make_ttl_policy("p1", "new", 1209600, "snooze", false),
+            make_ttl_policy("p2", "validated", 2592000, "prompt_promote", true),
+            make_ttl_policy("p3", "snoozed", 7776000, "retire_with_audit", false),
+        ];
+
+        let report = curation_health_from_rows(&[], &policies, now);
+
+        ensure(report.policy_count, 3, "three policies")?;
+        ensure(
+            report.auto_promote_enabled_count,
+            1,
+            "one auto-promote enabled",
+        )
+    }
+
+    #[test]
+    fn curation_health_computes_mean_review_latency() -> TestResult {
+        let now = chrono::Utc::now();
+        let policies = vec![make_ttl_policy(
+            "policy_new",
+            "new",
+            1209600,
+            "snooze",
+            false,
+        )];
+        let mut c1 = make_candidate(
+            "curate_1",
+            "accepted",
+            "2026-04-01T12:00:00Z",
+            Some("2026-04-01T12:00:00Z"),
+            Some("policy_new"),
+            Some("2026-04-05T12:00:00Z"),
+        );
+        c1.review_state = "accepted".to_owned();
+        let mut c2 = make_candidate(
+            "curate_2",
+            "accepted",
+            "2026-04-01T12:00:00Z",
+            Some("2026-04-01T12:00:00Z"),
+            Some("policy_new"),
+            Some("2026-04-09T12:00:00Z"),
+        );
+        c2.review_state = "accepted".to_owned();
+
+        let report = curation_health_from_rows(&[c1, c2], &policies, now);
+
+        ensure(report.accepted_count, 2, "two accepted")?;
+        ensure(
+            report.mean_review_latency_days,
+            Some(6),
+            "mean latency 6 days",
+        )
+    }
+
+    #[test]
+    fn curation_health_tracks_oldest_pending_age() -> TestResult {
+        let now = parse_ts("2026-05-01T12:00:00Z")?;
+        let policies = vec![make_ttl_policy(
+            "policy_new",
+            "new",
+            9999999,
+            "snooze",
+            false,
+        )];
+        let candidates = vec![
+            make_candidate(
+                "curate_1",
+                "new",
+                "2026-04-20T12:00:00Z",
+                Some("2026-04-20T12:00:00Z"),
+                Some("policy_new"),
+                None,
+            ),
+            make_candidate(
+                "curate_2",
+                "new",
+                "2026-04-01T12:00:00Z",
+                Some("2026-04-01T12:00:00Z"),
+                Some("policy_new"),
+                None,
+            ),
+        ];
+
+        let report = curation_health_from_rows(&candidates, &policies, now);
+
+        ensure(
+            report.oldest_pending_age_days,
+            Some(30),
+            "oldest is 30 days",
+        )
+    }
+
+    #[test]
+    fn curation_health_degradations_reports_escalations() -> TestResult {
+        let health = CurationHealthReport {
+            status: CurationHealthStatus::Escalated,
+            total_count: 1,
+            pending_count: 0,
+            accepted_count: 0,
+            snoozed_count: 0,
+            rejected_count: 1,
+            due_count: 1,
+            prompt_count: 0,
+            escalation_count: 1,
+            blocked_count: 0,
+            policy_count: 1,
+            auto_promote_enabled_count: 0,
+            oldest_pending_age_days: None,
+            mean_review_latency_days: None,
+            next_scheduled_at: None,
+        };
+
+        let degradations = curation_health_degradations(&health);
+
+        ensure(degradations.len(), 1, "one degradation")?;
+        ensure(
+            degradations[0].code,
+            "curation_harmful_candidate_escalated",
+            "escalation code",
+        )
+    }
+
+    #[test]
+    fn curation_health_prompt_promote_counted_separately() -> TestResult {
+        let now = parse_ts("2026-06-01T12:00:00Z")?;
+        let policies = vec![make_ttl_policy(
+            "policy_validated",
+            "validated",
+            2592000,
+            "prompt_promote",
+            true,
+        )];
+        let candidates = vec![make_candidate(
+            "curate_1",
+            "validated",
+            "2026-04-01T12:00:00Z",
+            Some("2026-04-01T12:00:00Z"),
+            Some("policy_validated"),
+            Some("2026-04-02T12:00:00Z"),
+        )];
+
+        let report = curation_health_from_rows(&candidates, &policies, now);
+
+        ensure(report.due_count, 1, "one due")?;
+        ensure(report.prompt_count, 1, "one prompt_promote")
     }
 }

@@ -19,6 +19,7 @@ use crate::core::artifact::{
 };
 use crate::core::backup::{BackupCreateOptions, create_backup};
 use crate::core::capabilities::CapabilitiesReport;
+use crate::core::causal::{TraceOptions as CausalTraceOptions, trace_causal_chains};
 use crate::core::check::CheckReport;
 use crate::core::context::{ContextPackError, ContextPackOptions, run_context_pack};
 use crate::core::curate::{
@@ -72,7 +73,10 @@ use crate::core::rule::{
     RuleShowReport, add_rule, list_rules, show_rule,
 };
 use crate::core::search::{SearchOptions, run_search};
-use crate::core::situation::{classify_task, explain_situation, show_situation};
+use crate::core::situation::{
+    SituationCompareOptions, classify_task, compare_situations, explain_situation,
+    plan_situation_link_dry_run, show_situation,
+};
 use crate::core::status::StatusReport;
 use crate::core::tripwire::{
     CheckOptions as TripwireCheckOptions, ListOptions as TripwireListOptions, check_tripwire,
@@ -232,6 +236,9 @@ pub enum Command {
     /// List, show, and verify certificate records.
     #[command(subcommand)]
     Certificate(CertificateCommand),
+    /// Trace causal chains over recorder runs, packs, preflights, tripwires, and procedures.
+    #[command(subcommand)]
+    Causal(CausalCommand),
     /// Manage and verify executable claims.
     #[command(subcommand)]
     Claim(ClaimCommand),
@@ -323,7 +330,7 @@ pub enum Command {
     Schema(SchemaCommand),
     /// Search indexed memories and sessions.
     Search(SearchArgs),
-    /// Classify, show, or explain task situations.
+    /// Classify, compare, link (dry-run), show, or explain task situations.
     #[command(subcommand)]
     Situation(SituationCommand),
     /// Report workspace and subsystem readiness.
@@ -1622,6 +1629,61 @@ pub struct CertificateVerifyArgs {
     /// Certificate ID to verify.
     #[arg(value_name = "CERTIFICATE_ID")]
     pub certificate_id: String,
+}
+
+/// Subcommands for `ee causal`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum CausalCommand {
+    /// Trace causal chains from memories through exposures to outcomes.
+    Trace(CausalTraceArgs),
+}
+
+/// Arguments for `ee causal trace`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct CausalTraceArgs {
+    /// Filter by memory ID.
+    #[arg(long, value_name = "MEMORY_ID")]
+    pub memory_id: Option<String>,
+
+    /// Filter by recorder run ID.
+    #[arg(long, value_name = "RUN_ID")]
+    pub run_id: Option<String>,
+
+    /// Filter by context pack ID.
+    #[arg(long, value_name = "PACK_ID")]
+    pub pack_id: Option<String>,
+
+    /// Filter by preflight ID.
+    #[arg(long, value_name = "PREFLIGHT_ID")]
+    pub preflight_id: Option<String>,
+
+    /// Filter by tripwire ID.
+    #[arg(long, value_name = "TRIPWIRE_ID")]
+    pub tripwire_id: Option<String>,
+
+    /// Filter by procedure ID.
+    #[arg(long, value_name = "PROCEDURE_ID")]
+    pub procedure_id: Option<String>,
+
+    /// Filter by agent ID.
+    #[arg(long, value_name = "AGENT_ID")]
+    pub agent_id: Option<String>,
+
+    /// Maximum chains to return.
+    #[arg(long, short = 'n', default_value_t = 50)]
+    pub limit: usize,
+
+    /// Include detailed exposure records in output.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_exposures: bool,
+
+    /// Include outcome summaries in output.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_outcomes: bool,
+
+    /// Show trace plan without executing queries.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// Subcommands for `ee preflight`.
@@ -2978,6 +3040,10 @@ pub struct MemoryHistoryArgs {
 pub enum SituationCommand {
     /// Classify task text into a situation category.
     Classify(SituationClassifyArgs),
+    /// Compare two task situations and report a dry-run link recommendation.
+    Compare(SituationCompareArgs),
+    /// Plan a curation-backed situation link in dry-run mode.
+    Link(SituationLinkArgs),
     /// Show details of a stored situation.
     Show(SituationShowArgs),
     /// Explain a situation with recommendations.
@@ -2990,6 +3056,66 @@ pub struct SituationClassifyArgs {
     /// Task text to classify.
     #[arg(value_name = "TEXT")]
     pub text: String,
+}
+
+/// Arguments for `ee situation compare`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct SituationCompareArgs {
+    /// Source task text to classify and compare.
+    #[arg(value_name = "SOURCE_TEXT")]
+    pub source_text: String,
+
+    /// Target task text to classify and compare.
+    #[arg(value_name = "TARGET_TEXT")]
+    pub target_text: String,
+
+    /// Optional stable source situation ID for deterministic reporting.
+    #[arg(long, value_name = "SITUATION_ID")]
+    pub source_situation_id: Option<String>,
+
+    /// Optional stable target situation ID for deterministic reporting.
+    #[arg(long, value_name = "SITUATION_ID")]
+    pub target_situation_id: Option<String>,
+
+    /// Evidence IDs supporting the comparison (repeatable).
+    #[arg(long = "evidence-id", value_name = "EVIDENCE_ID")]
+    pub evidence_ids: Vec<String>,
+
+    /// Enforce non-mutating dry-run execution.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee situation link`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct SituationLinkArgs {
+    /// Source task text to classify and compare.
+    #[arg(value_name = "SOURCE_TEXT")]
+    pub source_text: String,
+
+    /// Target task text to classify and compare.
+    #[arg(value_name = "TARGET_TEXT")]
+    pub target_text: String,
+
+    /// Optional stable source situation ID for deterministic reporting.
+    #[arg(long, value_name = "SITUATION_ID")]
+    pub source_situation_id: Option<String>,
+
+    /// Optional stable target situation ID for deterministic reporting.
+    #[arg(long, value_name = "SITUATION_ID")]
+    pub target_situation_id: Option<String>,
+
+    /// Evidence IDs supporting the link proposal (repeatable).
+    #[arg(long = "evidence-id", value_name = "EVIDENCE_ID")]
+    pub evidence_ids: Vec<String>,
+
+    /// Deterministic created-at timestamp for the planned link (RFC 3339).
+    #[arg(long, value_name = "RFC3339")]
+    pub created_at: Option<String>,
+
+    /// Enforce non-mutating dry-run execution.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `ee situation show`.
@@ -3323,6 +3449,9 @@ where
             CertificateCommand::Verify(args) => {
                 handle_certificate_verify(&cli, args, stdout, stderr)
             }
+        },
+        Some(Command::Causal(ref causal_cmd)) => match causal_cmd {
+            CausalCommand::Trace(args) => handle_causal_trace(&cli, args, stdout, stderr),
         },
         Some(Command::Claim(ref claim_cmd)) => match claim_cmd {
             ClaimCommand::List(args) => handle_claim_list(&cli, args, stdout, stderr),
@@ -3971,6 +4100,12 @@ where
         Some(Command::Search(ref args)) => handle_search(&cli, args, stdout, stderr),
         Some(Command::Situation(SituationCommand::Classify(ref args))) => {
             handle_situation_classify(&cli, args, stdout)
+        }
+        Some(Command::Situation(SituationCommand::Compare(ref args))) => {
+            handle_situation_compare(&cli, args, stdout, stderr)
+        }
+        Some(Command::Situation(SituationCommand::Link(ref args))) => {
+            handle_situation_link(&cli, args, stdout, stderr)
         }
         Some(Command::Situation(SituationCommand::Show(ref args))) => {
             handle_situation_show(&cli, args, stdout, stderr)
@@ -10056,6 +10191,201 @@ where
     }
 }
 
+fn situation_compare_options_from_args(
+    source_text: &str,
+    target_text: &str,
+    source_situation_id: Option<&str>,
+    target_situation_id: Option<&str>,
+    evidence_ids: &[String],
+    created_at: Option<&str>,
+) -> SituationCompareOptions {
+    let mut options = SituationCompareOptions::new(source_text, target_text);
+    if let Some(source_id) = source_situation_id {
+        options = options.source_situation_id(source_id);
+    }
+    if let Some(target_id) = target_situation_id {
+        options = options.target_situation_id(target_id);
+    }
+    for evidence_id in evidence_ids {
+        options = options.with_evidence(evidence_id.as_str());
+    }
+    if let Some(created_at_value) = created_at {
+        options = options.created_at(created_at_value);
+    }
+    options
+}
+
+fn situation_dry_run_required_error() -> DomainError {
+    DomainError::PolicyDenied {
+        message: "Situation compare/link currently supports dry-run mode only.".to_string(),
+        repair: Some("Re-run with `--dry-run`.".to_string()),
+    }
+}
+
+fn render_situation_compare_human(
+    report: &crate::core::situation::SituationCompareReport,
+) -> String {
+    let mut out = format!(
+        "Situation Compare (dry-run)\n=============================\nSource: {} [{}]\nTarget: {} [{}]\nRelation: {}\nConfidence: {} ({:.3})\nRecommended: {}\n",
+        report.source.situation_id,
+        report.source.category.as_str(),
+        report.target.situation_id,
+        report.target.category.as_str(),
+        report.relation.as_str(),
+        report.confidence.as_str(),
+        report.confidence_score,
+        if report.recommended { "yes" } else { "no" },
+    );
+
+    if !report.evidence_ids.is_empty() {
+        out.push_str("\nEvidence IDs:\n");
+        for evidence_id in &report.evidence_ids {
+            out.push_str(&format!("- {evidence_id}\n"));
+        }
+    }
+
+    if !report.reasons.is_empty() {
+        out.push_str("\nReasons:\n");
+        for reason in &report.reasons {
+            out.push_str(&format!("- {reason}\n"));
+        }
+    }
+
+    out
+}
+
+fn render_situation_link_human(
+    report: &crate::core::situation::SituationLinkDryRunReport,
+) -> String {
+    let mut out = format!(
+        "Situation Link (dry-run)\n=========================\nWould write: {}\nRecommended: {}\nRelation: {}\nConfidence: {} ({:.3})\nCandidate: {} ({})\n",
+        if report.would_write { "yes" } else { "no" },
+        if report.compare.recommended {
+            "yes"
+        } else {
+            "no"
+        },
+        report.compare.relation.as_str(),
+        report.compare.confidence.as_str(),
+        report.compare.confidence_score,
+        report.curation_candidate.candidate_id,
+        report.curation_candidate.status,
+    );
+
+    if let Some(link) = &report.planned_link {
+        out.push_str(&format!(
+            "\nPlanned link: {} -> {} ({})\n",
+            link.source_situation_id, link.target_situation_id, link.relation
+        ));
+    } else {
+        out.push_str("\nPlanned link: none (recommendation threshold not met)\n");
+    }
+
+    out.push_str("\nReasons:\n");
+    for reason in &report.compare.reasons {
+        out.push_str(&format!("- {reason}\n"));
+    }
+    out
+}
+
+fn handle_situation_compare<W, E>(
+    cli: &Cli,
+    args: &SituationCompareArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !args.dry_run {
+        return write_domain_error(
+            &situation_dry_run_required_error(),
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+
+    let options = situation_compare_options_from_args(
+        args.source_text.as_str(),
+        args.target_text.as_str(),
+        args.source_situation_id.as_deref(),
+        args.target_situation_id.as_deref(),
+        &args.evidence_ids,
+        None,
+    );
+    let report = compare_situations(&options);
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": report.data_json(),
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_situation_compare_human(&report))
+        }
+        output::Renderer::Toon => {
+            let json_str = response.to_string();
+            write_stdout(stdout, &(output::render_toon_from_json(&json_str) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
+fn handle_situation_link<W, E>(
+    cli: &Cli,
+    args: &SituationLinkArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !args.dry_run {
+        return write_domain_error(
+            &situation_dry_run_required_error(),
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+
+    let options = situation_compare_options_from_args(
+        args.source_text.as_str(),
+        args.target_text.as_str(),
+        args.source_situation_id.as_deref(),
+        args.target_situation_id.as_deref(),
+        &args.evidence_ids,
+        args.created_at.as_deref(),
+    );
+    let report = plan_situation_link_dry_run(&options);
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": report.data_json(),
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_situation_link_human(&report))
+        }
+        output::Renderer::Toon => {
+            let json_str = response.to_string();
+            write_stdout(stdout, &(output::render_toon_from_json(&json_str) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
 fn handle_situation_show<W, E>(
     cli: &Cli,
     args: &SituationShowArgs,
@@ -10269,6 +10599,83 @@ where
             stdout,
             &(output::render_certificate_verify_json(&report) + "\n"),
         ),
+    }
+}
+
+// ============================================================================
+// EE-451: Causal trace handlers
+// ============================================================================
+
+fn handle_causal_trace<W, E>(
+    cli: &Cli,
+    args: &CausalTraceArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let mut options = CausalTraceOptions::default();
+
+    if let Some(ref memory_id) = args.memory_id {
+        options = options.with_memory_id(memory_id);
+    }
+    if let Some(ref run_id) = args.run_id {
+        options = options.with_run_id(run_id);
+    }
+    if let Some(ref pack_id) = args.pack_id {
+        options = options.with_pack_id(pack_id);
+    }
+    if let Some(ref preflight_id) = args.preflight_id {
+        options = options.with_preflight_id(preflight_id);
+    }
+    if let Some(ref tripwire_id) = args.tripwire_id {
+        options = options.with_tripwire_id(tripwire_id);
+    }
+    if let Some(ref procedure_id) = args.procedure_id {
+        options = options.with_procedure_id(procedure_id);
+    }
+    if let Some(ref agent_id) = args.agent_id {
+        options = options.with_agent_id(agent_id);
+    }
+    options = options.with_limit(args.limit);
+    if args.include_exposures {
+        options = options.with_exposures();
+    }
+    if args.include_outcomes {
+        options = options.with_outcomes();
+    }
+    if args.dry_run {
+        options = options.dry_run();
+    }
+
+    let report = trace_causal_chains(&options);
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => {
+            let toon = format!(
+                "causal_trace chains={} exposures={} decisions={}\n",
+                report.chains.len(),
+                report.total_exposures,
+                report.total_decisions
+            );
+            write_stdout(stdout, &toon)
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::core::causal::CAUSAL_TRACE_LIST_SCHEMA_V1,
+                "success": true,
+                "data": report.data_json(),
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
     }
 }
 
@@ -11250,7 +11657,7 @@ const MEMORY_SUBCOMMANDS: &[&str] = &["list", "show", "history"];
 const MCP_SUBCOMMANDS: &[&str] = &["manifest"];
 const REVIEW_SUBCOMMANDS: &[&str] = &["session"];
 const SCHEMA_SUBCOMMANDS: &[&str] = &["list", "export"];
-const SITUATION_SUBCOMMANDS: &[&str] = &["classify", "show", "explain"];
+const SITUATION_SUBCOMMANDS: &[&str] = &["classify", "compare", "link", "show", "explain"];
 
 /// Read-only normalized representation of a CLI invocation.
 #[derive(Clone, Debug, PartialEq)]
@@ -11318,6 +11725,9 @@ impl NormalizedInvocation {
                     CertificateCommand::List(_) => "certificate list".to_string(),
                     CertificateCommand::Show(_) => "certificate show".to_string(),
                     CertificateCommand::Verify(_) => "certificate verify".to_string(),
+                },
+                Command::Causal(causal) => match causal {
+                    CausalCommand::Trace(_) => "causal trace".to_string(),
                 },
                 Command::Claim(claim) => match claim {
                     ClaimCommand::List(_) => "claim list".to_string(),
@@ -11469,6 +11879,8 @@ impl NormalizedInvocation {
                 Command::Search(_) => "search".to_string(),
                 Command::Situation(sit) => match sit {
                     SituationCommand::Classify(_) => "situation classify".to_string(),
+                    SituationCommand::Compare(_) => "situation compare".to_string(),
+                    SituationCommand::Link(_) => "situation link".to_string(),
                     SituationCommand::Show(_) => "situation show".to_string(),
                     SituationCommand::Explain(_) => "situation explain".to_string(),
                 },
@@ -11963,12 +12375,19 @@ mod tests {
     use super::{
         AgentCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli, Command, CurateCommand,
         DiagCommand, EconomyCommand, FieldsLevel, GraphCommand, ImportCommand, LearnCommand,
-        LearnExperimentCommand, MemoryCommand, OutputFormat, RuleCommand, ShadowMode, run,
+        LearnExperimentCommand, MemoryCommand, OutputFormat, RuleCommand, ShadowMode,
+        SituationCommand, run,
     };
     use crate::models::ProcessExitCode;
 
     const SITUATION_CLASSIFY_ROUTING_GOLDEN: &str =
         include_str!("../../tests/fixtures/golden/situation/classify_release_routing.json.golden");
+    const SITUATION_COMPARE_GOLDEN: &str = include_str!(
+        "../../tests/fixtures/golden/situation/compare_release_bug_to_login_bug.json.golden"
+    );
+    const SITUATION_LINK_DRY_RUN_GOLDEN: &str = include_str!(
+        "../../tests/fixtures/golden/situation/link_dry_run_release_bug_to_login_bug.json.golden"
+    );
 
     type TestResult = Result<(), String>;
 
@@ -12398,6 +12817,123 @@ mod tests {
             &SITUATION_CLASSIFY_ROUTING_GOLDEN.to_string(),
             "situation routing golden",
         )
+    }
+
+    #[test]
+    fn parser_accepts_situation_compare_args() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "situation",
+            "compare",
+            "fix failing release workflow",
+            "fix broken login crash",
+            "--source-situation-id",
+            "sit.release_bug",
+            "--target-situation-id",
+            "sit.login_bug",
+            "--evidence-id",
+            "feat.shared.fix",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse situation compare: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Situation(SituationCommand::Compare(args))) => {
+                ensure_equal(
+                    &args.source_text,
+                    &"fix failing release workflow".to_string(),
+                    "source text",
+                )?;
+                ensure_equal(
+                    &args.target_text,
+                    &"fix broken login crash".to_string(),
+                    "target text",
+                )?;
+                ensure_equal(
+                    &args.source_situation_id,
+                    &Some("sit.release_bug".to_string()),
+                    "source id",
+                )?;
+                ensure_equal(
+                    &args.target_situation_id,
+                    &Some("sit.login_bug".to_string()),
+                    "target id",
+                )?;
+                ensure_equal(
+                    &args.evidence_ids,
+                    &vec!["feat.shared.fix".to_string()],
+                    "evidence ids",
+                )?;
+                ensure_equal(&args.dry_run, &true, "dry run")
+            }
+            other => Err(format!("expected situation compare command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn situation_compare_json_matches_gate19_golden_data() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "situation",
+            "compare",
+            "fix failing release workflow",
+            "fix broken login crash",
+            "--source-situation-id",
+            "sit.release_bug",
+            "--target-situation-id",
+            "sit.login_bug",
+            "--evidence-id",
+            "feat.shared.fix",
+            "--dry-run",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "situation compare exit")?;
+        ensure(stderr.is_empty(), "situation compare JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "response schema",
+        )?;
+        let expected: serde_json::Value =
+            serde_json::from_str(SITUATION_COMPARE_GOLDEN).map_err(|error| error.to_string())?;
+        ensure_equal(&value["data"], &expected, "compare data golden")
+    }
+
+    #[test]
+    fn situation_link_dry_run_json_matches_gate19_golden_data() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "situation",
+            "link",
+            "fix failing release workflow",
+            "fix broken login crash",
+            "--source-situation-id",
+            "sit.release_bug",
+            "--target-situation-id",
+            "sit.login_bug",
+            "--evidence-id",
+            "feat.shared.fix",
+            "--created-at",
+            "2026-05-01T00:00:00Z",
+            "--dry-run",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "situation link exit")?;
+        ensure(stderr.is_empty(), "situation link JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "response schema",
+        )?;
+        let expected: serde_json::Value = serde_json::from_str(SITUATION_LINK_DRY_RUN_GOLDEN)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&value["data"], &expected, "link data golden")
     }
 
     #[test]

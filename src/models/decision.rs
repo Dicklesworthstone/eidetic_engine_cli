@@ -26,6 +26,8 @@ pub enum DecisionPlane {
     RepairOrder,
     /// Cache admission/eviction decisions.
     CacheAdmission,
+    /// Causal trace observation decisions.
+    Observe,
 }
 
 impl DecisionPlane {
@@ -37,6 +39,7 @@ impl DecisionPlane {
             Self::Curation => "curation",
             Self::RepairOrder => "repair_order",
             Self::CacheAdmission => "cache_admission",
+            Self::Observe => "observe",
         }
     }
 
@@ -48,6 +51,7 @@ impl DecisionPlane {
             Self::Curation,
             Self::RepairOrder,
             Self::CacheAdmission,
+            Self::Observe,
         ]
     }
 }
@@ -67,7 +71,7 @@ impl fmt::Display for ParseDecisionPlaneError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "invalid decision plane '{}'; expected one of: packing, ranking, curation, repair_order, cache_admission",
+            "invalid decision plane '{}'; expected one of: packing, ranking, curation, repair_order, cache_admission, observe",
             self.invalid
         )
     }
@@ -85,6 +89,7 @@ impl FromStr for DecisionPlane {
             "curation" => Ok(Self::Curation),
             "repair_order" => Ok(Self::RepairOrder),
             "cache_admission" => Ok(Self::CacheAdmission),
+            "observe" => Ok(Self::Observe),
             _ => Err(ParseDecisionPlaneError {
                 invalid: s.to_owned(),
             }),
