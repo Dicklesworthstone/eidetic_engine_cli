@@ -1,0 +1,24 @@
+{
+  "schema": "ee.learn.observe.v1",
+  "success": true,
+  "status": "dry_run",
+  "dryRun": true,
+  "observation": {
+    "schema": "ee.learning.observation.v1",
+    "observationId": "lobs_gate21_negative",
+    "experimentId": "exp_database_contract_fixture",
+    "observedAt": "2026-01-02T03:05:00Z",
+    "observer": "MistySalmon",
+    "signal": "negative",
+    "measurementName": "fixture_replay_pass",
+    "measurementValue": 0.0,
+    "evidenceIds": [
+      "fixture_async_error_boundary",
+      "mem_gate21_procedure"
+    ],
+    "note": "Replay contradicted promotion confidence.",
+    "redactionStatus": "redacted"
+  },
+  "feedback": null,
+  "generatedAt": "2026-01-02T03:04:05Z"
+}

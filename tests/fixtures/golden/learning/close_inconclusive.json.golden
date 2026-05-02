@@ -1,0 +1,73 @@
+{
+  "schema": "ee.learn.close.v1",
+  "success": true,
+  "status": "dry_run",
+  "dryRun": true,
+  "outcome": {
+    "schema": "ee.learning.experiment_outcome.v1",
+    "outcomeId": "lout_gate21_inconclusive",
+    "experimentId": "exp_database_contract_fixture",
+    "status": "inconclusive",
+    "closedAt": "2026-01-02T03:06:00Z",
+    "decisionImpact": "Insufficient confidence to promote policy change yet.",
+    "confidenceDelta": -0.12,
+    "priorityDelta": -3,
+    "promotedArtifactIds": [],
+    "demotedArtifactIds": [
+      "mem_gate21_budget"
+    ],
+    "safetyNotes": [
+      "ask_before_acting",
+      "requires_human_risk_tolerance"
+    ],
+    "auditIds": [
+      "audit_gate21_001"
+    ]
+  },
+  "feedback": null,
+  "downstreamEffects": {
+    "schema": "ee.learn.downstream_effects.v1",
+    "mutationMode": "dry_run_projection",
+    "economyScore": {
+      "affectedArtifactIds": [
+        "mem_gate21_budget"
+      ],
+      "promotedCount": 0,
+      "demotedCount": 1,
+      "utilityDelta": -0.08,
+      "confidenceDelta": -0.12,
+      "priorityDelta": -3,
+      "priorityMultiplier": 1.0,
+      "scoringNote": "Inconclusive experiment outcome is retained without economy score movement."
+    },
+    "procedureDrift": {
+      "procedureArtifactIds": [],
+      "driftSignal": "needs_more_evidence",
+      "driftScoreDelta": 0.05,
+      "requiresRevalidation": false,
+      "action": "no_procedure_artifacts"
+    },
+    "tripwireFalseAlarm": {
+      "tripwireArtifactIds": [],
+      "falseAlarmCostDelta": 0,
+      "confidenceDelta": 0.0,
+      "action": "retain_tripwire_audit",
+      "scoringNote": "Closed outcome does not move tripwire false-alarm cost."
+    },
+    "situationConfidence": {
+      "situationArtifactIds": [],
+      "confidenceDelta": -0.12,
+      "confidenceDirection": "decrease",
+      "action": "no_situation_artifacts"
+    },
+    "audit": {
+      "durableFeedbackRecorded": false,
+      "sourceType": "outcome_observed",
+      "sourceId": "lout_gate21_inconclusive",
+      "feedbackEventId": null,
+      "auditId": null,
+      "silentMutation": false
+    }
+  },
+  "generatedAt": "2026-01-02T03:04:05Z"
+}

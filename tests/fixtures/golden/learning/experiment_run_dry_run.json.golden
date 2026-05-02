@@ -1,0 +1,83 @@
+{
+  "schema": "ee.learn.experiment_run.v1",
+  "success": true,
+  "status": "dry_run",
+  "dryRun": true,
+  "experimentId": "exp_database_contract_fixture",
+  "experimentKind": "procedure_revalidation",
+  "title": "Run database-operation contract fixture",
+  "hypothesis": "A fixture-only dry run can show whether database-operation memories need stronger integration-test evidence.",
+  "budget": {
+    "requestedAttentionTokens": 700,
+    "requestedRuntimeSeconds": 180,
+    "plannedAttentionTokens": 700,
+    "plannedRuntimeSeconds": 180,
+    "shadowBudgetDeltaTokens": -80,
+    "budgetClass": "medium"
+  },
+  "safety": {
+    "boundary": "dry_run_only",
+    "dryRunFirst": true,
+    "mutationAllowed": false,
+    "reviewRequired": false,
+    "stopConditions": [
+      "Stop after fixture output records stdout/stderr separation and mutation posture.",
+      "Stop before any durable memory mutation; close with observe/close evidence first."
+    ],
+    "deniedReasons": []
+  },
+  "steps": [
+    {
+      "order": 1,
+      "name": "select_fixture",
+      "action": "Select deterministic database-operation contract fixture.",
+      "expectedSignal": "neutral",
+      "writesStorage": false
+    },
+    {
+      "order": 2,
+      "name": "revalidate_procedure",
+      "action": "Revalidate the procedure against fixture stdout/stderr contracts.",
+      "expectedSignal": "positive",
+      "writesStorage": false
+    },
+    {
+      "order": 3,
+      "name": "score_decision",
+      "action": "Estimate decision impact and confidence delta without storage writes.",
+      "expectedSignal": "positive",
+      "writesStorage": false
+    }
+  ],
+  "observations": [
+    {
+      "signal": "positive",
+      "measurementName": "procedure_revalidation_pass",
+      "measurementValue": 1.0,
+      "evidenceIds": [
+        "gap_002",
+        "mem_001",
+        "fixture_database_contract"
+      ],
+      "note": "Dry-run procedure revalidation would support stronger database-operation guidance."
+    }
+  ],
+  "outcomePreview": {
+    "status": "confirmed",
+    "decisionImpact": "Increase confidence for database-operation integration-test guidance.",
+    "confidenceDelta": 0.22,
+    "priorityDelta": -4,
+    "promotedArtifactIds": [
+      "mem_001"
+    ],
+    "demotedArtifactIds": [],
+    "safetyNotes": [
+      "Dry-run only; promote through learn close after reviewing fixture evidence."
+    ]
+  },
+  "nextActions": [
+    "ee learn observe exp_database_contract_fixture --signal positive --measurement-name <name> --dry-run --json",
+    "ee learn close exp_database_contract_fixture --status confirmed --decision-impact <impact> --dry-run --json"
+  ],
+  "generatedAt": "2026-01-02T03:04:05Z"
+}
