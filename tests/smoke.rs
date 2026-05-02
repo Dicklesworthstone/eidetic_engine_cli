@@ -13,13 +13,17 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use ee::db::{
-    CreateCurationCandidateInput, CreateMemoryLinkInput, DatabaseConfig, DbConnection,
-    MemoryLinkRelation, MemoryLinkSource,
+    CreateCurationCandidateInput, CreateMemoryLinkInput, CreateModelRegistryInput, DatabaseConfig,
+    DbConnection, MemoryLinkRelation, MemoryLinkSource,
 };
 #[cfg(unix)]
 use ee::graph::{
     AutolinkCandidateOptions, AutolinkExistingEdge, AutolinkMemoryInput,
     generate_autolink_candidates,
+};
+#[cfg(unix)]
+use ee::models::model_registry::{
+    ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
 };
 
 type TestResult = Result<(), String>;
@@ -634,6 +638,208 @@ fn status_json_stdout_is_stable_machine_data() -> TestResult {
         "status JSON runtime engine",
     )?;
     ensure_ends_with(&stdout, '\n', "status JSON trailing newline")
+}
+
+#[cfg(unix)]
+#[test]
+fn model_status_and_list_json_report_registry_contracts() -> TestResult {
+    let workspace = unique_artifact_dir("model-status-list")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+
+    let init = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "init"])?;
+    ensure(
+        init.status.success(),
+        format!(
+            "init should succeed before model status/list checks; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&init.stdout),
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )?;
+
+    let remember = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "remember",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "Seed memory for model status/list smoke.",
+    ])?;
+    ensure(
+        remember.status.success(),
+        format!(
+            "remember should succeed before model status/list checks; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&remember.stdout),
+            String::from_utf8_lossy(&remember.stderr)
+        ),
+    )?;
+    let remember_json: serde_json::Value =
+        serde_json::from_slice(&remember.stdout).map_err(|error| error.to_string())?;
+    let workspace_id = remember_json["data"]["workspace_id"]
+        .as_str()
+        .ok_or_else(|| "remember workspace_id must be present".to_string())?
+        .to_owned();
+    let database_path = workspace.join(".ee").join("ee.db");
+
+    let status_empty = run_ee_logged(
+        "model-status-empty",
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "model",
+            "status",
+        ],
+        &workspace,
+        None,
+        "fx.model.status.empty.v1",
+        "ee.response.v1",
+        None,
+    )?;
+    let status_empty_json = parse_logged_response(&status_empty, "model status empty")?;
+    ensure_equal(
+        &status_empty_json["data"]["schema"],
+        &serde_json::json!("ee.model.status.v1"),
+        "model status schema",
+    )?;
+    ensure_equal(
+        &status_empty_json["data"]["registeredCount"],
+        &serde_json::json!(0),
+        "model status empty registered count",
+    )?;
+    ensure_equal(
+        &status_empty_json["data"]["availableCount"],
+        &serde_json::json!(0),
+        "model status empty available count",
+    )?;
+    ensure(
+        status_empty_json["data"]["active"]["fastModelId"]
+            .as_str()
+            .is_some(),
+        "model status fastModelId should be present",
+    )?;
+    ensure_equal(
+        &status_empty_json["data"]["degradations"][0]["code"],
+        &serde_json::json!("model_registry_empty"),
+        "model status empty degradation code",
+    )?;
+
+    let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    connection
+        .insert_model_registry_entry(
+            "mdl_01HQ3K5Z000000000000000901",
+            &CreateModelRegistryInput {
+                workspace_id: workspace_id.clone(),
+                provider: ModelProvider::Hash,
+                model_name: "fnv1a-256".to_string(),
+                purpose: ModelPurpose::Embedding,
+                dimension: Some(256),
+                distance_metric: Some(ModelDistanceMetric::Cosine),
+                status: ModelRegistryStatus::Available,
+                version: Some("v1".to_string()),
+                source_uri: None,
+                content_hash: None,
+                metadata_json: None,
+                last_checked_at: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .insert_model_registry_entry(
+            "mdl_01HQ3K5Z000000000000000902",
+            &CreateModelRegistryInput {
+                workspace_id,
+                provider: ModelProvider::Model2Vec,
+                model_name: "minilm".to_string(),
+                purpose: ModelPurpose::Embedding,
+                dimension: Some(384),
+                distance_metric: Some(ModelDistanceMetric::Cosine),
+                status: ModelRegistryStatus::Disabled,
+                version: Some("v1".to_string()),
+                source_uri: None,
+                content_hash: None,
+                metadata_json: None,
+                last_checked_at: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+    let status_registry = run_ee_logged(
+        "model-status-registry",
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "model",
+            "status",
+        ],
+        &workspace,
+        None,
+        "fx.model.status.registry.v1",
+        "ee.response.v1",
+        None,
+    )?;
+    let status_registry_json = parse_logged_response(&status_registry, "model status registry")?;
+    ensure_equal(
+        &status_registry_json["data"]["registeredCount"],
+        &serde_json::json!(2),
+        "model status registered count",
+    )?;
+    ensure_equal(
+        &status_registry_json["data"]["availableCount"],
+        &serde_json::json!(1),
+        "model status available count",
+    )?;
+    ensure_equal(
+        &status_registry_json["data"]["active"]["source"],
+        &serde_json::json!("registry_observed"),
+        "model status source",
+    )?;
+
+    let list = run_ee_logged(
+        "model-list-registry",
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "model",
+            "list",
+        ],
+        &workspace,
+        None,
+        "fx.model.list.registry.v1",
+        "ee.response.v1",
+        None,
+    )?;
+    let list_json = parse_logged_response(&list, "model list registry")?;
+    ensure_equal(
+        &list_json["data"]["schema"],
+        &serde_json::json!("ee.model.list.v1"),
+        "model list schema",
+    )?;
+    ensure_equal(
+        &list_json["data"]["entries"].as_array().map(Vec::len),
+        &Some(2),
+        "model list entry count",
+    )?;
+    ensure_equal(
+        &list_json["data"]["entries"][0]["provider"],
+        &serde_json::json!("hash"),
+        "model list first provider ordering",
+    )?;
+    ensure_equal(
+        &list_json["data"]["entries"][1]["provider"],
+        &serde_json::json!("model2vec"),
+        "model list second provider ordering",
+    )?;
+    ensure_equal(
+        &list_json["data"]["degradations"],
+        &serde_json::json!([]),
+        "model list should not report degradations",
+    )
 }
 
 #[cfg(unix)]
