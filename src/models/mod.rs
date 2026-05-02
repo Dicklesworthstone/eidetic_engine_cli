@@ -1,8 +1,10 @@
 use std::process::ExitCode;
 
+pub mod backup;
 pub mod causal;
 pub mod certificate;
 pub mod claims;
+pub mod context_profile;
 pub mod decision;
 pub mod degradation;
 pub mod demo;
@@ -27,9 +29,14 @@ pub mod repro;
 pub mod revision;
 pub mod rule;
 pub mod schema;
+pub mod situation;
 pub mod timing;
 pub mod trust;
 
+pub use backup::{
+    BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
+    BACKUP_MANIFEST_SCHEMA_V1, BACKUP_VERIFY_SCHEMA_V1,
+};
 pub use causal::{
     CAUSAL_EXPOSURE_SCHEMA_V1, CAUSAL_SCHEMA_CATALOG_V1, CONFOUNDER_SCHEMA_V1, CausalConfounder,
     CausalDecisionTrace, CausalEvidenceStrength, CausalExposure, CausalExposureChannel,
@@ -53,6 +60,12 @@ pub use claims::{
     VerificationFrequency, is_valid_artifact_path, is_valid_blake3_hex, validate_artifact_entry,
     validate_manifest_structure,
 };
+pub use context_profile::{
+    CONTEXT_PROFILE_SCHEMA_CATALOG_V1, CONTEXT_PROFILE_SCHEMA_V1, ContextProfile,
+    ContextProfileFieldSchema, ContextProfileName, ContextProfileObjectSchema,
+    ContextProfileObjective, ContextProfileSection, ContextProfileSectionMix,
+    ContextProfileValidationError, context_profile_schema_catalog_json, context_profile_schemas,
+};
 pub use decision::{
     DECISION_PLANE_SCHEMA_V1, DecisionPlane, DecisionPlaneMetadata, DecisionRecord,
     DecisionRecordBuilder, ParseDecisionPlaneError,
@@ -69,12 +82,15 @@ pub use demo::{
     ParseOutputVerificationError, validate_demo_file,
 };
 pub use economy::{
-    ATTENTION_COST_SCHEMA_V1, AggregateUtility, AttentionCost, DebtLevel,
-    ECONOMY_RECOMMENDATION_SCHEMA_V1, ECONOMY_REPORT_SCHEMA_V1, ECONOMY_SCHEMA_CATALOG_V1,
-    EconomyFieldSchema, EconomyObjectSchema, EconomyRecommendation, EconomyReport,
-    EconomyRiskCategory, Effort, Impact, MAINTENANCE_DEBT_SCHEMA_V1, MaintenanceDebt,
-    RISK_RESERVE_SCHEMA_V1, RecommendationType, RiskReserve, UTILITY_VALUE_SCHEMA_V1, UtilityValue,
-    economy_schema_catalog_json, economy_schemas,
+    ATTENTION_BUDGET_SCHEMA_V1, ATTENTION_COST_SCHEMA_V1, AggregateUtility,
+    AttentionBudgetAllocation, AttentionBudgetRequest, AttentionCost, ContextAttentionProfile,
+    DebtLevel, ECONOMY_RECOMMENDATION_SCHEMA_V1, ECONOMY_REPORT_SCHEMA_V1,
+    ECONOMY_SCHEMA_CATALOG_V1, ECONOMY_SIMULATION_SCHEMA_V1, EconomyFieldSchema,
+    EconomyObjectSchema, EconomyRecommendation, EconomyReport, EconomyRiskCategory, Effort, Impact,
+    MAINTENANCE_DEBT_SCHEMA_V1, MaintenanceDebt, RISK_RESERVE_SCHEMA_V1, RecommendationType,
+    RiskReserve, SituationAttentionProfile, TAIL_RISK_RESERVE_RULE_SCHEMA_V1, TailRiskArtifactKind,
+    TailRiskDemotionAction, TailRiskReserveRule, TailRiskSeverity, UTILITY_VALUE_SCHEMA_V1,
+    UtilityValue, economy_schema_catalog_json, economy_schemas,
 };
 pub use episode::{
     ActionType, COUNTERFACTUAL_CLAIM_ID_PREFIX, COUNTERFACTUAL_CLAIM_SCHEMA_V1,
@@ -102,15 +118,16 @@ pub use install::{
     UpdateSourcePosture, compare_versions, findings_status, is_safe_install_path,
 };
 pub use jsonl::{
-    ALL_EXPORT_SCHEMAS, EXPORT_AGENT_SCHEMA_V1, EXPORT_AUDIT_SCHEMA_V1, EXPORT_FOOTER_SCHEMA_V1,
-    EXPORT_FORMAT_VERSION, EXPORT_HEADER_SCHEMA_V1, EXPORT_LINK_SCHEMA_V1, EXPORT_MEMORY_SCHEMA_V1,
-    EXPORT_TAG_SCHEMA_V1, EXPORT_WORKSPACE_SCHEMA_V1, ExportAgentRecord, ExportAgentRecordBuilder,
-    ExportAuditRecord, ExportAuditRecordBuilder, ExportFooter, ExportFooterBuilder, ExportHeader,
-    ExportHeaderBuilder, ExportLinkRecord, ExportLinkRecordBuilder, ExportMemoryRecord,
-    ExportMemoryRecordBuilder, ExportRecord, ExportRecordType, ExportScope, ExportTagRecord,
-    ExportWorkspaceRecord, ExportWorkspaceRecordBuilder, ImportSource, ParseExportRecordTypeError,
-    ParseExportScopeError, ParseImportSourceError, ParseRedactionLevelError, ParseTrustLevelError,
-    RedactionLevel, TrustLevel,
+    ALL_EXPORT_SCHEMAS, EXPORT_AGENT_SCHEMA_V1, EXPORT_ARTIFACT_SCHEMA_V1, EXPORT_AUDIT_SCHEMA_V1,
+    EXPORT_FOOTER_SCHEMA_V1, EXPORT_FORMAT_VERSION, EXPORT_HEADER_SCHEMA_V1, EXPORT_LINK_SCHEMA_V1,
+    EXPORT_MEMORY_SCHEMA_V1, EXPORT_TAG_SCHEMA_V1, EXPORT_WORKSPACE_SCHEMA_V1, ExportAgentRecord,
+    ExportAgentRecordBuilder, ExportArtifactRecord, ExportArtifactRecordBuilder, ExportAuditRecord,
+    ExportAuditRecordBuilder, ExportFooter, ExportFooterBuilder, ExportHeader, ExportHeaderBuilder,
+    ExportLinkRecord, ExportLinkRecordBuilder, ExportMemoryRecord, ExportMemoryRecordBuilder,
+    ExportRecord, ExportRecordType, ExportScope, ExportTagRecord, ExportWorkspaceRecord,
+    ExportWorkspaceRecordBuilder, ImportSource, ParseExportRecordTypeError, ParseExportScopeError,
+    ParseImportSourceError, ParseRedactionLevelError, ParseTrustLevelError, RedactionLevel,
+    TrustLevel,
 };
 pub use learn::{
     EXPERIMENT_OUTCOME_SCHEMA_V1, ExperimentOutcome, ExperimentOutcomeStatus,
@@ -165,10 +182,11 @@ pub use recorder::{
     IMPORT_CURSOR_SCHEMA_V1, ImportCursor, ImportSourceType, ParseImportSourceTypeError,
     ParsePayloadContentTypeError, ParseRecorderEventTypeError, ParseRecorderRunStatusError,
     ParseRedactionStatusError, PayloadContentType, RECORDER_EVENT_SCHEMA_V1,
-    RECORDER_PAYLOAD_SCHEMA_V1, RECORDER_RUN_SCHEMA_V1, RECORDER_SCHEMA_CATALOG_V1,
-    REDACTION_STATUS_SCHEMA_V1, RecorderEvent, RecorderEventType, RecorderFieldSchema,
-    RecorderObjectSchema, RecorderPayload, RecorderRunMeta, RecorderRunStatus, RedactionStatus,
-    RedactionStatusSnapshot, recorder_schema_catalog_json, recorder_schemas,
+    RECORDER_IMPORT_PLAN_SCHEMA_V1, RECORDER_PAYLOAD_SCHEMA_V1, RECORDER_RUN_SCHEMA_V1,
+    RECORDER_SCHEMA_CATALOG_V1, REDACTION_STATUS_SCHEMA_V1, RecorderEvent,
+    RecorderEventChainStatus, RecorderEventType, RecorderFieldSchema, RecorderObjectSchema,
+    RecorderPayload, RecorderRunMeta, RecorderRunStatus, RedactionStatus, RedactionStatusSnapshot,
+    recorder_schema_catalog_json, recorder_schemas,
 };
 pub use release::{
     RELEASE_ARTIFACT_SCHEMA_V1, RELEASE_BINARY_NAME, RELEASE_MANIFEST_SCHEMA_V1,
@@ -194,10 +212,23 @@ pub use revision::{
     LegalHoldId, REVISION_GROUP_ID_LEN, REVISION_GROUP_PREFIX, RevisionGroupId, RevisionIdError,
     RevisionMeta, SupersessionLink, SupersessionReason,
 };
-pub use rule::{ParseRuleMaturityError, ParseRuleScopeError, RuleMaturity, RuleScope};
+pub use rule::{
+    ParseRuleLifecycleActionError, ParseRuleLifecycleTriggerError, ParseRuleMaturityError,
+    ParseRuleScopeError, RuleLifecycleAction, RuleLifecycleEvidence, RuleLifecycleTransition,
+    RuleLifecycleTrigger, RuleMaturity, RuleScope,
+};
 pub use schema::{
     KNOWN_SCHEMAS, SchemaValidationError, is_known_schema, parse_schema_parts, validate_schema,
     validate_schema_match,
+};
+pub use situation::{
+    FEATURE_EVIDENCE_SCHEMA_V1, FeatureEvidence, ParseSituationValueError,
+    ROUTING_DECISION_SCHEMA_V1, RoutingDecision, SITUATION_CLASSIFY_SCHEMA_V1,
+    SITUATION_EXPLAIN_SCHEMA_V1, SITUATION_LINK_SCHEMA_V1, SITUATION_SCHEMA_CATALOG_V1,
+    SITUATION_SCHEMA_V1, SITUATION_SHOW_SCHEMA_V1, Situation, SituationCategory,
+    SituationConfidence, SituationFeatureType, SituationFieldSchema, SituationLink,
+    SituationLinkRelation, SituationObjectSchema, SituationReplayPolicy, SituationRoutingSurface,
+    TASK_SIGNATURE_SCHEMA_V1, TaskSignature, situation_schema_catalog_json, situation_schemas,
 };
 pub use timing::{DiagnosticTiming, TimingCapture, TimingPhase};
 pub use trust::{ParseTrustClassError, TrustClass};

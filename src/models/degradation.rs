@@ -88,6 +88,8 @@ pub enum DegradedSubsystem {
     Policy,
     /// External network access.
     Network,
+    /// Optional science analytics.
+    Science,
 }
 
 impl DegradedSubsystem {
@@ -103,6 +105,7 @@ impl DegradedSubsystem {
             Self::Curate => "curate",
             Self::Policy => "policy",
             Self::Network => "network",
+            Self::Science => "science",
         }
     }
 }
@@ -353,6 +356,37 @@ pub const NETWORK_UNAVAILABLE: DegradationCode = DegradationCode {
     repair: None,
 };
 
+// Science degradations (D800 - D899)
+pub const SCIENCE_BACKEND_UNAVAILABLE: DegradationCode = DegradationCode {
+    id: "D800",
+    subsystem: DegradedSubsystem::Science,
+    severity: DegradationSeverity::Warning,
+    description: "Science analytics backend unavailable",
+    behavior_change: "Optional science analytics are disabled; deterministic core diagnostics still work",
+    auto_recoverable: false,
+    repair: Some("ee doctor --json"),
+};
+
+pub const SCIENCE_INPUT_TOO_LARGE: DegradationCode = DegradationCode {
+    id: "D801",
+    subsystem: DegradedSubsystem::Science,
+    severity: DegradationSeverity::Warning,
+    description: "Science analytics input too large",
+    behavior_change: "Science analysis is skipped for oversized inputs; use a smaller sample or narrower query",
+    auto_recoverable: false,
+    repair: None,
+};
+
+pub const SCIENCE_BUDGET_EXCEEDED: DegradationCode = DegradationCode {
+    id: "D802",
+    subsystem: DegradedSubsystem::Science,
+    severity: DegradationSeverity::Warning,
+    description: "Science analytics budget exceeded",
+    behavior_change: "Science analysis stops at the configured budget; core command output remains available",
+    auto_recoverable: false,
+    repair: None,
+};
+
 /// All registered degradation codes for enumeration.
 pub const ALL_DEGRADATION_CODES: &[DegradationCode] = &[
     // Search
@@ -382,6 +416,10 @@ pub const ALL_DEGRADATION_CODES: &[DegradationCode] = &[
     REDACTION_PATTERNS_STALE,
     // Network
     NETWORK_UNAVAILABLE,
+    // Science
+    SCIENCE_BACKEND_UNAVAILABLE,
+    SCIENCE_INPUT_TOO_LARGE,
+    SCIENCE_BUDGET_EXCEEDED,
 ];
 
 /// Look up a degradation code by its stable ID (e.g., "D001").
@@ -504,6 +542,7 @@ mod tests {
                 DegradedSubsystem::Curate => 500..600,
                 DegradedSubsystem::Policy => 600..700,
                 DegradedSubsystem::Network => 700..800,
+                DegradedSubsystem::Science => 800..900,
             };
             if !expected_range.contains(&num) {
                 return Err(format!(
@@ -593,7 +632,8 @@ mod tests {
         ensure(DegradedSubsystem::Pack.as_str(), "pack", "pack")?;
         ensure(DegradedSubsystem::Curate.as_str(), "curate", "curate")?;
         ensure(DegradedSubsystem::Policy.as_str(), "policy", "policy")?;
-        ensure(DegradedSubsystem::Network.as_str(), "network", "network")
+        ensure(DegradedSubsystem::Network.as_str(), "network", "network")?;
+        ensure(DegradedSubsystem::Science.as_str(), "science", "science")
     }
 
     #[test]
@@ -607,6 +647,7 @@ mod tests {
             DegradedSubsystem::Curate,
             DegradedSubsystem::Policy,
             DegradedSubsystem::Network,
+            DegradedSubsystem::Science,
         ];
         for sub in subsystems {
             let codes = by_subsystem(sub);
@@ -615,6 +656,28 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn science_degradation_codes_are_registered() -> TestResult {
+        let science = by_subsystem(DegradedSubsystem::Science);
+        ensure(
+            science.iter().map(|code| code.id).collect(),
+            vec!["D800", "D801", "D802"],
+            "science code ids",
+        )?;
+        ensure(
+            science
+                .iter()
+                .map(|code| code.description)
+                .collect::<Vec<_>>(),
+            vec![
+                "Science analytics backend unavailable",
+                "Science analytics input too large",
+                "Science analytics budget exceeded",
+            ],
+            "science code descriptions",
+        )
     }
 
     #[test]

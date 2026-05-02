@@ -137,7 +137,8 @@ impl FromStr for ProcedureVerificationStatus {
 pub enum ProcedureExportFormat {
     Json,
     Markdown,
-    SkillMarkdown,
+    Playbook,
+    SkillCapsule,
 }
 
 impl ProcedureExportFormat {
@@ -146,13 +147,19 @@ impl ProcedureExportFormat {
         match self {
             Self::Json => "json",
             Self::Markdown => "markdown",
-            Self::SkillMarkdown => "skill_markdown",
+            Self::Playbook => "playbook",
+            Self::SkillCapsule => "skill_capsule",
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 3] {
-        [Self::Json, Self::Markdown, Self::SkillMarkdown]
+    pub const fn all() -> [Self; 4] {
+        [
+            Self::Json,
+            Self::Markdown,
+            Self::Playbook,
+            Self::SkillCapsule,
+        ]
     }
 }
 
@@ -166,14 +173,16 @@ impl FromStr for ProcedureExportFormat {
     type Err = ParseProcedureValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        let normalized = input.trim().to_ascii_lowercase().replace('-', "_");
+        match normalized.as_str() {
             "json" => Ok(Self::Json),
-            "markdown" => Ok(Self::Markdown),
-            "skill_markdown" => Ok(Self::SkillMarkdown),
+            "md" | "markdown" => Ok(Self::Markdown),
+            "yaml" | "yml" | "playbook" => Ok(Self::Playbook),
+            "skill" | "skill_capsule" | "skill_markdown" => Ok(Self::SkillCapsule),
             _ => Err(ParseProcedureValueError::new(
                 "procedure_export_format",
                 input,
-                "json, markdown, skill_markdown",
+                "json, markdown, playbook, skill_capsule",
             )),
         }
     }
@@ -1121,7 +1130,7 @@ mod tests {
         let export = ProcedureExport::new(
             "export-001",
             "proc-001",
-            ProcedureExportFormat::SkillMarkdown,
+            ProcedureExportFormat::SkillCapsule,
             "2026-04-30T12:15:00Z",
         )
         .include_evidence()

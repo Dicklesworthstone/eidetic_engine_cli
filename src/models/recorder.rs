@@ -29,6 +29,9 @@ pub const REDACTION_STATUS_SCHEMA_V1: &str = "ee.redaction.status.v1";
 /// Schema for import cursor state.
 pub const IMPORT_CURSOR_SCHEMA_V1: &str = "ee.import.cursor.v1";
 
+/// Schema for recorder import dry-run plans.
+pub const RECORDER_IMPORT_PLAN_SCHEMA_V1: &str = "ee.recorder.import_plan.v1";
+
 /// Schema for the recorder schema catalog.
 pub const RECORDER_SCHEMA_CATALOG_V1: &str = "ee.recorder.schemas.v1";
 
@@ -240,6 +243,9 @@ pub struct RecorderEvent {
     pub timestamp: String,
     pub payload_hash: Option<String>,
     pub redaction_status: RedactionStatus,
+    pub previous_event_hash: Option<String>,
+    pub event_hash: Option<String>,
+    pub chain_status: RecorderEventChainStatus,
 }
 
 impl RecorderEvent {
@@ -260,6 +266,9 @@ impl RecorderEvent {
             timestamp: timestamp.into(),
             payload_hash: None,
             redaction_status: RedactionStatus::None,
+            previous_event_hash: None,
+            event_hash: None,
+            chain_status: RecorderEventChainStatus::Root,
         }
     }
 
@@ -273,6 +282,56 @@ impl RecorderEvent {
     pub const fn with_redaction_status(mut self, status: RedactionStatus) -> Self {
         self.redaction_status = status;
         self
+    }
+
+    #[must_use]
+    pub fn with_chain(
+        mut self,
+        previous_event_hash: Option<String>,
+        event_hash: impl Into<String>,
+        status: RecorderEventChainStatus,
+    ) -> Self {
+        self.previous_event_hash = previous_event_hash;
+        self.event_hash = Some(event_hash.into());
+        self.chain_status = status;
+        self
+    }
+}
+
+/// Hash-chain status for one recorder event.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RecorderEventChainStatus {
+    #[default]
+    Root,
+    Linked,
+    MissingPrevious,
+}
+
+impl RecorderEventChainStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Root => "root",
+            Self::Linked => "linked",
+            Self::MissingPrevious => "missing_previous",
+        }
+    }
+
+    #[must_use]
+    pub fn for_event(sequence: u64, previous_event_hash: Option<&str>) -> Self {
+        if previous_event_hash.is_some() {
+            Self::Linked
+        } else if sequence <= 1 {
+            Self::Root
+        } else {
+            Self::MissingPrevious
+        }
+    }
+}
+
+impl fmt::Display for RecorderEventChainStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -703,10 +762,58 @@ const RECORDER_EVENT_FIELDS: &[RecorderFieldSchema] = &[
         "Hash of the associated payload, when stored.",
     ),
     RecorderFieldSchema::new(
+        "payloadBytes",
+        "integer",
+        true,
+        "Original accepted payload size in bytes.",
+    ),
+    RecorderFieldSchema::new(
+        "payloadAccepted",
+        "boolean",
+        true,
+        "Whether the payload passed size and redaction gates.",
+    ),
+    RecorderFieldSchema::new(
         "redactionStatus",
         "string",
         true,
         "Privacy state for the event.",
+    ),
+    RecorderFieldSchema::new(
+        "redactionClasses",
+        "array<string>",
+        true,
+        "Sorted redaction classes applied to the event payload.",
+    ),
+    RecorderFieldSchema::new(
+        "placeholderCount",
+        "integer",
+        true,
+        "Number of redaction placeholders applied.",
+    ),
+    RecorderFieldSchema::new(
+        "redactedBytes",
+        "integer",
+        true,
+        "Number of payload bytes redacted before hashing.",
+    ),
+    RecorderFieldSchema::new(
+        "previousEventHash",
+        "string|null",
+        false,
+        "Previous event hash used to link the append-only chain.",
+    ),
+    RecorderFieldSchema::new(
+        "eventHash",
+        "string",
+        true,
+        "BLAKE3 hash of canonical event metadata and previous hash.",
+    ),
+    RecorderFieldSchema::new(
+        "chainStatus",
+        "string",
+        true,
+        "Hash-chain state: root, linked, or missing_previous.",
     ),
 ];
 
@@ -798,8 +905,60 @@ const IMPORT_CURSOR_FIELDS: &[RecorderFieldSchema] = &[
     ),
 ];
 
+const RECORDER_IMPORT_PLAN_FIELDS: &[RecorderFieldSchema] = &[
+    RecorderFieldSchema::new("schema", "string", true, "Schema identifier."),
+    RecorderFieldSchema::new(
+        "command",
+        "string",
+        true,
+        "Stable command name: recorder import.",
+    ),
+    RecorderFieldSchema::new(
+        "dryRun",
+        "boolean",
+        true,
+        "Whether this plan avoids durable recorder writes.",
+    ),
+    RecorderFieldSchema::new(
+        "source",
+        "object",
+        true,
+        "Connector source identity and parser contract.",
+    ),
+    RecorderFieldSchema::new(
+        "run",
+        "object",
+        true,
+        "Planned imported recorder run metadata.",
+    ),
+    RecorderFieldSchema::new(
+        "summary",
+        "object",
+        true,
+        "Counts for discovered, mapped, rejected, and redacted events.",
+    ),
+    RecorderFieldSchema::new(
+        "mutations",
+        "array<object>",
+        true,
+        "Dry-run mutation descriptions that would be applied by a future writer.",
+    ),
+    RecorderFieldSchema::new(
+        "events",
+        "array<object>",
+        true,
+        "Deterministic mapped event plans without raw payload content.",
+    ),
+    RecorderFieldSchema::new(
+        "warnings",
+        "array<string>",
+        true,
+        "Non-fatal importer warnings and truncation notices.",
+    ),
+];
+
 #[must_use]
-pub const fn recorder_schemas() -> [RecorderObjectSchema; 5] {
+pub const fn recorder_schemas() -> [RecorderObjectSchema; 6] {
     [
         RecorderObjectSchema {
             schema_name: RECORDER_RUN_SCHEMA_V1,
@@ -840,6 +999,14 @@ pub const fn recorder_schemas() -> [RecorderObjectSchema; 5] {
             title: "ImportCursor",
             description: "Incremental import cursor for replayable connectors.",
             fields: IMPORT_CURSOR_FIELDS,
+        },
+        RecorderObjectSchema {
+            schema_name: RECORDER_IMPORT_PLAN_SCHEMA_V1,
+            schema_uri: "urn:ee:schema:recorder-import-plan:v1",
+            kind: "recorder_import_plan",
+            title: "RecorderImportPlan",
+            description: "Read-only connector mapping plan for imported recorder runs and events.",
+            fields: RECORDER_IMPORT_PLAN_FIELDS,
         },
     ]
 }
@@ -1067,7 +1234,12 @@ mod tests {
             "2026-04-30T12:00:01Z",
         )
         .with_payload_hash("blake3:abc")
-        .with_redaction_status(RedactionStatus::Verified);
+        .with_redaction_status(RedactionStatus::Verified)
+        .with_chain(
+            Some("blake3:previous".to_string()),
+            "blake3:event",
+            RecorderEventChainStatus::Linked,
+        );
 
         ensure(event.schema, RECORDER_EVENT_SCHEMA_V1, "schema")?;
         ensure(event.sequence, 7, "sequence")?;
@@ -1080,6 +1252,55 @@ mod tests {
             event.redaction_status,
             RedactionStatus::Verified,
             "redaction",
+        )?;
+        ensure(
+            event.previous_event_hash,
+            Some("blake3:previous".to_string()),
+            "previous hash",
+        )?;
+        ensure(
+            event.event_hash,
+            Some("blake3:event".to_string()),
+            "event hash",
+        )?;
+        ensure(
+            event.chain_status,
+            RecorderEventChainStatus::Linked,
+            "chain status",
+        )
+    }
+
+    #[test]
+    fn recorder_event_chain_status_strings_are_stable() -> TestResult {
+        ensure(RecorderEventChainStatus::Root.as_str(), "root", "root")?;
+        ensure(
+            RecorderEventChainStatus::Linked.as_str(),
+            "linked",
+            "linked",
+        )?;
+        ensure(
+            RecorderEventChainStatus::MissingPrevious.as_str(),
+            "missing_previous",
+            "missing previous",
+        )
+    }
+
+    #[test]
+    fn recorder_event_chain_status_detects_missing_previous() -> TestResult {
+        ensure(
+            RecorderEventChainStatus::for_event(1, None),
+            RecorderEventChainStatus::Root,
+            "root",
+        )?;
+        ensure(
+            RecorderEventChainStatus::for_event(2, Some("blake3:prev")),
+            RecorderEventChainStatus::Linked,
+            "linked",
+        )?;
+        ensure(
+            RecorderEventChainStatus::for_event(2, None),
+            RecorderEventChainStatus::MissingPrevious,
+            "missing",
         )
     }
 
@@ -1229,6 +1450,11 @@ mod tests {
             "cursor schema",
         )?;
         ensure(
+            RECORDER_IMPORT_PLAN_SCHEMA_V1,
+            "ee.recorder.import_plan.v1",
+            "import plan schema",
+        )?;
+        ensure(
             RECORDER_SCHEMA_CATALOG_V1,
             "ee.recorder.schemas.v1",
             "catalog schema",
@@ -1250,7 +1476,7 @@ mod tests {
     #[test]
     fn recorder_schema_catalog_order_is_stable() -> TestResult {
         let schemas = recorder_schemas();
-        ensure(schemas.len(), 5, "schema count")?;
+        ensure(schemas.len(), 6, "schema count")?;
         ensure(schemas[0].schema_name, RECORDER_RUN_SCHEMA_V1, "run")?;
         ensure(schemas[1].schema_name, RECORDER_EVENT_SCHEMA_V1, "event")?;
         ensure(
@@ -1263,7 +1489,12 @@ mod tests {
             REDACTION_STATUS_SCHEMA_V1,
             "redaction",
         )?;
-        ensure(schemas[4].schema_name, IMPORT_CURSOR_SCHEMA_V1, "cursor")
+        ensure(schemas[4].schema_name, IMPORT_CURSOR_SCHEMA_V1, "cursor")?;
+        ensure(
+            schemas[5].schema_name,
+            RECORDER_IMPORT_PLAN_SCHEMA_V1,
+            "import plan",
+        )
     }
 
     #[test]
@@ -1284,6 +1515,6 @@ mod tests {
             .get("schemas")
             .and_then(serde_json::Value::as_array)
             .ok_or_else(|| "schemas must be an array".to_string())?;
-        ensure(schemas.len(), 5, "catalog length")
+        ensure(schemas.len(), 6, "catalog length")
     }
 }

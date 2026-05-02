@@ -394,9 +394,11 @@ mod tests {
             .build();
 
         let json = serde_json::to_string(&event).expect("serialize");
-        assert!(!json.contains("progress"));
-        assert!(!json.contains("current_item"));
-        assert!(!json.contains("total_items"));
+        let value: serde_json::Value = serde_json::from_str(&json).expect("parse event json");
+        let object = value.as_object().expect("event json object");
+        assert!(!object.contains_key("progress"));
+        assert!(!object.contains_key("current_item"));
+        assert!(!object.contains_key("total_items"));
     }
 
     #[test]

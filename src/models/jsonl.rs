@@ -33,6 +33,9 @@ pub const EXPORT_HEADER_SCHEMA_V1: &str = "ee.export.header.v1";
 /// Schema identifier for export memory records.
 pub const EXPORT_MEMORY_SCHEMA_V1: &str = "ee.export.memory.v1";
 
+/// Schema identifier for export artifact records.
+pub const EXPORT_ARTIFACT_SCHEMA_V1: &str = "ee.export.artifact.v1";
+
 /// Schema identifier for export footer records.
 pub const EXPORT_FOOTER_SCHEMA_V1: &str = "ee.export.footer.v1";
 
@@ -55,6 +58,7 @@ pub const EXPORT_WORKSPACE_SCHEMA_V1: &str = "ee.export.workspace.v1";
 pub const ALL_EXPORT_SCHEMAS: &[&str] = &[
     EXPORT_HEADER_SCHEMA_V1,
     EXPORT_MEMORY_SCHEMA_V1,
+    EXPORT_ARTIFACT_SCHEMA_V1,
     EXPORT_FOOTER_SCHEMA_V1,
     EXPORT_AUDIT_SCHEMA_V1,
     EXPORT_LINK_SCHEMA_V1,
@@ -223,6 +227,7 @@ impl FromStr for TrustLevel {
 pub enum ExportRecordType {
     Header,
     Memory,
+    Artifact,
     Link,
     Tag,
     Agent,
@@ -237,6 +242,7 @@ impl ExportRecordType {
         match self {
             Self::Header => "header",
             Self::Memory => "memory",
+            Self::Artifact => "artifact",
             Self::Link => "link",
             Self::Tag => "tag",
             Self::Agent => "agent",
@@ -251,6 +257,7 @@ impl ExportRecordType {
         match self {
             Self::Header => EXPORT_HEADER_SCHEMA_V1,
             Self::Memory => EXPORT_MEMORY_SCHEMA_V1,
+            Self::Artifact => EXPORT_ARTIFACT_SCHEMA_V1,
             Self::Link => EXPORT_LINK_SCHEMA_V1,
             Self::Tag => EXPORT_TAG_SCHEMA_V1,
             Self::Agent => EXPORT_AGENT_SCHEMA_V1,
@@ -265,6 +272,7 @@ impl ExportRecordType {
         &[
             Self::Header,
             Self::Memory,
+            Self::Artifact,
             Self::Link,
             Self::Tag,
             Self::Agent,
@@ -290,7 +298,7 @@ impl fmt::Display for ParseExportRecordTypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "invalid export record type '{}'; expected one of: header, memory, link, tag, agent, workspace, audit, footer",
+            "invalid export record type '{}'; expected one of: header, memory, artifact, link, tag, agent, workspace, audit, footer",
             self.invalid
         )
     }
@@ -305,6 +313,7 @@ impl FromStr for ExportRecordType {
         match s {
             "header" => Ok(Self::Header),
             "memory" => Ok(Self::Memory),
+            "artifact" => Ok(Self::Artifact),
             "link" => Ok(Self::Link),
             "tag" => Ok(Self::Tag),
             "agent" => Ok(Self::Agent),
@@ -452,6 +461,11 @@ impl ExportScope {
     #[must_use]
     pub const fn includes_memories(self) -> bool {
         matches!(self, Self::All | Self::Memories | Self::MetadataOnly)
+    }
+
+    #[must_use]
+    pub const fn includes_artifacts(self) -> bool {
+        matches!(self, Self::All | Self::MetadataOnly)
     }
 
     #[must_use]
@@ -966,6 +980,185 @@ impl ExportMemoryRecordBuilder {
     }
 }
 
+/// Export artifact record.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExportArtifactRecord {
+    pub schema: String,
+    pub artifact_id: String,
+    pub workspace_id: String,
+    pub source_kind: String,
+    pub artifact_type: String,
+    pub original_path: Option<String>,
+    pub canonical_path: Option<String>,
+    pub external_ref: Option<String>,
+    pub content_hash: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub redaction_status: String,
+    pub snippet: Option<String>,
+    pub snippet_hash: Option<String>,
+    pub provenance_uri: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl ExportArtifactRecord {
+    #[must_use]
+    pub fn builder() -> ExportArtifactRecordBuilder {
+        ExportArtifactRecordBuilder::default()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ExportArtifactRecordBuilder {
+    artifact_id: Option<String>,
+    workspace_id: Option<String>,
+    source_kind: Option<String>,
+    artifact_type: Option<String>,
+    original_path: Option<String>,
+    canonical_path: Option<String>,
+    external_ref: Option<String>,
+    content_hash: Option<String>,
+    media_type: Option<String>,
+    size_bytes: Option<u64>,
+    redaction_status: Option<String>,
+    snippet: Option<String>,
+    snippet_hash: Option<String>,
+    provenance_uri: Option<String>,
+    metadata: Option<serde_json::Value>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
+impl ExportArtifactRecordBuilder {
+    #[must_use]
+    pub fn artifact_id(mut self, artifact_id: impl Into<String>) -> Self {
+        self.artifact_id = Some(artifact_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn workspace_id(mut self, workspace_id: impl Into<String>) -> Self {
+        self.workspace_id = Some(workspace_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn source_kind(mut self, source_kind: impl Into<String>) -> Self {
+        self.source_kind = Some(source_kind.into());
+        self
+    }
+
+    #[must_use]
+    pub fn artifact_type(mut self, artifact_type: impl Into<String>) -> Self {
+        self.artifact_type = Some(artifact_type.into());
+        self
+    }
+
+    #[must_use]
+    pub fn original_path(mut self, original_path: impl Into<String>) -> Self {
+        self.original_path = Some(original_path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn canonical_path(mut self, canonical_path: impl Into<String>) -> Self {
+        self.canonical_path = Some(canonical_path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn external_ref(mut self, external_ref: impl Into<String>) -> Self {
+        self.external_ref = Some(external_ref.into());
+        self
+    }
+
+    #[must_use]
+    pub fn content_hash(mut self, content_hash: impl Into<String>) -> Self {
+        self.content_hash = Some(content_hash.into());
+        self
+    }
+
+    #[must_use]
+    pub fn media_type(mut self, media_type: impl Into<String>) -> Self {
+        self.media_type = Some(media_type.into());
+        self
+    }
+
+    #[must_use]
+    pub fn size_bytes(mut self, size_bytes: u64) -> Self {
+        self.size_bytes = Some(size_bytes);
+        self
+    }
+
+    #[must_use]
+    pub fn redaction_status(mut self, redaction_status: impl Into<String>) -> Self {
+        self.redaction_status = Some(redaction_status.into());
+        self
+    }
+
+    #[must_use]
+    pub fn snippet(mut self, snippet: impl Into<String>) -> Self {
+        self.snippet = Some(snippet.into());
+        self
+    }
+
+    #[must_use]
+    pub fn snippet_hash(mut self, snippet_hash: impl Into<String>) -> Self {
+        self.snippet_hash = Some(snippet_hash.into());
+        self
+    }
+
+    #[must_use]
+    pub fn provenance_uri(mut self, provenance_uri: impl Into<String>) -> Self {
+        self.provenance_uri = Some(provenance_uri.into());
+        self
+    }
+
+    #[must_use]
+    pub fn metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    #[must_use]
+    pub fn created_at(mut self, created_at: impl Into<String>) -> Self {
+        self.created_at = Some(created_at.into());
+        self
+    }
+
+    #[must_use]
+    pub fn updated_at(mut self, updated_at: impl Into<String>) -> Self {
+        self.updated_at = Some(updated_at.into());
+        self
+    }
+
+    #[must_use]
+    pub fn build(self) -> ExportArtifactRecord {
+        ExportArtifactRecord {
+            schema: EXPORT_ARTIFACT_SCHEMA_V1.to_owned(),
+            artifact_id: self.artifact_id.unwrap_or_default(),
+            workspace_id: self.workspace_id.unwrap_or_default(),
+            source_kind: self.source_kind.unwrap_or_default(),
+            artifact_type: self.artifact_type.unwrap_or_default(),
+            original_path: self.original_path,
+            canonical_path: self.canonical_path,
+            external_ref: self.external_ref,
+            content_hash: self.content_hash.unwrap_or_default(),
+            media_type: self.media_type.unwrap_or_default(),
+            size_bytes: self.size_bytes.unwrap_or_default(),
+            redaction_status: self.redaction_status.unwrap_or_default(),
+            snippet: self.snippet,
+            snippet_hash: self.snippet_hash,
+            provenance_uri: self.provenance_uri,
+            metadata: self.metadata,
+            created_at: self.created_at.unwrap_or_default(),
+            updated_at: self.updated_at.unwrap_or_default(),
+        }
+    }
+}
+
 /// Export link record (memory relationships).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExportLinkRecord {
@@ -1326,6 +1519,7 @@ impl ExportAgentRecordBuilder {
 pub enum ExportRecord {
     Header(ExportHeader),
     Memory(ExportMemoryRecord),
+    Artifact(ExportArtifactRecord),
     Link(ExportLinkRecord),
     Tag(ExportTagRecord),
     Agent(ExportAgentRecord),
@@ -1340,6 +1534,7 @@ impl ExportRecord {
         match self {
             Self::Header(_) => ExportRecordType::Header,
             Self::Memory(_) => ExportRecordType::Memory,
+            Self::Artifact(_) => ExportRecordType::Artifact,
             Self::Link(_) => ExportRecordType::Link,
             Self::Tag(_) => ExportRecordType::Tag,
             Self::Agent(_) => ExportRecordType::Agent,
@@ -1354,6 +1549,7 @@ impl ExportRecord {
         match self {
             Self::Header(h) => &h.schema,
             Self::Memory(m) => &m.schema,
+            Self::Artifact(a) => &a.schema,
             Self::Link(l) => &l.schema,
             Self::Tag(t) => &t.schema,
             Self::Agent(a) => &a.schema,
@@ -1376,6 +1572,59 @@ mod tests {
             Ok(())
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
+        }
+    }
+
+    fn ensure_json_round_trip<T>(value: &T, ctx: &str) -> TestResult
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug + PartialEq,
+    {
+        let json = serde_json::to_string(value)
+            .map_err(|error| format!("{ctx} must serialize as JSON: {error}"))?;
+        let parsed: T = serde_json::from_str(&json)
+            .map_err(|error| format!("{ctx} must deserialize from JSON: {error}"))?;
+        ensure(&parsed, value, ctx)
+    }
+
+    fn ensure_export_record_match(
+        actual: &ExportRecord,
+        expected: &ExportRecord,
+        ctx: &str,
+    ) -> TestResult {
+        ensure(
+            actual.record_type(),
+            expected.record_type(),
+            &format!("{ctx} type"),
+        )?;
+        match (actual, expected) {
+            (ExportRecord::Header(actual), ExportRecord::Header(expected)) => {
+                ensure(actual, expected, ctx)
+            }
+            (ExportRecord::Memory(actual), ExportRecord::Memory(expected)) => {
+                ensure(actual, expected, ctx)
+            }
+            (ExportRecord::Artifact(actual), ExportRecord::Artifact(expected)) => {
+                ensure(actual, expected, ctx)
+            }
+            (ExportRecord::Link(actual), ExportRecord::Link(expected)) => {
+                ensure(actual, expected, ctx)
+            }
+            (ExportRecord::Tag(actual), ExportRecord::Tag(expected)) => {
+                ensure(actual, expected, ctx)
+            }
+            (ExportRecord::Agent(actual), ExportRecord::Agent(expected)) => {
+                ensure(actual, expected, ctx)
+            }
+            (ExportRecord::Workspace(actual), ExportRecord::Workspace(expected)) => {
+                ensure(actual, expected, ctx)
+            }
+            (ExportRecord::Audit(actual), ExportRecord::Audit(expected)) => {
+                ensure(actual, expected, ctx)
+            }
+            (ExportRecord::Footer(actual), ExportRecord::Footer(expected)) => {
+                ensure(actual, expected, ctx)
+            }
+            _ => Err(format!("{ctx}: mismatched record variants")),
         }
     }
 
@@ -1402,6 +1651,10 @@ mod tests {
     fn export_record_type_schema_mapping() {
         assert_eq!(ExportRecordType::Header.schema(), EXPORT_HEADER_SCHEMA_V1);
         assert_eq!(ExportRecordType::Memory.schema(), EXPORT_MEMORY_SCHEMA_V1);
+        assert_eq!(
+            ExportRecordType::Artifact.schema(),
+            EXPORT_ARTIFACT_SCHEMA_V1
+        );
         assert_eq!(ExportRecordType::Footer.schema(), EXPORT_FOOTER_SCHEMA_V1);
         assert_eq!(ExportRecordType::Audit.schema(), EXPORT_AUDIT_SCHEMA_V1);
         assert_eq!(ExportRecordType::Link.schema(), EXPORT_LINK_SCHEMA_V1);
@@ -1535,6 +1788,32 @@ mod tests {
     }
 
     #[test]
+    fn export_artifact_record_builder() {
+        let artifact = ExportArtifactRecord::builder()
+            .artifact_id("art_01234567890123456789012345")
+            .workspace_id("ws-123")
+            .source_kind("file")
+            .artifact_type("log")
+            .original_path("logs/build.log")
+            .canonical_path("/workspace/logs/build.log")
+            .content_hash("blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .media_type("text/plain")
+            .size_bytes(42)
+            .redaction_status("checked")
+            .snippet("build ok")
+            .created_at("2026-04-30T12:00:00Z")
+            .updated_at("2026-04-30T12:00:00Z")
+            .build();
+
+        assert_eq!(artifact.schema, EXPORT_ARTIFACT_SCHEMA_V1);
+        assert_eq!(artifact.artifact_id, "art_01234567890123456789012345");
+        assert_eq!(artifact.source_kind, "file");
+        assert_eq!(artifact.artifact_type, "log");
+        assert_eq!(artifact.redaction_status, "checked");
+        assert_eq!(artifact.snippet, Some("build ok".to_owned()));
+    }
+
+    #[test]
     fn export_link_record_builder() {
         let link = ExportLinkRecord::builder()
             .link_id("lnk-001")
@@ -1617,9 +1896,272 @@ mod tests {
         assert_eq!(memory.record_type(), ExportRecordType::Memory);
         assert_eq!(memory.schema(), EXPORT_MEMORY_SCHEMA_V1);
 
+        let artifact = ExportRecord::Artifact(ExportArtifactRecord::builder().build());
+        assert_eq!(artifact.record_type(), ExportRecordType::Artifact);
+        assert_eq!(artifact.schema(), EXPORT_ARTIFACT_SCHEMA_V1);
+
         let footer = ExportRecord::Footer(ExportFooter::builder().build());
         assert_eq!(footer.record_type(), ExportRecordType::Footer);
         assert_eq!(footer.schema(), EXPORT_FOOTER_SCHEMA_V1);
+    }
+
+    #[test]
+    fn concrete_export_records_round_trip_through_json() -> TestResult {
+        ensure_json_round_trip(
+            &ExportHeader::builder()
+                .created_at("2026-04-30T12:00:00Z")
+                .workspace_id("wsp_01234567890123456789012345")
+                .workspace_path("/workspace/project")
+                .export_scope(ExportScope::All)
+                .redaction_level(RedactionLevel::Standard)
+                .record_count(6)
+                .ee_version("0.1.0")
+                .hostname("agent-host")
+                .export_id("exp-round-trip")
+                .import_source(ImportSource::Native)
+                .trust_level(TrustLevel::Validated)
+                .checksum("blake3:export")
+                .signature("sigstore:fixture")
+                .source_schema_version("ee.export.v1")
+                .build(),
+            "header round-trip",
+        )?;
+        ensure_json_round_trip(
+            &ExportMemoryRecord::builder()
+                .memory_id("mem_01234567890123456789012345")
+                .workspace_id("wsp_01234567890123456789012345")
+                .level("procedural")
+                .kind("rule")
+                .content("Run cargo fmt --check before release.")
+                .importance(0.8)
+                .confidence(0.9)
+                .utility(0.7)
+                .created_at("2026-04-30T12:00:00Z")
+                .updated_at("2026-04-30T12:01:00Z")
+                .expires_at("2026-05-30T12:00:00Z")
+                .source_agent("NobleCardinal")
+                .provenance_uri("ee-export://round-trip")
+                .supersedes("mem_00234567890123456789012345")
+                .superseded_by("mem_00334567890123456789012345")
+                .redacted(true)
+                .redaction_reason("standard_export")
+                .build(),
+            "memory round-trip",
+        )?;
+        ensure_json_round_trip(
+            &ExportArtifactRecord::builder()
+                .artifact_id("art_01234567890123456789012345")
+                .workspace_id("wsp_01234567890123456789012345")
+                .source_kind("file")
+                .artifact_type("log")
+                .original_path("logs/build.log")
+                .canonical_path("/workspace/project/logs/build.log")
+                .content_hash(
+                    "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                )
+                .media_type("text/plain")
+                .size_bytes(256)
+                .redaction_status("checked")
+                .snippet("cargo fmt passed")
+                .snippet_hash(
+                    "blake3:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+                )
+                .provenance_uri("file:///workspace/project/logs/build.log")
+                .metadata(serde_json::json!({"title":"build log"}))
+                .created_at("2026-04-30T12:01:00Z")
+                .updated_at("2026-04-30T12:01:00Z")
+                .build(),
+            "artifact round-trip",
+        )?;
+        ensure_json_round_trip(
+            &ExportLinkRecord::builder()
+                .link_id("lnk_01234567890123456789012345")
+                .source_memory_id("mem_01234567890123456789012345")
+                .target_memory_id("mem_00334567890123456789012345")
+                .link_type("supersedes")
+                .weight(0.75)
+                .created_at("2026-04-30T12:02:00Z")
+                .metadata(serde_json::json!({"reason":"round_trip"}))
+                .build(),
+            "link round-trip",
+        )?;
+        ensure_json_round_trip(
+            &ExportTagRecord::new(
+                "mem_01234567890123456789012345",
+                "release",
+                "2026-04-30T12:03:00Z",
+            ),
+            "tag round-trip",
+        )?;
+        ensure_json_round_trip(
+            &ExportAuditRecord::builder()
+                .audit_id("aud_01234567890123456789012345")
+                .operation("export")
+                .target_type("memory")
+                .target_id("mem_01234567890123456789012345")
+                .performed_at("2026-04-30T12:04:00Z")
+                .performed_by("NobleCardinal")
+                .details(serde_json::json!({"records":6}))
+                .build(),
+            "audit round-trip",
+        )?;
+        ensure_json_round_trip(
+            &ExportWorkspaceRecord::builder()
+                .workspace_id("wsp_01234567890123456789012345")
+                .path("/workspace/project")
+                .name("Round Trip")
+                .created_at("2026-04-30T11:00:00Z")
+                .last_accessed("2026-04-30T12:05:00Z")
+                .build(),
+            "workspace round-trip",
+        )?;
+        ensure_json_round_trip(
+            &ExportAgentRecord::builder()
+                .agent_id("agt_01234567890123456789012345")
+                .name("NobleCardinal")
+                .program("codex-cli")
+                .model("gpt-5")
+                .created_at("2026-04-30T11:30:00Z")
+                .last_seen("2026-04-30T12:06:00Z")
+                .build(),
+            "agent round-trip",
+        )?;
+        ensure_json_round_trip(
+            &ExportFooter::builder()
+                .export_id("exp-round-trip")
+                .completed_at("2026-04-30T12:07:00Z")
+                .total_records(6)
+                .memory_count(1)
+                .link_count(1)
+                .tag_count(1)
+                .audit_count(1)
+                .checksum("blake3:footer")
+                .success(true)
+                .build(),
+            "footer round-trip",
+        )
+    }
+
+    #[test]
+    fn export_record_union_round_trips_line_delimited_jsonl() -> TestResult {
+        let records = [
+            ExportRecord::Header(
+                ExportHeader::builder()
+                    .created_at("2026-04-30T12:00:00Z")
+                    .workspace_id("wsp_01234567890123456789012345")
+                    .export_scope(ExportScope::All)
+                    .redaction_level(RedactionLevel::Minimal)
+                    .record_count(6)
+                    .ee_version("0.1.0")
+                    .export_id("exp-jsonl-round-trip")
+                    .import_source(ImportSource::Native)
+                    .trust_level(TrustLevel::Validated)
+                    .build(),
+            ),
+            ExportRecord::Workspace(
+                ExportWorkspaceRecord::builder()
+                    .workspace_id("wsp_01234567890123456789012345")
+                    .path("/workspace/project")
+                    .name("Round Trip")
+                    .created_at("2026-04-30T11:00:00Z")
+                    .build(),
+            ),
+            ExportRecord::Agent(
+                ExportAgentRecord::builder()
+                    .agent_id("agt_01234567890123456789012345")
+                    .name("NobleCardinal")
+                    .program("codex-cli")
+                    .model("gpt-5")
+                    .created_at("2026-04-30T11:30:00Z")
+                    .build(),
+            ),
+            ExportRecord::Memory(
+                ExportMemoryRecord::builder()
+                    .memory_id("mem_01234567890123456789012345")
+                    .workspace_id("wsp_01234567890123456789012345")
+                    .level("procedural")
+                    .kind("rule")
+                    .content("Run cargo fmt --check before release.")
+                    .created_at("2026-04-30T12:00:00Z")
+                    .source_agent("NobleCardinal")
+                    .redacted(false)
+                    .build(),
+            ),
+            ExportRecord::Artifact(
+                ExportArtifactRecord::builder()
+                    .artifact_id("art_01234567890123456789012345")
+                    .workspace_id("wsp_01234567890123456789012345")
+                    .source_kind("file")
+                    .artifact_type("log")
+                    .original_path("logs/build.log")
+                    .canonical_path("/workspace/project/logs/build.log")
+                    .content_hash(
+                        "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    )
+                    .media_type("text/plain")
+                    .size_bytes(256)
+                    .redaction_status("checked")
+                    .snippet("cargo fmt passed")
+                    .created_at("2026-04-30T12:01:00Z")
+                    .updated_at("2026-04-30T12:01:00Z")
+                    .build(),
+            ),
+            ExportRecord::Tag(ExportTagRecord::new(
+                "mem_01234567890123456789012345",
+                "release",
+                "2026-04-30T12:03:00Z",
+            )),
+            ExportRecord::Link(
+                ExportLinkRecord::builder()
+                    .link_id("lnk_01234567890123456789012345")
+                    .source_memory_id("mem_01234567890123456789012345")
+                    .target_memory_id("mem_00334567890123456789012345")
+                    .link_type("supports")
+                    .weight(0.75)
+                    .created_at("2026-04-30T12:02:00Z")
+                    .build(),
+            ),
+            ExportRecord::Audit(
+                ExportAuditRecord::builder()
+                    .audit_id("aud_01234567890123456789012345")
+                    .operation("export")
+                    .target_type("memory")
+                    .target_id("mem_01234567890123456789012345")
+                    .performed_at("2026-04-30T12:04:00Z")
+                    .performed_by("NobleCardinal")
+                    .build(),
+            ),
+            ExportRecord::Footer(
+                ExportFooter::builder()
+                    .export_id("exp-jsonl-round-trip")
+                    .completed_at("2026-04-30T12:07:00Z")
+                    .total_records(6)
+                    .memory_count(1)
+                    .link_count(1)
+                    .tag_count(1)
+                    .audit_count(1)
+                    .success(true)
+                    .build(),
+            ),
+        ];
+        let jsonl = records
+            .iter()
+            .map(|record| serde_json::to_string(record).map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+
+        let mut lines = jsonl.lines();
+        for (position, expected) in records.iter().enumerate() {
+            let line = lines
+                .next()
+                .ok_or_else(|| format!("missing JSONL record {position}"))?;
+            let parsed: ExportRecord = serde_json::from_str(line)
+                .map_err(|error| format!("JSONL record {position} must parse: {error}"))?;
+            ensure_export_record_match(&parsed, expected, &format!("JSONL record {position}"))?;
+        }
+        ensure(lines.next().is_none(), true, "no extra JSONL records")?;
+
+        Ok(())
     }
 
     #[test]
