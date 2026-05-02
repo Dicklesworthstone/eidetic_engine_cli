@@ -970,6 +970,8 @@ pub enum GraphCommand {
     Export(GraphExportArgs),
     /// Refresh centrality metrics (PageRank, betweenness) for memory graph.
     CentralityRefresh(GraphCentralityRefreshArgs),
+    /// Show the deterministic memory-link neighborhood for a memory.
+    Neighborhood(GraphNeighborhoodArgs),
 }
 
 /// Arguments for `ee graph export`.
@@ -1019,6 +1021,30 @@ pub struct GraphCentralityRefreshArgs {
     /// Maximum number of links to process.
     #[arg(long, value_name = "COUNT")]
     pub link_limit: Option<u32>,
+}
+
+/// Arguments for `ee graph neighborhood`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct GraphNeighborhoodArgs {
+    /// Memory ID at the center of the neighborhood.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Direction filter for incident edges.
+    #[arg(long, value_name = "DIRECTION", default_value = "both")]
+    pub direction: String,
+
+    /// Restrict to a single memory link relation.
+    #[arg(long, value_name = "RELATION")]
+    pub relation: Option<String>,
+
+    /// Maximum number of edges to return after deterministic ordering.
+    #[arg(long, value_name = "COUNT")]
+    pub limit: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -4178,6 +4204,9 @@ where
         }
         Some(Command::Graph(GraphCommand::CentralityRefresh(ref args))) => {
             handle_graph_centrality_refresh(&cli, args, stdout, stderr)
+        }
+        Some(Command::Graph(GraphCommand::Neighborhood(ref args))) => {
+            handle_graph_neighborhood(&cli, args, stdout, stderr)
         }
         Some(Command::Outcome(ref args)) => handle_outcome(&cli, args, stdout, stderr),
         Some(Command::Pack(ref args)) => handle_pack(&cli, args, stdout, stderr),
@@ -8389,6 +8418,134 @@ fn graph_export_toon_output(report: &crate::graph::GraphExportReport) -> String 
         report.graph_type,
         report.node_count,
         report.edge_count
+    )
+}
+
+fn handle_graph_neighborhood<W, E>(
+    cli: &Cli,
+    args: &GraphNeighborhoodArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let direction = match args.direction.as_str() {
+        "incoming" => crate::graph::GraphNeighborhoodDirection::Incoming,
+        "outgoing" => crate::graph::GraphNeighborhoodDirection::Outgoing,
+        "both" => crate::graph::GraphNeighborhoodDirection::Both,
+        other => {
+            let domain_error = DomainError::Usage {
+                message: format!("Unknown direction filter: {other}"),
+                repair: Some("Use one of incoming, outgoing, both.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let relation = match args.relation.as_deref() {
+        None => None,
+        Some(raw) => match crate::db::MemoryLinkRelation::parse(raw) {
+            Some(parsed) => Some(parsed),
+            None => {
+                let domain_error = DomainError::Usage {
+                    message: format!("Unknown memory link relation: {raw}"),
+                    repair: Some(
+                        "Use one of supports, contradicts, derived_from, supersedes, related, co_tag, co_mention."
+                            .to_string(),
+                    ),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        },
+    };
+
+    if matches!(args.limit, Some(0)) {
+        let domain_error = DomainError::Usage {
+            message: "--limit must be greater than zero".to_string(),
+            repair: Some("Omit --limit to keep all neighbors.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let options = crate::graph::GraphNeighborhoodOptions {
+        memory_id: args.memory_id.clone(),
+        direction,
+        relation,
+        limit: args.limit,
+    };
+
+    match crate::graph::graph_neighborhood(&conn, &options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(graph_neighborhood_toon_output(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = serde_json::json!({
+                    "schema": crate::graph::GRAPH_NEIGHBORHOOD_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json(),
+                });
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        Err(error) => {
+            let domain_error = DomainError::Graph {
+                message: error,
+                repair: Some("ee graph centrality-refresh".to_string()),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn graph_neighborhood_toon_output(report: &crate::graph::GraphNeighborhoodReport) -> String {
+    let neighbor_count = report
+        .nodes
+        .iter()
+        .filter(|node| node.role == "neighbor")
+        .count();
+    format!(
+        "schema: {}\nsuccess: true\ndata:\n  command: graph neighborhood\n  status: {}\n  memoryId: {}\n  direction: {}\n  edgeCount: {}\n  neighborCount: {}",
+        crate::graph::GRAPH_NEIGHBORHOOD_SCHEMA_V1,
+        report.status.as_str(),
+        report.memory_id,
+        report.direction.as_str(),
+        report.edges.len(),
+        neighbor_count,
     )
 }
 
@@ -12772,6 +12929,7 @@ impl NormalizedInvocation {
                 Command::Graph(graph) => match graph {
                     GraphCommand::Export(_) => "graph export".to_string(),
                     GraphCommand::CentralityRefresh(_) => "graph centrality-refresh".to_string(),
+                    GraphCommand::Neighborhood(_) => "graph neighborhood".to_string(),
                 },
                 Command::Index(index) => match index {
                     IndexCommand::Rebuild(_) => "index rebuild".to_string(),
@@ -13742,6 +13900,60 @@ mod tests {
                 ensure(args.snapshot_id.is_none(), "snapshot id defaults empty")
             }
             other => Err(format!("expected graph export command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_graph_neighborhood_with_filters() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "graph",
+            "neighborhood",
+            "mem_01HXX",
+            "--direction",
+            "outgoing",
+            "--relation",
+            "supports",
+            "--limit",
+            "5",
+        ])
+        .map(|cli| cli.command)
+        .map_err(|error| format!("failed to parse graph neighborhood: {:?}", error.kind()))?;
+
+        match parsed {
+            Some(Command::Graph(GraphCommand::Neighborhood(args))) => {
+                ensure_equal(&args.memory_id, &"mem_01HXX".to_string(), "memory id")?;
+                ensure_equal(&args.direction, &"outgoing".to_string(), "direction")?;
+                ensure_equal(
+                    &args.relation,
+                    &Some("supports".to_string()),
+                    "relation",
+                )?;
+                ensure_equal(&args.limit, &Some(5_usize), "limit")
+            }
+            other => Err(format!(
+                "expected graph neighborhood command, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn parser_graph_neighborhood_defaults() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "graph", "neighborhood", "mem_01HXX"])
+            .map(|cli| cli.command)
+            .map_err(|error| {
+                format!("failed to parse default graph neighborhood: {:?}", error.kind())
+            })?;
+        match parsed {
+            Some(Command::Graph(GraphCommand::Neighborhood(args))) => {
+                ensure_equal(&args.direction, &"both".to_string(), "default direction")?;
+                ensure(args.relation.is_none(), "no relation by default")?;
+                ensure(args.limit.is_none(), "no limit by default")
+            }
+            other => Err(format!(
+                "expected graph neighborhood command, got {other:?}"
+            )),
         }
     }
 
