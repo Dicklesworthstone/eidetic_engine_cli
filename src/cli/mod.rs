@@ -8,15 +8,31 @@ use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use crate::cass::{CassClient, CassImportOptions, import_cass_sessions};
 use crate::core::VersionReport;
-use crate::core::agent_detect::{AgentDetectOptions, detect_installed_agents};
+use crate::core::agent_detect::{
+    AgentDetectOptions, AgentSourcesOptions, AgentStatusOptions, build_agent_sources_report,
+    detect_installed_agents, gather_agent_status,
+};
 use crate::core::agent_docs::{AgentDocsReport, AgentDocsTopic};
+use crate::core::artifact::{
+    ArtifactInspectOptions, ArtifactListOptions, ArtifactRegisterOptions, inspect_artifact,
+    list_artifacts as list_artifact_registry, register_artifact,
+};
+use crate::core::backup::{BackupCreateOptions, create_backup};
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
 use crate::core::context::{ContextPackError, ContextPackOptions, run_context_pack};
+use crate::core::curate::{
+    CurateApplyOptions, CurateApplyReport, CurateCandidatesOptions, CurateCandidatesReport,
+    CurateDispositionOptions, CurateDispositionReport, CurateReviewAction, CurateReviewOptions,
+    CurateReviewReport, CurateValidateOptions, CurateValidateReport, apply_curation_candidate,
+    list_curation_candidates, review_curation_candidate, run_curation_disposition,
+    validate_curation_candidate,
+};
 use crate::core::doctor::{
     DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport, IntegrityDiagnosticsOptions,
     IntegrityDiagnosticsReport,
 };
+use crate::core::feedback::{PreflightFeedbackKind, TaskOutcome};
 use crate::core::handoff::{
     CapsuleProfile, CreateOptions as HandoffCreateOptions, InspectOptions as HandoffInspectOptions,
     PreviewOptions as HandoffPreviewOptions, ResumeOptions as HandoffResumeOptions, create_handoff,
@@ -24,7 +40,8 @@ use crate::core::handoff::{
 };
 use crate::core::health::HealthReport;
 use crate::core::index::{
-    IndexRebuildOptions, IndexStatusOptions, get_index_status, rebuild_index,
+    IndexRebuildOptions, IndexReembedOptions, IndexStatusOptions, get_index_status, rebuild_index,
+    reembed_index,
 };
 use crate::core::init::{InitOptions, init_workspace};
 use crate::core::install::{InstallCheckOptions, InstallPlanOptions, check_install, plan_install};
@@ -34,8 +51,10 @@ use crate::core::lab::{
     ReplayOptions as LabReplayOptions, capture_episode, replay_episode, run_counterfactual,
 };
 use crate::core::learn::{
-    LearnAgendaOptions, LearnExperimentProposeOptions, LearnSummaryOptions,
-    LearnUncertaintyOptions, propose_experiments, show_agenda, show_summary, show_uncertainty,
+    LearnAgendaOptions, LearnCloseOptions, LearnExperimentProposeOptions,
+    LearnExperimentRunOptions, LearnObserveOptions, LearnSummaryOptions, LearnUncertaintyOptions,
+    close_experiment, observe_experiment, propose_experiments, run_experiment, show_agenda,
+    show_summary, show_uncertainty,
 };
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
@@ -48,6 +67,10 @@ use crate::core::preflight::{
     ShowOptions as PreflightShowOptions, close_preflight, run_preflight, show_preflight,
 };
 use crate::core::quarantine::QuarantineReport;
+use crate::core::rule::{
+    RuleAddOptions, RuleAddReport, RuleListOptions, RuleListReport, RuleShowOptions,
+    RuleShowReport, add_rule, list_rules, show_rule,
+};
 use crate::core::search::{SearchOptions, run_search};
 use crate::core::situation::{classify_task, explain_situation, show_situation};
 use crate::core::status::StatusReport;
@@ -56,13 +79,16 @@ use crate::core::tripwire::{
     list_tripwires,
 };
 use crate::core::why::{WhyOptions, explain_memory};
+use crate::core::workspace as workspace_core;
 use crate::models::{
-    DomainError, ExperimentSafetyBoundary, InstallOperation, ProcessExitCode, QUERY_SCHEMA_V1,
+    DomainError, ExperimentOutcomeStatus, ExperimentSafetyBoundary, InstallOperation,
+    LearningObservationSignal, ProcessExitCode, QUERY_SCHEMA_V1, RedactionLevel,
 };
 use crate::output;
 use crate::pack::{
     ContextPackProfile, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
 };
+use crate::steward::{DaemonForegroundOptions, JobType, RunnerOptions, run_daemon_foreground};
 
 #[derive(Clone, Debug, Parser, PartialEq)]
 #[command(
@@ -147,6 +173,8 @@ impl Cli {
             OutputFormat::Compact => output::Renderer::Compact,
             OutputFormat::Hook => output::Renderer::Hook,
             OutputFormat::Markdown => output::Renderer::Markdown,
+            OutputFormat::Mermaid if self.json || self.robot => output::Renderer::Json,
+            OutputFormat::Mermaid => output::Renderer::Markdown,
         }
     }
 
@@ -191,6 +219,12 @@ pub enum Command {
     /// Operation audit timeline and inspection commands.
     #[command(subcommand)]
     Audit(AuditCommand),
+    /// Register and inspect narrow coding artifacts.
+    #[command(subcommand)]
+    Artifact(ArtifactCommand),
+    /// Create, verify, and inspect local backups.
+    #[command(subcommand)]
+    Backup(BackupCommand),
     /// Report feature availability, commands, and subsystem status.
     Capabilities,
     /// Quick posture summary: ready, degraded, or needs attention.
@@ -203,12 +237,17 @@ pub enum Command {
     Claim(ClaimCommand),
     /// Assemble a task-specific context pack from relevant memories.
     Context(ContextArgs),
+    /// Review curation proposals without silently mutating memory.
+    #[command(subcommand)]
+    Curate(CurateCommand),
     /// Run diagnostic commands for trust, quarantine, and streams.
     #[command(subcommand)]
     Diag(DiagCommand),
     /// List, run, and verify executable demos.
     #[command(subcommand)]
     Demo(DemoCommand),
+    /// Run the optional maintenance daemon in foreground mode.
+    Daemon(DaemonArgs),
     /// Run health checks on workspace and subsystems.
     Doctor(DoctorArgs),
     /// Memory economics: utility scores, attention budgets, maintenance debt.
@@ -224,7 +263,7 @@ pub enum Command {
     Health,
     /// Print command help.
     Help,
-    /// Graph analytics and centrality metrics.
+    /// Graph analytics, snapshots, and export artifacts.
     #[command(subcommand)]
     Graph(GraphCommand),
     /// Initialize an ee workspace.
@@ -249,6 +288,9 @@ pub enum Command {
     /// Manage stored memories (show, list, history).
     #[command(subcommand)]
     Memory(MemoryCommand),
+    /// Inspect the optional MCP adapter manifest.
+    #[command(subcommand)]
+    Mcp(McpCommand),
     /// Record observed feedback about a memory or related target.
     Outcome(OutcomeArgs),
     /// Build a context pack from an explicit query document.
@@ -273,6 +315,9 @@ pub enum Command {
     /// Review sessions and propose curation candidates.
     #[command(subcommand)]
     Review(ReviewCommand),
+    /// Direct procedural rule management.
+    #[command(subcommand)]
+    Rule(RuleCommand),
     /// List or export public response schemas.
     #[command(subcommand)]
     Schema(SchemaCommand),
@@ -293,6 +338,9 @@ pub enum Command {
     Version,
     /// Plan an update without mutating the installation.
     Update(UpdateArgs),
+    /// Resolve and manage workspace identities and aliases.
+    #[command(subcommand)]
+    Workspace(WorkspaceCommand),
     /// Explain why a memory was stored, retrieved, or selected.
     Why(WhyArgs),
 }
@@ -302,10 +350,171 @@ pub enum Command {
 pub enum AgentCommand {
     /// Detect installed coding agents on this system.
     Detect(AgentDetectArgs),
+    /// Report local agent inventory status.
+    Status(AgentStatusArgs),
     /// List known agent sources/connectors.
     Sources(AgentSourcesArgs),
     /// Scan and list probe paths for agent detection.
     Scan(AgentScanArgs),
+}
+
+/// Subcommands for `ee artifact`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum ArtifactCommand {
+    /// Register a local file or external artifact reference.
+    Register(Box<ArtifactRegisterArgs>),
+    /// Inspect one registered artifact.
+    Inspect(ArtifactInspectArgs),
+    /// List registered artifacts for a workspace.
+    List(ArtifactListArgs),
+}
+
+/// Arguments for `ee artifact register`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ArtifactRegisterArgs {
+    /// Local artifact path under the workspace.
+    #[arg(value_name = "PATH")]
+    pub path: Option<PathBuf>,
+
+    /// External artifact reference URI instead of a local path.
+    #[arg(long, value_name = "URI")]
+    pub external_ref: Option<String>,
+
+    /// BLAKE3 content hash for external references.
+    #[arg(long, value_name = "HASH")]
+    pub content_hash: Option<String>,
+
+    /// Byte size for external references.
+    #[arg(long, value_name = "BYTES")]
+    pub size_bytes: Option<u64>,
+
+    /// Artifact kind such as log, fixture, output, bundle, or release.
+    #[arg(long = "kind", value_name = "KIND", default_value = "file")]
+    pub artifact_type: String,
+
+    /// Human-readable title stored as artifact metadata.
+    #[arg(long, value_name = "TITLE")]
+    pub title: Option<String>,
+
+    /// Provenance URI for this artifact.
+    #[arg(long = "source", value_name = "URI")]
+    pub provenance_uri: Option<String>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Maximum local file size to read.
+    #[arg(long, value_name = "BYTES")]
+    pub max_bytes: Option<u64>,
+
+    /// Maximum number of UTF-8 snippet characters to store.
+    #[arg(long, value_name = "CHARS")]
+    pub snippet_chars: Option<usize>,
+
+    /// Validate and preview the artifact without writing to the database.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Link artifact to an existing memory ID.
+    #[arg(long = "link-memory", value_name = "MEMORY_ID")]
+    pub memory_links: Vec<String>,
+
+    /// Link artifact to an existing context pack ID.
+    #[arg(long = "link-pack", value_name = "PACK_ID")]
+    pub pack_links: Vec<String>,
+}
+
+/// Arguments for `ee artifact inspect`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ArtifactInspectArgs {
+    /// Artifact ID to inspect.
+    #[arg(value_name = "ARTIFACT_ID")]
+    pub artifact_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee artifact list`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ArtifactListArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Maximum number of artifacts to return.
+    #[arg(long, value_name = "COUNT", default_value_t = 50)]
+    pub limit: u32,
+}
+
+/// Subcommands for `ee backup`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum BackupCommand {
+    /// Create a redacted JSONL backup with a verified manifest.
+    Create(BackupCreateArgs),
+}
+
+/// Arguments for `ee backup create`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct BackupCreateArgs {
+    /// Optional human label recorded in the backup manifest.
+    #[arg(long, value_name = "LABEL")]
+    pub label: Option<String>,
+
+    /// Backup root directory. Defaults to <workspace>/.ee/backups/.
+    #[arg(long, value_name = "PATH")]
+    pub output_dir: Option<PathBuf>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Redaction level for exported records.
+    #[arg(long, value_enum, default_value_t = BackupRedaction::Standard)]
+    pub redaction: BackupRedaction,
+
+    /// Report the backup plan without creating files.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// CLI redaction levels for backup output.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum BackupRedaction {
+    /// No redaction applied.
+    None,
+    /// Redact secrets and credentials.
+    Minimal,
+    /// Redact secrets, paths, and identifiers.
+    #[default]
+    Standard,
+    /// Redact all potentially sensitive content.
+    Full,
+}
+
+impl BackupRedaction {
+    const fn to_model(self) -> RedactionLevel {
+        match self {
+            Self::None => RedactionLevel::None,
+            Self::Minimal => RedactionLevel::Minimal,
+            Self::Standard => RedactionLevel::Standard,
+            Self::Full => RedactionLevel::Full,
+        }
+    }
+}
+
+/// Arguments for `ee agent status`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct AgentStatusArgs {
+    /// Only check specific agent connectors (comma-separated slugs).
+    #[arg(long, value_name = "SLUGS")]
+    pub only: Option<String>,
+
+    /// Include agents that were not detected.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_undetected: bool,
 }
 
 /// Arguments for `ee agent sources`.
@@ -318,6 +527,10 @@ pub struct AgentSourcesArgs {
     /// Include probe paths in output.
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_paths: bool,
+
+    /// Include deterministic remote/mirror origin fixtures and path rewrites.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_origin_fixtures: bool,
 }
 
 /// Arguments for `ee agent scan`.
@@ -491,6 +704,55 @@ pub struct DemoVerifyArgs {
     pub artifacts_dir: Option<PathBuf>,
 }
 
+/// Arguments for `ee daemon`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct DaemonArgs {
+    /// Run the daemon loop in the current foreground process.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub foreground: bool,
+
+    /// Run exactly one scheduler tick and exit.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub once: bool,
+
+    /// Maximum foreground scheduler ticks before exiting.
+    #[arg(long, default_value_t = crate::steward::DEFAULT_DAEMON_FOREGROUND_TICK_LIMIT, value_name = "N")]
+    pub max_ticks: u32,
+
+    /// Delay between ticks in milliseconds.
+    #[arg(long, default_value_t = crate::steward::DEFAULT_DAEMON_FOREGROUND_INTERVAL_MS, value_name = "MS")]
+    pub interval_ms: u64,
+
+    /// Steward job type to run each tick. Repeat to run multiple job types.
+    #[arg(long = "job", value_name = "JOB", value_parser = parse_steward_job_type)]
+    pub jobs: Vec<JobType>,
+
+    /// Report planned foreground daemon work without mutating job state.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Override per-job time budget in milliseconds.
+    #[arg(long, value_name = "MS")]
+    pub time_limit_ms: Option<u64>,
+
+    /// Override per-job item budget.
+    #[arg(long, value_name = "N")]
+    pub item_limit: Option<u64>,
+}
+
+fn parse_steward_job_type(raw: &str) -> Result<JobType, String> {
+    raw.parse::<JobType>().map_err(|error| {
+        format!(
+            "{error}; expected one of {}",
+            JobType::all()
+                .iter()
+                .map(|job_type| job_type.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })
+}
+
 /// Arguments for `ee context`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct ContextArgs {
@@ -601,8 +863,35 @@ pub struct DiagIntegrityArgs {
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum GraphCommand {
+    /// Export a graph snapshot as a deterministic artifact.
+    Export(GraphExportArgs),
     /// Refresh centrality metrics (PageRank, betweenness) for memory graph.
     CentralityRefresh(GraphCentralityRefreshArgs),
+}
+
+/// Arguments for `ee graph export`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct GraphExportArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Workspace ID. Defaults to the current workspace's stable ID.
+    #[arg(long, value_name = "ID")]
+    pub workspace_id: Option<String>,
+
+    /// Specific snapshot ID to export. Defaults to latest snapshot by graph type.
+    #[arg(long, value_name = "ID")]
+    pub snapshot_id: Option<String>,
+
+    /// Graph snapshot type to export.
+    #[arg(
+        long = "graph-type",
+        alias = "type",
+        default_value = "memory_links",
+        value_name = "TYPE"
+    )]
+    pub graph_type: String,
 }
 
 /// Arguments for `ee graph centrality-refresh`.
@@ -633,6 +922,8 @@ pub struct GraphCentralityRefreshArgs {
 pub enum IndexCommand {
     /// Rebuild the search index from all memories and sessions.
     Rebuild(IndexRebuildArgs),
+    /// Rebuild embedding vectors for indexed memories and sessions.
+    Reembed(IndexReembedArgs),
     /// Inspect search index health and generation state.
     Status(IndexStatusArgs),
 }
@@ -649,6 +940,22 @@ pub struct IndexRebuildArgs {
     pub index_dir: Option<PathBuf>,
 
     /// Report the rebuild plan without writing the index.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee index reembed`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct IndexReembedArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    #[arg(long, value_name = "PATH")]
+    pub index_dir: Option<PathBuf>,
+
+    /// Report the re-embedding plan without queuing a job or writing the index.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 }
@@ -960,6 +1267,10 @@ pub enum LearnCommand {
     /// Propose and inspect safe active learning experiments.
     #[command(subcommand)]
     Experiment(LearnExperimentCommand),
+    /// Attach observed evidence to a learning experiment.
+    Observe(LearnObserveArgs),
+    /// Close a learning experiment with an auditable outcome.
+    Close(LearnCloseArgs),
     /// Report what the system has learned from recent activity.
     Summary(LearnSummaryArgs),
 }
@@ -1009,6 +1320,8 @@ pub struct LearnUncertaintyArgs {
 pub enum LearnExperimentCommand {
     /// Propose dry-run-first experiments that can change memory decisions.
     Propose(LearnExperimentProposeArgs),
+    /// Rehearse a proposed experiment without mutating storage.
+    Run(LearnExperimentRunArgs),
 }
 
 /// Arguments for `ee learn experiment propose`.
@@ -1037,6 +1350,166 @@ pub struct LearnExperimentProposeArgs {
     /// Safety boundary: dry_run_only, ask_before_acting, human_review, denied.
     #[arg(long, value_name = "BOUNDARY", default_value = "dry_run_only")]
     pub safety_boundary: String,
+}
+
+/// Arguments for `ee learn experiment run`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct LearnExperimentRunArgs {
+    /// Learning experiment ID to rehearse.
+    #[arg(long = "id", value_name = "EXPERIMENT_ID")]
+    pub experiment_id: String,
+
+    /// Maximum attention tokens for the rehearsal.
+    #[arg(long, default_value_t = 1_200)]
+    pub max_attention_tokens: u32,
+
+    /// Maximum runtime seconds for the rehearsal.
+    #[arg(long, default_value_t = 300)]
+    pub max_runtime_seconds: u32,
+
+    /// Rehearse the experiment without mutating storage.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee learn observe`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct LearnObserveArgs {
+    /// Learning experiment ID to observe.
+    #[arg(value_name = "EXPERIMENT_ID")]
+    pub experiment_id: String,
+
+    /// Caller-supplied observation ID for idempotent retries.
+    #[arg(long)]
+    pub observation_id: Option<String>,
+
+    /// RFC3339 timestamp when evidence was observed.
+    #[arg(long, value_name = "RFC3339")]
+    pub observed_at: Option<String>,
+
+    /// Agent or human who observed the evidence.
+    #[arg(long)]
+    pub observer: Option<String>,
+
+    /// Observation signal: positive, negative, neutral, or safety.
+    #[arg(long, default_value = "neutral")]
+    pub signal: String,
+
+    /// Measurement name, such as verification_status or fixture_replay.
+    #[arg(long)]
+    pub measurement_name: String,
+
+    /// Optional numeric measurement value.
+    #[arg(long)]
+    pub measurement_value: Option<String>,
+
+    /// Evidence ID supporting this observation. Repeatable.
+    #[arg(long = "evidence-id", action = ArgAction::Append)]
+    pub evidence_ids: Vec<String>,
+
+    /// Short note explaining the evidence.
+    #[arg(long)]
+    pub note: Option<String>,
+
+    /// Redaction status for attached evidence.
+    #[arg(long)]
+    pub redaction_status: Option<String>,
+
+    /// Workspace ID for non-memory targets.
+    #[arg(long)]
+    pub workspace_id: Option<String>,
+
+    /// Session ID associated with the observation.
+    #[arg(long)]
+    pub session_id: Option<String>,
+
+    /// Optional caller-supplied feedback event ID for idempotent writes.
+    #[arg(long)]
+    pub event_id: Option<String>,
+
+    /// Actor recorded in the audit log.
+    #[arg(long)]
+    pub actor: Option<String>,
+
+    /// Validate and render the observation without writing storage.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee learn close`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct LearnCloseArgs {
+    /// Learning experiment ID to close.
+    #[arg(value_name = "EXPERIMENT_ID")]
+    pub experiment_id: String,
+
+    /// Caller-supplied outcome ID for idempotent retries.
+    #[arg(long)]
+    pub outcome_id: Option<String>,
+
+    /// RFC3339 timestamp when the experiment was closed.
+    #[arg(long, value_name = "RFC3339")]
+    pub closed_at: Option<String>,
+
+    /// Outcome status: confirmed, rejected, inconclusive, or unsafe.
+    #[arg(long)]
+    pub status: String,
+
+    /// Concrete memory decision impact from the experiment.
+    #[arg(long)]
+    pub decision_impact: String,
+
+    /// Confidence delta from -1.0 to 1.0.
+    #[arg(long, default_value = "0.0")]
+    pub confidence_delta: String,
+
+    /// Priority delta applied to the affected decision.
+    #[arg(long, default_value_t = 0)]
+    pub priority_delta: i32,
+
+    /// Artifact ID promoted by the outcome. Repeatable.
+    #[arg(long = "promote-artifact", action = ArgAction::Append)]
+    pub promoted_artifact_ids: Vec<String>,
+
+    /// Artifact ID demoted by the outcome. Repeatable.
+    #[arg(long = "demote-artifact", action = ArgAction::Append)]
+    pub demoted_artifact_ids: Vec<String>,
+
+    /// Safety note attached to the closure. Repeatable.
+    #[arg(long = "safety-note", action = ArgAction::Append)]
+    pub safety_notes: Vec<String>,
+
+    /// Audit ID supporting the closure. Repeatable.
+    #[arg(long = "audit-id", action = ArgAction::Append)]
+    pub audit_ids: Vec<String>,
+
+    /// Workspace ID for non-memory targets.
+    #[arg(long)]
+    pub workspace_id: Option<String>,
+
+    /// Session ID associated with the outcome.
+    #[arg(long)]
+    pub session_id: Option<String>,
+
+    /// Optional caller-supplied feedback event ID for idempotent writes.
+    #[arg(long)]
+    pub event_id: Option<String>,
+
+    /// Actor recorded in the audit log.
+    #[arg(long)]
+    pub actor: Option<String>,
+
+    /// Validate and render the outcome without writing storage.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee learn summary`.
@@ -1213,6 +1686,14 @@ pub struct PreflightCloseArgs {
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
 
+    /// Observed task outcome: success, failure, cancelled, or unknown.
+    #[arg(long, value_name = "OUTCOME", value_parser = ["success", "failure", "cancelled", "unknown"])]
+    pub task_outcome: Option<String>,
+
+    /// Feedback class: helped, missed, stale-warning, false-alarm, or neutral.
+    #[arg(long, value_name = "KIND", value_parser = ["helped", "missed", "stale-warning", "stale_warning", "false-alarm", "false_alarm", "neutral"])]
+    pub feedback: Option<String>,
+
     /// Report the close action without executing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
@@ -1261,6 +1742,10 @@ pub struct TripwireCheckArgs {
     /// Update the last_checked_at timestamp.
     #[arg(long, action = ArgAction::SetTrue)]
     pub update_timestamp: bool,
+
+    /// Observed task outcome for false-alarm/miss scoring feedback.
+    #[arg(long, value_name = "OUTCOME", value_parser = ["success", "failure", "cancelled", "unknown"])]
+    pub task_outcome: Option<String>,
 
     /// Dry-run mode (check without persisting state changes).
     #[arg(long, action = ArgAction::SetTrue)]
@@ -1337,10 +1822,14 @@ pub enum ProcedureCommand {
     Show(ProcedureShowArgs),
     /// List procedures with optional filters.
     List(ProcedureListArgs),
-    /// Export a procedure as a skill capsule.
+    /// Export a procedure as Markdown, playbook, or a render-only skill capsule.
     Export(ProcedureExportArgs),
+    /// Plan promotion through curation and audit paths without mutating state.
+    Promote(ProcedurePromoteArgs),
     /// Verify a procedure against eval fixtures, repro packs, or claim evidence.
     Verify(ProcedureVerifyArgs),
+    /// Detect failed-verification, stale-evidence, and dependency-contract drift.
+    Drift(ProcedureDriftArgs),
 }
 
 /// Arguments for `ee procedure propose`.
@@ -1406,13 +1895,33 @@ pub struct ProcedureExportArgs {
     #[arg(value_name = "PROCEDURE_ID")]
     pub procedure_id: String,
 
-    /// Export format: markdown, json, yaml.
-    #[arg(long, default_value = "markdown")]
-    pub format: String,
+    /// Export artifact format: markdown, playbook, skill-capsule.
+    #[arg(long = "export-format", default_value = "markdown")]
+    pub export_format: String,
 
     /// Output file path (defaults to stdout).
     #[arg(long, short = 'o', value_name = "PATH")]
     pub output: Option<PathBuf>,
+}
+
+/// Arguments for `ee procedure promote`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ProcedurePromoteArgs {
+    /// Procedure ID to promote.
+    #[arg(value_name = "PROCEDURE_ID")]
+    pub procedure_id: String,
+
+    /// Build the promotion, curation, and audit plan without writing anything.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Actor to include in the planned audit record.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Review reason to include in the curation candidate.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
 }
 
 /// Arguments for `ee procedure verify`.
@@ -1439,6 +1948,41 @@ pub struct ProcedureVerifyArgs {
     pub allow_failure: bool,
 }
 
+/// Arguments for `ee procedure drift`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ProcedureDriftArgs {
+    /// Procedure ID to inspect for drift.
+    #[arg(value_name = "PROCEDURE_ID")]
+    pub procedure_id: String,
+
+    /// Fixed RFC 3339 check timestamp for deterministic reports.
+    #[arg(long, value_name = "RFC3339")]
+    pub checked_at: Option<String>,
+
+    /// Evidence older than this many days is stale.
+    #[arg(long, default_value_t = 30)]
+    pub staleness_threshold_days: u32,
+
+    /// Failed verification ID to include as a high-severity drift signal.
+    #[arg(long, value_name = "VERIFICATION_ID")]
+    pub failed_verification: Option<String>,
+
+    /// Source IDs checked by the failed verification.
+    #[arg(long = "failed-source", value_name = "SOURCE_ID")]
+    pub failed_sources: Vec<String>,
+
+    /// Evidence freshness observation as `ID|LAST_SEEN_AT|SOURCE_KIND`.
+    #[arg(long = "evidence", value_name = "ID|LAST_SEEN_AT|SOURCE_KIND")]
+    pub evidence: Vec<String>,
+
+    /// Dependency contract observation as `NAME|SURFACE|EXPECTED|ACTUAL|COMPATIBILITY`.
+    #[arg(
+        long = "dependency-contract",
+        value_name = "NAME|SURFACE|EXPECTED|ACTUAL|COMPATIBILITY"
+    )]
+    pub dependency_contracts: Vec<String>,
+}
+
 /// Subcommands for `ee recorder`.
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum RecorderCommand {
@@ -1450,6 +1994,8 @@ pub enum RecorderCommand {
     Finish(RecorderFinishArgs),
     /// Tail recent events from a recording session.
     Tail(RecorderTailArgs),
+    /// Plan a read-only recorder import from connector output.
+    Import(RecorderImportArgs),
 }
 
 /// Arguments for `ee recorder start`.
@@ -1490,6 +2036,14 @@ pub struct RecorderEventArgs {
     /// Redact the payload content.
     #[arg(long, action = ArgAction::SetTrue)]
     pub redact: bool,
+
+    /// Previous event hash for recorder hash-chain continuity.
+    #[arg(long, value_name = "BLAKE3_HASH")]
+    pub previous_event_hash: Option<String>,
+
+    /// Maximum accepted payload size in bytes.
+    #[arg(long, default_value_t = crate::core::recorder::DEFAULT_MAX_RECORDER_PAYLOAD_BYTES)]
+    pub max_payload_bytes: usize,
 
     /// Report what would be done without recording.
     #[arg(long, action = ArgAction::SetTrue)]
@@ -1534,6 +2088,50 @@ pub struct RecorderTailArgs {
     /// Output format for follow mode (jsonl for machine-readable stream).
     #[arg(long = "tail-format", value_name = "FORMAT")]
     pub tail_format: Option<String>,
+}
+
+/// Arguments for `ee recorder import`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct RecorderImportArgs {
+    /// Import source type: cass, eidetic_legacy, recorder, manual.
+    #[arg(long, default_value = "cass", value_name = "TYPE")]
+    pub source_type: String,
+
+    /// Stable external source identifier, such as a CASS session path.
+    #[arg(long, value_name = "SOURCE_ID")]
+    pub source_id: String,
+
+    /// Connector JSON input file; for CASS, pass saved `cass view --json` output.
+    #[arg(long, value_name = "PATH")]
+    pub input: Option<PathBuf>,
+
+    /// Agent ID to attach to the planned imported recorder run.
+    #[arg(long, value_name = "AGENT_ID")]
+    pub agent_id: Option<String>,
+
+    /// Optional session identifier for correlation.
+    #[arg(long, value_name = "SESSION_ID")]
+    pub session_id: Option<String>,
+
+    /// Optional workspace identifier for correlation.
+    #[arg(long, value_name = "WORKSPACE_ID")]
+    pub workspace_id: Option<String>,
+
+    /// Maximum source events to map into the dry-run plan.
+    #[arg(long, default_value_t = crate::core::recorder::DEFAULT_RECORDER_IMPORT_LIMIT)]
+    pub max_events: usize,
+
+    /// Maximum accepted source payload size in bytes.
+    #[arg(long, default_value_t = crate::core::recorder::DEFAULT_MAX_RECORDER_PAYLOAD_BYTES)]
+    pub max_payload_bytes: usize,
+
+    /// Force all mapped source payloads through redaction before hashing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub redact: bool,
+
+    /// Required: render the import plan without writing recorder storage.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// Subcommands for `ee rehearse`.
@@ -1657,6 +2255,53 @@ pub struct InitArgs {
     pub allow_symlink: bool,
 }
 
+/// Workspace identity and alias commands.
+#[derive(Clone, Debug, Subcommand, PartialEq)]
+pub enum WorkspaceCommand {
+    /// Resolve the active workspace, path, or alias.
+    Resolve(WorkspaceResolveArgs),
+    /// List locally registered workspaces and aliases.
+    List(WorkspaceListArgs),
+    /// Set or clear a human alias for a registered workspace.
+    Alias(WorkspaceAliasArgs),
+}
+
+/// Arguments for `ee workspace resolve`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct WorkspaceResolveArgs {
+    /// Optional alias or path to resolve. Defaults to --workspace/cwd.
+    #[arg(value_name = "TARGET")]
+    pub target: Option<String>,
+}
+
+/// Arguments for `ee workspace list`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct WorkspaceListArgs {}
+
+/// Arguments for `ee workspace alias`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct WorkspaceAliasArgs {
+    /// Alias to set. Equivalent to --as when --clear is not used.
+    #[arg(value_name = "NAME")]
+    pub name: Option<String>,
+
+    /// Workspace ID from `ee workspace list` or an initialized workspace path.
+    #[arg(long, value_name = "ID_OR_PATH")]
+    pub pick: Option<String>,
+
+    /// Alias to assign to the picked workspace.
+    #[arg(long = "as", value_name = "NAME")]
+    pub as_name: Option<String>,
+
+    /// Clear the picked workspace's alias.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub clear: bool,
+
+    /// Report the alias change without writing the registry.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
 /// Arguments for the remember command.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct RememberArgs {
@@ -1684,9 +2329,307 @@ pub struct RememberArgs {
     #[arg(long)]
     pub source: Option<String>,
 
+    /// RFC3339 timestamp when this memory becomes applicable.
+    #[arg(long, value_name = "RFC3339")]
+    pub valid_from: Option<String>,
+
+    /// RFC3339 timestamp when this memory stops being applicable.
+    #[arg(long, value_name = "RFC3339")]
+    pub valid_to: Option<String>,
+
     /// Perform a dry run without storing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+/// Explicit curation review commands.
+#[derive(Clone, Debug, Subcommand, PartialEq)]
+pub enum CurateCommand {
+    /// List curation candidates awaiting review.
+    Candidates(CurateCandidatesArgs),
+    /// Validate one curation candidate and record the review decision.
+    Validate(CurateValidateArgs),
+    /// Apply one approved curation candidate to its target memory.
+    Apply(CurateApplyArgs),
+    /// Accept a candidate as ready to apply.
+    Accept(CurateReviewArgs),
+    /// Reject a candidate without applying it.
+    Reject(CurateReviewArgs),
+    /// Hide a candidate from the default queue until a later review time.
+    Snooze(CurateSnoozeArgs),
+    /// Merge a candidate into another candidate and close the source candidate.
+    Merge(CurateMergeArgs),
+    /// Evaluate deterministic TTL disposition policies for the review queue.
+    Disposition(CurateDispositionArgs),
+}
+
+/// Arguments for `ee curate candidates`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct CurateCandidatesArgs {
+    /// Optional candidate action type: consolidate, promote, deprecate, supersede, tombstone, merge, split, or retract.
+    #[arg(long = "type", value_name = "TYPE")]
+    pub candidate_type: Option<String>,
+
+    /// Optional status filter. Defaults to pending unless --all is set.
+    #[arg(long)]
+    pub status: Option<String>,
+
+    /// List candidates for all statuses.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub all: bool,
+
+    /// Filter to candidates targeting one memory.
+    #[arg(long = "target-memory", value_name = "MEMORY_ID")]
+    pub target_memory_id: Option<String>,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Maximum number of candidates to return.
+    #[arg(long, default_value_t = 100)]
+    pub limit: u32,
+
+    /// Number of filtered candidates to skip.
+    #[arg(long, default_value_t = 0)]
+    pub offset: u32,
+}
+
+/// Arguments for `ee curate validate`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct CurateValidateArgs {
+    /// Curation candidate ID from `ee curate candidates`.
+    pub candidate_id: String,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Actor recorded in review and audit metadata.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Validate without updating candidate status or writing audit.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee curate apply`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct CurateApplyArgs {
+    /// Curation candidate ID from `ee curate candidates`.
+    pub candidate_id: String,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Actor recorded in apply and audit metadata.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Preview without updating memory, candidate status, or audit.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Shared arguments for `ee curate accept` and `ee curate reject`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct CurateReviewArgs {
+    /// Curation candidate ID from `ee curate candidates`.
+    pub candidate_id: String,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Actor recorded in review and audit metadata.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Preview without updating candidate review state or writing audit.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee curate snooze`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct CurateSnoozeArgs {
+    /// Curation candidate ID from `ee curate candidates`.
+    pub candidate_id: String,
+
+    /// RFC 3339 timestamp when the candidate should re-enter review attention.
+    #[arg(long, value_name = "RFC3339")]
+    pub until: String,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Actor recorded in review and audit metadata.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Preview without updating candidate review state or writing audit.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee curate merge`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct CurateMergeArgs {
+    /// Source curation candidate to close as merged.
+    pub source_candidate_id: String,
+
+    /// Target curation candidate that now carries the combined review work.
+    pub target_candidate_id: String,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Actor recorded in review and audit metadata.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Preview without updating candidate review state or writing audit.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee curate disposition`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct CurateDispositionArgs {
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Actor recorded in audit metadata when --apply is used.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Apply deterministic TTL transitions. Omit for dry-run planning.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub apply: bool,
+
+    /// Override the current time for deterministic replay and tests.
+    #[arg(long, value_name = "RFC3339")]
+    pub now: Option<String>,
+}
+
+/// Direct procedural rule management commands.
+#[derive(Clone, Debug, Subcommand, PartialEq)]
+pub enum RuleCommand {
+    /// Add a procedural rule.
+    Add(RuleAddArgs),
+    /// List procedural rules.
+    List(RuleListArgs),
+    /// Show one procedural rule.
+    Show(RuleShowArgs),
+}
+
+/// Arguments for `ee rule add`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct RuleAddArgs {
+    /// Procedural rule content to store.
+    #[arg(value_name = "CONTENT")]
+    pub content: String,
+
+    /// Rule scope: global, workspace, project, directory, or file_pattern.
+    #[arg(long, default_value = "workspace")]
+    pub scope: String,
+
+    /// Required for directory and file_pattern scopes.
+    #[arg(long, value_name = "PATTERN")]
+    pub scope_pattern: Option<String>,
+
+    /// Initial rule maturity: draft, candidate, or validated.
+    #[arg(long, default_value = "candidate")]
+    pub maturity: String,
+
+    /// Optional initial confidence score. Defaults from trust/evidence.
+    #[arg(long)]
+    pub confidence: Option<f32>,
+
+    /// Initial utility score (0.0 to 1.0).
+    #[arg(long, default_value = "0.5")]
+    pub utility: f32,
+
+    /// Initial importance score (0.0 to 1.0).
+    #[arg(long, default_value = "0.5")]
+    pub importance: f32,
+
+    /// Trust class for the rule.
+    #[arg(long, default_value = "human_explicit")]
+    pub trust_class: String,
+
+    /// Tags to apply. May be repeated or comma-separated.
+    #[arg(long = "tag", short = 't')]
+    pub tags: Vec<String>,
+
+    /// Source memory evidence IDs. May be repeated or comma-separated.
+    #[arg(long = "source-memory", value_name = "MEMORY_ID")]
+    pub source_memory_ids: Vec<String>,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Audit actor.
+    #[arg(long)]
+    pub actor: Option<String>,
+
+    /// Perform a dry run without storing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee rule list`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct RuleListArgs {
+    /// Optional rule maturity filter: draft, candidate, validated, deprecated, or superseded.
+    #[arg(long)]
+    pub maturity: Option<String>,
+
+    /// Optional rule scope filter: global, workspace, project, directory, or file_pattern.
+    #[arg(long)]
+    pub scope: Option<String>,
+
+    /// Optional tag filter.
+    #[arg(long)]
+    pub tag: Option<String>,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Include tombstoned rules.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
+
+    /// Maximum number of rules to return.
+    #[arg(long, default_value_t = 100)]
+    pub limit: u32,
+
+    /// Number of filtered rules to skip.
+    #[arg(long, default_value_t = 0)]
+    pub offset: u32,
+}
+
+/// Arguments for `ee rule show`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct RuleShowArgs {
+    /// Rule ID.
+    #[arg(value_name = "RULE_ID")]
+    pub rule_id: String,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Include tombstoned rules.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
 }
 
 /// Arguments for `ee outcome`.
@@ -1847,6 +2790,10 @@ pub enum EconomyCommand {
     Report(EconomyReportArgs),
     /// Score a specific memory or artifact for economic value.
     Score(EconomyScoreArgs),
+    /// Compare alternate attention budgets without changing ranking state.
+    Simulate(EconomySimulateArgs),
+    /// Plan report-only retire, compact, merge, demote, and revalidate actions.
+    PrunePlan(EconomyPrunePlanArgs),
 }
 
 /// Arguments for `ee economy report`.
@@ -1885,6 +2832,38 @@ pub struct EconomyScoreArgs {
     pub breakdown: bool,
 }
 
+/// Arguments for `ee economy simulate`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct EconomySimulateArgs {
+    /// Baseline budget in tokens used for delta comparisons.
+    #[arg(long, value_name = "TOKENS", default_value_t = 4000)]
+    pub baseline_budget: u32,
+
+    /// Alternate budget in tokens to compare. Repeat to compare multiple budgets.
+    #[arg(long = "budget", value_name = "TOKENS")]
+    pub budgets: Vec<u32>,
+
+    /// Context profile: compact, balanced, thorough, submodular, broad.
+    #[arg(long, value_name = "PROFILE", default_value = "balanced")]
+    pub context_profile: String,
+
+    /// Situation profile: minimal, summary, standard, full.
+    #[arg(long, value_name = "PROFILE", default_value = "standard")]
+    pub situation_profile: String,
+}
+
+/// Arguments for `ee economy prune-plan`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct EconomyPrunePlanArgs {
+    /// Confirm that the command must not mutate durable state.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Maximum recommendations to include.
+    #[arg(long, value_name = "COUNT", default_value_t = 20)]
+    pub max_recommendations: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum SchemaCommand {
     /// List all available public schemas.
@@ -1895,6 +2874,12 @@ pub enum SchemaCommand {
         #[arg(value_name = "SCHEMA_ID")]
         schema_id: Option<String>,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum McpCommand {
+    /// Print the MCP tool and schema manifest.
+    Manifest,
 }
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
@@ -2082,6 +3067,7 @@ pub enum OutputFormat {
     Compact,
     Hook,
     Markdown,
+    Mermaid,
 }
 
 impl OutputFormat {
@@ -2099,7 +3085,7 @@ impl OutputFormat {
             Self::Jsonl => output::Renderer::Jsonl,
             Self::Compact => output::Renderer::Compact,
             Self::Hook => output::Renderer::Hook,
-            Self::Markdown => output::Renderer::Markdown,
+            Self::Markdown | Self::Mermaid => output::Renderer::Markdown,
         }
     }
 }
@@ -2238,10 +3224,11 @@ where
     E: Write,
 {
     let args: Vec<OsString> = args.into_iter().collect();
-    let cli = match Cli::try_parse_from(&args) {
+    let mut cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(error) => return write_parse_error(error, &args, stdout, stderr),
     };
+    resolve_workspace_alias_global(&mut cli);
 
     if cli.schema {
         return write_stdout(stdout, &(output::schema_json() + "\n"));
@@ -2257,6 +3244,9 @@ where
         None | Some(Command::Help) => write_help(stdout),
         Some(Command::Agent(AgentCommand::Detect(ref args))) => {
             handle_agent_detect(&cli, args, stdout, stderr)
+        }
+        Some(Command::Agent(AgentCommand::Status(ref args))) => {
+            handle_agent_status(&cli, args, stdout, stderr)
         }
         Some(Command::Agent(AgentCommand::Sources(ref args))) => {
             handle_agent_sources(&cli, args, stdout, stderr)
@@ -2276,6 +3266,18 @@ where
         }
         Some(Command::Audit(AuditCommand::Verify(ref args))) => {
             handle_audit_verify(&cli, args, stdout, stderr)
+        }
+        Some(Command::Artifact(ArtifactCommand::Register(ref args))) => {
+            handle_artifact_register(&cli, args, stdout, stderr)
+        }
+        Some(Command::Artifact(ArtifactCommand::Inspect(ref args))) => {
+            handle_artifact_inspect(&cli, args, stdout, stderr)
+        }
+        Some(Command::Artifact(ArtifactCommand::List(ref args))) => {
+            handle_artifact_list(&cli, args, stdout, stderr)
+        }
+        Some(Command::Backup(BackupCommand::Create(ref args))) => {
+            handle_backup_create(&cli, args, stdout, stderr)
         }
         Some(Command::Capabilities) => {
             let report = CapabilitiesReport::gather();
@@ -2332,6 +3334,7 @@ where
             DemoCommand::Run(args) => handle_demo_run(&cli, args, stdout, stderr),
             DemoCommand::Verify(args) => handle_demo_verify(&cli, args, stdout, stderr),
         },
+        Some(Command::Daemon(ref args)) => handle_daemon(&cli, args, stdout, stderr),
         Some(Command::Context(ref args)) => handle_context(&cli, args, stdout, stderr),
         Some(Command::Diag(ref diag_cmd)) => match diag_cmd {
             DiagCommand::Claims(args) => handle_diag_claims(&cli, args, stdout),
@@ -2416,7 +3419,15 @@ where
                     ),
                 }
             } else if args.fix_plan {
-                let plan = report.to_fix_plan();
+                let agent_inventory = gather_agent_status(&AgentStatusOptions {
+                    only_connectors: None,
+                    include_undetected: false,
+                    root_overrides: vec![],
+                })
+                .unwrap_or_else(|error| {
+                    crate::core::agent_detect::AgentInventoryReport::unavailable(&error)
+                });
+                let plan = report.to_fix_plan_with_agent_inventory(&agent_inventory);
                 match cli.renderer() {
                     output::Renderer::Human | output::Renderer::Markdown => {
                         write_stdout(stdout, &output::render_fix_plan_human(&plan))
@@ -2432,20 +3443,24 @@ where
                     }
                 }
             } else {
-                match cli.renderer() {
-                    output::Renderer::Human | output::Renderer::Markdown => {
-                        write_stdout(stdout, &output::render_doctor_human(&report))
+                if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
+                    write_stdout(stdout, &(output::render_doctor_mermaid(&report) + "\n"))
+                } else {
+                    match cli.renderer() {
+                        output::Renderer::Human | output::Renderer::Markdown => {
+                            write_stdout(stdout, &output::render_doctor_human(&report))
+                        }
+                        output::Renderer::Toon => {
+                            write_stdout(stdout, &(output::render_doctor_toon(&report) + "\n"))
+                        }
+                        output::Renderer::Json
+                        | output::Renderer::Jsonl
+                        | output::Renderer::Compact
+                        | output::Renderer::Hook => write_stdout(
+                            stdout,
+                            &(output::render_doctor_json_filtered(&report, profile) + "\n"),
+                        ),
                     }
-                    output::Renderer::Toon => {
-                        write_stdout(stdout, &(output::render_doctor_toon(&report) + "\n"))
-                    }
-                    output::Renderer::Json
-                    | output::Renderer::Jsonl
-                    | output::Renderer::Compact
-                    | output::Renderer::Hook => write_stdout(
-                        stdout,
-                        &(output::render_doctor_json_filtered(&report, profile) + "\n"),
-                    ),
                 }
             }
         }
@@ -2628,6 +3643,12 @@ where
         Some(Command::Economy(EconomyCommand::Score(ref args))) => {
             handle_economy_score(&cli, args, stdout, stderr)
         }
+        Some(Command::Economy(EconomyCommand::Simulate(ref args))) => {
+            handle_economy_simulate(&cli, args, stdout, stderr)
+        }
+        Some(Command::Economy(EconomyCommand::PrunePlan(ref args))) => {
+            handle_economy_prune_plan(&cli, args, stdout, stderr)
+        }
         Some(Command::Eval(ref eval_cmd)) => match eval_cmd {
             EvalCommand::Run { scenario_id, .. } => match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => write_stdout(
@@ -2702,6 +3723,9 @@ where
         Some(Command::Index(IndexCommand::Rebuild(ref args))) => {
             handle_index_rebuild(&cli, args, stdout, stderr)
         }
+        Some(Command::Index(IndexCommand::Reembed(ref args))) => {
+            handle_index_reembed(&cli, args, stdout, stderr)
+        }
         Some(Command::Index(IndexCommand::Status(ref args))) => {
             handle_index_status(&cli, args, stdout, stderr)
         }
@@ -2723,8 +3747,20 @@ where
         Some(Command::Learn(LearnCommand::Experiment(LearnExperimentCommand::Propose(
             ref args,
         )))) => handle_learn_experiment_propose(&cli, args, stdout, stderr),
+        Some(Command::Learn(LearnCommand::Experiment(LearnExperimentCommand::Run(ref args)))) => {
+            handle_learn_experiment_run(&cli, args, stdout, stderr)
+        }
+        Some(Command::Learn(LearnCommand::Observe(ref args))) => {
+            handle_learn_observe(&cli, args, stdout, stderr)
+        }
+        Some(Command::Learn(LearnCommand::Close(ref args))) => {
+            handle_learn_close(&cli, args, stdout, stderr)
+        }
         Some(Command::Learn(LearnCommand::Summary(ref args))) => {
             handle_learn_summary(&cli, args, stdout, stderr)
+        }
+        Some(Command::Graph(GraphCommand::Export(ref args))) => {
+            handle_graph_export(&cli, args, stdout, stderr)
         }
         Some(Command::Graph(GraphCommand::CentralityRefresh(ref args))) => {
             handle_graph_centrality_refresh(&cli, args, stdout, stderr)
@@ -2764,8 +3800,14 @@ where
         Some(Command::Procedure(ProcedureCommand::Export(ref args))) => {
             handle_procedure_export(&cli, args, stdout, stderr)
         }
+        Some(Command::Procedure(ProcedureCommand::Promote(ref args))) => {
+            handle_procedure_promote(&cli, args, stdout, stderr)
+        }
         Some(Command::Procedure(ProcedureCommand::Verify(ref args))) => {
             handle_procedure_verify(&cli, args, stdout, stderr)
+        }
+        Some(Command::Procedure(ProcedureCommand::Drift(ref args))) => {
+            handle_procedure_drift(&cli, args, stdout, stderr)
         }
         Some(Command::Recorder(RecorderCommand::Start(ref args))) => {
             handle_recorder_start(&cli, args, stdout)
@@ -2779,6 +3821,9 @@ where
         Some(Command::Recorder(RecorderCommand::Tail(ref args))) => {
             handle_recorder_tail(&cli, args, stdout, stderr)
         }
+        Some(Command::Recorder(RecorderCommand::Import(ref args))) => {
+            handle_recorder_import(&cli, args, stdout, stderr)
+        }
         Some(Command::Rehearse(RehearseCommand::Plan(ref args))) => {
             handle_rehearse_plan(&cli, args, stdout, stderr)
         }
@@ -2791,6 +3836,20 @@ where
         Some(Command::Rehearse(RehearseCommand::PromotePlan(ref args))) => {
             handle_rehearse_promote_plan(&cli, args, stdout, stderr)
         }
+        Some(Command::Mcp(McpCommand::Manifest)) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_mcp_manifest_human())
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_mcp_manifest_toon() + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_mcp_manifest_json() + "\n"))
+            }
+        },
         Some(Command::Schema(ref schema_cmd)) => match schema_cmd {
             SchemaCommand::List => match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
@@ -2837,6 +3896,75 @@ where
             },
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
         },
+        Some(Command::Curate(CurateCommand::Candidates(ref args))) => {
+            handle_curate_candidates(&cli, args, stdout, stderr)
+        }
+        Some(Command::Curate(CurateCommand::Validate(ref args))) => {
+            handle_curate_validate(&cli, args, stdout, stderr)
+        }
+        Some(Command::Curate(CurateCommand::Apply(ref args))) => {
+            handle_curate_apply(&cli, args, stdout, stderr)
+        }
+        Some(Command::Curate(CurateCommand::Accept(ref args))) => handle_curate_review(
+            &cli,
+            CurateReviewAction::Accept,
+            &args.candidate_id,
+            args.database.as_deref(),
+            args.actor.as_deref(),
+            args.dry_run,
+            None,
+            None,
+            stdout,
+            stderr,
+        ),
+        Some(Command::Curate(CurateCommand::Reject(ref args))) => handle_curate_review(
+            &cli,
+            CurateReviewAction::Reject,
+            &args.candidate_id,
+            args.database.as_deref(),
+            args.actor.as_deref(),
+            args.dry_run,
+            None,
+            None,
+            stdout,
+            stderr,
+        ),
+        Some(Command::Curate(CurateCommand::Snooze(ref args))) => handle_curate_review(
+            &cli,
+            CurateReviewAction::Snooze,
+            &args.candidate_id,
+            args.database.as_deref(),
+            args.actor.as_deref(),
+            args.dry_run,
+            Some(args.until.as_str()),
+            None,
+            stdout,
+            stderr,
+        ),
+        Some(Command::Curate(CurateCommand::Merge(ref args))) => handle_curate_review(
+            &cli,
+            CurateReviewAction::Merge,
+            &args.source_candidate_id,
+            args.database.as_deref(),
+            args.actor.as_deref(),
+            args.dry_run,
+            None,
+            Some(args.target_candidate_id.as_str()),
+            stdout,
+            stderr,
+        ),
+        Some(Command::Curate(CurateCommand::Disposition(ref args))) => {
+            handle_curate_disposition(&cli, args, stdout, stderr)
+        }
+        Some(Command::Rule(RuleCommand::Add(ref args))) => {
+            handle_rule_add(&cli, args, stdout, stderr)
+        }
+        Some(Command::Rule(RuleCommand::List(ref args))) => {
+            handle_rule_list(&cli, args, stdout, stderr)
+        }
+        Some(Command::Rule(RuleCommand::Show(ref args))) => {
+            handle_rule_show(&cli, args, stdout, stderr)
+        }
         Some(Command::Review(ReviewCommand::Session(ref args))) => {
             handle_review_session(&cli, args, stdout, stderr)
         }
@@ -2857,26 +3985,25 @@ where
                 .as_deref()
                 .map_or_else(StatusReport::gather, StatusReport::gather_for_workspace);
             let timing = timing_capture.finish();
+            let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &output::render_status_human(&report))
                 }
-                output::Renderer::Toon => {
-                    write_stdout(stdout, &(output::render_status_toon(&report) + "\n"))
-                }
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &(output::render_status_toon_filtered(&report, profile) + "\n"),
+                ),
                 output::Renderer::Json
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
                 | output::Renderer::Hook => {
-                    let timing_ref = if cli.wants_meta() {
-                        Some(&timing)
+                    let rendered = if cli.wants_meta() {
+                        output::render_status_json_with_meta(&report, Some(&timing))
                     } else {
-                        None
+                        output::render_status_json_filtered(&report, profile)
                     };
-                    write_stdout(
-                        stdout,
-                        &(output::render_status_json_with_meta(&report, timing_ref) + "\n"),
-                    )
+                    write_stdout(stdout, &(rendered + "\n"))
                 }
             }
         }
@@ -2886,6 +4013,7 @@ where
         Some(Command::Support(SupportCommand::Inspect(ref args))) => {
             handle_support_inspect(&cli, args, stdout, stderr)
         }
+        Some(Command::Workspace(ref cmd)) => handle_workspace_command(&cli, cmd, stdout, stderr),
         Some(Command::Tripwire(TripwireCommand::List(ref args))) => {
             handle_tripwire_list(&cli, args, stdout, stderr)
         }
@@ -2963,6 +4091,48 @@ where
     render_install_plan(cli, &report, stdout)
 }
 
+fn handle_backup_create<W, E>(
+    cli: &Cli,
+    args: &BackupCreateArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = BackupCreateOptions {
+        workspace_path,
+        database_path: args.database.clone(),
+        output_dir: args.output_dir.clone(),
+        label: args.label.clone(),
+        redaction_level: args.redaction.to_model(),
+        dry_run: args.dry_run,
+    };
+
+    match create_backup(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json(),
+                });
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn handle_update<W, E>(
     cli: &Cli,
     args: &UpdateArgs,
@@ -3021,6 +4191,195 @@ where
     }
 }
 
+fn handle_workspace_command<W, E>(
+    cli: &Cli,
+    cmd: &WorkspaceCommand,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match cmd {
+        WorkspaceCommand::Resolve(args) => {
+            let options = workspace_core::WorkspaceResolveOptions {
+                workspace_path: cli.workspace.clone(),
+                target: args.target.clone(),
+                registry_path: None,
+            };
+            match workspace_core::resolve_workspace_report(&options) {
+                Ok(report) => render_workspace_resolve(cli, &report, stdout),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            }
+        }
+        WorkspaceCommand::List(_args) => {
+            let options = workspace_core::WorkspaceListOptions {
+                registry_path: None,
+            };
+            match workspace_core::list_workspace_registry(&options) {
+                Ok(report) => render_workspace_list(cli, &report, stdout),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            }
+        }
+        WorkspaceCommand::Alias(args) => {
+            let alias = match workspace_alias_name(args) {
+                Ok(alias) => alias,
+                Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            };
+            let options = workspace_core::WorkspaceAliasOptions {
+                workspace_path: cli.workspace.clone(),
+                pick: args.pick.clone(),
+                alias,
+                clear: args.clear,
+                dry_run: args.dry_run,
+                registry_path: None,
+            };
+            match workspace_core::alias_workspace(&options) {
+                Ok(report) => render_workspace_alias(cli, &report, stdout),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            }
+        }
+    }
+}
+
+fn workspace_alias_name(args: &WorkspaceAliasArgs) -> Result<Option<String>, DomainError> {
+    match (&args.name, &args.as_name) {
+        (Some(_), Some(_)) => Err(DomainError::Usage {
+            message: "provide either positional NAME or --as <name>, not both".to_string(),
+            repair: Some("ee workspace alias --pick <path-or-id> --as <name>".to_string()),
+        }),
+        (Some(name), None) | (None, Some(name)) => Ok(Some(name.clone())),
+        (None, None) => Ok(None),
+    }
+}
+
+fn render_workspace_list<W>(
+    cli: &Cli,
+    report: &workspace_core::WorkspaceListReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut out = format!("Workspace registry: {}\n", report.registry_path);
+            if report.workspaces.is_empty() {
+                out.push_str("No registered workspaces.\n");
+            } else {
+                for workspace in &report.workspaces {
+                    out.push_str(&format!(
+                        "{}  {}  {}\n",
+                        workspace.workspace_id,
+                        workspace.alias.as_deref().unwrap_or("-"),
+                        workspace.path
+                    ));
+                }
+            }
+            write_stdout(stdout, &out)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &format!(
+                "workspace_list: registry={} count={}\n",
+                report.registry_path,
+                report.workspaces.len()
+            ),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(workspace_response_json(report) + "\n")),
+    }
+}
+
+fn render_workspace_alias<W>(
+    cli: &Cli,
+    report: &workspace_core::WorkspaceAliasReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let alias = report.alias.as_deref().unwrap_or("-");
+            write_stdout(
+                stdout,
+                &format!(
+                    "Workspace alias {}: {} -> {}\n",
+                    report.status, alias, report.workspace_path
+                ),
+            )
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &format!(
+                "workspace_alias: status={} alias={} persisted={}\n",
+                report.status,
+                report.alias.as_deref().unwrap_or("-"),
+                report.persisted
+            ),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(workspace_response_json(report) + "\n")),
+    }
+}
+
+fn render_workspace_resolve<W>(
+    cli: &Cli,
+    report: &workspace_core::WorkspaceResolveReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut out = format!(
+                "Workspace: {}\nSource: {}\nID: {}\n",
+                report.root, report.source, report.workspace_id
+            );
+            if let Some(alias) = report.alias.as_deref() {
+                out.push_str(&format!("Alias: {alias}\n"));
+            }
+            if !report.diagnostics.is_empty() {
+                out.push_str("\nDiagnostics:\n");
+                for diagnostic in &report.diagnostics {
+                    out.push_str(&format!("  {}: {}\n", diagnostic.code, diagnostic.message));
+                }
+            }
+            write_stdout(stdout, &out)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &format!(
+                "workspace_resolve: source={} id={} root={}\n",
+                report.source, report.workspace_id, report.root
+            ),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(workspace_response_json(report) + "\n")),
+    }
+}
+
+fn workspace_response_json<T>(report: &T) -> String
+where
+    T: serde::Serialize,
+{
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": report,
+    })
+    .to_string()
+}
+
 fn write_stdout<W>(stdout: &mut W, text: &str) -> ProcessExitCode
 where
     W: Write,
@@ -3028,6 +4387,15 @@ where
     match stdout.write_all(text.as_bytes()) {
         Ok(()) => ProcessExitCode::Success,
         Err(_) => ProcessExitCode::Usage,
+    }
+}
+
+fn resolve_workspace_alias_global(cli: &mut Cli) {
+    let Some(raw) = cli.workspace.as_deref() else {
+        return;
+    };
+    if let Some(path) = workspace_core::resolve_workspace_alias_for_cli(raw) {
+        cli.workspace = Some(path);
     }
 }
 
@@ -3385,6 +4753,61 @@ where
                     report.memories_indexed,
                     report.sessions_indexed,
                     report.documents_total
+                ),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json(),
+                });
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        Err(error) => {
+            let domain_error = DomainError::SearchIndex {
+                message: error.to_string(),
+                repair: error.repair_hint().map(str::to_string),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_index_reembed<W, E>(
+    cli: &Cli,
+    args: &IndexReembedArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = IndexReembedOptions {
+        workspace_path,
+        database_path: args.database.clone(),
+        index_dir: args.index_dir.clone(),
+        dry_run: args.dry_run,
+    };
+
+    match reembed_index(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &format!(
+                    "INDEX_REEMBED|{}|{}|{}|{}\n",
+                    report.status.as_str(),
+                    report.job_status,
+                    report.documents_total,
+                    report.embedding.fast_model_id
                 ),
             ),
             output::Renderer::Json
@@ -3771,6 +5194,212 @@ where
     }
 }
 
+fn handle_learn_experiment_run<W, E>(
+    cli: &Cli,
+    args: &LearnExperimentRunArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = LearnExperimentRunOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        experiment_id: args.experiment_id.clone(),
+        max_attention_tokens: args.max_attention_tokens,
+        max_runtime_seconds: args.max_runtime_seconds,
+        dry_run: args.dry_run,
+    };
+
+    match run_experiment(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_learn_experiment_run_human(&report))
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_learn_experiment_run_toon(&report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_learn_experiment_run_json(&report) + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_learn_observe<W, E>(
+    cli: &Cli,
+    args: &LearnObserveArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let signal = match args.signal.parse::<LearningObservationSignal>() {
+        Ok(signal) => signal,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: format!(
+                    "Invalid observation signal `{}`: expected one of {}",
+                    error.value(),
+                    error.expected()
+                ),
+                repair: Some("Use --signal positive".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let measurement_value = match parse_learn_float_option(
+        "measurement value",
+        args.measurement_value.as_deref(),
+        "Use --measurement-value 1.0",
+    ) {
+        Ok(value) => value,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let options = LearnObserveOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        database_path: args.database.clone(),
+        workspace_id: args.workspace_id.clone(),
+        experiment_id: args.experiment_id.clone(),
+        observation_id: args.observation_id.clone(),
+        observed_at: args.observed_at.clone(),
+        observer: args.observer.clone(),
+        signal,
+        measurement_name: args.measurement_name.clone(),
+        measurement_value,
+        evidence_ids: args.evidence_ids.clone(),
+        note: args.note.clone(),
+        redaction_status: args.redaction_status.clone(),
+        session_id: args.session_id.clone(),
+        event_id: args.event_id.clone(),
+        actor: args.actor.clone(),
+        dry_run: args.dry_run,
+    };
+
+    match observe_experiment(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_learn_observe_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_learn_observe_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_learn_observe_json(&report) + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_learn_close<W, E>(
+    cli: &Cli,
+    args: &LearnCloseArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let status = match args.status.parse::<ExperimentOutcomeStatus>() {
+        Ok(status) => status,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: format!(
+                    "Invalid experiment outcome status `{}`: expected one of {}",
+                    error.value(),
+                    error.expected()
+                ),
+                repair: Some("Use --status confirmed".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let confidence_delta = match parse_learn_float(
+        "confidence delta",
+        &args.confidence_delta,
+        "Use --confidence-delta 0.25",
+    ) {
+        Ok(value) => value,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let options = LearnCloseOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        database_path: args.database.clone(),
+        workspace_id: args.workspace_id.clone(),
+        experiment_id: args.experiment_id.clone(),
+        outcome_id: args.outcome_id.clone(),
+        closed_at: args.closed_at.clone(),
+        status,
+        decision_impact: args.decision_impact.clone(),
+        confidence_delta,
+        priority_delta: args.priority_delta,
+        promoted_artifact_ids: args.promoted_artifact_ids.clone(),
+        demoted_artifact_ids: args.demoted_artifact_ids.clone(),
+        safety_notes: args.safety_notes.clone(),
+        audit_ids: args.audit_ids.clone(),
+        session_id: args.session_id.clone(),
+        event_id: args.event_id.clone(),
+        actor: args.actor.clone(),
+        dry_run: args.dry_run,
+    };
+
+    match close_experiment(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_learn_close_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_learn_close_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_learn_close_json(&report) + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn parse_learn_float_option(
+    field: &str,
+    raw: Option<&str>,
+    repair: &str,
+) -> Result<Option<f64>, DomainError> {
+    raw.map(|value| parse_learn_float(field, value, repair))
+        .transpose()
+}
+
+fn parse_learn_float(field: &str, raw: &str, repair: &str) -> Result<f64, DomainError> {
+    let value = raw.parse::<f64>().map_err(|_| DomainError::Usage {
+        message: format!("Invalid {field} `{raw}`: expected a finite number"),
+        repair: Some(repair.to_owned()),
+    })?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(DomainError::Usage {
+            message: format!("Invalid {field} `{raw}`: expected a finite number"),
+            repair: Some(repair.to_owned()),
+        })
+    }
+}
+
 fn handle_learn_summary<W, E>(
     cli: &Cli,
     args: &LearnSummaryArgs,
@@ -4063,18 +5692,28 @@ fn handle_preflight_close<W, E>(
     cli: &Cli,
     args: &PreflightCloseArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
     let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let task_outcome = match parse_task_outcome_arg(args.task_outcome.as_deref()) {
+        Ok(outcome) => outcome,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let feedback_kind = match parse_preflight_feedback_arg(args.feedback.as_deref()) {
+        Ok(kind) => kind,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
     let options = PreflightCloseOptions {
         workspace: workspace_path,
         run_id: args.run_id.clone(),
         cleared: args.cleared,
         reason: args.reason.clone(),
+        task_outcome,
+        feedback_kind,
         dry_run: args.dry_run,
     };
 
@@ -4108,6 +5747,28 @@ where
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
     }
+}
+
+fn parse_task_outcome_arg(raw: Option<&str>) -> Result<Option<TaskOutcome>, DomainError> {
+    raw.map(str::parse::<TaskOutcome>)
+        .transpose()
+        .map_err(|error| DomainError::Usage {
+            message: error.to_string(),
+            repair: Some("use --task-outcome success|failure|cancelled|unknown".to_owned()),
+        })
+}
+
+fn parse_preflight_feedback_arg(
+    raw: Option<&str>,
+) -> Result<Option<PreflightFeedbackKind>, DomainError> {
+    raw.map(str::parse::<PreflightFeedbackKind>)
+        .transpose()
+        .map_err(|error| DomainError::Usage {
+            message: error.to_string(),
+            repair: Some(
+                "use --feedback helped|missed|stale-warning|false-alarm|neutral".to_owned(),
+            ),
+        })
 }
 
 // ============================================================================
@@ -4604,7 +6265,7 @@ fn handle_procedure_export<W, E>(
     cli: &Cli,
     args: &ProcedureExportArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
@@ -4614,7 +6275,7 @@ where
     let options = crate::core::procedure::ProcedureExportOptions {
         workspace: workspace_path,
         procedure_id: args.procedure_id.clone(),
-        format: args.format.clone(),
+        format: args.export_format.clone(),
         output_path: args.output.clone(),
     };
 
@@ -4635,18 +6296,56 @@ where
                 &(output::render_procedure_export_json(&report) + "\n"),
             ),
         },
-        Err(error) => {
-            let json = serde_json::json!({
-                "schema": crate::models::ERROR_SCHEMA_V1,
-                "success": false,
-                "error": {
-                    "code": error.code(),
-                    "message": error.message(),
-                    "repair": error.repair(),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_procedure_promote<W, E>(
+    cli: &Cli,
+    args: &ProcedurePromoteArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = crate::core::procedure::ProcedurePromoteOptions {
+        workspace: workspace_path,
+        procedure_id: args.procedure_id.clone(),
+        dry_run: args.dry_run,
+        actor: args.actor.clone(),
+        reason: args.reason.clone(),
+    };
+
+    match crate::core::procedure::promote_procedure(&options) {
+        Ok(report) => {
+            if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
+                write_stdout(
+                    stdout,
+                    &(output::render_procedure_promote_mermaid(&report) + "\n"),
+                )
+            } else {
+                match cli.renderer() {
+                    output::Renderer::Human | output::Renderer::Markdown => {
+                        write_stdout(stdout, &output::render_procedure_promote_human(&report))
+                    }
+                    output::Renderer::Toon => write_stdout(
+                        stdout,
+                        &(output::render_procedure_promote_toon(&report) + "\n"),
+                    ),
+                    output::Renderer::Json
+                    | output::Renderer::Jsonl
+                    | output::Renderer::Compact
+                    | output::Renderer::Hook => write_stdout(
+                        stdout,
+                        &(output::render_procedure_promote_json(&report) + "\n"),
+                    ),
                 }
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
+            }
         }
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
 
@@ -4713,6 +6412,165 @@ where
     }
 }
 
+fn handle_procedure_drift<W, E>(
+    cli: &Cli,
+    args: &ProcedureDriftArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let evidence = match parse_procedure_drift_evidence_inputs(&args.evidence) {
+        Ok(evidence) => evidence,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let dependency_contracts =
+        match parse_procedure_dependency_contract_inputs(&args.dependency_contracts) {
+            Ok(dependency_contracts) => dependency_contracts,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    let verification = args
+        .failed_verification
+        .as_ref()
+        .map(|verification_id| build_failed_verification_fixture(args, verification_id));
+
+    let options = crate::core::procedure::ProcedureDriftOptions {
+        workspace: workspace_path,
+        procedure_id: args.procedure_id.clone(),
+        checked_at: args.checked_at.clone(),
+        staleness_threshold_days: args.staleness_threshold_days,
+        verification,
+        evidence,
+        dependency_contracts,
+        dry_run: true,
+    };
+
+    match crate::core::procedure::detect_procedure_drift(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_procedure_drift_human(&report))
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_procedure_drift_toon(&report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_procedure_drift_json(&report) + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn parse_procedure_drift_evidence_inputs(
+    raw_values: &[String],
+) -> Result<Vec<crate::core::procedure::ProcedureDriftEvidenceInput>, crate::models::DomainError> {
+    raw_values
+        .iter()
+        .map(|raw| {
+            let fields = parse_pipe_fields(raw, 3, "evidence")?;
+            Ok(crate::core::procedure::ProcedureDriftEvidenceInput {
+                evidence_id: fields[0].to_owned(),
+                last_seen_at: fields[1].to_owned(),
+                source_kind: fields[2].to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn parse_procedure_dependency_contract_inputs(
+    raw_values: &[String],
+) -> Result<Vec<crate::core::procedure::ProcedureDependencyContractInput>, crate::models::DomainError>
+{
+    raw_values
+        .iter()
+        .map(|raw| {
+            let fields = parse_pipe_fields(raw, 5, "dependency-contract")?;
+            Ok(crate::core::procedure::ProcedureDependencyContractInput {
+                dependency_name: fields[0].to_owned(),
+                owning_surface: fields[1].to_owned(),
+                expected_contract: fields[2].to_owned(),
+                actual_contract: fields[3].to_owned(),
+                compatibility: fields[4].to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn parse_pipe_fields<'a>(
+    raw: &'a str,
+    expected_count: usize,
+    flag_name: &str,
+) -> Result<Vec<&'a str>, crate::models::DomainError> {
+    let fields = raw
+        .split('|')
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+        .collect::<Vec<_>>();
+    if fields.len() == expected_count {
+        Ok(fields)
+    } else {
+        Err(crate::models::DomainError::Usage {
+            message: format!(
+                "--{flag_name} expects {expected_count} pipe-separated non-empty fields"
+            ),
+            repair: Some("Quote the value so the shell preserves `|` separators.".to_owned()),
+        })
+    }
+}
+
+fn build_failed_verification_fixture(
+    args: &ProcedureDriftArgs,
+    verification_id: &str,
+) -> crate::core::procedure::ProcedureVerifyReport {
+    let source_ids = if args.failed_sources.is_empty() {
+        vec![format!("{verification_id}_source")]
+    } else {
+        args.failed_sources.clone()
+    };
+    let fail_count = u32::try_from(source_ids.len()).unwrap_or(u32::MAX);
+    let verified_at = args
+        .checked_at
+        .clone()
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let sources_checked = source_ids
+        .into_iter()
+        .map(
+            |source_id| crate::core::procedure::VerificationSourceResult {
+                source_id,
+                source_kind: "eval_fixture".to_owned(),
+                result: "failed".to_owned(),
+                step_results: Vec::new(),
+                message: Some("verification failure supplied to procedure drift".to_owned()),
+            },
+        )
+        .collect();
+
+    crate::core::procedure::ProcedureVerifyReport {
+        schema: crate::core::procedure::PROCEDURE_VERIFY_REPORT_SCHEMA_V1.to_owned(),
+        procedure_id: args.procedure_id.clone(),
+        verification_id: verification_id.to_owned(),
+        status: "failed".to_owned(),
+        source_kind: "eval_fixture".to_owned(),
+        sources_checked,
+        pass_count: 0,
+        fail_count,
+        skip_count: 0,
+        overall_result: "failed".to_owned(),
+        verified_at,
+        dry_run: true,
+        confidence: 0.0,
+        next_actions: Vec::new(),
+    }
+}
+
 // ============================================================================
 // EE-401: Recorder Handlers
 // ============================================================================
@@ -4755,12 +6613,17 @@ where
     let event_type = match args.event_type.parse::<crate::models::RecorderEventType>() {
         Ok(t) => t,
         Err(_) => {
-            let _ = writeln!(
+            return write_recorder_event_usage_error(
+                cli.wants_json(),
+                stdout,
                 stderr,
-                "error: invalid event type '{}'. Valid: tool_call, tool_result, user_message, assistant_message, error, state_change",
-                args.event_type
+                "invalid_recorder_event_type",
+                format!("Invalid recorder event type '{}'.", args.event_type),
+                "Use one of: tool_call, tool_result, user_message, assistant_message, system_message, error, state_change.",
+                serde_json::json!({
+                    "eventType": args.event_type,
+                }),
             );
-            return ProcessExitCode::Usage;
         }
     };
 
@@ -4769,10 +6632,28 @@ where
         event_type,
         payload: args.payload.clone(),
         redact: args.redact,
+        previous_event_hash: args.previous_event_hash.clone(),
+        max_payload_bytes: args.max_payload_bytes,
         dry_run: args.dry_run,
     };
 
-    let report = crate::core::recorder::record_event(&options, 1);
+    let report = match crate::core::recorder::record_event(&options, 1) {
+        Ok(report) => report,
+        Err(error) => {
+            let message = error.message.clone();
+            let repair = error.repair.clone();
+            let details = error.data_json()["details"].clone();
+            return write_recorder_event_usage_error(
+                cli.wants_json(),
+                stdout,
+                stderr,
+                error.code.as_str(),
+                message,
+                &repair,
+                details,
+            );
+        }
+    };
 
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
@@ -4784,6 +6665,39 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => write_stdout(stdout, &(report.data_json().to_string() + "\n")),
     }
+}
+
+fn write_recorder_event_usage_error<W, E>(
+    wants_json: bool,
+    stdout: &mut W,
+    stderr: &mut E,
+    code: &str,
+    message: String,
+    repair: &str,
+    details: serde_json::Value,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if wants_json {
+        let json = serde_json::json!({
+            "schema": crate::models::ERROR_SCHEMA_V1,
+            "success": false,
+            "error": {
+                "code": code,
+                "message": message,
+                "severity": "medium",
+                "repair": repair,
+                "details": details,
+            }
+        });
+        let _ = stdout.write_all((json.to_string() + "\n").as_bytes());
+    } else {
+        let _ = writeln!(stderr, "error: {message}");
+        let _ = writeln!(stderr, "\nNext:\n  {repair}");
+    }
+    ProcessExitCode::Usage
 }
 
 fn handle_recorder_finish<W, E>(
@@ -4869,6 +6783,128 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => write_stdout(stdout, &(report.data_json().to_string() + "\n")),
     }
+}
+
+fn handle_recorder_import<W, E>(
+    cli: &Cli,
+    args: &RecorderImportArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let source_type = match args.source_type.parse::<crate::models::ImportSourceType>() {
+        Ok(source_type) => source_type,
+        Err(_) => {
+            let error = crate::core::recorder::RecorderImportError {
+                code: crate::core::recorder::RecorderImportErrorCode::InvalidSourceType,
+                message: format!(
+                    "Invalid recorder import source type '{}'.",
+                    args.source_type
+                ),
+                repair: "Use one of: cass, eidetic_legacy, recorder, manual.".to_string(),
+                details: Box::new(serde_json::json!({
+                    "sourceType": args.source_type
+                })),
+            };
+            return write_recorder_import_error(cli.wants_json(), stdout, stderr, &error);
+        }
+    };
+
+    let input_json = match args.input.as_ref() {
+        Some(path) => match fs::read_to_string(path) {
+            Ok(contents) => Some(contents),
+            Err(error) => {
+                let import_error = crate::core::recorder::RecorderImportError {
+                    code: crate::core::recorder::RecorderImportErrorCode::InvalidInputJson,
+                    message: format!(
+                        "Failed to read recorder import input '{}': {error}.",
+                        path.display()
+                    ),
+                    repair: "Check the --input path and pass a readable CASS view JSON file."
+                        .to_string(),
+                    details: Box::new(serde_json::json!({
+                        "inputPath": path.to_string_lossy()
+                    })),
+                };
+                return write_recorder_import_error(
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                    &import_error,
+                );
+            }
+        },
+        None => None,
+    };
+
+    let options = crate::core::recorder::RecorderImportOptions {
+        source_type,
+        source_id: args.source_id.clone(),
+        input_json,
+        input_path: args
+            .input
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned()),
+        agent_id: args.agent_id.clone(),
+        session_id: args.session_id.clone(),
+        workspace_id: args.workspace_id.clone(),
+        max_events: args.max_events,
+        redact: args.redact,
+        max_payload_bytes: args.max_payload_bytes,
+        dry_run: args.dry_run,
+    };
+
+    let report = match crate::core::recorder::plan_recorder_import(&options) {
+        Ok(report) => report,
+        Err(error) => {
+            return write_recorder_import_error(cli.wants_json(), stdout, stderr, &error);
+        }
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": report.data_json(),
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn write_recorder_import_error<W, E>(
+    wants_json: bool,
+    stdout: &mut W,
+    stderr: &mut E,
+    error: &crate::core::recorder::RecorderImportError,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if wants_json {
+        let json = serde_json::json!({
+            "schema": crate::models::ERROR_SCHEMA_V1,
+            "success": false,
+            "error": error.data_json(),
+        });
+        let _ = stdout.write_all((json.to_string() + "\n").as_bytes());
+    } else {
+        let _ = writeln!(stderr, "error: {}", error.message);
+        let _ = writeln!(stderr, "\nNext:\n  {}", error.repair);
+    }
+    ProcessExitCode::Usage
 }
 
 fn handle_recorder_tail_follow_jsonl<W, E>(
@@ -5246,10 +7282,8 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
 
     let database_path = args
         .database
@@ -5274,6 +7308,10 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
+    let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
 
     let options = crate::graph::CentralityRefreshOptions {
         dry_run: args.dry_run,
@@ -5282,7 +7320,7 @@ where
         link_limit: args.link_limit,
     };
 
-    match crate::graph::refresh_centrality(&conn, &options) {
+    match crate::graph::refresh_graph_snapshot(&conn, &workspace_id, &options) {
         Ok(report) => match cli.renderer() {
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &report.human_summary())
@@ -5308,6 +7346,174 @@ where
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
     }
+}
+
+fn handle_graph_export<W, E>(
+    cli: &Cli,
+    args: &GraphExportArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let workspace_id = match resolve_graph_export_workspace_id(&conn, &workspace, args) {
+        Ok(workspace_id) => workspace_id,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let graph_type = match args.graph_type.parse::<crate::db::GraphSnapshotType>() {
+        Ok(graph_type) => graph_type,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error,
+                repair: Some(
+                    "Use one of memory_links, session_graph, procedure_graph, evidence_graph, composite."
+                        .to_string(),
+                ),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let options = crate::graph::GraphExportOptions {
+        workspace_id,
+        graph_type,
+        snapshot_id: args.snapshot_id.clone(),
+        format: crate::graph::GraphExportFormat::Mermaid,
+    };
+
+    match crate::graph::export_graph_snapshot(&conn, &options) {
+        Ok(report) => write_graph_export_report(cli, &report, stdout),
+        Err(error) => {
+            let domain_error = DomainError::Graph {
+                message: error,
+                repair: Some("ee graph centrality-refresh".to_string()),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn resolve_cli_workspace_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    absolute.canonicalize().unwrap_or(absolute)
+}
+
+fn resolve_graph_export_workspace_id(
+    conn: &crate::db::DbConnection,
+    workspace: &Path,
+    args: &GraphExportArgs,
+) -> Result<String, DomainError> {
+    resolve_graph_workspace_id(conn, workspace, args.workspace_id.as_deref())
+}
+
+fn resolve_graph_workspace_id(
+    conn: &crate::db::DbConnection,
+    workspace: &Path,
+    explicit_workspace_id: Option<&str>,
+) -> Result<String, DomainError> {
+    if let Some(workspace_id) = explicit_workspace_id {
+        return Ok(workspace_id.to_owned());
+    }
+    let workspace_path = workspace.to_string_lossy().into_owned();
+    let stored = conn
+        .get_workspace_by_path(&workspace_path)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query workspace: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+
+    Ok(stored.map_or_else(
+        || stable_cli_workspace_id(workspace),
+        |workspace| workspace.id,
+    ))
+}
+
+fn stable_cli_workspace_id(path: &Path) -> String {
+    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+}
+
+fn write_graph_export_report<W>(
+    cli: &Cli,
+    report: &crate::graph::GraphExportReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
+        return write_stdout(stdout, &report.diagram);
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(graph_export_toon_output(report) + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": report.data_json(),
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn graph_export_toon_output(report: &crate::graph::GraphExportReport) -> String {
+    format!(
+        "schema: {}\nsuccess: true\ndata:\n  command: graph export\n  status: {}\n  format: {}\n  workspaceId: {}\n  graphType: {}\n  nodeCount: {}\n  edgeCount: {}",
+        crate::models::RESPONSE_SCHEMA_V1,
+        report.status.as_str(),
+        report.format.as_str(),
+        report.workspace_id,
+        report.graph_type,
+        report.node_count,
+        report.edge_count
+    )
 }
 
 fn handle_memory_list<W, E>(
@@ -5653,6 +7859,7 @@ enum QueryFileErrorCode {
     UnknownVersion,
     EmptyQuery,
     InvalidOperator,
+    InvalidTimestamp,
     UnsafePath,
     UnsupportedFeature,
     ZeroBudget,
@@ -5668,6 +7875,7 @@ impl QueryFileErrorCode {
             Self::UnknownVersion => "ERR_UNKNOWN_VERSION",
             Self::EmptyQuery => "ERR_EMPTY_QUERY",
             Self::InvalidOperator => "ERR_INVALID_OPERATOR",
+            Self::InvalidTimestamp => "ERR_INVALID_TIMESTAMP",
             Self::UnsafePath => "ERR_UNSAFE_PATH",
             Self::UnsupportedFeature => "ERR_UNSUPPORTED_FEATURE",
             Self::ZeroBudget => "ERR_ZERO_BUDGET",
@@ -5929,6 +8137,8 @@ fn validate_query_version(
 fn validate_unsupported_query_features(
     object: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), QueryFileError> {
+    validate_temporal_fields(object)?;
+
     if let Some(filters) = object.get("filters") {
         validate_filters(filters)?;
         return Err(QueryFileError::new(
@@ -5963,6 +8173,49 @@ fn validate_unsupported_query_features(
     }
 
     Ok(())
+}
+
+fn validate_temporal_fields(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), QueryFileError> {
+    for field in ["time", "asOf", "temporalValidity"] {
+        let Some(value) = object.get(field) else {
+            continue;
+        };
+        validate_temporal_value(field, value)?;
+    }
+    Ok(())
+}
+
+fn validate_temporal_value(field: &str, value: &serde_json::Value) -> Result<(), QueryFileError> {
+    match value {
+        serde_json::Value::String(raw) => validate_rfc3339_timestamp(field, raw),
+        serde_json::Value::Object(object) => {
+            for (key, nested) in object {
+                if nested.is_string() {
+                    validate_temporal_value(&format!("{field}.{key}"), nested)?;
+                }
+            }
+            Ok(())
+        }
+        _ => Err(QueryFileError::new(
+            QueryFileErrorCode::InvalidTimestamp,
+            format!("{field} must be an RFC 3339 timestamp string or timestamp object."),
+            Some("Use timestamps such as 2026-05-01T00:00:00Z.".to_string()),
+        )),
+    }
+}
+
+fn validate_rfc3339_timestamp(field: &str, raw: &str) -> Result<(), QueryFileError> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|_| ())
+        .map_err(|error| {
+            QueryFileError::new(
+                QueryFileErrorCode::InvalidTimestamp,
+                format!("{field} must be an RFC 3339 timestamp: {error}"),
+                Some("Use timestamps such as 2026-05-01T00:00:00Z.".to_string()),
+            )
+        })
 }
 
 fn validate_filters(value: &serde_json::Value) -> Result<(), QueryFileError> {
@@ -6569,26 +8822,30 @@ where
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            let output = format_why_human(&report);
-            write_stdout(stdout, &output)
-        }
-        output::Renderer::Toon => {
-            let output = format!(
-                "WHY|{}|{}|{:.2}\n",
-                report.memory_id,
-                report.found,
-                report.selection.as_ref().map_or(0.0, |s| s.selection_score)
-            );
-            write_stdout(stdout, &output)
-        }
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            let json = format_why_json(&report);
-            write_stdout(stdout, &(json + "\n"))
+    if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
+        write_stdout(stdout, &(output::render_why_mermaid(&report) + "\n"))
+    } else {
+        match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                let output = format_why_human(&report);
+                write_stdout(stdout, &output)
+            }
+            output::Renderer::Toon => {
+                let output = format!(
+                    "WHY|{}|{}|{:.2}\n",
+                    report.memory_id,
+                    report.found,
+                    report.selection.as_ref().map_or(0.0, |s| s.selection_score)
+                );
+                write_stdout(stdout, &output)
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = format_why_json(&report);
+                write_stdout(stdout, &(json + "\n"))
+            }
         }
     }
 }
@@ -6607,6 +8864,16 @@ fn format_why_human(report: &crate::core::why::WhyReport) -> String {
             output.push_str(&format!("  Provenance: {uri}\n"));
         }
         output.push_str(&format!("  Created: {}\n", storage.created_at));
+        output.push_str(&format!(
+            "  Validity: {} ({})\n",
+            storage.validity_status, storage.validity_window_kind
+        ));
+        if let Some(ref valid_from) = storage.valid_from {
+            output.push_str(&format!("  Valid from: {valid_from}\n"));
+        }
+        if let Some(ref valid_to) = storage.valid_to {
+            output.push_str(&format!("  Valid to: {valid_to}\n"));
+        }
         output.push('\n');
     }
 
@@ -6689,6 +8956,10 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "trust_subclass": s.trust_subclass,
             "provenance_uri": s.provenance_uri,
             "created_at": s.created_at,
+            "validFrom": s.valid_from,
+            "validTo": s.valid_to,
+            "validityStatus": s.validity_status,
+            "validityWindowKind": s.validity_window_kind,
         })
     });
 
@@ -6882,6 +9153,12 @@ impl RememberMemoryReport {
         let source_json = self.source.as_ref().map_or("null".to_string(), |s| {
             format!("\"{}\"", escape_json_string(s))
         });
+        let valid_from_json = self.valid_from.as_ref().map_or("null".to_string(), |s| {
+            format!("\"{}\"", escape_json_string(s))
+        });
+        let valid_to_json = self.valid_to.as_ref().map_or("null".to_string(), |s| {
+            format!("\"{}\"", escape_json_string(s))
+        });
         let provenance_uri_json = self.source.as_ref().map_or(String::new(), |s| {
             format!(",\"provenance_uri\":\"{}\"", escape_json_string(s))
         });
@@ -6897,9 +9174,11 @@ impl RememberMemoryReport {
             .map_or("null".to_string(), |id| {
                 format!("\"{}\"", escape_json_string(id))
             });
+        let suggested_links_json = self.suggested_links_json();
+        let suggested_link_degradations_json = self.suggested_link_degradations_json();
 
         let mut json = format!(
-            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":[],"redaction_status":"{}"}}"#,
+            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"redaction_status":"{}"}}"#,
             self.version,
             self.memory_id,
             escape_json_string(&self.workspace_id),
@@ -6911,6 +9190,10 @@ impl RememberMemoryReport {
             tags_json,
             source_json,
             provenance_uri_json,
+            valid_from_json,
+            valid_to_json,
+            escape_json_string(&self.validity_status),
+            escape_json_string(&self.validity_window_kind),
             self.dry_run,
             self.persisted,
             self.revision_number,
@@ -6918,10 +9201,65 @@ impl RememberMemoryReport {
             audit_id_json,
             index_job_id_json,
             escape_json_string(&self.index_status),
+            suggested_links_json,
+            escape_json_string(&self.suggested_link_status),
+            suggested_link_degradations_json,
             escape_json_string(&self.redaction_status)
         );
         json.push('}');
         json
+    }
+
+    fn suggested_links_json(&self) -> String {
+        use crate::output::escape_json_string;
+
+        let items = self
+            .suggested_links
+            .iter()
+            .map(|link| {
+                let matched_tags_json = link
+                    .matched_tags
+                    .iter()
+                    .map(|tag| format!("\"{}\"", escape_json_string(tag)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    r#"{{"schema":"{}","relation":"{}","target_memory_id":"{}","score":{},"confidence":{},"evidence_count":{},"evidence_summary":"{}","source":"{}","matched_tags":[{}],"next_action":"{}"}}"#,
+                    escape_json_string(link.schema),
+                    escape_json_string(&link.relation),
+                    escape_json_string(&link.target_memory_id),
+                    link.score,
+                    link.confidence,
+                    link.evidence_count,
+                    escape_json_string(&link.evidence_summary),
+                    escape_json_string(&link.source),
+                    matched_tags_json,
+                    escape_json_string(&link.next_action)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{items}]")
+    }
+
+    fn suggested_link_degradations_json(&self) -> String {
+        use crate::output::escape_json_string;
+
+        let items = self
+            .suggested_link_degradations
+            .iter()
+            .map(|degradation| {
+                format!(
+                    r#"{{"code":"{}","severity":"{}","message":"{}","repair":"{}"}}"#,
+                    escape_json_string(&degradation.code),
+                    escape_json_string(&degradation.severity),
+                    escape_json_string(&degradation.message),
+                    escape_json_string(&degradation.repair)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{items}]")
     }
 }
 
@@ -6936,8 +9274,435 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberMemoryRepor
         tags: args.tags.as_deref(),
         confidence: args.confidence,
         source: args.source.as_deref(),
+        valid_from: args.valid_from.as_deref(),
+        valid_to: args.valid_to.as_deref(),
         dry_run: args.dry_run,
     })
+}
+
+fn handle_curate_candidates<W, E>(
+    cli: &Cli,
+    args: &CurateCandidatesArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    if args.all && args.status.is_some() {
+        return write_domain_error(
+            &DomainError::Usage {
+                message: "--all cannot be combined with --status".to_owned(),
+                repair: Some("ee curate candidates --help".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+    let status = if args.all {
+        None
+    } else {
+        args.status.as_deref().or(Some("pending"))
+    };
+    let options = CurateCandidatesOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        candidate_type: args.candidate_type.as_deref(),
+        status,
+        target_memory_id: args.target_memory_id.as_deref(),
+        limit: args.limit,
+        offset: args.offset,
+    };
+
+    match list_curation_candidates(&options) {
+        Ok(report) => write_curate_candidates_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_curate_candidates_report<W>(
+    cli: &Cli,
+    report: &CurateCandidatesReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_curate_candidates_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_curate_candidates_toon(report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_curate_candidates_json(report) + "\n"),
+        ),
+    }
+}
+
+fn handle_curate_validate<W, E>(
+    cli: &Cli,
+    args: &CurateValidateArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = CurateValidateOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        candidate_id: &args.candidate_id,
+        actor: args.actor.as_deref(),
+        dry_run: args.dry_run,
+    };
+
+    match validate_curation_candidate(&options) {
+        Ok(report) => write_curate_validate_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_curate_validate_report<W>(
+    cli: &Cli,
+    report: &CurateValidateReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_curate_validate_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_curate_validate_toon(report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_curate_validate_json(report) + "\n"),
+        ),
+    }
+}
+
+fn handle_curate_apply<W, E>(
+    cli: &Cli,
+    args: &CurateApplyArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = CurateApplyOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        candidate_id: &args.candidate_id,
+        actor: args.actor.as_deref(),
+        dry_run: args.dry_run,
+    };
+
+    match apply_curation_candidate(&options) {
+        Ok(report) => write_curate_apply_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_curate_apply_report<W>(
+    cli: &Cli,
+    report: &CurateApplyReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_curate_apply_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_curate_apply_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_curate_apply_json(report) + "\n"))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_curate_review<W, E>(
+    cli: &Cli,
+    action: CurateReviewAction,
+    candidate_id: &str,
+    database_path: Option<&Path>,
+    actor: Option<&str>,
+    dry_run: bool,
+    snoozed_until: Option<&str>,
+    merge_into_candidate_id: Option<&str>,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = CurateReviewOptions {
+        workspace_path: &workspace_path,
+        database_path,
+        candidate_id,
+        action,
+        actor,
+        dry_run,
+        snoozed_until,
+        merge_into_candidate_id,
+    };
+
+    match review_curation_candidate(&options) {
+        Ok(report) => write_curate_review_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_curate_review_report<W>(
+    cli: &Cli,
+    report: &CurateReviewReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_curate_review_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_curate_review_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_curate_review_json(report) + "\n"))
+        }
+    }
+}
+
+fn handle_curate_disposition<W, E>(
+    cli: &Cli,
+    args: &CurateDispositionArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = CurateDispositionOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        actor: args.actor.as_deref(),
+        apply: args.apply,
+        now_rfc3339: args.now.as_deref(),
+    };
+
+    match run_curation_disposition(&options) {
+        Ok(report) => write_curate_disposition_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_curate_disposition_report<W>(
+    cli: &Cli,
+    report: &CurateDispositionReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_curate_disposition_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_curate_disposition_toon(report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_curate_disposition_json(report) + "\n"),
+        ),
+    }
+}
+
+fn handle_rule_add<W, E>(
+    cli: &Cli,
+    args: &RuleAddArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = RuleAddOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        content: &args.content,
+        scope: &args.scope,
+        scope_pattern: args.scope_pattern.as_deref(),
+        maturity: &args.maturity,
+        confidence: args.confidence,
+        utility: args.utility,
+        importance: args.importance,
+        trust_class: &args.trust_class,
+        tags: &args.tags,
+        source_memory_ids: &args.source_memory_ids,
+        dry_run: args.dry_run,
+        actor: args.actor.as_deref(),
+    };
+
+    match add_rule(&options) {
+        Ok(report) => write_rule_add_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_rule_add_report<W>(cli: &Cli, report: &RuleAddReport, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_rule_add_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_rule_add_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_rule_add_json(report) + "\n"))
+        }
+    }
+}
+
+fn handle_rule_list<W, E>(
+    cli: &Cli,
+    args: &RuleListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = RuleListOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        maturity: args.maturity.as_deref(),
+        scope: args.scope.as_deref(),
+        tag: args.tag.as_deref(),
+        include_tombstoned: args.include_tombstoned,
+        limit: args.limit,
+        offset: args.offset,
+    };
+
+    match list_rules(&options) {
+        Ok(report) => write_rule_list_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_rule_list_report<W>(cli: &Cli, report: &RuleListReport, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_rule_list_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_rule_list_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_rule_list_json(report) + "\n"))
+        }
+    }
+}
+
+fn handle_rule_show<W, E>(
+    cli: &Cli,
+    args: &RuleShowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = RuleShowOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        rule_id: &args.rule_id,
+        include_tombstoned: args.include_tombstoned,
+    };
+
+    match show_rule(&options) {
+        Ok(report) => write_rule_show_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_rule_show_report<W>(cli: &Cli, report: &RuleShowReport, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_rule_show_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_rule_show_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_rule_show_json(report) + "\n"))
+        }
+    }
 }
 
 fn handle_agent_detect<W, E>(
@@ -6965,77 +9730,73 @@ where
     };
 
     match detect_installed_agents(&options) {
-        Ok(report) => {
-            let human_output = || {
-                let mut out = format!("Agent Detection Report (v{})\n\n", report.format_version);
-                out.push_str(&format!(
-                    "Summary: {} detected of {} checked\n\n",
-                    report.summary.detected_count, report.summary.total_count
-                ));
-                for entry in &report.installed_agents {
-                    let status = if entry.detected { "✓" } else { "✗" };
-                    out.push_str(&format!("{} {}\n", status, entry.slug));
-                    if entry.detected && !entry.root_paths.is_empty() {
-                        for path in &entry.root_paths {
-                            out.push_str(&format!("    {}\n", path));
-                        }
-                    }
-                }
-                out
-            };
-
-            let toon_output = || {
-                format!(
-                    "AGENT_DETECT|{}|{}\n",
-                    report.summary.detected_count, report.summary.total_count
-                )
-            };
-
-            let json_output = || {
-                let agents: Vec<serde_json::Value> = report
-                    .installed_agents
-                    .iter()
-                    .map(|e| {
-                        serde_json::json!({
-                            "slug": e.slug,
-                            "detected": e.detected,
-                            "rootPaths": e.root_paths,
-                        })
-                    })
-                    .collect();
-
-                serde_json::json!({
-                    "schema": "ee.agent.detect.v1",
-                    "success": true,
-                    "data": {
-                        "command": "agent detect",
-                        "formatVersion": report.format_version,
-                        "generatedAt": report.generated_at,
-                        "summary": {
-                            "detectedCount": report.summary.detected_count,
-                            "totalCount": report.summary.total_count,
-                        },
-                        "installedAgents": agents,
-                    }
-                })
-                .to_string()
-            };
-
-            match cli.renderer() {
-                output::Renderer::Human | output::Renderer::Markdown => {
-                    write_stdout(stdout, &human_output())
-                }
-                output::Renderer::Toon => write_stdout(stdout, &toon_output()),
-                output::Renderer::Json
-                | output::Renderer::Jsonl
-                | output::Renderer::Compact
-                | output::Renderer::Hook => write_stdout(stdout, &(json_output() + "\n")),
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_agent_detect_human(&report))
             }
-        }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_agent_detect_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_agent_detect_json(&report) + "\n"))
+            }
+        },
         Err(err) => {
             let domain_error = DomainError::Usage {
                 message: err.to_string(),
                 repair: Some("ee agent detect --help".to_string()),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_agent_status<W, E>(
+    cli: &Cli,
+    args: &AgentStatusArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let only_connectors = args.only.as_ref().map(|s| {
+        s.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect()
+    });
+
+    let options = AgentStatusOptions {
+        only_connectors,
+        include_undetected: args.include_undetected,
+        root_overrides: vec![],
+    };
+
+    match gather_agent_status(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_agent_status_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_agent_status_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_agent_status_json(&report) + "\n"))
+            }
+        },
+        Err(err) => {
+            let domain_error = DomainError::Usage {
+                message: err.to_string(),
+                repair: Some("ee agent status --help".to_string()),
             };
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
@@ -7050,76 +9811,62 @@ fn handle_agent_sources<W, E>(
     cli: &Cli,
     args: &AgentSourcesArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    use franken_agent_detection::default_probe_paths_tilde;
-
-    let all_sources = default_probe_paths_tilde();
-
-    let filtered: Vec<_> = if let Some(ref only) = args.only {
-        let only_lower = only.to_lowercase();
-        all_sources
-            .into_iter()
-            .filter(|(slug, _)| *slug == only_lower)
-            .collect()
-    } else {
-        all_sources
-    };
+    let report = build_agent_sources_report(&AgentSourcesOptions {
+        only: args.only.clone(),
+        include_paths: args.include_paths,
+        include_origin_fixtures: args.include_origin_fixtures,
+        fixtures_root: None,
+    });
 
     let human_output = || {
         let mut out = String::from("Known Agent Sources\n===================\n\n");
-        for (slug, paths) in &filtered {
-            out.push_str(&format!("{slug}\n"));
+        for source in &report.sources {
+            out.push_str(&format!("{}\n", source.slug));
             if args.include_paths {
-                for path in paths {
+                for path in &source.probe_paths {
                     out.push_str(&format!("  {path}\n"));
                 }
             }
         }
-        out.push_str(&format!("\nTotal: {} connectors\n", filtered.len()));
+        out.push_str(&format!("\nTotal: {} connectors\n", report.total_count));
+        if args.include_origin_fixtures {
+            out.push_str("\nOrigin fixtures\n---------------\n");
+            for fixture in &report.origin_fixtures {
+                out.push_str(&format!(
+                    "{} [{}] {} -> {}\n",
+                    fixture.origin_id, fixture.kind, fixture.remote_root, fixture.local_root
+                ));
+            }
+            out.push_str("\nPath rewrites\n-------------\n");
+            for rewrite in &report.path_rewrites {
+                out.push_str(&format!(
+                    "{}: {} -> {}\n",
+                    rewrite.connector_slug, rewrite.from, rewrite.to
+                ));
+            }
+        }
         out
     };
 
     let toon_output = || {
-        filtered
+        let mut lines = report
+            .sources
             .iter()
-            .map(|(slug, _)| format!("AGENT_SOURCE|{slug}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n"
-    };
-
-    let json_output = || {
-        let sources: Vec<serde_json::Value> = filtered
-            .iter()
-            .map(|(slug, paths)| {
-                if args.include_paths {
-                    serde_json::json!({
-                        "slug": slug,
-                        "probePaths": paths,
-                    })
-                } else {
-                    serde_json::json!({
-                        "slug": slug,
-                    })
-                }
-            })
-            .collect();
-
-        serde_json::json!({
-            "schema": "ee.agent.sources.v1",
-            "success": true,
-            "data": {
-                "command": "agent sources",
-                "totalCount": filtered.len(),
-                "sources": sources,
-            }
-        })
-        .to_string()
+            .map(|source| format!("AGENT_SOURCE|{}", source.slug))
+            .collect::<Vec<_>>();
+        lines.extend(report.path_rewrites.iter().map(|rewrite| {
+            format!(
+                "AGENT_SOURCE_REWRITE|{}|{}|{}|{}",
+                rewrite.origin_id, rewrite.connector_slug, rewrite.from, rewrite.to
+            )
+        }));
+        lines.join("\n") + "\n"
     };
 
     match cli.renderer() {
@@ -7130,7 +9877,22 @@ where
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(stdout, &(json_output() + "\n")),
+        | output::Renderer::Hook => {
+            let raw = match serde_json::to_string(&report) {
+                Ok(raw) => raw,
+                Err(error) => {
+                    let domain_error = DomainError::Usage {
+                        message: format!("failed to serialize agent sources report: {error}"),
+                        repair: Some("ee agent sources --json".to_string()),
+                    };
+                    return write_domain_error(&domain_error, true, stdout, stderr);
+                }
+            };
+            write_stdout(
+                stdout,
+                &(output::ResponseEnvelope::success().data_raw(&raw).finish() + "\n"),
+            )
+        }
     }
 }
 
@@ -7192,14 +9954,14 @@ where
 
     let human_output = || {
         let mut out = String::from("Agent Scan Results\n==================\n\n");
-        let mut current_slug = String::new();
+        let mut current_slug = None;
         for (slug, tilde_path, resolved, exists) in &scan_results {
-            if *slug != current_slug {
-                if !current_slug.is_empty() {
+            if current_slug != Some(slug.as_str()) {
+                if current_slug.is_some() {
                     out.push('\n');
                 }
                 out.push_str(&format!("{slug}:\n"));
-                current_slug = slug.clone();
+                current_slug = Some(slug.as_str());
             }
             let status = if *exists { "✓" } else { "✗" };
             out.push_str(&format!("  {status} {tilde_path}\n"));
@@ -7948,6 +10710,215 @@ where
 }
 
 // ============================================================================
+// EE-207: Foreground Daemon Mode
+// ============================================================================
+
+fn handle_daemon<W, E>(
+    cli: &Cli,
+    args: &DaemonArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !args.foreground {
+        let error = DomainError::UnsatisfiedDegradedMode {
+            message: "Background daemon mode is not implemented; run the bounded foreground daemon explicitly.".to_owned(),
+            repair: Some("ee daemon --foreground --once --json".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let mut runner_options = RunnerOptions::new();
+    if let Some(time_limit_ms) = args.time_limit_ms {
+        runner_options = runner_options.with_time_limit(time_limit_ms);
+    }
+    if let Some(item_limit) = args.item_limit {
+        runner_options = runner_options.with_item_limit(item_limit);
+    }
+    runner_options = runner_options.with_dry_run(args.dry_run);
+
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .display()
+        .to_string();
+    let mut options = DaemonForegroundOptions::new(workspace);
+    options.tick_limit = if args.once { 1 } else { args.max_ticks };
+    options.interval_ms = args.interval_ms;
+    options.dry_run = args.dry_run;
+    options.runner_options = runner_options;
+    if !args.jobs.is_empty() {
+        options.job_types = args.jobs.clone();
+    }
+
+    match run_daemon_foreground(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&report.data_json().to_string()) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let response = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json(),
+                });
+                write_stdout(stdout, &(response.to_string() + "\n"))
+            }
+        },
+        Err(message) => {
+            let error = DomainError::Usage {
+                message,
+                repair: Some("ee daemon --foreground --once --json".to_owned()),
+            };
+            write_domain_error(&error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+// ============================================================================
+// EE-ARTIFACT-REGISTRY-001: Narrow Coding Artifact Registry
+// ============================================================================
+
+fn handle_artifact_register<W, E>(
+    cli: &Cli,
+    args: &ArtifactRegisterArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = ArtifactRegisterOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        path: args.path.as_deref(),
+        external_ref: args.external_ref.as_deref(),
+        content_hash: args.content_hash.as_deref(),
+        size_bytes: args.size_bytes,
+        artifact_type: &args.artifact_type,
+        title: args.title.as_deref(),
+        provenance_uri: args.provenance_uri.as_deref(),
+        max_bytes: args.max_bytes,
+        snippet_chars: args.snippet_chars,
+        dry_run: args.dry_run,
+        memory_links: args.memory_links.clone(),
+        pack_links: args.pack_links.clone(),
+    };
+
+    match register_artifact(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&report.data_json().to_string()) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_artifact_success(stdout, report.data_json()),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_artifact_inspect<W, E>(
+    cli: &Cli,
+    args: &ArtifactInspectArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = ArtifactInspectOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        artifact_id: &args.artifact_id,
+    };
+
+    match inspect_artifact(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&report.data_json().to_string()) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_artifact_success(stdout, report.data_json()),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_artifact_list<W, E>(
+    cli: &Cli,
+    args: &ArtifactListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = ArtifactListOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        limit: Some(args.limit),
+    };
+
+    match list_artifact_registry(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&report.data_json().to_string()) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_artifact_success(stdout, report.data_json()),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_artifact_success<W>(stdout: &mut W, data: serde_json::Value) -> ProcessExitCode
+where
+    W: Write,
+{
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": data,
+    });
+    write_stdout(stdout, &(response.to_string() + "\n"))
+}
+
+// ============================================================================
 // EE-DIAG-001: Redacted Diagnostic Support Bundle
 // ============================================================================
 
@@ -8137,6 +11108,84 @@ where
     }
 }
 
+fn handle_economy_simulate<W, E>(
+    cli: &Cli,
+    args: &EconomySimulateArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::economy::{EconomySimulateOptions, simulate_budgets};
+
+    let options = EconomySimulateOptions {
+        baseline_budget_tokens: args.baseline_budget,
+        budget_tokens: args.budgets.clone(),
+        context_profile: args.context_profile.clone(),
+        situation_profile: args.situation_profile.clone(),
+    };
+
+    match simulate_budgets(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_economy_simulation_human(&report))
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_economy_simulation_toon(&report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_economy_simulation_json(&report) + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_economy_prune_plan<W, E>(
+    cli: &Cli,
+    args: &EconomyPrunePlanArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::economy::{EconomyPrunePlanOptions, generate_prune_plan};
+
+    let options = EconomyPrunePlanOptions {
+        dry_run: args.dry_run,
+        max_recommendations: args.max_recommendations,
+    };
+
+    match generate_prune_plan(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_economy_prune_plan_human(&report))
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_economy_prune_plan_toon(&report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_economy_prune_plan_json(&report) + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 // ============================================================================
 // EE-040: Read-only Invocation Normalization and Did-You-Mean Errors
 // ============================================================================
@@ -8145,11 +11194,15 @@ where
 const COMMAND_NAMES: &[&str] = &[
     "agent",
     "agent-docs",
+    "artifact",
     "audit",
+    "backup",
     "capabilities",
     "check",
     "claim",
     "context",
+    "curate",
+    "daemon",
     "diag",
     "doctor",
     "economy",
@@ -8162,6 +11215,7 @@ const COMMAND_NAMES: &[&str] = &[
     "install",
     "introspect",
     "memory",
+    "mcp",
     "outcome",
     "remember",
     "review",
@@ -8176,8 +11230,11 @@ const COMMAND_NAMES: &[&str] = &[
 ];
 
 /// Subcommand names for nested commands.
-const AGENT_SUBCOMMANDS: &[&str] = &["detect", "sources", "scan"];
+const AGENT_SUBCOMMANDS: &[&str] = &["detect", "status", "sources", "scan"];
+const ARTIFACT_SUBCOMMANDS: &[&str] = &["register", "inspect", "list"];
+const BACKUP_SUBCOMMANDS: &[&str] = &["create"];
 const CLAIM_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
+const CURATE_SUBCOMMANDS: &[&str] = &["apply", "candidates", "validate"];
 const DIAG_SUBCOMMANDS: &[&str] = &[
     "dependencies",
     "graph",
@@ -8190,6 +11247,7 @@ const IMPORT_SUBCOMMANDS: &[&str] = &["cass", "jsonl", "eidetic-legacy"];
 const INDEX_SUBCOMMANDS: &[&str] = &["rebuild", "status"];
 const INSTALL_SUBCOMMANDS: &[&str] = &["check", "plan"];
 const MEMORY_SUBCOMMANDS: &[&str] = &["list", "show", "history"];
+const MCP_SUBCOMMANDS: &[&str] = &["manifest"];
 const REVIEW_SUBCOMMANDS: &[&str] = &["session"];
 const SCHEMA_SUBCOMMANDS: &[&str] = &["list", "export"];
 const SITUATION_SUBCOMMANDS: &[&str] = &["classify", "show", "explain"];
@@ -8235,6 +11293,7 @@ impl NormalizedInvocation {
             Some(cmd) => match cmd {
                 Command::Agent(agent) => match agent {
                     AgentCommand::Detect(_) => "agent detect".to_string(),
+                    AgentCommand::Status(_) => "agent status".to_string(),
                     AgentCommand::Sources(_) => "agent sources".to_string(),
                     AgentCommand::Scan(_) => "agent scan".to_string(),
                 },
@@ -8244,6 +11303,14 @@ impl NormalizedInvocation {
                     AuditCommand::Show(_) => "audit show".to_string(),
                     AuditCommand::Diff(_) => "audit diff".to_string(),
                     AuditCommand::Verify(_) => "audit verify".to_string(),
+                },
+                Command::Artifact(artifact) => match artifact {
+                    ArtifactCommand::Register(_) => "artifact register".to_string(),
+                    ArtifactCommand::Inspect(_) => "artifact inspect".to_string(),
+                    ArtifactCommand::List(_) => "artifact list".to_string(),
+                },
+                Command::Backup(backup) => match backup {
+                    BackupCommand::Create(_) => "backup create".to_string(),
                 },
                 Command::Capabilities => "capabilities".to_string(),
                 Command::Check => "check".to_string(),
@@ -8262,7 +11329,18 @@ impl NormalizedInvocation {
                     DemoCommand::Run(_) => "demo run".to_string(),
                     DemoCommand::Verify(_) => "demo verify".to_string(),
                 },
+                Command::Daemon(_) => "daemon".to_string(),
                 Command::Context(_) => "context".to_string(),
+                Command::Curate(curate) => match curate {
+                    CurateCommand::Candidates(_) => "curate candidates".to_string(),
+                    CurateCommand::Validate(_) => "curate validate".to_string(),
+                    CurateCommand::Apply(_) => "curate apply".to_string(),
+                    CurateCommand::Accept(_) => "curate accept".to_string(),
+                    CurateCommand::Reject(_) => "curate reject".to_string(),
+                    CurateCommand::Snooze(_) => "curate snooze".to_string(),
+                    CurateCommand::Merge(_) => "curate merge".to_string(),
+                    CurateCommand::Disposition(_) => "curate disposition".to_string(),
+                },
                 Command::Diag(diag) => match diag {
                     DiagCommand::Claims(_) => "diag claims".to_string(),
                     DiagCommand::Dependencies => "diag dependencies".to_string(),
@@ -8275,6 +11353,8 @@ impl NormalizedInvocation {
                 Command::Economy(econ) => match econ {
                     EconomyCommand::Report(_) => "economy report".to_string(),
                     EconomyCommand::Score(_) => "economy score".to_string(),
+                    EconomyCommand::Simulate(_) => "economy simulate".to_string(),
+                    EconomyCommand::PrunePlan(_) => "economy prune-plan".to_string(),
                 },
                 Command::Eval(eval) => match eval {
                     EvalCommand::Run { .. } => "eval run".to_string(),
@@ -8299,10 +11379,12 @@ impl NormalizedInvocation {
                     InstallCommand::Plan(_) => "install plan".to_string(),
                 },
                 Command::Graph(graph) => match graph {
+                    GraphCommand::Export(_) => "graph export".to_string(),
                     GraphCommand::CentralityRefresh(_) => "graph centrality-refresh".to_string(),
                 },
                 Command::Index(index) => match index {
                     IndexCommand::Rebuild(_) => "index rebuild".to_string(),
+                    IndexCommand::Reembed(_) => "index reembed".to_string(),
                     IndexCommand::Status(_) => "index status".to_string(),
                 },
                 Command::Introspect => "introspect".to_string(),
@@ -8318,13 +11400,19 @@ impl NormalizedInvocation {
                         LearnExperimentCommand::Propose(_) => {
                             "learn experiment propose".to_string()
                         }
+                        LearnExperimentCommand::Run(_) => "learn experiment run".to_string(),
                     },
+                    LearnCommand::Observe(_) => "learn observe".to_string(),
+                    LearnCommand::Close(_) => "learn close".to_string(),
                     LearnCommand::Summary(_) => "learn summary".to_string(),
                 },
                 Command::Memory(mem) => match mem {
                     MemoryCommand::List(_) => "memory list".to_string(),
                     MemoryCommand::Show(_) => "memory show".to_string(),
                     MemoryCommand::History(_) => "memory history".to_string(),
+                },
+                Command::Mcp(mcp) => match mcp {
+                    McpCommand::Manifest => "mcp manifest".to_string(),
                 },
                 Command::Outcome(_) => "outcome".to_string(),
                 Command::Pack(_) => "pack".to_string(),
@@ -8348,13 +11436,16 @@ impl NormalizedInvocation {
                     ProcedureCommand::Show(_) => "procedure show".to_string(),
                     ProcedureCommand::List(_) => "procedure list".to_string(),
                     ProcedureCommand::Export(_) => "procedure export".to_string(),
+                    ProcedureCommand::Promote(_) => "procedure promote".to_string(),
                     ProcedureCommand::Verify(_) => "procedure verify".to_string(),
+                    ProcedureCommand::Drift(_) => "procedure drift".to_string(),
                 },
                 Command::Recorder(rec) => match rec {
                     RecorderCommand::Start(_) => "recorder start".to_string(),
                     RecorderCommand::Event(_) => "recorder event".to_string(),
                     RecorderCommand::Finish(_) => "recorder finish".to_string(),
                     RecorderCommand::Tail(_) => "recorder tail".to_string(),
+                    RecorderCommand::Import(_) => "recorder import".to_string(),
                 },
                 Command::Remember(_) => "remember".to_string(),
                 Command::Rehearse(rehearse) => match rehearse {
@@ -8365,6 +11456,11 @@ impl NormalizedInvocation {
                 },
                 Command::Review(review) => match review {
                     ReviewCommand::Session(_) => "review session".to_string(),
+                },
+                Command::Rule(rule) => match rule {
+                    RuleCommand::Add(_) => "rule add".to_string(),
+                    RuleCommand::List(_) => "rule list".to_string(),
+                    RuleCommand::Show(_) => "rule show".to_string(),
                 },
                 Command::Schema(schema) => match schema {
                     SchemaCommand::List => "schema list".to_string(),
@@ -8380,6 +11476,11 @@ impl NormalizedInvocation {
                 Command::Support(sup) => match sup {
                     SupportCommand::Bundle(_) => "support bundle".to_string(),
                     SupportCommand::Inspect(_) => "support inspect".to_string(),
+                },
+                Command::Workspace(workspace) => match workspace {
+                    WorkspaceCommand::Resolve(_) => "workspace resolve".to_string(),
+                    WorkspaceCommand::List(_) => "workspace list".to_string(),
+                    WorkspaceCommand::Alias(_) => "workspace alias".to_string(),
                 },
                 Command::Tripwire(tw) => match tw {
                     TripwireCommand::List(_) => "tripwire list".to_string(),
@@ -8439,13 +11540,17 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
 pub fn did_you_mean(input: &str, parent_command: Option<&str>) -> Option<String> {
     let candidates: &[&str] = match parent_command {
         Some("agent") => AGENT_SUBCOMMANDS,
+        Some("artifact") => ARTIFACT_SUBCOMMANDS,
+        Some("backup") => BACKUP_SUBCOMMANDS,
         Some("claim") => CLAIM_SUBCOMMANDS,
+        Some("curate") => CURATE_SUBCOMMANDS,
         Some("diag") => DIAG_SUBCOMMANDS,
         Some("eval") => EVAL_SUBCOMMANDS,
         Some("import") => IMPORT_SUBCOMMANDS,
         Some("index") => INDEX_SUBCOMMANDS,
         Some("install") => INSTALL_SUBCOMMANDS,
         Some("memory") => MEMORY_SUBCOMMANDS,
+        Some("mcp") => MCP_SUBCOMMANDS,
         Some("review") => REVIEW_SUBCOMMANDS,
         Some("schema") => SCHEMA_SUBCOMMANDS,
         Some("situation") => SITUATION_SUBCOMMANDS,
@@ -8485,13 +11590,17 @@ fn extract_invalid_subcommand(args: &[OsString]) -> Option<(String, Option<Strin
                 if !next.starts_with('-') {
                     let subcommands = match *arg {
                         "agent" => Some(AGENT_SUBCOMMANDS),
+                        "artifact" => Some(ARTIFACT_SUBCOMMANDS),
+                        "backup" => Some(BACKUP_SUBCOMMANDS),
                         "claim" => Some(CLAIM_SUBCOMMANDS),
+                        "curate" => Some(CURATE_SUBCOMMANDS),
                         "diag" => Some(DIAG_SUBCOMMANDS),
                         "eval" => Some(EVAL_SUBCOMMANDS),
                         "import" => Some(IMPORT_SUBCOMMANDS),
                         "index" => Some(INDEX_SUBCOMMANDS),
                         "install" => Some(INSTALL_SUBCOMMANDS),
                         "memory" => Some(MEMORY_SUBCOMMANDS),
+                        "mcp" => Some(MCP_SUBCOMMANDS),
                         "review" => Some(REVIEW_SUBCOMMANDS),
                         "schema" => Some(SCHEMA_SUBCOMMANDS),
                         "situation" => Some(SITUATION_SUBCOMMANDS),
@@ -8784,10 +11893,15 @@ where
     W: Write,
     E: Write,
 {
+    let task_outcome = match parse_task_outcome_arg(args.task_outcome.as_deref()) {
+        Ok(outcome) => outcome,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
     let options = TripwireCheckOptions {
         workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
         tripwire_id: args.tripwire_id.clone(),
         update_timestamp: args.update_timestamp,
+        task_outcome,
         dry_run: args.dry_run,
     };
 
@@ -8811,6 +11925,15 @@ where
                 }
                 if let Some(ref details) = report.details {
                     buf.push_str(&format!("  Details: {details}\n"));
+                }
+                if let Some(ref feedback) = report.feedback {
+                    buf.push_str(&format!("  Feedback: {}\n", feedback.signal));
+                    buf.push_str(&format!(
+                        "  Score effect: utility {:+.2}, confidence {:+.2}, false alarms +{}\n",
+                        feedback.score_effect.utility_delta,
+                        feedback.score_effect.confidence_delta,
+                        feedback.score_effect.false_alarm_delta
+                    ));
                 }
                 if report.dry_run {
                     buf.push_str("  (dry-run mode)\n");
@@ -8838,10 +11961,14 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        Cli, Command, DiagCommand, FieldsLevel, ImportCommand, LearnCommand,
-        LearnExperimentCommand, MemoryCommand, OutputFormat, ShadowMode, run,
+        AgentCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli, Command, CurateCommand,
+        DiagCommand, EconomyCommand, FieldsLevel, GraphCommand, ImportCommand, LearnCommand,
+        LearnExperimentCommand, MemoryCommand, OutputFormat, RuleCommand, ShadowMode, run,
     };
     use crate::models::ProcessExitCode;
+
+    const SITUATION_CLASSIFY_ROUTING_GOLDEN: &str =
+        include_str!("../../tests/fixtures/golden/situation/classify_release_routing.json.golden");
 
     type TestResult = Result<(), String>;
 
@@ -8916,6 +12043,177 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_agent_sources_origin_fixtures() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "agent",
+            "sources",
+            "--only",
+            "codex-cli",
+            "--include-paths",
+            "--include-origin-fixtures",
+            "--json",
+        ])
+        .map_err(|error| format!("failed to parse agent sources: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Agent(AgentCommand::Sources(args))) => {
+                ensure_equal(&args.only, &Some("codex-cli".to_string()), "only")?;
+                ensure_equal(&args.include_paths, &true, "include paths")?;
+                ensure_equal(
+                    &args.include_origin_fixtures,
+                    &true,
+                    "include origin fixtures",
+                )
+            }
+            other => Err(format!("expected agent sources command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_backup_create_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "backup",
+            "create",
+            "--label",
+            "pre-test",
+            "--output-dir",
+            "out",
+            "--database",
+            "db.sqlite",
+            "--redaction",
+            "full",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse backup create: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Backup(BackupCommand::Create(args))) => {
+                ensure_equal(&args.label, &Some("pre-test".to_string()), "label")?;
+                ensure_equal(
+                    &args.output_dir,
+                    &Some(std::path::PathBuf::from("out")),
+                    "output dir",
+                )?;
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("db.sqlite")),
+                    "database",
+                )?;
+                ensure_equal(&args.redaction, &BackupRedaction::Full, "redaction")?;
+                ensure_equal(&args.dry_run, &true, "dry run")
+            }
+            other => Err(format!("expected backup create command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_artifact_register_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "artifact",
+            "register",
+            "logs/build.log",
+            "--kind",
+            "log",
+            "--title",
+            "build log",
+            "--source",
+            "file:///workspace/logs/build.log",
+            "--database",
+            "db.sqlite",
+            "--max-bytes",
+            "1024",
+            "--snippet-chars",
+            "128",
+            "--dry-run",
+            "--link-memory",
+            "mem_01234567890123456789012345",
+        ])
+        .map_err(|error| format!("failed to parse artifact register: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Artifact(ArtifactCommand::Register(args))) => {
+                ensure_equal(
+                    &args.path,
+                    &Some(std::path::PathBuf::from("logs/build.log")),
+                    "path",
+                )?;
+                ensure_equal(&args.artifact_type, &"log".to_string(), "kind")?;
+                ensure_equal(&args.title, &Some("build log".to_string()), "title")?;
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("db.sqlite")),
+                    "database",
+                )?;
+                ensure_equal(&args.max_bytes, &Some(1024), "max bytes")?;
+                ensure_equal(&args.snippet_chars, &Some(128), "snippet chars")?;
+                ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(
+                    &args.memory_links,
+                    &vec!["mem_01234567890123456789012345".to_string()],
+                    "memory links",
+                )
+            }
+            other => Err(format!("expected artifact register command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_economy_prune_plan_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "economy",
+            "prune-plan",
+            "--dry-run",
+            "--max-recommendations",
+            "3",
+        ])
+        .map_err(|error| format!("failed to parse economy prune-plan: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Economy(EconomyCommand::PrunePlan(args))) => {
+                ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(&args.max_recommendations, &3, "max recommendations")
+            }
+            other => Err(format!(
+                "expected economy prune-plan command, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_economy_simulate_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "economy",
+            "simulate",
+            "--baseline-budget",
+            "4000",
+            "--budget",
+            "2000",
+            "--budget",
+            "8000",
+            "--context-profile",
+            "thorough",
+            "--situation-profile",
+            "full",
+        ])
+        .map_err(|error| format!("failed to parse economy simulate: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Economy(EconomyCommand::Simulate(args))) => {
+                ensure_equal(&args.baseline_budget, &4000, "baseline budget")?;
+                ensure_equal(&args.budgets, &vec![2000, 8000], "budgets")?;
+                ensure_equal(&args.context_profile, &"thorough".to_string(), "context")?;
+                ensure_equal(&args.situation_profile, &"full".to_string(), "situation")
+            }
+            other => Err(format!("expected economy simulate command, got {other:?}")),
+        }
+    }
+
+    #[test]
     fn parser_accepts_robot_and_format_globals() -> TestResult {
         let parsed = Cli::try_parse_from(["ee", "status", "--robot", "--format", "json"])
             .map(|cli| (cli.robot, cli.format, cli.wants_json()))
@@ -8925,6 +12223,180 @@ mod tests {
             &parsed,
             &(true, OutputFormat::Json, true),
             "robot and format globals",
+        )
+    }
+
+    #[test]
+    fn parser_accepts_graph_export_mermaid_format() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "graph", "export", "--format", "mermaid"])
+            .map(|cli| (cli.format, cli.command))
+            .map_err(|error| format!("failed to parse graph export: {:?}", error.kind()))?;
+
+        ensure_equal(&parsed.0, &OutputFormat::Mermaid, "format mermaid")?;
+        match parsed.1 {
+            Some(Command::Graph(GraphCommand::Export(args))) => {
+                ensure_equal(&args.graph_type, &"memory_links".to_string(), "graph type")?;
+                ensure(args.snapshot_id.is_none(), "snapshot id defaults empty")
+            }
+            other => Err(format!("expected graph export command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn procedure_export_skill_capsule_json_is_response_enveloped() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "procedure",
+            "export",
+            "proc_export",
+            "--export-format",
+            "skill-capsule",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "procedure export exit")?;
+        ensure(stderr.is_empty(), "procedure export JSON stderr clean")?;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!("ee.procedure.export_report.v1"),
+            "data schema",
+        )?;
+        ensure_equal(
+            &value["data"]["format"],
+            &serde_json::json!("skill_capsule"),
+            "export format",
+        )?;
+        ensure_equal(
+            &value["data"]["installMode"],
+            &serde_json::json!("render_only"),
+            "install mode",
+        )?;
+        ensure_contains(
+            value["data"]["content"].as_str().unwrap_or_default(),
+            "This capsule is render-only",
+            "skill capsule safety text",
+        )
+    }
+
+    #[test]
+    fn procedure_export_markdown_defaults_to_artifact_stdout() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "procedure",
+            "export",
+            "proc_export",
+            "--export-format",
+            "markdown",
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "procedure export markdown exit",
+        )?;
+        ensure(stderr.is_empty(), "procedure export markdown stderr clean")?;
+        ensure_starts_with(&stdout, "# Procedure proc_export", "markdown header")?;
+        ensure_contains(&stdout, "## Provenance", "markdown provenance")
+    }
+
+    #[test]
+    fn procedure_promote_dry_run_json_is_response_enveloped() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "procedure",
+            "promote",
+            "proc_promote",
+            "--dry-run",
+            "--actor",
+            "MistySalmon",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "procedure promote exit")?;
+        ensure(stderr.is_empty(), "procedure promote JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!("ee.procedure.promote_report.v1"),
+            "promote data schema",
+        )?;
+        ensure_equal(
+            &value["data"]["dryRun"],
+            &serde_json::json!(true),
+            "dry run flag",
+        )?;
+        ensure_equal(
+            &value["data"]["status"],
+            &serde_json::json!("dry_run"),
+            "promotion status",
+        )?;
+        ensure_equal(
+            &value["data"]["curation"]["candidateType"],
+            &serde_json::json!("promote"),
+            "curation candidate type",
+        )?;
+        ensure_equal(
+            &value["data"]["audit"]["recorded"],
+            &serde_json::json!(false),
+            "audit not recorded",
+        )
+    }
+
+    #[test]
+    fn procedure_promote_without_dry_run_is_policy_error() -> TestResult {
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "--json", "procedure", "promote", "proc_promote"]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::PolicyDenied,
+            "procedure promote policy exit",
+        )?;
+        ensure(stderr.is_empty(), "procedure promote policy stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.error.v1"),
+            "error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("policy_denied"),
+            "policy code",
+        )
+    }
+
+    #[test]
+    fn situation_classify_json_includes_routing_golden() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "situation",
+            "classify",
+            "fix failing release workflow",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "situation exit")?;
+        ensure(stderr.is_empty(), "situation JSON stderr clean")?;
+        ensure_equal(
+            &stdout,
+            &SITUATION_CLASSIFY_ROUTING_GOLDEN.to_string(),
+            "situation routing golden",
         )
     }
 
@@ -9004,6 +12476,274 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_learn_experiment_run() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "learn",
+            "experiment",
+            "run",
+            "--id",
+            "exp_database_contract_fixture",
+            "--max-attention-tokens",
+            "600",
+            "--max-runtime-seconds",
+            "90",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse learn experiment run: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Learn(LearnCommand::Experiment(LearnExperimentCommand::Run(args)))) => {
+                ensure_equal(
+                    &args.experiment_id,
+                    &"exp_database_contract_fixture".to_string(),
+                    "experiment id",
+                )?;
+                ensure_equal(&args.max_attention_tokens, &600, "attention budget")?;
+                ensure_equal(&args.max_runtime_seconds, &90, "runtime budget")?;
+                ensure_equal(&args.dry_run, &true, "dry-run flag")
+            }
+            other => Err(format!("expected learn experiment run, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_learn_observe() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "learn",
+            "observe",
+            "exp_123",
+            "--observation-id",
+            "obs_123",
+            "--observed-at",
+            "2026-01-01T00:00:00Z",
+            "--observer",
+            "MistySalmon",
+            "--signal",
+            "positive",
+            "--measurement-name",
+            "fixture_replay",
+            "--measurement-value",
+            "1.0",
+            "--evidence-id",
+            "ev_a",
+            "--evidence-id",
+            "ev_b",
+            "--note",
+            "dry-run passed",
+            "--redaction-status",
+            "redacted",
+            "--workspace-id",
+            "wsp_123",
+            "--session-id",
+            "sess_123",
+            "--event-id",
+            "evt_123",
+            "--actor",
+            "agent",
+            "--database",
+            "db.sqlite",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse learn observe: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Learn(LearnCommand::Observe(args))) => {
+                ensure_equal(&args.experiment_id, &"exp_123".to_string(), "experiment id")?;
+                ensure_equal(
+                    &args.observation_id,
+                    &Some("obs_123".to_string()),
+                    "observation id",
+                )?;
+                ensure_equal(&args.signal, &"positive".to_string(), "signal")?;
+                ensure_equal(
+                    &args.measurement_name,
+                    &"fixture_replay".to_string(),
+                    "measurement name",
+                )?;
+                ensure_equal(
+                    &args.measurement_value,
+                    &Some("1.0".to_string()),
+                    "measurement value",
+                )?;
+                ensure_equal(
+                    &args.evidence_ids,
+                    &vec!["ev_a".to_string(), "ev_b".to_string()],
+                    "evidence ids",
+                )?;
+                ensure_equal(&args.dry_run, &true, "dry-run flag")?;
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("db.sqlite")),
+                    "database path",
+                )
+            }
+            other => Err(format!("expected learn observe, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_learn_close() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "learn",
+            "close",
+            "exp_123",
+            "--outcome-id",
+            "out_123",
+            "--closed-at",
+            "2026-01-01T00:00:00Z",
+            "--status",
+            "confirmed",
+            "--decision-impact",
+            "promote the fixture-backed rule",
+            "--confidence-delta",
+            "0.25",
+            "--priority-delta",
+            "3",
+            "--promote-artifact",
+            "mem_new",
+            "--demote-artifact",
+            "mem_old",
+            "--safety-note",
+            "dry-run only",
+            "--audit-id",
+            "audit_123",
+            "--workspace-id",
+            "wsp_123",
+            "--session-id",
+            "sess_123",
+            "--event-id",
+            "evt_123",
+            "--actor",
+            "agent",
+            "--database",
+            "db.sqlite",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse learn close: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Learn(LearnCommand::Close(args))) => {
+                ensure_equal(&args.experiment_id, &"exp_123".to_string(), "experiment id")?;
+                ensure_equal(&args.outcome_id, &Some("out_123".to_string()), "outcome id")?;
+                ensure_equal(&args.status, &"confirmed".to_string(), "status")?;
+                ensure_equal(
+                    &args.decision_impact,
+                    &"promote the fixture-backed rule".to_string(),
+                    "decision impact",
+                )?;
+                ensure_equal(
+                    &args.confidence_delta,
+                    &"0.25".to_string(),
+                    "confidence delta",
+                )?;
+                ensure_equal(&args.priority_delta, &3, "priority delta")?;
+                ensure_equal(
+                    &args.promoted_artifact_ids,
+                    &vec!["mem_new".to_string()],
+                    "promoted artifacts",
+                )?;
+                ensure_equal(
+                    &args.demoted_artifact_ids,
+                    &vec!["mem_old".to_string()],
+                    "demoted artifacts",
+                )?;
+                ensure_equal(
+                    &args.safety_notes,
+                    &vec!["dry-run only".to_string()],
+                    "safety notes",
+                )?;
+                ensure_equal(&args.audit_ids, &vec!["audit_123".to_string()], "audit ids")?;
+                ensure_equal(&args.dry_run, &true, "dry-run flag")
+            }
+            other => Err(format!("expected learn close, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn learn_observe_json_writes_machine_data_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "learn",
+            "observe",
+            "exp_123",
+            "--measurement-name",
+            "fixture_replay",
+            "--measurement-value",
+            "1.0",
+            "--signal",
+            "positive",
+            "--evidence-id",
+            "ev_a",
+            "--dry-run",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "learn observe exit")?;
+        ensure(stderr.is_empty(), "learn observe JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.learn.observe.v1"),
+            "observe schema",
+        )?;
+        ensure_equal(
+            &value["dryRun"],
+            &serde_json::json!(true),
+            "observe dry-run flag",
+        )?;
+        ensure_equal(
+            &value["observation"]["signal"],
+            &serde_json::json!("positive"),
+            "observe signal",
+        )
+    }
+
+    #[test]
+    fn learn_close_json_writes_machine_data_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "learn",
+            "close",
+            "exp_123",
+            "--status",
+            "confirmed",
+            "--decision-impact",
+            "promote the fixture-backed rule",
+            "--confidence-delta",
+            "0.25",
+            "--dry-run",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "learn close exit")?;
+        ensure(stderr.is_empty(), "learn close JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.learn.close.v1"),
+            "close schema",
+        )?;
+        ensure_equal(
+            &value["dryRun"],
+            &serde_json::json!(true),
+            "close dry-run flag",
+        )?;
+        ensure_equal(
+            &value["outcome"]["status"],
+            &serde_json::json!("confirmed"),
+            "outcome status",
+        )
+    }
+
+    #[test]
     fn status_json_writes_machine_data_to_stdout_only() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "status", "--json"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "status JSON exit")?;
@@ -9080,6 +12820,96 @@ mod tests {
     }
 
     #[test]
+    fn learn_experiment_run_json_writes_machine_data_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "learn",
+            "experiment",
+            "run",
+            "--id",
+            "exp_database_contract_fixture",
+            "--max-attention-tokens",
+            "600",
+            "--max-runtime-seconds",
+            "90",
+            "--dry-run",
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "learn experiment run JSON exit",
+        )?;
+        ensure(stderr.is_empty(), "learn experiment run stderr clean")?;
+        ensure_ends_with(&stdout, '\n', "learn experiment run newline")?;
+        let json: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("learn experiment run stdout must be JSON: {error}"))?;
+        ensure_equal(
+            &json["schema"],
+            &serde_json::json!("ee.learn.experiment_run.v1"),
+            "run schema",
+        )?;
+        ensure_equal(&json["success"], &serde_json::json!(true), "success flag")?;
+        ensure_equal(
+            &json["dryRun"],
+            &serde_json::json!(true),
+            "run dry-run flag",
+        )?;
+        ensure_equal(
+            &json["experimentKind"],
+            &serde_json::json!("procedure_revalidation"),
+            "experiment kind",
+        )?;
+        ensure_equal(
+            &json["budget"]["plannedAttentionTokens"],
+            &serde_json::json!(600),
+            "planned attention budget",
+        )?;
+        ensure(
+            json["steps"]
+                .as_array()
+                .is_some_and(|steps| !steps.is_empty()),
+            "steps must be present",
+        )
+    }
+
+    #[test]
+    fn learn_experiment_run_without_dry_run_is_policy_error() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "learn",
+            "experiment",
+            "run",
+            "--id",
+            "exp_database_contract_fixture",
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::PolicyDenied,
+            "learn experiment run policy exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "learn experiment run policy stderr clean",
+        )?;
+        let json: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("learn experiment run error stdout must be JSON: {error}"))?;
+        ensure_equal(
+            &json["schema"],
+            &serde_json::json!("ee.error.v1"),
+            "error schema",
+        )?;
+        ensure_equal(
+            &json["error"]["code"],
+            &serde_json::json!("policy_denied"),
+            "policy code",
+        )
+    }
+
+    #[test]
     fn status_format_toon_writes_toon_to_stdout_only() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "status", "--format", "toon"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "status format TOON exit")?;
@@ -9087,7 +12917,7 @@ mod tests {
         ensure_contains(&stdout, "command: status", "status TOON command")?;
         ensure_contains(
             &stdout,
-            "degraded[3]{code,severity,message,repair}:",
+            "degraded[3]{code,severity,message}:",
             "status TOON degradation table",
         )?;
         ensure_ends_with(&stdout, '\n', "status TOON trailing newline")?;
@@ -9299,6 +13129,8 @@ mod tests {
             ("jsonl", OutputFormat::Jsonl),
             ("compact", OutputFormat::Compact),
             ("hook", OutputFormat::Hook),
+            ("markdown", OutputFormat::Markdown),
+            ("mermaid", OutputFormat::Mermaid),
         ] {
             let parsed = Cli::try_parse_from(["ee", "--format", arg, "status"])
                 .map(|cli| cli.format)
@@ -9317,6 +13149,14 @@ mod tests {
         ensure(
             !OutputFormat::Toon.is_machine_readable(),
             "toon not machine",
+        )?;
+        ensure(
+            !OutputFormat::Markdown.is_machine_readable(),
+            "markdown not machine",
+        )?;
+        ensure(
+            !OutputFormat::Mermaid.is_machine_readable(),
+            "mermaid not machine",
         )?;
         ensure(OutputFormat::Json.is_machine_readable(), "json is machine")?;
         ensure(
@@ -9597,6 +13437,12 @@ mod tests {
         ensure_contains(&stdout, "\"totalIssues\":", "fix-plan total issues")?;
         ensure_contains(&stdout, "\"fixableIssues\":", "fix-plan fixable issues")?;
         ensure_contains(&stdout, "\"steps\":", "fix-plan steps array")?;
+        ensure_contains(&stdout, "\"cassImportGuidance\":", "fix-plan CASS guidance")?;
+        ensure_contains(
+            &stdout,
+            "\"suggestedCommands\":",
+            "fix-plan suggested commands",
+        )?;
         ensure(stderr.is_empty(), "fix-plan json stderr empty")
     }
 
@@ -9676,6 +13522,82 @@ mod tests {
             }
             _ => Err("expected diag integrity command".to_string()),
         }
+    }
+
+    #[test]
+    fn daemon_foreground_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "daemon",
+            "--foreground",
+            "--once",
+            "--interval-ms",
+            "0",
+            "--job",
+            "health_check",
+            "--dry-run",
+        ])
+        .map_err(|e| format!("failed to parse daemon foreground: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Daemon(args)) => {
+                ensure_equal(&args.foreground, &true, "foreground flag")?;
+                ensure_equal(&args.once, &true, "once flag")?;
+                ensure_equal(&args.interval_ms, &0, "interval")?;
+                ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(&args.jobs.len(), &1, "job count")?;
+                ensure_equal(&args.jobs[0].as_str(), &"health_check", "job type")
+            }
+            _ => Err("expected daemon command".to_string()),
+        }
+    }
+
+    #[test]
+    fn daemon_foreground_json_output_is_response_enveloped() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "daemon",
+            "--foreground",
+            "--once",
+            "--interval-ms",
+            "0",
+            "--job",
+            "health_check",
+            "--json",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "daemon exit")?;
+        ensure_contains(&stdout, "\"schema\":\"ee.response.v1\"", "response schema")?;
+        ensure_contains(
+            &stdout,
+            "\"schema\":\"ee.steward.daemon_foreground.v1\"",
+            "daemon schema",
+        )?;
+        ensure_contains(&stdout, "\"command\":\"daemon\"", "daemon command")?;
+        ensure_contains(&stdout, "\"mode\":\"foreground\"", "foreground mode")?;
+        ensure_contains(&stdout, "\"daemonized\":false", "not daemonized")?;
+        ensure_contains(&stdout, "\"tickCount\":1", "tick count")?;
+        ensure_contains(&stdout, "\"health_check\"", "health check job")?;
+        ensure(stderr.is_empty(), "daemon json stderr empty")
+    }
+
+    #[test]
+    fn daemon_background_mode_reports_stable_json_error() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "daemon", "--json"]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::UnsatisfiedDegradedMode,
+            "daemon background exit",
+        )?;
+        ensure_contains(&stdout, "\"schema\":\"ee.error.v1\"", "error schema")?;
+        ensure_contains(
+            &stdout,
+            "\"code\":\"unsatisfied_degraded_mode\"",
+            "error code",
+        )?;
+        ensure_contains(&stdout, "ee daemon --foreground --once --json", "repair")?;
+        ensure(stderr.is_empty(), "daemon json error stderr empty")
     }
 
     #[test]
@@ -10194,6 +14116,26 @@ mod tests {
     }
 
     #[test]
+    fn query_file_document_rejects_invalid_timestamp() -> TestResult {
+        let error = match super::parse_query_document(
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "release"},
+              "asOf": "not-a-timestamp"
+            }"#,
+        ) {
+            Ok(_) => return Err("invalid timestamp should fail".into()),
+            Err(error) => error,
+        };
+
+        ensure_equal(
+            &error.code,
+            &super::QueryFileErrorCode::InvalidTimestamp,
+            "invalid timestamp error code",
+        )
+    }
+
+    #[test]
     fn pack_json_missing_query_file_writes_machine_error_to_stdout() -> TestResult {
         let missing = format!(
             "/tmp/ee-missing-query-file-{}-{}.json",
@@ -10484,6 +14426,36 @@ mod tests {
     }
 
     #[test]
+    fn remember_command_accepts_temporal_validity_flags() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "remember",
+            "Temporal fact",
+            "--valid-from",
+            "2020-01-01T00:00:00Z",
+            "--valid-to",
+            "2099-01-01T00:00:00Z",
+        ])
+        .map_err(|error| format!("failed to parse remember validity: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Remember(ref args)) => {
+                ensure_equal(
+                    &args.valid_from,
+                    &Some("2020-01-01T00:00:00Z".to_string()),
+                    "valid_from",
+                )?;
+                ensure_equal(
+                    &args.valid_to,
+                    &Some("2099-01-01T00:00:00Z".to_string()),
+                    "valid_to",
+                )
+            }
+            _ => Err("expected Remember command".to_string()),
+        }
+    }
+
+    #[test]
     fn remember_json_omits_provenance_uri_when_no_source() -> TestResult {
         let (exit, stdout, stderr) =
             invoke(&["ee", "remember", "Test memory", "--dry-run", "--json"]);
@@ -10498,6 +14470,371 @@ mod tests {
             "provenance_uri omitted when no source",
         )?;
         ensure(stderr.is_empty(), "remember json stderr must be empty")
+    }
+
+    #[test]
+    fn curate_candidates_command_parses_filters() -> TestResult {
+        let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(8)).to_string();
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "curate",
+            "candidates",
+            "--type",
+            "promote",
+            "--status",
+            "approved",
+            "--target-memory",
+            memory_id.as_str(),
+            "--limit",
+            "25",
+            "--offset",
+            "5",
+        ])
+        .map_err(|error| format!("failed to parse curate candidates: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Curate(CurateCommand::Candidates(ref args))) => {
+                ensure_equal(
+                    &args.candidate_type,
+                    &Some("promote".to_string()),
+                    "candidate type",
+                )?;
+                ensure_equal(&args.status, &Some("approved".to_string()), "status")?;
+                ensure_equal(&args.target_memory_id, &Some(memory_id), "target memory id")?;
+                ensure_equal(&args.limit, &25, "limit")?;
+                ensure_equal(&args.offset, &5, "offset")?;
+                ensure_equal(&args.all, &false, "all statuses")
+            }
+            _ => Err("expected Curate Candidates command".to_string()),
+        }
+    }
+
+    #[test]
+    fn curate_validate_command_parses_review_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "curate",
+            "validate",
+            "curate_00000000000000000000000000",
+            "--actor",
+            "MistySalmon",
+            "--dry-run",
+            "--database",
+            "review.db",
+        ])
+        .map_err(|error| format!("failed to parse curate validate: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Curate(CurateCommand::Validate(ref args))) => {
+                ensure_equal(
+                    &args.candidate_id,
+                    &"curate_00000000000000000000000000".to_string(),
+                    "candidate id",
+                )?;
+                ensure_equal(&args.actor, &Some("MistySalmon".to_string()), "actor")?;
+                ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("review.db")),
+                    "database path",
+                )
+            }
+            _ => Err("expected Curate Validate command".to_string()),
+        }
+    }
+
+    #[test]
+    fn curate_apply_command_parses_apply_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "curate",
+            "apply",
+            "curate_00000000000000000000000000",
+            "--actor",
+            "MistySalmon",
+            "--dry-run",
+            "--database",
+            "apply.db",
+        ])
+        .map_err(|error| format!("failed to parse curate apply: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Curate(CurateCommand::Apply(ref args))) => {
+                ensure_equal(
+                    &args.candidate_id,
+                    &"curate_00000000000000000000000000".to_string(),
+                    "candidate id",
+                )?;
+                ensure_equal(&args.actor, &Some("MistySalmon".to_string()), "actor")?;
+                ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("apply.db")),
+                    "database path",
+                )
+            }
+            _ => Err("expected Curate Apply command".to_string()),
+        }
+    }
+
+    #[test]
+    fn curate_accept_and_reject_commands_parse_review_options() -> TestResult {
+        let accept = Cli::try_parse_from([
+            "ee",
+            "curate",
+            "accept",
+            "curate_00000000000000000000000000",
+            "--actor",
+            "MistySalmon",
+            "--dry-run",
+            "--database",
+            "review.db",
+        ])
+        .map_err(|error| format!("failed to parse curate accept: {:?}", error.kind()))?;
+
+        match accept.command {
+            Some(Command::Curate(CurateCommand::Accept(ref args))) => {
+                ensure_equal(
+                    &args.candidate_id,
+                    &"curate_00000000000000000000000000".to_string(),
+                    "accept candidate id",
+                )?;
+                ensure_equal(
+                    &args.actor,
+                    &Some("MistySalmon".to_string()),
+                    "accept actor",
+                )?;
+                ensure_equal(&args.dry_run, &true, "accept dry run")?;
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("review.db")),
+                    "accept database path",
+                )?;
+            }
+            _ => return Err("expected Curate Accept command".to_string()),
+        }
+
+        let reject = Cli::try_parse_from([
+            "ee",
+            "curate",
+            "reject",
+            "curate_00000000000000000000000001",
+            "--actor",
+            "MistySalmon",
+        ])
+        .map_err(|error| format!("failed to parse curate reject: {:?}", error.kind()))?;
+
+        match reject.command {
+            Some(Command::Curate(CurateCommand::Reject(ref args))) => ensure_equal(
+                &args.candidate_id,
+                &"curate_00000000000000000000000001".to_string(),
+                "reject candidate id",
+            ),
+            _ => Err("expected Curate Reject command".to_string()),
+        }
+    }
+
+    #[test]
+    fn curate_snooze_and_merge_commands_parse_lifecycle_options() -> TestResult {
+        let snooze = Cli::try_parse_from([
+            "ee",
+            "curate",
+            "snooze",
+            "curate_00000000000000000000000000",
+            "--until",
+            "2030-01-01T00:00:00Z",
+            "--actor",
+            "MistySalmon",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse curate snooze: {:?}", error.kind()))?;
+
+        match snooze.command {
+            Some(Command::Curate(CurateCommand::Snooze(ref args))) => {
+                ensure_equal(
+                    &args.candidate_id,
+                    &"curate_00000000000000000000000000".to_string(),
+                    "snooze candidate id",
+                )?;
+                ensure_equal(
+                    &args.until,
+                    &"2030-01-01T00:00:00Z".to_string(),
+                    "snooze until",
+                )?;
+                ensure_equal(
+                    &args.actor,
+                    &Some("MistySalmon".to_string()),
+                    "snooze actor",
+                )?;
+                ensure_equal(&args.dry_run, &true, "snooze dry run")?;
+            }
+            _ => return Err("expected Curate Snooze command".to_string()),
+        }
+
+        let merge = Cli::try_parse_from([
+            "ee",
+            "curate",
+            "merge",
+            "curate_00000000000000000000000001",
+            "curate_00000000000000000000000002",
+            "--actor",
+            "MistySalmon",
+            "--database",
+            "review.db",
+        ])
+        .map_err(|error| format!("failed to parse curate merge: {:?}", error.kind()))?;
+
+        match merge.command {
+            Some(Command::Curate(CurateCommand::Merge(ref args))) => {
+                ensure_equal(
+                    &args.source_candidate_id,
+                    &"curate_00000000000000000000000001".to_string(),
+                    "merge source candidate id",
+                )?;
+                ensure_equal(
+                    &args.target_candidate_id,
+                    &"curate_00000000000000000000000002".to_string(),
+                    "merge target candidate id",
+                )?;
+                ensure_equal(&args.actor, &Some("MistySalmon".to_string()), "merge actor")?;
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("review.db")),
+                    "merge database path",
+                )
+            }
+            _ => Err("expected Curate Merge command".to_string()),
+        }
+    }
+
+    #[test]
+    fn curate_disposition_command_parses_policy_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "curate",
+            "disposition",
+            "--actor",
+            "MistySalmon",
+            "--apply",
+            "--now",
+            "2030-01-01T00:00:00Z",
+            "--database",
+            "review.db",
+        ])
+        .map_err(|error| format!("failed to parse curate disposition: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Curate(CurateCommand::Disposition(ref args))) => {
+                ensure_equal(
+                    &args.actor,
+                    &Some("MistySalmon".to_string()),
+                    "disposition actor",
+                )?;
+                ensure_equal(&args.apply, &true, "disposition apply")?;
+                ensure_equal(
+                    &args.now,
+                    &Some("2030-01-01T00:00:00Z".to_string()),
+                    "disposition now",
+                )?;
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("review.db")),
+                    "disposition database path",
+                )
+            }
+            _ => Err("expected Curate Disposition command".to_string()),
+        }
+    }
+
+    #[test]
+    fn rule_add_command_parses_evidence_and_tags() -> TestResult {
+        let source = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(7)).to_string();
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "rule",
+            "add",
+            "Run cargo fmt --check before release.",
+            "--tag",
+            "rust",
+            "--tag",
+            "ci",
+            "--source-memory",
+            source.as_str(),
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse rule add: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Rule(RuleCommand::Add(ref args))) => {
+                ensure_equal(
+                    &args.content,
+                    &"Run cargo fmt --check before release.".to_string(),
+                    "content",
+                )?;
+                ensure_equal(
+                    &args.tags,
+                    &vec!["rust".to_string(), "ci".to_string()],
+                    "tags",
+                )?;
+                ensure_equal(&args.source_memory_ids, &vec![source], "source memory ids")?;
+                ensure_equal(&args.dry_run, &true, "dry run")
+            }
+            _ => Err("expected Rule Add command".to_string()),
+        }
+    }
+
+    #[test]
+    fn rule_list_command_parses_filters() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "rule",
+            "list",
+            "--maturity",
+            "validated",
+            "--scope",
+            "workspace",
+            "--tag",
+            "release",
+            "--limit",
+            "25",
+            "--offset",
+            "5",
+            "--include-tombstoned",
+        ])
+        .map_err(|error| format!("failed to parse rule list: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Rule(RuleCommand::List(ref args))) => {
+                ensure_equal(&args.maturity, &Some("validated".to_string()), "maturity")?;
+                ensure_equal(&args.scope, &Some("workspace".to_string()), "scope")?;
+                ensure_equal(&args.tag, &Some("release".to_string()), "tag")?;
+                ensure_equal(&args.limit, &25, "limit")?;
+                ensure_equal(&args.offset, &5, "offset")?;
+                ensure_equal(&args.include_tombstoned, &true, "include tombstoned")
+            }
+            _ => Err("expected Rule List command".to_string()),
+        }
+    }
+
+    #[test]
+    fn rule_show_command_parses_id() -> TestResult {
+        let rule_id = crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(9)).to_string();
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "rule",
+            "show",
+            rule_id.as_str(),
+            "--include-tombstoned",
+        ])
+        .map_err(|error| format!("failed to parse rule show: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Rule(RuleCommand::Show(ref args))) => {
+                ensure_equal(&args.rule_id, &rule_id, "rule id")?;
+                ensure_equal(&args.include_tombstoned, &true, "include tombstoned")
+            }
+            _ => Err("expected Rule Show command".to_string()),
+        }
     }
 
     // ========================================================================
