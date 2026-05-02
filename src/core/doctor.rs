@@ -1467,6 +1467,38 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         release_pin_decision: "Local path dependency is accepted only for development; release must record a registry pin or ADR-backed local source policy.",
     },
     DependencyContractEntry {
+        name: "franken_mermaid",
+        kind: "planned_rust_crate",
+        owning_surface: "ee-diagram",
+        status: "planned_not_linked",
+        enabled_by_default: false,
+        source: DependencySource {
+            kind: "not_linked",
+            version: "unresolved",
+            path: "/dp/franken_mermaid",
+        },
+        default_feature_profile: DependencyFeatureProfile {
+            default_features: false,
+            features: &[],
+        },
+        optional_feature_profiles: &[DependencyOptionalFeatureProfile {
+            name: "franken-mermaid-adapter",
+            features: &["diagram-validation"],
+            status: "blocked_until_repository_api_and_dependency_audit",
+        }],
+        blocked_features: &[DependencyBlockedFeature {
+            name: "browser-or-network-renderer",
+            forbidden_crates: &["tokio", "hyper", "axum", "tower", "reqwest"],
+            action: "plain_mermaid_text_remains_the_default_until_adapter_tree_is_clean",
+        }],
+        forbidden_transitive_dependencies: &[],
+        minimum_smoke_test: "Gate 11 Mermaid goldens plus future FrankenMermaid adapter cargo-tree audit",
+        degradation_code: "diagram_backend_unavailable",
+        status_fields: &["capabilities.output.diagram", "degraded[].code"],
+        diagnostic_command: "ee doctor --json",
+        release_pin_decision: "Do not link before /dp/franken_mermaid exists, its API is audited, and a forbidden-dependency cargo-tree gate passes.",
+    },
+    DependencyContractEntry {
         name: "franken_agent_detection",
         kind: "rust_crate",
         owning_surface: "ee-agent-detect",
@@ -1920,10 +1952,10 @@ mod tests {
             DEPENDENCY_MATRIX_SOURCE_BEAD,
             "source bead",
         )?;
-        ensure(report.entries.len(), 9, "matrix row count")?;
+        ensure(report.entries.len(), 10, "matrix row count")?;
         ensure(
             report.summary.total_dependencies,
-            9,
+            10,
             "summary total dependencies",
         )?;
         ensure(
@@ -1938,7 +1970,7 @@ mod tests {
         )?;
         ensure(
             report.summary.blocked_feature_count,
-            7,
+            8,
             "blocked feature count",
         )?;
 
@@ -1957,6 +1989,7 @@ mod tests {
             "franken_networkx",
             "coding_agent_session_search",
             "toon_rust",
+            "franken_mermaid",
             "franken_agent_detection",
             "fastmcp-rust",
         ] {
