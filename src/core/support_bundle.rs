@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use crate::db::DbConnection;
 use crate::models::DomainError;
 
 /// Options for creating a support bundle.
@@ -31,6 +32,8 @@ pub struct BundleReport {
     pub files_collected: Vec<String>,
     pub total_size_bytes: u64,
     pub redaction_applied: bool,
+    pub artifact_registry_count: u32,
+    pub artifact_registry_included: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_path: Option<PathBuf>,
     pub dry_run: bool,
@@ -50,10 +53,14 @@ pub struct InspectReport {
 
 /// Plan what would be collected without actually creating the bundle.
 pub fn plan_bundle(options: &BundleOptions) -> Result<BundleReport, DomainError> {
+    let artifact_registry_count = artifact_registry_count(&options.workspace);
+    let files_collected = bundle_files(artifact_registry_count);
     Ok(BundleReport {
-        files_collected: vec![".ee/config.toml".to_string(), ".ee/db.sqlite".to_string()],
+        files_collected,
         total_size_bytes: 0,
         redaction_applied: options.redacted,
+        artifact_registry_count,
+        artifact_registry_included: artifact_registry_count > 0,
         output_path: None,
         dry_run: true,
     })
@@ -69,10 +76,15 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
             repair: Some("ee support bundle --out <dir>".to_string()),
         })?;
 
+    let artifact_registry_count = artifact_registry_count(&options.workspace);
+    let files_collected = bundle_files(artifact_registry_count);
+
     Ok(BundleReport {
-        files_collected: vec![".ee/config.toml".to_string(), ".ee/db.sqlite".to_string()],
+        files_collected,
         total_size_bytes: 0,
         redaction_applied: options.redacted,
+        artifact_registry_count,
+        artifact_registry_included: artifact_registry_count > 0,
         output_path: Some(output_dir.join("support_bundle.tar.gz")),
         dry_run: false,
     })
@@ -105,6 +117,37 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
     })
 }
 
+fn bundle_files(artifact_registry_count: u32) -> Vec<String> {
+    let mut files = vec![
+        ".ee/config.redacted.toml".to_string(),
+        ".ee/diagnostics.redacted.json".to_string(),
+    ];
+    if artifact_registry_count > 0 {
+        files.push(".ee/artifacts.redacted.jsonl".to_string());
+    }
+    files
+}
+
+fn artifact_registry_count(workspace: &std::path::Path) -> u32 {
+    let workspace_path = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.is_file() {
+        return 0;
+    }
+    let Ok(connection) = DbConnection::open_file(&database_path) else {
+        return 0;
+    };
+    let workspace_key = workspace_path.to_string_lossy();
+    let Ok(Some(workspace_row)) = connection.get_workspace_by_path(&workspace_key) else {
+        return 0;
+    };
+    connection
+        .count_artifacts(&workspace_row.id)
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,7 +165,16 @@ mod tests {
         let report = plan_bundle(&options).map_err(|e| e.message())?;
         assert!(report.dry_run);
         assert!(report.redaction_applied);
+        assert_eq!(report.artifact_registry_count, 0);
+        assert!(!report.artifact_registry_included);
         Ok(())
+    }
+
+    #[test]
+    fn bundle_files_include_artifacts_when_registry_present() {
+        let files = bundle_files(2);
+        assert!(files.contains(&".ee/artifacts.redacted.jsonl".to_string()));
+        assert!(!files.contains(&".ee/db.sqlite".to_string()));
     }
 
     #[test]

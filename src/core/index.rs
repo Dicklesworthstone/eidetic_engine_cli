@@ -2,10 +2,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::db::{DbConnection, DbError};
+use crate::db::{
+    CreateSearchIndexJobInput, DbConnection, DbError, SearchIndexJobType, StoredSearchIndexJob,
+};
+use crate::models::MemoryId;
 use crate::search::{
-    CanonicalSearchDocument, EmbedderStack, HashEmbedder, IndexBuilder, memory_to_document,
-    session_to_document,
+    CanonicalSearchDocument, Embedder, EmbedderStack, HashEmbedder, IndexBuilder,
+    artifact_to_document, memory_to_document, session_to_document,
 };
 
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
@@ -40,11 +43,152 @@ pub struct IndexRebuildReport {
     pub status: IndexRebuildStatus,
     pub memories_indexed: u32,
     pub sessions_indexed: u32,
+    pub artifacts_indexed: u32,
     pub documents_total: u32,
     pub index_dir: PathBuf,
     pub elapsed_ms: f64,
     pub dry_run: bool,
     pub errors: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct IndexReembedOptions {
+    pub workspace_path: PathBuf,
+    pub database_path: Option<PathBuf>,
+    pub index_dir: Option<PathBuf>,
+    pub dry_run: bool,
+}
+
+impl IndexReembedOptions {
+    fn resolve_database_path(&self) -> PathBuf {
+        self.database_path
+            .clone()
+            .unwrap_or_else(|| self.workspace_path.join(".ee").join("ee.db"))
+    }
+
+    fn resolve_index_dir(&self) -> PathBuf {
+        self.index_dir
+            .clone()
+            .unwrap_or_else(|| self.workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct IndexReembedReport {
+    pub status: IndexReembedStatus,
+    pub job_id: Option<String>,
+    pub job_status: String,
+    pub job_type: String,
+    pub document_source: Option<String>,
+    pub embedding_scope: String,
+    pub embedding: ReembedEmbeddingSummary,
+    pub memories_indexed: u32,
+    pub sessions_indexed: u32,
+    pub artifacts_indexed: u32,
+    pub documents_total: u32,
+    pub index_dir: PathBuf,
+    pub elapsed_ms: f64,
+    pub dry_run: bool,
+    pub idempotency_key: String,
+    pub errors: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct IndexProcessingOptions {
+    pub workspace_path: PathBuf,
+    pub database_path: Option<PathBuf>,
+    pub index_dir: Option<PathBuf>,
+    pub dry_run: bool,
+    pub job_limit: Option<u32>,
+}
+
+impl IndexProcessingOptions {
+    fn resolve_database_path(&self) -> PathBuf {
+        self.database_path
+            .clone()
+            .unwrap_or_else(|| self.workspace_path.join(".ee").join("ee.db"))
+    }
+
+    fn resolve_index_dir(&self) -> PathBuf {
+        self.index_dir
+            .clone()
+            .unwrap_or_else(|| self.workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndexProcessingStatus {
+    Success,
+    DryRun,
+    NoPendingJobs,
+    PartialFailure,
+    Failed,
+}
+
+impl IndexProcessingStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::DryRun => "dry_run",
+            Self::NoPendingJobs => "no_pending_jobs",
+            Self::PartialFailure => "partial_failure",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct IndexProcessingJobReport {
+    pub job_id: String,
+    pub job_type: String,
+    pub document_source: Option<String>,
+    pub document_id: Option<String>,
+    pub outcome: String,
+    pub processing_mode: String,
+    pub documents_total: u32,
+    pub documents_indexed: u32,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct IndexProcessingReport {
+    pub status: IndexProcessingStatus,
+    pub workspace_id: String,
+    pub database_path: PathBuf,
+    pub index_dir: PathBuf,
+    pub pending_jobs: u32,
+    pub processed_jobs: u32,
+    pub completed_jobs: u32,
+    pub failed_jobs: u32,
+    pub dry_run: bool,
+    pub job_limit: Option<u32>,
+    pub elapsed_ms: f64,
+    pub jobs: Vec<IndexProcessingJobReport>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReembedEmbeddingSummary {
+    pub fast_model_id: String,
+    pub fast_dimension: usize,
+    pub quality_model_id: Option<String>,
+    pub quality_dimension: Option<usize>,
+    pub deterministic: bool,
+    pub semantic: bool,
+    pub registered_model_count: usize,
+    pub available_model_count: usize,
+    pub selected_registry_model: Option<ReembedRegistryModelSummary>,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReembedRegistryModelSummary {
+    pub id: String,
+    pub provider: String,
+    pub model_name: String,
+    pub status: String,
+    pub dimension: u32,
+    pub deterministic: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,6 +208,26 @@ impl IndexRebuildStatus {
             Self::DryRun => "dry_run",
             Self::NoDocuments => "no_documents",
             Self::DatabaseError => "database_error",
+            Self::IndexError => "index_error",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndexReembedStatus {
+    Success,
+    DryRun,
+    NoDocuments,
+    IndexError,
+}
+
+impl IndexReembedStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::DryRun => "dry_run",
+            Self::NoDocuments => "no_documents",
             Self::IndexError => "index_error",
         }
     }
@@ -94,6 +258,7 @@ impl IndexRebuildReport {
 
         output.push_str(&format!("  Memories: {}\n", self.memories_indexed));
         output.push_str(&format!("  Sessions: {}\n", self.sessions_indexed));
+        output.push_str(&format!("  Artifacts: {}\n", self.artifacts_indexed));
         output.push_str(&format!("  Total documents: {}\n", self.documents_total));
         output.push_str(&format!(
             "  Index directory: {}\n",
@@ -118,12 +283,200 @@ impl IndexRebuildReport {
             "status": self.status.as_str(),
             "memories_indexed": self.memories_indexed,
             "sessions_indexed": self.sessions_indexed,
+            "artifacts_indexed": self.artifacts_indexed,
             "documents_total": self.documents_total,
             "index_dir": self.index_dir.to_string_lossy(),
             "elapsed_ms": self.elapsed_ms,
             "dry_run": self.dry_run,
             "errors": self.errors,
         })
+    }
+}
+
+impl IndexReembedReport {
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut output = String::new();
+
+        match self.status {
+            IndexReembedStatus::DryRun => {
+                output.push_str("DRY RUN: Would re-embed search index\n\n");
+            }
+            IndexReembedStatus::Success => {
+                output.push_str("Search index re-embedded successfully\n\n");
+            }
+            IndexReembedStatus::NoDocuments => {
+                output.push_str("No documents to re-embed\n\n");
+            }
+            IndexReembedStatus::IndexError => {
+                output.push_str("Index error during re-embedding\n\n");
+            }
+        }
+
+        output.push_str(&format!("  Job: {}\n", self.job_status));
+        if let Some(job_id) = &self.job_id {
+            output.push_str(&format!("  Job ID: {job_id}\n"));
+        }
+        output.push_str(&format!(
+            "  Fast embedder: {} ({} dimensions)\n",
+            self.embedding.fast_model_id, self.embedding.fast_dimension
+        ));
+        if let Some(quality_id) = &self.embedding.quality_model_id {
+            output.push_str(&format!(
+                "  Quality embedder: {} ({} dimensions)\n",
+                quality_id,
+                self.embedding.quality_dimension.unwrap_or_default()
+            ));
+        }
+        output.push_str(&format!("  Memories: {}\n", self.memories_indexed));
+        output.push_str(&format!("  Sessions: {}\n", self.sessions_indexed));
+        output.push_str(&format!("  Artifacts: {}\n", self.artifacts_indexed));
+        output.push_str(&format!("  Total documents: {}\n", self.documents_total));
+        output.push_str(&format!(
+            "  Index directory: {}\n",
+            self.index_dir.display()
+        ));
+        output.push_str(&format!("  Elapsed: {:.1}ms\n", self.elapsed_ms));
+
+        if !self.errors.is_empty() {
+            output.push_str("\nErrors:\n");
+            for error in &self.errors {
+                output.push_str(&format!("  - {error}\n"));
+            }
+        }
+
+        output
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "command": "index_reembed",
+            "status": self.status.as_str(),
+            "job_id": self.job_id,
+            "job_status": self.job_status,
+            "job_type": self.job_type,
+            "document_source": self.document_source,
+            "embedding_scope": self.embedding_scope,
+            "embedding": self.embedding.data_json(),
+            "memories_indexed": self.memories_indexed,
+            "sessions_indexed": self.sessions_indexed,
+            "artifacts_indexed": self.artifacts_indexed,
+            "documents_total": self.documents_total,
+            "index_dir": self.index_dir.to_string_lossy(),
+            "elapsed_ms": self.elapsed_ms,
+            "dry_run": self.dry_run,
+            "idempotency_key": self.idempotency_key,
+            "errors": self.errors,
+        })
+    }
+}
+
+impl ReembedEmbeddingSummary {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "fast_model_id": self.fast_model_id,
+            "fast_dimension": self.fast_dimension,
+            "quality_model_id": self.quality_model_id,
+            "quality_dimension": self.quality_dimension,
+            "deterministic": self.deterministic,
+            "semantic": self.semantic,
+            "registered_model_count": self.registered_model_count,
+            "available_model_count": self.available_model_count,
+            "selected_registry_model": self.selected_registry_model.as_ref().map(ReembedRegistryModelSummary::data_json),
+            "source": self.source,
+        })
+    }
+}
+
+impl ReembedRegistryModelSummary {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "provider": self.provider,
+            "model_name": self.model_name,
+            "status": self.status,
+            "dimension": self.dimension,
+            "deterministic": self.deterministic,
+        })
+    }
+}
+
+impl IndexProcessingJobReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "job_id": self.job_id,
+            "job_type": self.job_type,
+            "document_source": self.document_source,
+            "document_id": self.document_id,
+            "outcome": self.outcome,
+            "processing_mode": self.processing_mode,
+            "documents_total": self.documents_total,
+            "documents_indexed": self.documents_indexed,
+            "error": self.error,
+        })
+    }
+}
+
+impl IndexProcessingReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "command": "index_process_jobs",
+            "status": self.status.as_str(),
+            "workspace_id": self.workspace_id,
+            "database_path": self.database_path.to_string_lossy(),
+            "index_dir": self.index_dir.to_string_lossy(),
+            "pending_jobs": self.pending_jobs,
+            "processed_jobs": self.processed_jobs,
+            "completed_jobs": self.completed_jobs,
+            "failed_jobs": self.failed_jobs,
+            "dry_run": self.dry_run,
+            "job_limit": self.job_limit,
+            "elapsed_ms": self.elapsed_ms,
+            "jobs": self
+                .jobs
+                .iter()
+                .map(IndexProcessingJobReport::data_json)
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut output = String::new();
+        match self.status {
+            IndexProcessingStatus::DryRun => {
+                output.push_str("DRY RUN: Would process search index jobs\n\n");
+            }
+            IndexProcessingStatus::Success => {
+                output.push_str("Search index jobs processed successfully\n\n");
+            }
+            IndexProcessingStatus::NoPendingJobs => {
+                output.push_str("No pending search index jobs\n\n");
+            }
+            IndexProcessingStatus::PartialFailure => {
+                output.push_str("Search index jobs processed with failures\n\n");
+            }
+            IndexProcessingStatus::Failed => {
+                output.push_str("Search index job processing failed\n\n");
+            }
+        }
+
+        output.push_str(&format!("  Pending jobs: {}\n", self.pending_jobs));
+        output.push_str(&format!("  Processed jobs: {}\n", self.processed_jobs));
+        output.push_str(&format!("  Completed jobs: {}\n", self.completed_jobs));
+        output.push_str(&format!("  Failed jobs: {}\n", self.failed_jobs));
+        output.push_str(&format!(
+            "  Index directory: {}\n",
+            self.index_dir.display()
+        ));
+        output.push_str(&format!("  Elapsed: {:.1}ms\n", self.elapsed_ms));
+
+        output
     }
 }
 
@@ -184,15 +537,17 @@ pub fn rebuild_index(
 
     let memories = db.list_memories(&workspace_id, None, false)?;
     let sessions = db.list_sessions(&workspace_id)?;
+    let artifacts = db.list_artifacts(&workspace_id, None)?;
 
     let memory_docs: Vec<CanonicalSearchDocument> =
         memories.iter().map(memory_to_document).collect();
     let session_docs: Vec<CanonicalSearchDocument> =
         sessions.iter().map(session_to_document).collect();
+    let artifact_docs: Vec<CanonicalSearchDocument> =
+        artifacts.iter().map(artifact_to_document).collect();
 
-    let memories_indexed = memory_docs.len() as u32;
-    let sessions_indexed = session_docs.len() as u32;
-    let documents_total = memories_indexed + sessions_indexed;
+    let (memories_indexed, sessions_indexed, artifacts_indexed, documents_total) =
+        checked_document_counts(memory_docs.len(), session_docs.len(), artifact_docs.len())?;
 
     if options.dry_run {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -200,6 +555,7 @@ pub fn rebuild_index(
             status: IndexRebuildStatus::DryRun,
             memories_indexed,
             sessions_indexed,
+            artifacts_indexed,
             documents_total,
             index_dir,
             elapsed_ms,
@@ -214,6 +570,7 @@ pub fn rebuild_index(
             status: IndexRebuildStatus::NoDocuments,
             memories_indexed: 0,
             sessions_indexed: 0,
+            artifacts_indexed: 0,
             documents_total: 0,
             index_dir,
             elapsed_ms,
@@ -228,13 +585,11 @@ pub fn rebuild_index(
     let indexable_docs: Vec<_> = memory_docs
         .into_iter()
         .chain(session_docs)
+        .chain(artifact_docs)
         .map(|doc| doc.into_indexable())
         .collect();
 
-    let fast_embedder = Arc::new(HashEmbedder::default_256()) as Arc<dyn crate::search::Embedder>;
-    let quality_embedder =
-        Arc::new(HashEmbedder::default_384()) as Arc<dyn crate::search::Embedder>;
-    let stack = EmbedderStack::from_parts(fast_embedder, Some(quality_embedder));
+    let stack = default_embedder_stack();
 
     let build_result = build_index_sync(&staging_dir, stack, indexable_docs);
 
@@ -250,6 +605,7 @@ pub fn rebuild_index(
                 status: IndexRebuildStatus::Success,
                 memories_indexed,
                 sessions_indexed,
+                artifacts_indexed,
                 documents_total,
                 index_dir,
                 elapsed_ms,
@@ -265,12 +621,413 @@ pub fn rebuild_index(
             status: IndexRebuildStatus::IndexError,
             memories_indexed,
             sessions_indexed,
+            artifacts_indexed,
             documents_total,
             index_dir,
             elapsed_ms,
             dry_run: false,
             errors: vec![e],
         }),
+    }
+}
+
+pub fn reembed_index(
+    options: &IndexReembedOptions,
+) -> Result<IndexReembedReport, IndexRebuildError> {
+    let start = Instant::now();
+    let database_path = options.resolve_database_path();
+    let index_dir = options.resolve_index_dir();
+
+    let db = DbConnection::open_file(&database_path)?;
+    let workspace_id = get_default_workspace_id(&db)?;
+
+    let memories = db.list_memories(&workspace_id, None, false)?;
+    let sessions = db.list_sessions(&workspace_id)?;
+    let artifacts = db.list_artifacts(&workspace_id, None)?;
+    let embedding = reembed_embedding_summary(&db, &workspace_id)?;
+
+    let memory_docs: Vec<CanonicalSearchDocument> =
+        memories.iter().map(memory_to_document).collect();
+    let session_docs: Vec<CanonicalSearchDocument> =
+        sessions.iter().map(session_to_document).collect();
+    let artifact_docs: Vec<CanonicalSearchDocument> =
+        artifacts.iter().map(artifact_to_document).collect();
+
+    let (memories_indexed, sessions_indexed, artifacts_indexed, documents_total) =
+        checked_document_counts(memory_docs.len(), session_docs.len(), artifact_docs.len())?;
+    let idempotency_key = reembed_idempotency_key(
+        &workspace_id,
+        &embedding.fast_model_id,
+        embedding.quality_model_id.as_deref(),
+        documents_total,
+    );
+
+    if options.dry_run {
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        return Ok(IndexReembedReport {
+            status: IndexReembedStatus::DryRun,
+            job_id: None,
+            job_status: "dry_run_not_queued".to_owned(),
+            job_type: SearchIndexJobType::FullRebuild.as_str().to_owned(),
+            document_source: None,
+            embedding_scope: "all_documents".to_owned(),
+            embedding,
+            memories_indexed,
+            sessions_indexed,
+            artifacts_indexed,
+            documents_total,
+            index_dir,
+            elapsed_ms,
+            dry_run: true,
+            idempotency_key,
+            errors: Vec::new(),
+        });
+    }
+
+    let job_id = generate_search_index_job_id();
+    let job_input = CreateSearchIndexJobInput {
+        workspace_id: workspace_id.clone(),
+        job_type: SearchIndexJobType::FullRebuild,
+        document_source: None,
+        document_id: Some(embedding.fast_model_id.clone()),
+        documents_total,
+    };
+    db.insert_search_index_job(&job_id, &job_input)?;
+    if !db.start_search_index_job(&job_id)? {
+        return Err(IndexRebuildError::Index(format!(
+            "Failed to start re-embedding job {job_id}"
+        )));
+    }
+
+    if documents_total == 0 {
+        db.complete_search_index_job(&job_id, 0)?;
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        return Ok(IndexReembedReport {
+            status: IndexReembedStatus::NoDocuments,
+            job_id: Some(job_id),
+            job_status: "completed".to_owned(),
+            job_type: SearchIndexJobType::FullRebuild.as_str().to_owned(),
+            document_source: None,
+            embedding_scope: "all_documents".to_owned(),
+            embedding,
+            memories_indexed: 0,
+            sessions_indexed: 0,
+            artifacts_indexed: 0,
+            documents_total: 0,
+            index_dir,
+            elapsed_ms,
+            dry_run: false,
+            idempotency_key,
+            errors: Vec::new(),
+        });
+    }
+
+    let _recovery_action = recover_interrupted_publish(&index_dir)?;
+    let staging_dir = create_publish_staging_dir(&index_dir)?;
+    let indexable_docs: Vec<_> = memory_docs
+        .into_iter()
+        .chain(session_docs)
+        .chain(artifact_docs)
+        .map(|doc| doc.into_indexable())
+        .collect();
+
+    let build_result = build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs);
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    match build_result {
+        Ok(stats) => {
+            db.update_search_index_job_progress(&job_id, documents_total)?;
+            write_index_metadata(&staging_dir, u64::from(documents_total), documents_total)
+                .and_then(|()| publish_staged_index(&index_dir, &staging_dir))?;
+            db.complete_search_index_job(&job_id, documents_total)?;
+
+            Ok(IndexReembedReport {
+                status: IndexReembedStatus::Success,
+                job_id: Some(job_id),
+                job_status: "completed".to_owned(),
+                job_type: SearchIndexJobType::FullRebuild.as_str().to_owned(),
+                document_source: None,
+                embedding_scope: "all_documents".to_owned(),
+                embedding,
+                memories_indexed,
+                sessions_indexed,
+                artifacts_indexed,
+                documents_total,
+                index_dir,
+                elapsed_ms,
+                dry_run: false,
+                idempotency_key,
+                errors: stats
+                    .errors
+                    .iter()
+                    .map(|(id, e)| format!("{id}: {e}"))
+                    .collect(),
+            })
+        }
+        Err(error) => {
+            let primary_error = error;
+            let mut errors = vec![primary_error.clone()];
+            if let Err(fail_error) = db.fail_search_index_job(&job_id, &primary_error) {
+                errors.push(format!(
+                    "failed to mark re-embedding job failed: {fail_error}"
+                ));
+            }
+
+            Ok(IndexReembedReport {
+                status: IndexReembedStatus::IndexError,
+                job_id: Some(job_id),
+                job_status: "failed".to_owned(),
+                job_type: SearchIndexJobType::FullRebuild.as_str().to_owned(),
+                document_source: None,
+                embedding_scope: "all_documents".to_owned(),
+                embedding,
+                memories_indexed,
+                sessions_indexed,
+                artifacts_indexed,
+                documents_total,
+                index_dir,
+                elapsed_ms,
+                dry_run: false,
+                idempotency_key,
+                errors,
+            })
+        }
+    }
+}
+
+pub fn process_index_jobs(
+    options: &IndexProcessingOptions,
+) -> Result<IndexProcessingReport, IndexRebuildError> {
+    let start = Instant::now();
+    let database_path = options.resolve_database_path();
+    let index_dir = options.resolve_index_dir();
+
+    let db = DbConnection::open_file(&database_path)?;
+    let workspace_id = get_default_workspace_id(&db)?;
+    let pending_jobs = db.list_pending_search_index_jobs(&workspace_id, options.job_limit)?;
+    let pending_count = u32::try_from(pending_jobs.len()).map_err(|_| {
+        IndexRebuildError::Index("Pending search index job count exceeds u32".to_owned())
+    })?;
+
+    if options.dry_run {
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let jobs = pending_jobs
+            .iter()
+            .map(|job| IndexProcessingJobReport {
+                job_id: job.id.clone(),
+                job_type: job.job_type.clone(),
+                document_source: job.document_source.clone(),
+                document_id: job.document_id.clone(),
+                outcome: "planned".to_owned(),
+                processing_mode: processing_mode_for_job(job).to_owned(),
+                documents_total: job.documents_total,
+                documents_indexed: job.documents_indexed,
+                error: None,
+            })
+            .collect();
+        return Ok(IndexProcessingReport {
+            status: IndexProcessingStatus::DryRun,
+            workspace_id,
+            database_path,
+            index_dir,
+            pending_jobs: pending_count,
+            processed_jobs: 0,
+            completed_jobs: 0,
+            failed_jobs: 0,
+            dry_run: true,
+            job_limit: options.job_limit,
+            elapsed_ms,
+            jobs,
+        });
+    }
+
+    if pending_jobs.is_empty() {
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        return Ok(IndexProcessingReport {
+            status: IndexProcessingStatus::NoPendingJobs,
+            workspace_id,
+            database_path,
+            index_dir,
+            pending_jobs: 0,
+            processed_jobs: 0,
+            completed_jobs: 0,
+            failed_jobs: 0,
+            dry_run: false,
+            job_limit: options.job_limit,
+            elapsed_ms,
+            jobs: Vec::new(),
+        });
+    }
+
+    let mut jobs = Vec::with_capacity(pending_jobs.len());
+    let mut completed_jobs = 0_u32;
+    let mut failed_jobs = 0_u32;
+
+    for job in pending_jobs {
+        let result = process_one_index_job(&db, &job, &index_dir)?;
+        if result.outcome == "failed" {
+            failed_jobs = failed_jobs.saturating_add(1);
+        } else {
+            completed_jobs = completed_jobs.saturating_add(1);
+        }
+        jobs.push(result);
+    }
+
+    let processed_jobs = completed_jobs.saturating_add(failed_jobs);
+    let status = match (completed_jobs, failed_jobs) {
+        (_, 0) => IndexProcessingStatus::Success,
+        (0, _) => IndexProcessingStatus::Failed,
+        _ => IndexProcessingStatus::PartialFailure,
+    };
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    Ok(IndexProcessingReport {
+        status,
+        workspace_id,
+        database_path,
+        index_dir,
+        pending_jobs: pending_count,
+        processed_jobs,
+        completed_jobs,
+        failed_jobs,
+        dry_run: false,
+        job_limit: options.job_limit,
+        elapsed_ms,
+        jobs,
+    })
+}
+
+fn process_one_index_job(
+    db: &DbConnection,
+    job: &StoredSearchIndexJob,
+    index_dir: &Path,
+) -> Result<IndexProcessingJobReport, IndexRebuildError> {
+    let processing_mode = processing_mode_for_job(job).to_owned();
+    if !db.start_search_index_job(&job.id)? {
+        return Ok(IndexProcessingJobReport {
+            job_id: job.id.clone(),
+            job_type: job.job_type.clone(),
+            document_source: job.document_source.clone(),
+            document_id: job.document_id.clone(),
+            outcome: "skipped".to_owned(),
+            processing_mode,
+            documents_total: job.documents_total,
+            documents_indexed: job.documents_indexed,
+            error: Some("search index job was not pending".to_owned()),
+        });
+    }
+
+    let (_memories_indexed, _sessions_indexed, documents_total, indexable_docs) =
+        collect_workspace_indexable_documents(db, &job.workspace_id)?;
+    db.update_search_index_job_total(&job.id, documents_total)?;
+
+    if documents_total == 0 {
+        db.complete_search_index_job(&job.id, 0)?;
+        return Ok(IndexProcessingJobReport {
+            job_id: job.id.clone(),
+            job_type: job.job_type.clone(),
+            document_source: job.document_source.clone(),
+            document_id: job.document_id.clone(),
+            outcome: "completed_no_documents".to_owned(),
+            processing_mode,
+            documents_total: 0,
+            documents_indexed: 0,
+            error: None,
+        });
+    }
+
+    let _recovery_action = recover_interrupted_publish(index_dir)?;
+    let staging_dir = create_publish_staging_dir(index_dir)?;
+    let build_result = build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs)
+        .and_then(|stats| {
+            write_index_metadata(&staging_dir, u64::from(documents_total), documents_total)
+                .and_then(|()| publish_staged_index(index_dir, &staging_dir))
+                .map_err(|error| error.to_string())?;
+            Ok(stats)
+        });
+
+    match build_result {
+        Ok(stats) => {
+            db.update_search_index_job_progress(&job.id, documents_total)?;
+            db.complete_search_index_job(&job.id, documents_total)?;
+            let mut errors = stats
+                .errors
+                .iter()
+                .map(|(id, error)| format!("{id}: {error}"))
+                .collect::<Vec<_>>();
+            errors.sort();
+            Ok(IndexProcessingJobReport {
+                job_id: job.id.clone(),
+                job_type: job.job_type.clone(),
+                document_source: job.document_source.clone(),
+                document_id: job.document_id.clone(),
+                outcome: "completed".to_owned(),
+                processing_mode,
+                documents_total,
+                documents_indexed: documents_total,
+                error: if errors.is_empty() {
+                    None
+                } else {
+                    Some(errors.join("; "))
+                },
+            })
+        }
+        Err(error) => {
+            let mut error_message = error;
+            if let Err(fail_error) = db.fail_search_index_job(&job.id, &error_message) {
+                error_message.push_str("; failed to mark search index job failed: ");
+                error_message.push_str(&fail_error.to_string());
+            }
+            Ok(IndexProcessingJobReport {
+                job_id: job.id.clone(),
+                job_type: job.job_type.clone(),
+                document_source: job.document_source.clone(),
+                document_id: job.document_id.clone(),
+                outcome: "failed".to_owned(),
+                processing_mode,
+                documents_total,
+                documents_indexed: 0,
+                error: Some(error_message),
+            })
+        }
+    }
+}
+
+fn collect_workspace_indexable_documents(
+    db: &DbConnection,
+    workspace_id: &str,
+) -> Result<(u32, u32, u32, Vec<crate::search::IndexableDocument>), IndexRebuildError> {
+    let memories = db.list_memories(workspace_id, None, false)?;
+    let sessions = db.list_sessions(workspace_id)?;
+    let artifacts = db.list_artifacts(workspace_id, None)?;
+    let memory_docs: Vec<CanonicalSearchDocument> =
+        memories.iter().map(memory_to_document).collect();
+    let session_docs: Vec<CanonicalSearchDocument> =
+        sessions.iter().map(session_to_document).collect();
+    let artifact_docs: Vec<CanonicalSearchDocument> =
+        artifacts.iter().map(artifact_to_document).collect();
+    let (memories_indexed, sessions_indexed, _artifacts_indexed, documents_total) =
+        checked_document_counts(memory_docs.len(), session_docs.len(), artifact_docs.len())?;
+    let indexable_docs = memory_docs
+        .into_iter()
+        .chain(session_docs)
+        .chain(artifact_docs)
+        .map(|doc| doc.into_indexable())
+        .collect();
+    Ok((
+        memories_indexed,
+        sessions_indexed,
+        documents_total,
+        indexable_docs,
+    ))
+}
+
+fn processing_mode_for_job(job: &StoredSearchIndexJob) -> &'static str {
+    match job.job_type_enum() {
+        Some(SearchIndexJobType::FullRebuild) => "full_rebuild",
+        Some(SearchIndexJobType::Incremental) => "incremental_as_full_rebuild",
+        Some(SearchIndexJobType::SingleDocument) => "single_document_as_full_rebuild",
+        None => "unknown_as_full_rebuild",
     }
 }
 
@@ -477,6 +1234,42 @@ fn current_timestamp_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+fn checked_document_counts(
+    memory_count: usize,
+    session_count: usize,
+    artifact_count: usize,
+) -> Result<(u32, u32, u32, u32), IndexRebuildError> {
+    let memories_indexed = u32::try_from(memory_count).map_err(|_| {
+        IndexRebuildError::Index(format!(
+            "Memory document count {memory_count} exceeds the supported maximum."
+        ))
+    })?;
+    let sessions_indexed = u32::try_from(session_count).map_err(|_| {
+        IndexRebuildError::Index(format!(
+            "Session document count {session_count} exceeds the supported maximum."
+        ))
+    })?;
+    let artifacts_indexed = u32::try_from(artifact_count).map_err(|_| {
+        IndexRebuildError::Index(format!(
+            "Artifact document count {artifact_count} exceeds the supported maximum."
+        ))
+    })?;
+    let documents_total = memories_indexed
+        .checked_add(sessions_indexed)
+        .and_then(|count| count.checked_add(artifacts_indexed))
+        .ok_or_else(|| {
+            IndexRebuildError::Index(
+                "Combined document count exceeds the supported maximum.".to_owned(),
+            )
+        })?;
+    Ok((
+        memories_indexed,
+        sessions_indexed,
+        artifacts_indexed,
+        documents_total,
+    ))
+}
+
 fn get_default_workspace_id(db: &DbConnection) -> Result<String, IndexRebuildError> {
     let rows = db.query(
         "SELECT id FROM workspaces ORDER BY created_at DESC LIMIT 1",
@@ -507,11 +1300,9 @@ fn build_index_sync(
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime_result = crate::core::run_cli_future(async move {
             let cx = asupersync::Cx::for_testing();
-            let mut builder = IndexBuilder::new(&index_dir_owned).with_embedder_stack(stack);
-
-            for doc in documents {
-                builder = builder.add_document(doc.id.clone(), doc.content.clone());
-            }
+            let builder = IndexBuilder::new(&index_dir_owned)
+                .with_embedder_stack(stack)
+                .add_documents(documents);
 
             let build_result = builder.build(&cx).await;
             let converted = match build_result {
@@ -541,6 +1332,79 @@ fn build_index_sync(
             .unwrap_or_else(|| Err("Index build result not captured".to_string())),
         Err(_) => Err("Index build panicked".to_string()),
     }
+}
+
+fn default_embedder_stack() -> EmbedderStack {
+    let fast_embedder = Arc::new(HashEmbedder::default_256()) as Arc<dyn crate::search::Embedder>;
+    let quality_embedder =
+        Arc::new(HashEmbedder::default_384()) as Arc<dyn crate::search::Embedder>;
+    EmbedderStack::from_parts(fast_embedder, Some(quality_embedder))
+}
+
+fn reembed_embedding_summary(
+    db: &DbConnection,
+    workspace_id: &str,
+) -> Result<ReembedEmbeddingSummary, IndexRebuildError> {
+    let fast_embedder = HashEmbedder::default_256();
+    let quality_embedder = HashEmbedder::default_384();
+    let records = db.list_embedding_metadata_records(workspace_id)?;
+    let selected_registry_model = records
+        .iter()
+        .find(|record| record.registry.status.as_str() == "available")
+        .map(|record| ReembedRegistryModelSummary {
+            id: record.registry.id.clone(),
+            provider: record.registry.provider.as_str().to_owned(),
+            model_name: record.registry.model_name.clone(),
+            status: record.registry.status.as_str().to_owned(),
+            dimension: record.metadata.dimension,
+            deterministic: record.metadata.deterministic,
+        });
+    let available_model_count = records
+        .iter()
+        .filter(|record| record.registry.status.as_str() == "available")
+        .count();
+    let source = if selected_registry_model.is_some() {
+        "registry_observed"
+    } else {
+        "frankensearch_hash_fallback"
+    };
+
+    Ok(ReembedEmbeddingSummary {
+        fast_model_id: fast_embedder.id().to_owned(),
+        fast_dimension: fast_embedder.dimension(),
+        quality_model_id: Some(quality_embedder.id().to_owned()),
+        quality_dimension: Some(quality_embedder.dimension()),
+        deterministic: true,
+        semantic: fast_embedder.is_semantic() || quality_embedder.is_semantic(),
+        registered_model_count: records.len(),
+        available_model_count,
+        selected_registry_model,
+        source: source.to_owned(),
+    })
+}
+
+fn reembed_idempotency_key(
+    workspace_id: &str,
+    fast_model_id: &str,
+    quality_model_id: Option<&str>,
+    documents_total: u32,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.index_reembed.v1\0");
+    hasher.update(workspace_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(fast_model_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(quality_model_id.unwrap_or("").as_bytes());
+    hasher.update(b"\0");
+    hasher.update(documents_total.to_string().as_bytes());
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn generate_search_index_job_id() -> String {
+    let memory_id = MemoryId::now().to_string();
+    let payload = memory_id.trim_start_matches("mem_");
+    format!("sidx_{payload}")
 }
 
 // ============================================================================
@@ -924,6 +1788,62 @@ mod tests {
         std::fs::write(dir.join(file), body).map_err(|e| e.to_string())
     }
 
+    fn seed_reembed_database(workspace: &Path, database: &Path) -> TestResult {
+        let parent = database
+            .parent()
+            .ok_or_else(|| "database path must have parent".to_string())?;
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        let connection = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_01234567890123456789012345",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("reembed-test".to_owned()),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .insert_memory(
+                "mem_01234567890123456789012345",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Run cargo fmt --check before release.".to_owned(),
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("file://AGENTS.md#compiler-checks".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: Some("unit-test".to_owned()),
+                    tags: vec!["release".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection.close().map_err(|e| e.to_string())
+    }
+
+    fn queue_pending_index_job(database: &Path, job_id: &str) -> TestResult {
+        let connection = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+        connection
+            .insert_search_index_job(
+                job_id,
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                    job_type: SearchIndexJobType::FullRebuild,
+                    document_source: None,
+                    document_id: None,
+                    documents_total: 0,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection.close().map_err(|e| e.to_string())
+    }
+
     fn read_marker(dir: &Path, file: &str) -> Result<String, String> {
         std::fs::read_to_string(dir.join(file)).map_err(|e| e.to_string())
     }
@@ -943,7 +1863,8 @@ mod tests {
             status: IndexRebuildStatus::Success,
             memories_indexed: 5,
             sessions_indexed: 3,
-            documents_total: 8,
+            artifacts_indexed: 2,
+            documents_total: 10,
             index_dir: PathBuf::from("/tmp/index"),
             elapsed_ms: 123.4,
             dry_run: false,
@@ -955,8 +1876,228 @@ mod tests {
         assert_eq!(json["status"], "success");
         assert_eq!(json["memories_indexed"], 5);
         assert_eq!(json["sessions_indexed"], 3);
-        assert_eq!(json["documents_total"], 8);
+        assert_eq!(json["artifacts_indexed"], 2);
+        assert_eq!(json["documents_total"], 10);
         assert_eq!(json["dry_run"], false);
+    }
+
+    #[test]
+    fn index_reembed_report_data_json_has_required_fields() {
+        let report = IndexReembedReport {
+            status: IndexReembedStatus::Success,
+            job_id: Some("sidx_01234567890123456789012345".to_owned()),
+            job_status: "completed".to_owned(),
+            job_type: "full_rebuild".to_owned(),
+            document_source: None,
+            embedding_scope: "all_documents".to_owned(),
+            embedding: ReembedEmbeddingSummary {
+                fast_model_id: "fnv1a-256".to_owned(),
+                fast_dimension: 256,
+                quality_model_id: Some("fnv1a-384".to_owned()),
+                quality_dimension: Some(384),
+                deterministic: true,
+                semantic: false,
+                registered_model_count: 0,
+                available_model_count: 0,
+                selected_registry_model: None,
+                source: "frankensearch_hash_fallback".to_owned(),
+            },
+            memories_indexed: 5,
+            sessions_indexed: 3,
+            artifacts_indexed: 2,
+            documents_total: 10,
+            index_dir: PathBuf::from("/tmp/index"),
+            elapsed_ms: 123.4,
+            dry_run: false,
+            idempotency_key: "blake3:test".to_owned(),
+            errors: Vec::new(),
+        };
+
+        let json = report.data_json();
+        assert_eq!(json["command"], "index_reembed");
+        assert_eq!(json["status"], "success");
+        assert_eq!(json["job_status"], "completed");
+        assert_eq!(json["job_type"], "full_rebuild");
+        assert_eq!(json["document_source"], serde_json::Value::Null);
+        assert_eq!(json["embedding_scope"], "all_documents");
+        assert_eq!(json["embedding"]["fast_model_id"], "fnv1a-256");
+        assert_eq!(json["embedding"]["quality_model_id"], "fnv1a-384");
+        assert_eq!(json["embedding"]["deterministic"], true);
+        assert_eq!(json["memories_indexed"], 5);
+        assert_eq!(json["sessions_indexed"], 3);
+        assert_eq!(json["artifacts_indexed"], 2);
+        assert_eq!(json["documents_total"], 10);
+        assert_eq!(json["dry_run"], false);
+    }
+
+    #[test]
+    fn index_reembed_dry_run_does_not_queue_job() -> TestResult {
+        let root = unique_test_dir("reembed-dry-run");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        seed_reembed_database(&workspace, &database)?;
+
+        let report = reembed_index(&IndexReembedOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir),
+            dry_run: true,
+        })
+        .map_err(|e| e.to_string())?;
+
+        ensure(
+            report.status == IndexReembedStatus::DryRun,
+            "dry-run status",
+        )?;
+        ensure(
+            report.job_id.is_none(),
+            "dry-run should not allocate job id",
+        )?;
+        ensure(
+            report.job_status == "dry_run_not_queued",
+            "dry-run job status",
+        )?;
+        ensure(report.documents_total == 1, "dry-run document count")?;
+
+        let connection = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+        let jobs = connection
+            .list_search_index_jobs("wsp_01234567890123456789012345", None)
+            .map_err(|e| e.to_string())?;
+        ensure(jobs.is_empty(), "dry-run must not queue search index jobs")?;
+        connection.close().map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn index_reembed_queues_and_completes_embedding_job() -> TestResult {
+        let root = unique_test_dir("reembed-completes-job");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        seed_reembed_database(&workspace, &database)?;
+
+        let report = reembed_index(&IndexReembedOptions {
+            workspace_path: workspace,
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+            dry_run: false,
+        })
+        .map_err(|e| e.to_string())?;
+
+        ensure(
+            report.status == IndexReembedStatus::Success,
+            format!("unexpected status: {:?}", report.status),
+        )?;
+        ensure(report.job_id.is_some(), "job id should be reported")?;
+        ensure(report.job_status == "completed", "job should complete")?;
+        ensure(report.document_source.is_none(), "document source")?;
+        ensure(
+            report.embedding_scope == "all_documents",
+            "embedding scope should cover all documents",
+        )?;
+        ensure(report.documents_total == 1, "document count")?;
+        ensure(
+            index_dir.join(INDEX_METADATA_FILE).is_file(),
+            "reembed should publish index metadata",
+        )?;
+
+        let job_id = report
+            .job_id
+            .ok_or_else(|| "job id should be present".to_string())?;
+        let connection = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+        let job = connection
+            .get_search_index_job(&job_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "stored reembed job should exist".to_string())?;
+        ensure(job.status == "completed", "stored job status")?;
+        ensure(job.job_type == "full_rebuild", "stored job type")?;
+        ensure(job.document_source.is_none(), "stored document source")?;
+        ensure(job.documents_total == 1, "stored documents_total")?;
+        ensure(job.documents_indexed == 1, "stored documents_indexed")?;
+        connection.close().map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn index_processing_dry_run_leaves_pending_job_unchanged() -> TestResult {
+        let root = unique_test_dir("process-dry-run");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        seed_reembed_database(&workspace, &database)?;
+        queue_pending_index_job(&database, "sidx_processdryrun0000000000000")?;
+
+        let report = process_index_jobs(&IndexProcessingOptions {
+            workspace_path: workspace,
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+            dry_run: true,
+            job_limit: Some(1),
+        })
+        .map_err(|e| e.to_string())?;
+
+        ensure(
+            report.status == IndexProcessingStatus::DryRun,
+            "processing dry-run status",
+        )?;
+        ensure(report.pending_jobs == 1, "dry-run pending job count")?;
+        ensure(report.processed_jobs == 0, "dry-run processed job count")?;
+        ensure(
+            !index_dir.join(INDEX_METADATA_FILE).exists(),
+            "dry-run must not publish index metadata",
+        )?;
+
+        let connection = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+        let job = connection
+            .get_search_index_job("sidx_processdryrun0000000000000")
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "pending job should exist".to_string())?;
+        ensure(job.status == "pending", "dry-run keeps job pending")?;
+        ensure(job.started_at.is_none(), "dry-run does not start job")?;
+        connection.close().map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn index_processing_completes_pending_rebuild_job() -> TestResult {
+        let root = unique_test_dir("process-completes-job");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        seed_reembed_database(&workspace, &database)?;
+        queue_pending_index_job(&database, "sidx_processcomplete00000000000")?;
+
+        let report = process_index_jobs(&IndexProcessingOptions {
+            workspace_path: workspace,
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+            dry_run: false,
+            job_limit: Some(1),
+        })
+        .map_err(|e| e.to_string())?;
+
+        ensure(
+            report.status == IndexProcessingStatus::Success,
+            format!("unexpected processing status: {:?}", report.status),
+        )?;
+        ensure(report.pending_jobs == 1, "pending job count")?;
+        ensure(report.processed_jobs == 1, "processed job count")?;
+        ensure(report.completed_jobs == 1, "completed job count")?;
+        ensure(report.failed_jobs == 0, "failed job count")?;
+        ensure(
+            index_dir.join(INDEX_METADATA_FILE).is_file(),
+            "processor should publish index metadata",
+        )?;
+
+        let connection = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+        let job = connection
+            .get_search_index_job("sidx_processcomplete00000000000")
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "processed job should exist".to_string())?;
+        ensure(job.status == "completed", "stored job status")?;
+        ensure(job.documents_total == 1, "stored documents_total")?;
+        ensure(job.documents_indexed == 1, "stored documents_indexed")?;
+        ensure(job.started_at.is_some(), "stored job started timestamp")?;
+        ensure(job.completed_at.is_some(), "stored job completed timestamp")?;
+        connection.close().map_err(|e| e.to_string())
     }
 
     #[test]

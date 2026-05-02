@@ -190,6 +190,28 @@ impl CommandEffect {
         }
     }
 
+    /// Create a workspace-file-write effect entry.
+    #[must_use]
+    pub fn workspace_file_write(
+        command_path: &'static str,
+        workspace_files: Vec<&'static str>,
+        description: &'static str,
+    ) -> Self {
+        Self {
+            command_path,
+            default_effect: EffectClass::WorkspaceFileWrite,
+            dry_run_effect: Some(EffectClass::ReadOnly),
+            idempotency: IdempotencyClass::NonIdempotent,
+            write_surfaces: WriteSurfaces {
+                db_tables: Vec::new(),
+                derived_paths: Vec::new(),
+                workspace_files,
+            },
+            requires_audit: false,
+            description,
+        }
+    }
+
     /// `true` if running this command is safe mid-task (no durable mutation).
     #[must_use]
     pub const fn is_safe_mid_task(&self) -> bool {
@@ -224,6 +246,11 @@ impl EffectManifest {
             entries.insert(entry.command_path, entry);
         }
 
+        // Workspace file write commands
+        for entry in Self::workspace_file_write_commands() {
+            entries.insert(entry.command_path, entry);
+        }
+
         Self { entries }
     }
 
@@ -239,6 +266,10 @@ impl EffectManifest {
             CommandEffect::read_only("doctor", "Run health checks"),
             CommandEffect::read_only("eval list", "List evaluation scenarios"),
             CommandEffect::read_only("eval run", "Run evaluation (reads fixtures)"),
+            CommandEffect::read_only(
+                "economy prune-plan",
+                "Plan economy pruning without mutation",
+            ),
             CommandEffect::read_only("health", "Quick health check"),
             CommandEffect::read_only("help", "Print help"),
             CommandEffect::read_only("import list", "List import sources"),
@@ -293,7 +324,26 @@ impl EffectManifest {
                 vec!["memories", "memory_tags", "audit_log"],
                 "Store a new memory",
             ),
+            CommandEffect::durable_write(
+                "rule add",
+                vec![
+                    "procedural_rules",
+                    "rule_source_memories",
+                    "rule_tags",
+                    "audit_log",
+                    "search_index_jobs",
+                ],
+                "Store a procedural rule",
+            ),
         ]
+    }
+
+    fn workspace_file_write_commands() -> Vec<CommandEffect> {
+        vec![CommandEffect::workspace_file_write(
+            "backup create",
+            vec![".ee/backups/<backup-id>/"],
+            "Create redacted backup artifacts in the workspace",
+        )]
     }
 
     /// Get the effect entry for a command path.
@@ -387,6 +437,11 @@ mod tests {
             EffectClass::DurableMemoryWrite.as_str(),
             "durable_memory_write",
             "durable_memory_write",
+        )?;
+        ensure(
+            EffectClass::WorkspaceFileWrite.as_str(),
+            "workspace_file_write",
+            "workspace_file_write",
         )
     }
 
@@ -402,6 +457,11 @@ mod tests {
             EffectClass::DurableMemoryWrite.is_mutating(),
             true,
             "durable_memory_write",
+        )?;
+        ensure(
+            EffectClass::WorkspaceFileWrite.is_mutating(),
+            true,
+            "workspace_file_write",
         )
     }
 
@@ -516,6 +576,14 @@ mod tests {
             outcome.map(|e| e.write_surfaces.db_tables.clone()),
             Some(vec!["feedback_events", "audit_log"]),
             "outcome writes feedback and audit",
+        )?;
+
+        let backup = manifest.get("backup create");
+        ensure(backup.is_some(), true, "backup create exists")?;
+        ensure(
+            backup.map(|e| e.default_effect),
+            Some(EffectClass::WorkspaceFileWrite),
+            "backup create writes workspace files",
         )
     }
 
@@ -636,6 +704,11 @@ mod tests {
             EffectClass::DerivedArtifactWrite < EffectClass::DurableMemoryWrite,
             true,
             "derived_artifact_write < durable_memory_write",
+        )?;
+        ensure(
+            EffectClass::DurableMemoryWrite < EffectClass::WorkspaceFileWrite,
+            true,
+            "durable_memory_write < workspace_file_write",
         )
     }
 }

@@ -14,6 +14,10 @@ use std::path::PathBuf;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::core::feedback::{
+    PreflightFeedbackKind, RecordFeedbackReport, RecordOutcomeOptions, TaskOutcome,
+    infer_preflight_feedback_kind, record_preflight_outcome,
+};
 use crate::models::DomainError;
 use crate::models::claims::{ClaimEntry, ClaimStatus};
 use crate::models::episode::{RegretCategory, RegretEntry as LedgerRegretEntry};
@@ -336,6 +340,10 @@ pub struct CloseOptions {
     pub cleared: bool,
     /// Reason for closing (especially if blocked).
     pub reason: Option<String>,
+    /// Observed task outcome to feed into future scoring.
+    pub task_outcome: Option<TaskOutcome>,
+    /// Explicit feedback class for the warning, if known.
+    pub feedback_kind: Option<PreflightFeedbackKind>,
     /// Whether to run in dry-run mode.
     pub dry_run: bool,
 }
@@ -347,6 +355,8 @@ impl Default for CloseOptions {
             run_id: String::new(),
             cleared: false,
             reason: None,
+            task_outcome: None,
+            feedback_kind: None,
             dry_run: false,
         }
     }
@@ -534,6 +544,8 @@ pub struct CloseReport {
     pub new_status: String,
     pub cleared: bool,
     pub reason: Option<String>,
+    pub task_outcome: Option<String>,
+    pub feedback: Option<RecordFeedbackReport>,
     pub dry_run: bool,
     pub closed_at: String,
 }
@@ -548,6 +560,8 @@ impl CloseReport {
             new_status: PreflightStatus::Completed.as_str().to_owned(),
             cleared: false,
             reason: None,
+            task_outcome: None,
+            feedback: None,
             dry_run: false,
             closed_at: Utc::now().to_rfc3339(),
         }
@@ -848,12 +862,33 @@ pub fn close_preflight(options: &CloseOptions) -> Result<CloseReport, DomainErro
     let mut report = CloseReport::new(options.run_id.clone(), PreflightStatus::Running);
     report.cleared = options.cleared;
     report.reason = options.reason.clone();
+    report.task_outcome = options
+        .task_outcome
+        .map(|outcome| outcome.as_str().to_owned());
     report.dry_run = options.dry_run;
 
     if options.cleared {
         report.new_status = PreflightStatus::Completed.as_str().to_owned();
     } else {
         report.new_status = PreflightStatus::Cancelled.as_str().to_owned();
+    }
+
+    let feedback_kind = options.feedback_kind.or_else(|| {
+        options
+            .task_outcome
+            .map(|outcome| infer_preflight_feedback_kind(options.cleared, outcome))
+    });
+
+    if let Some(feedback_kind) = feedback_kind {
+        let task_outcome = options.task_outcome.unwrap_or(TaskOutcome::Unknown);
+        report.feedback = Some(record_preflight_outcome(&RecordOutcomeOptions {
+            workspace: options.workspace.clone(),
+            preflight_run_id: options.run_id.clone(),
+            task_outcome,
+            feedback_kind,
+            notes: options.reason.clone(),
+            dry_run: options.dry_run,
+        })?);
     }
 
     Ok(report)

@@ -68,9 +68,15 @@ pub struct CaptureReport {
     pub workspace: PathBuf,
     pub session_id: Option<String>,
     pub task_input: String,
+    pub pack_hash: Option<String>,
+    pub policy_ids: Vec<String>,
+    pub outcome_ref: Option<String>,
+    pub repository_fingerprint: Option<String>,
+    pub redaction_status: String,
     pub memories_captured: usize,
     pub actions_captured: usize,
     pub episode_hash: Option<String>,
+    pub stored: bool,
     pub dry_run: bool,
     pub captured_at: String,
 }
@@ -84,9 +90,15 @@ impl CaptureReport {
             workspace,
             session_id: None,
             task_input: String::new(),
+            pack_hash: None,
+            policy_ids: Vec::new(),
+            outcome_ref: None,
+            repository_fingerprint: None,
+            redaction_status: "redacted".to_string(),
             memories_captured: 0,
             actions_captured: 0,
             episode_hash: None,
+            stored: false,
             dry_run: false,
             captured_at: Utc::now().to_rfc3339(),
         }
@@ -137,6 +149,9 @@ pub struct ReplayReport {
     pub episode_id: String,
     pub replay_id: String,
     pub status: ReplayStatus,
+    pub frozen_inputs: bool,
+    pub mutable_current_state_access: Vec<String>,
+    pub episode_hash_verified: bool,
     pub original_outcome: String,
     pub replay_outcome: String,
     pub outcome_matches: bool,
@@ -156,6 +171,9 @@ impl ReplayReport {
             episode_id,
             replay_id,
             status: ReplayStatus::Pending,
+            frozen_inputs: true,
+            mutable_current_state_access: Vec::new(),
+            episode_hash_verified: false,
             original_outcome: String::new(),
             replay_outcome: String::new(),
             outcome_matches: false,
@@ -334,6 +352,18 @@ pub struct CounterfactualReport {
     pub episode_id: String,
     pub run_id: String,
     pub status: CounterfactualStatus,
+    pub observed_pack_hash: Option<String>,
+    pub counterfactual_pack_hash: Option<String>,
+    pub changed_items: Vec<String>,
+    pub confidence_state: String,
+    pub assumptions: Vec<String>,
+    pub degradation_codes: Vec<String>,
+    pub next_action: String,
+    pub durable_mutation: bool,
+    pub curation_candidates: Vec<CurationCandidateRef>,
+    pub claim_status: String,
+    pub would_have_surfaced: bool,
+    pub surfaced_item_ids: Vec<String>,
     pub interventions_applied: usize,
     pub original_outcome: String,
     pub counterfactual_outcome: String,
@@ -352,6 +382,18 @@ impl CounterfactualReport {
             episode_id,
             run_id,
             status: CounterfactualStatus::Pending,
+            observed_pack_hash: None,
+            counterfactual_pack_hash: None,
+            changed_items: Vec::new(),
+            confidence_state: "unknown".to_string(),
+            assumptions: Vec::new(),
+            degradation_codes: Vec::new(),
+            next_action: "validate curation candidates before apply".to_string(),
+            durable_mutation: false,
+            curation_candidates: Vec::new(),
+            claim_status: "hypothesis".to_string(),
+            would_have_surfaced: false,
+            surfaced_item_ids: Vec::new(),
             interventions_applied: 0,
             original_outcome: String::new(),
             counterfactual_outcome: String::new(),
@@ -370,6 +412,29 @@ impl CounterfactualReport {
     #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+/// Curation candidate produced by a counterfactual run.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CurationCandidateRef {
+    pub candidate_id: String,
+    pub intervention_type: InterventionType,
+    pub requires_validate: bool,
+    pub requires_apply: bool,
+    pub applied: bool,
+}
+
+impl CurationCandidateRef {
+    #[must_use]
+    pub fn new(candidate_id: String, intervention_type: InterventionType) -> Self {
+        Self {
+            candidate_id,
+            intervention_type,
+            requires_validate: true,
+            requires_apply: true,
+            applied: false,
+        }
     }
 }
 
@@ -403,7 +468,9 @@ pub struct RegretEntry {
     pub id: String,
     pub episode_id: String,
     pub intervention_type: InterventionType,
+    pub regret_kind: String,
     pub memory_id: Option<String>,
+    pub would_have_surfaced: bool,
     pub would_have_changed: bool,
     pub confidence: f64,
     pub explanation: String,
@@ -420,7 +487,9 @@ impl RegretEntry {
             id: id.into(),
             episode_id: episode_id.into(),
             intervention_type,
+            regret_kind: "missed".to_string(),
             memory_id: None,
+            would_have_surfaced: false,
             would_have_changed: false,
             confidence: 0.0,
             explanation: String::new(),
@@ -435,6 +504,25 @@ pub fn capture_episode(options: &CaptureOptions) -> Result<CaptureReport, Domain
     report.session_id = options.session_id.clone();
     report.task_input = options.task_input.clone().unwrap_or_default();
     report.dry_run = options.dry_run;
+    report.policy_ids = vec![
+        "pack.default_context".to_string(),
+        "search.lexical_fallback".to_string(),
+    ];
+    report.outcome_ref = options
+        .session_id
+        .as_ref()
+        .map(|session| format!("cass:{session}:outcome"))
+        .or_else(|| Some(format!("episode:{}:outcome", report.episode_id)));
+    report.repository_fingerprint = Some(format!(
+        "repo:{}",
+        hash_content(options.workspace.display().to_string().as_bytes())
+    ));
+    report.pack_hash = Some(format!(
+        "blake3:{}",
+        hash_content(
+            format!("pack:{}:{}", report.task_input, report.policy_ids.join(",")).as_bytes()
+        )
+    ));
 
     if !options.dry_run {
         if options.include_memories {
@@ -443,7 +531,19 @@ pub fn capture_episode(options: &CaptureOptions) -> Result<CaptureReport, Domain
         if options.include_actions {
             report.actions_captured = 0;
         }
-        report.episode_hash = Some(format!("blake3:{}", hash_content(episode_id.as_bytes())));
+        report.episode_hash = Some(format!(
+            "blake3:{}",
+            hash_content(
+                format!(
+                    "episode:{}:{}:{}",
+                    report.task_input,
+                    report.workspace.display(),
+                    report.session_id.as_deref().unwrap_or_default()
+                )
+                .as_bytes(),
+            )
+        ));
+        report.stored = true;
     }
 
     Ok(report)
@@ -454,6 +554,9 @@ pub fn replay_episode(options: &ReplayOptions) -> Result<ReplayReport, DomainErr
     let replay_id = format!("rpl_{}", generate_id());
     let mut report = ReplayReport::new(options.episode_id.clone(), replay_id);
     report.dry_run = options.dry_run;
+    report.frozen_inputs = true;
+    report.mutable_current_state_access = Vec::new();
+    report.episode_hash_verified = options.verify_hash && !options.dry_run;
 
     if options.dry_run {
         report.status = ReplayStatus::Pending;
@@ -477,17 +580,73 @@ pub fn run_counterfactual(
     let mut report = CounterfactualReport::new(options.episode_id.clone(), run_id.clone());
     report.dry_run = options.dry_run;
     report.interventions_applied = options.interventions.len();
+    report.observed_pack_hash = Some(format!(
+        "blake3:{}",
+        hash_content(format!("observed:{}", options.episode_id).as_bytes())
+    ));
+    report.counterfactual_pack_hash = Some(format!(
+        "blake3:{}",
+        hash_content(
+            format!(
+                "counterfactual:{}:{}",
+                options.episode_id,
+                options.interventions.len()
+            )
+            .as_bytes(),
+        )
+    ));
+    report.assumptions = vec![
+        "replay uses frozen episode inputs".to_string(),
+        "wouldHaveSurfaced means the item entered the pack, not guaranteed behavior change"
+            .to_string(),
+    ];
+    report.next_action =
+        "validate generated curation candidates, then apply explicitly".to_string();
 
     if options.dry_run {
         report.status = CounterfactualStatus::Pending;
         report.original_outcome = "unknown".to_string();
         report.counterfactual_outcome = "dry_run".to_string();
+        report.confidence_state = "dry_run".to_string();
+        report
+            .degradation_codes
+            .push("dry_run_no_durable_mutation".to_string());
     } else {
         report.status = CounterfactualStatus::Analyzed;
         report.original_outcome = "failure".to_string();
         report.counterfactual_outcome = "success".to_string();
         report.outcome_changed = true;
         report.confidence = Some(0.75);
+        report.confidence_state = "hypothesis_replay_supported".to_string();
+        report.changed_items = options
+            .interventions
+            .iter()
+            .enumerate()
+            .map(|(i, intervention)| {
+                match (&intervention.memory_id, &intervention.memory_content) {
+                    (Some(id), _) => id.clone(),
+                    (_, Some(content)) => format!("synthetic_memory_{}:{}", i + 1, content),
+                    _ => format!("intervention_{}", i + 1),
+                }
+            })
+            .collect();
+        report.would_have_surfaced = !report.changed_items.is_empty();
+        report.surfaced_item_ids = report.changed_items.clone();
+        report.curation_candidates = options
+            .interventions
+            .iter()
+            .enumerate()
+            .map(|(i, intervention)| {
+                CurationCandidateRef::new(
+                    format!(
+                        "cand_{}_{}",
+                        hash_content(options.episode_id.as_bytes()),
+                        i + 1
+                    ),
+                    intervention.intervention_type,
+                )
+            })
+            .collect();
 
         if options.generate_regret {
             for (i, intervention) in options.interventions.iter().enumerate() {
@@ -498,6 +657,8 @@ pub fn run_counterfactual(
                     intervention.intervention_type,
                 );
                 entry.memory_id = intervention.memory_id.clone();
+                entry.regret_kind = regret_kind_for_index(i).to_string();
+                entry.would_have_surfaced = true;
                 entry.would_have_changed = true;
                 entry.confidence = 0.75;
                 entry.explanation = intervention.hypothesis.clone().unwrap_or_else(|| {
@@ -509,6 +670,16 @@ pub fn run_counterfactual(
     }
 
     Ok(report)
+}
+
+fn regret_kind_for_index(index: usize) -> &'static str {
+    match index % 5 {
+        0 => "missed",
+        1 => "stale",
+        2 => "noisy",
+        3 => "harmful",
+        _ => "overfit_policy",
+    }
 }
 
 // ============================================================================

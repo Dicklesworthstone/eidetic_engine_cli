@@ -3,10 +3,24 @@
 //! Gathers subsystem status data and returns a structured report that
 //! the output layer renders as JSON or human-readable text.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
+
+use crate::config::{
+    WorkspaceDiagnostic, WorkspaceDiagnosticSeverity, WorkspaceResolution, WorkspaceResolutionMode,
+    WorkspaceResolutionRequest, WorkspaceResolutionSource, diagnose_workspace_resolution,
+    resolve_workspace,
+};
+use crate::db::{
+    DbConnection, StoredCurationCandidate, StoredCurationTtlPolicy,
+    default_curation_ttl_policy_id_for_review_state,
+};
 use crate::models::CapabilityStatus;
 
+use super::agent_detect::AgentInventoryReport;
+use super::curate::stable_workspace_id;
 use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
 use super::{build_info, runtime_status};
 
@@ -172,6 +186,104 @@ fn bounded_score(score: Option<f32>) -> f32 {
         .clamp(0.0, 1.0)
 }
 
+/// Curation review queue health status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CurationHealthStatus {
+    /// The review queue has no open TTL attention items.
+    Healthy,
+    /// The review queue has due TTL decisions that can be handled deterministically.
+    Due,
+    /// Harmful/rejected candidates need human attention.
+    Escalated,
+    /// Queue metrics were gathered but some rows could not be evaluated.
+    Degraded,
+    /// The queue exists and has no candidates.
+    Empty,
+    /// No workspace was provided for inspection.
+    NotInspected,
+    /// Curation storage could not be inspected.
+    Unavailable,
+}
+
+impl CurationHealthStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Due => "due",
+            Self::Escalated => "escalated",
+            Self::Degraded => "degraded",
+            Self::Empty => "empty",
+            Self::NotInspected => "not_inspected",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Read-only health snapshot for curation TTL policies and review queue state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CurationHealthReport {
+    pub status: CurationHealthStatus,
+    pub total_count: u32,
+    pub pending_count: u32,
+    pub accepted_count: u32,
+    pub snoozed_count: u32,
+    pub rejected_count: u32,
+    pub due_count: u32,
+    pub prompt_count: u32,
+    pub escalation_count: u32,
+    pub blocked_count: u32,
+    pub policy_count: u32,
+    pub auto_promote_enabled_count: u32,
+    pub oldest_pending_age_days: Option<i64>,
+    pub mean_review_latency_days: Option<i64>,
+    pub next_scheduled_at: Option<String>,
+}
+
+impl CurationHealthReport {
+    #[must_use]
+    pub const fn not_inspected() -> Self {
+        Self {
+            status: CurationHealthStatus::NotInspected,
+            total_count: 0,
+            pending_count: 0,
+            accepted_count: 0,
+            snoozed_count: 0,
+            rejected_count: 0,
+            due_count: 0,
+            prompt_count: 0,
+            escalation_count: 0,
+            blocked_count: 0,
+            policy_count: 0,
+            auto_promote_enabled_count: 0,
+            oldest_pending_age_days: None,
+            mean_review_latency_days: None,
+            next_scheduled_at: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn unavailable() -> Self {
+        Self {
+            status: CurationHealthStatus::Unavailable,
+            total_count: 0,
+            pending_count: 0,
+            accepted_count: 0,
+            snoozed_count: 0,
+            rejected_count: 0,
+            due_count: 0,
+            prompt_count: 0,
+            escalation_count: 0,
+            blocked_count: 0,
+            policy_count: 0,
+            auto_promote_enabled_count: 0,
+            oldest_pending_age_days: None,
+            mean_review_latency_days: None,
+            next_scheduled_at: None,
+        }
+    }
+}
+
 /// Derived asset freshness classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DerivedAssetStatus {
@@ -293,12 +405,83 @@ pub struct StatusOptions {
     pub workspace_path: Option<PathBuf>,
 }
 
+/// Workspace selection and ambiguity diagnostics for status output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceStatusReport {
+    pub source: WorkspaceResolutionSource,
+    pub root: PathBuf,
+    pub config_dir: PathBuf,
+    pub marker_present: bool,
+    pub canonical_root: PathBuf,
+    pub fingerprint: String,
+    pub scope_kind: String,
+    pub repository_root: Option<PathBuf>,
+    pub repository_fingerprint: Option<String>,
+    pub subproject_path: Option<PathBuf>,
+    pub diagnostics: Vec<WorkspaceDiagnosticReport>,
+}
+
+impl WorkspaceStatusReport {
+    fn from_resolution(
+        resolution: WorkspaceResolution,
+        diagnostics: Vec<WorkspaceDiagnostic>,
+    ) -> Self {
+        Self {
+            source: resolution.source,
+            root: resolution.location.root,
+            config_dir: resolution.location.config_dir,
+            marker_present: resolution.marker_present,
+            canonical_root: resolution.canonical_root,
+            fingerprint: resolution.fingerprint,
+            scope_kind: resolution.scope.kind.as_str().to_string(),
+            repository_root: resolution.scope.repository_root,
+            repository_fingerprint: resolution.scope.repository_fingerprint,
+            subproject_path: resolution.scope.subproject_path,
+            diagnostics: diagnostics
+                .into_iter()
+                .map(WorkspaceDiagnosticReport::from)
+                .collect(),
+        }
+    }
+}
+
+/// A stable, renderable workspace diagnostic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceDiagnosticReport {
+    pub code: &'static str,
+    pub severity: WorkspaceDiagnosticSeverity,
+    pub message: String,
+    pub repair: String,
+    pub selected_source: Option<WorkspaceResolutionSource>,
+    pub selected_root: Option<PathBuf>,
+    pub conflicting_source: Option<WorkspaceResolutionSource>,
+    pub conflicting_root: Option<PathBuf>,
+    pub marker_roots: Vec<PathBuf>,
+}
+
+impl From<WorkspaceDiagnostic> for WorkspaceDiagnosticReport {
+    fn from(diagnostic: WorkspaceDiagnostic) -> Self {
+        Self {
+            code: diagnostic.code,
+            severity: diagnostic.severity,
+            message: diagnostic.message,
+            repair: diagnostic.repair,
+            selected_source: diagnostic.selected_source,
+            selected_root: diagnostic.selected_root,
+            conflicting_source: diagnostic.conflicting_source,
+            conflicting_root: diagnostic.conflicting_root,
+            marker_roots: diagnostic.marker_roots,
+        }
+    }
+}
+
 /// Describes the readiness of each ee subsystem.
 #[derive(Clone, Debug)]
 pub struct CapabilityReport {
     pub runtime: CapabilityStatus,
     pub storage: CapabilityStatus,
     pub search: CapabilityStatus,
+    pub agent_detection: CapabilityStatus,
 }
 
 impl CapabilityReport {
@@ -308,6 +491,7 @@ impl CapabilityReport {
             runtime: CapabilityStatus::Ready,
             storage: CapabilityStatus::Unimplemented,
             search: CapabilityStatus::Unimplemented,
+            agent_detection: CapabilityStatus::Ready,
         }
     }
 }
@@ -347,10 +531,13 @@ pub struct DegradationReport {
 #[derive(Clone, Debug)]
 pub struct StatusReport {
     pub version: &'static str,
+    pub workspace: Option<WorkspaceStatusReport>,
     pub capabilities: CapabilityReport,
     pub runtime: RuntimeReport,
     pub memory_health: MemoryHealthReport,
+    pub curation_health: CurationHealthReport,
     pub derived_assets: Vec<DerivedAssetReport>,
+    pub agent_inventory: AgentInventoryReport,
     pub degradations: Vec<DegradationReport>,
 }
 
@@ -376,7 +563,11 @@ impl StatusReport {
         let capabilities = CapabilityReport::gather();
         let runtime = RuntimeReport::gather();
         let memory_health = MemoryHealthReport::gather();
+        let workspace = gather_workspace_status(options.workspace_path.as_deref());
         let derived_assets = gather_derived_assets(options.workspace_path.as_deref());
+        let (curation_health, curation_degradations) =
+            gather_curation_health(options.workspace_path.as_deref());
+        let agent_inventory = AgentInventoryReport::not_inspected();
 
         let mut degradations = Vec::new();
 
@@ -407,15 +598,41 @@ impl StatusReport {
             });
         }
 
+        degradations.extend(curation_degradations);
+
         Self {
             version: build_info().version,
+            workspace,
             capabilities,
             runtime,
             memory_health,
+            curation_health,
             derived_assets,
+            agent_inventory,
             degradations,
         }
     }
+}
+
+fn gather_workspace_status(workspace_path: Option<&Path>) -> Option<WorkspaceStatusReport> {
+    let workspace_path = workspace_path?;
+    let request = match WorkspaceResolutionRequest::from_process(
+        Some(workspace_path.to_path_buf()),
+        WorkspaceResolutionMode::AllowUninitialized,
+    ) {
+        Ok(request) => request,
+        Err(_) => WorkspaceResolutionRequest::new(
+            PathBuf::from("."),
+            WorkspaceResolutionMode::AllowUninitialized,
+        )
+        .with_explicit_workspace(workspace_path.to_path_buf()),
+    };
+    let resolution = resolve_workspace(&request).ok()?;
+    let diagnostics = diagnose_workspace_resolution(&request, &resolution);
+    Some(WorkspaceStatusReport::from_resolution(
+        resolution,
+        diagnostics,
+    ))
 }
 
 fn gather_derived_assets(workspace_path: Option<&Path>) -> Vec<DerivedAssetReport> {
@@ -437,6 +654,263 @@ fn gather_derived_assets(workspace_path: Option<&Path>) -> Vec<DerivedAssetRepor
     let graph_snapshot = DerivedAssetReport::unimplemented("graph_snapshot", ".ee/graph");
 
     vec![search_index, graph_snapshot]
+}
+
+fn gather_curation_health(
+    workspace_path: Option<&Path>,
+) -> (CurationHealthReport, Vec<DegradationReport>) {
+    let Some(workspace_path) = workspace_path else {
+        return (CurationHealthReport::not_inspected(), Vec::new());
+    };
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return (
+            CurationHealthReport::unavailable(),
+            vec![DegradationReport {
+                code: "curation_health_unavailable",
+                severity: "low",
+                message: "Curation health is unavailable because the workspace database is missing.",
+                repair: "Run `ee init --workspace .` before inspecting curation health.",
+            }],
+        );
+    }
+
+    let canonical_workspace = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let workspace_id = stable_workspace_id(&canonical_workspace);
+    let connection = match DbConnection::open_file(&database_path) {
+        Ok(connection) => connection,
+        Err(_) => {
+            return (
+                CurationHealthReport::unavailable(),
+                vec![DegradationReport {
+                    code: "curation_health_unavailable",
+                    severity: "medium",
+                    message: "Curation health is unavailable because the database could not be opened.",
+                    repair: "Run `ee doctor --json`.",
+                }],
+            );
+        }
+    };
+    let candidates = match connection.list_curation_candidates(&workspace_id, None, None, None) {
+        Ok(candidates) => candidates,
+        Err(_) => {
+            return (
+                CurationHealthReport::unavailable(),
+                vec![DegradationReport {
+                    code: "curation_health_unavailable",
+                    severity: "medium",
+                    message: "Curation health is unavailable because candidate rows could not be read.",
+                    repair: "Run `ee db migrate --workspace .` and `ee doctor --json`.",
+                }],
+            );
+        }
+    };
+    let policies = match connection.list_curation_ttl_policies() {
+        Ok(policies) => policies,
+        Err(_) => {
+            return (
+                CurationHealthReport::unavailable(),
+                vec![DegradationReport {
+                    code: "curation_ttl_policy_unavailable",
+                    severity: "medium",
+                    message: "Curation TTL policy rows could not be read.",
+                    repair: "Run `ee db migrate --workspace .`.",
+                }],
+            );
+        }
+    };
+
+    let health = curation_health_from_rows(&candidates, &policies, Utc::now());
+    let degradations = curation_health_degradations(&health);
+    (health, degradations)
+}
+
+fn curation_health_from_rows(
+    candidates: &[StoredCurationCandidate],
+    policies: &[StoredCurationTtlPolicy],
+    now: DateTime<Utc>,
+) -> CurationHealthReport {
+    if candidates.is_empty() {
+        return CurationHealthReport {
+            status: CurationHealthStatus::Empty,
+            policy_count: capped_u32(policies.len()),
+            auto_promote_enabled_count: capped_u32(
+                policies
+                    .iter()
+                    .filter(|policy| policy.auto_promote_enabled)
+                    .count(),
+            ),
+            ..CurationHealthReport::not_inspected()
+        };
+    }
+
+    let policy_map = policies
+        .iter()
+        .map(|policy| (policy.id.as_str(), policy))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending_count = 0_u32;
+    let mut accepted_count = 0_u32;
+    let mut snoozed_count = 0_u32;
+    let mut rejected_count = 0_u32;
+    let mut due_count = 0_u32;
+    let mut prompt_count = 0_u32;
+    let mut escalation_count = 0_u32;
+    let mut blocked_count = 0_u32;
+    let mut oldest_pending_age_days = None;
+    let mut reviewed_latencies = Vec::new();
+    let mut next_scheduled_at: Option<String> = None;
+
+    for candidate in candidates {
+        let review_state = normalized_review_state(candidate);
+        match review_state.as_str() {
+            "accepted" => accepted_count = accepted_count.saturating_add(1),
+            "snoozed" => snoozed_count = snoozed_count.saturating_add(1),
+            "rejected" => rejected_count = rejected_count.saturating_add(1),
+            _ => pending_count = pending_count.saturating_add(1),
+        }
+
+        if let (Ok(created), Some(reviewed)) = (
+            DateTime::parse_from_rfc3339(&candidate.created_at),
+            candidate.reviewed_at.as_deref(),
+        ) && let Ok(reviewed) = DateTime::parse_from_rfc3339(reviewed)
+        {
+            reviewed_latencies
+                .push(reviewed.signed_duration_since(created).num_days().max(0));
+        }
+
+        if pending_count > 0
+            && let Ok(created) = DateTime::parse_from_rfc3339(&candidate.created_at)
+        {
+            let age = now
+                .signed_duration_since(created.with_timezone(&Utc))
+                .num_days()
+                .max(0);
+            oldest_pending_age_days = Some(oldest_pending_age_days.map_or(age, |oldest| {
+                std::cmp::max(oldest, age)
+            }));
+        }
+
+        let policy_id = candidate
+            .ttl_policy_id
+            .as_deref()
+            .unwrap_or_else(|| default_curation_ttl_policy_id_for_review_state(&review_state));
+        let Some(policy) = policy_map.get(policy_id) else {
+            blocked_count = blocked_count.saturating_add(1);
+            continue;
+        };
+        let Some(state_entered) = candidate_state_entered_at(candidate) else {
+            blocked_count = blocked_count.saturating_add(1);
+            continue;
+        };
+        let threshold = match i64::try_from(policy.threshold_seconds) {
+            Ok(value) => chrono::Duration::seconds(value),
+            Err(_) => {
+                blocked_count = blocked_count.saturating_add(1);
+                continue;
+            }
+        };
+        let due_at = state_entered + threshold;
+        if due_at > now {
+            let due_at_str = due_at.to_rfc3339();
+            next_scheduled_at = match next_scheduled_at {
+                Some(current) if current < due_at_str => Some(current),
+                _ => Some(due_at_str),
+            };
+            continue;
+        }
+
+        due_count = due_count.saturating_add(1);
+        match policy.action.as_str() {
+            "prompt_promote" => prompt_count = prompt_count.saturating_add(1),
+            "escalate" => escalation_count = escalation_count.saturating_add(1),
+            "snooze" | "retire_with_audit" => {}
+            _ => blocked_count = blocked_count.saturating_add(1),
+        }
+    }
+
+    let mean_review_latency_days = if reviewed_latencies.is_empty() {
+        None
+    } else {
+        Some(reviewed_latencies.iter().sum::<i64>() / reviewed_latencies.len() as i64)
+    };
+    let status = if escalation_count > 0 {
+        CurationHealthStatus::Escalated
+    } else if blocked_count > 0 {
+        CurationHealthStatus::Degraded
+    } else if due_count > 0 {
+        CurationHealthStatus::Due
+    } else {
+        CurationHealthStatus::Healthy
+    };
+
+    CurationHealthReport {
+        status,
+        total_count: capped_u32(candidates.len()),
+        pending_count,
+        accepted_count,
+        snoozed_count,
+        rejected_count,
+        due_count,
+        prompt_count,
+        escalation_count,
+        blocked_count,
+        policy_count: capped_u32(policies.len()),
+        auto_promote_enabled_count: capped_u32(
+            policies
+                .iter()
+                .filter(|policy| policy.auto_promote_enabled)
+                .count(),
+        ),
+        oldest_pending_age_days,
+        mean_review_latency_days,
+        next_scheduled_at,
+    }
+}
+
+fn curation_health_degradations(health: &CurationHealthReport) -> Vec<DegradationReport> {
+    let mut degradations = Vec::new();
+    if health.escalation_count > 0 {
+        degradations.push(DegradationReport {
+            code: "curation_harmful_candidate_escalated",
+            severity: "high",
+            message: "One or more rejected curation candidates reached their escalation TTL.",
+            repair: "Run `ee curate disposition --json` and review escalated candidates.",
+        });
+    }
+    if health.blocked_count > 0 {
+        degradations.push(DegradationReport {
+            code: "curation_ttl_blocked",
+            severity: "medium",
+            message: "One or more curation candidates could not be evaluated against TTL policy.",
+            repair: "Run `ee curate disposition --json` for candidate-level errors.",
+        });
+    }
+    degradations
+}
+
+fn normalized_review_state(candidate: &StoredCurationCandidate) -> String {
+    if candidate.review_state.trim().is_empty() {
+        "new".to_owned()
+    } else {
+        candidate.review_state.clone()
+    }
+}
+
+fn candidate_state_entered_at(candidate: &StoredCurationCandidate) -> Option<DateTime<Utc>> {
+    candidate
+        .state_entered_at
+        .as_deref()
+        .or(candidate.reviewed_at.as_deref())
+        .or(candidate.applied_at.as_deref())
+        .unwrap_or(candidate.created_at.as_str())
+        .parse::<DateTime<Utc>>()
+        .ok()
+}
+
+fn capped_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
@@ -475,6 +949,11 @@ mod tests {
             CapabilityStatus::Unimplemented,
             "search not yet implemented",
         )?;
+        ensure(
+            report.capabilities.agent_detection,
+            CapabilityStatus::Ready,
+            "agent detection should be ready",
+        )?;
         ensure(report.runtime.engine, "asupersync", "runtime engine")?;
         ensure(report.runtime.profile, "current_thread", "runtime profile")?;
         ensure(
@@ -483,6 +962,27 @@ mod tests {
             "derived assets should be reported",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn status_report_includes_deferred_agent_inventory() -> TestResult {
+        let report = StatusReport::gather();
+
+        ensure(
+            report.agent_inventory.status.as_str(),
+            "not_inspected",
+            "agent inventory status",
+        )?;
+        ensure(
+            report.agent_inventory.inspection_command,
+            "ee agent status --json",
+            "agent inventory inspection command",
+        )?;
+        ensure(
+            report.agent_inventory.installed_agents.is_empty(),
+            true,
+            "status report should not expose machine-specific roots",
+        )
     }
 
     #[test]

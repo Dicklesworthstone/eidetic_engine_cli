@@ -12,9 +12,9 @@ use crate::models::{
     InstallFinding, InstallFindingCode, InstallOperation, InstallPathAnalysis, InstallPathStatus,
     InstallPermissionCheck, InstallPermissionStatus, InstallPlanReport, InstallPlanStatus,
     InstallTarget, InstallVerificationPlan, PathBinary, PlannedInstallOperation,
-    RELEASE_BINARY_NAME, ReleaseManifest, ReleaseVerificationCode, ReleaseVerificationSeverity,
-    UPDATE_PLAN_SCHEMA_V1, UpdateSourcePosture, compare_versions, is_safe_install_path,
-    is_safe_release_artifact_path, is_supported_release_target,
+    RELEASE_BINARY_NAME, RELEASE_MANIFEST_SCHEMA_V1, ReleaseManifest, ReleaseVerificationCode,
+    ReleaseVerificationSeverity, UPDATE_PLAN_SCHEMA_V1, UpdateSourcePosture, compare_versions,
+    is_safe_install_path, is_safe_release_artifact_path, is_supported_release_target,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -219,7 +219,7 @@ pub fn plan_install(options: &InstallPlanOptions) -> InstallPlanReport {
     }
 
     if let Some(manifest_path) = &options.manifest {
-        match load_manifest(manifest_path) {
+        match load_manifest(manifest_path, &target_triple, &mut findings) {
             Ok(manifest) => {
                 manifest_status = "loaded".to_owned();
                 target_version = target_version.or(Some(manifest.release_version.clone()));
@@ -288,6 +288,11 @@ pub fn plan_install(options: &InstallPlanOptions) -> InstallPlanReport {
                 }
             }
             Err(finding) => {
+                manifest_status = if finding.code == InstallFindingCode::ManifestMissing {
+                    "missing".to_owned()
+                } else {
+                    "invalid".to_owned()
+                };
                 findings.push(finding);
             }
         }
@@ -537,7 +542,11 @@ fn check_permissions(install_dir: &Path, install_path: &str) -> InstallPermissio
     }
 }
 
-fn load_manifest(path: &Path) -> Result<ReleaseManifest, InstallFinding> {
+fn load_manifest(
+    path: &Path,
+    target_triple: &str,
+    findings: &mut Vec<InstallFinding>,
+) -> Result<ReleaseManifest, InstallFinding> {
     let raw = fs::read_to_string(path).map_err(|error| {
         InstallFinding::error(
             InstallFindingCode::ManifestMissing,
@@ -548,6 +557,7 @@ fn load_manifest(path: &Path) -> Result<ReleaseManifest, InstallFinding> {
             "Pass a readable --manifest path.",
         )
     })?;
+    collect_manifest_shape_findings(&raw, target_triple, findings);
     serde_json::from_str(&raw).map_err(|error| {
         InstallFinding::error(
             InstallFindingCode::ManifestInvalid,
@@ -558,6 +568,52 @@ fn load_manifest(path: &Path) -> Result<ReleaseManifest, InstallFinding> {
             "Regenerate the release manifest or pass a valid ee.release_manifest.v1 file.",
         )
     })
+}
+
+fn collect_manifest_shape_findings(
+    raw: &str,
+    target_triple: &str,
+    findings: &mut Vec<InstallFinding>,
+) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return;
+    };
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some(RELEASE_MANIFEST_SCHEMA_V1) {
+        return;
+    }
+
+    let Some(artifacts) = value.get("artifacts").and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    if artifacts.is_empty() {
+        findings.push(InstallFinding::error(
+            InstallFindingCode::NoArtifacts,
+            "release manifest contains no artifacts",
+            "Regenerate the release manifest after packaging at least one supported target.",
+        ));
+        return;
+    }
+
+    let matching_targets = artifacts
+        .iter()
+        .filter(|artifact| manifest_artifact_target(artifact) == Some(target_triple))
+        .count();
+    if matching_targets > 1 {
+        findings.push(InstallFinding::warning(
+            InstallFindingCode::DuplicateTarget,
+            format!(
+                "release manifest contains {matching_targets} artifacts for target '{target_triple}'"
+            ),
+            "Keep one artifact per target triple or split variants behind explicit target names.",
+        ));
+    }
+}
+
+fn manifest_artifact_target(artifact: &serde_json::Value) -> Option<&str> {
+    artifact
+        .get("targetTriple")
+        .or_else(|| artifact.get("target"))
+        .and_then(serde_json::Value::as_str)
 }
 
 fn map_release_finding(finding: &crate::models::ReleaseVerificationFinding) -> InstallFinding {
@@ -733,6 +789,46 @@ mod tests {
                 .iter()
                 .any(|finding| finding.code == InstallFindingCode::OfflineNoManifest),
             "offline_no_manifest finding",
+        )
+    }
+
+    #[test]
+    fn manifest_shape_reports_empty_artifacts() -> TestResult {
+        let mut findings = Vec::new();
+        collect_manifest_shape_findings(
+            r#"{"schema":"ee.release_manifest.v1","artifacts":[]}"#,
+            "x86_64-unknown-linux-gnu",
+            &mut findings,
+        );
+
+        ensure(
+            findings
+                .iter()
+                .any(|finding| finding.code == InstallFindingCode::NoArtifacts),
+            "no_artifacts finding",
+        )
+    }
+
+    #[test]
+    fn manifest_shape_reports_duplicate_target_aliases() -> TestResult {
+        let mut findings = Vec::new();
+        collect_manifest_shape_findings(
+            r#"{
+              "schema":"ee.release_manifest.v1",
+              "artifacts":[
+                {"target":"x86_64-unknown-linux-gnu"},
+                {"targetTriple":"x86_64-unknown-linux-gnu"}
+              ]
+            }"#,
+            "x86_64-unknown-linux-gnu",
+            &mut findings,
+        );
+
+        ensure(
+            findings
+                .iter()
+                .any(|finding| finding.code == InstallFindingCode::DuplicateTarget),
+            "duplicate_target finding",
         )
     }
 

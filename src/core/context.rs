@@ -479,11 +479,11 @@ fn candidate_from_hit(
     query: &str,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<PackCandidate> {
-    let memory_id = match MemoryId::from_str(&hit.doc_id) {
-        Ok(id) => id,
-        Err(_) => return None,
+    let (memory_id, artifact_id) = match MemoryId::from_str(&hit.doc_id) {
+        Ok(id) => (id, None),
+        Err(_) => artifact_linked_memory_id(connection, hit, degraded)?,
     };
-    let memory = match connection.get_memory(&hit.doc_id) {
+    let memory = match connection.get_memory(&memory_id.to_string()) {
         Ok(Some(memory)) if memory.tombstoned_at.is_none() => memory,
         Ok(_) | Err(_) => return None,
     };
@@ -504,11 +504,23 @@ fn candidate_from_hit(
     let relevance = unit_score(hit.score)?;
     let utility = unit_score(memory.utility)?;
     let content = memory.content.clone();
-    let why = format!(
-        "Selected for query `{query}` from {} search result with score {:.4} and utility {:.4}.",
-        hit.source.as_str(),
-        hit.score,
-        memory.utility
+    let why = artifact_id.map_or_else(
+        || {
+            format!(
+                "Selected for query `{query}` from {} search result with score {:.4} and utility {:.4}.",
+                hit.source.as_str(),
+                hit.score,
+                memory.utility
+            )
+        },
+        |artifact_id| {
+            format!(
+                "Selected for query `{query}` through registered artifact {artifact_id} from {} search result with score {:.4} and linked memory utility {:.4}.",
+                hit.source.as_str(),
+                hit.score,
+                memory.utility
+            )
+        },
     );
     let candidate = PackCandidate::new(PackCandidateInput {
         memory_id,
@@ -527,6 +539,105 @@ fn candidate_from_hit(
             .with_diversity_key(diversity_key_for_memory(&memory, &tags))
             .with_trust_signal(trust_signal_for_memory(&memory, memory_id, degraded)),
     )
+}
+
+fn artifact_linked_memory_id(
+    connection: &DbConnection,
+    hit: &crate::core::search::SearchHit,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Option<(MemoryId, Option<String>)> {
+    let has_artifact_metadata = hit
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("source"))
+        .and_then(serde_json::Value::as_str)
+        == Some("artifact");
+    if !has_artifact_metadata && !is_registered_artifact_hit(connection, &hit.doc_id, degraded) {
+        return None;
+    }
+
+    let links = match connection.list_artifact_links(&hit.doc_id) {
+        Ok(links) => links,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_artifact_links_unavailable",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Artifact links for {} could not be loaded: {error}",
+                    hit.doc_id
+                ),
+                Some(format!("ee artifact inspect {} --json", hit.doc_id)),
+            );
+            return None;
+        }
+    };
+
+    for link in links {
+        if link.target_type != "memory" {
+            continue;
+        }
+        match MemoryId::from_str(&link.target_id) {
+            Ok(memory_id) => return Some((memory_id, Some(hit.doc_id.clone()))),
+            Err(error) => push_degradation(
+                degraded,
+                "context_artifact_memory_link_invalid",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Artifact {} links to invalid memory id `{}`: {error}",
+                    hit.doc_id, link.target_id
+                ),
+                Some(format!("ee artifact inspect {} --json", hit.doc_id)),
+            ),
+        }
+    }
+
+    push_degradation(
+        degraded,
+        "context_artifact_unlinked",
+        ContextResponseSeverity::Low,
+        format!(
+            "Artifact {} matched search but has no valid memory link for context packing.",
+            hit.doc_id
+        ),
+        Some("ee artifact register <path> --link-memory <memory-id> --json".to_string()),
+    );
+    None
+}
+
+fn is_registered_artifact_hit(
+    connection: &DbConnection,
+    artifact_id: &str,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> bool {
+    if !is_registry_artifact_id(artifact_id) {
+        return false;
+    }
+
+    match connection.get_artifact(artifact_id) {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_artifact_lookup_unavailable",
+                ContextResponseSeverity::Low,
+                format!("Artifact {artifact_id} could not be loaded: {error}"),
+                Some(format!("ee artifact inspect {artifact_id} --json")),
+            );
+            false
+        }
+    }
+}
+
+fn is_registry_artifact_id(value: &str) -> bool {
+    value.len() == 30
+        && value.starts_with("art_")
+        && value.strip_prefix("art_").is_some_and(|suffix| {
+            suffix
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
 }
 
 fn trust_signal_for_memory(

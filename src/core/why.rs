@@ -10,6 +10,7 @@
 
 use std::path::Path;
 
+use crate::core::memory::memory_validity;
 use crate::db::DbConnection;
 use sqlmodel_core::{Row, Value};
 
@@ -26,6 +27,14 @@ pub struct StorageExplanation {
     pub provenance_uri: Option<String>,
     /// When the memory was created.
     pub created_at: String,
+    /// RFC3339 timestamp when this memory becomes applicable.
+    pub valid_from: Option<String>,
+    /// RFC3339 timestamp when this memory stops being applicable.
+    pub valid_to: Option<String>,
+    /// Current validity status computed from the stored validity window.
+    pub validity_status: String,
+    /// Stable shape of the validity window.
+    pub validity_window_kind: String,
 }
 
 /// Why a memory would be retrieved by search.
@@ -303,12 +312,17 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     // Fetch memory links (EE-LINK-USAGE-001)
     let links = fetch_links(&conn, options.memory_id);
 
+    let validity = memory_validity(&memory.valid_from, &memory.valid_to);
     let storage = StorageExplanation {
         origin: determine_origin(&memory.trust_class),
         trust_class: memory.trust_class.clone(),
         trust_subclass: memory.trust_subclass.clone(),
         provenance_uri: memory.provenance_uri.clone(),
         created_at: memory.created_at.clone(),
+        valid_from: validity.valid_from,
+        valid_to: validity.valid_to,
+        validity_status: validity.status,
+        validity_window_kind: validity.window_kind,
     };
 
     let retrieval = RetrievalExplanation {
@@ -624,6 +638,10 @@ mod tests {
                 trust_subclass: None,
                 provenance_uri: None,
                 created_at: "2026-04-29T12:00:00Z".to_string(),
+                valid_from: None,
+                valid_to: None,
+                validity_status: "unknown".to_string(),
+                validity_window_kind: "unbounded".to_string(),
             },
             RetrievalExplanation {
                 confidence: 0.9,

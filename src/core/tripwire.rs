@@ -14,6 +14,9 @@ use std::path::PathBuf;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::core::feedback::{
+    RecordFeedbackReport, RecordTripwireFeedbackOptions, TaskOutcome, record_tripwire_feedback,
+};
 use crate::models::DomainError;
 use crate::models::preflight::{Tripwire, TripwireAction, TripwireState, TripwireType};
 
@@ -128,6 +131,8 @@ pub struct CheckOptions {
     pub tripwire_id: String,
     /// Update the last_checked_at timestamp.
     pub update_timestamp: bool,
+    /// Observed task outcome for optional scoring feedback.
+    pub task_outcome: Option<TaskOutcome>,
     /// Perform a dry-run check without persisting.
     pub dry_run: bool,
 }
@@ -171,6 +176,7 @@ impl CheckResult {
 pub struct CheckReport {
     pub schema: String,
     pub tripwire_id: String,
+    pub preflight_run_id: Option<String>,
     pub result: CheckResult,
     pub state: String,
     pub action: String,
@@ -180,6 +186,7 @@ pub struct CheckReport {
     pub dry_run: bool,
     pub checked_at: String,
     pub details: Option<String>,
+    pub feedback: Option<RecordFeedbackReport>,
 }
 
 impl CheckReport {
@@ -188,6 +195,7 @@ impl CheckReport {
         Self {
             schema: TRIPWIRE_CHECK_SCHEMA_V1.to_owned(),
             tripwire_id: tripwire_id.into(),
+            preflight_run_id: None,
             result: CheckResult::NotFound,
             state: TripwireState::Armed.as_str().to_string(),
             action: TripwireAction::Warn.as_str().to_string(),
@@ -197,6 +205,7 @@ impl CheckReport {
             dry_run: false,
             checked_at: Utc::now().to_rfc3339(),
             details: None,
+            feedback: None,
         }
     }
 
@@ -290,6 +299,7 @@ pub fn check_tripwire(options: &CheckOptions) -> Result<CheckReport, DomainError
     report.action = tw.action.as_str().to_string();
     report.state = tw.state.as_str().to_string();
     report.message = tw.message.clone();
+    report.preflight_run_id = Some(tw.preflight_run_id.clone());
 
     match tw.state {
         TripwireState::Disarmed => {
@@ -316,6 +326,18 @@ pub fn check_tripwire(options: &CheckOptions) -> Result<CheckReport, DomainError
                 report.details = Some("Condition evaluated to false (triggered)".to_string());
             }
         }
+    }
+
+    if let Some(task_outcome) = options.task_outcome {
+        report.feedback = Some(record_tripwire_feedback(&RecordTripwireFeedbackOptions {
+            workspace: options.workspace.clone(),
+            preflight_run_id: tw.preflight_run_id.clone(),
+            tripwire_id: tw.id.clone(),
+            tripwire_fired: matches!(report.result, CheckResult::Triggered),
+            task_outcome,
+            notes: report.details.clone(),
+            dry_run: options.dry_run,
+        })?);
     }
 
     Ok(report)

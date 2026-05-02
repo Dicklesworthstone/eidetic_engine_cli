@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 
+use crate::core::agent_detect::{AgentInventoryReport, AgentInventoryStatus};
 use crate::db::{
     CreateMemoryInput, DbConnection, ForeignKeyCheckResult, IntegrityCheckResult,
     ProvenanceSampleVerificationReport,
@@ -142,6 +143,16 @@ impl DoctorReport {
     /// Convert the doctor report into a structured fix plan.
     #[must_use]
     pub fn to_fix_plan(&self) -> FixPlan {
+        self.to_fix_plan_with_agent_inventory(&AgentInventoryReport::not_inspected())
+    }
+
+    /// Convert the doctor report into a structured fix plan with optional
+    /// agent-root guidance for CASS import dry runs.
+    #[must_use]
+    pub fn to_fix_plan_with_agent_inventory(
+        &self,
+        agent_inventory: &AgentInventoryReport,
+    ) -> FixPlan {
         let steps: Vec<FixStep> = self
             .checks
             .iter()
@@ -169,6 +180,7 @@ impl DoctorReport {
             total_issues,
             fixable_issues,
             steps,
+            cass_import_guidance: CassImportGuidance::from_agent_inventory(agent_inventory),
         }
     }
 }
@@ -180,6 +192,7 @@ pub struct FixPlan {
     pub total_issues: usize,
     pub fixable_issues: usize,
     pub steps: Vec<FixStep>,
+    pub cass_import_guidance: CassImportGuidance,
 }
 
 impl FixPlan {
@@ -198,6 +211,128 @@ pub struct FixStep {
     pub issue: String,
     pub error_code: Option<ErrorCode>,
     pub command: &'static str,
+}
+
+/// CASS import guidance status derived from agent detection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CassImportGuidanceStatus {
+    AgentRootsDetected,
+    NoAgentRootsDetected,
+    NotInspected,
+    Unavailable,
+}
+
+impl CassImportGuidanceStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AgentRootsDetected => "agent_roots_detected",
+            Self::NoAgentRootsDetected => "no_agent_roots_detected",
+            Self::NotInspected => "not_inspected",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// One detected local agent source root relevant to CASS import review.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CassImportRootGuidance {
+    pub connector: String,
+    pub root_path: String,
+    pub guidance: String,
+}
+
+/// Agent-root guidance shown by `ee doctor --fix-plan`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CassImportGuidance {
+    pub status: CassImportGuidanceStatus,
+    pub detected_agent_count: usize,
+    pub detected_root_count: usize,
+    pub roots: Vec<CassImportRootGuidance>,
+    pub suggested_commands: Vec<String>,
+    pub message: String,
+}
+
+impl CassImportGuidance {
+    #[must_use]
+    pub fn from_agent_inventory(agent_inventory: &AgentInventoryReport) -> Self {
+        let mut roots: Vec<CassImportRootGuidance> = agent_inventory
+            .installed_agents
+            .iter()
+            .filter(|agent| agent.detected)
+            .flat_map(|agent| {
+                agent.root_paths.iter().map(|root_path| CassImportRootGuidance {
+                    connector: agent.slug.clone(),
+                    root_path: root_path.clone(),
+                    guidance: format!(
+                        "Review CASS dry-run coverage for {connector} history rooted at {root_path}.",
+                        connector = agent.slug
+                    ),
+                })
+            })
+            .collect();
+        roots.sort_by(|left, right| {
+            left.connector
+                .cmp(&right.connector)
+                .then(left.root_path.cmp(&right.root_path))
+        });
+
+        let status = match agent_inventory.status {
+            AgentInventoryStatus::Ready if roots.is_empty() => {
+                CassImportGuidanceStatus::NoAgentRootsDetected
+            }
+            AgentInventoryStatus::Ready => CassImportGuidanceStatus::AgentRootsDetected,
+            AgentInventoryStatus::Empty => CassImportGuidanceStatus::NoAgentRootsDetected,
+            AgentInventoryStatus::NotInspected => CassImportGuidanceStatus::NotInspected,
+            AgentInventoryStatus::Unavailable => CassImportGuidanceStatus::Unavailable,
+        };
+
+        let detected_root_count = roots.len();
+        let suggested_commands = match status {
+            CassImportGuidanceStatus::AgentRootsDetected => vec![
+                "ee agent status --json".to_string(),
+                "ee import cass --dry-run --json".to_string(),
+                "ee import cass --json".to_string(),
+            ],
+            CassImportGuidanceStatus::NoAgentRootsDetected => vec![
+                "ee agent scan --existing-only --json".to_string(),
+                "ee import cass --dry-run --json".to_string(),
+            ],
+            CassImportGuidanceStatus::NotInspected => vec![
+                "ee agent status --json".to_string(),
+                "ee agent scan --existing-only --json".to_string(),
+                "ee import cass --dry-run --json".to_string(),
+            ],
+            CassImportGuidanceStatus::Unavailable => vec![
+                "ee agent sources --json".to_string(),
+                "ee import cass --dry-run --json".to_string(),
+            ],
+        };
+
+        let message = match status {
+            CassImportGuidanceStatus::AgentRootsDetected => format!(
+                "Detected {detected_root_count} local agent source root(s); run a CASS dry-run before importing evidence."
+            ),
+            CassImportGuidanceStatus::NoAgentRootsDetected => {
+                "No local agent source roots were detected; CASS import can still report available sessions.".to_string()
+            }
+            CassImportGuidanceStatus::NotInspected => {
+                "Agent source roots were not inspected for this fix plan; run agent status for root-level guidance.".to_string()
+            }
+            CassImportGuidanceStatus::Unavailable => {
+                "Agent source root detection is unavailable; use the static source catalog and CASS dry-run output.".to_string()
+            }
+        };
+
+        Self {
+            status,
+            detected_agent_count: agent_inventory.summary.detected_count,
+            detected_root_count,
+            roots,
+            suggested_commands,
+            message,
+        }
+    }
 }
 
 /// Options for `ee diag integrity`.
@@ -1526,6 +1661,78 @@ mod tests {
         ensure(plan.is_empty(), true, "plan is empty when all healthy")?;
         ensure(plan.total_issues, 0, "no total issues")?;
         ensure(plan.fixable_issues, 0, "no fixable issues")
+    }
+
+    #[test]
+    fn fix_plan_default_guidance_defers_agent_root_inspection() -> TestResult {
+        let report = DoctorReport {
+            version: "0.1.0",
+            overall_healthy: true,
+            checks: vec![],
+        };
+        let plan = report.to_fix_plan();
+
+        ensure(
+            plan.cass_import_guidance.status,
+            CassImportGuidanceStatus::NotInspected,
+            "default guidance is deferred",
+        )?;
+        ensure(
+            plan.cass_import_guidance.detected_root_count,
+            0,
+            "deferred guidance has no roots",
+        )?;
+        ensure(
+            plan.cass_import_guidance
+                .suggested_commands
+                .contains(&"ee agent status --json".to_string()),
+            true,
+            "deferred guidance suggests agent status",
+        )
+    }
+
+    #[test]
+    fn fix_plan_agent_inventory_guidance_uses_detected_roots() -> TestResult {
+        let inventory = AgentInventoryReport::from_detection(
+            crate::core::agent_detect::detect_fixture_agents()
+                .map_err(|error| error.to_string())?,
+        );
+        let report = DoctorReport {
+            version: "0.1.0",
+            overall_healthy: false,
+            checks: vec![CheckResult::warning(
+                "cass",
+                "CASS import dry-run recommended.",
+                error_codes::AGENT_SOURCE_NOT_IMPORTED,
+            )],
+        };
+        let plan = report.to_fix_plan_with_agent_inventory(&inventory);
+
+        ensure(
+            plan.cass_import_guidance.status,
+            CassImportGuidanceStatus::AgentRootsDetected,
+            "fixture roots detected",
+        )?;
+        ensure(
+            plan.cass_import_guidance.detected_root_count >= 4,
+            true,
+            "fixture detected roots counted",
+        )?;
+        ensure(
+            plan.cass_import_guidance
+                .roots
+                .iter()
+                .any(|root| root.connector == "codex"),
+            true,
+            "codex fixture root present",
+        )?;
+        ensure(
+            plan.cass_import_guidance
+                .suggested_commands
+                .contains(&"ee import cass --dry-run --json".to_string()),
+            true,
+            "CASS dry-run command suggested",
+        )
     }
 
     #[test]

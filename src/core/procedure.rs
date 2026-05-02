@@ -3,14 +3,18 @@
 //! Provides propose, show, list, and export operations for procedures
 //! distilled from recorder runs and curation events.
 
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::Write as IoWrite;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::models::{
-    DomainError, ProcedureStatus, ProcedureVerificationStatus, SKILL_CAPSULE_SCHEMA_V1,
+    DomainError, ProcedureExportFormat, ProcedureStatus, ProcedureVerificationStatus,
+    SKILL_CAPSULE_SCHEMA_V1, SkillCapsuleInstallMode,
 };
 
 /// Schema for procedure propose report.
@@ -24,6 +28,18 @@ pub const PROCEDURE_LIST_REPORT_SCHEMA_V1: &str = "ee.procedure.list_report.v1";
 
 /// Schema for procedure export report.
 pub const PROCEDURE_EXPORT_REPORT_SCHEMA_V1: &str = "ee.procedure.export_report.v1";
+
+/// Schema for procedure promotion dry-run reports.
+pub const PROCEDURE_PROMOTE_REPORT_SCHEMA_V1: &str = "ee.procedure.promote_report.v1";
+
+/// Schema for procedure drift detection reports.
+pub const PROCEDURE_DRIFT_REPORT_SCHEMA_V1: &str = "ee.procedure.drift_report.v1";
+
+/// Schema for planned procedure promotion curation records.
+pub const PROCEDURE_PROMOTION_CURATION_SCHEMA_V1: &str = "ee.procedure.promotion_curation.v1";
+
+/// Schema for planned procedure promotion audit records.
+pub const PROCEDURE_PROMOTION_AUDIT_SCHEMA_V1: &str = "ee.procedure.promotion_audit.v1";
 
 // ============================================================================
 // Propose Operation
@@ -310,7 +326,7 @@ pub fn list_procedures(options: &ProcedureListOptions) -> Result<ProcedureListRe
     Ok(ProcedureListReport {
         schema: PROCEDURE_LIST_REPORT_SCHEMA_V1.to_owned(),
         total_count: 3,
-        filtered_count: filtered.len() as u32,
+        filtered_count: usize_to_u32_saturating(filtered.len()),
         procedures: filtered,
     })
 }
@@ -332,10 +348,18 @@ pub struct ProcedureExportOptions {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProcedureExportReport {
     pub schema: String,
+    pub export_id: String,
     pub procedure_id: String,
     pub format: String,
+    pub artifact_kind: String,
     pub output_path: Option<String>,
+    pub content: String,
     pub content_length: usize,
+    pub content_hash: String,
+    pub includes_evidence: bool,
+    pub redaction_status: String,
+    pub install_mode: Option<String>,
+    pub warnings: Vec<String>,
     pub exported_at: String,
 }
 
@@ -346,50 +370,657 @@ impl ProcedureExportReport {
     }
 }
 
-/// Export a procedure as a skill capsule.
+/// Export a procedure as Markdown, playbook YAML, or a render-only skill capsule.
 pub fn export_procedure(
     options: &ProcedureExportOptions,
 ) -> Result<ProcedureExportReport, DomainError> {
+    let format =
+        ProcedureExportFormat::from_str(&options.format).map_err(|error| DomainError::Usage {
+            message: error.to_string(),
+            repair: Some(
+                "Use --export-format markdown, --export-format playbook, or --export-format skill-capsule."
+                    .to_owned(),
+            ),
+        })?;
     let exported_at = Utc::now().to_rfc3339();
+    let export_id = format!("exp_{}", generate_id());
 
-    let content = match options.format.as_str() {
-        "json" => {
-            let capsule = json!({
-                "schema": SKILL_CAPSULE_SCHEMA_V1,
-                "procedureId": options.procedure_id,
-                "title": format!("Procedure {}", options.procedure_id),
-                "steps": [
-                    {"sequence": 1, "title": "Step 1", "instruction": "Do the first thing"},
-                    {"sequence": 2, "title": "Step 2", "instruction": "Do the second thing"},
-                ],
-                "exportedAt": exported_at,
-            });
-            serde_json::to_string_pretty(&capsule).unwrap_or_default()
-        }
-        "yaml" => {
-            format!(
-                "# Skill Capsule: {}\n\nprocedure_id: {}\ntitle: Procedure {}\nsteps:\n  - sequence: 1\n    title: Step 1\n  - sequence: 2\n    title: Step 2\n",
-                options.procedure_id, options.procedure_id, options.procedure_id
-            )
-        }
-        _ => {
-            format!(
-                "# Procedure: {}\n\n## Steps\n\n1. **Step 1**: Do the first thing\n2. **Step 2**: Do the second thing\n",
-                options.procedure_id
-            )
-        }
-    };
+    let snapshot = procedure_export_snapshot(&options.procedure_id, &exported_at)?;
+    let content = render_export_content(&snapshot, format, &export_id, &exported_at)?;
+    let content_hash = format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex());
+    let warnings = export_warnings(format);
+    let output_path = options
+        .output_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+
+    if let Some(path) = &options.output_path {
+        write_export_file(path, &content)?;
+    }
+
+    let content_length = content.len();
 
     Ok(ProcedureExportReport {
         schema: PROCEDURE_EXPORT_REPORT_SCHEMA_V1.to_owned(),
+        export_id,
         procedure_id: options.procedure_id.clone(),
-        format: options.format.clone(),
-        output_path: options
-            .output_path
-            .as_ref()
-            .map(|p| p.display().to_string()),
-        content_length: content.len(),
+        format: format.as_str().to_owned(),
+        artifact_kind: artifact_kind(format).to_owned(),
+        output_path,
+        content,
+        content_length,
+        content_hash,
+        includes_evidence: true,
+        redaction_status: "not_required".to_owned(),
+        install_mode: install_mode(format),
+        warnings,
         exported_at,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct ProcedureExportSnapshot {
+    procedure: ProcedureDetail,
+    steps: Vec<ProcedureStepDetail>,
+}
+
+fn procedure_export_snapshot(
+    procedure_id: &str,
+    exported_at: &str,
+) -> Result<ProcedureExportSnapshot, DomainError> {
+    let report = show_procedure(&ProcedureShowOptions {
+        procedure_id: procedure_id.to_owned(),
+        include_steps: true,
+        include_verification: false,
+        ..Default::default()
+    })?;
+
+    let mut procedure = report.procedure;
+    procedure.updated_at = exported_at.to_owned();
+
+    Ok(ProcedureExportSnapshot {
+        procedure,
+        steps: report.steps,
+    })
+}
+
+fn render_export_content(
+    snapshot: &ProcedureExportSnapshot,
+    format: ProcedureExportFormat,
+    export_id: &str,
+    exported_at: &str,
+) -> Result<String, DomainError> {
+    Ok(match format {
+        ProcedureExportFormat::Json => render_procedure_export_manifest(
+            snapshot,
+            export_id,
+            exported_at,
+            ProcedureExportFormat::Json,
+        )?,
+        ProcedureExportFormat::Markdown => render_procedure_markdown(snapshot, exported_at),
+        ProcedureExportFormat::Playbook => render_procedure_playbook(snapshot, exported_at),
+        ProcedureExportFormat::SkillCapsule => {
+            render_skill_capsule(snapshot, export_id, exported_at)
+        }
+    })
+}
+
+fn render_procedure_markdown(snapshot: &ProcedureExportSnapshot, exported_at: &str) -> String {
+    let procedure = &snapshot.procedure;
+    let mut out = String::with_capacity(1024);
+    out.push_str(&format!("# {}\n\n", procedure.title));
+    out.push_str(&format!("{}\n\n", procedure.summary));
+    out.push_str("## Procedure\n\n");
+    out.push_str(&format!("- ID: `{}`\n", procedure.procedure_id));
+    out.push_str(&format!("- Status: `{}`\n", procedure.status));
+    out.push_str(&format!("- Generated: `{exported_at}`\n"));
+    out.push_str("- Redaction: `not_required`\n\n");
+
+    out.push_str("## Steps\n\n");
+    for step in &snapshot.steps {
+        out.push_str(&format!("{}. **{}**\n", step.sequence, step.title));
+        out.push_str(&format!("   {}\n", step.instruction));
+        if let Some(command) = &step.command_hint {
+            out.push_str(&format!("   Command: `{command}`\n"));
+        }
+        out.push_str(&format!("   Required: `{}`\n\n", step.required));
+    }
+
+    push_markdown_provenance(&mut out, procedure);
+    out
+}
+
+fn render_procedure_playbook(snapshot: &ProcedureExportSnapshot, exported_at: &str) -> String {
+    let procedure = &snapshot.procedure;
+    let mut out = String::with_capacity(1024);
+    out.push_str("schema: \"ee.procedure.playbook.v1\"\n");
+    out.push_str(&format!(
+        "procedure_id: {}\n",
+        yaml_string(&procedure.procedure_id)
+    ));
+    out.push_str(&format!("title: {}\n", yaml_string(&procedure.title)));
+    out.push_str(&format!("summary: {}\n", yaml_string(&procedure.summary)));
+    out.push_str(&format!("status: {}\n", yaml_string(&procedure.status)));
+    out.push_str(&format!("generated_at: {}\n", yaml_string(exported_at)));
+    out.push_str("redaction_status: \"not_required\"\n");
+    out.push_str("steps:\n");
+    for step in &snapshot.steps {
+        out.push_str(&format!("  - sequence: {}\n", step.sequence));
+        out.push_str(&format!("    step_id: {}\n", yaml_string(&step.step_id)));
+        out.push_str(&format!("    title: {}\n", yaml_string(&step.title)));
+        out.push_str(&format!(
+            "    instruction: {}\n",
+            yaml_string(&step.instruction)
+        ));
+        match &step.command_hint {
+            Some(command) => out.push_str(&format!("    command_hint: {}\n", yaml_string(command))),
+            None => out.push_str("    command_hint: null\n"),
+        }
+        out.push_str(&format!("    required: {}\n", step.required));
+    }
+    push_yaml_array(&mut out, "source_run_ids", &procedure.source_run_ids);
+    push_yaml_array(&mut out, "evidence_ids", &procedure.evidence_ids);
+    out
+}
+
+fn render_skill_capsule(
+    snapshot: &ProcedureExportSnapshot,
+    export_id: &str,
+    exported_at: &str,
+) -> String {
+    let procedure = &snapshot.procedure;
+    let capsule_id = format!("capsule_{}", generate_id());
+    let capsule_name = format!("procedure-{}", slugify_identifier(&procedure.procedure_id));
+    let mut body = String::with_capacity(1536);
+    body.push_str("---\n");
+    body.push_str(&format!("name: {}\n", yaml_string(&capsule_name)));
+    body.push_str(&format!(
+        "description: {}\n",
+        yaml_string(&format!(
+            "Render-only procedure capsule for {}",
+            procedure.title
+        ))
+    ));
+    body.push_str(&format!("schema: \"{}\"\n", SKILL_CAPSULE_SCHEMA_V1));
+    body.push_str(&format!("capsule_id: {}\n", yaml_string(&capsule_id)));
+    body.push_str(&format!(
+        "procedure_id: {}\n",
+        yaml_string(&procedure.procedure_id)
+    ));
+    body.push_str(&format!("source_export_id: {}\n", yaml_string(export_id)));
+    body.push_str(&format!(
+        "install_mode: {}\n",
+        yaml_string(SkillCapsuleInstallMode::RenderOnly.as_str())
+    ));
+    body.push_str("---\n\n");
+    body.push_str(&format!("# {}\n\n", procedure.title));
+    body.push_str(&format!("{}\n\n", procedure.summary));
+    body.push_str("## Safety\n\n");
+    body.push_str("- This capsule is render-only and is not installed automatically.\n");
+    body.push_str(
+        "- Review the procedure and evidence before copying it into a skill directory.\n",
+    );
+    body.push_str(&format!("- Generated: `{exported_at}`\n\n"));
+    body.push_str("## Procedure Steps\n\n");
+    for step in &snapshot.steps {
+        body.push_str(&format!("{}. **{}**\n", step.sequence, step.title));
+        body.push_str(&format!("   {}\n", step.instruction));
+        if let Some(command) = &step.command_hint {
+            body.push_str(&format!("   Command: `{command}`\n"));
+        }
+        body.push('\n');
+    }
+    push_markdown_provenance(&mut body, procedure);
+    body
+}
+
+fn render_procedure_export_manifest(
+    snapshot: &ProcedureExportSnapshot,
+    export_id: &str,
+    exported_at: &str,
+    format: ProcedureExportFormat,
+) -> Result<String, DomainError> {
+    let value = json!({
+        "schema": "ee.procedure.export_artifact.v1",
+        "exportId": export_id,
+        "procedureId": snapshot.procedure.procedure_id,
+        "format": format.as_str(),
+        "generatedAt": exported_at,
+        "includesEvidence": true,
+        "redactionStatus": "not_required",
+        "procedure": snapshot.procedure,
+        "steps": snapshot.steps,
+    });
+    serde_json::to_string_pretty(&value).map_err(|error| DomainError::Usage {
+        message: format!("failed to render procedure export manifest: {error}"),
+        repair: Some("retry the export or choose --export-format markdown".to_owned()),
+    })
+}
+
+fn push_markdown_provenance(out: &mut String, procedure: &ProcedureDetail) {
+    out.push_str("## Provenance\n\n");
+    out.push_str("Source runs:\n");
+    for run_id in &procedure.source_run_ids {
+        out.push_str(&format!("- `{run_id}`\n"));
+    }
+    out.push_str("\nEvidence IDs:\n");
+    for evidence_id in &procedure.evidence_ids {
+        out.push_str(&format!("- `{evidence_id}`\n"));
+    }
+    out.push('\n');
+}
+
+fn push_yaml_array(out: &mut String, name: &str, values: &[String]) {
+    out.push_str(&format!("{name}:\n"));
+    if values.is_empty() {
+        out.push_str("  []\n");
+    } else {
+        for value in values {
+            out.push_str(&format!("  - {}\n", yaml_string(value)));
+        }
+    }
+}
+
+fn yaml_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned())
+}
+
+fn slugify_identifier(input: &str) -> String {
+    let mut slug = String::with_capacity(input.len());
+    let mut previous_dash = false;
+    for ch in input.chars() {
+        let next = if ch.is_ascii_alphanumeric() {
+            previous_dash = false;
+            Some(ch.to_ascii_lowercase())
+        } else if !previous_dash {
+            previous_dash = true;
+            Some('-')
+        } else {
+            None
+        };
+        if let Some(ch) = next {
+            slug.push(ch);
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "procedure".to_owned()
+    } else {
+        slug.to_owned()
+    }
+}
+
+fn artifact_kind(format: ProcedureExportFormat) -> &'static str {
+    match format {
+        ProcedureExportFormat::Json => "procedure_export_manifest",
+        ProcedureExportFormat::Markdown => "procedure_markdown",
+        ProcedureExportFormat::Playbook => "procedure_playbook",
+        ProcedureExportFormat::SkillCapsule => "skill_capsule",
+    }
+}
+
+fn install_mode(format: ProcedureExportFormat) -> Option<String> {
+    match format {
+        ProcedureExportFormat::SkillCapsule => {
+            Some(SkillCapsuleInstallMode::RenderOnly.as_str().to_owned())
+        }
+        ProcedureExportFormat::Json
+        | ProcedureExportFormat::Markdown
+        | ProcedureExportFormat::Playbook => None,
+    }
+}
+
+fn export_warnings(format: ProcedureExportFormat) -> Vec<String> {
+    match format {
+        ProcedureExportFormat::SkillCapsule => vec![
+            "skill capsule is render-only; no files are installed".to_owned(),
+            "manual review is required before copying into a skill directory".to_owned(),
+        ],
+        ProcedureExportFormat::Json
+        | ProcedureExportFormat::Markdown
+        | ProcedureExportFormat::Playbook => Vec::new(),
+    }
+}
+
+fn write_export_file(path: &Path, content: &str) -> Result<(), DomainError> {
+    if path.exists() {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "refusing to overwrite existing procedure export: {}",
+                path.display()
+            ),
+            repair: Some("choose a new --output path".to_owned()),
+        });
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to create procedure export at {}: {error}",
+                path.display()
+            ),
+            repair: Some("choose a writable output path whose parent exists".to_owned()),
+        })?;
+    file.write_all(content.as_bytes())
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to write procedure export at {}: {error}",
+                path.display()
+            ),
+            repair: Some("retry with a writable output path".to_owned()),
+        })
+}
+
+// ============================================================================
+// Promote Operation (EE-414)
+// ============================================================================
+
+/// Options for promoting a procedure through the dry-run curation path.
+#[derive(Clone, Debug, Default)]
+pub struct ProcedurePromoteOptions {
+    pub workspace: PathBuf,
+    pub procedure_id: String,
+    pub dry_run: bool,
+    pub actor: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// Report from a procedure promotion dry-run.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProcedurePromoteReport {
+    pub schema: String,
+    pub promotion_id: String,
+    pub procedure_id: String,
+    pub dry_run: bool,
+    pub status: String,
+    pub from_status: String,
+    pub to_status: String,
+    pub curation: ProcedurePromotionCurationPlan,
+    pub audit: ProcedurePromotionAuditPlan,
+    pub verification: ProcedurePromotionVerificationSummary,
+    pub planned_effects: Vec<ProcedurePromotionEffect>,
+    pub warnings: Vec<String>,
+    pub next_actions: Vec<String>,
+    pub generated_at: String,
+}
+
+/// Curation candidate that would be staged for a real procedure promotion.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcedurePromotionCurationPlan {
+    pub schema: String,
+    pub candidate_id: String,
+    pub candidate_type: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub target_title: String,
+    pub source_type: String,
+    pub source_id: Option<String>,
+    pub reason: String,
+    pub confidence: f64,
+    pub evidence_ids: Vec<String>,
+    pub status: String,
+    pub would_persist: bool,
+    pub applied: bool,
+}
+
+/// Audit record that would be written for a real procedure promotion.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcedurePromotionAuditPlan {
+    pub schema: String,
+    pub operation_id: String,
+    pub action: String,
+    pub effect_class: String,
+    pub outcome: String,
+    pub dry_run: bool,
+    pub actor: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub changed_surfaces: Vec<String>,
+    pub transaction_status: String,
+    pub would_record: bool,
+    pub recorded: bool,
+}
+
+/// Verification summary used to decide whether promotion can proceed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcedurePromotionVerificationSummary {
+    pub verification_id: String,
+    pub status: String,
+    pub overall_result: String,
+    pub pass_count: u32,
+    pub fail_count: u32,
+    pub skip_count: u32,
+    pub confidence: f64,
+    pub evidence_checked: Vec<String>,
+}
+
+/// Planned durable effect for a non-dry-run promotion.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcedurePromotionEffect {
+    pub surface: String,
+    pub operation: String,
+    pub target_id: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+    pub would_write: bool,
+    pub applied: bool,
+}
+
+impl ProcedurePromoteReport {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+/// Build a dry-run promotion plan for a procedure.
+pub fn promote_procedure(
+    options: &ProcedurePromoteOptions,
+) -> Result<ProcedurePromoteReport, DomainError> {
+    let procedure_id = options.procedure_id.trim();
+    if procedure_id.is_empty() {
+        return Err(DomainError::Usage {
+            message: "procedure id is required for promotion".to_owned(),
+            repair: Some("ee procedure promote <procedure-id> --dry-run --json".to_owned()),
+        });
+    }
+
+    if !options.dry_run {
+        return Err(DomainError::PolicyDenied {
+            message: "procedure promotion is dry-run-only in this implementation slice".to_owned(),
+            repair: Some("ee procedure promote <procedure-id> --dry-run --json".to_owned()),
+        });
+    }
+
+    let generated_at = Utc::now().to_rfc3339();
+    let show = show_procedure(&ProcedureShowOptions {
+        workspace: options.workspace.clone(),
+        procedure_id: procedure_id.to_owned(),
+        include_steps: true,
+        include_verification: true,
+    })?;
+    let verification = verify_procedure(&ProcedureVerifyOptions {
+        workspace: options.workspace.clone(),
+        procedure_id: procedure_id.to_owned(),
+        source_kind: Some("eval_fixture".to_owned()),
+        source_ids: show.procedure.evidence_ids.clone(),
+        dry_run: true,
+        allow_failure: true,
+    })?;
+
+    let from_status = show.procedure.status.clone();
+    let to_status = ProcedureStatus::Verified.as_str().to_owned();
+    let promotion_id = format!("pprom_{}", generate_id());
+    let candidate_id = format!("curate_{}", generate_id());
+    let operation_id = format!("audit_{}", generate_id());
+    let actor = options
+        .actor
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("agent")
+        .to_owned();
+    let reason = options
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            format!(
+                "Promote procedure {} after dry-run verification passed with {:.1}% confidence.",
+                show.procedure.procedure_id,
+                verification.confidence * 100.0
+            )
+        });
+
+    let already_verified = from_status == ProcedureStatus::Verified.as_str();
+    let blocked = verification.fail_count > 0 || verification.overall_result != "passed";
+    let status = if blocked {
+        "blocked"
+    } else if already_verified {
+        "already_verified_dry_run"
+    } else {
+        "dry_run"
+    }
+    .to_owned();
+
+    let curation_status = if blocked {
+        "blocked"
+    } else if already_verified {
+        "idempotent"
+    } else {
+        "pending_review"
+    }
+    .to_owned();
+
+    let audit_outcome = if blocked { "failure" } else { "dry_run" }.to_owned();
+    let verification_summary = ProcedurePromotionVerificationSummary {
+        verification_id: verification.verification_id,
+        status: verification.status,
+        overall_result: verification.overall_result,
+        pass_count: verification.pass_count,
+        fail_count: verification.fail_count,
+        skip_count: verification.skip_count,
+        confidence: verification.confidence,
+        evidence_checked: verification
+            .sources_checked
+            .iter()
+            .map(|source| source.source_id.clone())
+            .collect(),
+    };
+
+    let curation = ProcedurePromotionCurationPlan {
+        schema: PROCEDURE_PROMOTION_CURATION_SCHEMA_V1.to_owned(),
+        candidate_id: candidate_id.clone(),
+        candidate_type: "promote".to_owned(),
+        target_type: "procedure".to_owned(),
+        target_id: show.procedure.procedure_id.clone(),
+        target_title: show.procedure.title,
+        source_type: "human_request".to_owned(),
+        source_id: Some(procedure_id.to_owned()),
+        reason,
+        confidence: verification_summary.confidence,
+        evidence_ids: show.procedure.evidence_ids,
+        status: curation_status,
+        would_persist: false,
+        applied: false,
+    };
+
+    let audit = ProcedurePromotionAuditPlan {
+        schema: PROCEDURE_PROMOTION_AUDIT_SCHEMA_V1.to_owned(),
+        operation_id: operation_id.clone(),
+        action: "procedure.promote".to_owned(),
+        effect_class: "durable_memory_write".to_owned(),
+        outcome: audit_outcome,
+        dry_run: true,
+        actor,
+        target_type: "procedure".to_owned(),
+        target_id: procedure_id.to_owned(),
+        changed_surfaces: vec![
+            "procedures".to_owned(),
+            "curation_candidates".to_owned(),
+            "audit_log".to_owned(),
+        ],
+        transaction_status: "not_started".to_owned(),
+        would_record: false,
+        recorded: false,
+    };
+
+    let planned_effects = vec![
+        ProcedurePromotionEffect {
+            surface: "procedures".to_owned(),
+            operation: "update_status".to_owned(),
+            target_id: procedure_id.to_owned(),
+            before: Some(from_status.clone()),
+            after: Some(to_status.clone()),
+            would_write: !blocked && !already_verified,
+            applied: false,
+        },
+        ProcedurePromotionEffect {
+            surface: "curation_candidates".to_owned(),
+            operation: "insert".to_owned(),
+            target_id: candidate_id,
+            before: None,
+            after: Some("pending_review".to_owned()),
+            would_write: !blocked && !already_verified,
+            applied: false,
+        },
+        ProcedurePromotionEffect {
+            surface: "audit_log".to_owned(),
+            operation: "insert".to_owned(),
+            target_id: operation_id,
+            before: None,
+            after: Some("procedure.promote".to_owned()),
+            would_write: !blocked,
+            applied: false,
+        },
+    ];
+
+    let mut warnings = vec![
+        "dry-run only: no procedure status, curation candidate, or audit row was persisted"
+            .to_owned(),
+    ];
+    if blocked {
+        warnings.push("promotion is blocked until verification passes".to_owned());
+    }
+    if already_verified {
+        warnings.push("procedure is already verified; promotion would be idempotent".to_owned());
+    }
+
+    let next_actions = if blocked {
+        vec![
+            format!("ee procedure verify {procedure_id} --json"),
+            format!("ee procedure show {procedure_id} --include-verification --json"),
+        ]
+    } else {
+        vec![
+            "Review the planned curation candidate before enabling durable promotion".to_owned(),
+            "ee audit timeline --json".to_owned(),
+        ]
+    };
+
+    Ok(ProcedurePromoteReport {
+        schema: PROCEDURE_PROMOTE_REPORT_SCHEMA_V1.to_owned(),
+        promotion_id,
+        procedure_id: procedure_id.to_owned(),
+        dry_run: true,
+        status,
+        from_status,
+        to_status,
+        curation,
+        audit,
+        verification: verification_summary,
+        planned_effects,
+        warnings,
+        next_actions,
+        generated_at,
     })
 }
 
@@ -600,18 +1231,9 @@ pub fn verify_procedure(
             .collect()
     };
 
-    let pass_count = sources_checked
-        .iter()
-        .filter(|s| s.result == "passed")
-        .count() as u32;
-    let fail_count = sources_checked
-        .iter()
-        .filter(|s| s.result == "failed")
-        .count() as u32;
-    let skip_count = sources_checked
-        .iter()
-        .filter(|s| s.result == "skipped")
-        .count() as u32;
+    let pass_count = count_source_results(&sources_checked, "passed");
+    let fail_count = count_source_results(&sources_checked, "failed");
+    let skip_count = count_source_results(&sources_checked, "skipped");
 
     let overall_result = if fail_count > 0 {
         "failed".to_owned()
@@ -653,6 +1275,425 @@ pub fn verify_procedure(
         confidence,
         next_actions,
     })
+}
+
+// ============================================================================
+// Drift Detection Operation (EE-415)
+// ============================================================================
+
+/// Options for checking whether a procedure has drifted.
+#[derive(Clone, Debug, Default)]
+pub struct ProcedureDriftOptions {
+    /// Workspace path.
+    pub workspace: PathBuf,
+    /// Procedure ID to check.
+    pub procedure_id: String,
+    /// Fixed check timestamp. Defaults to now when omitted.
+    pub checked_at: Option<String>,
+    /// Evidence older than this threshold is stale. Defaults to 30 days.
+    pub staleness_threshold_days: u32,
+    /// Optional verification report; failed reports produce drift signals.
+    pub verification: Option<ProcedureVerifyReport>,
+    /// Evidence freshness observations.
+    pub evidence: Vec<ProcedureDriftEvidenceInput>,
+    /// Dependency contract observations.
+    pub dependency_contracts: Vec<ProcedureDependencyContractInput>,
+    /// Dry-run posture; drift checks never mutate in this implementation slice.
+    pub dry_run: bool,
+}
+
+/// Evidence freshness observation used by drift detection.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcedureDriftEvidenceInput {
+    pub evidence_id: String,
+    pub last_seen_at: String,
+    pub source_kind: String,
+}
+
+/// Dependency contract observation used by drift detection.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcedureDependencyContractInput {
+    pub dependency_name: String,
+    pub owning_surface: String,
+    pub expected_contract: String,
+    pub actual_contract: String,
+    pub compatibility: String,
+}
+
+/// Report from checking a procedure for drift.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcedureDriftReport {
+    pub schema: String,
+    pub procedure_id: String,
+    pub status: String,
+    pub drift_detected: bool,
+    pub checked_at: String,
+    pub staleness_threshold_days: u32,
+    pub dry_run: bool,
+    pub mutation: ProcedureDriftMutationPlan,
+    pub counts: ProcedureDriftCounts,
+    pub signals: Vec<ProcedureDriftSignal>,
+    pub next_actions: Vec<String>,
+}
+
+/// Dry-run mutation posture for drift detection.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcedureDriftMutationPlan {
+    pub would_mark_stale: bool,
+    pub would_open_curation_candidate: bool,
+    pub would_record_audit: bool,
+    pub applied: bool,
+}
+
+/// Deterministic signal counters for drift detection.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcedureDriftCounts {
+    pub total: u32,
+    pub failed_verifications: u32,
+    pub stale_evidence: u32,
+    pub dependency_contract_changes: u32,
+    pub high: u32,
+    pub medium: u32,
+    pub low: u32,
+}
+
+/// A single reason a procedure may have drifted.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcedureDriftSignal {
+    pub signal_id: String,
+    pub kind: String,
+    pub severity: String,
+    pub source_id: String,
+    pub summary: String,
+    pub evidence_ids: Vec<String>,
+    pub details: Vec<ProcedureDriftDetail>,
+    pub recommended_action: String,
+}
+
+/// Stable key/value detail for a drift signal.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcedureDriftDetail {
+    pub name: String,
+    pub value: String,
+}
+
+impl ProcedureDriftReport {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+/// Detect failed-verification, stale-evidence, and dependency-contract drift.
+pub fn detect_procedure_drift(
+    options: &ProcedureDriftOptions,
+) -> Result<ProcedureDriftReport, DomainError> {
+    let procedure_id = options.procedure_id.trim();
+    if procedure_id.is_empty() {
+        return Err(DomainError::Usage {
+            message: "procedure id is required for drift detection".to_owned(),
+            repair: Some(
+                "ee procedure show <procedure-id> --include-verification --json".to_owned(),
+            ),
+        });
+    }
+
+    let checked_at = options
+        .checked_at
+        .clone()
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let checked_time = parse_rfc3339_utc(&checked_at, "checked_at")?;
+    let threshold_days = if options.staleness_threshold_days == 0 {
+        30
+    } else {
+        options.staleness_threshold_days
+    };
+
+    let mut signals = Vec::new();
+    let mut next_actions = Vec::new();
+
+    if let Some(verification) = &options.verification {
+        push_failed_verification_signal(
+            &mut signals,
+            &mut next_actions,
+            procedure_id,
+            verification,
+        );
+    }
+
+    for evidence in &options.evidence {
+        push_stale_evidence_signal(
+            &mut signals,
+            &mut next_actions,
+            procedure_id,
+            evidence,
+            checked_time,
+            threshold_days,
+        )?;
+    }
+
+    for dependency in &options.dependency_contracts {
+        push_dependency_contract_signal(&mut signals, &mut next_actions, procedure_id, dependency);
+    }
+
+    let counts = count_drift_signals(&signals);
+    let status = if counts.high > 0 {
+        "drifted"
+    } else if counts.total > 0 {
+        "at_risk"
+    } else {
+        "current"
+    }
+    .to_owned();
+    let drift_detected = counts.total > 0;
+
+    if drift_detected {
+        push_unique_action(
+            &mut next_actions,
+            "Review drift signals before promoting or exporting this procedure.",
+        );
+    } else {
+        push_unique_action(&mut next_actions, "No drift action required.");
+    }
+
+    Ok(ProcedureDriftReport {
+        schema: PROCEDURE_DRIFT_REPORT_SCHEMA_V1.to_owned(),
+        procedure_id: procedure_id.to_owned(),
+        status: status.clone(),
+        drift_detected,
+        checked_at,
+        staleness_threshold_days: threshold_days,
+        dry_run: true,
+        mutation: ProcedureDriftMutationPlan {
+            would_mark_stale: drift_detected,
+            would_open_curation_candidate: status == "drifted",
+            would_record_audit: drift_detected,
+            applied: false,
+        },
+        counts,
+        signals,
+        next_actions,
+    })
+}
+
+fn push_failed_verification_signal(
+    signals: &mut Vec<ProcedureDriftSignal>,
+    next_actions: &mut Vec<String>,
+    procedure_id: &str,
+    verification: &ProcedureVerifyReport,
+) {
+    let failed = verification.fail_count > 0
+        || verification.overall_result == "failed"
+        || verification.status == "failed";
+    if !failed {
+        return;
+    }
+
+    let evidence_ids = verification
+        .sources_checked
+        .iter()
+        .map(|source| source.source_id.clone())
+        .collect();
+    signals.push(ProcedureDriftSignal {
+        signal_id: next_drift_signal_id(signals),
+        kind: "failed_verification".to_owned(),
+        severity: "high".to_owned(),
+        source_id: verification.verification_id.clone(),
+        summary: format!(
+            "Procedure verification failed with {} failed source(s).",
+            verification.fail_count
+        ),
+        evidence_ids,
+        details: vec![
+            ProcedureDriftDetail {
+                name: "verificationId".to_owned(),
+                value: verification.verification_id.clone(),
+            },
+            ProcedureDriftDetail {
+                name: "overallResult".to_owned(),
+                value: verification.overall_result.clone(),
+            },
+            ProcedureDriftDetail {
+                name: "verifiedAt".to_owned(),
+                value: verification.verified_at.clone(),
+            },
+        ],
+        recommended_action: format!(
+            "Re-run or inspect verification before reusing procedure {procedure_id}."
+        ),
+    });
+    push_unique_action(
+        next_actions,
+        &format!("ee procedure verify {procedure_id} --json"),
+    );
+}
+
+fn push_stale_evidence_signal(
+    signals: &mut Vec<ProcedureDriftSignal>,
+    next_actions: &mut Vec<String>,
+    procedure_id: &str,
+    evidence: &ProcedureDriftEvidenceInput,
+    checked_time: DateTime<Utc>,
+    threshold_days: u32,
+) -> Result<(), DomainError> {
+    let evidence_time = parse_rfc3339_utc(&evidence.last_seen_at, "evidence.last_seen_at")?;
+    let staleness_days = checked_time
+        .signed_duration_since(evidence_time)
+        .num_days()
+        .max(0);
+    let staleness_days = u32::try_from(staleness_days).unwrap_or(u32::MAX);
+    if staleness_days < threshold_days {
+        return Ok(());
+    }
+
+    signals.push(ProcedureDriftSignal {
+        signal_id: next_drift_signal_id(signals),
+        kind: "stale_evidence".to_owned(),
+        severity: "medium".to_owned(),
+        source_id: evidence.evidence_id.clone(),
+        summary: format!(
+            "Evidence has not been refreshed for {staleness_days} day(s), meeting the {threshold_days}-day threshold."
+        ),
+        evidence_ids: vec![evidence.evidence_id.clone()],
+        details: vec![
+            ProcedureDriftDetail {
+                name: "sourceKind".to_owned(),
+                value: evidence.source_kind.clone(),
+            },
+            ProcedureDriftDetail {
+                name: "lastSeenAt".to_owned(),
+                value: evidence.last_seen_at.clone(),
+            },
+            ProcedureDriftDetail {
+                name: "stalenessDays".to_owned(),
+                value: staleness_days.to_string(),
+            },
+        ],
+        recommended_action: format!("Refresh evidence before trusting procedure {procedure_id}."),
+    });
+    push_unique_action(
+        next_actions,
+        &format!("ee procedure show {procedure_id} --include-verification --json"),
+    );
+    Ok(())
+}
+
+fn push_dependency_contract_signal(
+    signals: &mut Vec<ProcedureDriftSignal>,
+    next_actions: &mut Vec<String>,
+    procedure_id: &str,
+    dependency: &ProcedureDependencyContractInput,
+) {
+    let changed = dependency.expected_contract.trim() != dependency.actual_contract.trim()
+        || !matches!(
+            dependency.compatibility.trim(),
+            "compatible" | "unchanged" | "same"
+        );
+    if !changed {
+        return;
+    }
+
+    let compatibility = dependency.compatibility.trim();
+    let severity = if matches!(compatibility, "breaking" | "incompatible" | "removed") {
+        "high"
+    } else {
+        "medium"
+    };
+
+    signals.push(ProcedureDriftSignal {
+        signal_id: next_drift_signal_id(signals),
+        kind: "dependency_contract_change".to_owned(),
+        severity: severity.to_owned(),
+        source_id: dependency.dependency_name.clone(),
+        summary: format!(
+            "{} contract changed for {}.",
+            dependency.dependency_name, dependency.owning_surface
+        ),
+        evidence_ids: Vec::new(),
+        details: vec![
+            ProcedureDriftDetail {
+                name: "owningSurface".to_owned(),
+                value: dependency.owning_surface.clone(),
+            },
+            ProcedureDriftDetail {
+                name: "expectedContract".to_owned(),
+                value: dependency.expected_contract.clone(),
+            },
+            ProcedureDriftDetail {
+                name: "actualContract".to_owned(),
+                value: dependency.actual_contract.clone(),
+            },
+            ProcedureDriftDetail {
+                name: "compatibility".to_owned(),
+                value: dependency.compatibility.clone(),
+            },
+        ],
+        recommended_action: format!(
+            "Review {} contract drift before reusing procedure {procedure_id}.",
+            dependency.dependency_name
+        ),
+    });
+    push_unique_action(
+        next_actions,
+        "ee schema export ee.procedure.schemas.v1 --json",
+    );
+}
+
+fn count_drift_signals(signals: &[ProcedureDriftSignal]) -> ProcedureDriftCounts {
+    let mut counts = ProcedureDriftCounts {
+        total: usize_to_u32_saturating(signals.len()),
+        ..ProcedureDriftCounts::default()
+    };
+    for signal in signals {
+        match signal.kind.as_str() {
+            "failed_verification" => counts.failed_verifications += 1,
+            "stale_evidence" => counts.stale_evidence += 1,
+            "dependency_contract_change" => counts.dependency_contract_changes += 1,
+            _ => {}
+        }
+        match signal.severity.as_str() {
+            "high" => counts.high += 1,
+            "medium" => counts.medium += 1,
+            "low" => counts.low += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
+fn parse_rfc3339_utc(value: &str, field: &str) -> Result<DateTime<Utc>, DomainError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|error| DomainError::Usage {
+            message: format!("invalid {field} timestamp '{value}': {error}"),
+            repair: Some("Use RFC 3339 timestamps such as 2026-05-01T12:00:00Z.".to_owned()),
+        })
+}
+
+fn next_drift_signal_id(signals: &[ProcedureDriftSignal]) -> String {
+    format!("drift_sig_{:03}", signals.len() + 1)
+}
+
+fn push_unique_action(actions: &mut Vec<String>, action: &str) {
+    if !actions.iter().any(|existing| existing == action) {
+        actions.push(action.to_owned());
+    }
+}
+
+fn count_source_results(sources: &[VerificationSourceResult], result: &str) -> u32 {
+    let count = sources.iter().filter(|s| s.result == result).count();
+    usize_to_u32_saturating(count)
+}
+
+fn usize_to_u32_saturating(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 /// Generate a short random ID.
@@ -731,21 +1772,7 @@ mod tests {
     }
 
     #[test]
-    fn export_json_format() -> TestResult {
-        let options = ProcedureExportOptions {
-            procedure_id: "proc_export".to_owned(),
-            format: "json".to_owned(),
-            ..Default::default()
-        };
-
-        let report = export_procedure(&options).map_err(|e| e.message())?;
-        assert_eq!(report.format, "json");
-        assert!(report.content_length > 0);
-        Ok(())
-    }
-
-    #[test]
-    fn export_markdown_format() -> TestResult {
+    fn export_markdown_format_contains_steps_and_provenance() -> TestResult {
         let options = ProcedureExportOptions {
             procedure_id: "proc_export".to_owned(),
             format: "markdown".to_owned(),
@@ -754,6 +1781,116 @@ mod tests {
 
         let report = export_procedure(&options).map_err(|e| e.message())?;
         assert_eq!(report.format, "markdown");
+        assert_eq!(report.artifact_kind, "procedure_markdown");
+        assert!(report.content_length > 0);
+        assert!(report.content.contains("# Procedure proc_export"));
+        assert!(report.content.contains("## Steps"));
+        assert!(report.content.contains("## Provenance"));
+        assert!(report.content_hash.starts_with("blake3:"));
+        Ok(())
+    }
+
+    #[test]
+    fn export_playbook_format_is_yaml_like() -> TestResult {
+        let options = ProcedureExportOptions {
+            procedure_id: "proc_export".to_owned(),
+            format: "playbook".to_owned(),
+            ..Default::default()
+        };
+
+        let report = export_procedure(&options).map_err(|e| e.message())?;
+        assert_eq!(report.format, "playbook");
+        assert_eq!(report.artifact_kind, "procedure_playbook");
+        assert!(
+            report
+                .content
+                .contains("schema: \"ee.procedure.playbook.v1\"")
+        );
+        assert!(report.content.contains("steps:"));
+        assert!(report.content.contains("source_run_ids:"));
+        Ok(())
+    }
+
+    #[test]
+    fn export_skill_capsule_is_render_only() -> TestResult {
+        let options = ProcedureExportOptions {
+            procedure_id: "proc_export".to_owned(),
+            format: "skill-capsule".to_owned(),
+            ..Default::default()
+        };
+
+        let report = export_procedure(&options).map_err(|e| e.message())?;
+        assert_eq!(report.format, "skill_capsule");
+        assert_eq!(report.artifact_kind, "skill_capsule");
+        assert_eq!(report.install_mode.as_deref(), Some("render_only"));
+        assert!(report.content.contains("schema: \"ee.skill_capsule.v1\""));
+        assert!(report.content.contains("install_mode: \"render_only\""));
+        assert!(report.content.contains("This capsule is render-only"));
+        assert_eq!(report.warnings.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn export_rejects_unknown_format() -> TestResult {
+        let options = ProcedureExportOptions {
+            procedure_id: "proc_export".to_owned(),
+            format: "zip".to_owned(),
+            ..Default::default()
+        };
+
+        let Err(error) = export_procedure(&options) else {
+            return Err("unknown format should fail".to_owned());
+        };
+        assert_eq!(error.code(), "usage");
+        Ok(())
+    }
+
+    #[test]
+    fn promote_dry_run_builds_curation_and_audit_plan() -> TestResult {
+        let options = ProcedurePromoteOptions {
+            procedure_id: "proc_promote".to_owned(),
+            dry_run: true,
+            actor: Some("MistySalmon".to_owned()),
+            reason: Some("Verified enough to promote".to_owned()),
+            ..Default::default()
+        };
+
+        let report = promote_procedure(&options).map_err(|e| e.message())?;
+        assert_eq!(report.schema, PROCEDURE_PROMOTE_REPORT_SCHEMA_V1);
+        assert_eq!(report.status, "dry_run");
+        assert!(report.dry_run);
+        assert_eq!(report.from_status, "candidate");
+        assert_eq!(report.to_status, "verified");
+        assert_eq!(report.curation.candidate_type, "promote");
+        assert_eq!(report.curation.target_type, "procedure");
+        assert_eq!(report.curation.status, "pending_review");
+        assert!(!report.curation.would_persist);
+        assert_eq!(report.audit.action, "procedure.promote");
+        assert_eq!(report.audit.outcome, "dry_run");
+        assert!(!report.audit.recorded);
+        assert!(report.planned_effects.iter().all(|effect| !effect.applied));
+        assert!(report.verification.pass_count > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn promote_without_dry_run_is_policy_denied() -> TestResult {
+        let options = ProcedurePromoteOptions {
+            procedure_id: "proc_promote".to_owned(),
+            dry_run: false,
+            ..Default::default()
+        };
+
+        let Err(error) = promote_procedure(&options) else {
+            return Err("non-dry-run promotion should be denied".to_owned());
+        };
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            error
+                .repair()
+                .unwrap_or_default()
+                .contains("procedure promote")
+        );
         Ok(())
     }
 
@@ -817,6 +1954,126 @@ mod tests {
         let summary = report.human_summary();
         assert!(summary.contains("Procedure Verification"));
         assert!(summary.contains("proc_test"));
+        Ok(())
+    }
+
+    #[test]
+    fn drift_detection_marks_failed_verification_as_drifted() -> TestResult {
+        let verification = ProcedureVerifyReport {
+            schema: PROCEDURE_VERIFY_REPORT_SCHEMA_V1.to_owned(),
+            procedure_id: "proc_test".to_owned(),
+            verification_id: "ver_failed".to_owned(),
+            status: "failed".to_owned(),
+            source_kind: "eval_fixture".to_owned(),
+            sources_checked: vec![VerificationSourceResult {
+                source_id: "fixture_failure".to_owned(),
+                source_kind: "eval_fixture".to_owned(),
+                result: "failed".to_owned(),
+                step_results: Vec::new(),
+                message: Some("expected command failed".to_owned()),
+            }],
+            pass_count: 0,
+            fail_count: 1,
+            skip_count: 0,
+            overall_result: "failed".to_owned(),
+            verified_at: "2026-05-01T10:00:00Z".to_owned(),
+            dry_run: true,
+            confidence: 0.0,
+            next_actions: Vec::new(),
+        };
+        let report = detect_procedure_drift(&ProcedureDriftOptions {
+            procedure_id: "proc_test".to_owned(),
+            checked_at: Some("2026-05-01T12:00:00Z".to_owned()),
+            verification: Some(verification),
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.schema, PROCEDURE_DRIFT_REPORT_SCHEMA_V1);
+        assert_eq!(report.status, "drifted");
+        assert!(report.drift_detected);
+        assert_eq!(report.counts.failed_verifications, 1);
+        assert!(report.mutation.would_open_curation_candidate);
+        assert!(!report.mutation.applied);
+        Ok(())
+    }
+
+    #[test]
+    fn drift_detection_marks_stale_evidence_as_at_risk() -> TestResult {
+        let report = detect_procedure_drift(&ProcedureDriftOptions {
+            procedure_id: "proc_test".to_owned(),
+            checked_at: Some("2026-05-01T12:00:00Z".to_owned()),
+            staleness_threshold_days: 30,
+            evidence: vec![ProcedureDriftEvidenceInput {
+                evidence_id: "ev_old".to_owned(),
+                last_seen_at: "2026-03-20T12:00:00Z".to_owned(),
+                source_kind: "recorder_run".to_owned(),
+            }],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.status, "at_risk");
+        assert_eq!(report.counts.stale_evidence, 1);
+        assert_eq!(report.signals[0].kind, "stale_evidence");
+        assert!(report.mutation.would_mark_stale);
+        assert!(!report.mutation.would_open_curation_candidate);
+        Ok(())
+    }
+
+    #[test]
+    fn drift_detection_marks_breaking_dependency_contract_as_drifted() -> TestResult {
+        let report = detect_procedure_drift(&ProcedureDriftOptions {
+            procedure_id: "proc_test".to_owned(),
+            checked_at: Some("2026-05-01T12:00:00Z".to_owned()),
+            dependency_contracts: vec![ProcedureDependencyContractInput {
+                dependency_name: "cass".to_owned(),
+                owning_surface: "procedure verification".to_owned(),
+                expected_contract: "cass.robot.v1:abc".to_owned(),
+                actual_contract: "cass.robot.v2:def".to_owned(),
+                compatibility: "breaking".to_owned(),
+            }],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.status, "drifted");
+        assert_eq!(report.counts.dependency_contract_changes, 1);
+        assert_eq!(report.counts.high, 1);
+        assert_eq!(report.signals[0].kind, "dependency_contract_change");
+        Ok(())
+    }
+
+    #[test]
+    fn drift_detection_current_when_no_signals() -> TestResult {
+        let report = detect_procedure_drift(&ProcedureDriftOptions {
+            procedure_id: "proc_test".to_owned(),
+            checked_at: Some("2026-05-01T12:00:00Z".to_owned()),
+            staleness_threshold_days: 30,
+            evidence: vec![ProcedureDriftEvidenceInput {
+                evidence_id: "ev_fresh".to_owned(),
+                last_seen_at: "2026-04-30T12:00:00Z".to_owned(),
+                source_kind: "recorder_run".to_owned(),
+            }],
+            dependency_contracts: vec![ProcedureDependencyContractInput {
+                dependency_name: "cass".to_owned(),
+                owning_surface: "procedure verification".to_owned(),
+                expected_contract: "cass.robot.v1:abc".to_owned(),
+                actual_contract: "cass.robot.v1:abc".to_owned(),
+                compatibility: "compatible".to_owned(),
+            }],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.status, "current");
+        assert!(!report.drift_detected);
+        assert_eq!(report.counts.total, 0);
+        assert_eq!(report.next_actions, vec!["No drift action required."]);
         Ok(())
     }
 }

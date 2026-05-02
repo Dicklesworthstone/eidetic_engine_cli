@@ -117,6 +117,12 @@ pub enum VerificationResult {
     Valid,
     /// Certificate payload hash mismatch.
     HashMismatch,
+    /// Certificate payload hash points at stale source data.
+    StalePayloadHash,
+    /// Certificate was issued against an unsupported schema version.
+    StaleSchemaVersion,
+    /// Certificate assumptions no longer hold.
+    FailedAssumptions,
     /// Certificate has expired.
     Expired,
     /// Certificate was revoked.
@@ -133,6 +139,9 @@ impl VerificationResult {
         match self {
             Self::Valid => "valid",
             Self::HashMismatch => "hash_mismatch",
+            Self::StalePayloadHash => "stale_payload_hash",
+            Self::StaleSchemaVersion => "stale_schema_version",
+            Self::FailedAssumptions => "failed_assumptions",
             Self::Expired => "expired",
             Self::Revoked => "revoked",
             Self::InvalidStatus => "invalid_status",
@@ -147,7 +156,15 @@ impl VerificationResult {
 
     #[must_use]
     pub const fn is_terminal_failure(self) -> bool {
-        matches!(self, Self::HashMismatch | Self::Revoked | Self::NotFound)
+        matches!(
+            self,
+            Self::HashMismatch
+                | Self::StalePayloadHash
+                | Self::StaleSchemaVersion
+                | Self::FailedAssumptions
+                | Self::Revoked
+                | Self::NotFound
+        )
     }
 }
 
@@ -158,8 +175,12 @@ pub struct CertificateVerifyReport {
     pub result: VerificationResult,
     pub checked_at: String,
     pub hash_verified: bool,
+    pub payload_hash_fresh: bool,
+    pub schema_version_valid: bool,
+    pub assumptions_valid: bool,
     pub status_valid: bool,
     pub expiry_valid: bool,
+    pub failure_codes: Vec<String>,
     pub message: String,
 }
 
@@ -171,8 +192,12 @@ impl CertificateVerifyReport {
             result: VerificationResult::Valid,
             checked_at: chrono::Utc::now().to_rfc3339(),
             hash_verified: true,
+            payload_hash_fresh: true,
+            schema_version_valid: true,
+            assumptions_valid: true,
             status_valid: true,
             expiry_valid: true,
+            failure_codes: Vec::new(),
             message: "Certificate verification passed".to_owned(),
         }
     }
@@ -184,8 +209,12 @@ impl CertificateVerifyReport {
             result: VerificationResult::NotFound,
             checked_at: chrono::Utc::now().to_rfc3339(),
             hash_verified: false,
+            payload_hash_fresh: false,
+            schema_version_valid: false,
+            assumptions_valid: false,
             status_valid: false,
             expiry_valid: false,
+            failure_codes: vec!["not_found".to_owned()],
             message: "Certificate not found".to_owned(),
         }
     }
@@ -197,9 +226,64 @@ impl CertificateVerifyReport {
             result: VerificationResult::Expired,
             checked_at: chrono::Utc::now().to_rfc3339(),
             hash_verified: true,
+            payload_hash_fresh: true,
+            schema_version_valid: true,
+            assumptions_valid: true,
             status_valid: false,
             expiry_valid: false,
+            failure_codes: vec!["expired".to_owned()],
             message: "Certificate has expired".to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn stale_payload_hash(certificate_id: impl Into<String>) -> Self {
+        Self {
+            certificate_id: certificate_id.into(),
+            result: VerificationResult::StalePayloadHash,
+            checked_at: chrono::Utc::now().to_rfc3339(),
+            hash_verified: false,
+            payload_hash_fresh: false,
+            schema_version_valid: true,
+            assumptions_valid: true,
+            status_valid: true,
+            expiry_valid: true,
+            failure_codes: vec!["stale_payload_hash".to_owned()],
+            message: "Certificate payload hash no longer matches the current payload".to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn stale_schema_version(certificate_id: impl Into<String>) -> Self {
+        Self {
+            certificate_id: certificate_id.into(),
+            result: VerificationResult::StaleSchemaVersion,
+            checked_at: chrono::Utc::now().to_rfc3339(),
+            hash_verified: true,
+            payload_hash_fresh: true,
+            schema_version_valid: false,
+            assumptions_valid: true,
+            status_valid: true,
+            expiry_valid: true,
+            failure_codes: vec!["stale_schema_version".to_owned()],
+            message: "Certificate schema version is no longer supported".to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn failed_assumptions(certificate_id: impl Into<String>) -> Self {
+        Self {
+            certificate_id: certificate_id.into(),
+            result: VerificationResult::FailedAssumptions,
+            checked_at: chrono::Utc::now().to_rfc3339(),
+            hash_verified: true,
+            payload_hash_fresh: true,
+            schema_version_valid: true,
+            assumptions_valid: false,
+            status_valid: true,
+            expiry_valid: true,
+            failure_codes: vec!["failed_assumptions".to_owned()],
+            message: "Certificate assumptions failed during verification".to_owned(),
         }
     }
 
@@ -336,6 +420,15 @@ pub fn verify_certificate(certificate_id: &str) -> CertificateVerifyReport {
 
     for cert in mock_certs {
         if cert.id == certificate_id {
+            if cert.id == "cert_pack_stale_payload" {
+                return CertificateVerifyReport::stale_payload_hash(&cert.id);
+            }
+            if cert.id == "cert_pack_stale_schema" {
+                return CertificateVerifyReport::stale_schema_version(&cert.id);
+            }
+            if cert.id == "cert_pack_failed_assumptions" {
+                return CertificateVerifyReport::failed_assumptions(&cert.id);
+            }
             if cert.is_usable() {
                 return CertificateVerifyReport::valid(&cert.id);
             } else if cert.is_expired() {
@@ -346,8 +439,12 @@ pub fn verify_certificate(certificate_id: &str) -> CertificateVerifyReport {
                     result: VerificationResult::InvalidStatus,
                     checked_at: chrono::Utc::now().to_rfc3339(),
                     hash_verified: true,
+                    payload_hash_fresh: true,
+                    schema_version_valid: true,
+                    assumptions_valid: true,
                     status_valid: false,
                     expiry_valid: true,
+                    failure_codes: vec!["invalid_status".to_owned()],
                     message: format!("Certificate status is {}", cert.status.as_str()),
                 };
             }
@@ -367,6 +464,36 @@ fn create_mock_certificates() -> Vec<Certificate> {
             issued_at: "2026-04-29T10:00:00Z".to_string(),
             expires_at: Some("2026-05-29T10:00:00Z".to_string()),
             payload_hash: "b3a4c5d6e7f8".to_string(),
+            decision_metadata: DecisionPlaneMetadata::empty(),
+        },
+        Certificate {
+            id: "cert_pack_stale_payload".to_string(),
+            kind: CertificateKind::Pack,
+            status: CertificateStatus::Valid,
+            workspace_id: "wsp_default".to_string(),
+            issued_at: "2026-04-29T10:05:00Z".to_string(),
+            expires_at: Some("2026-05-29T10:05:00Z".to_string()),
+            payload_hash: "stale_payload_hash".to_string(),
+            decision_metadata: DecisionPlaneMetadata::empty(),
+        },
+        Certificate {
+            id: "cert_pack_stale_schema".to_string(),
+            kind: CertificateKind::Pack,
+            status: CertificateStatus::Valid,
+            workspace_id: "wsp_default".to_string(),
+            issued_at: "2026-04-29T10:10:00Z".to_string(),
+            expires_at: Some("2026-05-29T10:10:00Z".to_string()),
+            payload_hash: "stale_schema_payload".to_string(),
+            decision_metadata: DecisionPlaneMetadata::empty(),
+        },
+        Certificate {
+            id: "cert_pack_failed_assumptions".to_string(),
+            kind: CertificateKind::Pack,
+            status: CertificateStatus::Valid,
+            workspace_id: "wsp_default".to_string(),
+            issued_at: "2026-04-29T10:15:00Z".to_string(),
+            expires_at: Some("2026-05-29T10:15:00Z".to_string()),
+            payload_hash: "failed_assumptions_payload".to_string(),
             decision_metadata: DecisionPlaneMetadata::empty(),
         },
         Certificate {
@@ -473,6 +600,21 @@ mod tests {
             &"hash_mismatch",
             "hash_mismatch",
         )?;
+        ensure_equal(
+            &VerificationResult::StalePayloadHash.as_str(),
+            &"stale_payload_hash",
+            "stale_payload_hash",
+        )?;
+        ensure_equal(
+            &VerificationResult::StaleSchemaVersion.as_str(),
+            &"stale_schema_version",
+            "stale_schema_version",
+        )?;
+        ensure_equal(
+            &VerificationResult::FailedAssumptions.as_str(),
+            &"failed_assumptions",
+            "failed_assumptions",
+        )?;
         ensure_equal(&VerificationResult::Expired.as_str(), &"expired", "expired")?;
         ensure_equal(&VerificationResult::Revoked.as_str(), &"revoked", "revoked")?;
         ensure_equal(
@@ -505,6 +647,18 @@ mod tests {
         ensure(
             VerificationResult::HashMismatch.is_terminal_failure(),
             "hash_mismatch is terminal",
+        )?;
+        ensure(
+            VerificationResult::StalePayloadHash.is_terminal_failure(),
+            "stale_payload_hash is terminal",
+        )?;
+        ensure(
+            VerificationResult::StaleSchemaVersion.is_terminal_failure(),
+            "stale_schema_version is terminal",
+        )?;
+        ensure(
+            VerificationResult::FailedAssumptions.is_terminal_failure(),
+            "failed_assumptions is terminal",
         )?;
         ensure(
             VerificationResult::Revoked.is_terminal_failure(),

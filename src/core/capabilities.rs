@@ -68,6 +68,82 @@ impl FeatureEntry {
     }
 }
 
+/// Output format entry from the renderer registry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutputFormatEntry {
+    pub name: &'static str,
+    pub available: bool,
+    pub machine_readable: bool,
+    pub description: &'static str,
+}
+
+impl OutputFormatEntry {
+    #[must_use]
+    pub const fn new(
+        name: &'static str,
+        available: bool,
+        machine_readable: bool,
+        description: &'static str,
+    ) -> Self {
+        Self {
+            name,
+            available,
+            machine_readable,
+            description,
+        }
+    }
+}
+
+/// Resolved TOON dependency metadata reported by `ee capabilities --json`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToonDependencySource {
+    pub crate_name: &'static str,
+    pub package: &'static str,
+    pub version: &'static str,
+    pub source_kind: &'static str,
+    pub path: &'static str,
+    pub default_features: bool,
+}
+
+impl ToonDependencySource {
+    #[must_use]
+    pub const fn local() -> Self {
+        Self {
+            crate_name: "toon",
+            package: "tru",
+            version: "0.2.3",
+            source_kind: "path",
+            path: "/data/projects/toon_rust",
+            default_features: false,
+        }
+    }
+}
+
+/// TOON output adapter readiness metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToonOutputCapability {
+    pub available: bool,
+    pub canonical_source_format: &'static str,
+    pub dependency: ToonDependencySource,
+    pub supported_output_profiles: Vec<&'static str>,
+    pub default_format_env: &'static str,
+    pub error_codes: Vec<&'static str>,
+}
+
+impl ToonOutputCapability {
+    #[must_use]
+    pub fn ready() -> Self {
+        Self {
+            available: true,
+            canonical_source_format: "json",
+            dependency: ToonDependencySource::local(),
+            supported_output_profiles: vec!["minimal", "summary", "standard", "full"],
+            default_format_env: "TOON_DEFAULT_FORMAT",
+            error_codes: vec!["toon_decode_failed", "toon_encoding_failed"],
+        }
+    }
+}
+
 /// Full capabilities report returned by the capabilities command.
 #[derive(Clone, Debug)]
 pub struct CapabilitiesReport {
@@ -75,6 +151,8 @@ pub struct CapabilitiesReport {
     pub subsystems: Vec<CapabilityEntry>,
     pub features: Vec<FeatureEntry>,
     pub commands: Vec<CommandEntry>,
+    pub output_formats: Vec<OutputFormatEntry>,
+    pub toon: ToonOutputCapability,
 }
 
 impl CapabilitiesReport {
@@ -142,6 +220,7 @@ impl CapabilitiesReport {
             CommandEntry::new("help", true, "Command help"),
             CommandEntry::new("import", true, "Import from external sources"),
             CommandEntry::new("remember", true, "Store memories"),
+            CommandEntry::new("rule", true, "Manage procedural rules"),
             CommandEntry::new("schema", true, "Schema registry"),
             CommandEntry::new("status", true, "Subsystem readiness"),
             CommandEntry::new("version", true, "Version info"),
@@ -153,11 +232,23 @@ impl CapabilitiesReport {
             CommandEntry::new("curate", false, "Rule curation"),
         ];
 
+        let output_formats = vec![
+            OutputFormatEntry::new("json", true, true, "Canonical stable response envelope"),
+            OutputFormatEntry::new("toon", true, false, "TOON renderer over canonical JSON"),
+            OutputFormatEntry::new("human", true, false, "Human-readable terminal output"),
+            OutputFormatEntry::new("markdown", true, false, "Markdown context output"),
+            OutputFormatEntry::new("jsonl", true, true, "Line-delimited JSON stream output"),
+            OutputFormatEntry::new("compact", true, true, "Compact machine-readable output"),
+            OutputFormatEntry::new("hook", true, true, "Hook protocol output"),
+        ];
+
         Self {
             version: info.version,
             subsystems,
             features,
             commands,
+            output_formats,
+            toon: ToonOutputCapability::ready(),
         }
     }
 
@@ -222,7 +313,8 @@ mod tests {
         )?;
         ensure_at_least(report.subsystems.len(), 3, "at least 3 subsystems")?;
         ensure_at_least(report.features.len(), 3, "at least 3 features")?;
-        ensure_at_least(report.commands.len(), 5, "at least 5 commands")
+        ensure_at_least(report.commands.len(), 5, "at least 5 commands")?;
+        ensure_at_least(report.output_formats.len(), 5, "at least 5 output formats")
     }
 
     #[test]
@@ -261,5 +353,27 @@ mod tests {
             .find(|c| c.name == "capabilities")
             .expect("capabilities command must exist");
         ensure(cmd.available, true, "capabilities command is available")
+    }
+
+    #[test]
+    fn capabilities_report_includes_toon_output_metadata() -> TestResult {
+        let report = CapabilitiesReport::gather();
+
+        ensure(report.toon.available, true, "toon output is available")?;
+        ensure(
+            report.toon.dependency.package,
+            "tru",
+            "toon dependency package",
+        )?;
+        ensure(
+            report.toon.dependency.path,
+            "/data/projects/toon_rust",
+            "toon dependency path",
+        )?;
+        ensure_at_least(
+            report.toon.supported_output_profiles.len(),
+            4,
+            "toon supported profiles",
+        )
     }
 }

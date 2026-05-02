@@ -5,7 +5,10 @@
 
 use serde_json::{Value as JsonValue, json};
 
-use crate::models::{RecorderEventType, RecorderRunStatus, RedactionStatus};
+use crate::models::{
+    ImportSourceType, RecorderEventChainStatus, RecorderEventType, RecorderRunStatus,
+    RedactionStatus,
+};
 
 /// Schema for recorder start response.
 pub const RECORDER_START_SCHEMA_V1: &str = "ee.recorder.start.v1";
@@ -21,6 +24,17 @@ pub const RECORDER_TAIL_SCHEMA_V1: &str = "ee.recorder.tail.v1";
 
 /// Schema for recorder tail follow event (JSONL).
 pub const RECORDER_TAIL_FOLLOW_EVENT_SCHEMA_V1: &str = "ee.recorder.tail_follow_event.v1";
+
+/// Schema for recorder import dry-run plans.
+pub const RECORDER_IMPORT_PLAN_SCHEMA_V1: &str = "ee.recorder.import_plan.v1";
+
+/// Default maximum recorder event payload size accepted by the CLI.
+pub const DEFAULT_MAX_RECORDER_PAYLOAD_BYTES: usize = 64 * 1024;
+
+/// Default maximum number of source spans mapped into one recorder import plan.
+pub const DEFAULT_RECORDER_IMPORT_LIMIT: usize = 100;
+
+const DRY_RUN_TIMESTAMP: &str = "1970-01-01T00:00:00Z";
 
 // ============================================================================
 // Start Recording
@@ -128,6 +142,10 @@ pub struct RecorderEventOptions {
     pub payload: Option<String>,
     /// Whether payload should be redacted.
     pub redact: bool,
+    /// Optional previous event hash for append-only chain continuity.
+    pub previous_event_hash: Option<String>,
+    /// Maximum accepted payload size in bytes.
+    pub max_payload_bytes: usize,
     /// Whether to perform a dry run.
     pub dry_run: bool,
 }
@@ -142,7 +160,15 @@ pub struct RecorderEventReport {
     pub event_type: RecorderEventType,
     pub timestamp: String,
     pub payload_hash: Option<String>,
+    pub payload_bytes: u64,
+    pub payload_accepted: bool,
     pub redaction_status: RedactionStatus,
+    pub redaction_classes: Vec<String>,
+    pub placeholder_count: u64,
+    pub redacted_bytes: u64,
+    pub previous_event_hash: Option<String>,
+    pub event_hash: String,
+    pub chain_status: RecorderEventChainStatus,
     pub dry_run: bool,
 }
 
@@ -158,7 +184,15 @@ impl RecorderEventReport {
             "sequence": self.sequence,
             "eventType": self.event_type.as_str(),
             "timestamp": self.timestamp,
+            "payloadBytes": self.payload_bytes,
+            "payloadAccepted": self.payload_accepted,
             "redactionStatus": self.redaction_status.as_str(),
+            "redactionClasses": self.redaction_classes,
+            "placeholderCount": self.placeholder_count,
+            "redactedBytes": self.redacted_bytes,
+            "previousEventHash": self.previous_event_hash,
+            "eventHash": self.event_hash,
+            "chainStatus": self.chain_status.as_str(),
             "dryRun": self.dry_run,
         });
         if let Some(ref hash) = self.payload_hash {
@@ -185,41 +219,729 @@ impl RecorderEventReport {
         if let Some(ref hash) = self.payload_hash {
             out.push_str(&format!("Payload:  {hash}\n"));
         }
+        out.push_str(&format!("Bytes:    {}\n", self.payload_bytes));
         out.push_str(&format!("Redacted: {}\n", self.redaction_status));
+        if !self.redaction_classes.is_empty() {
+            out.push_str(&format!(
+                "\nClasses:  {}",
+                self.redaction_classes.join(", ")
+            ));
+        }
+        out.push_str(&format!("\nEvent hash: {}\n", self.event_hash));
+        out.push_str(&format!("Chain:    {}\n", self.chain_status));
         out
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecorderEventRejectionCode {
+    PayloadTooLarge,
+}
+
+impl RecorderEventRejectionCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PayloadTooLarge => "recorder_payload_too_large",
+        }
+    }
+}
+
+/// Stable rejection details for recorder event validation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecorderEventError {
+    pub code: RecorderEventRejectionCode,
+    pub message: String,
+    pub repair: String,
+    pub payload_bytes: usize,
+    pub max_payload_bytes: usize,
+}
+
+impl RecorderEventError {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "code": self.code.as_str(),
+            "message": self.message,
+            "severity": "medium",
+            "repair": self.repair,
+            "details": {
+                "payloadBytes": self.payload_bytes,
+                "maxPayloadBytes": self.max_payload_bytes,
+            },
+        })
+    }
+}
+
+impl std::fmt::Display for RecorderEventError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RecorderEventError {}
+
 /// Record an event to a recording session.
-#[must_use]
-pub fn record_event(options: &RecorderEventOptions, sequence: u64) -> RecorderEventReport {
+pub fn record_event(
+    options: &RecorderEventOptions,
+    sequence: u64,
+) -> Result<RecorderEventReport, RecorderEventError> {
     let timestamp = chrono::Utc::now().to_rfc3339();
     let event_id = format!("evt_{}", uuid::Uuid::now_v7());
+    let payload = inspect_event_payload(
+        options.payload.as_deref(),
+        options.redact,
+        options.max_payload_bytes,
+    )?;
 
-    let payload_hash = options.payload.as_ref().map(|p| {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(p.as_bytes());
-        format!("{:x}", hasher.finalize())
-    });
+    let chain_status =
+        RecorderEventChainStatus::for_event(sequence, options.previous_event_hash.as_deref());
+    let event_hash = event_chain_hash(
+        &options.run_id,
+        sequence,
+        options.event_type,
+        &timestamp,
+        payload.hash.as_deref(),
+        payload.redaction_status,
+        options.previous_event_hash.as_deref(),
+    );
 
-    let redaction_status = if options.redact {
-        RedactionStatus::Full
-    } else {
-        RedactionStatus::None
-    };
-
-    RecorderEventReport {
+    Ok(RecorderEventReport {
         schema: RECORDER_EVENT_RESPONSE_SCHEMA_V1,
         event_id,
         run_id: options.run_id.clone(),
         sequence,
         event_type: options.event_type,
         timestamp,
-        payload_hash,
-        redaction_status,
+        payload_hash: payload.hash,
+        payload_bytes: usize_to_u64(payload.bytes),
+        payload_accepted: options.payload.is_some(),
+        redaction_status: payload.redaction_status,
+        redaction_classes: payload.redaction_classes,
+        placeholder_count: payload.placeholder_count,
+        redacted_bytes: usize_to_u64(payload.redacted_bytes),
+        previous_event_hash: options.previous_event_hash.clone(),
+        event_hash,
+        chain_status,
         dry_run: options.dry_run,
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EventPayloadInspection {
+    hash: Option<String>,
+    bytes: usize,
+    redaction_status: RedactionStatus,
+    redaction_classes: Vec<String>,
+    placeholder_count: u64,
+    redacted_bytes: usize,
+}
+
+fn inspect_event_payload(
+    payload: Option<&str>,
+    force_redact: bool,
+    max_payload_bytes: usize,
+) -> Result<EventPayloadInspection, RecorderEventError> {
+    let Some(payload) = payload else {
+        return Ok(EventPayloadInspection {
+            hash: None,
+            bytes: 0,
+            redaction_status: RedactionStatus::None,
+            redaction_classes: Vec::new(),
+            placeholder_count: 0,
+            redacted_bytes: 0,
+        });
+    };
+
+    let bytes = payload.len();
+    if bytes > max_payload_bytes {
+        return Err(RecorderEventError {
+            code: RecorderEventRejectionCode::PayloadTooLarge,
+            message: format!(
+                "Recorder event payload is {bytes} bytes, exceeding the {max_payload_bytes} byte limit."
+            ),
+            repair: "Use a smaller payload, attach evidence by hash, or raise --max-payload-bytes intentionally.".to_string(),
+            payload_bytes: bytes,
+            max_payload_bytes,
+        });
     }
+
+    let redaction_classes = if force_redact {
+        vec!["manual".to_string()]
+    } else {
+        detected_redaction_classes(payload)
+    };
+    let redacted = !redaction_classes.is_empty();
+    let effective_payload = if redacted {
+        format!("[REDACTED:{}:{} bytes]", redaction_classes.join(","), bytes)
+    } else {
+        payload.to_string()
+    };
+
+    Ok(EventPayloadInspection {
+        hash: Some(blake3_hash(effective_payload.as_bytes())),
+        bytes,
+        redaction_status: if redacted {
+            RedactionStatus::Full
+        } else {
+            RedactionStatus::None
+        },
+        placeholder_count: u64::try_from(redaction_classes.len()).unwrap_or(u64::MAX),
+        redacted_bytes: if redacted { bytes } else { 0 },
+        redaction_classes,
+    })
+}
+
+fn detected_redaction_classes(payload: &str) -> Vec<String> {
+    let lower = payload.to_ascii_lowercase();
+    let mut classes = Vec::new();
+    for (marker, class) in [
+        ("api_key", "api_key"),
+        ("apikey", "api_key"),
+        ("password", "password"),
+        ("passwd", "password"),
+        ("private_key", "private_key"),
+        ("ssh_key", "ssh_key"),
+        ("secret", "secret"),
+        ("token", "token"),
+    ] {
+        if lower.contains(marker) && !classes.iter().any(|known| known == class) {
+            classes.push(class.to_string());
+        }
+    }
+    classes.sort();
+    classes
+}
+
+fn event_chain_hash(
+    run_id: &str,
+    sequence: u64,
+    event_type: RecorderEventType,
+    timestamp: &str,
+    payload_hash: Option<&str>,
+    redaction_status: RedactionStatus,
+    previous_event_hash: Option<&str>,
+) -> String {
+    let canonical = json!({
+        "runId": run_id,
+        "sequence": sequence,
+        "eventType": event_type.as_str(),
+        "timestamp": timestamp,
+        "payloadHash": payload_hash,
+        "redactionStatus": redaction_status.as_str(),
+        "previousEventHash": previous_event_hash,
+    });
+    blake3_hash(canonical.to_string().as_bytes())
+}
+
+fn blake3_hash(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+// ============================================================================
+// Import Recording Plan
+// ============================================================================
+
+/// Options for planning a dry-run recorder import.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecorderImportOptions {
+    /// Source connector family.
+    pub source_type: ImportSourceType,
+    /// Stable external source identity.
+    pub source_id: String,
+    /// Optional source JSON payload, currently CASS `view --json`.
+    pub input_json: Option<String>,
+    /// Optional source path reported in output only.
+    pub input_path: Option<String>,
+    /// Agent identifier for the planned recorder run.
+    pub agent_id: Option<String>,
+    /// Session identifier for correlation.
+    pub session_id: Option<String>,
+    /// Workspace identifier for correlation.
+    pub workspace_id: Option<String>,
+    /// Maximum source events to map.
+    pub max_events: usize,
+    /// Force all mapped payloads through redaction.
+    pub redact: bool,
+    /// Maximum accepted payload size in bytes.
+    pub max_payload_bytes: usize,
+    /// Whether this is a read-only dry run.
+    pub dry_run: bool,
+}
+
+/// A mapped source event in a recorder import plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecorderImportEventPlan {
+    pub action: &'static str,
+    pub source_span_id: String,
+    pub source_line_start: u32,
+    pub source_line_end: u32,
+    pub event_id: String,
+    pub sequence: u64,
+    pub event_type: RecorderEventType,
+    pub timestamp: String,
+    pub payload_hash: Option<String>,
+    pub payload_bytes: u64,
+    pub redaction_status: RedactionStatus,
+    pub redaction_classes: Vec<String>,
+    pub redacted_bytes: u64,
+    pub previous_event_hash: Option<String>,
+    pub event_hash: String,
+    pub chain_status: RecorderEventChainStatus,
+}
+
+/// Summary returned by `ee recorder import --dry-run`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecorderImportPlanReport {
+    pub schema: &'static str,
+    pub source_type: ImportSourceType,
+    pub source_id: String,
+    pub input_path: Option<String>,
+    pub connector: &'static str,
+    pub run_id: String,
+    pub agent_id: String,
+    pub session_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub dry_run: bool,
+    pub events_discovered: u64,
+    pub events_mapped: u64,
+    pub events_rejected: u64,
+    pub payload_bytes: u64,
+    pub redacted_count: u64,
+    pub redacted_bytes: u64,
+    pub redaction_classes: Vec<String>,
+    pub chain_complete: bool,
+    pub events: Vec<RecorderImportEventPlan>,
+    pub warnings: Vec<String>,
+}
+
+impl RecorderImportPlanReport {
+    /// Render as stable JSON data payload.
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "schema": self.schema,
+            "command": "recorder import",
+            "dryRun": self.dry_run,
+            "source": {
+                "type": self.source_type.as_str(),
+                "sourceId": self.source_id,
+                "inputPath": self.input_path,
+                "connector": self.connector,
+            },
+            "run": {
+                "runId": self.run_id,
+                "agentId": self.agent_id,
+                "sessionId": self.session_id,
+                "workspaceId": self.workspace_id,
+                "status": RecorderRunStatus::Imported.as_str(),
+                "startedAt": self.started_at,
+                "endedAt": self.ended_at,
+                "eventCount": self.events_mapped,
+                "redactedCount": self.redacted_count,
+            },
+            "summary": {
+                "eventsDiscovered": self.events_discovered,
+                "eventsMapped": self.events_mapped,
+                "eventsRejected": self.events_rejected,
+                "payloadBytes": self.payload_bytes,
+                "redactedBytes": self.redacted_bytes,
+                "redactionClasses": self.redaction_classes,
+                "chainComplete": self.chain_complete,
+            },
+            "mutations": [
+                {
+                    "action": "would_create_run",
+                    "count": 1,
+                    "schema": "ee.recorder.run.v1",
+                },
+                {
+                    "action": "would_create_event",
+                    "count": self.events_mapped,
+                    "schema": "ee.recorder.event.v1",
+                },
+            ],
+            "events": self.events.iter().map(|event| json!({
+                "action": event.action,
+                "sourceSpanId": event.source_span_id,
+                "sourceLineStart": event.source_line_start,
+                "sourceLineEnd": event.source_line_end,
+                "eventId": event.event_id,
+                "sequence": event.sequence,
+                "eventType": event.event_type.as_str(),
+                "timestamp": event.timestamp,
+                "payloadHash": event.payload_hash,
+                "payloadBytes": event.payload_bytes,
+                "redactionStatus": event.redaction_status.as_str(),
+                "redactionClasses": event.redaction_classes,
+                "redactedBytes": event.redacted_bytes,
+                "previousEventHash": event.previous_event_hash,
+                "eventHash": event.event_hash,
+                "chainStatus": event.chain_status.as_str(),
+            })).collect::<Vec<_>>(),
+            "warnings": self.warnings,
+        })
+    }
+
+    /// Render as human-readable string.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut output = String::with_capacity(256);
+        output.push_str("Recorder Import Plan [DRY RUN]\n");
+        output.push_str("==============================\n\n");
+        output.push_str(&format!(
+            "Source:   {} {}\n",
+            self.source_type, self.source_id
+        ));
+        output.push_str(&format!("Run ID:   {}\n", self.run_id));
+        output.push_str(&format!("Agent:    {}\n", self.agent_id));
+        output.push_str(&format!("Events:   {}\n", self.events_mapped));
+        output.push_str(&format!("Redacted: {}\n", self.redacted_count));
+        output.push_str("\nNo recorder records were written.\n");
+        output
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecorderImportErrorCode {
+    DryRunRequired,
+    InvalidInputJson,
+    InvalidSourceType,
+    InvalidSourceShape,
+    PayloadTooLarge,
+}
+
+impl RecorderImportErrorCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DryRunRequired => "recorder_import_dry_run_required",
+            Self::InvalidInputJson => "recorder_import_invalid_json",
+            Self::InvalidSourceType => "recorder_import_invalid_source_type",
+            Self::InvalidSourceShape => "recorder_import_invalid_source_shape",
+            Self::PayloadTooLarge => "recorder_import_payload_too_large",
+        }
+    }
+}
+
+/// Stable recorder import planning error.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecorderImportError {
+    pub code: RecorderImportErrorCode,
+    pub message: String,
+    pub repair: String,
+    pub details: Box<JsonValue>,
+}
+
+impl RecorderImportError {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "code": self.code.as_str(),
+            "message": self.message,
+            "severity": "medium",
+            "repair": self.repair,
+            "details": self.details.as_ref(),
+        })
+    }
+}
+
+impl std::fmt::Display for RecorderImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RecorderImportError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SourceEvent {
+    span_id: String,
+    line_start: u32,
+    line_end: u32,
+    event_type: RecorderEventType,
+    payload: String,
+}
+
+/// Plan a read-only recorder import from connector JSON.
+///
+/// # Errors
+///
+/// Returns [`RecorderImportError`] for unsupported mutation mode, malformed
+/// source JSON, unsupported source shapes, or payload validation failures.
+pub fn plan_recorder_import(
+    options: &RecorderImportOptions,
+) -> Result<RecorderImportPlanReport, RecorderImportError> {
+    if !options.dry_run {
+        return Err(RecorderImportError {
+            code: RecorderImportErrorCode::DryRunRequired,
+            message: "Recorder import writes are not implemented; use --dry-run.".to_string(),
+            repair: "Re-run with ee recorder import --dry-run --json.".to_string(),
+            details: Box::new(json!({"dryRun": options.dry_run})),
+        });
+    }
+
+    let source_events = parse_import_source_events(options)?;
+    let discovered = usize_to_u64(source_events.len());
+    let max_events = options.max_events.max(1);
+    let limited = source_events.into_iter().take(max_events);
+    let run_id = stable_prefixed_id(
+        "run",
+        &format!("{}:{}", options.source_type, options.source_id),
+    );
+    let agent_id = options
+        .agent_id
+        .clone()
+        .unwrap_or_else(|| default_agent_id(options.source_type).to_string());
+    let mut events = Vec::new();
+    let mut previous_event_hash = None;
+
+    for (index, source_event) in limited.enumerate() {
+        let sequence = u64::try_from(index + 1).unwrap_or(u64::MAX);
+        let payload = inspect_event_payload(
+            Some(source_event.payload.as_str()),
+            options.redact,
+            options.max_payload_bytes,
+        )
+        .map_err(|error| {
+            let details = Box::new(error.data_json()["details"].clone());
+            RecorderImportError {
+                code: RecorderImportErrorCode::PayloadTooLarge,
+                message: error.message,
+                repair: error.repair,
+                details,
+            }
+        })?;
+        let timestamp = DRY_RUN_TIMESTAMP.to_string();
+        let chain_status =
+            RecorderEventChainStatus::for_event(sequence, previous_event_hash.as_deref());
+        let event_hash = event_chain_hash(
+            &run_id,
+            sequence,
+            source_event.event_type,
+            &timestamp,
+            payload.hash.as_deref(),
+            payload.redaction_status,
+            previous_event_hash.as_deref(),
+        );
+        let event_id = stable_prefixed_id(
+            "evt",
+            &format!("{}:{}:{}", run_id, sequence, source_event.span_id),
+        );
+        events.push(RecorderImportEventPlan {
+            action: "would_record",
+            source_span_id: source_event.span_id,
+            source_line_start: source_event.line_start,
+            source_line_end: source_event.line_end,
+            event_id,
+            sequence,
+            event_type: source_event.event_type,
+            timestamp,
+            payload_hash: payload.hash,
+            payload_bytes: usize_to_u64(payload.bytes),
+            redaction_status: payload.redaction_status,
+            redaction_classes: payload.redaction_classes,
+            redacted_bytes: usize_to_u64(payload.redacted_bytes),
+            previous_event_hash: previous_event_hash.clone(),
+            event_hash: event_hash.clone(),
+            chain_status,
+        });
+        previous_event_hash = Some(event_hash);
+    }
+
+    let mut redaction_classes = Vec::new();
+    for event in &events {
+        for class in &event.redaction_classes {
+            if !redaction_classes.iter().any(|known| known == class) {
+                redaction_classes.push(class.clone());
+            }
+        }
+    }
+    redaction_classes.sort();
+
+    let payload_bytes = events.iter().fold(0_u64, |total, event| {
+        total.saturating_add(event.payload_bytes)
+    });
+    let redacted_bytes = events.iter().fold(0_u64, |total, event| {
+        total.saturating_add(event.redacted_bytes)
+    });
+    let redacted_count = usize_to_u64(
+        events
+            .iter()
+            .filter(|event| event.redaction_status.is_redacted())
+            .count(),
+    );
+    let mapped = usize_to_u64(events.len());
+    let mut warnings = Vec::new();
+    if discovered > mapped {
+        warnings.push(format!(
+            "source contained {discovered} events but maxEvents limited mapping to {mapped}",
+        ));
+    }
+
+    Ok(RecorderImportPlanReport {
+        schema: RECORDER_IMPORT_PLAN_SCHEMA_V1,
+        source_type: options.source_type,
+        source_id: options.source_id.clone(),
+        input_path: options.input_path.clone(),
+        connector: connector_contract(options.source_type),
+        run_id,
+        agent_id,
+        session_id: options.session_id.clone(),
+        workspace_id: options.workspace_id.clone(),
+        started_at: DRY_RUN_TIMESTAMP.to_string(),
+        ended_at: None,
+        dry_run: true,
+        events_discovered: discovered,
+        events_mapped: mapped,
+        events_rejected: discovered.saturating_sub(mapped),
+        payload_bytes,
+        redacted_count,
+        redacted_bytes,
+        redaction_classes,
+        chain_complete: events.iter().all(|event| {
+            matches!(
+                event.chain_status,
+                RecorderEventChainStatus::Root | RecorderEventChainStatus::Linked
+            )
+        }),
+        events,
+        warnings,
+    })
+}
+
+fn parse_import_source_events(
+    options: &RecorderImportOptions,
+) -> Result<Vec<SourceEvent>, RecorderImportError> {
+    let Some(input) = options.input_json.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let value: JsonValue = serde_json::from_str(input).map_err(|error| RecorderImportError {
+        code: RecorderImportErrorCode::InvalidInputJson,
+        message: format!("Recorder import input is not valid JSON: {error}"),
+        repair: "Provide CASS `view --json` output with a top-level lines array.".to_string(),
+        details: Box::new(json!({"sourceId": options.source_id})),
+    })?;
+
+    match options.source_type {
+        ImportSourceType::Cass => parse_cass_view_events(&value, &options.source_id),
+        other => Err(RecorderImportError {
+            code: RecorderImportErrorCode::InvalidSourceShape,
+            message: format!(
+                "Recorder import source '{}' does not have a supported input parser yet.",
+                other.as_str()
+            ),
+            repair: "Use --source-type cass with CASS `view --json` output, or omit --input for an empty future-connector plan.".to_string(),
+            details: Box::new(json!({"sourceType": other.as_str()})),
+        }),
+    }
+}
+
+fn parse_cass_view_events(
+    value: &JsonValue,
+    source_id: &str,
+) -> Result<Vec<SourceEvent>, RecorderImportError> {
+    let lines = value
+        .get("lines")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| RecorderImportError {
+            code: RecorderImportErrorCode::InvalidSourceShape,
+            message: "Recorder import expected CASS view JSON with a lines array.".to_string(),
+            repair:
+                "Run cass view <session> -n <line> --json and pass the saved JSON through --input."
+                    .to_string(),
+            details: Box::new(json!({"missing": "lines"})),
+        })?;
+    let mut events = Vec::with_capacity(lines.len());
+    for line in lines {
+        let line_number = line
+            .get("line")
+            .and_then(JsonValue::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| RecorderImportError {
+                code: RecorderImportErrorCode::InvalidSourceShape,
+                message: "Recorder import CASS line is missing numeric line.".to_string(),
+                repair: "Ensure each CASS view line has a numeric line field.".to_string(),
+                details: Box::new(json!({"sourceId": source_id})),
+            })?;
+        let content = line
+            .get("content")
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| RecorderImportError {
+                code: RecorderImportErrorCode::InvalidSourceShape,
+                message: "Recorder import CASS line is missing string content.".to_string(),
+                repair: "Ensure each CASS view line has a string content field.".to_string(),
+                details: Box::new(json!({"line": line_number})),
+            })?;
+        events.push(SourceEvent {
+            span_id: format!("{source_id}:{line_number}"),
+            line_start: line_number,
+            line_end: line_number,
+            event_type: classify_cass_line_event_type(content),
+            payload: content.to_string(),
+        });
+    }
+    Ok(events)
+}
+
+fn classify_cass_line_event_type(content: &str) -> RecorderEventType {
+    let Ok(value) = serde_json::from_str::<JsonValue>(content) else {
+        return RecorderEventType::UserMessage;
+    };
+    let line_type = value
+        .get("type")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    match line_type {
+        "tool_use" | "tool-call" | "tool_call" => return RecorderEventType::ToolCall,
+        "tool_result" | "tool-result" => return RecorderEventType::ToolResult,
+        "summary" | "file" | "file-history-snapshot" | "state_change" => {
+            return RecorderEventType::StateChange;
+        }
+        _ => {}
+    }
+
+    let role = value
+        .get("message")
+        .and_then(|message| message.get("role"))
+        .and_then(JsonValue::as_str)
+        .or_else(|| value.get("role").and_then(JsonValue::as_str))
+        .unwrap_or_default();
+    match role {
+        "assistant" | "model" => RecorderEventType::AssistantMessage,
+        "system" => RecorderEventType::SystemMessage,
+        "tool" | "function" => RecorderEventType::ToolResult,
+        _ => RecorderEventType::UserMessage,
+    }
+}
+
+fn default_agent_id(source_type: ImportSourceType) -> &'static str {
+    match source_type {
+        ImportSourceType::Cass => "cass",
+        ImportSourceType::EideticLegacy => "eidetic-legacy",
+        ImportSourceType::Recorder => "recorder",
+        ImportSourceType::Manual => "manual",
+    }
+}
+
+fn connector_contract(source_type: ImportSourceType) -> &'static str {
+    match source_type {
+        ImportSourceType::Cass => "cass_view_json",
+        ImportSourceType::EideticLegacy => "future_connector",
+        ImportSourceType::Recorder => "future_connector",
+        ImportSourceType::Manual => "future_connector",
+    }
+}
+
+fn stable_prefixed_id(prefix: &str, input: &str) -> String {
+    let hash = blake3::hash(input.as_bytes()).to_hex().to_string();
+    format!("{prefix}_{}", &hash[..26])
 }
 
 // ============================================================================
@@ -837,36 +1559,247 @@ mod tests {
     }
 
     #[test]
-    fn record_event_creates_event_id() {
+    fn record_event_creates_event_id() -> TestResult {
         let options = RecorderEventOptions {
             run_id: "run_test".to_string(),
             event_type: RecorderEventType::ToolCall,
             payload: Some("test payload".to_string()),
             redact: false,
+            previous_event_hash: None,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
             dry_run: false,
         };
 
-        let report = record_event(&options, 1);
+        let report = record_event(&options, 1).map_err(|error| error.to_string())?;
 
         assert!(report.event_id.starts_with("evt_"));
         assert_eq!(report.run_id, "run_test");
         assert_eq!(report.sequence, 1);
         assert!(report.payload_hash.is_some());
+        assert!(report.event_hash.starts_with("blake3:"));
+        assert_eq!(report.chain_status, RecorderEventChainStatus::Root);
+        Ok(())
     }
 
     #[test]
-    fn record_event_with_redaction() {
+    fn record_event_with_redaction() -> TestResult {
         let options = RecorderEventOptions {
             run_id: "run_test".to_string(),
             event_type: RecorderEventType::UserMessage,
             payload: Some("secret".to_string()),
             redact: true,
+            previous_event_hash: None,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
             dry_run: false,
         };
 
-        let report = record_event(&options, 5);
+        let report = record_event(&options, 5).map_err(|error| error.to_string())?;
 
         assert_eq!(report.redaction_status, RedactionStatus::Full);
+        assert_eq!(report.redaction_classes, vec!["manual".to_string()]);
+        assert_eq!(report.redacted_bytes, 6);
+        Ok(())
+    }
+
+    #[test]
+    fn record_event_auto_redacts_sensitive_payload_before_hashing() -> TestResult {
+        let options = RecorderEventOptions {
+            run_id: "run_test".to_string(),
+            event_type: RecorderEventType::UserMessage,
+            payload: Some("password marker token marker".to_string()),
+            redact: false,
+            previous_event_hash: None,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: false,
+        };
+
+        let report = record_event(&options, 1).map_err(|error| error.to_string())?;
+
+        assert_eq!(report.redaction_status, RedactionStatus::Full);
+        assert_eq!(
+            report.redaction_classes,
+            vec!["password".to_string(), "token".to_string()]
+        );
+        assert_eq!(report.placeholder_count, 2);
+        assert_eq!(report.redacted_bytes, 28);
+        assert!(report.payload_hash.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn record_event_rejects_oversized_payload() -> TestResult {
+        let options = RecorderEventOptions {
+            run_id: "run_test".to_string(),
+            event_type: RecorderEventType::ToolCall,
+            payload: Some("0123456789".to_string()),
+            redact: false,
+            previous_event_hash: None,
+            max_payload_bytes: 4,
+            dry_run: false,
+        };
+
+        let error = match record_event(&options, 1) {
+            Ok(_) => return Err("oversized payload should fail".to_string()),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, RecorderEventRejectionCode::PayloadTooLarge);
+        assert_eq!(error.payload_bytes, 10);
+        assert_eq!(error.max_payload_bytes, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn record_event_links_to_previous_hash() -> TestResult {
+        let options = RecorderEventOptions {
+            run_id: "run_test".to_string(),
+            event_type: RecorderEventType::ToolResult,
+            payload: Some("ok".to_string()),
+            redact: false,
+            previous_event_hash: Some("blake3:previous".to_string()),
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: false,
+        };
+
+        let report = record_event(&options, 2).map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            report.previous_event_hash,
+            Some("blake3:previous".to_string())
+        );
+        assert_eq!(report.chain_status, RecorderEventChainStatus::Linked);
+        assert!(report.event_hash.starts_with("blake3:"));
+        Ok(())
+    }
+
+    #[test]
+    fn recorder_import_plan_maps_cass_lines_deterministically() -> TestResult {
+        let input = json!({
+            "lines": [
+                {
+                    "line": 7,
+                    "content": "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"format release\"}}"
+                },
+                {
+                    "line": 8,
+                    "content": "{\"type\":\"tool_use\",\"name\":\"shell\"}"
+                },
+                {
+                    "line": 9,
+                    "content": "{\"type\":\"tool_result\",\"content\":\"ok\"}"
+                }
+            ]
+        });
+        let options = RecorderImportOptions {
+            source_type: ImportSourceType::Cass,
+            source_id: "/sessions/cass-a.jsonl".to_string(),
+            input_json: Some(input.to_string()),
+            input_path: Some("cass-view.json".to_string()),
+            agent_id: Some("codex".to_string()),
+            session_id: Some("cass-session-a".to_string()),
+            workspace_id: Some("workspace-a".to_string()),
+            max_events: DEFAULT_RECORDER_IMPORT_LIMIT,
+            redact: false,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: true,
+        };
+
+        let report = plan_recorder_import(&options).map_err(|error| error.to_string())?;
+
+        ensure(report.schema, RECORDER_IMPORT_PLAN_SCHEMA_V1, "schema")?;
+        ensure(report.events_discovered, 3, "events discovered")?;
+        ensure(report.events_mapped, 3, "events mapped")?;
+        ensure(report.agent_id, "codex".to_string(), "agent")?;
+        ensure(
+            report.events[0].event_type,
+            RecorderEventType::UserMessage,
+            "user event",
+        )?;
+        ensure(
+            report.events[1].event_type,
+            RecorderEventType::ToolCall,
+            "tool call",
+        )?;
+        ensure(
+            report.events[2].event_type,
+            RecorderEventType::ToolResult,
+            "tool result",
+        )?;
+        ensure(
+            report.events[1].previous_event_hash.clone(),
+            Some(report.events[0].event_hash.clone()),
+            "hash chain",
+        )?;
+        ensure(report.chain_complete, true, "chain complete")
+    }
+
+    #[test]
+    fn recorder_import_plan_can_force_redaction_without_echoing_payload() -> TestResult {
+        let input = json!({
+            "lines": [
+                {"line": 1, "content": "ordinary transcript text"}
+            ]
+        });
+        let options = RecorderImportOptions {
+            source_type: ImportSourceType::Cass,
+            source_id: "cass://session/redact".to_string(),
+            input_json: Some(input.to_string()),
+            input_path: None,
+            agent_id: None,
+            session_id: None,
+            workspace_id: None,
+            max_events: DEFAULT_RECORDER_IMPORT_LIMIT,
+            redact: true,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: true,
+        };
+
+        let report = plan_recorder_import(&options).map_err(|error| error.to_string())?;
+        let json = report.data_json().to_string();
+
+        ensure(
+            report.events[0].redaction_status,
+            RedactionStatus::Full,
+            "redacted",
+        )?;
+        ensure(
+            report.events[0].redaction_classes.clone(),
+            vec!["manual".to_string()],
+            "manual class",
+        )?;
+        ensure(
+            json.contains("ordinary transcript text"),
+            false,
+            "raw payload omitted",
+        )
+    }
+
+    #[test]
+    fn recorder_import_plan_requires_dry_run() -> TestResult {
+        let options = RecorderImportOptions {
+            source_type: ImportSourceType::Cass,
+            source_id: "cass://session/write".to_string(),
+            input_json: None,
+            input_path: None,
+            agent_id: None,
+            session_id: None,
+            workspace_id: None,
+            max_events: DEFAULT_RECORDER_IMPORT_LIMIT,
+            redact: false,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: false,
+        };
+
+        let error = match plan_recorder_import(&options) {
+            Ok(_) => return Err("non-dry-run recorder import should fail".to_string()),
+            Err(error) => error,
+        };
+
+        ensure(
+            error.code,
+            RecorderImportErrorCode::DryRunRequired,
+            "error code",
+        )
     }
 
     #[test]

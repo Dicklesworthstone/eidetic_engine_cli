@@ -819,7 +819,7 @@ mod tests {
     use asupersync::Outcome;
     use asupersync::types::{CancelKind, CancelReason, PanicPayload, RegionId, Time};
 
-    use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+    use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection, feedback_scoring};
 
     use super::{
         CliCancelReason, CliOutcomeClass, CliOutcomeSummary, EXIT_CANCELLED, EXIT_PANICKED,
@@ -1102,7 +1102,7 @@ mod tests {
         )?;
         ensure_equal(
             &default_feedback_weight("outcome_observed", "harmful"),
-            &1.8000001_f32,
+            &(feedback_scoring::WEIGHT_OUTCOME_OBSERVED * feedback_scoring::HARMFUL_MULTIPLIER),
             "outcome harmful weight",
         )
     }

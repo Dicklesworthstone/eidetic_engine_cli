@@ -4,9 +4,11 @@
 //! - `get_memory_details`: retrieve a single memory with its tags and metadata
 //! - `revise_memory`: create an immutable revision of an existing memory
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+
+use chrono::{DateTime, SecondsFormat, Utc};
 
 use crate::db::{
     CreateAuditInput, CreateMemoryInput, CreateSearchIndexJobInput, CreateWorkspaceInput,
@@ -45,6 +47,10 @@ pub struct RememberMemoryOptions<'a> {
     pub confidence: f32,
     /// Optional source provenance URI.
     pub source: Option<&'a str>,
+    /// RFC3339 timestamp when this memory becomes applicable.
+    pub valid_from: Option<&'a str>,
+    /// RFC3339 timestamp when this memory stops being applicable.
+    pub valid_to: Option<&'a str>,
     /// Validate and render the write without mutating storage.
     pub dry_run: bool,
 }
@@ -74,6 +80,14 @@ pub struct RememberMemoryReport {
     pub tags: Vec<String>,
     /// Canonical source/provenance URI.
     pub source: Option<String>,
+    /// RFC3339 timestamp when this memory becomes applicable.
+    pub valid_from: Option<String>,
+    /// RFC3339 timestamp when this memory stops being applicable.
+    pub valid_to: Option<String>,
+    /// Current validity status computed from the stored validity window.
+    pub validity_status: String,
+    /// Stable shape of the validity window.
+    pub validity_window_kind: String,
     /// Whether this was a dry run.
     pub dry_run: bool,
     /// Whether a memory row was persisted.
@@ -90,10 +104,57 @@ pub struct RememberMemoryReport {
     pub index_status: String,
     /// Effect IDs once command-effect recording is backed by storage.
     pub effect_ids: Vec<String>,
-    /// Placeholder for future adjacency suggestions.
-    pub suggested_links: Vec<String>,
+    /// Staged adjacency suggestions. These do not create durable memory_links rows.
+    pub suggested_links: Vec<RememberSuggestedLink>,
+    /// Status of suggestion generation.
+    pub suggested_link_status: String,
+    /// Non-fatal degradations encountered while generating suggestions.
+    pub suggested_link_degradations: Vec<RememberSuggestedLinkDegradation>,
     /// Stable redaction/policy status for the accepted content.
     pub redaction_status: String,
+}
+
+/// Stable schema name for remember-time staged link suggestions.
+pub const REMEMBER_SUGGESTED_LINK_SCHEMA_V1: &str = "ee.remember.suggested_link.v1";
+
+const REMEMBER_SUGGESTED_LINK_LIMIT: usize = 5;
+
+/// A staged adjacent-memory suggestion returned from `ee remember`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RememberSuggestedLink {
+    /// Per-item schema for forward-compatible contract tests.
+    pub schema: &'static str,
+    /// Suggested edge relation.
+    pub relation: String,
+    /// Existing memory that may be adjacent to the newly remembered memory.
+    pub target_memory_id: String,
+    /// Deterministic score for ordering and display.
+    pub score: f32,
+    /// Conservative confidence in the suggestion.
+    pub confidence: f32,
+    /// Number of evidence features supporting the suggestion.
+    pub evidence_count: u32,
+    /// Human-readable summary of the evidence.
+    pub evidence_summary: String,
+    /// Candidate source that produced the suggestion.
+    pub source: String,
+    /// Canonical tags shared with the newly remembered memory.
+    pub matched_tags: Vec<String>,
+    /// Explicit next action; no durable link is created automatically.
+    pub next_action: String,
+}
+
+/// Non-fatal remember suggestion degradation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RememberSuggestedLinkDegradation {
+    /// Stable machine code.
+    pub code: String,
+    /// Severity string.
+    pub severity: String,
+    /// Human-readable message.
+    pub message: String,
+    /// Suggested repair action.
+    pub repair: String,
 }
 
 /// Create a manual memory and enqueue a single-document index job.
@@ -117,6 +178,10 @@ pub fn remember_memory(
             confidence: prepared.confidence,
             tags: prepared.tags,
             source: prepared.provenance_uri,
+            valid_from: prepared.valid_from,
+            valid_to: prepared.valid_to,
+            validity_status: prepared.validity_status,
+            validity_window_kind: prepared.validity_window_kind,
             dry_run: true,
             persisted: false,
             revision_number: 1,
@@ -126,6 +191,8 @@ pub fn remember_memory(
             index_status: "dry_run_not_queued".to_owned(),
             effect_ids: Vec::new(),
             suggested_links: Vec::new(),
+            suggested_link_status: "dry_run_not_evaluated".to_owned(),
+            suggested_link_degradations: Vec::new(),
             redaction_status: "checked".to_owned(),
         });
     }
@@ -161,8 +228,8 @@ pub fn remember_memory(
         trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
         trust_subclass: Some("ee remember".to_owned()),
         tags: prepared.tags.clone(),
-        valid_from: None,
-        valid_to: None,
+        valid_from: prepared.valid_from.clone(),
+        valid_to: prepared.valid_to.clone(),
     };
     let audit_details = remember_audit_details(&memory_id, &memory_input);
     let index_input = CreateSearchIndexJobInput {
@@ -194,6 +261,37 @@ pub fn remember_memory(
             repair: Some("ee doctor".to_string()),
         })?;
 
+    let (suggested_links, suggested_link_status, suggested_link_degradations) =
+        match suggest_links_for_remember(
+            &connection,
+            &prepared.workspace_id,
+            &memory_id,
+            &prepared.tags,
+        ) {
+            Ok(suggested_links) => {
+                let status = if suggested_links.is_empty() {
+                    "no_candidates"
+                } else {
+                    "ready"
+                };
+                (suggested_links, status.to_owned(), Vec::new())
+            }
+            Err(error) => (
+                Vec::new(),
+                "degraded".to_owned(),
+                vec![RememberSuggestedLinkDegradation {
+                    code: "remember_link_suggestion_failed".to_owned(),
+                    severity: "low".to_owned(),
+                    message: format!(
+                        "Remembered the memory, but link suggestions failed: {}",
+                        error.message()
+                    ),
+                    repair: "Run `ee doctor --json` and inspect memory tag/link indexes."
+                        .to_owned(),
+                }],
+            ),
+        };
+
     Ok(RememberMemoryReport {
         version: env!("CARGO_PKG_VERSION"),
         memory_id: prepared.memory_id,
@@ -206,6 +304,10 @@ pub fn remember_memory(
         confidence: prepared.confidence,
         tags: prepared.tags,
         source: prepared.provenance_uri,
+        valid_from: prepared.valid_from,
+        valid_to: prepared.valid_to,
+        validity_status: prepared.validity_status,
+        validity_window_kind: prepared.validity_window_kind,
         dry_run: false,
         persisted: true,
         revision_number: 1,
@@ -214,7 +316,9 @@ pub fn remember_memory(
         index_job_id: Some(index_job_id),
         index_status: "queued".to_owned(),
         effect_ids: Vec::new(),
-        suggested_links: Vec::new(),
+        suggested_links,
+        suggested_link_status,
+        suggested_link_degradations,
         redaction_status: "checked".to_owned(),
     })
 }
@@ -231,6 +335,10 @@ struct PreparedRememberMemory {
     confidence: f32,
     tags: Vec<String>,
     provenance_uri: Option<String>,
+    valid_from: Option<String>,
+    valid_to: Option<String>,
+    validity_status: String,
+    validity_window_kind: String,
 }
 
 fn prepare_remember_memory(
@@ -262,6 +370,7 @@ fn prepare_remember_memory(
                 .map_err(|error| remember_usage_error(format!("invalid provenance URI: {error}")))
         })
         .transpose()?;
+    let validity = prepare_validity_window(options.valid_from, options.valid_to)?;
 
     Ok(PreparedRememberMemory {
         memory_id: MemoryId::now(),
@@ -274,7 +383,143 @@ fn prepare_remember_memory(
         confidence,
         tags,
         provenance_uri,
+        valid_from: validity.valid_from,
+        valid_to: validity.valid_to,
+        validity_status: validity.status,
+        validity_window_kind: validity.window_kind,
     })
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PreparedValidityWindow {
+    valid_from: Option<String>,
+    valid_to: Option<String>,
+    status: String,
+    window_kind: String,
+}
+
+/// Stable validity metadata derived from a memory's validity window.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryValidity {
+    /// RFC3339 timestamp when this memory becomes applicable.
+    pub valid_from: Option<String>,
+    /// RFC3339 timestamp when this memory stops being applicable.
+    pub valid_to: Option<String>,
+    /// Current status: unknown, current, future, expired, or invalid.
+    pub status: String,
+    /// Window shape: unbounded, starts_at, ends_at, bounded, or instant.
+    pub window_kind: String,
+}
+
+/// Compute stable display metadata for stored validity timestamps.
+#[must_use]
+pub fn memory_validity(valid_from: &Option<String>, valid_to: &Option<String>) -> MemoryValidity {
+    let parsed_from = valid_from
+        .as_deref()
+        .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
+        .map(|timestamp| timestamp.with_timezone(&Utc));
+    let parsed_to = valid_to
+        .as_deref()
+        .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
+        .map(|timestamp| timestamp.with_timezone(&Utc));
+    let status = match (
+        valid_from.as_ref(),
+        valid_to.as_ref(),
+        parsed_from,
+        parsed_to,
+    ) {
+        (Some(_), _, None, _) | (_, Some(_), _, None) => "invalid",
+        (_, _, from, to) => classify_validity_status(from, to),
+    };
+
+    MemoryValidity {
+        valid_from: valid_from.clone(),
+        valid_to: valid_to.clone(),
+        status: status.to_owned(),
+        window_kind: validity_window_kind(valid_from.as_deref(), valid_to.as_deref()).to_owned(),
+    }
+}
+
+fn prepare_validity_window(
+    valid_from: Option<&str>,
+    valid_to: Option<&str>,
+) -> Result<PreparedValidityWindow, DomainError> {
+    let parsed_from = parse_validity_timestamp("valid_from", valid_from)?;
+    let parsed_to = parse_validity_timestamp("valid_to", valid_to)?;
+
+    if let (Some(from), Some(to)) = (parsed_from.as_ref(), parsed_to.as_ref()) {
+        if from > to {
+            return Err(remember_usage_error(
+                "valid_from must be less than or equal to valid_to".to_owned(),
+            ));
+        }
+    }
+
+    let valid_from = parsed_from.map(normalize_validity_timestamp);
+    let valid_to = parsed_to.map(normalize_validity_timestamp);
+
+    Ok(PreparedValidityWindow {
+        status: memory_validity(&valid_from, &valid_to).status,
+        window_kind: validity_window_kind(valid_from.as_deref(), valid_to.as_deref()).to_owned(),
+        valid_from,
+        valid_to,
+    })
+}
+
+fn parse_validity_timestamp(
+    field_name: &str,
+    value: Option<&str>,
+) -> Result<Option<DateTime<Utc>>, DomainError> {
+    value
+        .map(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(remember_usage_error(format!(
+                    "{field_name} must be a non-empty RFC3339 timestamp"
+                )));
+            }
+            DateTime::parse_from_rfc3339(trimmed)
+                .map(|timestamp| timestamp.with_timezone(&Utc))
+                .map_err(|error| {
+                    remember_usage_error(format!(
+                        "{field_name} must be an RFC3339 timestamp: {error}"
+                    ))
+                })
+        })
+        .transpose()
+}
+
+fn normalize_validity_timestamp(timestamp: DateTime<Utc>) -> String {
+    timestamp.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn classify_validity_status(
+    valid_from: Option<DateTime<Utc>>,
+    valid_to: Option<DateTime<Utc>>,
+) -> &'static str {
+    match (valid_from, valid_to) {
+        (None, None) => "unknown",
+        (from, to) => {
+            let now = Utc::now();
+            if from.is_some_and(|timestamp| now < timestamp) {
+                "future"
+            } else if to.is_some_and(|timestamp| now > timestamp) {
+                "expired"
+            } else {
+                "current"
+            }
+        }
+    }
+}
+
+fn validity_window_kind(valid_from: Option<&str>, valid_to: Option<&str>) -> &'static str {
+    match (valid_from, valid_to) {
+        (None, None) => "unbounded",
+        (Some(from), Some(to)) if from == to => "instant",
+        (Some(_), Some(_)) => "bounded",
+        (Some(_), None) => "starts_at",
+        (None, Some(_)) => "ends_at",
+    }
 }
 
 fn parse_tags(tags: Option<&str>) -> Result<Vec<String>, DomainError> {
@@ -419,6 +664,146 @@ fn remember_audit_details(memory_id: &str, input: &CreateMemoryInput) -> String 
         "tagCount": input.tags.len(),
     })
     .to_string()
+}
+
+fn suggest_links_for_remember(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+    tags: &[String],
+) -> Result<Vec<RememberSuggestedLink>, DomainError> {
+    if tags.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut matches: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for tag in tags {
+        let tagged_memory_ids =
+            connection
+                .list_memories_by_tag(workspace_id, tag)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to query memories by tag for suggestions: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?;
+        for target_memory_id in tagged_memory_ids {
+            if target_memory_id == memory_id {
+                continue;
+            }
+            matches
+                .entry(target_memory_id)
+                .or_default()
+                .insert(tag.clone());
+        }
+    }
+
+    if matches.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let existing_links = connection
+        .list_memory_links_for_memory(memory_id, None)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query existing memory links for suggestions: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    let mut existing_targets = BTreeSet::new();
+    for link in existing_links {
+        if link.src_memory_id == memory_id {
+            existing_targets.insert(link.dst_memory_id);
+        } else if link.dst_memory_id == memory_id {
+            existing_targets.insert(link.src_memory_id);
+        }
+    }
+
+    Ok(build_suggested_links_from_matches(
+        memory_id,
+        matches,
+        &existing_targets,
+        tags.len(),
+        REMEMBER_SUGGESTED_LINK_LIMIT,
+    ))
+}
+
+fn build_suggested_links_from_matches(
+    memory_id: &str,
+    matches: BTreeMap<String, BTreeSet<String>>,
+    existing_targets: &BTreeSet<String>,
+    tag_count: usize,
+    limit: usize,
+) -> Vec<RememberSuggestedLink> {
+    let mut candidates: Vec<(String, Vec<String>)> = matches
+        .into_iter()
+        .filter(|(target_memory_id, matched_tags)| {
+            target_memory_id != memory_id
+                && !matched_tags.is_empty()
+                && !existing_targets.contains(target_memory_id)
+        })
+        .map(|(target_memory_id, matched_tags)| {
+            (
+                target_memory_id,
+                matched_tags.into_iter().collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+
+    candidates.sort_by(|(left_id, left_tags), (right_id, right_tags)| {
+        right_tags
+            .len()
+            .cmp(&left_tags.len())
+            .then_with(|| left_id.cmp(right_id))
+    });
+
+    candidates
+        .into_iter()
+        .take(limit)
+        .map(|(target_memory_id, matched_tags)| {
+            let evidence_count = u32::try_from(matched_tags.len()).unwrap_or(u32::MAX);
+            RememberSuggestedLink {
+                schema: REMEMBER_SUGGESTED_LINK_SCHEMA_V1,
+                relation: "co_tag".to_owned(),
+                target_memory_id,
+                score: co_tag_score(matched_tags.len(), tag_count),
+                confidence: co_tag_confidence(matched_tags.len()),
+                evidence_count,
+                evidence_summary: summarize_matched_tags(&matched_tags),
+                source: "tag_cooccurrence".to_owned(),
+                matched_tags,
+                next_action:
+                    "Review this staged link; apply only through an explicit curation/apply command."
+                        .to_owned(),
+            }
+        })
+        .collect()
+}
+
+fn summarize_matched_tags(tags: &[String]) -> String {
+    if tags.len() == 1 {
+        return format!("Shares tag `{}` with the newly remembered memory.", tags[0]);
+    }
+
+    let rendered = tags
+        .iter()
+        .map(|tag| format!("`{tag}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Shares {} tags with the newly remembered memory: {rendered}.",
+        tags.len()
+    )
+}
+
+fn co_tag_score(matched_tag_count: usize, total_tag_count: usize) -> f32 {
+    let matched = usize_count_to_f32(matched_tag_count);
+    let total = usize_count_to_f32(total_tag_count.max(1));
+    (0.55 + ((matched / total) * 0.4)).min(0.95)
+}
+
+fn co_tag_confidence(matched_tag_count: usize) -> f32 {
+    (0.5 + (usize_count_to_f32(matched_tag_count) * 0.1)).min(0.9)
+}
+
+fn usize_count_to_f32(value: usize) -> f32 {
+    f32::from(u16::try_from(value).unwrap_or(u16::MAX))
 }
 
 fn remember_usage_error(message: String) -> DomainError {
@@ -573,6 +958,14 @@ pub struct MemorySummary {
     pub provenance_uri: Option<String>,
     /// Whether tombstoned.
     pub is_tombstoned: bool,
+    /// RFC3339 timestamp when this memory becomes applicable.
+    pub valid_from: Option<String>,
+    /// RFC3339 timestamp when this memory stops being applicable.
+    pub valid_to: Option<String>,
+    /// Current validity status computed from the stored validity window.
+    pub validity_status: String,
+    /// Stable shape of the validity window.
+    pub validity_window_kind: String,
     /// Creation timestamp.
     pub created_at: String,
 }
@@ -682,15 +1075,22 @@ pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
     let memories: Vec<MemorySummary> = filtered
         .into_iter()
         .take(options.limit as usize)
-        .map(|m| MemorySummary {
-            id: m.id,
-            level: m.level,
-            kind: m.kind,
-            content_preview: truncate_content(&m.content),
-            confidence: m.confidence,
-            provenance_uri: m.provenance_uri,
-            is_tombstoned: m.tombstoned_at.is_some(),
-            created_at: m.created_at,
+        .map(|m| {
+            let validity = memory_validity(&m.valid_from, &m.valid_to);
+            MemorySummary {
+                id: m.id,
+                level: m.level,
+                kind: m.kind,
+                content_preview: truncate_content(&m.content),
+                confidence: m.confidence,
+                provenance_uri: m.provenance_uri,
+                is_tombstoned: m.tombstoned_at.is_some(),
+                valid_from: validity.valid_from,
+                valid_to: validity.valid_to,
+                validity_status: validity.status,
+                validity_window_kind: validity.window_kind,
+                created_at: m.created_at,
+            }
         })
         .collect();
 
@@ -1546,6 +1946,8 @@ mod tests {
             tags: Some("Release,cli,release"),
             confidence: 0.8,
             source: Some("file://AGENTS.md#L42"),
+            valid_from: None,
+            valid_to: None,
             dry_run: true,
         })
         .map_err(|error| error.message())?;
@@ -1572,6 +1974,16 @@ mod tests {
             "suggested links empty",
         )?;
         ensure(
+            report.suggested_link_status,
+            "dry_run_not_evaluated".to_string(),
+            "suggested link status",
+        )?;
+        ensure(
+            report.suggested_link_degradations.is_empty(),
+            true,
+            "suggested link degradations",
+        )?;
+        ensure(
             report.redaction_status,
             "checked".to_string(),
             "redaction status",
@@ -1590,6 +2002,18 @@ mod tests {
             report.source,
             Some("file://AGENTS.md#L42".to_string()),
             "canonical source",
+        )?;
+        ensure(report.valid_from, None, "valid_from absent")?;
+        ensure(report.valid_to, None, "valid_to absent")?;
+        ensure(
+            report.validity_status,
+            "unknown".to_string(),
+            "validity status",
+        )?;
+        ensure(
+            report.validity_window_kind,
+            "unbounded".to_string(),
+            "validity window kind",
         )
     }
 
@@ -1607,6 +2031,8 @@ mod tests {
             tags: Some("release,checks"),
             confidence: 0.9,
             source: Some("file://README.md#L74-77"),
+            valid_from: None,
+            valid_to: None,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -1627,6 +2053,16 @@ mod tests {
             report.suggested_links.is_empty(),
             true,
             "suggested links empty",
+        )?;
+        ensure(
+            report.suggested_link_status,
+            "no_candidates".to_string(),
+            "suggested link status",
+        )?;
+        ensure(
+            report.suggested_link_degradations.is_empty(),
+            true,
+            "suggested link degradations",
         )?;
         ensure(
             report.redaction_status,
@@ -1661,6 +2097,8 @@ mod tests {
             Some("file://README.md#L74-77".to_string()),
             "provenance uri",
         )?;
+        ensure(memory.valid_from, None, "stored valid_from")?;
+        ensure(memory.valid_to, None, "stored valid_to")?;
         let tags = connection
             .get_memory_tags(&report.memory_id.to_string())
             .map_err(|error| error.to_string())?;
@@ -1698,6 +2136,279 @@ mod tests {
     }
 
     #[test]
+    fn remember_memory_validates_and_stores_temporal_validity_window() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let report = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Temporal memories retain their explicit applicability window.",
+            level: "semantic",
+            kind: "fact",
+            tags: Some("temporal,validity"),
+            confidence: 0.8,
+            source: None,
+            valid_from: Some("2020-01-01T00:00:00+00:00"),
+            valid_to: Some("2099-01-01T00:00:00Z"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            report.valid_from,
+            Some("2020-01-01T00:00:00Z".to_string()),
+            "normalized valid_from",
+        )?;
+        ensure(
+            report.valid_to,
+            Some("2099-01-01T00:00:00Z".to_string()),
+            "normalized valid_to",
+        )?;
+        ensure(
+            report.validity_status,
+            "current".to_string(),
+            "validity status",
+        )?;
+        ensure(
+            report.validity_window_kind,
+            "bounded".to_string(),
+            "validity window kind",
+        )?;
+
+        let connection = crate::db::DbConnection::open_file(&report.database_path)
+            .map_err(|error| error.to_string())?;
+        let memory = connection
+            .get_memory(&report.memory_id.to_string())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory should be persisted".to_string())?;
+        ensure(
+            memory.valid_from,
+            Some("2020-01-01T00:00:00Z".to_string()),
+            "stored valid_from",
+        )?;
+        ensure(
+            memory.valid_to,
+            Some("2099-01-01T00:00:00Z".to_string()),
+            "stored valid_to",
+        )
+    }
+
+    #[test]
+    fn remember_memory_rejects_invalid_temporal_validity_windows() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+
+        let malformed = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Temporal windows must parse.",
+            level: "semantic",
+            kind: "fact",
+            tags: None,
+            confidence: 0.8,
+            source: None,
+            valid_from: Some("not a timestamp"),
+            valid_to: None,
+            dry_run: true,
+        });
+        match malformed {
+            Err(DomainError::Usage { message, .. }) => {
+                ensure(message.contains("valid_from"), true, "mentions valid_from")?;
+            }
+            Err(error) => return Err(format!("expected usage error, got {error:?}")),
+            Ok(_) => return Err("malformed valid_from should fail".to_string()),
+        }
+
+        let reversed = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Temporal windows must be ordered.",
+            level: "semantic",
+            kind: "fact",
+            tags: None,
+            confidence: 0.8,
+            source: None,
+            valid_from: Some("2099-01-01T00:00:00Z"),
+            valid_to: Some("2020-01-01T00:00:00Z"),
+            dry_run: true,
+        });
+        match reversed {
+            Err(DomainError::Usage { message, .. }) => {
+                ensure(message.contains("valid_from"), true, "mentions valid_from")?;
+                ensure(message.contains("valid_to"), true, "mentions valid_to")?;
+            }
+            Err(error) => return Err(format!("expected usage error, got {error:?}")),
+            Ok(_) => return Err("reversed validity window should fail".to_string()),
+        }
+
+        let boundary = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Instant validity windows are accepted at the boundary.",
+            level: "semantic",
+            kind: "fact",
+            tags: None,
+            confidence: 0.8,
+            source: None,
+            valid_from: Some("2050-01-01T00:00:00Z"),
+            valid_to: Some("2050-01-01T00:00:00Z"),
+            dry_run: true,
+        })
+        .map_err(|error| error.message())?;
+        ensure(
+            boundary.validity_window_kind,
+            "instant".to_string(),
+            "boundary-equal window kind",
+        )
+    }
+
+    #[test]
+    fn remember_memory_returns_tag_cooccurrence_suggestions_without_links() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let first = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Release checks include cargo fmt.",
+            level: "procedural",
+            kind: "rule",
+            tags: Some("release,checks"),
+            confidence: 0.9,
+            source: None,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let second = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Release docs mention supported targets.",
+            level: "semantic",
+            kind: "fact",
+            tags: Some("release,docs"),
+            confidence: 0.8,
+            source: None,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let third = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Before release, run checks and record evidence.",
+            level: "procedural",
+            kind: "rule",
+            tags: Some("checks,release"),
+            confidence: 0.85,
+            source: None,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            third.suggested_link_status,
+            "ready".to_string(),
+            "suggested link status",
+        )?;
+        ensure(
+            third.suggested_link_degradations.is_empty(),
+            true,
+            "suggested link degradations",
+        )?;
+        ensure(third.suggested_links.len(), 2, "suggestion count")?;
+        ensure(
+            third.suggested_links[0].target_memory_id.clone(),
+            first.memory_id.to_string(),
+            "highest-overlap target first",
+        )?;
+        ensure(
+            third.suggested_links[0].matched_tags.clone(),
+            vec!["checks".to_string(), "release".to_string()],
+            "highest-overlap tags",
+        )?;
+        ensure(
+            third.suggested_links[0].relation.clone(),
+            "co_tag".to_string(),
+            "relation",
+        )?;
+        ensure(
+            third.suggested_links[0].source.clone(),
+            "tag_cooccurrence".to_string(),
+            "source",
+        )?;
+        ensure(
+            third.suggested_links[1].target_memory_id.clone(),
+            second.memory_id.to_string(),
+            "lower-overlap target second",
+        )?;
+
+        let connection = crate::db::DbConnection::open_file(&third.database_path)
+            .map_err(|error| error.to_string())?;
+        let links = connection
+            .list_all_memory_links(None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            links.is_empty(),
+            true,
+            "suggestions must not create durable memory links",
+        )
+    }
+
+    #[test]
+    fn staged_link_builder_suppresses_self_existing_and_limits_stably() -> TestResult {
+        let mut matches = BTreeMap::new();
+        matches.insert(
+            "mem_new".to_string(),
+            BTreeSet::from(["release".to_string(), "checks".to_string()]),
+        );
+        matches.insert(
+            "mem_existing".to_string(),
+            BTreeSet::from(["release".to_string(), "checks".to_string()]),
+        );
+        matches.insert(
+            "mem_c".to_string(),
+            BTreeSet::from(["release".to_string(), "checks".to_string()]),
+        );
+        matches.insert("mem_a".to_string(), BTreeSet::from(["release".to_string()]));
+        matches.insert("mem_b".to_string(), BTreeSet::from(["release".to_string()]));
+
+        let existing_targets = BTreeSet::from(["mem_existing".to_string()]);
+        let suggestions =
+            build_suggested_links_from_matches("mem_new", matches, &existing_targets, 2, 2);
+
+        ensure(suggestions.len(), 2, "bounded suggestions")?;
+        ensure(
+            suggestions[0].target_memory_id.clone(),
+            "mem_c".to_string(),
+            "highest overlap first",
+        )?;
+        ensure(
+            suggestions[1].target_memory_id.clone(),
+            "mem_a".to_string(),
+            "tie broken by target id",
+        )?;
+        ensure(
+            suggestions
+                .iter()
+                .any(|suggestion| suggestion.target_memory_id == "mem_new"),
+            false,
+            "self-link suppressed",
+        )?;
+        ensure(
+            suggestions
+                .iter()
+                .any(|suggestion| suggestion.target_memory_id == "mem_existing"),
+            false,
+            "existing link suppressed",
+        )
+    }
+
+    #[test]
     fn remember_memory_rejects_secret_like_content_before_storage() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let secret_like_content = format!(
@@ -1713,6 +2424,8 @@ mod tests {
             tags: None,
             confidence: 0.8,
             source: None,
+            valid_from: None,
+            valid_to: None,
             dry_run: false,
         });
 

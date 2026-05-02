@@ -17,11 +17,12 @@ use crate::db::{
     DbError,
 };
 use crate::models::{
-    EXPORT_AGENT_SCHEMA_V1, EXPORT_AUDIT_SCHEMA_V1, EXPORT_FOOTER_SCHEMA_V1,
-    EXPORT_HEADER_SCHEMA_V1, EXPORT_LINK_SCHEMA_V1, EXPORT_MEMORY_SCHEMA_V1, EXPORT_TAG_SCHEMA_V1,
-    EXPORT_WORKSPACE_SCHEMA_V1, ExportFooter, ExportHeader, ExportMemoryRecord, ExportTagRecord,
-    IMPORT_JSONL_SCHEMA_V1, ImportSource, MemoryContent, MemoryId, MemoryKind, MemoryLevel, Tag,
-    TrustClass, TrustLevel, UnitScore, WorkspaceId,
+    EXPORT_AGENT_SCHEMA_V1, EXPORT_ARTIFACT_SCHEMA_V1, EXPORT_AUDIT_SCHEMA_V1,
+    EXPORT_FOOTER_SCHEMA_V1, EXPORT_HEADER_SCHEMA_V1, EXPORT_LINK_SCHEMA_V1,
+    EXPORT_MEMORY_SCHEMA_V1, EXPORT_TAG_SCHEMA_V1, EXPORT_WORKSPACE_SCHEMA_V1, ExportFooter,
+    ExportHeader, ExportMemoryRecord, ExportTagRecord, IMPORT_JSONL_SCHEMA_V1, ImportSource,
+    MemoryContent, MemoryId, MemoryKind, MemoryLevel, Tag, TrustClass, TrustLevel, UnitScore,
+    WorkspaceId,
 };
 
 const DEFAULT_DB_FILE: &str = "ee.db";
@@ -473,6 +474,7 @@ fn parse_jsonl_source(input: &str) -> ParsedJsonlImport {
             EXPORT_TAG_SCHEMA_V1 => parse_tag_record(&mut parsed, line_number, value),
             EXPORT_FOOTER_SCHEMA_V1 => parse_footer_record(&mut parsed, line_number, value),
             EXPORT_AGENT_SCHEMA_V1
+            | EXPORT_ARTIFACT_SCHEMA_V1
             | EXPORT_AUDIT_SCHEMA_V1
             | EXPORT_LINK_SCHEMA_V1
             | EXPORT_WORKSPACE_SCHEMA_V1 => {
