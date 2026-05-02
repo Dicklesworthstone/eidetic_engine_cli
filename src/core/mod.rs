@@ -7,17 +7,21 @@ use crate::models::{
 
 pub mod agent_detect;
 pub mod agent_docs;
+pub mod artifact;
 pub mod audit;
+pub mod backup;
 pub mod budget;
 pub mod capabilities;
 pub mod certificate;
 pub mod check;
 pub mod claims;
 pub mod context;
+pub mod curate;
 pub mod degraded_honesty;
 pub mod doctor;
 pub mod economy;
 pub mod effect;
+pub mod feedback;
 pub mod handoff;
 pub mod health;
 pub mod index;
@@ -36,6 +40,7 @@ pub mod quarantine;
 pub mod recorder;
 pub mod rehearse;
 pub mod repro;
+pub mod rule;
 pub mod search;
 pub mod situation;
 pub mod status;
@@ -44,6 +49,7 @@ pub mod support_bundle;
 pub mod tripwire;
 pub mod verify;
 pub mod why;
+pub mod workspace;
 
 pub use budget::{BudgetDimension, BudgetExceeded, BudgetSnapshot, RequestBudget};
 pub use context::{AccessLevel, CapabilitySet, CommandContext};
@@ -442,7 +448,14 @@ mod tests {
             .collect();
         ensure_equal(
             &schemas,
-            &vec!["response", "error", "version_provenance"],
+            &vec![
+                "response",
+                "error",
+                "version_provenance",
+                "install_check",
+                "install_plan",
+                "update_plan",
+            ],
             "schema names",
         )
     }
