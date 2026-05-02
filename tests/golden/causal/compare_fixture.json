@@ -1,0 +1,66 @@
+{
+  "schema": "ee.causal.compare.v1",
+  "command": "causal compare",
+  "comparisons": [
+    {
+      "comparisonId": "cmp-fixture_replay-fixture_replay_001",
+      "sourceKind": "fixture_replay",
+      "sourceId": "fixture_replay_001",
+      "baselineUplift": 0.07,
+      "candidateUplift": 0.2,
+      "upliftDelta": 0.13,
+      "confidenceState": "medium",
+      "evidenceStrength": "replay_supported",
+      "verdict": "improves"
+    },
+    {
+      "comparisonId": "cmp-shadow_run-shadow_run_001",
+      "sourceKind": "shadow_run",
+      "sourceId": "shadow_run_001",
+      "baselineUplift": 0.07,
+      "candidateUplift": 0.17,
+      "upliftDelta": 0.1,
+      "confidenceState": "medium",
+      "evidenceStrength": "replay_supported",
+      "verdict": "improves"
+    },
+    {
+      "comparisonId": "cmp-counterfactual_episode-counterfactual_episode_001",
+      "sourceKind": "counterfactual_episode",
+      "sourceId": "counterfactual_episode_001",
+      "baselineUplift": 0.07,
+      "candidateUplift": 0.15000000000000002,
+      "upliftDelta": 0.08000000000000002,
+      "confidenceState": "medium",
+      "evidenceStrength": "replay_supported",
+      "verdict": "improves"
+    },
+    {
+      "comparisonId": "cmp-active_learning_experiment-experiment_001",
+      "sourceKind": "active_learning_experiment",
+      "sourceId": "experiment_001",
+      "baselineUplift": 0.07,
+      "candidateUplift": 0.14,
+      "upliftDelta": 0.07,
+      "confidenceState": "medium",
+      "evidenceStrength": "replay_supported",
+      "verdict": "improves"
+    }
+  ],
+  "summary": {
+    "totalComparisons": 4,
+    "improvesCount": 4,
+    "regressesCount": 0,
+    "flatCount": 0,
+    "methodUsed": "replay"
+  },
+  "filtersApplied": [
+    "artifact_id=mem_fixture_001",
+    "fixture_replay_id=fixture_replay_001",
+    "shadow_run_id=shadow_run_001",
+    "counterfactual_episode_id=counterfactual_episode_001",
+    "experiment_id=experiment_001"
+  ],
+  "degradations": [],
+  "dryRun": false
+}

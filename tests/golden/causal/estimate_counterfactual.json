@@ -1,0 +1,64 @@
+{
+  "schema": "ee.causal.estimate.v1",
+  "command": "causal estimate",
+  "estimates": [
+    {
+      "estimateId": "est-mem_counterfactual_001-unknown-decision",
+      "artifactId": "mem_counterfactual_001",
+      "decisionId": "unknown-decision",
+      "method": "experiment",
+      "uplift": 0.15,
+      "direction": "positive",
+      "confidence": 0.92,
+      "evidenceStrength": "experiment_supported",
+      "confidenceState": "high",
+      "sampleSize": 42,
+      "estimatedAt": "TIMESTAMP"
+    }
+  ],
+  "assumptions": [
+    {
+      "code": "stable_unit",
+      "description": "Treatment of one unit does not affect outcomes of other units",
+      "impact": "Violation could lead to biased estimates"
+    },
+    {
+      "code": "positivity",
+      "description": "All units have non-zero probability of receiving treatment",
+      "impact": "Violation prevents extrapolation to untreated units"
+    },
+    {
+      "code": "proper_randomization",
+      "description": "Treatment assignment was properly randomized",
+      "impact": "If violated, selection bias contaminates estimate"
+    }
+  ],
+  "confounders": [
+    {
+      "confounderId": "conf-task-complexity-mem_counterfactual_001",
+      "kind": "task_complexity",
+      "description": "Task complexity correlates with both memory usage and success",
+      "severity": 0.6,
+      "mitigation": "Stratify by task difficulty or use matching"
+    },
+    {
+      "confounderId": "conf-agent-skill-mem_counterfactual_001",
+      "kind": "agent_capability",
+      "description": "More capable agents may both use memory more and succeed more",
+      "severity": 0.4,
+      "mitigation": "Include agent-level fixed effects"
+    }
+  ],
+  "summary": {
+    "totalEstimates": 1,
+    "totalAssumptions": 3,
+    "totalConfounders": 2,
+    "methodUsed": "experiment"
+  },
+  "filtersApplied": [
+    "artifact_id=mem_counterfactual_001",
+    "chain_id=chain_counterfactual_001"
+  ],
+  "degradations": [],
+  "dryRun": false
+}

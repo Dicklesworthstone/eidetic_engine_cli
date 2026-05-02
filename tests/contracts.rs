@@ -46,6 +46,9 @@ mod cache_admission;
 #[path = "contracts/causal_trace.rs"]
 mod causal_trace;
 
+#[path = "contracts/causal_credit.rs"]
+mod causal_credit;
+
 #[path = "contracts/submodular_packer.rs"]
 mod submodular_packer;
 

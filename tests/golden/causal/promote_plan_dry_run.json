@@ -1,0 +1,48 @@
+{
+  "schema": "ee.causal.promote_plan.v1",
+  "command": "causal promote-plan",
+  "plans": [
+    {
+      "schema": "ee.causal.promotion_plan.v1",
+      "planId": "plan-mem_fixture_001",
+      "artifactId": "mem_fixture_001",
+      "action": "promote",
+      "status": "dry_run_ready",
+      "evidenceStrength": "replay_supported",
+      "minimumUplift": 0.05,
+      "estimatedUplift": 0.1,
+      "requiredEvidenceIds": [
+        "evidence-mem_fixture_001"
+      ],
+      "blockingConfounderIds": [],
+      "dryRunFirst": true,
+      "auditIds": [
+        "audit-promote-plan-mem_fixture_001"
+      ],
+      "createdAt": "TIMESTAMP"
+    }
+  ],
+  "recommendations": {
+    "revalidation": [
+      "Re-run `ee causal estimate --artifact-id mem_fixture_001 --method replay --json` before applying changes."
+    ],
+    "narrowerRouting": [
+      "Narrow routing scope for `mem_fixture_001` to higher-confidence task families."
+    ],
+    "experimentProposals": [
+      "Propose controlled experiment for `mem_fixture_001` with `ee learn experiment --artifact-id mem_fixture_001 --dry-run --json`."
+    ]
+  },
+  "summary": {
+    "totalPlans": 1,
+    "promoteCount": 1,
+    "holdCount": 0,
+    "demoteCount": 0,
+    "methodUsed": "replay"
+  },
+  "filtersApplied": [
+    "artifact_id=mem_fixture_001"
+  ],
+  "degradations": [],
+  "dryRun": true
+}

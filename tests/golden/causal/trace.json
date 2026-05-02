@@ -1,0 +1,80 @@
+{
+  "schema": "ee.causal.trace.v1",
+  "command": "causal trace",
+  "chains": [
+    {
+      "chainId": "run_fixture_001",
+      "decisionTrace": {
+        "schema": "ee.causal.decision_trace.v1",
+        "decisionId": "decision-for-run_fixture_001",
+        "traceId": "trace-run_fixture_001",
+        "plane": "observe",
+        "decidedAt": "TIMESTAMP",
+        "outcome": "used",
+        "agent": "agent_fixture_001",
+        "taskId": null,
+        "policyId": null,
+        "exposedArtifactIds": [],
+        "selectedArtifactIds": [],
+        "rejectedArtifactIds": [],
+        "rationale": "Traced decision from causal analysis",
+        "evidenceIds": []
+      },
+      "exposures": [
+        {
+          "exposureId": "exp-run_fixture_001",
+          "channel": "context_pack",
+          "artifactId": "run_fixture_001",
+          "artifactType": "recorder_run",
+          "exposedAt": "TIMESTAMP",
+          "recorderRunId": "run_fixture_001"
+        },
+        {
+          "exposureId": "exp-pack_fixture_001",
+          "channel": "context_pack",
+          "artifactId": "pack_fixture_001",
+          "artifactType": "context_pack",
+          "exposedAt": "TIMESTAMP",
+          "contextPackId": "pack_fixture_001"
+        },
+        {
+          "exposureId": "exp-proc_fixture_001",
+          "channel": "procedure",
+          "artifactId": "proc_fixture_001",
+          "artifactType": "procedure",
+          "exposedAt": "TIMESTAMP"
+        }
+      ],
+      "recorderRunIds": [
+        "run_fixture_001"
+      ],
+      "contextPackIds": [
+        "pack_fixture_001"
+      ],
+      "preflightIds": [
+        "pre_fixture_001"
+      ],
+      "tripwireIds": [
+        "trip_fixture_001"
+      ],
+      "procedureIds": [
+        "proc_fixture_001"
+      ]
+    }
+  ],
+  "summary": {
+    "totalChains": 1,
+    "totalExposures": 3,
+    "totalDecisions": 1
+  },
+  "filtersApplied": [
+    "run_id=run_fixture_001",
+    "pack_id=pack_fixture_001",
+    "preflight_id=pre_fixture_001",
+    "tripwire_id=trip_fixture_001",
+    "procedure_id=proc_fixture_001",
+    "agent_id=agent_fixture_001"
+  ],
+  "degradations": [],
+  "dryRun": false
+}

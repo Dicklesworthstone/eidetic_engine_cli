@@ -1,0 +1,37 @@
+{
+  "schema": "ee.causal.audit_confounded.v1",
+  "command": "causal promote-plan",
+  "methodUsed": "naive",
+  "dryRun": false,
+  "planStatuses": [
+    "proposed"
+  ],
+  "dryRunFirst": [
+    true
+  ],
+  "blockingConfounderIds": [
+    "confounder-mem_confounded_001"
+  ],
+  "auditIds": [
+    "audit-promote-plan-mem_confounded_001"
+  ],
+  "degradations": [
+    {
+      "code": "dry_run_recommended",
+      "message": "Promotion planning is policy-conservative; prefer --dry-run in automation.",
+      "severity": "info"
+    }
+  ],
+  "recommendations": {
+    "revalidation": [
+      "Re-run `ee causal estimate --artifact-id mem_confounded_001 --method replay --json` before applying changes."
+    ],
+    "narrowerRouting": [
+      "Narrow routing scope for `mem_confounded_001` to higher-confidence task families."
+    ],
+    "experimentProposals": [
+      "Propose controlled experiment for `mem_confounded_001` with `ee learn experiment --artifact-id mem_confounded_001 --dry-run --json`."
+    ]
+  },
+  "mutationGuard": "no_direct_apply"
+}

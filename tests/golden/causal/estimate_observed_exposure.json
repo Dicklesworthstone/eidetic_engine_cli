@@ -1,0 +1,64 @@
+{
+  "schema": "ee.causal.estimate.v1",
+  "command": "causal estimate",
+  "estimates": [
+    {
+      "estimateId": "est-mem_fixture_001-decision_fixture_001",
+      "artifactId": "mem_fixture_001",
+      "decisionId": "decision_fixture_001",
+      "method": "naive",
+      "uplift": 0.05,
+      "direction": "positive",
+      "confidence": 0.3,
+      "evidenceStrength": "exposure_only",
+      "confidenceState": "insufficient",
+      "sampleSize": 42,
+      "estimatedAt": "TIMESTAMP"
+    }
+  ],
+  "assumptions": [
+    {
+      "code": "stable_unit",
+      "description": "Treatment of one unit does not affect outcomes of other units",
+      "impact": "Violation could lead to biased estimates"
+    },
+    {
+      "code": "positivity",
+      "description": "All units have non-zero probability of receiving treatment",
+      "impact": "Violation prevents extrapolation to untreated units"
+    },
+    {
+      "code": "no_confounders",
+      "description": "No unmeasured confounders affect both exposure and outcome",
+      "impact": "Almost certainly violated; estimate is likely biased"
+    }
+  ],
+  "confounders": [
+    {
+      "confounderId": "conf-task-complexity-mem_fixture_001",
+      "kind": "task_complexity",
+      "description": "Task complexity correlates with both memory usage and success",
+      "severity": 0.6,
+      "mitigation": "Stratify by task difficulty or use matching"
+    },
+    {
+      "confounderId": "conf-agent-skill-mem_fixture_001",
+      "kind": "agent_capability",
+      "description": "More capable agents may both use memory more and succeed more",
+      "severity": 0.4,
+      "mitigation": "Include agent-level fixed effects"
+    }
+  ],
+  "summary": {
+    "totalEstimates": 1,
+    "totalAssumptions": 3,
+    "totalConfounders": 2,
+    "methodUsed": "naive"
+  },
+  "filtersApplied": [
+    "artifact_id=mem_fixture_001",
+    "decision_id=decision_fixture_001"
+  ],
+  "degradations": [],
+  "dryRun": false
+}
