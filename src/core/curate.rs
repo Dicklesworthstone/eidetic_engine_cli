@@ -53,6 +53,10 @@ pub struct CurateCandidatesOptions<'a> {
     pub limit: u32,
     /// Number of filtered candidates to skip.
     pub offset: u32,
+    /// Sort mode for queue presentation.
+    pub sort: &'a str,
+    /// Group likely duplicates contiguously in the result ordering.
+    pub group_duplicates: bool,
 }
 
 /// Options for validating one curation candidate through `ee curate validate`.
@@ -761,6 +765,8 @@ pub struct CurateCandidatesFilter {
     pub candidate_type: Option<String>,
     pub status: Option<String>,
     pub target_memory_id: Option<String>,
+    pub sort: String,
+    pub group_duplicates: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -859,7 +865,8 @@ pub fn list_curation_candidates(
             repair: Some("ee doctor".to_owned()),
         })?;
     let now = Utc::now().to_rfc3339();
-    let stored = if status.as_deref() == Some(CandidateStatus::Pending.as_str()) {
+    let sort_mode = parse_curate_candidate_sort_mode(options.sort)?;
+    let mut stored = if status.as_deref() == Some(CandidateStatus::Pending.as_str()) {
         stored
             .into_iter()
             .filter(|candidate| !candidate_hidden_from_default_queue(candidate, &now))
@@ -867,6 +874,7 @@ pub fn list_curation_candidates(
     } else {
         stored
     };
+    sort_curate_candidates(&mut stored, sort_mode, options.group_duplicates);
 
     let total_count = stored.len();
     let offset = usize::try_from(options.offset).map_err(|_| {
@@ -911,11 +919,113 @@ pub fn list_curation_candidates(
             candidate_type,
             status,
             target_memory_id,
+            sort: sort_mode.as_str().to_owned(),
+            group_duplicates: options.group_duplicates,
         },
         candidates,
         degraded: Vec::new(),
         next_action,
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CurateCandidateSortMode {
+    ReviewState,
+    CreatedAt,
+    Confidence,
+}
+
+impl CurateCandidateSortMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReviewState => "review_state",
+            Self::CreatedAt => "created_at",
+            Self::Confidence => "confidence",
+        }
+    }
+}
+
+fn parse_curate_candidate_sort_mode(raw: &str) -> Result<CurateCandidateSortMode, DomainError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "review_state" | "review-state" | "state" | "queue" => {
+            Ok(CurateCandidateSortMode::ReviewState)
+        }
+        "created_at" | "created-at" | "created" | "time" => Ok(CurateCandidateSortMode::CreatedAt),
+        "confidence" | "score" => Ok(CurateCandidateSortMode::Confidence),
+        _ => Err(curate_usage_error(
+            format!(
+                "Unknown curate candidates sort mode `{raw}`; expected review_state, created_at, or confidence"
+            ),
+            "ee curate candidates --help",
+        )),
+    }
+}
+
+fn sort_curate_candidates(
+    stored: &mut [StoredCurationCandidate],
+    sort_mode: CurateCandidateSortMode,
+    group_duplicates: bool,
+) {
+    stored.sort_by(|left, right| {
+        if group_duplicates {
+            let left_group = duplicate_group_key(left);
+            let right_group = duplicate_group_key(right);
+            let cmp = left_group.cmp(&right_group);
+            if !cmp.is_eq() {
+                return cmp;
+            }
+        }
+
+        let cmp = match sort_mode {
+            CurateCandidateSortMode::ReviewState => review_state_rank(&left.review_state)
+                .cmp(&review_state_rank(&right.review_state))
+                .then_with(|| right.created_at.cmp(&left.created_at))
+                .then_with(|| left.id.cmp(&right.id)),
+            CurateCandidateSortMode::CreatedAt => right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| left.id.cmp(&right.id)),
+            CurateCandidateSortMode::Confidence => right
+                .confidence
+                .partial_cmp(&left.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| right.created_at.cmp(&left.created_at))
+                .then_with(|| left.id.cmp(&right.id)),
+        };
+        if cmp.is_eq() {
+            left.id.cmp(&right.id)
+        } else {
+            cmp
+        }
+    });
+}
+
+fn duplicate_group_key(candidate: &StoredCurationCandidate) -> (String, String, String) {
+    (
+        candidate.target_memory_id.clone(),
+        candidate.candidate_type.clone(),
+        candidate
+            .proposed_content
+            .clone()
+            .unwrap_or_else(|| candidate.reason.clone()),
+    )
+}
+
+fn review_state_rank(review_state: &str) -> u8 {
+    match review_state {
+        "new" => 0,
+        "needs_evidence" => 1,
+        "needs_scope" => 2,
+        "duplicate" => 3,
+        "snoozed" => 4,
+        "accepted" => 5,
+        "rejected" => 6,
+        "merged" => 7,
+        "superseded" => 8,
+        "expired" => 9,
+        "applied" => 10,
+        _ => 255,
+    }
 }
 
 /// Validate one curation candidate and record the curation review decision.
@@ -3552,6 +3662,8 @@ mod tests {
             target_memory_id: None,
             limit: 10,
             offset: 0,
+            sort: "review_state",
+            group_duplicates: false,
         })
         .map_err(|error| error.message())?;
 
@@ -3561,6 +3673,133 @@ mod tests {
         assert_eq!(report.candidates[0].id, pending_id);
         assert!(!report.durable_mutation);
         assert_eq!(report.filter.status.as_deref(), Some("pending"));
+        Ok(())
+    }
+
+    #[test]
+    fn list_curation_candidates_supports_sorting_and_duplicate_grouping() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(21)).to_string();
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("curate-sort-group".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Review queue sort/group fixture.".to_owned(),
+                    confidence: 0.7,
+                    utility: 0.6,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let dup_older = curate_id(22);
+        let dup_newer = curate_id(23);
+        let other_group = curate_id(24);
+        connection
+            .insert_curation_candidate(
+                &dup_older,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "promote".to_owned(),
+                    target_memory_id: memory_id.clone(),
+                    proposed_content: Some("group-a".to_owned()),
+                    proposed_confidence: Some(0.65),
+                    proposed_trust_class: Some("agent_validated".to_owned()),
+                    source_type: "feedback_event".to_owned(),
+                    source_id: Some("outcome_dup_older".to_owned()),
+                    reason: "duplicate group older".to_owned(),
+                    confidence: 0.65,
+                    status: Some("pending".to_owned()),
+                    created_at: Some("2026-05-01T00:00:01Z".to_owned()),
+                    ttl_expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_curation_candidate(
+                &dup_newer,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "promote".to_owned(),
+                    target_memory_id: memory_id.clone(),
+                    proposed_content: Some("group-a".to_owned()),
+                    proposed_confidence: Some(0.90),
+                    proposed_trust_class: Some("agent_validated".to_owned()),
+                    source_type: "feedback_event".to_owned(),
+                    source_id: Some("outcome_dup_newer".to_owned()),
+                    reason: "duplicate group newer".to_owned(),
+                    confidence: 0.90,
+                    status: Some("pending".to_owned()),
+                    created_at: Some("2026-05-01T00:00:03Z".to_owned()),
+                    ttl_expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_curation_candidate(
+                &other_group,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "supersede".to_owned(),
+                    target_memory_id: memory_id,
+                    proposed_content: Some("group-b".to_owned()),
+                    proposed_confidence: Some(0.80),
+                    proposed_trust_class: Some("agent_validated".to_owned()),
+                    source_type: "human_request".to_owned(),
+                    source_id: Some("reviewer".to_owned()),
+                    reason: "separate group".to_owned(),
+                    confidence: 0.80,
+                    status: Some("pending".to_owned()),
+                    created_at: Some("2026-05-01T00:00:02Z".to_owned()),
+                    ttl_expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let report = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_type: None,
+            status: Some("pending"),
+            target_memory_id: None,
+            limit: 10,
+            offset: 0,
+            sort: "created_at",
+            group_duplicates: true,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.filter.sort, "created_at");
+        assert!(report.filter.group_duplicates);
+        assert_eq!(report.candidates.len(), 3);
+        assert_eq!(report.candidates[0].id, dup_newer);
+        assert_eq!(report.candidates[1].id, dup_older);
+        assert_eq!(report.candidates[2].id, other_group);
         Ok(())
     }
 

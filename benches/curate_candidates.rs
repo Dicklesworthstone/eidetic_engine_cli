@@ -154,6 +154,8 @@ fn run_curate_candidates_once(fixture: &CurateFixture) -> f64 {
         target_memory_id: None,
         limit: 1000,
         offset: 0,
+        sort: "review_state",
+        group_duplicates: false,
     };
 
     let report = list_curation_candidates(&options)
