@@ -2041,3 +2041,165 @@ fn causal_commands_support_human_output() -> TestResult {
         "human output must contain header",
     )
 }
+
+// ============================================================================
+// Rehearse Tests (EE-REHEARSE-001)
+// ============================================================================
+
+#[test]
+fn rehearse_plan_returns_valid_json() -> TestResult {
+    let output = run_ee(&["rehearse", "plan", "--json"])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        stdout_contains(&output, "ee.rehearse.plan.v1"),
+        "must have rehearse plan schema",
+    )?;
+    ensure(
+        stdout_contains(&output, "can_proceed"),
+        "must contain can_proceed",
+    )?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")
+}
+
+#[test]
+fn rehearse_plan_reports_non_rehearsable_command() -> TestResult {
+    let command_spec = r#"[{
+      "id":"cmd_non_rehearsable",
+      "command":"serve",
+      "args":["--json"],
+      "expected_effect":"external_io",
+      "stop_on_failure":true,
+      "idempotency_key":null
+    }]"#;
+    let output = run_ee(&[
+        "rehearse",
+        "plan",
+        "--commands-json",
+        command_spec,
+        "--profile",
+        "full",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    let value = stdout_json(&output)?;
+    ensure(
+        value["non_rehearsable"]
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()),
+        "must include non_rehearsable entries",
+    )?;
+    ensure_equal(
+        &value["non_rehearsable"][0]["reason_code"],
+        &serde_json::json!("external_io"),
+        "reason code",
+    )?;
+    ensure_equal(
+        &value["can_proceed"],
+        &serde_json::json!(false),
+        "can proceed",
+    )
+}
+
+#[test]
+fn rehearse_run_returns_manifest_json() -> TestResult {
+    let command_spec = r#"[{
+      "id":"cmd_status",
+      "command":"status",
+      "args":["--json"],
+      "expected_effect":"read_only",
+      "stop_on_failure":false,
+      "idempotency_key":"idem-status-001"
+    }]"#;
+    let output = run_ee(&[
+        "rehearse",
+        "run",
+        "--commands-json",
+        command_spec,
+        "--profile",
+        "quick",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    let value = stdout_json(&output)?;
+    ensure_equal(
+        &value["schema"],
+        &serde_json::json!("ee.rehearse.run.v1"),
+        "schema",
+    )?;
+    ensure(value.get("run_id").is_some(), "must contain run_id")?;
+    ensure(
+        value.get("command_results").is_some(),
+        "must contain command_results",
+    )?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")
+}
+
+#[test]
+fn rehearse_inspect_and_promote_plan_return_valid_json() -> TestResult {
+    let inspect_output = run_ee(&["rehearse", "inspect", "rrun_fixture_001", "--json"])?;
+    ensure_equal(&inspect_output.status.code(), &Some(0), "inspect exit code")?;
+    ensure(
+        stdout_is_json(&inspect_output),
+        "inspect stdout must be valid JSON",
+    )?;
+    let inspect_json = stdout_json(&inspect_output)?;
+    ensure_equal(
+        &inspect_json["schema"],
+        &serde_json::json!("ee.rehearse.inspect.v1"),
+        "inspect schema",
+    )?;
+    ensure(
+        inspect_json.get("manifest_hash").is_some(),
+        "manifest hash must exist",
+    )?;
+
+    let promote_output = run_ee(&["rehearse", "promote-plan", "rrun_fixture_001", "--json"])?;
+    ensure_equal(
+        &promote_output.status.code(),
+        &Some(0),
+        "promote-plan exit code",
+    )?;
+    ensure(
+        stdout_is_json(&promote_output),
+        "promote stdout must be valid JSON",
+    )?;
+    let promote_json = stdout_json(&promote_output)?;
+    ensure_equal(
+        &promote_json["schema"],
+        &serde_json::json!("ee.rehearse.promote_plan.v1"),
+        "promote schema",
+    )?;
+    ensure(
+        promote_json["plan_steps"]
+            .as_array()
+            .is_some_and(|steps| !steps.is_empty()),
+        "plan_steps must be present",
+    )?;
+    ensure(
+        stdout_is_clean(&promote_output),
+        "promote stdout must be clean",
+    )
+}
+
+#[test]
+fn all_rehearse_commands_produce_stdout_only_data() -> TestResult {
+    let commands = [
+        vec!["rehearse", "plan", "--json"],
+        vec!["rehearse", "run", "--profile", "quick", "--json"],
+        vec!["rehearse", "inspect", "rrun_fixture_001", "--json"],
+        vec!["rehearse", "promote-plan", "rrun_fixture_001", "--json"],
+    ];
+
+    for args in &commands {
+        let output = run_ee(args)?;
+        if output.status.code() == Some(0) {
+            ensure(
+                stdout_is_clean(&output),
+                format!("ee {} must have clean stdout", args.join(" ")),
+            )?;
+        }
+    }
+    Ok(())
+}
