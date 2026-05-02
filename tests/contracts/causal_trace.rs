@@ -1,10 +1,13 @@
-//! Causal trace contract coverage (EE-451).
+//! Causal trace and estimate contract coverage (EE-451, EE-452).
 //!
-//! Verifies that `ee causal trace --json` produces stable, schema-compliant
-//! output for tracing causal chains over recorder runs, context packs,
-//! preflight closes, tripwire checks, and procedure uses.
+//! Verifies that `ee causal trace --json` and `ee causal estimate --json`
+//! produce stable, schema-compliant output for tracing causal chains and
+//! estimating uplift with evidence tiers, assumptions, and confounders.
 
-use ee::core::causal::{TraceOptions, trace_causal_chains};
+use ee::core::causal::{
+    CAUSAL_ESTIMATE_SCHEMA_V1, ConfidenceState, EstimateOptions, TraceOptions,
+    estimate_causal_uplift, trace_causal_chains,
+};
 use ee::models::causal::CAUSAL_TRACE_SCHEMA_V1;
 use serde_json::Value as JsonValue;
 
@@ -236,6 +239,160 @@ fn dry_run_human_summary_indicates_mode() -> TestResult {
     ensure(
         summary.contains("[DRY RUN]"),
         "should indicate dry run mode",
+    )?;
+
+    Ok(())
+}
+
+// ============================================================================
+// EE-452: Causal Estimate Contract Tests
+// ============================================================================
+
+#[test]
+fn estimate_report_has_correct_schema() -> TestResult {
+    let options = EstimateOptions::new()
+        .with_artifact_id("art-001")
+        .with_decision_id("dec-001");
+    let report = estimate_causal_uplift(&options);
+    let json = report.data_json();
+
+    assert_schema_field(&json, CAUSAL_ESTIMATE_SCHEMA_V1, "estimate report")?;
+    assert_has_field(&json, "command", "estimate report")?;
+    assert_has_field(&json, "estimates", "estimate report")?;
+    assert_has_field(&json, "assumptions", "estimate report")?;
+    assert_has_field(&json, "confounders", "estimate report")?;
+    assert_has_field(&json, "summary", "estimate report")?;
+    assert_has_field(&json, "filtersApplied", "estimate report")?;
+    assert_has_field(&json, "dryRun", "estimate report")?;
+
+    Ok(())
+}
+
+#[test]
+fn estimate_summary_has_required_fields() -> TestResult {
+    let options = EstimateOptions::new().with_artifact_id("art-001");
+    let report = estimate_causal_uplift(&options);
+    let json = report.data_json();
+
+    let summary = json.get("summary").ok_or("missing summary field")?;
+
+    assert_has_field(summary, "totalEstimates", "summary")?;
+    assert_has_field(summary, "totalAssumptions", "summary")?;
+    assert_has_field(summary, "totalConfounders", "summary")?;
+    assert_has_field(summary, "methodUsed", "summary")?;
+
+    Ok(())
+}
+
+#[test]
+fn estimate_with_artifact_produces_result() -> TestResult {
+    let options = EstimateOptions::new()
+        .with_artifact_id("memory-001")
+        .with_decision_id("decision-001");
+    let report = estimate_causal_uplift(&options);
+
+    ensure(!report.is_empty(), "should produce estimate with filters")?;
+    ensure(
+        report.estimates[0].artifact_id == "memory-001",
+        "artifact_id should match",
+    )?;
+
+    Ok(())
+}
+
+#[test]
+fn estimate_evidence_tiers_are_conservative() -> TestResult {
+    let naive = EstimateOptions::new()
+        .with_artifact_id("art-001")
+        .with_method("naive");
+    let replay = EstimateOptions::new()
+        .with_artifact_id("art-001")
+        .with_method("replay");
+    let experiment = EstimateOptions::new()
+        .with_artifact_id("art-001")
+        .with_method("experiment");
+
+    let naive_report = estimate_causal_uplift(&naive);
+    let replay_report = estimate_causal_uplift(&replay);
+    let exp_report = estimate_causal_uplift(&experiment);
+
+    ensure(
+        naive_report.estimates[0].confidence_state == ConfidenceState::Insufficient,
+        "naive method should have insufficient confidence",
+    )?;
+    ensure(
+        replay_report.estimates[0].confidence_state == ConfidenceState::Medium,
+        "replay method should have medium confidence",
+    )?;
+    ensure(
+        exp_report.estimates[0].confidence_state == ConfidenceState::High,
+        "experiment method should have high confidence",
+    )?;
+
+    Ok(())
+}
+
+#[test]
+fn estimate_includes_assumptions_when_requested() -> TestResult {
+    let options = EstimateOptions::new()
+        .with_artifact_id("art-001")
+        .with_assumptions();
+    let report = estimate_causal_uplift(&options);
+
+    ensure(
+        !report.assumptions.is_empty(),
+        "should include assumptions when requested",
+    )?;
+    ensure(
+        report.assumptions.iter().any(|a| a.code == "stable_unit"),
+        "should include stable_unit assumption",
+    )?;
+
+    Ok(())
+}
+
+#[test]
+fn estimate_includes_confounders_when_requested() -> TestResult {
+    let options = EstimateOptions::new()
+        .with_artifact_id("art-001")
+        .with_confounders();
+    let report = estimate_causal_uplift(&options);
+
+    ensure(
+        report.has_confounders(),
+        "should include confounders when requested",
+    )?;
+
+    Ok(())
+}
+
+#[test]
+fn estimate_dry_run_returns_empty_estimates() -> TestResult {
+    let options = EstimateOptions::new().with_artifact_id("art-001").dry_run();
+    let report = estimate_causal_uplift(&options);
+
+    ensure(report.is_empty(), "dry run should return empty estimates")?;
+    ensure(report.dry_run, "dry_run flag should be true")?;
+
+    Ok(())
+}
+
+#[test]
+fn estimate_human_summary_shows_key_info() -> TestResult {
+    let options = EstimateOptions::new()
+        .with_artifact_id("art-001")
+        .with_method("replay");
+    let report = estimate_causal_uplift(&options);
+    let summary = report.human_summary();
+
+    ensure(
+        summary.contains("Causal Estimate Report"),
+        "should contain title",
+    )?;
+    ensure(summary.contains("Method:"), "should show method")?;
+    ensure(
+        summary.contains("Estimates found:"),
+        "should show estimate count",
     )?;
 
     Ok(())
