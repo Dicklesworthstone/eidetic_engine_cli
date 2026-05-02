@@ -15,6 +15,7 @@ use serde_json::Value as JsonValue;
 type TestResult = Result<(), String>;
 
 const CAUSAL_COMPARE_ALL_SOURCES_GOLDEN: &str =
+    // EE-453: deterministic snapshot across replay, shadow, counterfactual, and experiment inputs.
     include_str!("../fixtures/golden/causal/compare_all_sources.json.golden");
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
