@@ -478,6 +478,92 @@ fn assert_curate_review_json(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn assert_curate_review_audit_details(
+    database_path: &Path,
+    audit_id: &str,
+    expected_action: &str,
+    candidate_id: &str,
+    expected_review_action: &str,
+    expected_from_status: &str,
+    expected_to_status: &str,
+    expected_from_review_state: &str,
+    expected_to_review_state: &str,
+    expected_snoozed_until: Option<&str>,
+    expected_merged_into_candidate_id: Option<&str>,
+    expected_decision: &str,
+) -> TestResult {
+    let connection = DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+    let audit = connection
+        .get_audit(audit_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("missing audit entry {audit_id}"))?;
+    ensure_equal(&audit.action, &expected_action.to_string(), "audit action")?;
+    ensure_equal(
+        &audit.target_type,
+        &Some("curation_candidate".to_string()),
+        "audit target type",
+    )?;
+    ensure_equal(
+        &audit.target_id,
+        &Some(candidate_id.to_string()),
+        "audit target id",
+    )?;
+
+    let details_raw = audit
+        .details
+        .as_ref()
+        .ok_or_else(|| format!("audit details missing for {audit_id}"))?;
+    let details: serde_json::Value = serde_json::from_str(details_raw)
+        .map_err(|error| format!("audit details must be valid JSON: {error}"))?;
+    ensure_equal(
+        &details["candidateId"],
+        &serde_json::json!(candidate_id),
+        "audit details candidateId",
+    )?;
+    ensure_equal(
+        &details["action"],
+        &serde_json::json!(expected_review_action),
+        "audit details action",
+    )?;
+    ensure_equal(
+        &details["fromStatus"],
+        &serde_json::json!(expected_from_status),
+        "audit details fromStatus",
+    )?;
+    ensure_equal(
+        &details["toStatus"],
+        &serde_json::json!(expected_to_status),
+        "audit details toStatus",
+    )?;
+    ensure_equal(
+        &details["fromReviewState"],
+        &serde_json::json!(expected_from_review_state),
+        "audit details fromReviewState",
+    )?;
+    ensure_equal(
+        &details["toReviewState"],
+        &serde_json::json!(expected_to_review_state),
+        "audit details toReviewState",
+    )?;
+    ensure_equal(
+        &details["snoozedUntil"],
+        &serde_json::json!(expected_snoozed_until),
+        "audit details snoozedUntil",
+    )?;
+    ensure_equal(
+        &details["mergedIntoCandidateId"],
+        &serde_json::json!(expected_merged_into_candidate_id),
+        "audit details mergedIntoCandidateId",
+    )?;
+    ensure_equal(
+        &details["decision"],
+        &serde_json::json!(expected_decision),
+        "audit details decision",
+    )
+}
+
+#[cfg(unix)]
 fn ensure_pack_query_file_machine_error(
     workspace_prefix: &str,
     query_file_arg: &str,
@@ -1950,6 +2036,23 @@ fn curate_review_lifecycle_commands_json_update_review_state() -> TestResult {
         "approved",
         "accepted",
     )?;
+    let accept_audit_id = accept_json["data"]["mutation"]["auditId"]
+        .as_str()
+        .ok_or_else(|| "curate accept auditId must be present".to_string())?;
+    assert_curate_review_audit_details(
+        &database_path,
+        accept_audit_id,
+        "curation_candidate.accept",
+        accept_id,
+        "accept",
+        "pending",
+        "approved",
+        "new",
+        "accepted",
+        None,
+        None,
+        "accept",
+    )?;
 
     let reject = run_ee_logged(
         "curate-review-reject",
@@ -1976,6 +2079,23 @@ fn curate_review_lifecycle_commands_json_update_review_state() -> TestResult {
         "reject",
         "rejected",
         "rejected",
+    )?;
+    let reject_audit_id = reject_json["data"]["mutation"]["auditId"]
+        .as_str()
+        .ok_or_else(|| "curate reject auditId must be present".to_string())?;
+    assert_curate_review_audit_details(
+        &database_path,
+        reject_audit_id,
+        "curation_candidate.reject",
+        reject_id,
+        "reject",
+        "pending",
+        "rejected",
+        "new",
+        "rejected",
+        None,
+        None,
+        "reject",
     )?;
 
     let snooze = run_ee_logged(
@@ -2011,6 +2131,23 @@ fn curate_review_lifecycle_commands_json_update_review_state() -> TestResult {
         &serde_json::json!("2030-01-01T00:00:00Z"),
         "snooze until",
     )?;
+    let snooze_audit_id = snooze_json["data"]["mutation"]["auditId"]
+        .as_str()
+        .ok_or_else(|| "curate snooze auditId must be present".to_string())?;
+    assert_curate_review_audit_details(
+        &database_path,
+        snooze_audit_id,
+        "curation_candidate.snooze",
+        snooze_id,
+        "snooze",
+        "pending",
+        "pending",
+        "new",
+        "snoozed",
+        Some("2030-01-01T00:00:00Z"),
+        None,
+        "snooze",
+    )?;
 
     let merge = run_ee_logged(
         "curate-review-merge",
@@ -2037,6 +2174,23 @@ fn curate_review_lifecycle_commands_json_update_review_state() -> TestResult {
         &merge_json["data"]["mutation"]["mergedIntoCandidateId"],
         &serde_json::json!(merge_target_id),
         "merge target id",
+    )?;
+    let merge_audit_id = merge_json["data"]["mutation"]["auditId"]
+        .as_str()
+        .ok_or_else(|| "curate merge auditId must be present".to_string())?;
+    assert_curate_review_audit_details(
+        &database_path,
+        merge_audit_id,
+        "curation_candidate.merge",
+        merge_source_id,
+        "merge",
+        "pending",
+        "rejected",
+        "new",
+        "merged",
+        None,
+        Some(merge_target_id),
+        "merge",
     )?;
 
     for (candidate_id, status, review_state) in [
