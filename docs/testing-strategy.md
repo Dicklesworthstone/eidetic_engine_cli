@@ -325,3 +325,17 @@ Prefer names that encode behavior over implementation details. For example,
 `graceful_degradation_no_cass` is better than `import_error_case_3`, and
 `pack_audit_hash_stable` is better than `hash_test`.
 
+## Gate Closure Notes
+
+### Gate 18: Procedure Distillation Readiness (`eidetic_engine_cli-0zum`)
+
+Gate 18 closure evidence is anchored in:
+
+- `tests/contracts/procedure_gate18.rs`
+- `tests/fixtures/golden/procedure/gate18_procedure_propose.json.golden`
+- `tests/fixtures/golden/procedure/gate18_procedure_show.json.golden`
+- `tests/fixtures/golden/procedure/gate18_procedure_verify.json.golden`
+- `tests/fixtures/golden/procedure/gate18_procedure_export_skill_capsule.json.golden`
+
+These fixtures and contracts are the canonical references for procedure
+proposal, verification, and skill-capsule parity behavior under Gate 18.
