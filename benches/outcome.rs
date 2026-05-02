@@ -6,6 +6,7 @@
 //! - empty: fresh database with only the target memory
 //! - 100: database seeded with 100 additional memories
 //! - 5000: database seeded with 5000 additional memories
+#![allow(clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
 
@@ -16,16 +17,7 @@ use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::core::outcome::{OutcomeRecordOptions, record_outcome};
 use ee::db::DbConnection;
 
-/// Performance budget from plan §28 (README "Performance" table).
-/// p50 must stay under 8ms, p99 under 30ms.
-const BUDGET_P50_MS: f64 = 8.0;
-const BUDGET_P99_MS: f64 = 30.0;
-
-/// Regression threshold: fail if p50 degrades by more than 30%.
-const REGRESSION_THRESHOLD: f64 = 0.30;
-
 struct OutcomeFixture {
-    workspace_path: PathBuf,
     db_path: PathBuf,
     target_memory_id: String,
 }
@@ -51,8 +43,8 @@ fn remember_seed_memory(workspace_path: &Path, db_path: &Path, index: usize) {
 fn seed_fixture(temp_dir: &Path, memory_count: usize) -> OutcomeFixture {
     let workspace_path = temp_dir.to_path_buf();
     let db_path = workspace_path.join(".ee").join("ee.db");
-    std::fs::create_dir_all(db_path.parent().expect("db parent path"))
-        .expect("create benchmark .ee directory");
+    let db_parent = db_path.parent().expect("db parent path");
+    std::fs::create_dir_all(db_parent).expect("create benchmark .ee directory");
 
     let connection = DbConnection::open_file(&db_path).expect("open benchmark db");
     connection.migrate().expect("migrate benchmark db");
@@ -77,7 +69,6 @@ fn seed_fixture(temp_dir: &Path, memory_count: usize) -> OutcomeFixture {
     .expect("create target memory");
 
     OutcomeFixture {
-        workspace_path,
         db_path,
         target_memory_id: target.memory_id.to_string(),
     }
@@ -101,7 +92,7 @@ fn bench_outcome(c: &mut Criterion) {
             let mut counter = 0usize;
             b.iter(|| {
                 counter += 1;
-                let signal = if counter.is_multiple_of(2) {
+                let signal = if counter % 2 == 0 {
                     "helpful"
                 } else {
                     "harmful"
@@ -173,53 +164,28 @@ criterion_main!(benches);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn benchmark_group_name_is_canonical() {
         assert_eq!("ee_outcome", "ee_outcome", "canonical group name");
     }
 
     #[test]
-    fn budget_constants_match_plan() {
-        assert!(
-            (BUDGET_P50_MS - 8.0).abs() < f64::EPSILON,
-            "p50 budget matches plan §28"
-        );
-        assert!(
-            (BUDGET_P99_MS - 30.0).abs() < f64::EPSILON,
-            "p99 budget matches plan §28"
-        );
-    }
-
-    #[test]
-    fn regression_threshold_is_30_percent() {
-        assert!(
-            (REGRESSION_THRESHOLD - 0.30).abs() < f64::EPSILON,
-            "regression threshold is 30%"
-        );
-    }
-
-    #[test]
     fn fixture_seeding_creates_target_memory() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let fixture = seed_fixture(temp_dir.path(), 5);
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let fixture = super::seed_fixture(temp_dir.path(), 5);
         assert!(fixture.db_path.exists(), "benchmark db should exist");
         assert!(
             fixture.target_memory_id.starts_with("mem_"),
             "target memory id should use mem_ prefix"
         );
-        assert!(
-            fixture.workspace_path.exists(),
-            "workspace path should exist for fixture"
-        );
+        assert!(temp_dir.path().exists(), "workspace path should exist");
     }
 
     #[test]
     fn record_outcome_succeeds_on_seeded_fixture() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let fixture = seed_fixture(temp_dir.path(), 1);
-        let report = record_outcome(&OutcomeRecordOptions {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let fixture = super::seed_fixture(temp_dir.path(), 1);
+        let report = super::record_outcome(&super::OutcomeRecordOptions {
             database_path: fixture.db_path.as_path(),
             target_type: "memory".to_string(),
             target_id: fixture.target_memory_id.clone(),

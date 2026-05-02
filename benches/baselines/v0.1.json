@@ -97,26 +97,26 @@
       }
     },
     "ee_import_cass": {
-      "p50_ms": 330.0,
-      "p99_ms": 380.0,
+      "p50_ms": 4100.0,
+      "p99_ms": 11000.0,
       "hard_ceiling_ms": 30000.0,
       "scales": {
         "empty": {
           "message_count": 0,
-          "p50_ms": 310.0,
-          "p99_ms": 335.0,
+          "p50_ms": 50.0,
+          "p99_ms": 100.0,
           "hard_ceiling_ms": 30000.0
         },
         "100_messages": {
           "message_count": 100,
-          "p50_ms": 320.0,
-          "p99_ms": 340.0,
+          "p50_ms": 700.0,
+          "p99_ms": 2000.0,
           "hard_ceiling_ms": 30000.0
         },
         "1000_messages": {
           "message_count": 1000,
-          "p50_ms": 330.0,
-          "p99_ms": 380.0,
+          "p50_ms": 4100.0,
+          "p99_ms": 11000.0,
           "hard_ceiling_ms": 30000.0
         }
       }

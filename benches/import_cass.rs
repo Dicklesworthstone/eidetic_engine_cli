@@ -171,7 +171,7 @@ impl ImportCassFixture {
             database_path: Some(db_path.clone()),
             limit: 10,
             dry_run: false,
-            include_spans: false,
+            include_spans: true,
         };
 
         let start = Instant::now();
@@ -188,7 +188,7 @@ impl ImportCassFixture {
     fn validate_report(&self, report: &ee::cass::CassImportReport) -> Result<(), String> {
         let expected_discovered = if self.scale.message_count == 0 { 0 } else { 1 };
         let expected_imported = expected_discovered;
-        let expected_spans = 0u32;
+        let expected_spans = u32::try_from(self.scale.message_count).unwrap_or(u32::MAX);
 
         if report.sessions_discovered != expected_discovered {
             return Err(format!(
