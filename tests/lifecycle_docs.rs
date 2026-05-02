@@ -1,5 +1,8 @@
 use ee::models::trust::{LOCAL_SIGNING_KEY_POLICY_SCHEMA_V1, LocalSigningKeyPosture};
-use ee::models::{ERROR_SCHEMA_V1, LifecycleEvent, RESPONSE_SCHEMA_V1, RuleMaturity, TrustClass};
+use ee::models::{
+    ERROR_SCHEMA_V1, LifecycleEvent, RESPONSE_SCHEMA_V1, RuleLifecycleAction, RuleLifecycleTrigger,
+    RuleMaturity, TrustClass,
+};
 
 type TestResult = Result<(), String>;
 
@@ -65,6 +68,32 @@ fn trust_model_mentions_rule_maturity_states() -> TestResult {
         "promotion, demotion, quarantine",
         "curation lifecycle coverage",
     )
+}
+
+#[test]
+fn trust_model_mentions_rule_lifecycle_triggers_and_actions() -> TestResult {
+    for trigger in RuleLifecycleTrigger::all() {
+        ensure_contains(
+            TRUST_MODEL,
+            trigger.as_str(),
+            "trust model rule lifecycle trigger coverage",
+        )?;
+    }
+    for action in RuleLifecycleAction::all() {
+        ensure_contains(
+            TRUST_MODEL,
+            action.as_str(),
+            "trust model rule lifecycle action coverage",
+        )?;
+    }
+    for phrase in [
+        "candidate-to-validated",
+        "explicit review",
+        "no silent promotion",
+    ] {
+        ensure_contains(TRUST_MODEL, phrase, "rule lifecycle safety coverage")?;
+    }
+    Ok(())
 }
 
 #[test]

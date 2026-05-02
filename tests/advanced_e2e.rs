@@ -4,6 +4,7 @@
 //! Each test validates JSON output contracts, dry-run behavior, and stdout/stderr isolation.
 
 use std::fmt::Debug;
+use std::fs;
 use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
@@ -52,6 +53,12 @@ fn stdout_has_schema(output: &Output, expected: &str) -> bool {
 fn stdout_contains(output: &Output, needle: &str) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
     stdout.contains(needle)
+}
+
+fn stdout_json(output: &Output) -> Result<serde_json::Value, String> {
+    let stdout = String::from_utf8(output.stdout.clone())
+        .map_err(|error| format!("stdout was not UTF-8: {error}"))?;
+    serde_json::from_str(&stdout).map_err(|error| format!("stdout was not JSON: {error}"))
 }
 
 fn stdout_is_clean(output: &Output) -> bool {
@@ -131,8 +138,7 @@ fn recorder_event_supports_redaction() -> TestResult {
         "--event-type",
         "user_message",
         "--payload",
-        "secret",
-        "--redact",
+        "password marker token marker",
         "--json",
     ])?;
     ensure_equal(&output.status.code(), &Some(0), "exit code")?;
@@ -140,6 +146,97 @@ fn recorder_event_supports_redaction() -> TestResult {
     ensure(
         stdout_contains(&output, "redactionStatus"),
         "must contain redactionStatus",
+    )?;
+    let value = stdout_json(&output)?;
+    ensure_equal(
+        &value["redactionStatus"],
+        &serde_json::json!("full"),
+        "redaction status",
+    )?;
+    ensure_equal(
+        &value["redactionClasses"],
+        &serde_json::json!(["password", "token"]),
+        "redaction classes",
+    )?;
+    ensure_equal(
+        &value["redactedBytes"],
+        &serde_json::json!(28),
+        "redacted bytes",
+    )?;
+    ensure(
+        !String::from_utf8_lossy(&output.stdout).contains("password marker token marker"),
+        "stdout must not echo raw payload",
+    )
+}
+
+#[test]
+fn recorder_event_returns_hash_chain_fields() -> TestResult {
+    let output = run_ee(&[
+        "recorder",
+        "event",
+        "run_test_123",
+        "--event-type",
+        "tool_result",
+        "--payload",
+        "ok",
+        "--previous-event-hash",
+        "blake3:previous",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    let value = stdout_json(&output)?;
+    ensure_equal(
+        &value["previousEventHash"],
+        &serde_json::json!("blake3:previous"),
+        "previous hash",
+    )?;
+    ensure_equal(
+        &value["chainStatus"],
+        &serde_json::json!("linked"),
+        "chain status",
+    )?;
+    ensure(
+        value["eventHash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("blake3:")),
+        "event hash must be BLAKE3-prefixed",
+    )
+}
+
+#[test]
+fn recorder_event_rejects_oversized_payload_with_stable_code() -> TestResult {
+    let output = run_ee(&[
+        "recorder",
+        "event",
+        "run_test_123",
+        "--event-type",
+        "tool_call",
+        "--payload",
+        "0123456789",
+        "--max-payload-bytes",
+        "4",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(1), "exit code")?;
+    let value = stdout_json(&output)?;
+    ensure_equal(
+        &value["schema"],
+        &serde_json::json!("ee.error.v1"),
+        "error schema",
+    )?;
+    ensure_equal(
+        &value["error"]["code"],
+        &serde_json::json!("recorder_payload_too_large"),
+        "error code",
+    )?;
+    ensure_equal(
+        &value["error"]["details"]["payloadBytes"],
+        &serde_json::json!(10),
+        "payload bytes",
+    )?;
+    ensure(
+        output.stderr.is_empty(),
+        "json rejection diagnostics must not use stderr",
     )
 }
 
@@ -157,6 +254,106 @@ fn recorder_event_validates_event_type() -> TestResult {
         &output.status.code(),
         &Some(1),
         "exit code for invalid event type",
+    )
+}
+
+#[test]
+fn recorder_import_dry_run_maps_cass_view_without_mutation() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let input_path = tempdir.path().join("cass-view.json");
+    fs::write(
+        &input_path,
+        r#"{"lines":[{"line":3,"content":"{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"format release\"}}"},{"line":4,"content":"{\"type\":\"tool_use\",\"name\":\"shell\"}"}]}"#,
+    )
+    .map_err(|error| error.to_string())?;
+    let input = input_path.to_string_lossy().into_owned();
+
+    let output = run_ee(&[
+        "recorder",
+        "import",
+        "--source-type",
+        "cass",
+        "--source-id",
+        "/sessions/cass-a.jsonl",
+        "--input",
+        input.as_str(),
+        "--agent-id",
+        "codex",
+        "--session-id",
+        "cass-a",
+        "--dry-run",
+        "--json",
+    ])?;
+
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(output.stderr.is_empty(), "json dry-run stderr empty")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
+    let value = stdout_json(&output)?;
+    ensure_equal(
+        &value["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "response envelope",
+    )?;
+    ensure_equal(
+        &value["data"]["schema"],
+        &serde_json::json!("ee.recorder.import_plan.v1"),
+        "import plan schema",
+    )?;
+    ensure_equal(
+        &value["data"]["dryRun"],
+        &serde_json::json!(true),
+        "dry run",
+    )?;
+    ensure_equal(
+        &value["data"]["summary"]["eventsMapped"],
+        &serde_json::json!(2),
+        "mapped count",
+    )?;
+    ensure_equal(
+        &value["data"]["events"][0]["eventType"],
+        &serde_json::json!("user_message"),
+        "first event type",
+    )?;
+    ensure_equal(
+        &value["data"]["events"][1]["eventType"],
+        &serde_json::json!("tool_call"),
+        "second event type",
+    )?;
+    ensure_equal(
+        &value["data"]["mutations"][0]["action"],
+        &serde_json::json!("would_create_run"),
+        "run mutation is planned only",
+    )?;
+    ensure(
+        !String::from_utf8_lossy(&output.stdout).contains("format release"),
+        "raw CASS payload must not be echoed",
+    )
+}
+
+#[test]
+fn recorder_import_requires_dry_run_with_stable_error_code() -> TestResult {
+    let output = run_ee(&[
+        "recorder",
+        "import",
+        "--source-type",
+        "cass",
+        "--source-id",
+        "/sessions/cass-a.jsonl",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(1), "exit code")?;
+    ensure(output.stderr.is_empty(), "json error stderr empty")?;
+    let value = stdout_json(&output)?;
+    ensure_equal(
+        &value["schema"],
+        &serde_json::json!("ee.error.v1"),
+        "error schema",
+    )?;
+    ensure_equal(
+        &value["error"]["code"],
+        &serde_json::json!("recorder_import_dry_run_required"),
+        "stable error code",
     )
 }
 
@@ -270,6 +467,778 @@ fn economy_score_handles_not_found() -> TestResult {
     }
 }
 
+#[test]
+fn economy_simulate_compares_budgets_without_mutation() -> TestResult {
+    let output = run_ee(&[
+        "economy",
+        "simulate",
+        "--baseline-budget",
+        "4000",
+        "--budget",
+        "2000",
+        "--budget",
+        "8000",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
+    ensure(
+        output.stderr.is_empty(),
+        "json command must keep diagnostics off stderr",
+    )?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        json.get("schema").unwrap_or(&serde_json::Value::Null),
+        &serde_json::json!("ee.response.v1"),
+        "response schema",
+    )?;
+    ensure_equal(
+        json.pointer("/data/schema")
+            .unwrap_or(&serde_json::Value::Null),
+        &serde_json::json!("ee.economy.simulation.v1"),
+        "simulation schema",
+    )?;
+    ensure_equal(
+        json.pointer("/data/mutationStatus")
+            .unwrap_or(&serde_json::Value::Null),
+        &serde_json::json!("not_applied"),
+        "mutation status",
+    )?;
+    ensure_equal(
+        json.pointer("/data/rankingStateUnchanged")
+            .unwrap_or(&serde_json::Value::Null),
+        &serde_json::json!(true),
+        "ranking state unchanged",
+    )?;
+    let hash_before = json
+        .pointer("/data/rankingStateHashBefore")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "rankingStateHashBefore must be a string".to_string())?;
+    let hash_after = json
+        .pointer("/data/rankingStateHashAfter")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "rankingStateHashAfter must be a string".to_string())?;
+    ensure_equal(&hash_before, &hash_after, "ranking state hash")?;
+
+    let scenarios = json
+        .pointer("/data/scenarios")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "scenarios must be an array".to_string())?;
+    let budgets = scenarios
+        .iter()
+        .filter_map(|scenario| {
+            scenario
+                .pointer("/budgetTokens")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .collect::<Vec<_>>();
+    ensure_equal(&budgets, &vec![2000, 4000, 8000], "scenario budgets")
+}
+
+#[test]
+fn economy_simulate_rejects_zero_budget() -> TestResult {
+    let output = run_ee(&["economy", "simulate", "--budget", "0", "--json"])?;
+    ensure_equal(&output.status.code(), &Some(1), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        output.stderr.is_empty(),
+        "json rejection diagnostics must not use stderr",
+    )?;
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        json.get("schema").unwrap_or(&serde_json::Value::Null),
+        &serde_json::json!("ee.error.v1"),
+        "error schema",
+    )?;
+    ensure_equal(
+        json.pointer("/error/code")
+            .unwrap_or(&serde_json::Value::Null),
+        &serde_json::json!("usage"),
+        "error code",
+    )
+}
+
+#[test]
+fn economy_prune_plan_dry_run_returns_recommendations() -> TestResult {
+    let output = run_ee(&[
+        "economy",
+        "prune-plan",
+        "--dry-run",
+        "--max-recommendations",
+        "5",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "response schema",
+    )?;
+    ensure_equal(
+        &json["data"]["schema"],
+        &serde_json::json!("ee.economy.prune_plan.v1"),
+        "prune plan schema",
+    )?;
+    ensure_equal(
+        &json["data"]["dryRun"],
+        &serde_json::json!(true),
+        "dry run flag",
+    )?;
+    ensure_equal(
+        &json["data"]["mutationStatus"],
+        &serde_json::json!("not_applied"),
+        "mutation status",
+    )?;
+    let actions = json["data"]["summary"]["actions"]
+        .as_array()
+        .ok_or_else(|| "actions must be an array".to_string())?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    ensure_equal(
+        &actions,
+        &vec!["revalidate", "retire", "compact", "merge", "demote"],
+        "prune actions",
+    )
+}
+
+#[test]
+fn economy_prune_plan_requires_dry_run() -> TestResult {
+    let output = run_ee(&["economy", "prune-plan", "--json"])?;
+    ensure_equal(&output.status.code(), &Some(8), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        output.stderr.is_empty(),
+        "stderr must stay clean for JSON errors",
+    )
+}
+
+// ============================================================================
+// Learning Experiment Tests (EE-444)
+// ============================================================================
+
+#[test]
+fn learn_experiment_run_dry_run_returns_plan_shape() -> TestResult {
+    let output = run_ee(&[
+        "learn",
+        "experiment",
+        "run",
+        "--id",
+        "exp_database_contract_fixture",
+        "--max-attention-tokens",
+        "600",
+        "--max-runtime-seconds",
+        "90",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
+    ensure(output.stderr.is_empty(), "stderr must be empty")?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.learn.experiment_run.v1"),
+        "run schema",
+    )?;
+    ensure_equal(
+        &json["dryRun"],
+        &serde_json::json!(true),
+        "run dry-run flag",
+    )?;
+    ensure_equal(&json["status"], &serde_json::json!("dry_run"), "run status")?;
+    ensure_equal(
+        &json["experimentKind"],
+        &serde_json::json!("procedure_revalidation"),
+        "experiment kind",
+    )?;
+    ensure_equal(
+        &json["budget"]["plannedAttentionTokens"],
+        &serde_json::json!(600),
+        "planned attention tokens",
+    )?;
+    ensure_equal(
+        &json["budget"]["plannedRuntimeSeconds"],
+        &serde_json::json!(90),
+        "planned runtime seconds",
+    )?;
+    let steps = json["steps"]
+        .as_array()
+        .ok_or_else(|| "steps must be an array".to_string())?;
+    ensure(!steps.is_empty(), "steps must not be empty")?;
+    ensure(
+        steps
+            .iter()
+            .all(|step| step["writesStorage"] == serde_json::json!(false)),
+        "dry-run steps must not write storage",
+    )?;
+    ensure_equal(
+        &json["observations"][0]["signal"],
+        &serde_json::json!("positive"),
+        "observation signal",
+    )?;
+    ensure_equal(
+        &json["outcomePreview"]["status"],
+        &serde_json::json!("confirmed"),
+        "outcome preview status",
+    )
+}
+
+#[test]
+fn learn_experiment_run_rejects_non_dry_run() -> TestResult {
+    let output = run_ee(&[
+        "learn",
+        "experiment",
+        "run",
+        "--id",
+        "exp_database_contract_fixture",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(8), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        output.stderr.is_empty(),
+        "stderr must stay clean for JSON errors",
+    )?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.error.v1"),
+        "error schema",
+    )?;
+    ensure_equal(
+        &json["error"]["code"],
+        &serde_json::json!("policy_denied"),
+        "error code",
+    )
+}
+
+#[test]
+fn learn_experiment_run_supports_shadow_budget_template() -> TestResult {
+    let output = run_ee(&[
+        "learn",
+        "experiment",
+        "run",
+        "--id",
+        "exp_shadow_budget_probe",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["experimentKind"],
+        &serde_json::json!("shadow_budget"),
+        "experiment kind",
+    )?;
+    ensure(
+        json["budget"]["shadowBudgetDeltaTokens"]
+            .as_i64()
+            .is_some_and(|value| value < 0),
+        "shadow budget delta must be negative",
+    )
+}
+
+#[test]
+fn learn_observe_dry_run_records_evidence_shape() -> TestResult {
+    let output = run_ee(&[
+        "learn",
+        "observe",
+        "exp_fixture_001",
+        "--measurement-name",
+        "fixture_replay",
+        "--measurement-value",
+        "1.0",
+        "--signal",
+        "positive",
+        "--evidence-id",
+        "ev_b",
+        "--evidence-id",
+        "ev_a",
+        "--evidence-id",
+        "ev_a",
+        "--note",
+        "Replay matched expected output.",
+        "--redaction-status",
+        "redacted",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
+    ensure(output.stderr.is_empty(), "stderr must be empty")?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.learn.observe.v1"),
+        "observe schema",
+    )?;
+    ensure_equal(
+        &json["dryRun"],
+        &serde_json::json!(true),
+        "observe dry-run flag",
+    )?;
+    ensure_equal(
+        &json["status"],
+        &serde_json::json!("dry_run"),
+        "observe status",
+    )?;
+    ensure_equal(
+        &json["observation"]["signal"],
+        &serde_json::json!("positive"),
+        "observation signal",
+    )?;
+    ensure_equal(
+        &json["observation"]["measurementValue"],
+        &serde_json::json!(1.0),
+        "measurement value",
+    )?;
+    ensure_equal(
+        &json["observation"]["evidenceIds"],
+        &serde_json::json!(["ev_a", "ev_b"]),
+        "deduplicated evidence ids",
+    )
+}
+
+#[test]
+fn learn_close_dry_run_records_outcome_shape() -> TestResult {
+    let output = run_ee(&[
+        "learn",
+        "close",
+        "exp_fixture_001",
+        "--status",
+        "confirmed",
+        "--decision-impact",
+        "Promote fixture-backed rule",
+        "--confidence-delta",
+        "0.25",
+        "--priority-delta",
+        "3",
+        "--promote-artifact",
+        "mem_rule_001",
+        "--promote-artifact",
+        "proc_release_001",
+        "--promote-artifact",
+        "sit_release_001",
+        "--demote-artifact",
+        "mem_old_001",
+        "--demote-artifact",
+        "tw_noisy_001",
+        "--safety-note",
+        "Dry-run only.",
+        "--audit-id",
+        "audit_001",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
+    ensure(output.stderr.is_empty(), "stderr must be empty")?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.learn.close.v1"),
+        "close schema",
+    )?;
+    ensure_equal(
+        &json["dryRun"],
+        &serde_json::json!(true),
+        "close dry-run flag",
+    )?;
+    ensure_equal(
+        &json["status"],
+        &serde_json::json!("dry_run"),
+        "close status",
+    )?;
+    ensure_equal(
+        &json["outcome"]["status"],
+        &serde_json::json!("confirmed"),
+        "outcome status",
+    )?;
+    ensure_equal(
+        &json["outcome"]["confidenceDelta"],
+        &serde_json::json!(0.25),
+        "confidence delta",
+    )?;
+    ensure_equal(
+        &json["outcome"]["promotedArtifactIds"],
+        &serde_json::json!(["mem_rule_001", "proc_release_001", "sit_release_001"]),
+        "promoted artifacts",
+    )?;
+    ensure_equal(
+        &json["outcome"]["demotedArtifactIds"],
+        &serde_json::json!(["mem_old_001", "tw_noisy_001"]),
+        "demoted artifacts",
+    )?;
+    ensure_equal(
+        &json["downstreamEffects"]["schema"],
+        &serde_json::json!("ee.learn.downstream_effects.v1"),
+        "downstream effects schema",
+    )?;
+    ensure_equal(
+        &json["downstreamEffects"]["mutationMode"],
+        &serde_json::json!("dry_run_projection"),
+        "downstream mutation mode",
+    )?;
+    ensure_equal(
+        &json["downstreamEffects"]["economyScore"]["priorityDelta"],
+        &serde_json::json!(3),
+        "economy priority delta",
+    )?;
+    ensure_equal(
+        &json["downstreamEffects"]["procedureDrift"]["procedureArtifactIds"],
+        &serde_json::json!(["proc_release_001"]),
+        "procedure artifacts",
+    )?;
+    ensure_equal(
+        &json["downstreamEffects"]["procedureDrift"]["driftSignal"],
+        &serde_json::json!("validated_by_experiment"),
+        "procedure drift signal",
+    )?;
+    ensure_equal(
+        &json["downstreamEffects"]["tripwireFalseAlarm"]["falseAlarmCostDelta"],
+        &serde_json::json!(0),
+        "tripwire false alarm delta",
+    )?;
+    ensure_equal(
+        &json["downstreamEffects"]["situationConfidence"]["situationArtifactIds"],
+        &serde_json::json!(["sit_release_001"]),
+        "situation artifacts",
+    )?;
+    ensure_equal(
+        &json["downstreamEffects"]["situationConfidence"]["confidenceDelta"],
+        &serde_json::json!(0.25),
+        "situation confidence delta",
+    )?;
+    ensure_equal(
+        &json["downstreamEffects"]["audit"]["durableFeedbackRecorded"],
+        &serde_json::json!(false),
+        "dry-run durable feedback",
+    )?;
+    ensure_equal(
+        &json["downstreamEffects"]["audit"]["silentMutation"],
+        &serde_json::json!(false),
+        "silent mutation guard",
+    )
+}
+
+#[test]
+fn learn_close_rejects_invalid_confidence_delta() -> TestResult {
+    let output = run_ee(&[
+        "learn",
+        "close",
+        "exp_fixture_001",
+        "--status",
+        "confirmed",
+        "--decision-impact",
+        "Promote fixture-backed rule",
+        "--confidence-delta",
+        "2.0",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(1), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        output.stderr.is_empty(),
+        "stderr must stay clean for JSON errors",
+    )?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.error.v1"),
+        "error schema",
+    )?;
+    ensure_equal(
+        &json["error"]["code"],
+        &serde_json::json!("usage"),
+        "error code",
+    )
+}
+
+// ============================================================================
+// Rule Tests (EE-086)
+// ============================================================================
+
+#[test]
+fn rule_add_dry_run_returns_response_envelope() -> TestResult {
+    let output = run_ee(&[
+        "rule",
+        "add",
+        "Run cargo fmt --check before release.",
+        "--tag",
+        "Rust,CI",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
+    ensure(output.stderr.is_empty(), "stderr must be empty")?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "response schema",
+    )?;
+    ensure_equal(
+        &json["data"]["schema"],
+        &serde_json::json!("ee.rule.add.v1"),
+        "rule add schema",
+    )?;
+    ensure_equal(
+        &json["data"]["dryRun"],
+        &serde_json::json!(true),
+        "dry-run flag",
+    )?;
+    ensure_equal(
+        &json["data"]["persisted"],
+        &serde_json::json!(false),
+        "persisted flag",
+    )?;
+    ensure_equal(
+        &json["data"]["tags"],
+        &serde_json::json!(["ci", "rust"]),
+        "canonical tags",
+    )?;
+    ensure_equal(
+        &json["data"]["evidence"]["status"],
+        &serde_json::json!("missing"),
+        "evidence status",
+    )?;
+    ensure_equal(
+        &json["data"]["indexStatus"],
+        &serde_json::json!("dry_run_not_queued"),
+        "dry-run index status",
+    )
+}
+
+#[test]
+fn rule_add_rejects_validated_rule_without_evidence() -> TestResult {
+    let output = run_ee(&[
+        "rule",
+        "add",
+        "Validated rules need evidence.",
+        "--maturity",
+        "validated",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(1), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        output.stderr.is_empty(),
+        "stderr must stay clean for JSON errors",
+    )?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.error.v1"),
+        "error schema",
+    )?;
+    ensure_equal(
+        &json["error"]["code"],
+        &serde_json::json!("usage"),
+        "error code",
+    )
+}
+
+#[test]
+fn rule_show_rejects_invalid_rule_id_as_json_error() -> TestResult {
+    let output = run_ee(&["rule", "show", "not-a-rule-id", "--json"])?;
+    ensure_equal(&output.status.code(), &Some(1), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        output.stderr.is_empty(),
+        "stderr must stay clean for JSON errors",
+    )?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.error.v1"),
+        "error schema",
+    )?;
+    ensure_equal(
+        &json["error"]["code"],
+        &serde_json::json!("usage"),
+        "error code",
+    )
+}
+
+#[test]
+fn rule_add_persists_rule_with_source_memory() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(0), "init exit")?;
+    ensure(init.stderr.is_empty(), "init stderr must be empty")?;
+
+    let remember = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "Release evidence: cargo fmt caught a formatting regression.",
+        "--level",
+        "episodic",
+        "--kind",
+        "fact",
+        "--json",
+    ])?;
+    ensure_equal(&remember.status.code(), &Some(0), "remember exit")?;
+    ensure(remember.stderr.is_empty(), "remember stderr must be empty")?;
+    let remember_json = stdout_json(&remember)?;
+    let source_memory_id = remember_json["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "remember memory_id must be a string".to_string())?;
+
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "rule",
+        "add",
+        "Run cargo fmt --check before release.",
+        "--maturity",
+        "validated",
+        "--confidence",
+        "0.86",
+        "--source-memory",
+        source_memory_id,
+        "--tag",
+        "release",
+        "--json",
+    ])?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure_equal(&output.status.code(), &Some(0), "rule add exit")?;
+    ensure(
+        output.stderr.is_empty(),
+        format!("rule add stderr must be empty: {stderr}"),
+    )?;
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["data"]["persisted"],
+        &serde_json::json!(true),
+        "persisted flag",
+    )?;
+    ensure_equal(
+        &json["data"]["maturity"],
+        &serde_json::json!("validated"),
+        "maturity",
+    )?;
+    ensure_equal(
+        &json["data"]["sourceMemoryIds"],
+        &serde_json::json!([source_memory_id]),
+        "source memory IDs",
+    )?;
+    ensure_equal(
+        &json["data"]["evidence"]["status"],
+        &serde_json::json!("verified"),
+        "evidence status",
+    )?;
+    ensure(
+        json["data"]["auditId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("audit_")),
+        "audit ID must be present",
+    )?;
+    ensure(
+        json["data"]["indexJobId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("sidx_")),
+        "index job ID must be present",
+    )?;
+    let rule_id = json["data"]["ruleId"]
+        .as_str()
+        .ok_or_else(|| "ruleId must be a string".to_string())?;
+
+    let list = run_ee(&[
+        "--workspace",
+        &workspace,
+        "rule",
+        "list",
+        "--maturity",
+        "validated",
+        "--tag",
+        "release",
+        "--json",
+    ])?;
+    let list_stderr = String::from_utf8_lossy(&list.stderr);
+    ensure_equal(&list.status.code(), &Some(0), "rule list exit")?;
+    ensure(
+        list.stderr.is_empty(),
+        format!("rule list stderr must be empty: {list_stderr}"),
+    )?;
+    ensure(stdout_is_json(&list), "rule list stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&list), "rule list stdout must be clean")?;
+    let list_json = stdout_json(&list)?;
+    ensure_equal(
+        &list_json["data"]["schema"],
+        &serde_json::json!("ee.rule.list.v1"),
+        "rule list schema",
+    )?;
+    ensure_equal(
+        &list_json["data"]["totalCount"],
+        &serde_json::json!(1),
+        "rule list total count",
+    )?;
+    ensure_equal(
+        &list_json["data"]["rules"][0]["id"],
+        &serde_json::json!(rule_id),
+        "rule list id",
+    )?;
+    ensure_equal(
+        &list_json["data"]["rules"][0]["evidence"]["sourceMemoryCount"],
+        &serde_json::json!(1),
+        "rule list evidence count",
+    )?;
+
+    let show = run_ee(&["--workspace", &workspace, "rule", "show", rule_id, "--json"])?;
+    let show_stderr = String::from_utf8_lossy(&show.stderr);
+    ensure_equal(&show.status.code(), &Some(0), "rule show exit")?;
+    ensure(
+        show.stderr.is_empty(),
+        format!("rule show stderr must be empty: {show_stderr}"),
+    )?;
+    ensure(stdout_is_json(&show), "rule show stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&show), "rule show stdout must be clean")?;
+    let show_json = stdout_json(&show)?;
+    ensure_equal(
+        &show_json["data"]["schema"],
+        &serde_json::json!("ee.rule.show.v1"),
+        "rule show schema",
+    )?;
+    ensure_equal(
+        &show_json["data"]["rule"]["id"],
+        &serde_json::json!(rule_id),
+        "rule show id",
+    )?;
+    ensure_equal(
+        &show_json["data"]["rule"]["sourceMemoryIds"],
+        &serde_json::json!([source_memory_id]),
+        "rule show source memory IDs",
+    )
+}
+
 // ============================================================================
 // Preflight Tests (EE-391 - Stub tests for when implemented)
 // ============================================================================
@@ -311,6 +1280,14 @@ fn all_recorder_commands_produce_stdout_only_data() -> TestResult {
         ],
         vec!["recorder", "finish", "run_1", "--dry-run", "--json"],
         vec!["recorder", "tail", "run_1", "--json"],
+        vec![
+            "recorder",
+            "import",
+            "--source-id",
+            "cass://empty",
+            "--dry-run",
+            "--json",
+        ],
     ];
 
     for args in &commands {

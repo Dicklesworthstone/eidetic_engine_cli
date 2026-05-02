@@ -1,5 +1,6 @@
 use ee::eval::{
     CommandStep, DegradedBranch, EVAL_FIXTURE_SCHEMA_V1, EvaluationScenario, ExpectedOutput,
+    RedactionClass, RedactionLeakDetector,
 };
 use ee::models::model_registry::{
     EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
@@ -2023,6 +2024,137 @@ fn semantic_model_admissibility_source_maps_to_domain_reports() -> TestResult {
         ],
         "mode coverage",
     )
+}
+
+#[test]
+fn semantic_model_admissibility_privacy_surfaces_stay_clean() -> TestResult {
+    let scenario = parse_json(
+        SEMANTIC_MODEL_ADMISSIBILITY_SCENARIO,
+        "semantic_model_admissibility scenario",
+    )?;
+    let source = parse_json(
+        SEMANTIC_MODEL_ADMISSIBILITY_SOURCE,
+        "semantic_model_admissibility source",
+    )?;
+    let detector = RedactionLeakDetector::new();
+    let privacy_classes = [
+        RedactionClass::Secret,
+        RedactionClass::Pii,
+        RedactionClass::InternalPath,
+    ];
+
+    let all_fixture_text = format!(
+        "{SEMANTIC_MODEL_ADMISSIBILITY_SCENARIO}\n{SEMANTIC_MODEL_ADMISSIBILITY_SOURCE}\n{SEMANTIC_MODEL_ADMISSIBILITY_README}"
+    );
+    let fixture_leaks = detector.detect_leaks_in_classes(&all_fixture_text, &privacy_classes);
+    ensure(
+        fixture_leaks.is_empty(),
+        &format!(
+            "semantic admissibility fixture must not leak privacy-sensitive values: {}",
+            fixture_leaks
+                .iter()
+                .map(|leak| leak.display())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+    )?;
+
+    let secret_policy = field(&source, "secret_policy")?;
+    ensure_equal(
+        string_field(secret_policy, "synthetic_secret_policy")?,
+        "none",
+        "semantic fixture secret policy",
+    )?;
+    ensure_equal(
+        bool_field(secret_policy, "secret_like_values_present")?,
+        false,
+        "semantic fixture secret-like value flag",
+    )?;
+    for blocked in [
+        "api_token",
+        "github_token",
+        "cloud_access_key",
+        "private_key",
+    ] {
+        ensure(
+            array_contains_string(array_field(secret_policy, "blocked_classes")?, blocked),
+            &format!("semantic fixture must block `{blocked}`"),
+        )?;
+    }
+
+    for output in array_field(&scenario, "expected_outputs")? {
+        let absent = array_field(output, "absent_fields")?;
+        ensure(
+            array_contains_string(absent, "secret"),
+            "semantic outputs must declare secret absence",
+        )?;
+        ensure(
+            array_contains_string(absent, "token"),
+            "semantic outputs must declare token absence",
+        )?;
+    }
+
+    let budget_json = field(&source, "budget")?;
+    let mut budget = SemanticModelAdmissibilityBudget::local_default();
+    budget.max_dimension = u32_field(budget_json, "maxDimension")?;
+    budget.max_query_tokens = u32_field(budget_json, "maxQueryTokens")?;
+    budget.max_model_bytes = Some(u64_field(budget_json, "maxModelBytes")?);
+    budget.max_p95_latency_ms = Some(u32_field(budget_json, "maxP95LatencyMs")?);
+    budget.allow_remote_models = bool_field(budget_json, "allowRemoteModels")?;
+    budget.require_deterministic = bool_field(budget_json, "requireDeterministic")?;
+    budget.require_known_token_limit = bool_field(budget_json, "requireKnownTokenLimit")?;
+    budget.validate().map_err(|error| error.to_string())?;
+
+    for candidate_json in array_field(&source, "candidates")? {
+        let mut metadata = EmbeddingMetadataRecord::new(
+            u32_field(candidate_json, "dimension")?,
+            ModelDistanceMetric::Cosine,
+        );
+        metadata.max_input_tokens = Some(u32_field(candidate_json, "max_input_tokens")?);
+        metadata.tokenizer = Some("fixture:semantic_model_admissibility".to_string());
+        metadata.model_revision = Some("fixture.v1".to_string());
+        metadata.deterministic = bool_field(candidate_json, "deterministic")?;
+
+        let provider = string_field(candidate_json, "provider")?
+            .parse::<ModelProvider>()
+            .map_err(|error| error.to_string())?;
+        let purpose = string_field(candidate_json, "purpose")?
+            .parse::<ModelPurpose>()
+            .map_err(|error| error.to_string())?;
+        let status = string_field(candidate_json, "status")?
+            .parse::<ModelRegistryStatus>()
+            .map_err(|error| error.to_string())?;
+
+        let candidate = SemanticModelCandidate::new(
+            string_field(candidate_json, "model_id")?,
+            provider,
+            metadata,
+        )
+        .with_purpose(purpose)
+        .with_status(status)
+        .with_model_bytes(u64_field(candidate_json, "model_bytes")?)
+        .with_p95_latency_ms(u32_field(candidate_json, "p95_latency_ms")?)
+        .with_remote(bool_field(candidate_json, "remote")?);
+
+        let report = SemanticModelAdmissibilityReport::evaluate(&candidate, &budget)
+            .map_err(|error| error.to_string())?;
+        let report_json = serde_json::to_string(&report).map_err(|error| error.to_string())?;
+        let report_leaks = detector.detect_leaks_in_classes(&report_json, &privacy_classes);
+        ensure(
+            report_leaks.is_empty(),
+            &format!(
+                "semantic report for `{}` must not leak privacy-sensitive values: {}",
+                report.model_id,
+                report_leaks
+                    .iter()
+                    .map(|leak| leak.display())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )?;
+    }
+
+    Ok(())
 }
 
 #[test]

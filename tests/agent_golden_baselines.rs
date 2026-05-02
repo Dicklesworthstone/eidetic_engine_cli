@@ -897,6 +897,12 @@ fn capabilities_json_output_matches_golden() -> TestResult {
     ensure_contains(&stdout, "\"subsystems\":[", "capabilities JSON subsystems")?;
     ensure_contains(&stdout, "\"features\":[", "capabilities JSON features")?;
     ensure_contains(&stdout, "\"commands\":[", "capabilities JSON commands")?;
+    ensure_contains(&stdout, "\"output\":", "capabilities JSON output metadata")?;
+    ensure_contains(
+        &stdout,
+        "\"package\":\"tru\"",
+        "capabilities JSON toon package",
+    )?;
 
     assert_golden("capabilities", "capabilities_json", &stdout)
 }
@@ -920,6 +926,8 @@ fn capabilities_toon_output_matches_golden() -> TestResult {
         "schema: ee.response.v1",
         "capabilities TOON schema",
     )?;
+    ensure_contains(&stdout, "output:", "capabilities TOON output metadata")?;
+    ensure_contains(&stdout, "package: tru", "capabilities TOON toon package")?;
 
     assert_golden("capabilities", "capabilities_toon", &stdout)
 }

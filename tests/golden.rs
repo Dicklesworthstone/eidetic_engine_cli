@@ -232,6 +232,92 @@ mod tests {
         assert_golden("agent", name, &stdout)
     }
 
+    fn run_json_stdout(args: &[&str], expect_success: bool) -> Result<serde_json::Value, String> {
+        let output = run_ee(args)?;
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|error| format!("stdout was not UTF-8 for ee {}: {error}", args.join(" ")))?;
+        let stderr = String::from_utf8(output.stderr)
+            .map_err(|error| format!("stderr was not UTF-8 for ee {}: {error}", args.join(" ")))?;
+
+        ensure(
+            output.status.success() == expect_success,
+            format!(
+                "ee {} exit status mismatch: got {:?}, stderr: {stderr}",
+                args.join(" "),
+                output.status.code()
+            ),
+        )?;
+        ensure(
+            stderr.is_empty(),
+            format!("ee {} must keep diagnostics out of stderr", args.join(" ")),
+        )?;
+        ensure(
+            stdout.starts_with('{'),
+            format!("ee {} stdout must start with JSON data", args.join(" ")),
+        )?;
+        ensure(
+            stdout.ends_with('\n'),
+            format!("ee {} stdout must end with a newline", args.join(" ")),
+        )?;
+
+        serde_json::from_str(&stdout)
+            .map_err(|error| format!("ee {} stdout must be JSON: {error}", args.join(" ")))
+    }
+
+    fn normalize_gate16_json(mut value: serde_json::Value) -> String {
+        normalize_gate16_value(&mut value);
+        serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()) + "\n"
+    }
+
+    fn normalize_gate16_value(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(object) => {
+                for (key, nested) in object.iter_mut() {
+                    normalize_gate16_field(key, nested);
+                    normalize_gate16_value(nested);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    normalize_gate16_value(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn normalize_gate16_field(key: &str, value: &mut serde_json::Value) {
+        const TIMESTAMP_FIELDS: &[&str] = &[
+            "started_at",
+            "completed_at",
+            "closed_at",
+            "listed_at",
+            "checked_at",
+            "created_at",
+            "last_checked_at",
+            "triggered_at",
+            "recorded_at",
+        ];
+
+        if TIMESTAMP_FIELDS.contains(&key) && value.is_string() {
+            *value = serde_json::json!("TIMESTAMP");
+            return;
+        }
+
+        if key == "run_id"
+            && value
+                .as_str()
+                .is_some_and(|raw| raw.starts_with("pf_") && raw.contains('-'))
+        {
+            *value = serde_json::json!("pf_DYNAMIC");
+            return;
+        }
+
+        if key == "risk_brief_id" && value.is_string() {
+            *value = serde_json::json!("rb_DYNAMIC");
+        }
+    }
+
     fn seed_search_workspace(workspace: &Path, database: &Path) -> TestResult {
         if let Some(parent) = database.parent() {
             fs::create_dir_all(parent).map_err(|error| {
@@ -355,11 +441,221 @@ mod tests {
 
     #[test]
     fn agent_search_unavailable_json_matches_golden() -> TestResult {
-        assert_agent_stdout_golden(
-            &["--json", "search", "format-before-release"],
-            "search_unavailable.json",
-            false,
-        )
+        let artifact_dir = unique_artifact_dir("search-unavailable")?;
+        let workspace = artifact_dir.join("workspace");
+        fs::create_dir_all(&workspace).map_err(|error| {
+            format!(
+                "failed to create workspace {}: {error}",
+                workspace.display()
+            )
+        })?;
+
+        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .arg("--json")
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("search")
+            .arg("format-before-release")
+            .output()
+            .map_err(|error| format!("failed to run ee search --json: {error}"))?;
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|error| format!("search stdout was not UTF-8: {error}"))?;
+        let stderr = String::from_utf8(output.stderr)
+            .map_err(|error| format!("search stderr was not UTF-8: {error}"))?;
+
+        ensure(
+            !output.status.success(),
+            format!("search should fail without a database; stderr: {stderr}"),
+        )?;
+        ensure(
+            stderr.is_empty(),
+            format!("search JSON diagnostics must stay out of stderr, got: {stderr:?}"),
+        )?;
+        ensure(
+            stdout.starts_with('{'),
+            format!("search stdout must start with JSON data, got: {stdout:?}"),
+        )?;
+        ensure(
+            stdout.ends_with('\n'),
+            format!("search stdout must end with a newline, got: {stdout:?}"),
+        )?;
+
+        assert_golden("agent", "search_unavailable.json", &stdout)
+    }
+
+    #[test]
+    fn gate16_preflight_run_json_matches_golden() -> TestResult {
+        let value = run_json_stdout(
+            &[
+                "--json",
+                "preflight",
+                "run",
+                "deploy production database migration",
+            ],
+            true,
+        )?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "preflight run response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["status"],
+            &serde_json::json!("completed"),
+            "preflight run status",
+        )?;
+        ensure_equal(
+            &value["data"]["risk_level"],
+            &serde_json::json!("high"),
+            "preflight run risk level",
+        )?;
+        ensure_equal(
+            &value["data"]["cleared"],
+            &serde_json::json!(false),
+            "preflight run clearance",
+        )?;
+
+        let normalized = normalize_gate16_json(value);
+        assert_golden("preflight", "gate16_preflight_run.json", &normalized)
+    }
+
+    #[test]
+    fn gate16_preflight_show_json_matches_golden() -> TestResult {
+        let value = run_json_stdout(&["--json", "preflight", "show", "pf_gate16_contract"], true)?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "preflight show response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["run"]["id"],
+            &serde_json::json!("pf_gate16_contract"),
+            "preflight show run id",
+        )?;
+        ensure_equal(
+            &value["data"]["run"]["block_reason"],
+            &serde_json::json!("Storage not yet wired"),
+            "preflight show degraded storage reason",
+        )?;
+
+        let normalized = normalize_gate16_json(value);
+        assert_golden("preflight", "gate16_preflight_show.json", &normalized)
+    }
+
+    #[test]
+    fn gate16_preflight_close_json_matches_golden() -> TestResult {
+        let value = run_json_stdout(
+            &[
+                "--json",
+                "preflight",
+                "close",
+                "pf_gate16_contract",
+                "--cleared",
+                "--reason",
+                "gate 16 reviewed",
+                "--task-outcome",
+                "success",
+                "--feedback",
+                "helped",
+                "--dry-run",
+            ],
+            true,
+        )?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "preflight close response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["dry_run"],
+            &serde_json::json!(true),
+            "preflight close dry-run",
+        )?;
+        ensure_equal(
+            &value["data"]["new_status"],
+            &serde_json::json!("completed"),
+            "preflight close status",
+        )?;
+        ensure_equal(
+            &value["data"]["feedback"]["signal"],
+            &serde_json::json!("helpful"),
+            "preflight close feedback signal",
+        )?;
+
+        let normalized = normalize_gate16_json(value);
+        assert_golden("preflight", "gate16_preflight_close.json", &normalized)
+    }
+
+    #[test]
+    fn gate16_tripwire_list_json_matches_golden() -> TestResult {
+        let value = run_json_stdout(
+            &[
+                "--json",
+                "tripwire",
+                "list",
+                "--state",
+                "triggered",
+                "--include-disarmed",
+            ],
+            true,
+        )?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.tripwire.list.v1"),
+            "tripwire list schema",
+        )?;
+        ensure_equal(
+            &value["triggered_count"],
+            &serde_json::json!(1),
+            "tripwire list triggered count",
+        )?;
+        ensure_equal(
+            &value["filters_applied"],
+            &serde_json::json!(["state=triggered"]),
+            "tripwire list filters",
+        )?;
+
+        let normalized = normalize_gate16_json(value);
+        assert_golden("preflight", "gate16_tripwire_list.json", &normalized)
+    }
+
+    #[test]
+    fn gate16_tripwire_check_json_matches_golden() -> TestResult {
+        let value = run_json_stdout(
+            &[
+                "--json",
+                "tripwire",
+                "check",
+                "tw_004",
+                "--task-outcome",
+                "success",
+                "--dry-run",
+            ],
+            true,
+        )?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.tripwire.check.v1"),
+            "tripwire check schema",
+        )?;
+        ensure_equal(
+            &value["result"],
+            &serde_json::json!("triggered"),
+            "tripwire check result",
+        )?;
+        ensure_equal(
+            &value["should_halt"],
+            &serde_json::json!(true),
+            "tripwire check halt decision",
+        )?;
+        ensure_equal(
+            &value["feedback"]["evaluation"],
+            &serde_json::json!("false_alarm"),
+            "tripwire check false alarm feedback",
+        )?;
+
+        let normalized = normalize_gate16_json(value);
+        assert_golden("preflight", "gate16_tripwire_check.json", &normalized)
     }
 
     #[test]
@@ -601,6 +897,90 @@ mod tests {
 
         let normalized = normalize_context_pack_json(&stdout);
         assert_golden("agent", "context_pack.json", &normalized)
+    }
+
+    #[test]
+    fn agent_pack_query_file_json_matches_context_pack_golden() -> TestResult {
+        let artifact_dir = unique_artifact_dir("pack-query-file-json")?;
+        let workspace = artifact_dir.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        fs::create_dir_all(&workspace).map_err(|error| {
+            format!(
+                "failed to create workspace {}: {error}",
+                workspace.display()
+            )
+        })?;
+
+        seed_search_workspace(&workspace, &database)?;
+        build_search_index(&workspace, &database, &index_dir)?;
+        let query_file = workspace.join("context.eeq.json");
+        fs::write(
+            &query_file,
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "format before release", "mode": "hybrid"},
+              "budget": {"maxTokens": 4000, "candidatePool": 10},
+              "output": {"format": "json", "profile": "compact"}
+            }"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("pack")
+            .arg("--query-file")
+            .arg(&query_file)
+            .arg("--database")
+            .arg(&database)
+            .arg("--index-dir")
+            .arg(&index_dir)
+            .output()
+            .map_err(|error| format!("failed to run ee pack --query-file: {error}"))?;
+
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|error| format!("pack query-file stdout was not UTF-8: {error}"))?;
+        let stderr = String::from_utf8(output.stderr)
+            .map_err(|error| format!("pack query-file stderr was not UTF-8: {error}"))?;
+
+        ensure(
+            output.status.success(),
+            format!("pack query-file should succeed; stderr: {stderr}"),
+        )?;
+        ensure(
+            stderr.is_empty(),
+            format!("pack query-file stderr must be empty, got: {stderr:?}"),
+        )?;
+        ensure(
+            stdout.starts_with('{'),
+            format!("pack query-file stdout must start with JSON data, got: {stdout:?}"),
+        )?;
+        ensure(
+            stdout.ends_with('\n'),
+            format!("pack query-file stdout must end with a newline, got: {stdout:?}"),
+        )?;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "pack query-file schema",
+        )?;
+        ensure_equal(
+            &value["data"]["request"]["query"],
+            &serde_json::json!("format before release"),
+            "pack query-file query",
+        )?;
+        ensure_equal(
+            &value["data"]["request"]["profile"],
+            &serde_json::json!("compact"),
+            "pack query-file profile",
+        )?;
+
+        let normalized = normalize_context_pack_json(&stdout);
+        assert_golden("agent", "query_file_context_pack.json", &normalized)
     }
 
     #[test]
@@ -944,7 +1324,9 @@ mod tests {
             "codes": codes,
         });
 
-        serde_json::to_string_pretty(&matrix).unwrap_or_default()
+        let mut json = serde_json::to_string_pretty(&matrix).unwrap_or_default();
+        json.push('\n');
+        json
     }
 
     #[test]
@@ -1072,6 +1454,7 @@ mod tests {
             DegradedSubsystem::Curate,
             DegradedSubsystem::Policy,
             DegradedSubsystem::Network,
+            DegradedSubsystem::Science,
         ];
 
         let covered: HashSet<&str> = ALL_DEGRADATION_CODES
