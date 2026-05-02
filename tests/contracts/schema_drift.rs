@@ -447,6 +447,11 @@ pub const EVAL_SCHEMAS: &[SchemaEntry] = &[
         "ee.eval.tail_budget_config.v1",
         SchemaCategory::Eval,
     ),
+    SchemaEntry::new(
+        "science_metrics",
+        "ee.eval.science_metrics.v1",
+        SchemaCategory::Eval,
+    ),
 ];
 
 /// Backup schemas.
@@ -689,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn eval_schemas_include_release_gate_and_tail_budget() -> TestResult {
+    fn eval_schemas_include_release_gate_tail_budget_and_science_metrics() -> TestResult {
         let versions: Vec<&str> = EVAL_SCHEMAS.iter().map(|s| s.version).collect();
         ensure(
             versions.contains(&"ee.eval.release_gate.v1"),
@@ -698,6 +703,10 @@ mod tests {
         ensure(
             versions.contains(&"ee.eval.tail_budget_config.v1"),
             "eval schemas must include tail_budget_config (EE-348)",
+        )?;
+        ensure(
+            versions.contains(&"ee.eval.science_metrics.v1"),
+            "eval schemas must include science metrics (EE-175)",
         )
     }
 

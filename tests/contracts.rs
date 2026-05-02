@@ -90,3 +90,6 @@ mod franken_agent_detection_default;
 
 #[path = "contracts/fastmcp_rust_adapter.rs"]
 mod fastmcp_rust_adapter;
+
+#[path = "contracts/eval_science.rs"]
+mod eval_science;
