@@ -1784,6 +1784,54 @@ mod tests {
         ensure_close(metrics.f1_score, 0.8, "f1")
     }
 
+    #[cfg(feature = "science-analytics")]
+    #[test]
+    fn evaluation_report_science_metrics_reference_parity_all_pass() -> TestResult {
+        let mut report = EvaluationReport::new();
+        for scenario_id in ["pass_a", "pass_b", "pass_c"] {
+            report.add_result(ScenarioValidationResult {
+                scenario_id: scenario_id.to_string(),
+                passed: true,
+                steps_passed: 1,
+                steps_total: 1,
+                failures: vec![],
+            });
+        }
+
+        let report = report.with_science_metrics();
+        let metrics = science_metrics(&report)?;
+        ensure(metrics.scenarios_evaluated, 3, "scenario count")?;
+        ensure_close(metrics.precision, 1.0, "all-pass precision")?;
+        ensure_close(metrics.recall, 1.0, "all-pass recall")?;
+        ensure_close(metrics.f1_score, 1.0, "all-pass f1")
+    }
+
+    #[cfg(feature = "science-analytics")]
+    #[test]
+    fn evaluation_report_science_metrics_reference_parity_all_fail() -> TestResult {
+        let mut report = EvaluationReport::new();
+        for scenario_id in ["fail_a", "fail_b", "fail_c"] {
+            report.add_result(ScenarioValidationResult {
+                scenario_id: scenario_id.to_string(),
+                passed: false,
+                steps_passed: 0,
+                steps_total: 1,
+                failures: vec![ValidationFailure {
+                    step: 1,
+                    kind: ValidationFailureKind::GoldenMismatch,
+                    message: "mismatch".to_string(),
+                }],
+            });
+        }
+
+        let report = report.with_science_metrics();
+        let metrics = science_metrics(&report)?;
+        ensure(metrics.scenarios_evaluated, 3, "scenario count")?;
+        ensure(metrics.precision, None, "all-fail precision undefined")?;
+        ensure_close(metrics.recall, 0.0, "all-fail recall")?;
+        ensure(metrics.f1_score, None, "all-fail f1 undefined")
+    }
+
     #[test]
     fn evaluation_status_strings_are_stable() -> TestResult {
         ensure(
