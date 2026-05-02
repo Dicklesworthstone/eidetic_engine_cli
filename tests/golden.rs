@@ -514,6 +514,16 @@ mod tests {
             &serde_json::json!(false),
             "preflight run clearance",
         )?;
+        ensure_equal(
+            &value["data"]["task_input"],
+            &serde_json::json!("deploy production database migration"),
+            "preflight run task input",
+        )?;
+        ensure_equal(
+            &value["data"]["dry_run"],
+            &serde_json::json!(false),
+            "preflight run persists non-dry-run provenance",
+        )?;
 
         let normalized = normalize_gate16_json(value);
         assert_golden("preflight", "gate16_preflight_run.json", &normalized)
@@ -536,6 +546,16 @@ mod tests {
             &value["data"]["run"]["block_reason"],
             &serde_json::json!("Storage not yet wired"),
             "preflight show degraded storage reason",
+        )?;
+        ensure_equal(
+            &value["data"]["brief"],
+            &serde_json::json!(null),
+            "preflight show keeps brief absent when storage fallback is active",
+        )?;
+        ensure_equal(
+            &value["data"]["tripwires"],
+            &serde_json::json!([]),
+            "preflight show keeps tripwire list explicit in degraded fallback",
         )?;
 
         let normalized = normalize_gate16_json(value);
@@ -581,6 +601,16 @@ mod tests {
             &serde_json::json!("helpful"),
             "preflight close feedback signal",
         )?;
+        ensure_equal(
+            &value["data"]["feedback"]["durable_mutation"],
+            &serde_json::json!(false),
+            "preflight close dry-run must not mutate durable state",
+        )?;
+        ensure_equal(
+            &value["data"]["feedback"]["evidence_preserved"],
+            &serde_json::json!(true),
+            "preflight close preserves evidence in dry-run path",
+        )?;
 
         let normalized = normalize_gate16_json(value);
         assert_golden("preflight", "gate16_preflight_close.json", &normalized)
@@ -613,6 +643,16 @@ mod tests {
             &value["filters_applied"],
             &serde_json::json!(["state=triggered"]),
             "tripwire list filters",
+        )?;
+        ensure_equal(
+            &value["tripwires"][0]["action"],
+            &serde_json::json!("halt"),
+            "tripwire list preserves high-severity halt action",
+        )?;
+        ensure_equal(
+            &value["tripwires"][0]["state"],
+            &serde_json::json!("triggered"),
+            "tripwire list retains triggered state under projection",
         )?;
 
         let normalized = normalize_gate16_json(value);
@@ -652,6 +692,16 @@ mod tests {
             &value["feedback"]["evaluation"],
             &serde_json::json!("false_alarm"),
             "tripwire check false alarm feedback",
+        )?;
+        ensure_equal(
+            &value["feedback"]["durable_mutation"],
+            &serde_json::json!(false),
+            "tripwire check dry-run keeps storage read-only",
+        )?;
+        ensure_equal(
+            &value["feedback"]["counterfactual_effect"]["intervention"],
+            &serde_json::json!("demote_repeated_false_alarm"),
+            "tripwire check emits deterministic false-alarm remediation",
         )?;
 
         let normalized = normalize_gate16_json(value);
