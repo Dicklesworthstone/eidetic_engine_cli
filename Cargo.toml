@@ -73,6 +73,10 @@ name = "outcome"
 harness = false
 
 [[bench]]
+name = "context"
+harness = false
+
+[[bench]]
 name = "status"
 harness = false
 
