@@ -33,6 +33,35 @@
       "Propose controlled experiment for `mem_fixture_001` with `ee learn experiment --artifact-id mem_fixture_001 --dry-run --json`."
     ]
   },
+  "downstreamEffects": {
+    "schema": "ee.causal.downstream_effects.v1",
+    "economyScore": {
+      "priorityDelta": 3,
+      "utilityDelta": 0.13,
+      "confidenceDelta": 0.1,
+      "reasoning": "Causal action `promote` with `replay_supported` evidence projects deterministic economy scoring movement."
+    },
+    "learningAgenda": {
+      "priorityDelta": 2,
+      "queueAction": "raise_priority",
+      "reasoning": "Uplift 0.100 and `replay_supported` evidence update learning agenda priority without mutating source evidence."
+    },
+    "preflightRouting": {
+      "profile": "standard",
+      "confidenceGate": "medium",
+      "reasoning": "Promotion action `promote` maps to `standard` preflight profile under `medium` confidence gate."
+    },
+    "procedureVerification": {
+      "status": "validated_by_uplift",
+      "requiresRevalidation": false,
+      "reasoning": "Procedure verification status tracks causal action `promote` while preserving raw evidence immutability."
+    },
+    "audit": {
+      "mutationMode": "dry_run_projection",
+      "rawEvidenceReplaced": false,
+      "silentMutation": false
+    }
+  },
   "summary": {
     "totalPlans": 1,
     "promoteCount": 1,

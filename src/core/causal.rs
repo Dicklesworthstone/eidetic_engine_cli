@@ -501,6 +501,9 @@ pub const CAUSAL_COMPARE_SCHEMA_V1: &str = "ee.causal.compare.v1";
 /// Schema for causal promotion plan response.
 pub const CAUSAL_PROMOTE_PLAN_SCHEMA_V1: &str = "ee.causal.promote_plan.v1";
 
+/// Schema for causal downstream projection effects.
+pub const CAUSAL_DOWNSTREAM_EFFECTS_SCHEMA_V1: &str = "ee.causal.downstream_effects.v1";
+
 /// Options for computing causal estimates.
 #[derive(Clone, Debug, Default)]
 pub struct EstimateOptions {
@@ -1484,12 +1487,135 @@ impl PromotePlanRecommendations {
     }
 }
 
+/// Deterministic economy projection derived from causal uplift planning.
+#[derive(Clone, Debug)]
+pub struct PromotePlanEconomyProjection {
+    pub priority_delta: i32,
+    pub utility_delta: f64,
+    pub confidence_delta: f64,
+    pub reasoning: String,
+}
+
+impl PromotePlanEconomyProjection {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "priorityDelta": self.priority_delta,
+            "utilityDelta": self.utility_delta,
+            "confidenceDelta": self.confidence_delta,
+            "reasoning": self.reasoning,
+        })
+    }
+}
+
+/// Deterministic learning-agenda projection derived from causal uplift planning.
+#[derive(Clone, Debug)]
+pub struct PromotePlanLearningAgendaProjection {
+    pub priority_delta: i32,
+    pub queue_action: String,
+    pub reasoning: String,
+}
+
+impl PromotePlanLearningAgendaProjection {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "priorityDelta": self.priority_delta,
+            "queueAction": self.queue_action,
+            "reasoning": self.reasoning,
+        })
+    }
+}
+
+/// Deterministic preflight routing projection derived from causal uplift planning.
+#[derive(Clone, Debug)]
+pub struct PromotePlanPreflightRoutingProjection {
+    pub profile: String,
+    pub confidence_gate: String,
+    pub reasoning: String,
+}
+
+impl PromotePlanPreflightRoutingProjection {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "profile": self.profile,
+            "confidenceGate": self.confidence_gate,
+            "reasoning": self.reasoning,
+        })
+    }
+}
+
+/// Deterministic procedure-verification projection derived from causal uplift planning.
+#[derive(Clone, Debug)]
+pub struct PromotePlanProcedureVerificationProjection {
+    pub status: String,
+    pub requires_revalidation: bool,
+    pub reasoning: String,
+}
+
+impl PromotePlanProcedureVerificationProjection {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "status": self.status,
+            "requiresRevalidation": self.requires_revalidation,
+            "reasoning": self.reasoning,
+        })
+    }
+}
+
+/// Audit metadata proving downstream effects remain projection-only.
+#[derive(Clone, Debug)]
+pub struct PromotePlanDownstreamAudit {
+    pub mutation_mode: String,
+    pub raw_evidence_replaced: bool,
+    pub silent_mutation: bool,
+}
+
+impl PromotePlanDownstreamAudit {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "mutationMode": self.mutation_mode,
+            "rawEvidenceReplaced": self.raw_evidence_replaced,
+            "silentMutation": self.silent_mutation,
+        })
+    }
+}
+
+/// Cross-subsystem deterministic projections derived from causal uplift planning.
+#[derive(Clone, Debug)]
+pub struct PromotePlanDownstreamEffects {
+    pub schema: &'static str,
+    pub economy_score: PromotePlanEconomyProjection,
+    pub learning_agenda: PromotePlanLearningAgendaProjection,
+    pub preflight_routing: PromotePlanPreflightRoutingProjection,
+    pub procedure_verification: PromotePlanProcedureVerificationProjection,
+    pub audit: PromotePlanDownstreamAudit,
+}
+
+impl PromotePlanDownstreamEffects {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "schema": self.schema,
+            "economyScore": self.economy_score.data_json(),
+            "learningAgenda": self.learning_agenda.data_json(),
+            "preflightRouting": self.preflight_routing.data_json(),
+            "procedureVerification": self.procedure_verification.data_json(),
+            "audit": self.audit.data_json(),
+        })
+    }
+}
+
 /// Report from `ee causal promote-plan`.
 #[derive(Clone, Debug)]
 pub struct PromotePlanReport {
     pub schema: &'static str,
     pub plans: Vec<PromotionPlan>,
     pub recommendations: PromotePlanRecommendations,
+    pub downstream_effects: PromotePlanDownstreamEffects,
     pub filters_applied: Vec<String>,
     pub degradations: Vec<TraceDegradation>,
     pub method_used: String,
@@ -1514,6 +1640,7 @@ impl PromotePlanReport {
             "command": "causal promote-plan",
             "plans": self.plans.iter().map(PromotionPlan::data_json).collect::<Vec<_>>(),
             "recommendations": self.recommendations.data_json(),
+            "downstreamEffects": self.downstream_effects.data_json(),
             "summary": {
                 "totalPlans": self.plans.len(),
                 "promoteCount": promote_count,
@@ -1571,6 +1698,23 @@ impl PromotePlanReport {
                 out.push_str(&format!("  - {proposal}\n"));
             }
         }
+        out.push_str("\nDownstream Projections:\n");
+        out.push_str(&format!(
+            "  - Economy priority delta: {}\n",
+            self.downstream_effects.economy_score.priority_delta
+        ));
+        out.push_str(&format!(
+            "  - Learning agenda action: {}\n",
+            self.downstream_effects.learning_agenda.queue_action
+        ));
+        out.push_str(&format!(
+            "  - Preflight routing profile: {}\n",
+            self.downstream_effects.preflight_routing.profile
+        ));
+        out.push_str(&format!(
+            "  - Procedure verification: {}\n",
+            self.downstream_effects.procedure_verification.status
+        ));
         if !self.degradations.is_empty() {
             out.push_str("\nDegradations:\n");
             for degradation in &self.degradations {
@@ -1631,6 +1775,12 @@ pub fn promote_causal_plan(options: &PromotePlanOptions) -> PromotePlanReport {
             schema: CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
             plans: Vec::new(),
             recommendations: PromotePlanRecommendations::default(),
+            downstream_effects: project_downstream_effects(
+                PromotionAction::Hold,
+                evidence_strength,
+                estimated_uplift,
+                options.dry_run,
+            ),
             filters_applied,
             degradations,
             method_used,
@@ -1658,6 +1808,8 @@ pub fn promote_causal_plan(options: &PromotePlanOptions) -> PromotePlanReport {
     let action = options.action.unwrap_or_else(|| {
         derive_action(estimated_uplift, options.minimum_uplift, evidence_strength)
     });
+    let downstream_effects =
+        project_downstream_effects(action, evidence_strength, estimated_uplift, options.dry_run);
 
     let mut plan = PromotionPlan::new(
         format!("plan-{artifact_id}"),
@@ -1716,10 +1868,137 @@ pub fn promote_causal_plan(options: &PromotePlanOptions) -> PromotePlanReport {
         schema: CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
         plans: vec![plan],
         recommendations,
+        downstream_effects,
         filters_applied,
         degradations,
         method_used,
         dry_run: options.dry_run,
+    }
+}
+
+fn project_downstream_effects(
+    action: PromotionAction,
+    evidence_strength: CausalEvidenceStrength,
+    estimated_uplift: f64,
+    dry_run: bool,
+) -> PromotePlanDownstreamEffects {
+    let priority_delta = match action {
+        PromotionAction::Promote => 3,
+        PromotionAction::Hold => 1,
+        PromotionAction::Demote => -2,
+        PromotionAction::Archive | PromotionAction::Quarantine => -3,
+    };
+    let utility_base = match action {
+        PromotionAction::Promote => 0.08,
+        PromotionAction::Hold => 0.01,
+        PromotionAction::Demote => -0.06,
+        PromotionAction::Archive | PromotionAction::Quarantine => -0.09,
+    };
+    let utility_delta = (utility_base + (estimated_uplift * 0.5)).clamp(-1.0, 1.0);
+    let confidence_delta = estimated_uplift.clamp(-0.25, 0.25);
+
+    let learning_priority_delta = match action {
+        PromotionAction::Promote => 2,
+        PromotionAction::Hold => 1,
+        PromotionAction::Demote => -1,
+        PromotionAction::Archive | PromotionAction::Quarantine => -2,
+    };
+    let learning_queue_action = match action {
+        PromotionAction::Promote => "raise_priority",
+        PromotionAction::Hold => "monitor",
+        PromotionAction::Demote => "investigate_regression",
+        PromotionAction::Archive | PromotionAction::Quarantine => "quarantine_review",
+    };
+
+    let confidence_gate = match evidence_strength {
+        CausalEvidenceStrength::ExperimentSupported => "high",
+        CausalEvidenceStrength::ReplaySupported => "medium",
+        CausalEvidenceStrength::Correlational
+        | CausalEvidenceStrength::ExposureOnly
+        | CausalEvidenceStrength::Rejected => "low",
+    };
+    let preflight_profile = match action {
+        PromotionAction::Promote => {
+            if matches!(
+                evidence_strength,
+                CausalEvidenceStrength::ExperimentSupported
+                    | CausalEvidenceStrength::ReplaySupported
+            ) {
+                "standard"
+            } else {
+                "full"
+            }
+        }
+        PromotionAction::Hold => "standard",
+        PromotionAction::Demote | PromotionAction::Archive | PromotionAction::Quarantine => "full",
+    };
+
+    let (procedure_status, requires_revalidation) = match action {
+        PromotionAction::Promote => {
+            if matches!(
+                evidence_strength,
+                CausalEvidenceStrength::ExperimentSupported
+                    | CausalEvidenceStrength::ReplaySupported
+            ) {
+                ("validated_by_uplift", false)
+            } else {
+                ("provisional_requires_revalidation", true)
+            }
+        }
+        PromotionAction::Hold => ("revalidation_required", true),
+        PromotionAction::Demote | PromotionAction::Archive | PromotionAction::Quarantine => {
+            ("blocked_until_reverified", true)
+        }
+    };
+
+    PromotePlanDownstreamEffects {
+        schema: CAUSAL_DOWNSTREAM_EFFECTS_SCHEMA_V1,
+        economy_score: PromotePlanEconomyProjection {
+            priority_delta,
+            utility_delta,
+            confidence_delta,
+            reasoning: format!(
+                "Causal action `{}` with `{}` evidence projects deterministic economy scoring movement.",
+                action.as_str(),
+                evidence_strength.as_str()
+            ),
+        },
+        learning_agenda: PromotePlanLearningAgendaProjection {
+            priority_delta: learning_priority_delta,
+            queue_action: learning_queue_action.to_string(),
+            reasoning: format!(
+                "Uplift {:.3} and `{}` evidence update learning agenda priority without mutating source evidence.",
+                estimated_uplift,
+                evidence_strength.as_str()
+            ),
+        },
+        preflight_routing: PromotePlanPreflightRoutingProjection {
+            profile: preflight_profile.to_string(),
+            confidence_gate: confidence_gate.to_string(),
+            reasoning: format!(
+                "Promotion action `{}` maps to `{}` preflight profile under `{}` confidence gate.",
+                action.as_str(),
+                preflight_profile,
+                confidence_gate
+            ),
+        },
+        procedure_verification: PromotePlanProcedureVerificationProjection {
+            status: procedure_status.to_string(),
+            requires_revalidation,
+            reasoning: format!(
+                "Procedure verification status tracks causal action `{}` while preserving raw evidence immutability.",
+                action.as_str()
+            ),
+        },
+        audit: PromotePlanDownstreamAudit {
+            mutation_mode: if dry_run {
+                "dry_run_projection".to_string()
+            } else {
+                "proposal_projection".to_string()
+            },
+            raw_evidence_replaced: false,
+            silent_mutation: false,
+        },
     }
 }
 
@@ -2264,7 +2543,35 @@ mod tests {
         assert_eq!(json["command"], "causal promote-plan");
         assert!(json["plans"].is_array());
         assert!(json["recommendations"]["revalidation"].is_array());
+        assert_eq!(
+            json["downstreamEffects"]["schema"],
+            CAUSAL_DOWNSTREAM_EFFECTS_SCHEMA_V1
+        );
         assert!(json["summary"]["totalPlans"].is_number());
+    }
+
+    #[test]
+    fn promote_plan_projects_cross_surface_effects_without_mutation() {
+        let report = promote_causal_plan(
+            &PromotePlanOptions::new()
+                .with_artifact_id("mem-001")
+                .with_method("experiment")
+                .dry_run(),
+        );
+        let downstream = &report.downstream_effects;
+
+        assert_eq!(downstream.schema, CAUSAL_DOWNSTREAM_EFFECTS_SCHEMA_V1);
+        assert_eq!(downstream.economy_score.priority_delta, 3);
+        assert_eq!(downstream.learning_agenda.queue_action, "raise_priority");
+        assert_eq!(downstream.preflight_routing.profile, "standard");
+        assert_eq!(
+            downstream.procedure_verification.status,
+            "validated_by_uplift"
+        );
+        assert!(!downstream.procedure_verification.requires_revalidation);
+        assert_eq!(downstream.audit.mutation_mode, "dry_run_projection");
+        assert!(!downstream.audit.raw_evidence_replaced);
+        assert!(!downstream.audit.silent_mutation);
     }
 
     #[test]

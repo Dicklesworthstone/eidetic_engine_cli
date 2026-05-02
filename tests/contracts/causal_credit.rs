@@ -229,6 +229,24 @@ fn causal_promote_plan_dry_run_matches_fixture() -> TestResult {
         json!(CAUSAL_PROMOTE_PLAN_SCHEMA_V1),
         "promote-plan schema",
     )?;
+    ensure_field_eq(
+        &payload["downstreamEffects"],
+        "schema",
+        json!("ee.causal.downstream_effects.v1"),
+        "downstream schema",
+    )?;
+    ensure_field_eq(
+        &payload["downstreamEffects"]["audit"],
+        "rawEvidenceReplaced",
+        json!(false),
+        "raw evidence replacement guard",
+    )?;
+    ensure_field_eq(
+        &payload["downstreamEffects"]["audit"],
+        "silentMutation",
+        json!(false),
+        "silent mutation guard",
+    )?;
     assert_fixture_json("promote_plan_dry_run", &payload)
 }
 

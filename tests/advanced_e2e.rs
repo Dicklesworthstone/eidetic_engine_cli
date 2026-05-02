@@ -2070,6 +2070,60 @@ fn causal_promote_plan_supports_explicit_action_override() -> TestResult {
 }
 
 #[test]
+fn causal_promote_plan_projects_cross_surface_effects() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "promote-plan",
+        "--artifact-id",
+        "art-001",
+        "--method",
+        "experiment",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    let json = stdout_json(&output)?;
+    let downstream = &json["downstreamEffects"];
+    ensure_equal(
+        &downstream["schema"],
+        &serde_json::json!("ee.causal.downstream_effects.v1"),
+        "downstream effects schema",
+    )?;
+    ensure(
+        downstream["economyScore"].is_object(),
+        "economy score projection",
+    )?;
+    ensure(
+        downstream["learningAgenda"].is_object(),
+        "learning agenda projection",
+    )?;
+    ensure(
+        downstream["preflightRouting"].is_object(),
+        "preflight routing projection",
+    )?;
+    ensure(
+        downstream["procedureVerification"].is_object(),
+        "procedure verification projection",
+    )?;
+    ensure_equal(
+        &downstream["audit"]["mutationMode"],
+        &serde_json::json!("dry_run_projection"),
+        "downstream mutation mode",
+    )?;
+    ensure_equal(
+        &downstream["audit"]["rawEvidenceReplaced"],
+        &serde_json::json!(false),
+        "raw evidence remains immutable",
+    )?;
+    ensure_equal(
+        &downstream["audit"]["silentMutation"],
+        &serde_json::json!(false),
+        "silent mutation disabled",
+    )?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")
+}
+
+#[test]
 fn all_causal_commands_produce_stdout_only_data() -> TestResult {
     let commands = [
         vec!["causal", "trace", "--run-id", "test", "--dry-run", "--json"],
