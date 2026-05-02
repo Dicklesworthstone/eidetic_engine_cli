@@ -7,7 +7,8 @@
 use serde_json::{Value as JsonValue, json};
 
 use crate::models::causal::{
-    CAUSAL_TRACE_SCHEMA_V1, CausalDecisionTrace, CausalExposureChannel, DecisionTraceOutcome,
+    CAUSAL_TRACE_SCHEMA_V1, CausalDecisionTrace, CausalEvidenceStrength, CausalExposureChannel,
+    DecisionTraceOutcome, PromotionAction, PromotionPlan, PromotionPlanStatus,
 };
 use crate::models::decision::DecisionPlane;
 
@@ -493,6 +494,9 @@ fn build_sample_chains(options: &TraceOptions) -> Vec<CausalChain> {
 
 /// Schema for causal estimate response.
 pub const CAUSAL_ESTIMATE_SCHEMA_V1: &str = "ee.causal.estimate.v1";
+
+/// Schema for causal promotion plan response.
+pub const CAUSAL_PROMOTE_PLAN_SCHEMA_V1: &str = "ee.causal.promote_plan.v1";
 
 /// Options for computing causal estimates.
 #[derive(Clone, Debug, Default)]
@@ -992,6 +996,422 @@ fn build_sample_confounders(options: &EstimateOptions) -> Vec<EstimateConfounder
     ]
 }
 
+/// Options for producing a dry-run-first causal promotion plan.
+#[derive(Clone, Debug)]
+pub struct PromotePlanOptions {
+    /// Artifact ID targeted by the plan.
+    pub artifact_id: Option<String>,
+    /// Decision ID used to scope the plan.
+    pub decision_id: Option<String>,
+    /// Estimate ID used to scope the plan.
+    pub estimate_id: Option<String>,
+    /// Explicit action override (promote, hold, demote, archive, quarantine).
+    pub action: Option<PromotionAction>,
+    /// Method used for the supporting estimate (naive, matching, replay, experiment).
+    pub method: Option<String>,
+    /// Minimum uplift required before auto-promoting.
+    pub minimum_uplift: f64,
+    /// Include revalidation follow-up recommendations.
+    pub include_revalidation: bool,
+    /// Include narrower routing recommendations.
+    pub include_narrower_routing: bool,
+    /// Include experiment proposals.
+    pub include_experiment_proposals: bool,
+    /// Dry-run mode only (required by policy, but surfaced explicitly for logs).
+    pub dry_run: bool,
+}
+
+impl Default for PromotePlanOptions {
+    fn default() -> Self {
+        Self {
+            artifact_id: None,
+            decision_id: None,
+            estimate_id: None,
+            action: None,
+            method: Some("replay".to_string()),
+            minimum_uplift: 0.05,
+            include_revalidation: false,
+            include_narrower_routing: false,
+            include_experiment_proposals: false,
+            dry_run: false,
+        }
+    }
+}
+
+impl PromotePlanOptions {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_artifact_id(mut self, id: impl Into<String>) -> Self {
+        self.artifact_id = Some(id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_decision_id(mut self, id: impl Into<String>) -> Self {
+        self.decision_id = Some(id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_estimate_id(mut self, id: impl Into<String>) -> Self {
+        self.estimate_id = Some(id.into());
+        self
+    }
+
+    #[must_use]
+    pub const fn with_action(mut self, action: PromotionAction) -> Self {
+        self.action = Some(action);
+        self
+    }
+
+    #[must_use]
+    pub fn with_method(mut self, method: impl Into<String>) -> Self {
+        self.method = Some(method.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_minimum_uplift(mut self, uplift: f64) -> Self {
+        self.minimum_uplift = uplift.clamp(-1.0, 1.0);
+        self
+    }
+
+    #[must_use]
+    pub fn with_revalidation(mut self) -> Self {
+        self.include_revalidation = true;
+        self
+    }
+
+    #[must_use]
+    pub fn with_narrower_routing(mut self) -> Self {
+        self.include_narrower_routing = true;
+        self
+    }
+
+    #[must_use]
+    pub fn with_experiment_proposals(mut self) -> Self {
+        self.include_experiment_proposals = true;
+        self
+    }
+
+    #[must_use]
+    pub fn dry_run(mut self) -> Self {
+        self.dry_run = true;
+        self
+    }
+
+    fn has_any_filter(&self) -> bool {
+        self.artifact_id.is_some() || self.decision_id.is_some() || self.estimate_id.is_some()
+    }
+}
+
+/// Follow-up recommendations from a causal promotion plan.
+#[derive(Clone, Debug, Default)]
+pub struct PromotePlanRecommendations {
+    pub revalidation_steps: Vec<String>,
+    pub narrower_routing_steps: Vec<String>,
+    pub experiment_proposals: Vec<String>,
+}
+
+impl PromotePlanRecommendations {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "revalidation": self.revalidation_steps,
+            "narrowerRouting": self.narrower_routing_steps,
+            "experimentProposals": self.experiment_proposals,
+        })
+    }
+}
+
+/// Report from `ee causal promote-plan`.
+#[derive(Clone, Debug)]
+pub struct PromotePlanReport {
+    pub schema: &'static str,
+    pub plans: Vec<PromotionPlan>,
+    pub recommendations: PromotePlanRecommendations,
+    pub filters_applied: Vec<String>,
+    pub degradations: Vec<TraceDegradation>,
+    pub method_used: String,
+    pub dry_run: bool,
+}
+
+impl PromotePlanReport {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        let (promote_count, hold_count, demote_count) =
+            self.plans
+                .iter()
+                .fold((0usize, 0usize, 0usize), |acc, plan| match plan.action {
+                    PromotionAction::Promote => (acc.0 + 1, acc.1, acc.2),
+                    PromotionAction::Hold => (acc.0, acc.1 + 1, acc.2),
+                    PromotionAction::Demote => (acc.0, acc.1, acc.2 + 1),
+                    PromotionAction::Archive | PromotionAction::Quarantine => acc,
+                });
+
+        json!({
+            "schema": self.schema,
+            "command": "causal promote-plan",
+            "plans": self.plans.iter().map(PromotionPlan::data_json).collect::<Vec<_>>(),
+            "recommendations": self.recommendations.data_json(),
+            "summary": {
+                "totalPlans": self.plans.len(),
+                "promoteCount": promote_count,
+                "holdCount": hold_count,
+                "demoteCount": demote_count,
+                "methodUsed": self.method_used,
+            },
+            "filtersApplied": self.filters_applied,
+            "degradations": self.degradations.iter().map(TraceDegradation::data_json).collect::<Vec<_>>(),
+            "dryRun": self.dry_run,
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut out = String::with_capacity(1024);
+        if self.dry_run {
+            out.push_str("Causal Promotion Plan [DRY RUN]\n");
+        } else {
+            out.push_str("Causal Promotion Plan\n");
+        }
+        out.push_str("=====================\n\n");
+        out.push_str(&format!("Method: {}\n", self.method_used));
+        out.push_str(&format!("Plans generated: {}\n", self.plans.len()));
+
+        if !self.plans.is_empty() {
+            out.push_str("\nPlans:\n");
+            for (index, plan) in self.plans.iter().enumerate() {
+                out.push_str(&format!(
+                    "  {}. {} -> {} (uplift: {:.3}, evidence: {})\n",
+                    index + 1,
+                    plan.artifact_id,
+                    plan.action.as_str(),
+                    plan.estimated_uplift,
+                    plan.evidence_strength.as_str()
+                ));
+            }
+        }
+
+        if !self.recommendations.revalidation_steps.is_empty() {
+            out.push_str("\nRevalidation:\n");
+            for step in &self.recommendations.revalidation_steps {
+                out.push_str(&format!("  - {step}\n"));
+            }
+        }
+        if !self.recommendations.narrower_routing_steps.is_empty() {
+            out.push_str("\nNarrower Routing:\n");
+            for step in &self.recommendations.narrower_routing_steps {
+                out.push_str(&format!("  - {step}\n"));
+            }
+        }
+        if !self.recommendations.experiment_proposals.is_empty() {
+            out.push_str("\nExperiment Proposals:\n");
+            for proposal in &self.recommendations.experiment_proposals {
+                out.push_str(&format!("  - {proposal}\n"));
+            }
+        }
+        if !self.degradations.is_empty() {
+            out.push_str("\nDegradations:\n");
+            for degradation in &self.degradations {
+                out.push_str(&format!(
+                    "  - [{}] {}: {}\n",
+                    degradation.severity, degradation.code, degradation.message
+                ));
+            }
+        }
+        out
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.plans.is_empty()
+    }
+}
+
+#[must_use]
+pub fn promote_causal_plan(options: &PromotePlanOptions) -> PromotePlanReport {
+    let mut filters_applied = Vec::new();
+    let mut degradations = Vec::new();
+
+    if let Some(ref artifact_id) = options.artifact_id {
+        filters_applied.push(format!("artifact_id={artifact_id}"));
+    }
+    if let Some(ref decision_id) = options.decision_id {
+        filters_applied.push(format!("decision_id={decision_id}"));
+    }
+    if let Some(ref estimate_id) = options.estimate_id {
+        filters_applied.push(format!("estimate_id={estimate_id}"));
+    }
+
+    let requested_method = options
+        .method
+        .clone()
+        .unwrap_or_else(|| "replay".to_string());
+    let method_used = normalize_method(&requested_method, &mut degradations);
+    let (evidence_strength, estimated_uplift) = method_signal(method_used.as_str());
+
+    if !options.dry_run {
+        degradations.push(TraceDegradation {
+            code: "dry_run_recommended".to_string(),
+            message: "Promotion planning is policy-conservative; prefer --dry-run in automation."
+                .to_string(),
+            severity: "info".to_string(),
+        });
+    }
+
+    if !options.has_any_filter() {
+        degradations.push(TraceDegradation {
+            code: "no_filters".to_string(),
+            message: "No artifact, decision, or estimate ID provided; cannot produce plan."
+                .to_string(),
+            severity: "warning".to_string(),
+        });
+        return PromotePlanReport {
+            schema: CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
+            plans: Vec::new(),
+            recommendations: PromotePlanRecommendations::default(),
+            filters_applied,
+            degradations,
+            method_used,
+            dry_run: options.dry_run,
+        };
+    }
+
+    let artifact_id = options
+        .artifact_id
+        .clone()
+        .or_else(|| {
+            options
+                .estimate_id
+                .as_ref()
+                .map(|id| format!("artifact-from-{id}"))
+        })
+        .or_else(|| {
+            options
+                .decision_id
+                .as_ref()
+                .map(|id| format!("artifact-for-{id}"))
+        })
+        .unwrap_or_else(|| "artifact-unknown".to_string());
+
+    let action = options.action.unwrap_or_else(|| {
+        derive_action(estimated_uplift, options.minimum_uplift, evidence_strength)
+    });
+
+    let mut plan = PromotionPlan::new(
+        format!("plan-{artifact_id}"),
+        artifact_id.clone(),
+        action,
+        chrono::Utc::now().to_rfc3339(),
+    )
+    .with_status(if options.dry_run {
+        PromotionPlanStatus::DryRunReady
+    } else {
+        PromotionPlanStatus::Proposed
+    })
+    .with_evidence_strength(evidence_strength)
+    .with_minimum_uplift(options.minimum_uplift)
+    .with_estimated_uplift(estimated_uplift)
+    .with_required_evidence(format!("evidence-{artifact_id}"))
+    .with_audit_id(format!("audit-promote-plan-{artifact_id}"));
+
+    if matches!(
+        action,
+        PromotionAction::Demote | PromotionAction::Archive | PromotionAction::Quarantine
+    ) {
+        plan = plan.with_blocking_confounder(format!("confounder-{artifact_id}"));
+    }
+
+    let mut recommendations = PromotePlanRecommendations::default();
+    if options.include_revalidation
+        || matches!(
+            action,
+            PromotionAction::Hold | PromotionAction::Demote | PromotionAction::Quarantine
+        )
+    {
+        recommendations.revalidation_steps.push(format!(
+            "Re-run `ee causal estimate --artifact-id {artifact_id} --method replay --json` before applying changes."
+        ));
+    }
+    if options.include_narrower_routing
+        || matches!(
+            action,
+            PromotionAction::Demote | PromotionAction::Archive | PromotionAction::Quarantine
+        )
+    {
+        recommendations.narrower_routing_steps.push(format!(
+            "Narrow routing scope for `{artifact_id}` to higher-confidence task families."
+        ));
+    }
+    if options.include_experiment_proposals
+        || evidence_strength != CausalEvidenceStrength::ExperimentSupported
+    {
+        recommendations.experiment_proposals.push(format!(
+            "Propose controlled experiment for `{artifact_id}` with `ee learn experiment --artifact-id {artifact_id} --dry-run --json`."
+        ));
+    }
+
+    PromotePlanReport {
+        schema: CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
+        plans: vec![plan],
+        recommendations,
+        filters_applied,
+        degradations,
+        method_used,
+        dry_run: options.dry_run,
+    }
+}
+
+fn normalize_method(method: &str, degradations: &mut Vec<TraceDegradation>) -> String {
+    match method {
+        "naive" | "matching" | "replay" | "experiment" => method.to_string(),
+        _ => {
+            degradations.push(TraceDegradation {
+                code: "unknown_method".to_string(),
+                message: format!(
+                    "Unknown method `{method}`; falling back to `naive` for conservative planning."
+                ),
+                severity: "warning".to_string(),
+            });
+            "naive".to_string()
+        }
+    }
+}
+
+fn method_signal(method: &str) -> (CausalEvidenceStrength, f64) {
+    match method {
+        "experiment" => (CausalEvidenceStrength::ExperimentSupported, 0.16),
+        "replay" => (CausalEvidenceStrength::ReplaySupported, 0.10),
+        "matching" => (CausalEvidenceStrength::Correlational, 0.04),
+        _ => (CausalEvidenceStrength::ExposureOnly, 0.01),
+    }
+}
+
+fn derive_action(
+    estimated_uplift: f64,
+    minimum_uplift: f64,
+    evidence_strength: CausalEvidenceStrength,
+) -> PromotionAction {
+    if estimated_uplift < 0.0 {
+        return PromotionAction::Demote;
+    }
+    if estimated_uplift >= minimum_uplift
+        && matches!(
+            evidence_strength,
+            CausalEvidenceStrength::ExperimentSupported | CausalEvidenceStrength::ReplaySupported
+        )
+    {
+        PromotionAction::Promote
+    } else {
+        PromotionAction::Hold
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1268,5 +1688,121 @@ mod tests {
             ConfidenceState::from_evidence_strength(CausalEvidenceStrength::Rejected),
             ConfidenceState::Rejected
         );
+    }
+
+    #[test]
+    fn promote_plan_options_builder_works() {
+        let options = PromotePlanOptions::new()
+            .with_artifact_id("mem-001")
+            .with_decision_id("dec-001")
+            .with_estimate_id("est-001")
+            .with_action(PromotionAction::Demote)
+            .with_method("matching")
+            .with_minimum_uplift(0.12)
+            .with_revalidation()
+            .with_narrower_routing()
+            .with_experiment_proposals()
+            .dry_run();
+
+        assert_eq!(options.artifact_id, Some("mem-001".to_string()));
+        assert_eq!(options.decision_id, Some("dec-001".to_string()));
+        assert_eq!(options.estimate_id, Some("est-001".to_string()));
+        assert_eq!(options.action, Some(PromotionAction::Demote));
+        assert_eq!(options.method, Some("matching".to_string()));
+        assert_eq!(options.minimum_uplift, 0.12);
+        assert!(options.include_revalidation);
+        assert!(options.include_narrower_routing);
+        assert!(options.include_experiment_proposals);
+        assert!(options.dry_run);
+    }
+
+    #[test]
+    fn promote_plan_without_filters_returns_degradation() {
+        let report = promote_causal_plan(&PromotePlanOptions::new().dry_run());
+        assert!(report.is_empty());
+        assert!(!report.degradations.is_empty());
+        assert_eq!(report.degradations[0].code, "no_filters");
+    }
+
+    #[test]
+    fn promote_plan_dry_run_returns_dry_run_ready_plan() {
+        let report = promote_causal_plan(
+            &PromotePlanOptions::new()
+                .with_artifact_id("mem-001")
+                .dry_run(),
+        );
+
+        assert!(!report.is_empty());
+        assert!(report.dry_run);
+        assert_eq!(report.plans[0].status, PromotionPlanStatus::DryRunReady);
+        assert!(report.plans[0].dry_run_first);
+    }
+
+    #[test]
+    fn promote_plan_unknown_method_degrades_to_naive() {
+        let report = promote_causal_plan(
+            &PromotePlanOptions::new()
+                .with_artifact_id("mem-001")
+                .with_method("mystery")
+                .dry_run(),
+        );
+
+        assert_eq!(report.method_used, "naive");
+        assert!(
+            report
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "unknown_method")
+        );
+    }
+
+    #[test]
+    fn promote_plan_action_override_is_honored() {
+        let report = promote_causal_plan(
+            &PromotePlanOptions::new()
+                .with_artifact_id("mem-001")
+                .with_action(PromotionAction::Archive)
+                .dry_run(),
+        );
+
+        assert_eq!(report.plans[0].action, PromotionAction::Archive);
+        assert!(
+            report.plans[0]
+                .blocking_confounder_ids
+                .iter()
+                .any(|confounder| confounder.contains("confounder-"))
+        );
+    }
+
+    #[test]
+    fn promote_plan_report_json_has_correct_schema() {
+        let report = promote_causal_plan(
+            &PromotePlanOptions::new()
+                .with_artifact_id("mem-001")
+                .with_method("experiment")
+                .with_revalidation()
+                .with_experiment_proposals()
+                .dry_run(),
+        );
+        let json = report.data_json();
+
+        assert_eq!(json["schema"], CAUSAL_PROMOTE_PLAN_SCHEMA_V1);
+        assert_eq!(json["command"], "causal promote-plan");
+        assert!(json["plans"].is_array());
+        assert!(json["recommendations"]["revalidation"].is_array());
+        assert!(json["summary"]["totalPlans"].is_number());
+    }
+
+    #[test]
+    fn promote_plan_human_summary_is_readable() {
+        let report = promote_causal_plan(
+            &PromotePlanOptions::new()
+                .with_artifact_id("mem-001")
+                .dry_run(),
+        );
+        let summary = report.human_summary();
+
+        assert!(summary.contains("Causal Promotion Plan"));
+        assert!(summary.contains("Plans generated:"));
     }
 }

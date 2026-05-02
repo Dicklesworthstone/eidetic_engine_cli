@@ -23,8 +23,10 @@ use crate::core::backup::{
 };
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::causal::{
-    CAUSAL_ESTIMATE_SCHEMA_V1, EstimateOptions as CausalEstimateOptions,
-    TraceOptions as CausalTraceOptions, estimate_causal_uplift, trace_causal_chains,
+    CAUSAL_ESTIMATE_SCHEMA_V1, CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
+    EstimateOptions as CausalEstimateOptions, PromotePlanOptions as CausalPromotePlanOptions,
+    TraceOptions as CausalTraceOptions, estimate_causal_uplift, promote_causal_plan,
+    trace_causal_chains,
 };
 use crate::core::check::CheckReport;
 use crate::core::context::{ContextPackError, ContextPackOptions, run_context_pack};
@@ -168,20 +170,45 @@ pub struct Cli {
 
 impl Cli {
     #[must_use]
-    pub fn wants_json(&self) -> bool {
-        self.renderer().is_machine_readable()
+    pub const fn wants_json(&self) -> bool {
+        self.json || self.robot || self.format.is_machine_readable()
     }
 
     #[must_use]
-    pub fn renderer(&self) -> output::Renderer {
-        let format_override = match self.format {
-            OutputFormat::Human => None,
-            OutputFormat::Mermaid if self.json || self.robot => Some(output::Renderer::Json),
-            OutputFormat::Mermaid => Some(output::Renderer::Markdown),
-            _ => Some(self.format.to_renderer()),
-        };
+    pub const fn renderer(&self) -> output::Renderer {
+        match self.format {
+            OutputFormat::Human if self.json || self.robot => output::Renderer::Json,
+            OutputFormat::Human => output::Renderer::Human,
+            OutputFormat::Json => output::Renderer::Json,
+            OutputFormat::Toon => output::Renderer::Toon,
+            OutputFormat::Jsonl => output::Renderer::Jsonl,
+            OutputFormat::Compact => output::Renderer::Compact,
+            OutputFormat::Hook => output::Renderer::Hook,
+            OutputFormat::Markdown => output::Renderer::Markdown,
+            OutputFormat::Mermaid if self.json || self.robot => output::Renderer::Json,
+            OutputFormat::Mermaid => output::Renderer::Markdown,
+        }
+    }
 
-        output::OutputContext::detect_with_hints(self.json, self.robot, format_override).renderer
+    /// Returns the renderer for context pack output.
+    ///
+    /// Context packs default to Markdown when no explicit format is requested,
+    /// making them directly consumable by agent harnesses. JSON remains the
+    /// canonical contract for --json, --robot, and explicit --format json.
+    #[must_use]
+    pub const fn context_renderer(&self) -> output::Renderer {
+        match self.format {
+            OutputFormat::Human if self.json || self.robot => output::Renderer::Json,
+            OutputFormat::Human => output::Renderer::Markdown,
+            OutputFormat::Json => output::Renderer::Json,
+            OutputFormat::Toon => output::Renderer::Toon,
+            OutputFormat::Jsonl => output::Renderer::Jsonl,
+            OutputFormat::Compact => output::Renderer::Compact,
+            OutputFormat::Hook => output::Renderer::Hook,
+            OutputFormat::Markdown => output::Renderer::Markdown,
+            OutputFormat::Mermaid if self.json || self.robot => output::Renderer::Json,
+            OutputFormat::Mermaid => output::Renderer::Markdown,
+        }
     }
 
     #[must_use]
@@ -1672,12 +1699,14 @@ pub struct CertificateVerifyArgs {
 }
 
 /// Subcommands for `ee causal`.
-#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+#[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum CausalCommand {
     /// Trace causal chains from memories through exposures to outcomes.
     Trace(CausalTraceArgs),
     /// Estimate causal uplift with evidence tiers, assumptions, and confounders.
     Estimate(CausalEstimateArgs),
+    /// Produce dry-run-first promotion plans for memory posture changes.
+    PromotePlan(CausalPromotePlanArgs),
 }
 
 /// Arguments for `ee causal trace`.
@@ -1760,6 +1789,50 @@ pub struct CausalEstimateArgs {
     pub include_assumptions: bool,
 
     /// Show estimation plan without computing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee causal promote-plan`.
+#[derive(Clone, Debug, Default, Parser, PartialEq)]
+pub struct CausalPromotePlanArgs {
+    /// Artifact ID to scope planning.
+    #[arg(long, value_name = "ARTIFACT_ID")]
+    pub artifact_id: Option<String>,
+
+    /// Decision ID to scope planning.
+    #[arg(long, value_name = "DECISION_ID")]
+    pub decision_id: Option<String>,
+
+    /// Estimate ID to scope planning.
+    #[arg(long, value_name = "ESTIMATE_ID")]
+    pub estimate_id: Option<String>,
+
+    /// Explicit target action (promote, hold, demote, archive, quarantine).
+    #[arg(long, value_name = "ACTION")]
+    pub action: Option<String>,
+
+    /// Estimation method used for planning (naive, matching, replay, experiment).
+    #[arg(long, value_name = "METHOD", default_value = "replay")]
+    pub method: String,
+
+    /// Minimum uplift threshold required before promotion.
+    #[arg(long, value_name = "UPLIFT", default_value_t = 0.05)]
+    pub minimum_uplift: f64,
+
+    /// Include explicit revalidation recommendations.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_revalidation: bool,
+
+    /// Include explicit narrower routing recommendations.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_narrower_routing: bool,
+
+    /// Include explicit experiment proposals.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_experiment_proposals: bool,
+
+    /// Run in dry-run mode (recommended for automation).
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 }
@@ -2918,6 +2991,9 @@ pub enum EvalCommand {
         /// Path to fixture directory (defaults to tests/fixtures/eval/).
         #[arg(long, value_name = "PATH")]
         fixture_dir: Option<std::path::PathBuf>,
+        /// Include science-backed metrics in the eval report payload.
+        #[arg(long, action = ArgAction::SetTrue)]
+        science: bool,
     },
     /// List available evaluation scenarios.
     List,
@@ -3540,6 +3616,9 @@ where
         Some(Command::Causal(ref causal_cmd)) => match causal_cmd {
             CausalCommand::Trace(args) => handle_causal_trace(&cli, args, stdout, stderr),
             CausalCommand::Estimate(args) => handle_causal_estimate(&cli, args, stdout, stderr),
+            CausalCommand::PromotePlan(args) => {
+                handle_causal_promote_plan(&cli, args, stdout, stderr)
+            }
         },
         Some(Command::Claim(ref claim_cmd)) => match claim_cmd {
             ClaimCommand::List(args) => handle_claim_list(&cli, args, stdout, stderr),
@@ -3867,21 +3946,25 @@ where
             handle_economy_prune_plan(&cli, args, stdout, stderr)
         }
         Some(Command::Eval(ref eval_cmd)) => match eval_cmd {
-            EvalCommand::Run { scenario_id, .. } => match cli.renderer() {
+            EvalCommand::Run {
+                scenario_id,
+                science,
+                ..
+            } => match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => write_stdout(
                     stdout,
-                    &output::render_eval_run_human(scenario_id.as_deref()),
+                    &output::render_eval_run_human(scenario_id.as_deref(), *science),
                 ),
                 output::Renderer::Toon => write_stdout(
                     stdout,
-                    &(output::render_eval_run_toon(scenario_id.as_deref()) + "\n"),
+                    &(output::render_eval_run_toon(scenario_id.as_deref(), *science) + "\n"),
                 ),
                 output::Renderer::Json
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
                 | output::Renderer::Hook => write_stdout(
                     stdout,
-                    &(output::render_eval_run_json(scenario_id.as_deref()) + "\n"),
+                    &(output::render_eval_run_json(scenario_id.as_deref(), *science) + "\n"),
                 ),
             },
             EvalCommand::List => match cli.renderer() {
@@ -8225,7 +8308,7 @@ where
     };
 
     match run_context_pack(&options) {
-        Ok(response) => write_context_response(cli.renderer(), &response, stdout),
+        Ok(response) => write_context_response(cli.context_renderer(), &response, stdout),
         Err(error) => {
             let domain_error = context_error_to_domain(&error);
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
@@ -11022,6 +11105,90 @@ where
     }
 }
 
+fn handle_causal_promote_plan<W, E>(
+    cli: &Cli,
+    args: &CausalPromotePlanArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let action = match args.action.as_deref() {
+        Some(raw) => match raw.parse::<crate::models::causal::PromotionAction>() {
+            Ok(parsed) => Some(parsed),
+            Err(_) => {
+                let domain_error = DomainError::Usage {
+                    message: format!("Invalid promotion action '{raw}'."),
+                    repair: Some(
+                        "Use one of: promote, hold, demote, archive, quarantine.".to_string(),
+                    ),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        },
+        None => None,
+    };
+
+    let mut options = CausalPromotePlanOptions::default().with_method(&args.method);
+
+    if let Some(ref artifact_id) = args.artifact_id {
+        options = options.with_artifact_id(artifact_id);
+    }
+    if let Some(ref decision_id) = args.decision_id {
+        options = options.with_decision_id(decision_id);
+    }
+    if let Some(ref estimate_id) = args.estimate_id {
+        options = options.with_estimate_id(estimate_id);
+    }
+    if let Some(parsed_action) = action {
+        options = options.with_action(parsed_action);
+    }
+    options = options.with_minimum_uplift(args.minimum_uplift);
+    if args.include_revalidation {
+        options = options.with_revalidation();
+    }
+    if args.include_narrower_routing {
+        options = options.with_narrower_routing();
+    }
+    if args.include_experiment_proposals {
+        options = options.with_experiment_proposals();
+    }
+    if args.dry_run {
+        options = options.dry_run();
+    }
+
+    let report = promote_causal_plan(&options);
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => {
+            let toon = format!(
+                "causal_promote_plan plans={} method={} experiments={} revalidation={}\n",
+                report.plans.len(),
+                report.method_used,
+                report.recommendations.experiment_proposals.len(),
+                report.recommendations.revalidation_steps.len(),
+            );
+            write_stdout(stdout, &toon)
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
+                "success": true,
+                "data": report.data_json(),
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
 // ============================================================================
 // EE-362: Claim verification handlers
 // ============================================================================
@@ -12075,6 +12242,7 @@ impl NormalizedInvocation {
                 Command::Causal(causal) => match causal {
                     CausalCommand::Trace(_) => "causal trace".to_string(),
                     CausalCommand::Estimate(_) => "causal estimate".to_string(),
+                    CausalCommand::PromotePlan(_) => "causal promote-plan".to_string(),
                 },
                 Command::Claim(claim) => match claim {
                     ClaimCommand::List(_) => "claim list".to_string(),
@@ -14883,6 +15051,72 @@ mod tests {
             }
             _ => Err("expected Context command".to_string()),
         }
+    }
+
+    #[test]
+    fn context_renderer_defaults_to_markdown() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "context", "test"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        ensure_equal(
+            &cli.context_renderer(),
+            &output::Renderer::Markdown,
+            "context default renderer should be Markdown",
+        )
+    }
+
+    #[test]
+    fn context_renderer_returns_json_when_json_flag_set() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "--json", "context", "test"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        ensure_equal(
+            &cli.context_renderer(),
+            &output::Renderer::Json,
+            "context renderer with --json should be JSON",
+        )
+    }
+
+    #[test]
+    fn context_renderer_returns_json_when_robot_flag_set() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "--robot", "context", "test"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        ensure_equal(
+            &cli.context_renderer(),
+            &output::Renderer::Json,
+            "context renderer with --robot should be JSON",
+        )
+    }
+
+    #[test]
+    fn context_renderer_respects_explicit_format_json() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "--format", "json", "context", "test"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        ensure_equal(
+            &cli.context_renderer(),
+            &output::Renderer::Json,
+            "context renderer with --format json should be JSON",
+        )
+    }
+
+    #[test]
+    fn context_renderer_respects_explicit_format_toon() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "--format", "toon", "context", "test"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        ensure_equal(
+            &cli.context_renderer(),
+            &output::Renderer::Toon,
+            "context renderer with --format toon should be TOON",
+        )
+    }
+
+    #[test]
+    fn context_renderer_explicit_format_markdown_returns_markdown() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "--format", "markdown", "context", "test"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        ensure_equal(
+            &cli.context_renderer(),
+            &output::Renderer::Markdown,
+            "context renderer with --format markdown should be Markdown",
+        )
     }
 
     #[test]

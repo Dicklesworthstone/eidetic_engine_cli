@@ -1,12 +1,13 @@
-//! Causal trace and estimate contract coverage (EE-451, EE-452).
+//! Causal trace, estimate, and promote-plan contract coverage (EE-451, EE-452, EE-454).
 //!
 //! Verifies that `ee causal trace --json` and `ee causal estimate --json`
 //! produce stable, schema-compliant output for tracing causal chains and
 //! estimating uplift with evidence tiers, assumptions, and confounders.
 
 use ee::core::causal::{
-    CAUSAL_ESTIMATE_SCHEMA_V1, ConfidenceState, EstimateOptions, TraceOptions,
-    estimate_causal_uplift, trace_causal_chains,
+    CAUSAL_ESTIMATE_SCHEMA_V1, CAUSAL_PROMOTE_PLAN_SCHEMA_V1, ConfidenceState, EstimateOptions,
+    PromotePlanOptions, TraceOptions, estimate_causal_uplift, promote_causal_plan,
+    trace_causal_chains,
 };
 use ee::models::causal::CAUSAL_TRACE_SCHEMA_V1;
 use serde_json::Value as JsonValue;
@@ -395,5 +396,99 @@ fn estimate_human_summary_shows_key_info() -> TestResult {
         "should show estimate count",
     )?;
 
+    Ok(())
+}
+
+// ============================================================================
+// EE-454: Causal Promote Plan Contract Tests
+// ============================================================================
+
+#[test]
+fn promote_plan_report_has_correct_schema() -> TestResult {
+    let options = PromotePlanOptions::new()
+        .with_artifact_id("mem-001")
+        .with_method("replay")
+        .dry_run();
+    let report = promote_causal_plan(&options);
+    let json = report.data_json();
+
+    assert_schema_field(&json, CAUSAL_PROMOTE_PLAN_SCHEMA_V1, "promote-plan report")?;
+    assert_has_field(&json, "command", "promote-plan report")?;
+    assert_has_field(&json, "plans", "promote-plan report")?;
+    assert_has_field(&json, "recommendations", "promote-plan report")?;
+    assert_has_field(&json, "summary", "promote-plan report")?;
+    assert_has_field(&json, "filtersApplied", "promote-plan report")?;
+    assert_has_field(&json, "degradations", "promote-plan report")?;
+    assert_has_field(&json, "dryRun", "promote-plan report")?;
+    Ok(())
+}
+
+#[test]
+fn promote_plan_dry_run_produces_plan_with_action() -> TestResult {
+    let options = PromotePlanOptions::new()
+        .with_artifact_id("mem-001")
+        .with_method("experiment")
+        .dry_run();
+    let report = promote_causal_plan(&options);
+    ensure(
+        !report.is_empty(),
+        "promote-plan should produce at least one plan",
+    )?;
+
+    let plans = report.data_json().get("plans").cloned().unwrap_or_default();
+    ensure(
+        plans.as_array().is_some_and(|entries| {
+            entries
+                .first()
+                .and_then(|entry| entry.get("action"))
+                .is_some()
+        }),
+        "first plan should include action field",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn promote_plan_unknown_method_reports_degradation() -> TestResult {
+    let options = PromotePlanOptions::new()
+        .with_artifact_id("mem-001")
+        .with_method("mystery")
+        .dry_run();
+    let report = promote_causal_plan(&options);
+    let json = report.data_json();
+    let degradations = json
+        .get("degradations")
+        .and_then(JsonValue::as_array)
+        .ok_or("missing degradations")?;
+
+    ensure(
+        degradations.iter().any(|item| {
+            item.get("code")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|code| code == "unknown_method")
+        }),
+        "should contain unknown_method degradation",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn promote_plan_includes_experiment_proposal_when_requested() -> TestResult {
+    let options = PromotePlanOptions::new()
+        .with_artifact_id("mem-001")
+        .with_experiment_proposals()
+        .dry_run();
+    let report = promote_causal_plan(&options);
+    let json = report.data_json();
+    let proposals = json
+        .get("recommendations")
+        .and_then(|value| value.get("experimentProposals"))
+        .and_then(JsonValue::as_array)
+        .ok_or("missing experiment proposals")?;
+
+    ensure(
+        !proposals.is_empty(),
+        "experiment proposals should be present",
+    )?;
     Ok(())
 }

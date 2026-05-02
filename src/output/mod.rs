@@ -3988,8 +3988,46 @@ pub fn render_capabilities_toon(report: &CapabilitiesReport) -> String {
 ///
 /// This stub version is used when no report is available.
 #[must_use]
-pub fn render_eval_run_json(scenario_id: Option<&str>) -> String {
-    render_eval_report_json(&EvaluationReport::new(), scenario_id)
+pub fn render_eval_run_json(scenario_id: Option<&str>, include_science_metrics: bool) -> String {
+    render_eval_report_json(
+        &build_eval_run_stub_report(include_science_metrics),
+        scenario_id,
+    )
+}
+
+fn build_eval_run_stub_report(include_science_metrics: bool) -> EvaluationReport {
+    let mut report = EvaluationReport::new();
+    if include_science_metrics {
+        report.attach_science_metrics();
+    }
+    report
+}
+
+fn render_eval_science_metrics_json(
+    obj: &mut JsonBuilder,
+    metrics: &crate::eval::EvaluationScienceMetricsReport,
+) {
+    obj.field_str("schema", metrics.schema);
+    obj.field_str("status", metrics.status.as_str());
+    obj.field_bool("available", metrics.available);
+    field_optional_str(obj, "degradationCode", metrics.degradation_code);
+    obj.field_raw(
+        "scenariosEvaluated",
+        &metrics.scenarios_evaluated.to_string(),
+    );
+    obj.field_str("positiveLabel", metrics.positive_label);
+    match metrics.precision {
+        Some(value) => obj.field_raw("precision", &format!("{value:.6}")),
+        None => obj.field_raw("precision", "null"),
+    };
+    match metrics.recall {
+        Some(value) => obj.field_raw("recall", &format!("{value:.6}")),
+        None => obj.field_raw("recall", "null"),
+    };
+    match metrics.f1_score {
+        Some(value) => obj.field_raw("f1Score", &format!("{value:.6}")),
+        None => obj.field_raw("f1Score", "null"),
+    };
 }
 
 /// Render evaluation report as JSON (ee.response.v1 envelope).
@@ -4017,6 +4055,11 @@ pub fn render_eval_report_json(report: &EvaluationReport, scenario_id: Option<&s
                 "No evaluation scenarios configured. Add fixtures to tests/fixtures/eval/.",
             );
         }
+        if let Some(ref metrics) = report.science_metrics {
+            d.field_object("scienceMetrics", |science| {
+                render_eval_science_metrics_json(science, metrics);
+            });
+        }
         d.field_array_of_objects("results", &report.results, render_scenario_result_json);
     });
     b.finish()
@@ -4038,8 +4081,11 @@ fn render_scenario_result_json(obj: &mut JsonBuilder, result: &ScenarioValidatio
 ///
 /// This stub version is used when no report is available.
 #[must_use]
-pub fn render_eval_run_human(scenario_id: Option<&str>) -> String {
-    render_eval_report_human(&EvaluationReport::new(), scenario_id)
+pub fn render_eval_run_human(scenario_id: Option<&str>, include_science_metrics: bool) -> String {
+    render_eval_report_human(
+        &build_eval_run_stub_report(include_science_metrics),
+        scenario_id,
+    )
 }
 
 /// Render evaluation report as human-readable text.
@@ -4090,6 +4136,32 @@ pub fn render_eval_report_human(report: &EvaluationReport, scenario_id: Option<&
         }
     }
 
+    if let Some(metrics) = report.science_metrics.as_ref() {
+        output.push_str("\nScience metrics:\n");
+        output.push_str(&format!("  Status: {}\n", metrics.status.as_str()));
+        output.push_str(&format!("  Available: {}\n", metrics.available));
+        output.push_str(&format!(
+            "  Scenarios evaluated: {}\n",
+            metrics.scenarios_evaluated
+        ));
+        if let Some(code) = metrics.degradation_code {
+            output.push_str(&format!("  Degradation: {code}\n"));
+        }
+        output.push_str(&format!("  Positive label: {}\n", metrics.positive_label));
+        match metrics.precision {
+            Some(value) => output.push_str(&format!("  Precision: {value:.3}\n")),
+            None => output.push_str("  Precision: n/a\n"),
+        }
+        match metrics.recall {
+            Some(value) => output.push_str(&format!("  Recall: {value:.3}\n")),
+            None => output.push_str("  Recall: n/a\n"),
+        }
+        match metrics.f1_score {
+            Some(value) => output.push_str(&format!("  F1: {value:.3}\n")),
+            None => output.push_str("  F1: n/a\n"),
+        }
+    }
+
     output
 }
 
@@ -4097,8 +4169,11 @@ pub fn render_eval_report_human(report: &EvaluationReport, scenario_id: Option<&
 ///
 /// This stub version is used when no report is available.
 #[must_use]
-pub fn render_eval_run_toon(scenario_id: Option<&str>) -> String {
-    render_eval_report_toon(&EvaluationReport::new(), scenario_id)
+pub fn render_eval_run_toon(scenario_id: Option<&str>, include_science_metrics: bool) -> String {
+    render_eval_report_toon(
+        &build_eval_run_stub_report(include_science_metrics),
+        scenario_id,
+    )
 }
 
 /// Render evaluation report as TOON.
@@ -10167,6 +10242,40 @@ mod tests {
         let json = render_eval_report_json(&report, Some("test_scenario"));
 
         ensure_contains(&json, "\"scenarioId\":\"test_scenario\"", "scenarioId")
+    }
+
+    #[test]
+    fn render_eval_run_json_with_science_includes_metrics() -> TestResult {
+        use super::render_eval_report_json;
+        use crate::eval::{EVAL_SCIENCE_METRICS_SCHEMA_V1, EvaluationReport};
+        use crate::science::status;
+
+        let mut report = EvaluationReport::new();
+        report.attach_science_metrics();
+        let json = render_eval_report_json(&report, None);
+        ensure_contains(&json, "\"scienceMetrics\":", "science metrics block")?;
+        ensure_contains(
+            &json,
+            &format!("\"schema\":\"{EVAL_SCIENCE_METRICS_SCHEMA_V1}\""),
+            "science schema",
+        )?;
+        ensure_contains(
+            &json,
+            &format!("\"status\":\"{}\"", status().as_str()),
+            "science status",
+        )
+    }
+
+    #[test]
+    fn render_eval_run_human_with_science_includes_metrics_section() -> TestResult {
+        use super::render_eval_report_human;
+        use crate::eval::EvaluationReport;
+
+        let mut report = EvaluationReport::new();
+        report.attach_science_metrics();
+        let human = render_eval_report_human(&report, None);
+        ensure_contains(&human, "Science metrics:", "science header")?;
+        ensure_contains(&human, "Scenarios evaluated:", "scenario count")
     }
 
     #[test]

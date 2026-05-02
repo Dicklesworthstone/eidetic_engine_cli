@@ -1953,6 +1953,50 @@ fn causal_estimate_summary_contains_method_used() -> TestResult {
     )
 }
 
+// ============================================================================
+// Causal Promote Plan Tests (EE-454)
+// ============================================================================
+
+#[test]
+fn causal_promote_plan_dry_run_returns_valid_json() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "promote-plan",
+        "--artifact-id",
+        "art-001",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        stdout_contains(&output, "ee.causal.promote_plan.v1"),
+        "must have causal promote-plan schema",
+    )?;
+    ensure(stdout_contains(&output, "plans"), "must include plans")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")
+}
+
+#[test]
+fn causal_promote_plan_supports_explicit_action_override() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "promote-plan",
+        "--artifact-id",
+        "art-001",
+        "--action",
+        "demote",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        stdout_contains(&output, "\"action\":\"demote\""),
+        "explicit action must be reflected in plan output",
+    )
+}
+
 #[test]
 fn all_causal_commands_produce_stdout_only_data() -> TestResult {
     let commands = [
@@ -1960,6 +2004,14 @@ fn all_causal_commands_produce_stdout_only_data() -> TestResult {
         vec![
             "causal",
             "estimate",
+            "--artifact-id",
+            "art-001",
+            "--dry-run",
+            "--json",
+        ],
+        vec![
+            "causal",
+            "promote-plan",
             "--artifact-id",
             "art-001",
             "--dry-run",
