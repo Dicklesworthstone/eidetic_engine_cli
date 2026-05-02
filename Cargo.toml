@@ -84,6 +84,18 @@ harness = false
 name = "import_cass"
 harness = false
 
+[[bench]]
+name = "link"
+harness = false
+
+[[bench]]
+name = "graph_pagerank"
+harness = false
+
+[[bench]]
+name = "curate_candidates"
+harness = false
+
 [patch.crates-io]
 fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
 fsqlite-core = { path = "/data/projects/frankensqlite/crates/fsqlite-core" }
