@@ -43,6 +43,9 @@ mod demo_manifests;
 #[path = "contracts/cache_admission.rs"]
 mod cache_admission;
 
+#[path = "contracts/causal_trace.rs"]
+mod causal_trace;
+
 #[path = "contracts/submodular_packer.rs"]
 mod submodular_packer;
 
