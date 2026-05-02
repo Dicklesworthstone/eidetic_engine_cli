@@ -2083,7 +2083,13 @@ fn causal_promote_plan_projects_cross_surface_effects() -> TestResult {
     ])?;
     ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     let json = stdout_json(&output)?;
-    let downstream = &json["downstreamEffects"];
+    let downstream = json
+        .get("downstreamEffects")
+        .or_else(|| {
+            json.get("data")
+                .and_then(|data| data.get("downstreamEffects"))
+        })
+        .ok_or_else(|| "missing downstreamEffects payload".to_string())?;
     ensure_equal(
         &downstream["schema"],
         &serde_json::json!("ee.causal.downstream_effects.v1"),
