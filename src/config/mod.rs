@@ -21,9 +21,11 @@ pub use merge::{
 };
 pub use path::{PathExpander, PathExpansionError};
 pub use workspace::{
-    WORKSPACE_ENV_VAR, WORKSPACE_MARKER, WorkspaceError, WorkspaceLocation, WorkspaceResolution,
-    WorkspaceResolutionMode, WorkspaceResolutionRequest, WorkspaceResolutionSource, discover,
-    discover_from_current_dir, resolve_workspace,
+    WORKSPACE_ENV_VAR, WORKSPACE_MARKER, WorkspaceDiagnostic, WorkspaceDiagnosticSeverity,
+    WorkspaceError, WorkspaceLocation, WorkspaceResolution, WorkspaceResolutionMode,
+    WorkspaceResolutionRequest, WorkspaceResolutionSource, WorkspaceScope, WorkspaceScopeKind,
+    derive_workspace_scope, diagnose_workspace_resolution, discover, discover_all,
+    discover_from_current_dir, resolve_workspace, workspace_scope_from_repository_root,
 };
 
 pub const SUBSYSTEM: &str = "config";

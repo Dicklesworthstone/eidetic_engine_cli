@@ -128,6 +128,58 @@ impl fmt::Display for ShadowVerdict {
     }
 }
 
+/// Safety guards that block policy promotion even when aggregate metrics improve.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ShadowPromotionGuards {
+    /// Candidate dropped a critical warning the incumbent kept.
+    pub dropped_critical_warnings: bool,
+    /// Candidate changed redaction posture or leaked a previously redacted field.
+    pub redaction_differences: bool,
+    /// Candidate regressed p99/tail latency beyond tolerance.
+    pub p99_regression: bool,
+    /// Candidate regressed catastrophic/tail-risk handling.
+    pub tail_risk_regression: bool,
+    /// Candidate mismatch exceeded the configured semantic tolerance.
+    pub shadow_mismatch_above_tolerance: bool,
+}
+
+impl ShadowPromotionGuards {
+    #[must_use]
+    pub const fn blocks_promotion(&self) -> bool {
+        self.dropped_critical_warnings
+            || self.redaction_differences
+            || self.p99_regression
+            || self.tail_risk_regression
+            || self.shadow_mismatch_above_tolerance
+    }
+
+    #[must_use]
+    pub fn blocker_codes(&self) -> Vec<&'static str> {
+        let mut codes = Vec::new();
+        if self.dropped_critical_warnings {
+            codes.push("dropped_critical_warnings");
+        }
+        if self.redaction_differences {
+            codes.push("redaction_differences");
+        }
+        if self.p99_regression {
+            codes.push("p99_regression");
+        }
+        if self.tail_risk_regression {
+            codes.push("tail_risk_regression");
+        }
+        if self.shadow_mismatch_above_tolerance {
+            codes.push("shadow_mismatch_above_tolerance");
+        }
+        codes
+    }
+}
+
+#[must_use]
+pub fn candidate_promotion_allowed(verdict: ShadowVerdict, guards: &ShadowPromotionGuards) -> bool {
+    verdict.is_safe_to_promote() && !guards.blocks_promotion()
+}
+
 /// Comparison metrics from a shadow run.
 #[derive(Clone, Debug, Default)]
 pub struct ShadowMetrics {
@@ -446,6 +498,14 @@ pub mod cache {
         pub stats: CacheStats,
         /// Final cache size.
         pub final_size: usize,
+        /// Estimated memory used by the cache.
+        pub memory_bytes: u64,
+        /// Aggregate miss cost for the workload.
+        pub miss_cost: u64,
+        /// p95 latency for cache operations.
+        pub p95_latency_us: u64,
+        /// p99 latency for cache operations.
+        pub p99_latency_us: u64,
         /// Execution time in microseconds.
         pub time_us: u64,
     }
@@ -509,6 +569,31 @@ mod tests {
         assert!(!ShadowVerdict::IncumbentBetter.is_safe_to_promote());
         assert!(!ShadowVerdict::Divergent.is_safe_to_promote());
         assert!(!ShadowVerdict::Inconclusive.is_safe_to_promote());
+    }
+
+    #[test]
+    fn promotion_guards_block_unsafe_candidate() {
+        let guards = ShadowPromotionGuards {
+            dropped_critical_warnings: true,
+            redaction_differences: false,
+            p99_regression: true,
+            tail_risk_regression: false,
+            shadow_mismatch_above_tolerance: false,
+        };
+
+        assert!(guards.blocks_promotion());
+        assert_eq!(
+            guards.blocker_codes(),
+            vec!["dropped_critical_warnings", "p99_regression"]
+        );
+        assert!(!candidate_promotion_allowed(
+            ShadowVerdict::CandidateBetter,
+            &guards
+        ));
+        assert!(candidate_promotion_allowed(
+            ShadowVerdict::CandidateBetter,
+            &ShadowPromotionGuards::default()
+        ));
     }
 
     #[test]
@@ -729,6 +814,10 @@ mod tests {
                     promotions: 5,
                 },
                 final_size: 50,
+                memory_bytes: 4096,
+                miss_cost: 20_000,
+                p95_latency_us: 120,
+                p99_latency_us: 200,
                 time_us: 100,
             };
             let candidate = CacheShadowOutput {
@@ -739,6 +828,10 @@ mod tests {
                     promotions: 7,
                 },
                 final_size: 50,
+                memory_bytes: 3584,
+                miss_cost: 10_000,
+                p95_latency_us: 90,
+                p99_latency_us: 150,
                 time_us: 110,
             };
             let config = ShadowGateConfig::default();

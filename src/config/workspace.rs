@@ -527,6 +527,43 @@ impl WorkspaceResolutionSource {
     }
 }
 
+/// Stable classification for a resolved workspace's repository scope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceScopeKind {
+    /// No containing git repository was detected.
+    Standalone,
+    /// The workspace root is also the containing repository root.
+    Repository,
+    /// The workspace root is nested below the containing repository root.
+    Subproject,
+}
+
+impl WorkspaceScopeKind {
+    /// Stable machine-facing spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standalone => "standalone",
+            Self::Repository => "repository",
+            Self::Subproject => "subproject",
+        }
+    }
+}
+
+/// Repository/subproject metadata derived during workspace resolution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceScope {
+    /// Workspace scope classification.
+    pub kind: WorkspaceScopeKind,
+    /// Containing repository root, if any.
+    pub repository_root: Option<PathBuf>,
+    /// Stable local repository fingerprint, if a repository was detected.
+    pub repository_fingerprint: Option<String>,
+    /// Workspace path relative to the repository root for subprojects.
+    pub subproject_path: Option<PathBuf>,
+}
+
 /// Whether resolution must find an initialized workspace marker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceResolutionMode {
@@ -608,6 +645,8 @@ pub struct WorkspaceResolution {
     pub canonical_root: PathBuf,
     /// Stable local identity fingerprint derived from `canonical_root`.
     pub fingerprint: String,
+    /// Repository/subproject scope for monorepo-aware consumers.
+    pub scope: WorkspaceScope,
 }
 
 impl WorkspaceResolution {
@@ -615,12 +654,103 @@ impl WorkspaceResolution {
         let marker_present = location.config_dir.is_dir();
         let canonical_root = canonical_or_lexical(&location.root);
         let fingerprint = workspace_fingerprint(&canonical_root);
+        let scope = derive_workspace_scope(&canonical_root);
         Self {
             location,
             source,
             marker_present,
             canonical_root,
             fingerprint,
+            scope,
+        }
+    }
+}
+
+/// Severity for workspace diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceDiagnosticSeverity {
+    /// Informational context for the selected workspace.
+    Info,
+    /// The selected workspace is valid, but another plausible workspace exists.
+    Warning,
+    /// The workspace choice is unsafe for writes.
+    Error,
+}
+
+impl WorkspaceDiagnosticSeverity {
+    /// Stable machine-facing spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// A diagnostic explaining workspace selection ambiguity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceDiagnostic {
+    /// Stable diagnostic code.
+    pub code: &'static str,
+    /// Diagnostic severity.
+    pub severity: WorkspaceDiagnosticSeverity,
+    /// Human-readable explanation.
+    pub message: String,
+    /// Suggested repair or disambiguation action.
+    pub repair: String,
+    /// The selected workspace source, when a source exists.
+    pub selected_source: Option<WorkspaceResolutionSource>,
+    /// The selected workspace root, when relevant.
+    pub selected_root: Option<PathBuf>,
+    /// The conflicting candidate source, when relevant.
+    pub conflicting_source: Option<WorkspaceResolutionSource>,
+    /// The conflicting candidate root, when relevant.
+    pub conflicting_root: Option<PathBuf>,
+    /// All discovered marker roots involved in the diagnostic, nearest first.
+    pub marker_roots: Vec<PathBuf>,
+}
+
+impl WorkspaceDiagnostic {
+    fn source_conflict(
+        code: &'static str,
+        message: String,
+        repair: &'static str,
+        selected_source: WorkspaceResolutionSource,
+        selected_root: PathBuf,
+        conflicting_source: WorkspaceResolutionSource,
+        conflicting_root: PathBuf,
+    ) -> Self {
+        Self {
+            code,
+            severity: WorkspaceDiagnosticSeverity::Warning,
+            message,
+            repair: repair.to_owned(),
+            selected_source: Some(selected_source),
+            selected_root: Some(selected_root),
+            conflicting_source: Some(conflicting_source),
+            conflicting_root: Some(conflicting_root),
+            marker_roots: Vec::new(),
+        }
+    }
+
+    fn nested_markers(selected_source: WorkspaceResolutionSource, roots: Vec<PathBuf>) -> Self {
+        let selected_root = roots.first().cloned();
+        Self {
+            code: "workspace_nested_markers",
+            severity: WorkspaceDiagnosticSeverity::Warning,
+            message: format!(
+                "Found {} initialized ee workspaces in the current directory ancestry; the nearest marker wins unless --workspace is explicit.",
+                roots.len()
+            ),
+            repair: "Use `--workspace <path>` for writes when working inside nested repositories."
+                .to_owned(),
+            selected_source: Some(selected_source),
+            selected_root,
+            conflicting_source: Some(WorkspaceResolutionSource::Discovered),
+            conflicting_root: roots.get(1).cloned(),
+            marker_roots: roots,
         }
     }
 }
@@ -720,8 +850,7 @@ fn resolve_selected_root(
     raw: &Path,
     source: WorkspaceResolutionSource,
 ) -> Result<WorkspaceResolution, WorkspaceError> {
-    let expanded = expand_selected_path(raw);
-    let root = lexical_absolute(&request.current_dir, &expanded);
+    let root = selected_root(request, raw);
     let location = WorkspaceLocation::new(root);
     if request.mode == WorkspaceResolutionMode::ExistingOnly && !location.config_dir.is_dir() {
         return Err(WorkspaceError::MissingMarker {
@@ -732,6 +861,11 @@ fn resolve_selected_root(
     Ok(WorkspaceResolution::new(location, source))
 }
 
+fn selected_root(request: &WorkspaceResolutionRequest, raw: &Path) -> PathBuf {
+    let expanded = expand_selected_path(raw);
+    lexical_absolute(&request.current_dir, &expanded)
+}
+
 fn expand_selected_path(raw: &Path) -> PathBuf {
     let Some(raw_str) = raw.to_str() else {
         return raw.to_path_buf();
@@ -739,6 +873,115 @@ fn expand_selected_path(raw: &Path) -> PathBuf {
     match PathExpander::from_process_env().expand(raw_str) {
         Ok(path) => path,
         Err(_) => raw.to_path_buf(),
+    }
+}
+
+/// Explain ambiguity in a successful workspace resolution.
+///
+/// The diagnostics are read-only: they do not change the selected workspace and
+/// they do not create directories. They exist so callers can fail writes safely
+/// or warn agents before work crosses workspace boundaries.
+#[must_use]
+pub fn diagnose_workspace_resolution(
+    request: &WorkspaceResolutionRequest,
+    resolution: &WorkspaceResolution,
+) -> Vec<WorkspaceDiagnostic> {
+    let mut diagnostics = Vec::new();
+
+    if let (Some(explicit), Some(environment)) = (
+        request.explicit_workspace.as_ref(),
+        request.environment_workspace.as_ref(),
+    ) {
+        let explicit_root = selected_root(request, explicit);
+        let environment_root = selected_root(request, environment);
+        if roots_differ(&explicit_root, &environment_root) {
+            diagnostics.push(WorkspaceDiagnostic::source_conflict(
+                "workspace_explicit_environment_conflict",
+                "The explicit --workspace path differs from EE_WORKSPACE; --workspace takes precedence."
+                    .to_owned(),
+                "Unset EE_WORKSPACE or pass the intended --workspace path explicitly.",
+                WorkspaceResolutionSource::Explicit,
+                explicit_root,
+                WorkspaceResolutionSource::Environment,
+                environment_root,
+            ));
+        }
+    }
+
+    if let Some(discovered) = discover(&request.current_dir) {
+        let discovered = absolutize_location(&request.current_dir, discovered);
+        if roots_differ(&resolution.location.root, &discovered.root) {
+            diagnostics.push(WorkspaceDiagnostic::source_conflict(
+                "workspace_selected_differs_from_discovered",
+                "The selected workspace differs from the nearest initialized workspace discovered from the current directory."
+                    .to_owned(),
+                "Confirm --workspace/EE_WORKSPACE before running mutating commands.",
+                resolution.source,
+                resolution.location.root.clone(),
+                WorkspaceResolutionSource::Discovered,
+                discovered.root,
+            ));
+        }
+    }
+
+    let marker_roots = discover_all(&request.current_dir)
+        .into_iter()
+        .map(|location| absolutize_location(&request.current_dir, location).root)
+        .collect::<Vec<_>>();
+    if marker_roots.len() > 1 {
+        diagnostics.push(WorkspaceDiagnostic::nested_markers(
+            resolution.source,
+            marker_roots,
+        ));
+    }
+
+    diagnostics
+}
+
+fn roots_differ(left: &Path, right: &Path) -> bool {
+    canonical_or_lexical(left) != canonical_or_lexical(right)
+}
+
+/// Derive monorepo-aware scope metadata for a workspace root.
+#[must_use]
+pub fn derive_workspace_scope(workspace_root: &Path) -> WorkspaceScope {
+    let repository_root = detect_git_root(workspace_root).map(|root| canonical_or_lexical(&root));
+    workspace_scope_from_repository_root(workspace_root, repository_root)
+}
+
+/// Build scope metadata from an already-known repository root.
+#[must_use]
+pub fn workspace_scope_from_repository_root(
+    workspace_root: &Path,
+    repository_root: Option<PathBuf>,
+) -> WorkspaceScope {
+    let workspace_root = canonical_or_lexical(workspace_root);
+    let Some(repository_root) = repository_root.map(|root| canonical_or_lexical(&root)) else {
+        return WorkspaceScope {
+            kind: WorkspaceScopeKind::Standalone,
+            repository_root: None,
+            repository_fingerprint: None,
+            subproject_path: None,
+        };
+    };
+
+    let repository_fingerprint = Some(format!("repo:{}", workspace_fingerprint(&repository_root)));
+    let subproject_path = workspace_root
+        .strip_prefix(&repository_root)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map(Path::to_path_buf);
+    let kind = if subproject_path.is_some() {
+        WorkspaceScopeKind::Subproject
+    } else {
+        WorkspaceScopeKind::Repository
+    };
+
+    WorkspaceScope {
+        kind,
+        repository_root: Some(repository_root),
+        repository_fingerprint,
+        subproject_path,
     }
 }
 
@@ -818,6 +1061,33 @@ pub fn discover(start: &Path) -> Option<WorkspaceLocation> {
     }
 }
 
+/// Return every initialized workspace found while walking upward from `start`.
+///
+/// Results are ordered nearest-to-farthest. Like [`discover`], this is a
+/// read-only marker walk and treats missing or unreadable directories as absent.
+#[must_use]
+pub fn discover_all(start: &Path) -> Vec<WorkspaceLocation> {
+    let mut locations = Vec::new();
+    let mut current = start;
+    loop {
+        let candidate = current.join(WORKSPACE_MARKER);
+        if candidate.is_dir() {
+            locations.push(WorkspaceLocation {
+                root: current.to_path_buf(),
+                config_dir: candidate,
+            });
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+    locations
+}
+
 /// Like [`discover`], but starts from [`std::env::current_dir`].
 ///
 /// # Errors
@@ -842,8 +1112,9 @@ mod tests {
 
     use super::{
         WORKSPACE_ENV_VAR, WORKSPACE_MARKER, WorkspaceError, WorkspaceLocation,
-        WorkspaceResolutionMode, WorkspaceResolutionRequest, WorkspaceResolutionSource, discover,
-        discover_from_current_dir, resolve_workspace,
+        WorkspaceResolutionMode, WorkspaceResolutionRequest, WorkspaceResolutionSource,
+        WorkspaceScopeKind, discover, discover_from_current_dir, resolve_workspace,
+        workspace_scope_from_repository_root,
     };
 
     type TestResult = Result<(), String>;
@@ -1040,6 +1311,46 @@ mod tests {
     }
 
     #[test]
+    fn workspace_scope_classifies_standalone_repository_and_subproject() -> TestResult {
+        let standalone = workspace_scope_from_repository_root(Path::new("/work/standalone"), None);
+        assert_eq!(standalone.kind, WorkspaceScopeKind::Standalone);
+        assert!(standalone.repository_root.is_none());
+        assert!(standalone.repository_fingerprint.is_none());
+        assert!(standalone.subproject_path.is_none());
+
+        let repository = workspace_scope_from_repository_root(
+            Path::new("/work/repo"),
+            Some(PathBuf::from("/work/repo")),
+        );
+        assert_eq!(repository.kind, WorkspaceScopeKind::Repository);
+        assert_eq!(
+            repository.repository_root,
+            Some(PathBuf::from("/work/repo"))
+        );
+        assert!(repository.repository_fingerprint.is_some());
+        assert!(repository.subproject_path.is_none());
+
+        let subproject = workspace_scope_from_repository_root(
+            Path::new("/work/repo/crates/api"),
+            Some(PathBuf::from("/work/repo")),
+        );
+        assert_eq!(subproject.kind, WorkspaceScopeKind::Subproject);
+        assert_eq!(
+            subproject.repository_root,
+            Some(PathBuf::from("/work/repo"))
+        );
+        assert_eq!(
+            subproject.subproject_path,
+            Some(PathBuf::from("crates/api"))
+        );
+        assert_eq!(
+            repository.repository_fingerprint, subproject.repository_fingerprint,
+            "all subprojects in one repo share the repository fingerprint",
+        );
+        Ok(())
+    }
+
+    #[test]
     fn resolve_prefers_explicit_workspace_over_env_and_discovery() -> TestResult {
         let scratch = ScratchDir::new("resolve-explicit")?;
         let cwd = scratch.make_dir("current")?;
@@ -1167,6 +1478,95 @@ mod tests {
         let resolved = resolve_workspace(&request).map_err(|error| error.to_string())?;
         assert_eq!(resolved.location.root, workspace);
         assert!(resolved.marker_present);
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostics_report_explicit_environment_conflict() -> TestResult {
+        let scratch = ScratchDir::new("diag-explicit-env")?;
+        let cwd = scratch.make_dir("current")?;
+        let explicit = scratch.make_dir("explicit")?;
+        scratch.make_dir("explicit/.ee")?;
+        let environment = scratch.make_dir("environment")?;
+        scratch.make_dir("environment/.ee")?;
+        let request = WorkspaceResolutionRequest::new(cwd, WorkspaceResolutionMode::ExistingOnly)
+            .with_explicit_workspace(explicit.clone())
+            .with_environment_workspace(environment.clone());
+
+        let resolved = resolve_workspace(&request).map_err(|error| error.to_string())?;
+        let diagnostics = super::diagnose_workspace_resolution(&request, &resolved);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "workspace_explicit_environment_conflict")
+            .ok_or_else(|| "missing explicit/environment conflict diagnostic".to_string())?;
+
+        assert_eq!(
+            diagnostic.selected_source,
+            Some(WorkspaceResolutionSource::Explicit)
+        );
+        assert_eq!(
+            diagnostic.conflicting_source,
+            Some(WorkspaceResolutionSource::Environment)
+        );
+        assert_eq!(diagnostic.selected_root, Some(explicit));
+        assert_eq!(diagnostic.conflicting_root, Some(environment));
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostics_report_selected_workspace_that_differs_from_discovery() -> TestResult {
+        let scratch = ScratchDir::new("diag-discovered")?;
+        let selected = scratch.make_dir("selected")?;
+        scratch.make_dir("selected/.ee")?;
+        let discovered = scratch.make_dir("discovered")?;
+        scratch.make_dir("discovered/.ee")?;
+        let leaf = scratch.make_dir("discovered/src/leaf")?;
+        let request = WorkspaceResolutionRequest::new(leaf, WorkspaceResolutionMode::ExistingOnly)
+            .with_explicit_workspace(selected.clone());
+
+        let resolved = resolve_workspace(&request).map_err(|error| error.to_string())?;
+        let diagnostics = super::diagnose_workspace_resolution(&request, &resolved);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "workspace_selected_differs_from_discovered")
+            .ok_or_else(|| "missing selected/discovered conflict diagnostic".to_string())?;
+
+        assert_eq!(
+            diagnostic.selected_source,
+            Some(WorkspaceResolutionSource::Explicit)
+        );
+        assert_eq!(
+            diagnostic.conflicting_source,
+            Some(WorkspaceResolutionSource::Discovered)
+        );
+        assert_eq!(diagnostic.selected_root, Some(selected));
+        assert_eq!(diagnostic.conflicting_root, Some(discovered));
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostics_report_nested_workspace_markers_nearest_first() -> TestResult {
+        let scratch = ScratchDir::new("diag-nested")?;
+        let outer = scratch.make_dir("outer")?;
+        scratch.make_dir("outer/.ee")?;
+        let inner = scratch.make_dir("outer/inner")?;
+        scratch.make_dir("outer/inner/.ee")?;
+        let leaf = scratch.make_dir("outer/inner/src/leaf")?;
+        let request = WorkspaceResolutionRequest::new(leaf, WorkspaceResolutionMode::ExistingOnly);
+
+        let resolved = resolve_workspace(&request).map_err(|error| error.to_string())?;
+        let diagnostics = super::diagnose_workspace_resolution(&request, &resolved);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "workspace_nested_markers")
+            .ok_or_else(|| "missing nested marker diagnostic".to_string())?;
+
+        assert_eq!(resolved.location.root, inner);
+        assert_eq!(diagnostic.marker_roots, vec![inner, outer]);
+        assert_eq!(
+            diagnostic.conflicting_source,
+            Some(WorkspaceResolutionSource::Discovered)
+        );
         Ok(())
     }
 

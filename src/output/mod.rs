@@ -1,8 +1,13 @@
 use std::env;
 use std::io::IsTerminal;
 
+use crate::core::agent_detect::{AgentInventoryReport, InstalledAgentDetectionReport};
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
+use crate::core::curate::{
+    CurateApplyReport, CurateCandidatesReport, CurateDispositionReport, CurateReviewReport,
+    CurateValidateReport,
+};
 use crate::core::doctor::{
     DependencyBlockedFeature, DependencyContractEntry, DependencyDiagnosticsReport,
     DependencyFeatureProfile, DependencyOptionalFeatureProfile, DependencySource, DoctorReport,
@@ -10,9 +15,13 @@ use crate::core::doctor::{
     IntegrityDiagnosticCheck, IntegrityDiagnosticDegradation, IntegrityDiagnosticsReport,
 };
 use crate::core::health::HealthReport;
-use crate::core::memory::{MemoryDetails, MemoryHistoryReport, MemoryListReport, MemoryShowReport};
+use crate::core::memory::{
+    MemoryDetails, MemoryHistoryReport, MemoryListReport, MemoryShowReport, memory_validity,
+};
 use crate::core::quarantine::{QuarantineEntry, QuarantineReport};
+use crate::core::rule::{RuleAddReport, RuleListReport, RuleShowReport};
 use crate::core::status::StatusReport;
+use crate::core::why::WhyReport;
 use crate::core::{VERSION_PROVENANCE_SCHEMA_V1, VersionReport};
 use crate::eval::{EvaluationReport, EvaluationStatus, ScenarioValidationResult};
 use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
@@ -21,8 +30,8 @@ use crate::models::{
 };
 use crate::pack::{
     ContextResponse, PackAdvisoryBanner, PackAdvisoryNote, PackDraftItem, PackItemProvenance,
-    PackOmissionMetrics, PackQualityMetrics, PackSectionMetric, PackSelectionCertificate,
-    PackSelectionStep, RenderedPackProvenance,
+    PackOmissionMetrics, PackQualityMetrics, PackRejectedFrontierItem, PackSectionMetric,
+    PackSelectedItem, PackSelectionCertificate, PackSelectionStep, RenderedPackProvenance,
 };
 
 pub mod jsonl_export;
@@ -152,6 +161,12 @@ impl CardsProfile {
 /// Schema identifier for cards output.
 pub const CARDS_SCHEMA_V1: &str = "ee.cards.v1";
 
+/// MCP protocol version advertised by the optional stdio adapter.
+pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// Schema identifier for the MCP manifest data payload.
+pub const MCP_MANIFEST_SCHEMA_V1: &str = "ee.mcp.manifest.v1";
+
 /// A single card in structured output.
 #[derive(Clone, Debug)]
 pub struct Card {
@@ -248,6 +263,10 @@ pub struct CardMath {
     pub value: Option<f64>,
     pub confidence: Option<f64>,
     pub unit: Option<String>,
+    pub substituted_values: Option<String>,
+    pub intuition: Option<String>,
+    pub assumptions: Vec<String>,
+    pub decision_change: Option<String>,
 }
 
 impl CardMath {
@@ -258,6 +277,10 @@ impl CardMath {
             value: None,
             confidence: None,
             unit: None,
+            substituted_values: None,
+            intuition: None,
+            assumptions: Vec::new(),
+            decision_change: None,
         }
     }
 
@@ -281,6 +304,26 @@ impl CardMath {
         self
     }
 
+    pub fn with_substituted_values(mut self, values: impl Into<String>) -> Self {
+        self.substituted_values = Some(values.into());
+        self
+    }
+
+    pub fn with_intuition(mut self, intuition: impl Into<String>) -> Self {
+        self.intuition = Some(intuition.into());
+        self
+    }
+
+    pub fn with_assumption(mut self, assumption: impl Into<String>) -> Self {
+        self.assumptions.push(assumption.into());
+        self
+    }
+
+    pub fn with_decision_change(mut self, decision_change: impl Into<String>) -> Self {
+        self.decision_change = Some(decision_change.into());
+        self
+    }
+
     #[must_use]
     pub fn to_json(&self) -> String {
         let mut b = JsonBuilder::new();
@@ -295,6 +338,21 @@ impl CardMath {
         }
         if let Some(ref unit) = self.unit {
             b.field_str("unit", unit);
+        }
+        if let Some(ref values) = self.substituted_values {
+            b.field_str("substitutedValues", values);
+        }
+        if let Some(ref intuition) = self.intuition {
+            b.field_str("intuition", intuition);
+        }
+        if !self.assumptions.is_empty() {
+            b.field_raw(
+                "assumptions",
+                &string_array_json(self.assumptions.iter().map(String::as_str)),
+            );
+        }
+        if let Some(ref decision_change) = self.decision_change {
+            b.field_str("decisionChange", decision_change);
         }
         b.finish()
     }
@@ -313,18 +371,23 @@ pub fn selection_score_card(confidence: f32, utility: f32, importance: f32, scor
     let computation = format!(
         "score = 0.40×{confidence:.2} + 0.35×{utility:.2} + 0.25×{importance:.2} = {score:.3}"
     );
+    let math = CardMath::new()
+        .with_formula(formula)
+        .with_value(score as f64)
+        .with_confidence(confidence as f64)
+        .with_substituted_values(computation.clone())
+        .with_intuition("Higher confidence, utility, and importance raise the selected score.")
+        .with_assumption("Weights are fixed for this certificate profile.")
+        .with_decision_change(
+            "A lower confidence or utility value could move this item below the cutoff.",
+        );
     Card::new(
         "card_selection_score",
         CardKind::Certificate,
         "Selection Score Computation",
     )
     .with_summary(computation)
-    .with_math(
-        CardMath::new()
-            .with_formula(formula)
-            .with_value(score as f64)
-            .with_confidence(confidence as f64),
-    )
+    .with_math(math)
 }
 
 /// Create a relevance score math card showing semantic/lexical fusion.
@@ -337,19 +400,22 @@ pub fn relevance_score_card(
     rrf_k: u32,
 ) -> Card {
     let rrf_formula = format!("RRF(d) = Σ(1 / (k + rank(d))), k={rrf_k}");
+    let summary =
+        format!("Rank {rank}: semantic={semantic:.3}, lexical={lexical:.3} → fused={fused:.4}");
+    let math = CardMath::new()
+        .with_formula(rrf_formula)
+        .with_value(fused as f64)
+        .with_substituted_values(summary.clone())
+        .with_intuition("Documents ranked well by either retriever gain fused relevance.")
+        .with_assumption("Semantic and lexical ranks are stable for the same index generation.")
+        .with_decision_change("A worse semantic or lexical rank would lower fused relevance.");
     Card::new(
         "card_relevance_score",
         CardKind::Certificate,
         "Relevance Score (RRF Fusion)",
     )
-    .with_summary(format!(
-        "Rank {rank}: semantic={semantic:.3}, lexical={lexical:.3} → fused={fused:.4}"
-    ))
-    .with_math(
-        CardMath::new()
-            .with_formula(rrf_formula)
-            .with_value(fused as f64),
-    )
+    .with_summary(summary)
+    .with_math(math)
 }
 
 /// Create a utility decay math card showing temporal decay computation.
@@ -364,18 +430,21 @@ pub fn utility_decay_card(
     let computation = format!(
         "utility = {base_utility:.3} × exp(-{decay_rate:.4} × {age_days}) = {current_utility:.3}"
     );
+    let math = CardMath::new()
+        .with_formula(formula)
+        .with_value(current_utility as f64)
+        .with_unit("utility units".to_string())
+        .with_substituted_values(computation.clone())
+        .with_intuition("Older memories lose utility unless their base value is high enough.")
+        .with_assumption("The decay rate is fixed for the active policy.")
+        .with_decision_change("A lower age or decay rate would preserve more utility.");
     Card::new(
         "card_utility_decay",
         CardKind::Certificate,
         "Utility Temporal Decay",
     )
     .with_summary(computation)
-    .with_math(
-        CardMath::new()
-            .with_formula(formula)
-            .with_value(current_utility as f64)
-            .with_unit("utility units".to_string()),
-    )
+    .with_math(math)
 }
 
 /// Create a trust score math card showing weighted trust class contribution.
@@ -389,18 +458,21 @@ pub fn trust_score_card(
     let formula = "trust = class_weight × confidence";
     let computation =
         format!("trust({trust_class}) = {trust_weight:.2} × {confidence:.2} = {combined:.3}");
+    let math = CardMath::new()
+        .with_formula(formula)
+        .with_value(combined as f64)
+        .with_confidence(confidence as f64)
+        .with_substituted_values(computation.clone())
+        .with_intuition("Higher-trust sources contribute more strongly to selection.")
+        .with_assumption("Trust class weights are policy-controlled and deterministic.")
+        .with_decision_change("A lower trust class weight could demote this memory.");
     Card::new(
         "card_trust_score",
         CardKind::Certificate,
         "Trust Score Computation",
     )
     .with_summary(computation)
-    .with_math(
-        CardMath::new()
-            .with_formula(formula)
-            .with_value(combined as f64)
-            .with_confidence(confidence as f64),
-    )
+    .with_math(math)
 }
 
 /// Create a pack budget math card showing token budget utilization.
@@ -417,14 +489,17 @@ pub fn pack_budget_card(
         "{used_tokens}/{max_tokens} tokens ({utilization:.1}%), \
          {item_count} items packed, {omitted_count} omitted"
     );
+    let math = CardMath::new()
+        .with_formula(formula)
+        .with_value(utilization)
+        .with_unit("%".to_string())
+        .with_substituted_values(summary.clone())
+        .with_intuition("Higher utilization means less room remains for additional memories.")
+        .with_assumption("Token estimates use the active deterministic estimator.")
+        .with_decision_change("A larger max token budget could admit omitted items.");
     Card::new("card_pack_budget", CardKind::Audit, "Pack Token Budget")
         .with_summary(summary)
-        .with_math(
-            CardMath::new()
-                .with_formula(formula)
-                .with_value(utilization)
-                .with_unit("%".to_string()),
-        )
+        .with_math(math)
 }
 
 /// Create a diversity penalty math card showing MMR-style diversity score.
@@ -440,17 +515,20 @@ pub fn diversity_penalty_card(
         "final = {base_score:.3} - {diversity_penalty:.3} = {final_score:.3} \
          ({similar_items} similar items penalized)"
     );
+    let math = CardMath::new()
+        .with_formula(formula)
+        .with_value(final_score as f64)
+        .with_substituted_values(computation.clone())
+        .with_intuition("Redundant memories lose score so the pack covers more distinct evidence.")
+        .with_assumption("Similarity is computed against already selected items.")
+        .with_decision_change("Less overlap with selected memories would reduce the penalty.");
     Card::new(
         "card_diversity_penalty",
         CardKind::Certificate,
         "Diversity Penalty (MMR)",
     )
     .with_summary(computation)
-    .with_math(
-        CardMath::new()
-            .with_formula(formula)
-            .with_value(final_score as f64),
-    )
+    .with_math(math)
 }
 
 // ============================================================================
@@ -616,8 +694,15 @@ pub fn graveyard_uplift_candidate_card(
     .with_summary(summary)
     .with_math(
         CardMath::new()
+            .with_formula("confidence = consecutive_pass_signal")
             .with_value(confidence_score as f64)
-            .with_unit("confidence"),
+            .with_unit("confidence")
+            .with_substituted_values(format!(
+                "consecutive_passes={consecutive_passes}, confidence={confidence_score:.3}"
+            ))
+            .with_intuition("Repeated successful verification raises promotion confidence.")
+            .with_assumption("Recent verification attempts are comparable.")
+            .with_decision_change("A new failed verification would block promotion."),
     )
 }
 
@@ -646,8 +731,15 @@ pub fn graveyard_output_drift_card(
     .with_summary(summary)
     .with_math(
         CardMath::new()
+            .with_formula("drift = changed_output_bytes / expected_output_bytes")
             .with_value(drift_percentage as f64)
-            .with_unit("drift"),
+            .with_unit("drift")
+            .with_substituted_values(format!("drift={drift_percentage:.3}"))
+            .with_intuition("Large output drift can indicate a changed contract.")
+            .with_assumption("Expected and actual hashes refer to the same demo.")
+            .with_decision_change(
+                "Refreshing the expected artifact after review would clear drift.",
+            ),
     )
 }
 
@@ -1590,10 +1682,23 @@ fn build_pack_omission_metrics(obj: &mut JsonBuilder, metrics: &PackOmissionMetr
 }
 
 fn build_pack_selection_certificate(obj: &mut JsonBuilder, certificate: &PackSelectionCertificate) {
+    if let Some(certificate_id) = &certificate.certificate_id {
+        obj.field_str("certificateId", certificate_id);
+    }
     obj.field_str("profile", certificate.profile.as_str());
     obj.field_str("objective", certificate.objective.as_str());
     obj.field_str("algorithm", certificate.algorithm);
     obj.field_str("guarantee", certificate.guarantee);
+    obj.field_str("guaranteeStatus", certificate.guarantee_status.as_str());
+    obj.field_object("guaranteeEvidence", |guarantee| {
+        guarantee.field_str("status", certificate.guarantee_status.as_str());
+        match &certificate.certificate_id {
+            Some(certificate_id) => guarantee.field_str("certificateId", certificate_id),
+            None => guarantee.field_raw("certificateId", "null"),
+        };
+        guarantee.field_bool("identityValid", certificate.has_valid_guarantee_identity());
+        guarantee.field_str("summary", certificate.guarantee);
+    });
     obj.field_raw("candidateCount", &certificate.candidate_count.to_string());
     obj.field_raw("selectedCount", &certificate.selected_count.to_string());
     obj.field_raw("omittedCount", &certificate.omitted_count.to_string());
@@ -1605,7 +1710,31 @@ fn build_pack_selection_certificate(obj: &mut JsonBuilder, certificate: &PackSel
     );
     obj.field_bool("monotone", certificate.monotone);
     obj.field_bool("submodular", certificate.submodular);
+    obj.field_array_of_objects(
+        "selectedItems",
+        &certificate.selected_items,
+        build_pack_selected_item,
+    );
+    obj.field_array_of_objects(
+        "rejectedFrontier",
+        &certificate.rejected_frontier,
+        build_pack_rejected_frontier_item,
+    );
     obj.field_array_of_objects("steps", &certificate.steps, build_pack_selection_step);
+}
+
+fn build_pack_selected_item(obj: &mut JsonBuilder, item: &PackSelectedItem) {
+    obj.field_u32("rank", item.rank);
+    obj.field_str("memoryId", &item.memory_id.to_string());
+    obj.field_u32("tokenCost", item.token_cost);
+    obj.field_bool("feasible", item.feasible);
+}
+
+fn build_pack_rejected_frontier_item(obj: &mut JsonBuilder, item: &PackRejectedFrontierItem) {
+    obj.field_str("memoryId", &item.memory_id.to_string());
+    obj.field_u32("tokenCost", item.token_cost);
+    obj.field_str("reason", item.reason.as_str());
+    obj.field_bool("feasible", item.feasible);
 }
 
 fn build_pack_selection_step(obj: &mut JsonBuilder, step: &PackSelectionStep) {
@@ -1613,6 +1742,8 @@ fn build_pack_selection_step(obj: &mut JsonBuilder, step: &PackSelectionStep) {
     obj.field_str("memoryId", &step.memory_id.to_string());
     obj.field_raw("marginalGain", &score_json(step.marginal_gain));
     obj.field_raw("objectiveValue", &score_json(step.objective_value));
+    obj.field_u32("tokenCost", step.token_cost);
+    obj.field_bool("feasible", step.feasible);
     obj.field_raw(
         "coveredFeatures",
         &string_array_json(step.covered_features.iter()),
@@ -1669,10 +1800,17 @@ pub fn render_status_json(report: &StatusReport) -> String {
     b.field_object("data", |d| {
         d.field_str("command", "status");
         d.field_str("version", report.version);
+        if let Some(workspace) = report.workspace.as_ref() {
+            render_workspace_status_json(d, workspace);
+        }
         d.field_object("capabilities", |c| {
             c.field_str("runtime", report.capabilities.runtime.as_str());
             c.field_str("storage", report.capabilities.storage.as_str());
             c.field_str("search", report.capabilities.search.as_str());
+            c.field_str(
+                "agentDetection",
+                report.capabilities.agent_detection.as_str(),
+            );
         });
         d.field_object("runtime", |r| {
             r.field_str("engine", report.runtime.engine);
@@ -1682,6 +1820,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
         });
         render_memory_health_json(d, &report.memory_health);
         render_derived_assets_json(d, &report.derived_assets, true);
+        render_agent_inventory_json(d, "agentInventory", &report.agent_inventory, false);
         d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
             obj.field_str("code", deg.code);
             obj.field_str("severity", deg.severity);
@@ -1690,6 +1829,65 @@ pub fn render_status_json(report: &StatusReport) -> String {
         });
     });
     b.finish()
+}
+
+fn render_workspace_status_json(
+    parent: &mut JsonBuilder,
+    workspace: &crate::core::status::WorkspaceStatusReport,
+) {
+    parent.field_object("workspace", |w| {
+        w.field_str("source", workspace.source.as_str());
+        w.field_str("root", &workspace.root.to_string_lossy());
+        w.field_str("configDir", &workspace.config_dir.to_string_lossy());
+        w.field_bool("markerPresent", workspace.marker_present);
+        w.field_str("canonicalRoot", &workspace.canonical_root.to_string_lossy());
+        w.field_str("fingerprint", &workspace.fingerprint);
+        w.field_str("scopeKind", &workspace.scope_kind);
+        if let Some(repository_root) = workspace.repository_root.as_ref() {
+            w.field_str("repositoryRoot", &repository_root.to_string_lossy());
+        } else {
+            w.field_raw("repositoryRoot", "null");
+        }
+        if let Some(repository_fingerprint) = workspace.repository_fingerprint.as_ref() {
+            w.field_str("repositoryFingerprint", repository_fingerprint);
+        } else {
+            w.field_raw("repositoryFingerprint", "null");
+        }
+        if let Some(subproject_path) = workspace.subproject_path.as_ref() {
+            w.field_str("subprojectPath", &subproject_path.to_string_lossy());
+        } else {
+            w.field_raw("subprojectPath", "null");
+        }
+        w.field_array_of_objects("diagnostics", &workspace.diagnostics, |obj, diagnostic| {
+            obj.field_str("code", diagnostic.code);
+            obj.field_str("severity", diagnostic.severity.as_str());
+            obj.field_str("message", &diagnostic.message);
+            obj.field_str("repair", &diagnostic.repair);
+            if let Some(source) = diagnostic.selected_source {
+                obj.field_str("selectedSource", source.as_str());
+            }
+            if let Some(root) = diagnostic.selected_root.as_ref() {
+                obj.field_str("selectedRoot", &root.to_string_lossy());
+            }
+            if let Some(source) = diagnostic.conflicting_source {
+                obj.field_str("conflictingSource", source.as_str());
+            }
+            if let Some(root) = diagnostic.conflicting_root.as_ref() {
+                obj.field_str("conflictingRoot", &root.to_string_lossy());
+            }
+            if !diagnostic.marker_roots.is_empty() {
+                let marker_roots = diagnostic
+                    .marker_roots
+                    .iter()
+                    .map(|root| root.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                obj.field_raw(
+                    "markerRoots",
+                    &string_array_json(marker_roots.iter().map(String::as_str)),
+                );
+            }
+        });
+    });
 }
 
 fn render_memory_health_json(
@@ -1767,6 +1965,42 @@ fn render_derived_assets_json(
     });
 }
 
+fn render_agent_inventory_json(
+    parent: &mut JsonBuilder,
+    field_name: &str,
+    inventory: &AgentInventoryReport,
+    include_agents: bool,
+) {
+    parent.field_object(field_name, |agent| {
+        agent.field_str("schema", inventory.schema);
+        agent.field_str("status", inventory.status.as_str());
+        agent.field_u32("formatVersion", inventory.format_version);
+        agent.field_object("summary", |summary| {
+            summary.field_u32("detectedCount", inventory.summary.detected_count as u32);
+            summary.field_u32("totalCount", inventory.summary.total_count as u32);
+        });
+        agent.field_str("inspectionCommand", inventory.inspection_command);
+        if include_agents {
+            agent.field_array_of_objects(
+                "installedAgents",
+                &inventory.installed_agents,
+                |obj, item| {
+                    obj.field_str("slug", &item.slug);
+                    obj.field_bool("detected", item.detected);
+                    obj.field_raw("evidence", &strings_to_json_array(&item.evidence));
+                    obj.field_raw("rootPaths", &strings_to_json_array(&item.root_paths));
+                },
+            );
+        }
+        agent.field_array_of_objects("degraded", &inventory.degraded, |obj, degraded| {
+            obj.field_str("code", &degraded.code);
+            obj.field_str("severity", degraded.severity);
+            obj.field_str("message", &degraded.message);
+            obj.field_str("repair", degraded.repair);
+        });
+    });
+}
+
 /// Render a status report as JSON with optional timing metadata.
 ///
 /// When `timing` is provided, adds a `meta` object with timing fields.
@@ -1781,10 +2015,17 @@ pub fn render_status_json_with_meta(
     b.field_object("data", |d| {
         d.field_str("command", "status");
         d.field_str("version", report.version);
+        if let Some(workspace) = report.workspace.as_ref() {
+            render_workspace_status_json(d, workspace);
+        }
         d.field_object("capabilities", |c| {
             c.field_str("runtime", report.capabilities.runtime.as_str());
             c.field_str("storage", report.capabilities.storage.as_str());
             c.field_str("search", report.capabilities.search.as_str());
+            c.field_str(
+                "agentDetection",
+                report.capabilities.agent_detection.as_str(),
+            );
         });
         d.field_object("runtime", |r| {
             r.field_str("engine", report.runtime.engine);
@@ -1794,6 +2035,7 @@ pub fn render_status_json_with_meta(
         });
         render_memory_health_json(d, &report.memory_health);
         render_derived_assets_json(d, &report.derived_assets, true);
+        render_agent_inventory_json(d, "agentInventory", &report.agent_inventory, false);
         d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
             obj.field_str("code", deg.code);
             obj.field_str("severity", deg.severity);
@@ -1820,10 +2062,25 @@ pub fn render_status_json_with_meta(
 /// Render a status report as human-readable text.
 #[must_use]
 pub fn render_status_human(report: &StatusReport) -> String {
+    let workspace_line = report
+        .workspace
+        .as_ref()
+        .map_or_else(String::new, |workspace| {
+            let diagnostics = workspace.diagnostics.len();
+            format!(
+                "workspace: {} ({}; {} diagnostic{})\n",
+                workspace.root.display(),
+                workspace.source.as_str(),
+                diagnostics,
+                if diagnostics == 1 { "" } else { "s" }
+            )
+        });
     format!(
-        "ee status\n\nstorage: {}\nsearch: {}\nruntime: {} ({} {})\n\nNext:\n  ee status --json\n",
+        "ee status\n\n{}storage: {}\nsearch: {}\nagent detection: {}\nruntime: {} ({} {})\n\nNext:\n  ee status --json\n",
+        workspace_line,
         report.capabilities.storage.as_str(),
         report.capabilities.search.as_str(),
+        report.capabilities.agent_detection.as_str(),
         report.capabilities.runtime.as_str(),
         report.runtime.engine,
         report.runtime.profile
@@ -1833,7 +2090,13 @@ pub fn render_status_human(report: &StatusReport) -> String {
 /// Render a status report as TOON (Terse Object Output Notation).
 #[must_use]
 pub fn render_status_toon(report: &StatusReport) -> String {
-    render_toon_from_json(&render_status_json(report))
+    render_status_toon_filtered(report, FieldProfile::Standard)
+}
+
+/// Render a status report as TOON with field filtering.
+#[must_use]
+pub fn render_status_toon_filtered(report: &StatusReport, profile: FieldProfile) -> String {
+    render_toon_from_json(&render_status_json_filtered(report, profile))
 }
 
 /// Render a doctor report as JSON (ee.response.v1 envelope).
@@ -1893,6 +2156,131 @@ pub fn render_doctor_toon(report: &DoctorReport) -> String {
     render_toon_from_json(&render_doctor_json(report))
 }
 
+/// Render a doctor report as a deterministic Mermaid diagram.
+#[must_use]
+pub fn render_doctor_mermaid(report: &DoctorReport) -> String {
+    let mut output = String::from("flowchart TD\n");
+    let summary = if report.overall_healthy {
+        "ee doctor: healthy"
+    } else {
+        "ee doctor: needs repair"
+    };
+    output.push_str(&format!(
+        "  doctor[\"{}\"]\n",
+        escape_mermaid_label(summary)
+    ));
+
+    for (index, check) in report.checks.iter().enumerate() {
+        let node_id = format!("check{}", index + 1);
+        let label = format!("{}: {}", check.name, check.severity.as_str());
+        output.push_str(&format!(
+            "  {}[\"{}\"]\n",
+            node_id,
+            escape_mermaid_label(&label)
+        ));
+        output.push_str(&format!("  doctor --> {}\n", node_id));
+
+        if let Some(repair) = check.repair {
+            let repair_id = format!("repair{}", index + 1);
+            output.push_str(&format!(
+                "  {}[\"{}\"]\n",
+                repair_id,
+                escape_mermaid_label(repair)
+            ));
+            output.push_str(&format!("  {} -. repair .-> {}\n", node_id, repair_id));
+        }
+    }
+
+    output
+}
+
+/// Render a why report as a deterministic Mermaid diagram.
+#[must_use]
+pub fn render_why_mermaid(report: &WhyReport) -> String {
+    let mut output = String::from("flowchart TD\n");
+    output.push_str(&format!(
+        "  memory[\"memory: {}\"]\n",
+        escape_mermaid_label(&report.memory_id)
+    ));
+
+    if let Some(storage) = &report.storage {
+        let label = format!("storage: {} / {}", storage.origin, storage.trust_class);
+        output.push_str(&format!(
+            "  storage[\"{}\"]\n",
+            escape_mermaid_label(&label)
+        ));
+        output.push_str("  memory --> storage\n");
+    }
+
+    if let Some(retrieval) = &report.retrieval {
+        let label = format!(
+            "retrieval: {} {} confidence {:.2}",
+            retrieval.level, retrieval.kind, retrieval.confidence
+        );
+        output.push_str(&format!(
+            "  retrieval[\"{}\"]\n",
+            escape_mermaid_label(&label)
+        ));
+        if report.storage.is_some() {
+            output.push_str("  storage --> retrieval\n");
+        } else {
+            output.push_str("  memory --> retrieval\n");
+        }
+    }
+
+    if let Some(selection) = &report.selection {
+        let label = format!(
+            "selection: score {:.2}, active {}",
+            selection.selection_score, selection.is_active
+        );
+        output.push_str(&format!(
+            "  selection[\"{}\"]\n",
+            escape_mermaid_label(&label)
+        ));
+        if report.retrieval.is_some() {
+            output.push_str("  retrieval --> selection\n");
+        } else {
+            output.push_str("  memory --> selection\n");
+        }
+
+        if let Some(pack) = &selection.latest_pack_selection {
+            let pack_label = format!("pack: {} rank {}", pack.pack_id, pack.rank);
+            output.push_str(&format!(
+                "  pack[\"{}\"]\n",
+                escape_mermaid_label(&pack_label)
+            ));
+            output.push_str("  selection --> pack\n");
+        }
+    }
+
+    for (index, link) in report.links.iter().enumerate() {
+        let node_id = format!("link{}", index + 1);
+        let label = format!(
+            "{} {} {}",
+            link.direction, link.relation, link.linked_memory_id
+        );
+        output.push_str(&format!(
+            "  {}[\"{}\"]\n",
+            node_id,
+            escape_mermaid_label(&label)
+        ));
+        output.push_str(&format!("  memory --> {}\n", node_id));
+    }
+
+    for (index, degraded) in report.degraded.iter().enumerate() {
+        let node_id = format!("degraded{}", index + 1);
+        let label = format!("degraded: {} ({})", degraded.code, degraded.severity);
+        output.push_str(&format!(
+            "  {}[\"{}\"]\n",
+            node_id,
+            escape_mermaid_label(&label)
+        ));
+        output.push_str(&format!("  memory -.-> {}\n", node_id));
+    }
+
+    output
+}
+
 /// Render a fix plan as JSON (ee.response.v1 envelope).
 #[must_use]
 pub fn render_fix_plan_json(plan: &FixPlan) -> String {
@@ -1915,6 +2303,31 @@ pub fn render_fix_plan_json(plan: &FixPlan) -> String {
             }
             obj.field_str("command", step.command);
         });
+        d.field_object("cassImportGuidance", |guidance| {
+            guidance.field_str("status", plan.cass_import_guidance.status.as_str());
+            guidance.field_raw(
+                "detectedAgentCount",
+                &plan.cass_import_guidance.detected_agent_count.to_string(),
+            );
+            guidance.field_raw(
+                "detectedRootCount",
+                &plan.cass_import_guidance.detected_root_count.to_string(),
+            );
+            guidance.field_str("message", &plan.cass_import_guidance.message);
+            guidance.field_array_of_objects(
+                "roots",
+                &plan.cass_import_guidance.roots,
+                |obj, root| {
+                    obj.field_str("connector", &root.connector);
+                    obj.field_str("rootPath", &root.root_path);
+                    obj.field_str("guidance", &root.guidance);
+                },
+            );
+            guidance.field_array_of_strings(
+                "suggestedCommands",
+                &plan.cass_import_guidance.suggested_commands,
+            );
+        });
     });
     b.finish()
 }
@@ -1926,27 +2339,48 @@ pub fn render_fix_plan_human(plan: &FixPlan) -> String {
 
     if plan.is_empty() {
         output.push_str("No issues to fix. All subsystems are healthy.\n");
-        return output;
-    }
-
-    output.push_str(&format!(
-        "Found {} issue(s), {} fixable:\n\n",
-        plan.total_issues, plan.fixable_issues
-    ));
-
-    for step in &plan.steps {
+    } else {
         output.push_str(&format!(
-            "{}. [{}] {}\n   Issue: {}\n   Fix:   {}\n\n",
-            step.order,
-            step.subsystem,
-            step.severity.as_str().to_uppercase(),
-            step.issue,
-            step.command
+            "Found {} issue(s), {} fixable:\n\n",
+            plan.total_issues, plan.fixable_issues
         ));
+
+        for step in &plan.steps {
+            output.push_str(&format!(
+                "{}. [{}] {}\n   Issue: {}\n   Fix:   {}\n\n",
+                step.order,
+                step.subsystem,
+                step.severity.as_str().to_uppercase(),
+                step.issue,
+                step.command
+            ));
+        }
+
+        if plan.fixable_issues > 0 {
+            output.push_str("Run commands in order to resolve issues.\n");
+        }
     }
 
-    if plan.fixable_issues > 0 {
-        output.push_str("Run commands in order to resolve issues.\n");
+    output.push_str("\nCASS import guidance:\n");
+    output.push_str(&format!(
+        "  Status: {}\n",
+        plan.cass_import_guidance.status.as_str()
+    ));
+    output.push_str(&format!(
+        "  Message: {}\n",
+        plan.cass_import_guidance.message
+    ));
+    if !plan.cass_import_guidance.roots.is_empty() {
+        output.push_str("  Detected roots:\n");
+        for root in &plan.cass_import_guidance.roots {
+            output.push_str(&format!("    - {}: {}\n", root.connector, root.root_path));
+        }
+    }
+    if !plan.cass_import_guidance.suggested_commands.is_empty() {
+        output.push_str("  Suggested commands:\n");
+        for command in &plan.cass_import_guidance.suggested_commands {
+            output.push_str(&format!("    {command}\n"));
+        }
     }
 
     output
@@ -2826,6 +3260,11 @@ fn render_memory_fields(b: &mut JsonBuilder, details: &MemoryDetails) {
     if let Some(ref ts) = mem.tombstoned_at {
         b.field_str("tombstoned_at", ts);
     }
+    let validity = memory_validity(&mem.valid_from, &mem.valid_to);
+    field_optional_str(b, "valid_from", validity.valid_from.as_deref());
+    field_optional_str(b, "valid_to", validity.valid_to.as_deref());
+    b.field_str("validity_status", &validity.status);
+    b.field_str("validity_window_kind", &validity.window_kind);
     b.field_array_of_objects("tags", &details.tags, |obj, tag| {
         obj.field_str("name", tag);
     });
@@ -2868,6 +3307,17 @@ pub fn render_memory_show_human(report: &MemoryShowReport) -> String {
     output.push_str(&format!("  Updated: {}\n", mem.updated_at));
     if let Some(ref ts) = mem.tombstoned_at {
         output.push_str(&format!("  Tombstoned: {}\n", ts));
+    }
+    let validity = memory_validity(&mem.valid_from, &mem.valid_to);
+    output.push_str(&format!(
+        "  Validity: {} ({})\n",
+        validity.status, validity.window_kind
+    ));
+    if let Some(ref ts) = validity.valid_from {
+        output.push_str(&format!("    From: {ts}\n"));
+    }
+    if let Some(ref ts) = validity.valid_to {
+        output.push_str(&format!("    To: {ts}\n"));
     }
     if !details.tags.is_empty() {
         output.push_str(&format!("  Tags: {}\n", details.tags.join(", ")));
@@ -2913,6 +3363,10 @@ pub fn render_memory_list_json(report: &MemoryListReport) -> String {
                 obj.field_str("provenance_uri", uri);
             }
             obj.field_bool("is_tombstoned", m.is_tombstoned);
+            field_optional_str(obj, "valid_from", m.valid_from.as_deref());
+            field_optional_str(obj, "valid_to", m.valid_to.as_deref());
+            obj.field_str("validity_status", &m.validity_status);
+            obj.field_str("validity_window_kind", &m.validity_window_kind);
             obj.field_str("created_at", &m.created_at);
         });
 
@@ -2945,8 +3399,8 @@ pub fn render_memory_list_human(report: &MemoryListReport) -> String {
         output.push_str(&format!("  {} [{}] {}\n", m.id, m.level, m.kind));
         output.push_str(&format!("    {}\n", m.content_preview));
         output.push_str(&format!(
-            "    confidence={:.2}, created={}\n",
-            m.confidence, m.created_at
+            "    confidence={:.2}, created={}, validity={} ({})\n",
+            m.confidence, m.created_at, m.validity_status, m.validity_window_kind
         ));
         if m.is_tombstoned {
             output.push_str("    [TOMBSTONED]\n");
@@ -3046,6 +3500,166 @@ pub fn render_memory_history_human(report: &MemoryHistoryReport) -> String {
 #[must_use]
 pub fn render_memory_history_toon(report: &MemoryHistoryReport) -> String {
     render_toon_from_json(&render_memory_history_json(report))
+}
+
+/// Render a procedural rule add report as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_rule_add_json(report: &RuleAddReport) -> String {
+    ResponseEnvelope::success()
+        .data_raw(&report.data_json())
+        .finish()
+}
+
+/// Render a procedural rule add report as human-readable text.
+#[must_use]
+pub fn render_rule_add_human(report: &RuleAddReport) -> String {
+    report.human_summary()
+}
+
+/// Render a procedural rule add report as TOON.
+#[must_use]
+pub fn render_rule_add_toon(report: &RuleAddReport) -> String {
+    render_toon_from_json(&render_rule_add_json(report))
+}
+
+/// Render a procedural rule list report as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_rule_list_json(report: &RuleListReport) -> String {
+    ResponseEnvelope::success()
+        .data_raw(&report.data_json())
+        .finish()
+}
+
+/// Render a procedural rule list report as human-readable text.
+#[must_use]
+pub fn render_rule_list_human(report: &RuleListReport) -> String {
+    report.human_summary()
+}
+
+/// Render a procedural rule list report as TOON.
+#[must_use]
+pub fn render_rule_list_toon(report: &RuleListReport) -> String {
+    render_toon_from_json(&render_rule_list_json(report))
+}
+
+/// Render a procedural rule show report as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_rule_show_json(report: &RuleShowReport) -> String {
+    ResponseEnvelope::success()
+        .data_raw(&report.data_json())
+        .finish()
+}
+
+/// Render a procedural rule show report as human-readable text.
+#[must_use]
+pub fn render_rule_show_human(report: &RuleShowReport) -> String {
+    report.human_summary()
+}
+
+/// Render a procedural rule show report as TOON.
+#[must_use]
+pub fn render_rule_show_toon(report: &RuleShowReport) -> String {
+    render_toon_from_json(&render_rule_show_json(report))
+}
+
+/// Render a curation candidate list report as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_curate_candidates_json(report: &CurateCandidatesReport) -> String {
+    ResponseEnvelope::success()
+        .data_raw(&report.data_json())
+        .finish()
+}
+
+/// Render a curation candidate list report as human-readable text.
+#[must_use]
+pub fn render_curate_candidates_human(report: &CurateCandidatesReport) -> String {
+    report.human_summary()
+}
+
+/// Render a curation candidate list report as TOON.
+#[must_use]
+pub fn render_curate_candidates_toon(report: &CurateCandidatesReport) -> String {
+    render_toon_from_json(&render_curate_candidates_json(report))
+}
+
+/// Render a curation validation report as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_curate_validate_json(report: &CurateValidateReport) -> String {
+    ResponseEnvelope::success()
+        .data_raw(&report.data_json())
+        .finish()
+}
+
+/// Render a curation validation report as human-readable text.
+#[must_use]
+pub fn render_curate_validate_human(report: &CurateValidateReport) -> String {
+    report.human_summary()
+}
+
+/// Render a curation validation report as TOON.
+#[must_use]
+pub fn render_curate_validate_toon(report: &CurateValidateReport) -> String {
+    render_toon_from_json(&render_curate_validate_json(report))
+}
+
+/// Render a curation apply report as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_curate_apply_json(report: &CurateApplyReport) -> String {
+    ResponseEnvelope::success()
+        .data_raw(&report.data_json())
+        .finish()
+}
+
+/// Render a curation apply report as human-readable text.
+#[must_use]
+pub fn render_curate_apply_human(report: &CurateApplyReport) -> String {
+    report.human_summary()
+}
+
+/// Render a curation apply report as TOON.
+#[must_use]
+pub fn render_curate_apply_toon(report: &CurateApplyReport) -> String {
+    render_toon_from_json(&render_curate_apply_json(report))
+}
+
+/// Render a curation review lifecycle report as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_curate_review_json(report: &CurateReviewReport) -> String {
+    ResponseEnvelope::success()
+        .data_raw(&report.data_json())
+        .finish()
+}
+
+/// Render a curation review lifecycle report as human-readable text.
+#[must_use]
+pub fn render_curate_review_human(report: &CurateReviewReport) -> String {
+    report.human_summary()
+}
+
+/// Render a curation review lifecycle report as TOON.
+#[must_use]
+pub fn render_curate_review_toon(report: &CurateReviewReport) -> String {
+    render_toon_from_json(&render_curate_review_json(report))
+}
+
+/// Render a curation TTL disposition report as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_curate_disposition_json(report: &CurateDispositionReport) -> String {
+    ResponseEnvelope::success()
+        .data_raw(&report.data_json())
+        .finish()
+}
+
+/// Render a curation TTL disposition report as human-readable text.
+#[must_use]
+pub fn render_curate_disposition_human(report: &CurateDispositionReport) -> String {
+    report.human_summary()
+}
+
+/// Render a curation TTL disposition report as TOON.
+#[must_use]
+pub fn render_curate_disposition_toon(report: &CurateDispositionReport) -> String {
+    render_toon_from_json(&render_curate_disposition_json(report))
 }
 
 /// Render binary version and build provenance as JSON (`ee.response.v1` envelope).
@@ -3223,6 +3837,7 @@ pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
             obj.field_bool("available", cmd.available);
             obj.field_str("description", cmd.description);
         });
+        write_capabilities_output_metadata(d, report, true);
         d.field_object("summary", |s| {
             s.field_raw(
                 "readySubsystems",
@@ -3242,6 +3857,47 @@ pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
         });
     });
     b.finish()
+}
+
+fn write_capabilities_output_metadata(
+    builder: &mut JsonBuilder,
+    report: &CapabilitiesReport,
+    include_size_diagnostics: bool,
+) {
+    builder.field_object("output", |output| {
+        output.field_array_of_objects("formats", &report.output_formats, |obj, format| {
+            obj.field_str("name", format.name);
+            obj.field_bool("available", format.available);
+            obj.field_bool("machineReadable", format.machine_readable);
+            obj.field_str("description", format.description);
+        });
+        output.field_object("toon", |toon| {
+            toon.field_bool("available", report.toon.available);
+            toon.field_str("canonicalSourceFormat", report.toon.canonical_source_format);
+            toon.field_object("dependency", |dependency| {
+                dependency.field_str("crate", report.toon.dependency.crate_name);
+                dependency.field_str("package", report.toon.dependency.package);
+                dependency.field_str("version", report.toon.dependency.version);
+                dependency.field_str("sourceKind", report.toon.dependency.source_kind);
+                dependency.field_str("path", report.toon.dependency.path);
+                dependency.field_bool("defaultFeatures", report.toon.dependency.default_features);
+            });
+            toon.field_array_of_strs(
+                "supportedOutputProfiles",
+                &report.toon.supported_output_profiles,
+            );
+            toon.field_str("defaultFormatEnv", report.toon.default_format_env);
+            toon.field_array_of_strs("errorCodes", &report.toon.error_codes);
+        });
+        if include_size_diagnostics {
+            let diagnostics = compute_representative_size_diagnostics();
+            output.field_array_of_objects("sizeDiagnostics", &diagnostics, |obj, item| {
+                let (command, diagnostic) = item;
+                obj.field_str("command", command);
+                obj.field_raw("diagnostic", &diagnostic.to_json());
+            });
+        }
+    });
 }
 
 /// Render a capabilities report as human-readable text.
@@ -3475,6 +4131,12 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             category: "envelope",
         },
         SchemaEntry {
+            id: MCP_MANIFEST_SCHEMA_V1,
+            version: "1",
+            description: "MCP adapter manifest generated from ee's public command and schema registries",
+            category: "adapter",
+        },
+        SchemaEntry {
             id: "ee.certificate.v1",
             version: "1",
             description: "Certificate schemas for pack, curation, tail-risk, privacy-budget, and lifecycle",
@@ -3495,13 +4157,31 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
         SchemaEntry {
             id: "ee.economy.schemas.v1",
             version: "1",
-            description: "Utility, attention-cost, reserve, debt, recommendation, and report schemas",
+            description: "Utility, attention-cost, reserve, debt, recommendation, report, and simulation schemas",
             category: "domain",
         },
         SchemaEntry {
             id: "ee.learning.schemas.v1",
             version: "1",
             description: "Learning question, uncertainty, experiment, observation, and outcome schemas",
+            category: "domain",
+        },
+        SchemaEntry {
+            id: "ee.rule.add.v1",
+            version: "1",
+            description: "Procedural rule creation response data",
+            category: "domain",
+        },
+        SchemaEntry {
+            id: "ee.rule.list.v1",
+            version: "1",
+            description: "Procedural rule list response data",
+            category: "domain",
+        },
+        SchemaEntry {
+            id: "ee.rule.show.v1",
+            version: "1",
+            description: "Procedural rule detail response data",
             category: "domain",
         },
         SchemaEntry {
@@ -3566,6 +4246,7 @@ fn render_single_schema_export(schema_id: &str) -> String {
     match schema_id {
         "ee.response.v1" => response_schema_definition(),
         "ee.error.v1" => error_schema_definition(),
+        MCP_MANIFEST_SCHEMA_V1 => mcp_manifest_schema_definition(),
         "ee.certificate.v1" => certificate_schema_definition(),
         "ee.executable_id_schemas.v1" => crate::models::executable_id_schema_catalog_json(),
         "ee.procedure.schemas.v1" => crate::models::procedure_schema_catalog_json(),
@@ -3594,9 +4275,10 @@ fn render_all_schemas_export() -> String {
         d.field_raw(
             "schemas",
             &format!(
-                "[{},{},{},{},{},{},{},{}]",
+                "[{},{},{},{},{},{},{},{},{}]",
                 response_schema_definition(),
                 error_schema_definition(),
+                mcp_manifest_schema_definition(),
                 certificate_schema_definition(),
                 crate::models::executable_id_schema_catalog_json(),
                 crate::models::procedure_schema_catalog_json(),
@@ -3615,6 +4297,37 @@ fn response_schema_definition() -> String {
 
 fn error_schema_definition() -> String {
     r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"ee.error.v1","type":"object","required":["schema","error"],"properties":{"schema":{"const":"ee.error.v1"},"error":{"type":"object","required":["code","message"],"properties":{"code":{"type":"string"},"message":{"type":"string"},"repair":{"type":"string"}}}}}"#.to_string()
+}
+
+fn mcp_manifest_schema_definition() -> String {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": MCP_MANIFEST_SCHEMA_V1,
+        "type": "object",
+        "required": [
+            "command",
+            "schema",
+            "version",
+            "protocolVersion",
+            "adapter",
+            "capabilities",
+            "tools",
+            "schemas",
+            "degraded"
+        ],
+        "properties": {
+            "command": { "const": "mcp manifest" },
+            "schema": { "const": MCP_MANIFEST_SCHEMA_V1 },
+            "version": { "type": "string" },
+            "protocolVersion": { "type": "string" },
+            "adapter": { "type": "object" },
+            "capabilities": { "type": "object" },
+            "tools": { "type": "array", "items": { "type": "object" } },
+            "schemas": { "type": "array", "items": { "type": "object" } },
+            "degraded": { "type": "array", "items": { "type": "object" } }
+        }
+    })
+    .to_string()
 }
 
 fn certificate_schema_definition() -> String {
@@ -3636,6 +4349,154 @@ pub fn render_schema_export_human(schema_id: Option<&str>) -> String {
 #[must_use]
 pub fn render_schema_export_toon(schema_id: Option<&str>) -> String {
     render_toon_from_json(&render_schema_export_json(schema_id))
+}
+
+struct McpManifestDegradation {
+    code: &'static str,
+    severity: &'static str,
+    message: &'static str,
+    repair: &'static str,
+}
+
+const MCP_FEATURE_DISABLED_DEGRADATION: McpManifestDegradation = McpManifestDegradation {
+    code: "mcp_feature_disabled",
+    severity: "low",
+    message: "The MCP stdio adapter feature is not enabled in this build; the command/schema manifest is still available.",
+    repair: "Build or install ee with the mcp feature enabled.",
+};
+
+/// Render the MCP adapter manifest as JSON.
+#[must_use]
+pub fn render_mcp_manifest_json() -> String {
+    let mut b = JsonBuilder::with_capacity(8192);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "mcp manifest");
+        d.field_str("schema", MCP_MANIFEST_SCHEMA_V1);
+        d.field_str("version", env!("CARGO_PKG_VERSION"));
+        d.field_str("protocolVersion", MCP_PROTOCOL_VERSION);
+        d.field_object("adapter", |adapter| {
+            adapter.field_str("name", "ee");
+            adapter.field_str("transport", "stdio");
+            adapter.field_str("feature", "mcp");
+            adapter.field_bool("featureEnabled", cfg!(feature = "mcp"));
+            adapter.field_str("runtime", "asupersync");
+            adapter.field_str("businessLogic", "cli_core_services");
+        });
+        d.field_object("capabilities", |capabilities| {
+            capabilities.field_bool("tools", true);
+            capabilities.field_bool("resources", cfg!(feature = "mcp"));
+            capabilities.field_bool("prompts", cfg!(feature = "mcp"));
+            capabilities.field_bool("experimental", false);
+        });
+        d.field_object("registry", |registry| {
+            registry.field_str("commandSource", "COMMAND_MANIFEST");
+            registry.field_str("schemaSource", "public_schemas");
+            registry.field_raw("commandCount", &COMMAND_MANIFEST.len().to_string());
+            registry.field_raw("schemaCount", &public_schemas().len().to_string());
+        });
+        d.field_array_of_objects("tools", COMMAND_MANIFEST, render_mcp_tool_manifest_entry);
+        d.field_array_of_objects("schemas", public_schemas(), render_public_schema_entry);
+        if cfg!(feature = "mcp") {
+            d.field_raw("degraded", "[]");
+        } else {
+            d.field_array_of_objects(
+                "degraded",
+                &[MCP_FEATURE_DISABLED_DEGRADATION],
+                render_mcp_manifest_degradation,
+            );
+        }
+    });
+    b.finish()
+}
+
+fn render_mcp_tool_manifest_entry(obj: &mut JsonBuilder, cmd: &CommandEntry) {
+    let tool_name = format!("ee_{}", cmd.name.replace('-', "_"));
+    obj.field_str("name", &tool_name);
+    obj.field_str("command", cmd.name);
+    obj.field_str("description", cmd.description);
+    obj.field_bool("available", cmd.available);
+    obj.field_str("source", "public_command_manifest");
+    obj.field_str("responseEnvelope", RESPONSE_SCHEMA_V1);
+    obj.field_str("errorEnvelope", ERROR_SCHEMA_V1);
+    obj.field_array_of_objects("subcommands", cmd.subcommands, |sub, sc| {
+        sub.field_str("name", sc.name);
+        sub.field_str("description", sc.description);
+    });
+    obj.field_array_of_objects("args", cmd.args, |arg, a| {
+        arg.field_str("name", a.name);
+        arg.field_str("description", a.description);
+        arg.field_bool("required", a.required);
+        if let Some(default) = a.default {
+            arg.field_str("default", default);
+        }
+    });
+    obj.field_object("inputSchema", |schema| {
+        schema.field_str("type", "object");
+        schema.field_object("properties", |properties| {
+            properties.field_object("workspace", |workspace| {
+                workspace.field_str("type", "string");
+                workspace.field_str(
+                    "description",
+                    "Workspace path, equivalent to the CLI --workspace option.",
+                );
+            });
+            properties.field_object("args", |args| {
+                args.field_str("type", "array");
+                args.field_str("description", "Command-specific CLI arguments in order.");
+                args.field_object("items", |items| {
+                    items.field_str("type", "string");
+                });
+            });
+            properties.field_object("json", |json| {
+                json.field_str("type", "boolean");
+                json.field_str("description", "Request the stable JSON response envelope.");
+            });
+        });
+        schema.field_raw("required", "[]");
+    });
+}
+
+fn render_public_schema_entry(obj: &mut JsonBuilder, schema: &SchemaEntry) {
+    obj.field_str("id", schema.id);
+    obj.field_str("version", schema.version);
+    obj.field_str("description", schema.description);
+    obj.field_str("category", schema.category);
+}
+
+fn render_mcp_manifest_degradation(obj: &mut JsonBuilder, degraded: &McpManifestDegradation) {
+    obj.field_str("code", degraded.code);
+    obj.field_str("severity", degraded.severity);
+    obj.field_str("message", degraded.message);
+    obj.field_str("repair", degraded.repair);
+}
+
+/// Render the MCP adapter manifest as human-readable text.
+#[must_use]
+pub fn render_mcp_manifest_human() -> String {
+    let feature_status = if cfg!(feature = "mcp") {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let mut output = String::from("ee mcp manifest\n\n");
+    output.push_str(&format!("Protocol: {MCP_PROTOCOL_VERSION}\n"));
+    output.push_str(&format!("Feature: mcp ({feature_status})\n"));
+    output.push_str(&format!("Tools: {}\n", COMMAND_MANIFEST.len()));
+    output.push_str(&format!("Schemas: {}\n", public_schemas().len()));
+    if !cfg!(feature = "mcp") {
+        output.push_str("\nDegraded: mcp_feature_disabled\n");
+        output.push_str("Build or install ee with the mcp feature enabled.\n");
+    }
+    output.push_str("\nUse `ee mcp manifest --json` for the machine-readable manifest.\n");
+    output
+}
+
+/// Render the MCP adapter manifest as TOON.
+#[must_use]
+pub fn render_mcp_manifest_toon() -> String {
+    render_toon_from_json(&render_mcp_manifest_json())
 }
 
 pub fn render_toon_from_json(json: &str) -> String {
@@ -3942,6 +4803,16 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         args: &[],
     },
     CommandEntry {
+        name: "mcp",
+        description: "Inspect the optional MCP adapter manifest",
+        available: true,
+        subcommands: &[SubcommandEntry {
+            name: "manifest",
+            description: "Print the MCP tool and schema manifest",
+        }],
+        args: &[],
+    },
+    CommandEntry {
         name: "remember",
         description: "Store a new memory",
         available: true,
@@ -3990,6 +4861,26 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
                 default: None,
             },
         ],
+    },
+    CommandEntry {
+        name: "rule",
+        description: "Direct procedural rule management",
+        available: true,
+        subcommands: &[
+            SubcommandEntry {
+                name: "add",
+                description: "Add a procedural rule with lifecycle and evidence metadata",
+            },
+            SubcommandEntry {
+                name: "list",
+                description: "List procedural rules with stable filters",
+            },
+            SubcommandEntry {
+                name: "show",
+                description: "Show one procedural rule with evidence and lifecycle metadata",
+            },
+        ],
+        args: &[],
     },
     CommandEntry {
         name: "schema",
@@ -4216,8 +5107,6 @@ pub fn agent_docs() -> String {
     render_agent_docs_json(&report)
 }
 
-use crate::core::agent_detect::InstalledAgentDetectionReport;
-
 fn strings_to_json_array(strings: &[String]) -> String {
     let mut arr = String::from("[");
     for (i, s) in strings.iter().enumerate() {
@@ -4282,6 +5171,61 @@ pub fn render_agent_detect_human(report: &InstalledAgentDetectionReport) -> Stri
 #[must_use]
 pub fn render_agent_detect_toon(report: &InstalledAgentDetectionReport) -> String {
     render_toon_from_json(&render_agent_detect_json(report))
+}
+
+#[must_use]
+pub fn render_agent_status_json(report: &AgentInventoryReport) -> String {
+    let mut b = JsonBuilder::with_capacity(2048);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool(
+        "success",
+        report.status != crate::core::agent_detect::AgentInventoryStatus::Unavailable,
+    );
+    b.field_object("data", |d| {
+        d.field_str("command", "agent status");
+        d.field_str("version", env!("CARGO_PKG_VERSION"));
+        render_agent_inventory_json(d, "inventory", report, true);
+    });
+    b.finish()
+}
+
+#[must_use]
+pub fn render_agent_status_human(report: &AgentInventoryReport) -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str("Agent Inventory\n");
+    out.push_str("===============\n\n");
+    out.push_str(&format!(
+        "Status: {}\nDetected: {} of {} known connector(s)\n\n",
+        report.status.as_str(),
+        report.summary.detected_count,
+        report.summary.total_count
+    ));
+
+    for agent in &report.installed_agents {
+        let state = if agent.detected {
+            "detected"
+        } else {
+            "missing"
+        };
+        out.push_str(&format!("{} [{}]\n", agent.slug, state));
+        for path in &agent.root_paths {
+            out.push_str(&format!("  - {}\n", path));
+        }
+    }
+
+    if !report.degraded.is_empty() {
+        out.push_str("\nDegraded:\n");
+        for degraded in &report.degraded {
+            out.push_str(&format!("  - {}: {}\n", degraded.code, degraded.message));
+        }
+    }
+
+    out
+}
+
+#[must_use]
+pub fn render_agent_status_toon(report: &AgentInventoryReport) -> String {
+    render_toon_from_json(&render_agent_status_json(report))
 }
 
 use crate::core::agent_docs::{
@@ -4652,6 +5596,13 @@ pub fn error_response_toon(error: &DomainError) -> String {
     render_toon_from_json(&error_response_json(error))
 }
 
+fn escape_mermaid_label(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\n', '\r'], " ")
+}
+
 pub fn escape_json_string(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     for c in s.chars() {
@@ -4691,12 +5642,19 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
     b.field_object("data", |d| {
         d.field_str("command", "status");
         d.field_str("version", report.version);
+        if let Some(workspace) = report.workspace.as_ref() {
+            render_workspace_status_json(d, workspace);
+        }
 
         if profile.include_summary_metrics() {
             d.field_object("capabilities", |c| {
                 c.field_str("runtime", report.capabilities.runtime.as_str());
                 c.field_str("storage", report.capabilities.storage.as_str());
                 c.field_str("search", report.capabilities.search.as_str());
+                c.field_str(
+                    "agentDetection",
+                    report.capabilities.agent_detection.as_str(),
+                );
             });
         }
 
@@ -4711,6 +5669,12 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
             render_derived_assets_json(
                 d,
                 &report.derived_assets,
+                profile.include_verbose_details(),
+            );
+            render_agent_inventory_json(
+                d,
+                "agentInventory",
+                &report.agent_inventory,
                 profile.include_verbose_details(),
             );
             d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
@@ -4762,6 +5726,7 @@ pub fn render_capabilities_json_filtered(
                     obj.field_str("description", cmd.description);
                 }
             });
+            write_capabilities_output_metadata(d, report, true);
         }
 
         if profile.include_summary_metrics() {
@@ -5087,8 +6052,15 @@ pub fn render_certificate_verify_json(report: &CertificateVerifyReport) -> Strin
         d.field_str("result", report.result.as_str());
         d.field_str("checkedAt", &report.checked_at);
         d.field_bool("hashVerified", report.hash_verified);
+        d.field_bool("payloadHashFresh", report.payload_hash_fresh);
+        d.field_bool("schemaVersionValid", report.schema_version_valid);
+        d.field_bool("assumptionsValid", report.assumptions_valid);
         d.field_bool("statusValid", report.status_valid);
         d.field_bool("expiryValid", report.expiry_valid);
+        d.field_raw(
+            "failureCodes",
+            &string_array_json(report.failure_codes.iter().map(String::as_str)),
+        );
         d.field_str("message", &report.message);
     });
     b.finish()
@@ -5109,6 +6081,30 @@ pub fn render_certificate_verify_human(report: &CertificateVerifyReport) -> Stri
     out.push_str(&format!(
         "  Hash Verified: {}\n",
         if report.hash_verified { "yes" } else { "no" }
+    ));
+    out.push_str(&format!(
+        "  Payload Hash Fresh: {}\n",
+        if report.payload_hash_fresh {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
+    out.push_str(&format!(
+        "  Schema Version Valid: {}\n",
+        if report.schema_version_valid {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
+    out.push_str(&format!(
+        "  Assumptions Valid: {}\n",
+        if report.assumptions_valid {
+            "yes"
+        } else {
+            "no"
+        }
     ));
     out.push_str(&format!(
         "  Status Valid: {}\n",
@@ -5282,6 +6278,10 @@ pub fn render_claim_verify_json(report: &ClaimVerifyReport) -> String {
             d.field_u32("artifactsChecked", result.artifacts_checked as u32);
             d.field_u32("artifactsPassed", result.artifacts_passed as u32);
             d.field_u32("artifactsFailed", result.artifacts_failed as u32);
+            if !result.errors.is_empty() {
+                let errors = result.errors.iter().map(String::as_str).collect::<Vec<_>>();
+                d.field_array_of_strs("errors", &errors);
+            }
         });
     });
     b.finish()
@@ -5403,7 +6403,9 @@ pub fn render_support_inspect_toon(report: &InspectReport) -> String {
 // EE-431: Memory Economics Rendering
 // ============================================================================
 
-use crate::core::economy::{EconomyReport, EconomyScoreReport};
+use crate::core::economy::{
+    EconomyPrunePlan, EconomyReport, EconomyScoreReport, EconomySimulationReport,
+};
 
 #[must_use]
 pub fn render_economy_report_json(report: &EconomyReport) -> String {
@@ -5506,6 +6508,96 @@ pub fn render_economy_score_human(report: &EconomyScoreReport) -> String {
 #[must_use]
 pub fn render_economy_score_toon(report: &EconomyScoreReport) -> String {
     render_toon_from_json(&render_economy_score_json(report))
+}
+
+#[must_use]
+pub fn render_economy_simulation_json(report: &EconomySimulationReport) -> String {
+    let raw = serde_json::to_string(report).unwrap_or_default();
+    ResponseEnvelope::success().data_raw(&raw).finish()
+}
+
+#[must_use]
+pub fn render_economy_simulation_human(report: &EconomySimulationReport) -> String {
+    let mut out = String::new();
+
+    out.push_str("Economy Simulation\n");
+    out.push_str(&format!("Mutation: {}\n", report.mutation_status));
+    out.push_str(&format!(
+        "Ranking State Unchanged: {}\n",
+        report.ranking_state_unchanged
+    ));
+    out.push_str(&format!(
+        "Baseline Budget: {} tokens\n",
+        report.baseline_budget_tokens
+    ));
+    out.push_str(&format!(
+        "Recommended Budget: {} tokens\n",
+        report.summary.recommended_budget_tokens
+    ));
+    out.push_str(&format!(
+        "Best Score: {:.3} ({:+.3} vs baseline)\n\n",
+        report.summary.best_score, report.summary.score_delta_vs_baseline
+    ));
+
+    for scenario in &report.scenarios {
+        out.push_str(&format!(
+            "- {} tokens: score {:.3}, surfaced {}, reserve {} tokens\n",
+            scenario.budget_tokens,
+            scenario.score,
+            scenario.surfaced_count,
+            scenario.budget.risk_reserve_tokens
+        ));
+    }
+
+    out
+}
+
+#[must_use]
+pub fn render_economy_simulation_toon(report: &EconomySimulationReport) -> String {
+    render_toon_from_json(&render_economy_simulation_json(report))
+}
+
+#[must_use]
+pub fn render_economy_prune_plan_json(report: &EconomyPrunePlan) -> String {
+    let raw = serde_json::to_string(report).unwrap_or_default();
+    ResponseEnvelope::success().data_raw(&raw).finish()
+}
+
+#[must_use]
+pub fn render_economy_prune_plan_human(report: &EconomyPrunePlan) -> String {
+    let mut out = String::new();
+
+    out.push_str("Economy Prune Plan\n");
+    out.push_str(&format!("Status: {}\n", report.status));
+    out.push_str(&format!("Dry Run: {}\n", report.dry_run));
+    out.push_str(&format!("Mutation: {}\n", report.mutation_status));
+    out.push_str(&format!(
+        "Recommendations: {}\n",
+        report.summary.recommendation_count
+    ));
+    out.push_str(&format!(
+        "Estimated Token Savings: {}\n\n",
+        report.summary.estimated_token_savings
+    ));
+
+    for recommendation in &report.recommendations {
+        out.push_str(&format!(
+            "- {} {} {} item(s): {} [priority {}, risk {}]\n",
+            recommendation.action,
+            recommendation.candidate_count,
+            recommendation.artifact_type,
+            recommendation.rationale,
+            recommendation.priority,
+            recommendation.risk
+        ));
+    }
+
+    out
+}
+
+#[must_use]
+pub fn render_economy_prune_plan_toon(report: &EconomyPrunePlan) -> String {
+    render_toon_from_json(&render_economy_prune_plan_json(report))
 }
 
 /// Schema identifier for shadow-run reports.
@@ -5758,7 +6850,15 @@ pub fn render_lab_capture_json(report: &CaptureReport) -> String {
         "success": true,
         "data": {
             "episode_id": report.episode_id,
+            "workspace": report.workspace,
             "task_input": report.task_input,
+            "packHash": report.pack_hash,
+            "policyIds": report.policy_ids,
+            "outcomeRef": report.outcome_ref,
+            "repositoryFingerprint": report.repository_fingerprint,
+            "redactionStatus": report.redaction_status,
+            "episodeHash": report.episode_hash,
+            "stored": report.stored,
             "memories_captured": report.memories_captured,
             "actions_captured": report.actions_captured,
             "dry_run": report.dry_run,
@@ -5813,8 +6913,12 @@ pub fn render_lab_replay_json(report: &ReplayReport) -> String {
             "episode_id": report.episode_id,
             "replay_id": report.replay_id,
             "status": report.status.as_str(),
+            "frozenInputs": report.frozen_inputs,
+            "mutableCurrentStateAccess": report.mutable_current_state_access,
+            "episodeHashVerified": report.episode_hash_verified,
             "outcome_matches": report.outcome_matches,
             "dry_run": report.dry_run,
+            "warnings": report.warnings,
             "replayed_at": report.replayed_at,
         }
     });
@@ -5863,8 +6967,22 @@ pub fn render_lab_counterfactual_json(report: &CounterfactualReport) -> String {
             "run_id": report.run_id,
             "episode_id": report.episode_id,
             "status": report.status.as_str(),
+            "observedPackHash": report.observed_pack_hash,
+            "counterfactualPackHash": report.counterfactual_pack_hash,
+            "changedItems": report.changed_items,
+            "confidenceState": report.confidence_state,
+            "assumptions": report.assumptions,
+            "degradationCodes": report.degradation_codes,
+            "nextAction": report.next_action,
+            "durableMutation": report.durable_mutation,
+            "curationCandidates": report.curation_candidates,
+            "claimStatus": report.claim_status,
+            "wouldHaveSurfaced": report.would_have_surfaced,
+            "surfacedItemIds": report.surfaced_item_ids,
             "interventions_applied": report.interventions_applied,
             "regret_entries": report.regret_entries.len(),
+            "regretKinds": report.regret_entries.iter().map(|entry| &entry.regret_kind).collect::<Vec<_>>(),
+            "confidence": report.confidence,
             "outcome_changed": report.outcome_changed,
             "dry_run": report.dry_run,
             "analyzed_at": report.analyzed_at,
@@ -6044,6 +7162,8 @@ pub fn render_preflight_close_json(report: &CloseReport) -> String {
             "new_status": report.new_status,
             "cleared": report.cleared,
             "reason": report.reason,
+            "task_outcome": report.task_outcome,
+            "feedback": report.feedback,
             "dry_run": report.dry_run,
             "closed_at": report.closed_at,
         }
@@ -6064,8 +7184,20 @@ pub fn render_preflight_close_human(report: &CloseReport) -> String {
     lines.push(format!("  Previous status: {}", report.previous_status));
     lines.push(format!("  New status: {}", report.new_status));
     lines.push(format!("  Cleared: {}", report.cleared));
+    if let Some(ref outcome) = report.task_outcome {
+        lines.push(format!("  Task outcome: {}", outcome));
+    }
     if let Some(ref reason) = report.reason {
         lines.push(format!("  Reason: {}", reason));
+    }
+    if let Some(ref feedback) = report.feedback {
+        lines.push(format!("  Feedback: {}", feedback.signal));
+        lines.push(format!(
+            "  Score effect: utility {:+.2}, confidence {:+.2}, false alarms +{}",
+            feedback.score_effect.utility_delta,
+            feedback.score_effect.confidence_delta,
+            feedback.score_effect.false_alarm_delta
+        ));
     }
     lines.push(format!("  Closed at: {}", report.closed_at));
     lines.join("\n")
@@ -6087,7 +7219,8 @@ pub fn render_preflight_close_toon(report: &CloseReport) -> String {
 // ============================================================================
 
 use crate::core::procedure::{
-    ProcedureExportReport, ProcedureListReport, ProcedureProposeReport, ProcedureShowReport,
+    ProcedureDriftReport, ProcedureExportReport, ProcedureListReport, ProcedurePromoteReport,
+    ProcedureProposeReport, ProcedureShowReport,
 };
 
 /// Render a procedure propose report as JSON.
@@ -6176,7 +7309,7 @@ pub fn render_procedure_show_human(report: &ProcedureShowReport) -> String {
 
     out.push_str("\nNext:\n  ee procedure export ");
     out.push_str(&report.procedure.procedure_id);
-    out.push_str(" --format markdown\n");
+    out.push_str(" --export-format markdown\n");
     out
 }
 
@@ -6232,13 +7365,25 @@ pub fn render_procedure_list_toon(report: &ProcedureListReport) -> String {
 #[must_use]
 pub fn render_procedure_export_json(report: &ProcedureExportReport) -> String {
     serde_json::json!({
-        "schema": report.schema,
+        "schema": RESPONSE_SCHEMA_V1,
         "success": true,
-        "procedureId": report.procedure_id,
-        "format": report.format,
-        "outputPath": report.output_path,
-        "contentLength": report.content_length,
-        "exportedAt": report.exported_at,
+        "data": {
+            "schema": report.schema,
+            "command": "procedure export",
+            "exportId": report.export_id,
+            "procedureId": report.procedure_id,
+            "format": report.format,
+            "artifactKind": report.artifact_kind,
+            "outputPath": report.output_path,
+            "content": report.content,
+            "contentLength": report.content_length,
+            "contentHash": report.content_hash,
+            "includesEvidence": report.includes_evidence,
+            "redactionStatus": report.redaction_status,
+            "installMode": report.install_mode,
+            "warnings": report.warnings,
+            "exportedAt": report.exported_at,
+        }
     })
     .to_string()
 }
@@ -6246,10 +7391,16 @@ pub fn render_procedure_export_json(report: &ProcedureExportReport) -> String {
 /// Render a procedure export report as human-readable text.
 #[must_use]
 pub fn render_procedure_export_human(report: &ProcedureExportReport) -> String {
+    if report.output_path.is_none() {
+        return report.content.clone();
+    }
+
     let mut out = String::with_capacity(256);
     out.push_str(&format!("Exported: {}\n", report.procedure_id));
     out.push_str(&format!("Format: {}\n", report.format));
+    out.push_str(&format!("Artifact: {}\n", report.artifact_kind));
     out.push_str(&format!("Size: {} bytes\n", report.content_length));
+    out.push_str(&format!("Hash: {}\n", report.content_hash));
     if let Some(ref path) = report.output_path {
         out.push_str(&format!("Output: {}\n", path));
     }
@@ -6260,8 +7411,225 @@ pub fn render_procedure_export_human(report: &ProcedureExportReport) -> String {
 #[must_use]
 pub fn render_procedure_export_toon(report: &ProcedureExportReport) -> String {
     format!(
-        "PROCEDURE_EXPORT|{}|{}|{}",
-        report.procedure_id, report.format, report.content_length
+        "PROCEDURE_EXPORT|id={}|format={}|kind={}|bytes={}|hash={}",
+        report.procedure_id,
+        report.format,
+        report.artifact_kind,
+        report.content_length,
+        report.content_hash
+    )
+}
+
+/// Render a procedure promotion dry-run report as JSON.
+#[must_use]
+pub fn render_procedure_promote_json(report: &ProcedurePromoteReport) -> String {
+    serde_json::json!({
+        "schema": RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "schema": report.schema,
+            "command": "procedure promote",
+            "promotionId": report.promotion_id,
+            "procedureId": report.procedure_id,
+            "dryRun": report.dry_run,
+            "status": report.status,
+            "fromStatus": report.from_status,
+            "toStatus": report.to_status,
+            "curation": report.curation,
+            "audit": report.audit,
+            "verification": report.verification,
+            "plannedEffects": report.planned_effects,
+            "warnings": report.warnings,
+            "nextActions": report.next_actions,
+            "generatedAt": report.generated_at,
+        }
+    })
+    .to_string()
+}
+
+/// Render a procedure promotion dry-run report as human-readable text.
+#[must_use]
+pub fn render_procedure_promote_human(report: &ProcedurePromoteReport) -> String {
+    let mut out = String::with_capacity(768);
+    out.push_str("Procedure Promotion [DRY RUN]\n\n");
+    out.push_str(&format!("Procedure: {}\n", report.procedure_id));
+    out.push_str(&format!(
+        "Status: {} -> {} ({})\n",
+        report.from_status, report.to_status, report.status
+    ));
+    out.push_str(&format!(
+        "Curation candidate: {}\n",
+        report.curation.candidate_id
+    ));
+    out.push_str(&format!("Audit operation: {}\n", report.audit.operation_id));
+    out.push_str(&format!(
+        "Verification: {} passed, {} failed, confidence {:.1}%\n",
+        report.verification.pass_count,
+        report.verification.fail_count,
+        report.verification.confidence * 100.0
+    ));
+
+    if !report.planned_effects.is_empty() {
+        out.push_str("\nPlanned effects:\n");
+        for effect in &report.planned_effects {
+            out.push_str(&format!(
+                "  - {} {} {} (would write: {}, applied: {})\n",
+                effect.surface,
+                effect.operation,
+                effect.target_id,
+                effect.would_write,
+                effect.applied
+            ));
+        }
+    }
+
+    if !report.warnings.is_empty() {
+        out.push_str("\nWarnings:\n");
+        for warning in &report.warnings {
+            out.push_str(&format!("  - {warning}\n"));
+        }
+    }
+
+    if !report.next_actions.is_empty() {
+        out.push_str("\nNext:\n");
+        for action in &report.next_actions {
+            out.push_str(&format!("  {action}\n"));
+        }
+    }
+
+    out
+}
+
+/// Render a procedure-promotion curation plan as a deterministic Mermaid diagram.
+#[must_use]
+pub fn render_procedure_promote_mermaid(report: &ProcedurePromoteReport) -> String {
+    let mut output = String::from("flowchart TD\n");
+    output.push_str(&format!(
+        "  procedure[\"procedure: {}\"]\n",
+        escape_mermaid_label(&report.procedure_id)
+    ));
+    let curation_label = format!(
+        "curation: {} {}",
+        report.curation.candidate_id, report.curation.candidate_type
+    );
+    output.push_str(&format!(
+        "  curation[\"{}\"]\n",
+        escape_mermaid_label(&curation_label)
+    ));
+    output.push_str("  procedure --> curation\n");
+
+    let verification_label = format!(
+        "verification: {} pass {} fail {}",
+        report.verification.status, report.verification.pass_count, report.verification.fail_count
+    );
+    output.push_str(&format!(
+        "  verification[\"{}\"]\n",
+        escape_mermaid_label(&verification_label)
+    ));
+    output.push_str("  curation --> verification\n");
+
+    let audit_label = format!("audit: {}", report.audit.operation_id);
+    output.push_str(&format!(
+        "  audit[\"{}\"]\n",
+        escape_mermaid_label(&audit_label)
+    ));
+    output.push_str("  curation --> audit\n");
+
+    for (index, effect) in report.planned_effects.iter().enumerate() {
+        let node_id = format!("effect{}", index + 1);
+        let label = format!(
+            "{}: {} {}",
+            effect.surface, effect.operation, effect.target_id
+        );
+        output.push_str(&format!(
+            "  {}[\"{}\"]\n",
+            node_id,
+            escape_mermaid_label(&label)
+        ));
+        output.push_str(&format!("  curation --> {}\n", node_id));
+    }
+
+    output
+}
+
+/// Render a procedure promotion dry-run report as TOON.
+#[must_use]
+pub fn render_procedure_promote_toon(report: &ProcedurePromoteReport) -> String {
+    format!(
+        "PROCEDURE_PROMOTE|id={}|status={}|dry_run={}|effects={}|warnings={}",
+        report.procedure_id,
+        report.status,
+        report.dry_run,
+        report.planned_effects.len(),
+        report.warnings.len()
+    )
+}
+
+/// Render a procedure drift report as JSON.
+#[must_use]
+pub fn render_procedure_drift_json(report: &ProcedureDriftReport) -> String {
+    serde_json::json!({
+        "schema": RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "schema": report.schema,
+            "command": "procedure drift",
+            "procedureId": report.procedure_id,
+            "status": report.status,
+            "driftDetected": report.drift_detected,
+            "checkedAt": report.checked_at,
+            "stalenessThresholdDays": report.staleness_threshold_days,
+            "dryRun": report.dry_run,
+            "mutation": report.mutation,
+            "counts": report.counts,
+            "signals": report.signals,
+            "nextActions": report.next_actions,
+        }
+    })
+    .to_string()
+}
+
+/// Render a procedure drift report as human-readable text.
+#[must_use]
+pub fn render_procedure_drift_human(report: &ProcedureDriftReport) -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str("Procedure Drift [DRY RUN]\n\n");
+    out.push_str(&format!("Procedure: {}\n", report.procedure_id));
+    out.push_str(&format!("Status: {}\n", report.status));
+    out.push_str(&format!("Signals: {}\n", report.counts.total));
+    out.push_str(&format!("Checked: {}\n", report.checked_at));
+
+    if !report.signals.is_empty() {
+        out.push_str("\nSignals:\n");
+        for signal in &report.signals {
+            out.push_str(&format!(
+                "  - {} [{}] {}: {}\n",
+                signal.kind, signal.severity, signal.source_id, signal.summary
+            ));
+            out.push_str(&format!("    Next: {}\n", signal.recommended_action));
+        }
+    }
+
+    if !report.next_actions.is_empty() {
+        out.push_str("\nNext:\n");
+        for action in &report.next_actions {
+            out.push_str(&format!("  {action}\n"));
+        }
+    }
+    out
+}
+
+/// Render a procedure drift report as TOON.
+#[must_use]
+pub fn render_procedure_drift_toon(report: &ProcedureDriftReport) -> String {
+    format!(
+        "PROCEDURE_DRIFT|id={}|status={}|signals={}|high={}|medium={}|applied={}",
+        report.procedure_id,
+        report.status,
+        report.counts.total,
+        report.counts.high,
+        report.counts.medium,
+        report.mutation.applied
     )
 }
 
@@ -6270,7 +7638,8 @@ pub fn render_procedure_export_toon(report: &ProcedureExportReport) -> String {
 // ============================================================================
 
 use crate::core::learn::{
-    LearnAgendaReport, LearnExperimentProposalReport, LearnSummaryReport, LearnUncertaintyReport,
+    LearnAgendaReport, LearnCloseReport, LearnExperimentProposalReport, LearnExperimentRunReport,
+    LearnObserveReport, LearnSummaryReport, LearnUncertaintyReport,
 };
 
 /// Render a learn agenda report as JSON.
@@ -6513,6 +7882,60 @@ pub fn render_learn_experiment_proposal_toon(report: &LearnExperimentProposalRep
         "LEARN_EXPERIMENT_PROPOSAL|returned={}|candidates={}|min_ev={:.2}",
         report.returned, report.total_candidates, report.min_expected_value
     )
+}
+
+/// Render a learn experiment run rehearsal as JSON.
+#[must_use]
+pub fn render_learn_experiment_run_json(report: &LearnExperimentRunReport) -> String {
+    report.data_json().to_string()
+}
+
+/// Render a learn experiment run rehearsal as human-readable text.
+#[must_use]
+pub fn render_learn_experiment_run_human(report: &LearnExperimentRunReport) -> String {
+    report.human_summary()
+}
+
+/// Render a learn experiment run rehearsal as TOON.
+#[must_use]
+pub fn render_learn_experiment_run_toon(report: &LearnExperimentRunReport) -> String {
+    report.toon_summary()
+}
+
+/// Render a learn observation report as JSON.
+#[must_use]
+pub fn render_learn_observe_json(report: &LearnObserveReport) -> String {
+    report.data_json().to_string()
+}
+
+/// Render a learn observation report as human-readable text.
+#[must_use]
+pub fn render_learn_observe_human(report: &LearnObserveReport) -> String {
+    report.human_summary()
+}
+
+/// Render a learn observation report as TOON.
+#[must_use]
+pub fn render_learn_observe_toon(report: &LearnObserveReport) -> String {
+    report.toon_summary()
+}
+
+/// Render a learn closure report as JSON.
+#[must_use]
+pub fn render_learn_close_json(report: &LearnCloseReport) -> String {
+    report.data_json().to_string()
+}
+
+/// Render a learn closure report as human-readable text.
+#[must_use]
+pub fn render_learn_close_human(report: &LearnCloseReport) -> String {
+    report.human_summary()
+}
+
+/// Render a learn closure report as TOON.
+#[must_use]
+pub fn render_learn_close_toon(report: &LearnCloseReport) -> String {
+    report.toon_summary()
 }
 
 // ============================================================================
@@ -7209,14 +8632,15 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        Degradation, DegradationSeverity, JsonBuilder, OutputContext, OutputEnvironment, Renderer,
-        ResponseEnvelope, SHADOW_RUN_SCHEMA_V1, ShadowRunComparison, ShadowRunReport,
-        error_response_json, escape_json_string, help_text, human_status, render_agent_docs_json,
-        render_agent_docs_toon, render_context_response_json, render_context_response_toon,
-        render_doctor_json, render_doctor_toon, render_health_json, render_health_toon,
-        render_learn_experiment_proposal_human, render_learn_experiment_proposal_json,
-        render_learn_experiment_proposal_toon, render_shadow_run_human, render_shadow_run_json,
-        render_shadow_run_toon, render_status_json, render_status_toon, render_version_json,
+        Degradation, DegradationSeverity, FieldProfile, JsonBuilder, OutputContext,
+        OutputEnvironment, Renderer, ResponseEnvelope, SHADOW_RUN_SCHEMA_V1, ShadowRunComparison,
+        ShadowRunReport, error_response_json, escape_json_string, help_text, human_status,
+        render_agent_docs_json, render_agent_docs_toon, render_context_response_json,
+        render_context_response_toon, render_doctor_json, render_doctor_toon, render_health_json,
+        render_health_toon, render_learn_experiment_proposal_human,
+        render_learn_experiment_proposal_json, render_learn_experiment_proposal_toon,
+        render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
+        render_status_json, render_status_json_filtered, render_status_toon, render_version_json,
         status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
@@ -7523,8 +8947,11 @@ mod tests {
             "\"compatibility\":\"unknown_without_workspace\"",
             "workspace compatibility state",
         )?;
+        let assignment_needle = concat!("TOKEN", "=");
         ensure(
-            !json.contains("/tmp/") && !json.contains("TOKEN=") && !json.contains("ubuntu"),
+            !json.contains("/tmp/")
+                && !json.contains(assignment_needle)
+                && !json.contains("ubuntu"),
             "version JSON must not leak build paths, usernames, or assignment-like secrets",
         )
     }
@@ -8315,7 +9742,7 @@ mod tests {
         let toon = render_status_toon(&report);
         ensure_contains(
             &toon,
-            "degraded[3]{code,severity,message,repair}:",
+            "degraded[3]{code,severity,message}:",
             "degradation section",
         )?;
         ensure_contains(&toon, "storage_not_implemented", "storage degradation code")?;
@@ -8330,7 +9757,7 @@ mod tests {
     #[test]
     fn json_toon_parity_status_decodes_to_same_json() -> TestResult {
         let report = StatusReport::gather();
-        let json = render_status_json(&report);
+        let json = render_status_json_filtered(&report, FieldProfile::Standard);
         let toon = render_status_toon(&report);
 
         let expected_json = serde_json::from_str::<serde_json::Value>(&json)

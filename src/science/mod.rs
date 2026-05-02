@@ -86,6 +86,218 @@ pub const DEGRADATION_CODE_INPUT_TOO_LARGE: &str = "science_input_too_large";
 /// Degradation code for science budget exceeded.
 pub const DEGRADATION_CODE_BUDGET_EXCEEDED: &str = "science_budget_exceeded";
 
+/// Stable schema for `ee analyze science-status --json` payloads.
+pub const SCIENCE_STATUS_SCHEMA_V1: &str = "ee.science.status.v1";
+
+/// Canonical command path for science status diagnostics.
+pub const SCIENCE_STATUS_COMMAND: &str = "analyze science-status";
+
+/// Feature flag that enables science analytics.
+pub const SCIENCE_ANALYTICS_FEATURE: &str = "science-analytics";
+
+/// Stable science analytics status report for machine-readable diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScienceStatusReport {
+    /// Versioned schema for the report body.
+    pub schema: &'static str,
+    /// Canonical command path that will emit this report.
+    pub command: &'static str,
+    /// Subsystem covered by the report.
+    pub subsystem: &'static str,
+    /// Overall availability state.
+    pub status: ScienceStatus,
+    /// Whether science analytics can run in this binary.
+    pub available: bool,
+    /// Compile-time feature status.
+    pub feature: ScienceFeatureStatus,
+    /// Deterministically ordered capability inventory.
+    pub capabilities: Vec<ScienceCapabilityStatus>,
+    /// Current degradations, if any.
+    pub degradations: Vec<ScienceDegradation>,
+    /// Agent-facing next actions.
+    pub next_actions: Vec<&'static str>,
+}
+
+impl ScienceStatusReport {
+    /// Build the current status report for this binary.
+    #[must_use]
+    pub fn current() -> Self {
+        let status = status();
+        let available = status.is_available();
+        Self {
+            schema: SCIENCE_STATUS_SCHEMA_V1,
+            command: SCIENCE_STATUS_COMMAND,
+            subsystem: SUBSYSTEM,
+            status,
+            available,
+            feature: ScienceFeatureStatus::current(),
+            capabilities: science_capabilities(available),
+            degradations: science_degradations(status),
+            next_actions: science_next_actions(status),
+        }
+    }
+}
+
+/// Compile-time science feature state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScienceFeatureStatus {
+    pub name: &'static str,
+    pub enabled: bool,
+    pub description: &'static str,
+}
+
+impl ScienceFeatureStatus {
+    #[must_use]
+    pub const fn current() -> Self {
+        Self {
+            name: SCIENCE_ANALYTICS_FEATURE,
+            enabled: cfg!(feature = "science-analytics"),
+            description: "Optional offline analytics for evaluation metrics and diagnostics.",
+        }
+    }
+}
+
+/// Status for an individual science capability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScienceCapabilityState {
+    /// Capability is usable.
+    Available,
+    /// Capability is unavailable with a stable degradation code.
+    Degraded,
+}
+
+impl ScienceCapabilityState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Degraded => "degraded",
+        }
+    }
+}
+
+/// Deterministic status for a named science capability.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScienceCapabilityStatus {
+    pub name: &'static str,
+    pub state: ScienceCapabilityState,
+    pub required_feature: &'static str,
+    pub degradation_code: Option<&'static str>,
+    pub description: &'static str,
+}
+
+impl ScienceCapabilityStatus {
+    #[must_use]
+    pub const fn available(name: &'static str, description: &'static str) -> Self {
+        Self {
+            name,
+            state: ScienceCapabilityState::Available,
+            required_feature: SCIENCE_ANALYTICS_FEATURE,
+            degradation_code: None,
+            description,
+        }
+    }
+
+    #[must_use]
+    pub const fn degraded(name: &'static str, description: &'static str) -> Self {
+        Self {
+            name,
+            state: ScienceCapabilityState::Degraded,
+            required_feature: SCIENCE_ANALYTICS_FEATURE,
+            degradation_code: Some(DEGRADATION_CODE_NOT_COMPILED),
+            description,
+        }
+    }
+}
+
+/// Stable degradation entry for science status diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScienceDegradation {
+    pub code: &'static str,
+    pub message: &'static str,
+    pub repair: &'static str,
+}
+
+impl ScienceDegradation {
+    #[must_use]
+    pub const fn not_compiled() -> Self {
+        Self {
+            code: DEGRADATION_CODE_NOT_COMPILED,
+            message: "Science analytics were not compiled into this binary.",
+            repair: "Rebuild ee with --features science-analytics.",
+        }
+    }
+
+    #[must_use]
+    pub const fn backend_unavailable() -> Self {
+        Self {
+            code: DEGRADATION_CODE_BACKEND_UNAVAILABLE,
+            message: "Science analytics backend is unavailable.",
+            repair: "Run ee doctor --json and inspect science diagnostics.",
+        }
+    }
+
+    #[must_use]
+    pub const fn input_too_large() -> Self {
+        Self {
+            code: DEGRADATION_CODE_INPUT_TOO_LARGE,
+            message: "Science analytics input exceeds the supported size.",
+            repair: "Reduce the science analytics input size and retry.",
+        }
+    }
+
+    #[must_use]
+    pub const fn budget_exceeded() -> Self {
+        Self {
+            code: DEGRADATION_CODE_BUDGET_EXCEEDED,
+            message: "Science analytics budget was exhausted.",
+            repair: "Increase the science analytics budget or use a smaller input.",
+        }
+    }
+}
+
+#[must_use]
+pub fn science_status_report() -> ScienceStatusReport {
+    ScienceStatusReport::current()
+}
+
+fn science_capabilities(available: bool) -> Vec<ScienceCapabilityStatus> {
+    const EVALUATION_METRICS: &str =
+        "Deterministic precision, recall, and F1 metrics for evaluation runs.";
+    const CLUSTERING_DIAGNOSTICS: &str =
+        "Deterministic clustering diagnostics for consolidation candidates.";
+
+    if available {
+        vec![
+            ScienceCapabilityStatus::available("clustering_diagnostics", CLUSTERING_DIAGNOSTICS),
+            ScienceCapabilityStatus::available("evaluation_metrics", EVALUATION_METRICS),
+        ]
+    } else {
+        vec![
+            ScienceCapabilityStatus::degraded("clustering_diagnostics", CLUSTERING_DIAGNOSTICS),
+            ScienceCapabilityStatus::degraded("evaluation_metrics", EVALUATION_METRICS),
+        ]
+    }
+}
+
+fn science_degradations(status: ScienceStatus) -> Vec<ScienceDegradation> {
+    match status {
+        ScienceStatus::Available => Vec::new(),
+        ScienceStatus::NotCompiled => vec![ScienceDegradation::not_compiled()],
+        ScienceStatus::BackendUnavailable => vec![ScienceDegradation::backend_unavailable()],
+    }
+}
+
+fn science_next_actions(status: ScienceStatus) -> Vec<&'static str> {
+    match status {
+        ScienceStatus::Available => Vec::new(),
+        ScienceStatus::NotCompiled => vec!["Rebuild ee with --features science-analytics."],
+        ScienceStatus::BackendUnavailable => {
+            vec!["Inspect science backend diagnostics and rebuild if required."]
+        }
+    }
+}
+
 #[cfg(feature = "science-analytics")]
 mod enabled {
     //! Science analytics implementation when feature is enabled.
@@ -93,9 +305,11 @@ mod enabled {
     //! This submodule contains the actual implementations that depend on
     //! science/numerical crates. It is only compiled when the feature is on.
 
-    use super::*;
+    use std::collections::BTreeMap;
 
-    /// Placeholder for science-backed evaluation metrics.
+    const COSINE_CLUSTER_THRESHOLD: f64 = 0.8;
+
+    /// Science-backed evaluation metrics.
     #[derive(Clone, Debug, Default)]
     pub struct EvaluationMetrics {
         pub precision: Option<f64>,
@@ -105,13 +319,52 @@ mod enabled {
 
     impl EvaluationMetrics {
         #[must_use]
-        pub fn compute(_predictions: &[bool], _ground_truth: &[bool]) -> Self {
-            // Placeholder - actual implementation will use science crates
-            Self::default()
+        pub fn compute(predictions: &[bool], ground_truth: &[bool]) -> Self {
+            if predictions.is_empty() || predictions.len() != ground_truth.len() {
+                return Self::default();
+            }
+
+            let mut true_positive = 0_u32;
+            let mut false_positive = 0_u32;
+            let mut false_negative = 0_u32;
+
+            for (&predicted, &actual) in predictions.iter().zip(ground_truth.iter()) {
+                match (predicted, actual) {
+                    (true, true) => true_positive += 1,
+                    (true, false) => false_positive += 1,
+                    (false, true) => false_negative += 1,
+                    (false, false) => {}
+                }
+            }
+
+            let predicted_positive = true_positive + false_positive;
+            let actual_positive = true_positive + false_negative;
+            let precision = ratio(true_positive, predicted_positive);
+            let recall = ratio(true_positive, actual_positive);
+            let f1_score = match (precision, recall) {
+                (Some(precision), Some(recall)) if precision + recall > 0.0 => {
+                    Some((2.0 * precision * recall) / (precision + recall))
+                }
+                _ => None,
+            };
+
+            Self {
+                precision,
+                recall,
+                f1_score,
+            }
         }
     }
 
-    /// Placeholder for clustering diagnostics.
+    fn ratio(numerator: u32, denominator: u32) -> Option<f64> {
+        if denominator == 0 {
+            None
+        } else {
+            Some(f64::from(numerator) / f64::from(denominator))
+        }
+    }
+
+    /// Science-backed clustering diagnostics.
     #[derive(Clone, Debug, Default)]
     pub struct ClusteringDiagnostics {
         pub cluster_count: usize,
@@ -120,10 +373,175 @@ mod enabled {
 
     impl ClusteringDiagnostics {
         #[must_use]
-        pub fn compute(_embeddings: &[Vec<f32>]) -> Self {
-            // Placeholder - actual implementation will use science crates
-            Self::default()
+        pub fn compute(embeddings: &[Vec<f32>]) -> Self {
+            if !valid_embeddings(embeddings) {
+                return Self::default();
+            }
+
+            let labels = cluster_labels(embeddings);
+            let cluster_count = labels.iter().copied().max().map_or(0, |max| max + 1);
+            let silhouette_score = silhouette_score(embeddings, &labels, cluster_count);
+
+            Self {
+                cluster_count,
+                silhouette_score,
+            }
         }
+    }
+
+    fn valid_embeddings(embeddings: &[Vec<f32>]) -> bool {
+        let Some(first) = embeddings.first() else {
+            return false;
+        };
+        let dimension = first.len();
+        dimension > 0
+            && embeddings.iter().all(|embedding| {
+                embedding.len() == dimension
+                    && embedding.iter().all(|value| value.is_finite())
+                    && vector_norm(embedding) > f64::EPSILON
+            })
+    }
+
+    fn cluster_labels(embeddings: &[Vec<f32>]) -> Vec<usize> {
+        let mut parents: Vec<_> = (0..embeddings.len()).collect();
+        for (left_index, left_embedding) in embeddings.iter().enumerate() {
+            for (right_index, right_embedding) in embeddings.iter().enumerate().skip(left_index + 1)
+            {
+                if cosine_similarity(left_embedding, right_embedding) >= COSINE_CLUSTER_THRESHOLD {
+                    union(&mut parents, left_index, right_index);
+                }
+            }
+        }
+
+        let mut root_to_label = BTreeMap::new();
+        let mut next_label = 0_usize;
+        (0..embeddings.len())
+            .map(|index| {
+                let root = find(&mut parents, index);
+                *root_to_label.entry(root).or_insert_with(|| {
+                    let label = next_label;
+                    next_label += 1;
+                    label
+                })
+            })
+            .collect()
+    }
+
+    fn union(parents: &mut [usize], left: usize, right: usize) {
+        let left_root = find(parents, left);
+        let right_root = find(parents, right);
+        if left_root != right_root {
+            let keep = left_root.min(right_root);
+            let replace = left_root.max(right_root);
+            if let Some(parent) = parents.get_mut(replace) {
+                *parent = keep;
+            }
+        }
+    }
+
+    fn find(parents: &mut [usize], index: usize) -> usize {
+        let Some(&parent) = parents.get(index) else {
+            return index;
+        };
+        if parent == index {
+            index
+        } else {
+            let root = find(parents, parent);
+            if let Some(parent) = parents.get_mut(index) {
+                *parent = root;
+            }
+            root
+        }
+    }
+
+    fn silhouette_score(
+        embeddings: &[Vec<f32>],
+        labels: &[usize],
+        cluster_count: usize,
+    ) -> Option<f64> {
+        if cluster_count < 2 || embeddings.len() < 2 {
+            return None;
+        }
+
+        let mut total = 0.0_f64;
+        for (index, current_embedding) in embeddings.iter().enumerate() {
+            let Some(&own_label) = labels.get(index) else {
+                continue;
+            };
+            let same_cluster_distances: Vec<_> = embeddings
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| {
+                    *other != index && labels.get(*other).is_some_and(|label| *label == own_label)
+                })
+                .map(|(_, embedding)| cosine_distance(current_embedding, embedding))
+                .collect();
+            let a = mean_distance(&same_cluster_distances).unwrap_or(0.0);
+
+            let mut nearest_other_cluster: Option<f64> = None;
+            for label in 0..cluster_count {
+                if label == own_label {
+                    continue;
+                }
+                let distances: Vec<_> = embeddings
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, _)| labels.get(*other).is_some_and(|other| *other == label))
+                    .map(|(_, embedding)| cosine_distance(current_embedding, embedding))
+                    .collect();
+                if let Some(distance) = mean_distance(&distances) {
+                    nearest_other_cluster = Some(match nearest_other_cluster {
+                        Some(current) if current < distance => current,
+                        _ => distance,
+                    });
+                }
+            }
+
+            let Some(b) = nearest_other_cluster else {
+                continue;
+            };
+            let denominator = a.max(b);
+            if denominator > f64::EPSILON {
+                total += (b - a) / denominator;
+            }
+        }
+
+        Some(total / sample_count(embeddings))
+    }
+
+    fn mean_distance(values: &[f64]) -> Option<f64> {
+        if values.is_empty() {
+            None
+        } else {
+            Some(values.iter().sum::<f64>() / sample_count(values))
+        }
+    }
+
+    fn sample_count<T>(values: &[T]) -> f64 {
+        values.iter().fold(0.0, |count, _| count + 1.0)
+    }
+
+    fn cosine_distance(left: &[f32], right: &[f32]) -> f64 {
+        (1.0 - cosine_similarity(left, right)).clamp(0.0, 2.0)
+    }
+
+    fn cosine_similarity(left: &[f32], right: &[f32]) -> f64 {
+        dot_product(left, right) / (vector_norm(left) * vector_norm(right))
+    }
+
+    fn dot_product(left: &[f32], right: &[f32]) -> f64 {
+        left.iter()
+            .zip(right.iter())
+            .map(|(left, right)| f64::from(*left) * f64::from(*right))
+            .sum()
+    }
+
+    fn vector_norm(values: &[f32]) -> f64 {
+        values
+            .iter()
+            .map(|value| f64::from(*value).powi(2))
+            .sum::<f64>()
+            .sqrt()
     }
 }
 
@@ -181,6 +599,26 @@ mod tests {
             Ok(())
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
+        }
+    }
+
+    fn capability<'a>(
+        report: &'a ScienceStatusReport,
+        name: &str,
+    ) -> Result<&'a ScienceCapabilityStatus, String> {
+        report
+            .capabilities
+            .iter()
+            .find(|capability| capability.name == name)
+            .ok_or_else(|| format!("missing capability {name}"))
+    }
+
+    #[cfg(feature = "science-analytics")]
+    fn ensure_close(actual: Option<f64>, expected: f64, ctx: &str) -> TestResult {
+        match actual {
+            Some(actual) if (actual - expected).abs() <= 1.0e-12 => Ok(()),
+            Some(actual) => Err(format!("{ctx}: expected {expected:?}, got {actual:?}")),
+            None => Err(format!("{ctx}: expected {expected:?}, got None")),
         }
     }
 
@@ -253,6 +691,153 @@ mod tests {
     }
 
     #[test]
+    fn science_status_report_contract_is_stable() -> TestResult {
+        let report = science_status_report();
+        ensure(
+            report.schema,
+            SCIENCE_STATUS_SCHEMA_V1,
+            "science status schema",
+        )?;
+        ensure(
+            report.command,
+            SCIENCE_STATUS_COMMAND,
+            "science status command",
+        )?;
+        ensure(report.subsystem, SUBSYSTEM, "science status subsystem")?;
+        ensure(
+            report.feature.name,
+            SCIENCE_ANALYTICS_FEATURE,
+            "science feature name",
+        )?;
+        ensure(
+            report.feature.enabled,
+            cfg!(feature = "science-analytics"),
+            "science feature enabled",
+        )?;
+        ensure(
+            report.available,
+            cfg!(feature = "science-analytics"),
+            "science report availability",
+        )?;
+        ensure(report.capabilities.len(), 2, "science capability count")?;
+        ensure(
+            capability(&report, "clustering_diagnostics")?.required_feature,
+            SCIENCE_ANALYTICS_FEATURE,
+            "clustering required feature",
+        )?;
+        ensure(
+            capability(&report, "evaluation_metrics")?.required_feature,
+            SCIENCE_ANALYTICS_FEATURE,
+            "metrics required feature",
+        )
+    }
+
+    #[cfg(not(feature = "science-analytics"))]
+    #[test]
+    fn science_status_report_degrades_without_feature() -> TestResult {
+        let report = ScienceStatusReport::current();
+        ensure(report.status, ScienceStatus::NotCompiled, "status")?;
+        ensure(report.degradations.len(), 1, "degradation count")?;
+        ensure(
+            report.degradations.iter().map(|entry| entry.code).collect(),
+            vec![DEGRADATION_CODE_NOT_COMPILED],
+            "degradation codes",
+        )?;
+        ensure(
+            capability(&report, "clustering_diagnostics")?.state,
+            ScienceCapabilityState::Degraded,
+            "clustering degraded",
+        )?;
+        ensure(
+            capability(&report, "evaluation_metrics")?.state,
+            ScienceCapabilityState::Degraded,
+            "metrics degraded",
+        )?;
+        ensure(
+            report.next_actions,
+            vec!["Rebuild ee with --features science-analytics."],
+            "next actions",
+        )
+    }
+
+    #[cfg(feature = "science-analytics")]
+    #[test]
+    fn science_status_report_is_available_with_feature() -> TestResult {
+        let report = ScienceStatusReport::current();
+        ensure(report.status, ScienceStatus::Available, "status")?;
+        ensure(report.degradations.is_empty(), true, "degradations empty")?;
+        ensure(report.next_actions.is_empty(), true, "next actions empty")?;
+        ensure(
+            capability(&report, "clustering_diagnostics")?.state,
+            ScienceCapabilityState::Available,
+            "clustering available",
+        )?;
+        ensure(
+            capability(&report, "evaluation_metrics")?.state,
+            ScienceCapabilityState::Available,
+            "metrics available",
+        )
+    }
+
+    #[test]
+    fn science_capability_state_strings_are_stable() -> TestResult {
+        ensure(
+            ScienceCapabilityState::Available.as_str(),
+            "available",
+            "available state",
+        )?;
+        ensure(
+            ScienceCapabilityState::Degraded.as_str(),
+            "degraded",
+            "degraded state",
+        )
+    }
+
+    #[test]
+    fn science_backend_unavailable_degradation_is_stable() -> TestResult {
+        ensure(
+            super::science_degradations(ScienceStatus::BackendUnavailable)
+                .iter()
+                .map(|entry| entry.code)
+                .collect(),
+            vec![DEGRADATION_CODE_BACKEND_UNAVAILABLE],
+            "backend unavailable degradation",
+        )?;
+        ensure(
+            super::science_next_actions(ScienceStatus::BackendUnavailable),
+            vec!["Inspect science backend diagnostics and rebuild if required."],
+            "backend unavailable next action",
+        )
+    }
+
+    #[test]
+    fn science_operational_degradation_entries_are_stable() -> TestResult {
+        let entries = [
+            ScienceDegradation::backend_unavailable(),
+            ScienceDegradation::input_too_large(),
+            ScienceDegradation::budget_exceeded(),
+        ];
+        ensure(
+            entries.iter().map(|entry| entry.code).collect(),
+            vec![
+                DEGRADATION_CODE_BACKEND_UNAVAILABLE,
+                DEGRADATION_CODE_INPUT_TOO_LARGE,
+                DEGRADATION_CODE_BUDGET_EXCEEDED,
+            ],
+            "operational degradation codes",
+        )?;
+        ensure(
+            entries.iter().map(|entry| entry.repair).collect(),
+            vec![
+                "Run ee doctor --json and inspect science diagnostics.",
+                "Reduce the science analytics input size and retry.",
+                "Increase the science analytics budget or use a smaller input.",
+            ],
+            "operational degradation repairs",
+        )
+    }
+
+    #[test]
     fn evaluation_metrics_default_is_empty() -> TestResult {
         let metrics = EvaluationMetrics::default();
         ensure(metrics.precision, None, "precision is None")?;
@@ -260,10 +845,198 @@ mod tests {
         ensure(metrics.f1_score, None, "f1_score is None")
     }
 
+    #[cfg(not(feature = "science-analytics"))]
+    #[test]
+    fn evaluation_metrics_compute_degrades_when_science_is_not_compiled() -> TestResult {
+        let metrics = EvaluationMetrics::compute(&[true, false, true], &[true, true, false]);
+        ensure(metrics.precision, None, "precision remains unavailable")?;
+        ensure(metrics.recall, None, "recall remains unavailable")?;
+        ensure(metrics.f1_score, None, "f1 remains unavailable")
+    }
+
+    #[cfg(not(feature = "science-analytics"))]
+    #[test]
+    fn science_analytics_is_not_enabled_by_default() -> TestResult {
+        ensure(
+            cfg!(feature = "science-analytics"),
+            false,
+            "default feature set keeps science disabled",
+        )
+    }
+
+    #[cfg(feature = "science-analytics")]
+    #[test]
+    fn science_metric_reference_parity_balanced_case() -> TestResult {
+        let metrics = EvaluationMetrics::compute(
+            &[true, true, false, true, false, false],
+            &[true, false, true, true, false, false],
+        );
+
+        ensure_close(metrics.precision, 2.0 / 3.0, "precision parity")?;
+        ensure_close(metrics.recall, 2.0 / 3.0, "recall parity")?;
+        ensure_close(metrics.f1_score, 2.0 / 3.0, "f1 parity")
+    }
+
+    #[cfg(feature = "science-analytics")]
+    #[test]
+    fn science_metric_reference_parity_perfect_case() -> TestResult {
+        let metrics = EvaluationMetrics::compute(&[true, false, true], &[true, false, true]);
+
+        ensure_close(metrics.precision, 1.0, "precision perfect")?;
+        ensure_close(metrics.recall, 1.0, "recall perfect")?;
+        ensure_close(metrics.f1_score, 1.0, "f1 perfect")
+    }
+
+    #[cfg(feature = "science-analytics")]
+    #[test]
+    fn science_metric_reference_parity_handles_empty_and_mismatched_inputs() -> TestResult {
+        let empty = EvaluationMetrics::compute(&[], &[]);
+        ensure(empty.precision, None, "empty precision")?;
+        ensure(empty.recall, None, "empty recall")?;
+        ensure(empty.f1_score, None, "empty f1")?;
+
+        let mismatched = EvaluationMetrics::compute(&[true, false], &[true]);
+        ensure(mismatched.precision, None, "mismatched precision")?;
+        ensure(mismatched.recall, None, "mismatched recall")?;
+        ensure(mismatched.f1_score, None, "mismatched f1")
+    }
+
+    #[cfg(feature = "science-analytics")]
+    #[test]
+    fn science_metric_reference_parity_handles_undefined_denominators() -> TestResult {
+        let no_positive_predictions =
+            EvaluationMetrics::compute(&[false, false, false], &[true, false, true]);
+        ensure(
+            no_positive_predictions.precision,
+            None,
+            "precision without predicted positives",
+        )?;
+        ensure_close(
+            no_positive_predictions.recall,
+            0.0,
+            "recall without predicted positives",
+        )?;
+        ensure(
+            no_positive_predictions.f1_score,
+            None,
+            "f1 without precision",
+        )?;
+
+        let no_actual_positives = EvaluationMetrics::compute(&[true, false], &[false, false]);
+        ensure_close(
+            no_actual_positives.precision,
+            0.0,
+            "precision without true positives",
+        )?;
+        ensure(
+            no_actual_positives.recall,
+            None,
+            "recall without actual positives",
+        )?;
+        ensure(no_actual_positives.f1_score, None, "f1 without recall")
+    }
+
     #[test]
     fn clustering_diagnostics_default_is_empty() -> TestResult {
         let diag = ClusteringDiagnostics::default();
         ensure(diag.cluster_count, 0, "cluster_count is 0")?;
         ensure(diag.silhouette_score, None, "silhouette_score is None")
+    }
+
+    #[cfg(not(feature = "science-analytics"))]
+    #[test]
+    fn clustering_diagnostics_compute_degrades_when_science_is_not_compiled() -> TestResult {
+        let diag = ClusteringDiagnostics::compute(&[
+            vec![1.0, 0.0],
+            vec![0.99, 0.1],
+            vec![-1.0, 0.0],
+            vec![-0.99, -0.1],
+        ]);
+
+        ensure(diag.cluster_count, 0, "cluster count remains unavailable")?;
+        ensure(
+            diag.silhouette_score,
+            None,
+            "silhouette remains unavailable",
+        )
+    }
+
+    #[cfg(feature = "science-analytics")]
+    #[test]
+    fn clustering_diagnostics_reference_parity_two_clear_clusters() -> TestResult {
+        let diag = ClusteringDiagnostics::compute(&[
+            vec![1.0, 0.0],
+            vec![0.99, 0.1],
+            vec![-1.0, 0.0],
+            vec![-0.99, -0.1],
+        ]);
+
+        ensure(diag.cluster_count, 2, "cluster count")?;
+        match diag.silhouette_score {
+            Some(score) if score > 0.9 && score <= 1.0 => Ok(()),
+            other => Err(format!("expected high silhouette score, got {other:?}")),
+        }
+    }
+
+    #[cfg(feature = "science-analytics")]
+    #[test]
+    fn clustering_diagnostics_reference_parity_single_cluster_has_no_silhouette() -> TestResult {
+        let diag =
+            ClusteringDiagnostics::compute(&[vec![1.0, 0.0], vec![0.98, 0.1], vec![0.95, 0.2]]);
+
+        ensure(diag.cluster_count, 1, "single cluster count")?;
+        ensure(
+            diag.silhouette_score,
+            None,
+            "single cluster silhouette is undefined",
+        )
+    }
+
+    #[cfg(feature = "science-analytics")]
+    #[test]
+    fn clustering_diagnostics_rejects_invalid_embeddings() -> TestResult {
+        let empty = ClusteringDiagnostics::compute(&[]);
+        ensure(empty.cluster_count, 0, "empty cluster count")?;
+        ensure(empty.silhouette_score, None, "empty silhouette")?;
+
+        let mismatched = ClusteringDiagnostics::compute(&[vec![1.0, 0.0], vec![1.0]]);
+        ensure(mismatched.cluster_count, 0, "mismatched cluster count")?;
+
+        let non_finite = ClusteringDiagnostics::compute(&[vec![1.0, f32::NAN]]);
+        ensure(non_finite.cluster_count, 0, "non-finite cluster count")?;
+
+        let zero_vector = ClusteringDiagnostics::compute(&[vec![0.0, 0.0]]);
+        ensure(zero_vector.cluster_count, 0, "zero-vector cluster count")
+    }
+
+    #[cfg(feature = "science-analytics")]
+    #[test]
+    fn clustering_diagnostics_are_deterministic_under_input_order() -> TestResult {
+        let first = ClusteringDiagnostics::compute(&[
+            vec![1.0, 0.0],
+            vec![0.99, 0.1],
+            vec![-1.0, 0.0],
+            vec![-0.99, -0.1],
+        ]);
+        let reordered = ClusteringDiagnostics::compute(&[
+            vec![-0.99, -0.1],
+            vec![0.99, 0.1],
+            vec![-1.0, 0.0],
+            vec![1.0, 0.0],
+        ]);
+
+        ensure(
+            reordered.cluster_count,
+            first.cluster_count,
+            "cluster count",
+        )?;
+        let Some(expected) = first.silhouette_score else {
+            return Err("expected first silhouette score".to_owned());
+        };
+        ensure_close(
+            reordered.silhouette_score,
+            expected,
+            "deterministic silhouette",
+        )
     }
 }

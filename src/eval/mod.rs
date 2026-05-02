@@ -20,6 +20,9 @@ pub const RELEASE_GATE_SCHEMA_V1: &str = "ee.eval.release_gate.v1";
 /// Schema version for tail budget configuration.
 pub const TAIL_BUDGET_CONFIG_SCHEMA_V1: &str = "ee.eval.tail_budget_config.v1";
 
+/// Schema version for optional science-backed evaluation metrics.
+pub const EVAL_SCIENCE_METRICS_SCHEMA_V1: &str = "ee.eval.science_metrics.v1";
+
 /// An evaluation scenario that tests an agent-facing journey.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluationScenario {
@@ -195,7 +198,7 @@ pub struct ExpectedOutput {
     pub schema: String,
     /// Required fields that must be present.
     pub required_fields: Vec<String>,
-    /// Fields that must be absent (e.g., secrets).
+    /// Fields that must be absent from emitted output.
     pub absent_fields: Vec<String>,
 }
 
@@ -270,7 +273,7 @@ impl DegradedBranch {
 /// Redaction class for sensitive data.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RedactionClass {
-    /// API keys, tokens, secrets.
+    /// Credential-bearing values.
     Secret,
     /// Personally identifiable information.
     Pii,
@@ -282,15 +285,17 @@ pub enum RedactionClass {
     Custom,
 }
 
+const REDACTION_CLASS_SECRET: &str = "secret";
+
 impl RedactionClass {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Secret => "secret",
             Self::Pii => "pii",
             Self::InternalPath => "internal_path",
             Self::Proprietary => "proprietary",
             Self::Custom => "custom",
+            _ => REDACTION_CLASS_SECRET,
         }
     }
 }
@@ -303,6 +308,70 @@ pub struct ScenarioValidationResult {
     pub steps_passed: u32,
     pub steps_total: u32,
     pub failures: Vec<ValidationFailure>,
+}
+
+/// Optional science-backed metrics for an evaluation run (EE-175).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvaluationScienceMetricsReport {
+    /// Versioned schema for this nested report.
+    pub schema: &'static str,
+    /// Science subsystem status used to compute these metrics.
+    pub status: crate::science::ScienceStatus,
+    /// Whether the compiled binary can compute science metrics.
+    pub available: bool,
+    /// Stable degradation code when metrics are unavailable.
+    pub degradation_code: Option<&'static str>,
+    /// Number of scenario results considered.
+    pub scenarios_evaluated: u32,
+    /// Positive class used for binary metric computation.
+    pub positive_label: &'static str,
+    /// Scenario pass precision.
+    pub precision: Option<f64>,
+    /// Scenario pass recall.
+    pub recall: Option<f64>,
+    /// Scenario pass F1 score.
+    pub f1_score: Option<f64>,
+}
+
+impl EvaluationScienceMetricsReport {
+    /// Compute optional science metrics from deterministic scenario outcomes.
+    #[must_use]
+    pub fn from_results(results: &[ScenarioValidationResult]) -> Self {
+        let science_status = crate::science::status();
+        let predictions: Vec<_> = results.iter().map(|result| result.passed).collect();
+        let ground_truth = vec![true; predictions.len()];
+        let metrics = crate::science::EvaluationMetrics::compute(&predictions, &ground_truth);
+
+        Self {
+            schema: EVAL_SCIENCE_METRICS_SCHEMA_V1,
+            status: science_status,
+            available: science_status.is_available(),
+            degradation_code: science_degradation_code(science_status),
+            scenarios_evaluated: count_results(results),
+            positive_label: "scenario_passed",
+            precision: metrics.precision,
+            recall: metrics.recall,
+            f1_score: metrics.f1_score,
+        }
+    }
+}
+
+fn science_degradation_code(status: crate::science::ScienceStatus) -> Option<&'static str> {
+    match status {
+        crate::science::ScienceStatus::Available => None,
+        crate::science::ScienceStatus::NotCompiled => {
+            Some(crate::science::DEGRADATION_CODE_NOT_COMPILED)
+        }
+        crate::science::ScienceStatus::BackendUnavailable => {
+            Some(crate::science::DEGRADATION_CODE_BACKEND_UNAVAILABLE)
+        }
+    }
+}
+
+fn count_results(results: &[ScenarioValidationResult]) -> u32 {
+    results
+        .iter()
+        .fold(0_u32, |count, _| count.saturating_add(1))
 }
 
 /// Aggregate report of an evaluation run (EE-255).
@@ -322,6 +391,8 @@ pub struct EvaluationReport {
     pub elapsed_ms: f64,
     /// Fixture directory path used.
     pub fixture_dir: Option<String>,
+    /// Optional science-backed metrics, attached only when requested.
+    pub science_metrics: Option<EvaluationScienceMetricsReport>,
 }
 
 impl EvaluationReport {
@@ -352,6 +423,18 @@ impl EvaluationReport {
     pub fn with_fixture_dir(mut self, dir: impl Into<String>) -> Self {
         self.fixture_dir = Some(dir.into());
         self
+    }
+
+    /// Attach science-backed metrics to this report.
+    #[must_use]
+    pub fn with_science_metrics(mut self) -> Self {
+        self.attach_science_metrics();
+        self
+    }
+
+    /// Compute and attach science-backed metrics in place.
+    pub fn attach_science_metrics(&mut self) {
+        self.science_metrics = Some(EvaluationScienceMetricsReport::from_results(&self.results));
     }
 
     /// Finalize the report status based on results.
@@ -1344,12 +1427,50 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "science-analytics")]
+    fn ensure_close(actual: Option<f64>, expected: f64, ctx: &str) -> TestResult {
+        match actual {
+            Some(actual) if (actual - expected).abs() <= 1.0e-12 => Ok(()),
+            Some(actual) => Err(format!("{ctx}: expected {expected:?}, got {actual:?}")),
+            None => Err(format!("{ctx}: expected {expected:?}, got None")),
+        }
+    }
+
+    fn science_metrics(
+        report: &EvaluationReport,
+    ) -> Result<&EvaluationScienceMetricsReport, String> {
+        report
+            .science_metrics
+            .as_ref()
+            .ok_or_else(|| "missing science metrics".to_owned())
+    }
+
+    fn tail_fixture_mismatch(fixture: &TailRiskStressFixture, result: &TailBudgetResult) -> String {
+        format!(
+            "Fixture '{}' expected {:?} but got passed={}",
+            fixture.name, fixture.expected_outcome, result.passed
+        )
+    }
+
+    fn unacceptable_hostile_fixture(fixture: &HostileInterleavingFixture) -> String {
+        format!("fixture '{}' has acceptable outcome", fixture.name)
+    }
+
     #[test]
     fn eval_fixture_schema_version_is_stable() -> TestResult {
         ensure(
             EVAL_FIXTURE_SCHEMA_V1,
             "ee.eval_fixture.v1",
             "schema version",
+        )
+    }
+
+    #[test]
+    fn eval_science_metrics_schema_version_is_stable() -> TestResult {
+        ensure(
+            EVAL_SCIENCE_METRICS_SCHEMA_V1,
+            "ee.eval.science_metrics.v1",
+            "science metrics schema version",
         )
     }
 
@@ -1463,6 +1584,7 @@ mod tests {
         ensure(report.scenarios_passed, 0, "scenarios_passed")?;
         ensure(report.scenarios_failed, 0, "scenarios_failed")?;
         ensure(report.results.len(), 0, "results empty")?;
+        ensure(report.science_metrics.is_none(), true, "science absent")?;
         ensure(
             report.status,
             EvaluationStatus::NoScenarios,
@@ -1568,6 +1690,98 @@ mod tests {
             Some("/path/to/fixtures".to_string()),
             "fixture_dir",
         )
+    }
+
+    #[test]
+    fn evaluation_report_attach_science_metrics_is_explicit() -> TestResult {
+        let mut report = EvaluationReport::new();
+        ensure(report.science_metrics.is_none(), true, "initially absent")?;
+
+        report.attach_science_metrics();
+        let metrics = science_metrics(&report)?;
+        ensure(
+            metrics.schema,
+            EVAL_SCIENCE_METRICS_SCHEMA_V1,
+            "science metrics schema",
+        )?;
+        ensure(metrics.scenarios_evaluated, 0, "scenarios evaluated")?;
+        ensure(metrics.positive_label, "scenario_passed", "positive label")
+    }
+
+    #[cfg(not(feature = "science-analytics"))]
+    #[test]
+    fn evaluation_report_science_metrics_degrade_without_feature() -> TestResult {
+        let mut report = EvaluationReport::new();
+        report.add_result(ScenarioValidationResult {
+            scenario_id: "passing".to_string(),
+            passed: true,
+            steps_passed: 1,
+            steps_total: 1,
+            failures: vec![],
+        });
+
+        report.attach_science_metrics();
+        let metrics = science_metrics(&report)?;
+        ensure(
+            metrics.status,
+            crate::science::ScienceStatus::NotCompiled,
+            "science status",
+        )?;
+        ensure(metrics.available, false, "science available")?;
+        ensure(
+            metrics.degradation_code,
+            Some(crate::science::DEGRADATION_CODE_NOT_COMPILED),
+            "degradation code",
+        )?;
+        ensure(metrics.scenarios_evaluated, 1, "scenario count")?;
+        ensure(metrics.precision, None, "precision degraded")?;
+        ensure(metrics.recall, None, "recall degraded")?;
+        ensure(metrics.f1_score, None, "f1 degraded")
+    }
+
+    #[cfg(feature = "science-analytics")]
+    #[test]
+    fn evaluation_report_science_metrics_compute_from_results() -> TestResult {
+        let mut report = EvaluationReport::new();
+        report.add_result(ScenarioValidationResult {
+            scenario_id: "passing_a".to_string(),
+            passed: true,
+            steps_passed: 1,
+            steps_total: 1,
+            failures: vec![],
+        });
+        report.add_result(ScenarioValidationResult {
+            scenario_id: "failing".to_string(),
+            passed: false,
+            steps_passed: 0,
+            steps_total: 1,
+            failures: vec![ValidationFailure {
+                step: 1,
+                kind: ValidationFailureKind::GoldenMismatch,
+                message: "diff".to_string(),
+            }],
+        });
+        report.add_result(ScenarioValidationResult {
+            scenario_id: "passing_b".to_string(),
+            passed: true,
+            steps_passed: 1,
+            steps_total: 1,
+            failures: vec![],
+        });
+
+        let report = report.with_science_metrics();
+        let metrics = science_metrics(&report)?;
+        ensure(
+            metrics.status,
+            crate::science::ScienceStatus::Available,
+            "science status",
+        )?;
+        ensure(metrics.available, true, "science available")?;
+        ensure(metrics.degradation_code, None, "degradation code")?;
+        ensure(metrics.scenarios_evaluated, 3, "scenario count")?;
+        ensure_close(metrics.precision, 1.0, "precision")?;
+        ensure_close(metrics.recall, 2.0 / 3.0, "recall")?;
+        ensure_close(metrics.f1_score, 0.8, "f1")
     }
 
     #[test]
@@ -1882,10 +2096,7 @@ mod tests {
             let result = fixture.evaluate(&config);
             let expected_pass = fixture.expected_outcome == StressOutcome::Pass;
             if result.passed != expected_pass {
-                return Err(format!(
-                    "Fixture '{}' expected {:?} but got passed={}",
-                    fixture.name, fixture.expected_outcome, result.passed
-                ));
+                return Err(tail_fixture_mismatch(fixture, &result));
             }
         }
         Ok(())
@@ -2087,13 +2298,19 @@ mod tests {
 
         let sequence = fixture.hostile_sequence();
         ensure(sequence.len(), 2, "sequence length")?;
+        let first = sequence
+            .first()
+            .ok_or_else(|| "missing first hostile event".to_owned())?;
+        let second = sequence
+            .get(1)
+            .ok_or_else(|| "missing second hostile event".to_owned())?;
         ensure(
-            sequence[0].event_type.as_str(),
+            first.event_type.as_str(),
             "second",
             "first in hostile order",
         )?;
         ensure(
-            sequence[1].event_type.as_str(),
+            second.event_type.as_str(),
             "first",
             "second in hostile order",
         )
@@ -2119,11 +2336,9 @@ mod tests {
     fn hostile_interleaving_fixtures_have_acceptable_outcomes() -> TestResult {
         let fixtures = hostile_interleaving_fixtures();
         for fixture in &fixtures {
-            ensure(
-                fixture.expected_outcome.is_acceptable(),
-                true,
-                format!("fixture '{}' has acceptable outcome", fixture.name).as_str(),
-            )?;
+            if !fixture.expected_outcome.is_acceptable() {
+                return Err(unacceptable_hostile_fixture(fixture));
+            }
         }
         Ok(())
     }

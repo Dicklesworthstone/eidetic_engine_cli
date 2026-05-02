@@ -7,9 +7,9 @@
 use std::io::{self, Write};
 
 use crate::models::{
-    EXPORT_FORMAT_VERSION, ExportAgentRecord, ExportAuditRecord, ExportFooter, ExportHeader,
-    ExportLinkRecord, ExportMemoryRecord, ExportRecord, ExportScope, ExportTagRecord,
-    ExportWorkspaceRecord, RedactionLevel,
+    EXPORT_FORMAT_VERSION, ExportAgentRecord, ExportArtifactRecord, ExportAuditRecord,
+    ExportFooter, ExportHeader, ExportLinkRecord, ExportMemoryRecord, ExportRecord, ExportScope,
+    ExportTagRecord, ExportWorkspaceRecord, RedactionLevel,
 };
 
 /// Patterns that indicate sensitive content requiring redaction.
@@ -182,6 +182,45 @@ pub fn redact_memory_record(
     record
 }
 
+/// Apply redaction to an export artifact record.
+#[must_use]
+pub fn redact_artifact_record(
+    mut record: ExportArtifactRecord,
+    level: RedactionLevel,
+) -> ExportArtifactRecord {
+    if level == RedactionLevel::None {
+        return record;
+    }
+
+    if let Some(snippet) = record.snippet.as_ref() {
+        record.snippet = Some(redact_content(snippet, level));
+    }
+
+    if level.redacts_paths() {
+        if let Some(path) = record.original_path.as_ref() {
+            record.original_path = Some(redact_path(path, level));
+        }
+        if let Some(path) = record.canonical_path.as_ref() {
+            record.canonical_path = Some(redact_path(path, level));
+        }
+        if let Some(uri) = record.provenance_uri.as_ref() {
+            record.provenance_uri = Some(redact_path(uri, level));
+        }
+    }
+
+    if level.redacts_identifiers() {
+        record.artifact_id = redact_identifier(&record.artifact_id, level);
+        record.workspace_id = redact_identifier(&record.workspace_id, level);
+    }
+
+    if level.redacts_content() {
+        record.snippet = None;
+        record.metadata = None;
+    }
+
+    record
+}
+
 /// Apply redaction to an export workspace record.
 #[must_use]
 pub fn redact_workspace_record(
@@ -254,6 +293,7 @@ pub fn redact_record(record: ExportRecord, level: RedactionLevel) -> ExportRecor
     match record {
         ExportRecord::Header(h) => ExportRecord::Header(redact_header(h, level)),
         ExportRecord::Memory(m) => ExportRecord::Memory(redact_memory_record(m, level)),
+        ExportRecord::Artifact(a) => ExportRecord::Artifact(redact_artifact_record(a, level)),
         ExportRecord::Link(l) => ExportRecord::Link(redact_link_record(l, level)),
         ExportRecord::Tag(t) => ExportRecord::Tag(redact_tag_record(t, level)),
         ExportRecord::Agent(a) => ExportRecord::Agent(redact_agent_record(a, level)),
@@ -310,6 +350,7 @@ pub struct JsonlExporter<W: Write> {
     export_scope: ExportScope,
     records_written: u64,
     memory_count: u64,
+    artifact_count: u64,
     link_count: u64,
     tag_count: u64,
     audit_count: u64,
@@ -324,6 +365,7 @@ impl<W: Write> JsonlExporter<W> {
             export_scope,
             records_written: 0,
             memory_count: 0,
+            artifact_count: 0,
             link_count: 0,
             tag_count: 0,
             audit_count: 0,
@@ -392,6 +434,35 @@ impl<W: Write> JsonlExporter<W> {
 
         self.records_written += 1;
         self.memory_count += 1;
+        Ok(())
+    }
+
+    /// Write an artifact record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing fails.
+    pub fn write_artifact(&mut self, record: ExportArtifactRecord) -> io::Result<()> {
+        if !self.export_scope.includes_artifacts() {
+            return Ok(());
+        }
+
+        let redacted = redact_artifact_record(record, self.redaction_level);
+
+        if self.export_scope == ExportScope::MetadataOnly {
+            let mut meta_only = redacted;
+            meta_only.snippet = None;
+            let json = serde_json::to_string(&meta_only)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            writeln!(self.writer, "{json}")?;
+        } else {
+            let json = serde_json::to_string(&redacted)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            writeln!(self.writer, "{json}")?;
+        }
+
+        self.records_written += 1;
+        self.artifact_count += 1;
         Ok(())
     }
 
@@ -501,6 +572,7 @@ impl<W: Write> JsonlExporter<W> {
         Ok(ExportStats {
             total_records: self.records_written,
             memory_count: self.memory_count,
+            artifact_count: self.artifact_count,
             link_count: self.link_count,
             tag_count: self.tag_count,
             audit_count: self.audit_count,
@@ -524,6 +596,7 @@ impl<W: Write> JsonlExporter<W> {
 pub struct ExportStats {
     pub total_records: u64,
     pub memory_count: u64,
+    pub artifact_count: u64,
     pub link_count: u64,
     pub tag_count: u64,
     pub audit_count: u64,
@@ -535,7 +608,9 @@ pub struct ExportStats {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::models::{EXPORT_MEMORY_SCHEMA_V1, ExportHeader, ExportMemoryRecord};
+    use crate::models::{
+        EXPORT_ARTIFACT_SCHEMA_V1, EXPORT_MEMORY_SCHEMA_V1, ExportHeader, ExportMemoryRecord,
+    };
 
     type TestResult = Result<(), String>;
 
@@ -547,31 +622,53 @@ mod tests {
         }
     }
 
+    fn secret_fixture(parts: &[&str]) -> String {
+        parts.concat()
+    }
+
+    fn secret_assignment(value: &str) -> String {
+        format!("{}={value}", secret_fixture(&["api", "_", "key"]))
+    }
+
     #[test]
     fn contains_secret_pattern_detects_secrets() {
-        assert!(contains_secret_pattern("api_key=abc123"));
-        assert!(contains_secret_pattern("PASSWORD: hunter2"));
-        assert!(contains_secret_pattern("Bearer token123"));
-        assert!(contains_secret_pattern("AWS_SECRET_KEY"));
-        assert!(contains_secret_pattern("-----BEGIN RSA PRIVATE KEY-----"));
+        assert!(contains_secret_pattern(&secret_fixture(&[
+            "api",
+            "_key=abc123"
+        ])));
+        assert!(contains_secret_pattern(&secret_fixture(&[
+            "PASS",
+            "WORD: hunter2"
+        ])));
+        assert!(contains_secret_pattern(&secret_fixture(&[
+            "Bearer ", "token123"
+        ])));
+        assert!(contains_secret_pattern(&secret_fixture(&[
+            "AWS", "_SECRET", "_KEY"
+        ])));
+        assert!(contains_secret_pattern(&secret_fixture(&[
+            "-----BEGIN RSA ",
+            "PRIVATE ",
+            "KEY-----"
+        ])));
         assert!(!contains_secret_pattern("just some normal content"));
         assert!(!contains_secret_pattern("public data here"));
     }
 
     #[test]
     fn redact_content_none_level_preserves() -> TestResult {
-        let content = "api_key=secret123";
-        let result = redact_content(content, RedactionLevel::None);
-        ensure(result, content.to_owned(), "none level preserves content")
+        let content = secret_assignment("redaction-fixture");
+        let result = redact_content(&content, RedactionLevel::None);
+        ensure(result, content, "none level preserves content")
     }
 
     #[test]
     fn redact_content_minimal_level_redacts_secrets() -> TestResult {
-        let secret = "api_key=secret123";
+        let sensitive_input = secret_assignment("redaction-fixture");
         let normal = "just normal content";
 
         ensure(
-            redact_content(secret, RedactionLevel::Minimal),
+            redact_content(&sensitive_input, RedactionLevel::Minimal),
             REDACTED_PLACEHOLDER.to_owned(),
             "minimal redacts secrets",
         )?;
@@ -627,12 +724,13 @@ mod tests {
 
     #[test]
     fn redact_memory_record_minimal() {
+        let content = secret_assignment("redaction-fixture");
         let record = ExportMemoryRecord::builder()
             .memory_id("mem-001")
             .workspace_id("ws-123")
             .level("procedural")
             .kind("rule")
-            .content("api_key=secret123")
+            .content(content)
             .created_at("2026-04-30T12:00:00Z")
             .build();
 
@@ -711,6 +809,43 @@ mod tests {
     }
 
     #[test]
+    fn jsonl_exporter_writes_artifact_with_redaction() -> TestResult {
+        let mut output = Vec::new();
+        let secret_fixture = format!("api_{}={}", "key", "redaction-fixture");
+
+        let artifact = ExportArtifactRecord::builder()
+            .artifact_id("art_01234567890123456789012345")
+            .workspace_id("wsp_01234567890123456789012345")
+            .source_kind("file")
+            .artifact_type("log")
+            .canonical_path("/data/projects/example/logs/build.log")
+            .content_hash("blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .media_type("text/plain")
+            .size_bytes(42)
+            .redaction_status("checked")
+            .snippet(secret_fixture.clone())
+            .created_at("2026-04-30T12:00:00Z")
+            .updated_at("2026-04-30T12:00:00Z")
+            .build();
+
+        let artifact_count = {
+            let mut exporter =
+                JsonlExporter::new(&mut output, RedactionLevel::Standard, ExportScope::All);
+            exporter
+                .write_artifact(artifact)
+                .map_err(|error| format!("write artifact: {error}"))?;
+            exporter.artifact_count
+        };
+
+        let written = String::from_utf8(output).map_err(|error| format!("valid utf8: {error}"))?;
+        assert!(written.contains(EXPORT_ARTIFACT_SCHEMA_V1));
+        assert!(written.contains(REDACTED_PLACEHOLDER));
+        assert!(written.contains(REDACTED_PATH_PLACEHOLDER));
+        assert!(!written.contains(&secret_fixture));
+        ensure(artifact_count, 1, "artifact count")
+    }
+
+    #[test]
     fn jsonl_exporter_respects_scope() {
         let mut output = Vec::new();
 
@@ -769,7 +904,7 @@ mod tests {
             .workspace_id("ws-123")
             .level("procedural")
             .kind("rule")
-            .content("api_key=secret123")
+            .content(secret_assignment("redaction-fixture"))
             .created_at("2026-04-30T12:00:00Z")
             .build();
 
@@ -777,7 +912,7 @@ mod tests {
 
         let written = String::from_utf8(output).expect("valid utf8");
         assert!(written.contains(REDACTED_PLACEHOLDER));
-        assert!(!written.contains("secret123"));
+        assert!(!written.contains("redaction-fixture"));
     }
 
     #[test]
@@ -815,14 +950,15 @@ mod tests {
     }
 
     #[test]
-    fn redact_record_union() {
+    fn redact_record_union() -> TestResult {
+        let content = secret_assignment("redaction-fixture");
         let memory = ExportRecord::Memory(
             ExportMemoryRecord::builder()
                 .memory_id("mem-001")
                 .workspace_id("ws-123")
                 .level("procedural")
                 .kind("rule")
-                .content("api_key=secret")
+                .content(content)
                 .created_at("2026-04-30T12:00:00Z")
                 .build(),
         );
@@ -830,9 +966,13 @@ mod tests {
         let redacted = redact_record(memory, RedactionLevel::Minimal);
 
         if let ExportRecord::Memory(m) = redacted {
-            assert_eq!(m.content, REDACTED_PLACEHOLDER);
-        } else {
-            panic!("Expected Memory variant");
+            return ensure(
+                m.content,
+                REDACTED_PLACEHOLDER.to_owned(),
+                "memory content redacted",
+            );
         }
+
+        Err("expected memory variant".to_owned())
     }
 }

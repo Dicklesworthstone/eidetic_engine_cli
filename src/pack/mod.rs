@@ -2,7 +2,10 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt;
 
-use crate::models::{MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass, UnitScore};
+use crate::models::{
+    ContextProfile, ContextProfileName, ContextProfileSection, ContextProfileSectionMix, MemoryId,
+    ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass, UnitScore,
+};
 
 pub const SUBSYSTEM: &str = "pack";
 pub const CONTEXT_COMMAND: &str = "context";
@@ -91,31 +94,7 @@ pub const fn subsystem_name() -> &'static str {
     SUBSYSTEM
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ContextPackProfile {
-    Compact,
-    Balanced,
-    Thorough,
-    Submodular,
-}
-
-impl ContextPackProfile {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Compact => "compact",
-            Self::Balanced => "balanced",
-            Self::Thorough => "thorough",
-            Self::Submodular => "submodular",
-        }
-    }
-}
-
-impl fmt::Display for ContextPackProfile {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
+pub type ContextPackProfile = ContextProfileName;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PackSection {
@@ -258,6 +237,33 @@ impl SectionQuotas {
         }
     }
 
+    /// Create quotas from a context profile section mix.
+    #[must_use]
+    pub fn from_section_mix(section_mix: ContextProfileSectionMix, total_budget: u32) -> Self {
+        Self::new(
+            quota_for_basis_points(
+                total_budget,
+                section_mix.weight_bps(ContextProfileSection::ProceduralRules),
+            ),
+            quota_for_basis_points(
+                total_budget,
+                section_mix.weight_bps(ContextProfileSection::Decisions),
+            ),
+            quota_for_basis_points(
+                total_budget,
+                section_mix.weight_bps(ContextProfileSection::Failures),
+            ),
+            quota_for_basis_points(
+                total_budget,
+                section_mix.weight_bps(ContextProfileSection::Evidence),
+            ),
+            quota_for_basis_points(
+                total_budget,
+                section_mix.weight_bps(ContextProfileSection::Artifacts),
+            ),
+        )
+    }
+
     /// Create balanced quotas based on total budget and profile.
     ///
     /// Balanced profile allocates roughly:
@@ -268,19 +274,7 @@ impl SectionQuotas {
     /// - Artifacts: 10%
     #[must_use]
     pub fn balanced(total_budget: u32) -> Self {
-        let procedural = (total_budget as f32 * 0.30).ceil() as u32;
-        let decisions = (total_budget as f32 * 0.20).ceil() as u32;
-        let failures = (total_budget as f32 * 0.20).ceil() as u32;
-        let evidence = (total_budget as f32 * 0.20).ceil() as u32;
-        let artifacts = (total_budget as f32 * 0.10).ceil() as u32;
-
-        Self::new(
-            SectionQuota::capped(procedural),
-            SectionQuota::capped(decisions),
-            SectionQuota::capped(failures),
-            SectionQuota::capped(evidence),
-            SectionQuota::capped(artifacts),
-        )
+        Self::for_profile(ContextPackProfile::Balanced, total_budget)
     }
 
     /// Create compact quotas that prioritize procedural rules.
@@ -293,19 +287,7 @@ impl SectionQuotas {
     /// - Artifacts: 5%
     #[must_use]
     pub fn compact(total_budget: u32) -> Self {
-        let procedural = (total_budget as f32 * 0.50).ceil() as u32;
-        let decisions = (total_budget as f32 * 0.15).ceil() as u32;
-        let failures = (total_budget as f32 * 0.20).ceil() as u32;
-        let evidence = (total_budget as f32 * 0.10).ceil() as u32;
-        let artifacts = (total_budget as f32 * 0.05).ceil() as u32;
-
-        Self::new(
-            SectionQuota::capped(procedural),
-            SectionQuota::capped(decisions),
-            SectionQuota::capped(failures),
-            SectionQuota::capped(evidence),
-            SectionQuota::capped(artifacts),
-        )
+        Self::for_profile(ContextPackProfile::Compact, total_budget)
     }
 
     /// Create thorough quotas with more even distribution.
@@ -318,30 +300,14 @@ impl SectionQuotas {
     /// - Artifacts: 15%
     #[must_use]
     pub fn thorough(total_budget: u32) -> Self {
-        let procedural = (total_budget as f32 * 0.20).ceil() as u32;
-        let decisions = (total_budget as f32 * 0.20).ceil() as u32;
-        let failures = (total_budget as f32 * 0.20).ceil() as u32;
-        let evidence = (total_budget as f32 * 0.25).ceil() as u32;
-        let artifacts = (total_budget as f32 * 0.15).ceil() as u32;
-
-        Self::new(
-            SectionQuota::capped(procedural),
-            SectionQuota::capped(decisions),
-            SectionQuota::capped(failures),
-            SectionQuota::capped(evidence),
-            SectionQuota::capped(artifacts),
-        )
+        Self::for_profile(ContextPackProfile::Thorough, total_budget)
     }
 
     /// Get quotas based on profile and budget.
     #[must_use]
     pub fn for_profile(profile: ContextPackProfile, total_budget: u32) -> Self {
-        match profile {
-            ContextPackProfile::Compact => Self::compact(total_budget),
-            ContextPackProfile::Balanced => Self::balanced(total_budget),
-            ContextPackProfile::Thorough => Self::thorough(total_budget),
-            ContextPackProfile::Submodular => Self::thorough(total_budget),
-        }
+        let profile = ContextProfile::builtin(profile);
+        Self::from_section_mix(profile.section_mix, total_budget)
     }
 
     /// Get the quota for a specific section.
@@ -374,6 +340,12 @@ impl Default for SectionQuotas {
     fn default() -> Self {
         Self::unlimited()
     }
+}
+
+fn quota_for_basis_points(total_budget: u32, basis_points: u16) -> SectionQuota {
+    let product = u64::from(total_budget) * u64::from(basis_points);
+    let tokens = product.div_ceil(10_000).min(u64::from(u32::MAX));
+    SectionQuota::capped(tokens as u32)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -690,10 +662,12 @@ impl PackCandidate {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PackSelectionCertificate {
+    pub certificate_id: Option<String>,
     pub profile: ContextPackProfile,
     pub objective: PackSelectionObjective,
     pub algorithm: &'static str,
     pub guarantee: &'static str,
+    pub guarantee_status: PackGuaranteeStatus,
     pub candidate_count: usize,
     pub selected_count: usize,
     pub omitted_count: usize,
@@ -702,7 +676,34 @@ pub struct PackSelectionCertificate {
     pub total_objective_value: f32,
     pub monotone: bool,
     pub submodular: bool,
+    pub selected_items: Vec<PackSelectedItem>,
+    pub rejected_frontier: Vec<PackRejectedFrontierItem>,
     pub steps: Vec<PackSelectionStep>,
+}
+
+impl PackSelectionCertificate {
+    #[must_use]
+    pub fn has_valid_guarantee_identity(&self) -> bool {
+        self.guarantee_status != PackGuaranteeStatus::Valid || self.certificate_id.is_some()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackGuaranteeStatus {
+    Valid,
+    Conditional,
+    Invalid,
+}
+
+impl PackGuaranteeStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Conditional => "conditional",
+            Self::Invalid => "invalid",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -727,7 +728,25 @@ pub struct PackSelectionStep {
     pub memory_id: MemoryId,
     pub marginal_gain: f32,
     pub objective_value: f32,
+    pub token_cost: u32,
+    pub feasible: bool,
     pub covered_features: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackSelectedItem {
+    pub rank: u32,
+    pub memory_id: MemoryId,
+    pub token_cost: u32,
+    pub feasible: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackRejectedFrontierItem {
+    pub memory_id: MemoryId,
+    pub token_cost: u32,
+    pub reason: PackOmissionReason,
+    pub feasible: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1432,6 +1451,8 @@ fn assemble_mmr_draft(
                     memory_id: candidate.memory_id,
                     marginal_gain,
                     objective_value,
+                    token_cost: candidate.estimated_tokens,
+                    feasible: true,
                     covered_features: certificate_features(&candidate),
                 });
                 used_tokens = total;
@@ -1463,10 +1484,12 @@ fn assemble_mmr_draft(
         budget,
         used_tokens,
         selection_certificate: PackSelectionCertificate {
+            certificate_id: None,
             profile,
             objective: PackSelectionObjective::MmrRedundancy,
             algorithm: "deterministic_greedy_mmr",
             guarantee: "deterministic redundancy-controlled greedy ranking; no submodular guarantee claimed",
+            guarantee_status: PackGuaranteeStatus::Conditional,
             candidate_count,
             selected_count: items.len(),
             omitted_count: omitted.len(),
@@ -1475,6 +1498,8 @@ fn assemble_mmr_draft(
             total_objective_value: objective_value,
             monotone: false,
             submodular: false,
+            selected_items: selected_items_from_draft_items(&items),
+            rejected_frontier: rejected_frontier_from_omissions(&omitted),
             steps,
         },
         items,
@@ -1544,6 +1569,8 @@ fn assemble_facility_location_draft(
             memory_id: candidate.memory_id,
             marginal_gain,
             objective_value,
+            token_cost: candidate.estimated_tokens,
+            feasible: true,
             covered_features: certificate_features(&candidate),
         });
         items.push(PackDraftItem {
@@ -1566,10 +1593,12 @@ fn assemble_facility_location_draft(
         budget,
         used_tokens,
         selection_certificate: PackSelectionCertificate {
+            certificate_id: None,
             profile,
             objective: PackSelectionObjective::FacilityLocation,
             algorithm: "deterministic_greedy_facility_location_gain_per_token",
             guarantee: "monotone submodular facility-location objective; deterministic budgeted greedy certificate, exact optimum not claimed",
+            guarantee_status: PackGuaranteeStatus::Conditional,
             candidate_count,
             selected_count: items.len(),
             omitted_count: omitted.len(),
@@ -1578,11 +1607,37 @@ fn assemble_facility_location_draft(
             total_objective_value: objective_value,
             monotone: true,
             submodular: true,
+            selected_items: selected_items_from_draft_items(&items),
+            rejected_frontier: rejected_frontier_from_omissions(&omitted),
             steps,
         },
         items,
         omitted,
     })
+}
+
+fn selected_items_from_draft_items(items: &[PackDraftItem]) -> Vec<PackSelectedItem> {
+    items
+        .iter()
+        .map(|item| PackSelectedItem {
+            rank: item.rank,
+            memory_id: item.memory_id,
+            token_cost: item.estimated_tokens,
+            feasible: true,
+        })
+        .collect()
+}
+
+fn rejected_frontier_from_omissions(omitted: &[PackOmission]) -> Vec<PackRejectedFrontierItem> {
+    omitted
+        .iter()
+        .map(|omission| PackRejectedFrontierItem {
+            memory_id: omission.memory_id,
+            token_cost: omission.estimated_tokens,
+            reason: omission.reason,
+            feasible: false,
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1673,18 +1728,18 @@ fn select_facility_candidate_index(
         }
 
         let marginal_gain = facility_location_marginal_gain(candidate, selected, universe);
-        let gain_per_token = marginal_gain / candidate.estimated_tokens as f32;
+        let gain_ratio = marginal_gain / candidate.estimated_tokens as f32;
         match best {
-            None => best = Some((candidate_index, marginal_gain, gain_per_token)),
+            None => best = Some((candidate_index, marginal_gain, gain_ratio)),
             Some((best_index, best_gain, best_ratio)) => {
                 let best_candidate = &candidates[best_index];
-                if gain_per_token
+                if gain_ratio
                     .total_cmp(&best_ratio)
                     .then_with(|| marginal_gain.total_cmp(&best_gain))
                     .then_with(|| compare_candidates(best_candidate, candidate))
                     == Ordering::Greater
                 {
-                    best = Some((candidate_index, marginal_gain, gain_per_token));
+                    best = Some((candidate_index, marginal_gain, gain_ratio));
                 }
             }
         }
@@ -2124,7 +2179,7 @@ mod tests {
         TokenBudget, TokenEstimationStrategy, assemble_draft, assemble_draft_with_profile,
         estimate_tokens, estimate_tokens_default, subsystem_name,
     };
-    use crate::models::{MemoryId, ProvenanceUri, TrustClass, UnitScore};
+    use crate::models::{ContextProfile, MemoryId, ProvenanceUri, TrustClass, UnitScore};
     use crate::testing::ensure_contains;
 
     type TestResult = Result<(), String>;
@@ -2508,6 +2563,158 @@ mod tests {
     }
 
     #[test]
+    fn section_quotas_follow_context_profile_model() -> TestResult {
+        let profile = ContextProfile::builtin(ContextPackProfile::Compact);
+        let quotas = SectionQuotas::for_profile(profile.name, 1000);
+
+        ensure_equal(
+            &quotas.get(PackSection::ProceduralRules).max_tokens,
+            &500,
+            "compact procedural quota",
+        )?;
+        ensure_equal(
+            &quotas.get(PackSection::Evidence).max_tokens,
+            &100,
+            "compact evidence quota",
+        )?;
+        ensure_equal(
+            &profile.section_mix.total_bps(),
+            &10_000,
+            "profile section mix total",
+        )
+    }
+
+    #[test]
+    fn profile_specific_quotas_match_builtin_context_profiles() -> TestResult {
+        let expected = [
+            (ContextPackProfile::Compact, [50, 15, 20, 10, 5]),
+            (ContextPackProfile::Balanced, [30, 20, 20, 20, 10]),
+            (ContextPackProfile::Thorough, [20, 20, 20, 25, 15]),
+            (ContextPackProfile::Submodular, [20, 20, 20, 25, 15]),
+        ];
+
+        for (profile, [procedural, decisions, failures, evidence, artifacts]) in expected {
+            let quotas = SectionQuotas::for_profile(profile, 100);
+            ensure_equal(
+                &quotas.get(PackSection::ProceduralRules).max_tokens,
+                &procedural,
+                &format!("{profile} procedural quota"),
+            )?;
+            ensure_equal(
+                &quotas.get(PackSection::Decisions).max_tokens,
+                &decisions,
+                &format!("{profile} decisions quota"),
+            )?;
+            ensure_equal(
+                &quotas.get(PackSection::Failures).max_tokens,
+                &failures,
+                &format!("{profile} failures quota"),
+            )?;
+            ensure_equal(
+                &quotas.get(PackSection::Evidence).max_tokens,
+                &evidence,
+                &format!("{profile} evidence quota"),
+            )?;
+            ensure_equal(
+                &quotas.get(PackSection::Artifacts).max_tokens,
+                &artifacts,
+                &format!("{profile} artifacts quota"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn profile_specific_compact_allows_larger_procedural_rules() -> TestResult {
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let procedural_rule = candidate_in_section(
+            101,
+            PackSection::ProceduralRules,
+            1.0,
+            0.5,
+            40,
+            "Run release verification commands through rch.",
+        )?;
+
+        let compact = assemble_draft_with_profile(
+            ContextPackProfile::Compact,
+            "prepare release",
+            budget,
+            vec![procedural_rule.clone()],
+        )
+        .map_err(|error| format!("compact draft rejected: {error:?}"))?;
+        let balanced = assemble_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare release",
+            budget,
+            vec![procedural_rule],
+        )
+        .map_err(|error| format!("balanced draft rejected: {error:?}"))?;
+
+        ensure_equal(
+            &compact.items.first().map(|item| item.memory_id),
+            &Some(memory_id(101)),
+            "compact selects the 40-token procedural rule",
+        )?;
+        ensure_equal(
+            &balanced.items.len(),
+            &0,
+            "balanced omits the procedural rule above its section quota",
+        )?;
+        ensure_equal(
+            &balanced.omitted.first().map(|omission| omission.reason),
+            &Some(PackOmissionReason::TokenBudgetExceeded),
+            "balanced omission reason",
+        )
+    }
+
+    #[test]
+    fn profile_specific_thorough_allows_larger_evidence_items() -> TestResult {
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let evidence = candidate_in_section(
+            202,
+            PackSection::Evidence,
+            1.0,
+            0.7,
+            25,
+            "Release artifacts were signed and checksums matched.",
+        )?;
+
+        let thorough = assemble_draft_with_profile(
+            ContextPackProfile::Thorough,
+            "prepare release",
+            budget,
+            vec![evidence.clone()],
+        )
+        .map_err(|error| format!("thorough draft rejected: {error:?}"))?;
+        let balanced = assemble_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare release",
+            budget,
+            vec![evidence],
+        )
+        .map_err(|error| format!("balanced draft rejected: {error:?}"))?;
+
+        ensure_equal(
+            &thorough.items.first().map(|item| item.memory_id),
+            &Some(memory_id(202)),
+            "thorough selects the 25-token evidence item",
+        )?;
+        ensure_equal(
+            &balanced.items.len(),
+            &0,
+            "balanced omits evidence above its section quota",
+        )?;
+        ensure_equal(
+            &balanced.omitted.first().map(|omission| omission.reason),
+            &Some(PackOmissionReason::TokenBudgetExceeded),
+            "balanced evidence omission reason",
+        )
+    }
+
+    #[test]
     fn section_quotas_has_room_checks_capacity() -> TestResult {
         let quotas = SectionQuotas::balanced(100);
         let section = PackSection::ProceduralRules;
@@ -2815,7 +3022,7 @@ mod tests {
 
     #[test]
     fn pack_quality_metrics_summarize_selected_and_omitted_items() -> TestResult {
-        let budget = TokenBudget::new(25).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let budget = TokenBudget::new(48).map_err(|error| format!("budget rejected: {error:?}"))?;
         let first = candidate_in_section(
             1,
             PackSection::ProceduralRules,
@@ -2847,11 +3054,12 @@ mod tests {
             PackSection::Failures,
             0.7,
             0.4,
-            10,
+            27,
             "A prior release failed after skipping formatter checks.",
         )?;
 
-        let draft = assemble_draft(
+        let draft = assemble_draft_with_profile(
+            ContextPackProfile::Thorough,
             "prepare release",
             budget,
             vec![redundant, over_budget, evidence, first],
@@ -2862,8 +3070,12 @@ mod tests {
         ensure_equal(&metrics.item_count, &2, "metric item count")?;
         ensure_equal(&metrics.omitted_count, &2, "metric omitted count")?;
         ensure_equal(&metrics.used_tokens, &22, "metric used tokens")?;
-        ensure_equal(&metrics.max_tokens, &25, "metric max tokens")?;
-        ensure_close(metrics.budget_utilization, 0.88, "budget utilization")?;
+        ensure_equal(&metrics.max_tokens, &48, "metric max tokens")?;
+        ensure_close(
+            metrics.budget_utilization,
+            22.0_f32 / 48.0_f32,
+            "budget utilization",
+        )?;
         ensure_close(metrics.average_relevance, 0.9, "average relevance")?;
         ensure_close(metrics.average_utility, 0.6, "average utility")?;
         ensure_equal(
@@ -3073,7 +3285,8 @@ mod tests {
 
     #[test]
     fn submodular_profile_emits_facility_location_certificate() -> TestResult {
-        let budget = TokenBudget::new(40).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let budget =
+            TokenBudget::new(150).map_err(|error| format!("budget rejected: {error:?}"))?;
         let first =
             candidate_with_content(1, 1.0, 0.6, 10, "Run cargo fmt --check before release.")?
                 .with_diversity_key("release-formatting");
@@ -3128,7 +3341,7 @@ mod tests {
         ensure_equal(
             &draft.selection_certificate.steps.len(),
             &3,
-            "all fitting candidates receive certificate steps",
+            "all candidates fitting overall and section budgets receive certificate steps",
         )?;
         ensure(
             draft.selection_certificate.total_objective_value > 0.0,

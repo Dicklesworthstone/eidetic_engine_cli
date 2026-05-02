@@ -6,6 +6,7 @@
 
 pub mod regret;
 
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
@@ -13,8 +14,16 @@ use std::str::FromStr;
 pub const SUBSYSTEM: &str = "curate";
 pub const DEFAULT_SPECIFICITY_MIN: f32 = 0.45;
 pub const CANDIDATE_TOO_GENERIC_CODE: &str = "candidate_too_generic";
+pub const REVIEW_QUEUE_STATE_SCHEMA_V1: &str = "ee.curate.review_queue_state.v1";
+pub const REVIEW_QUEUE_INVALID_TRANSITION_CODE: &str = "review_queue_invalid_transition";
+pub const DUPLICATE_RULE_CHECK_SCHEMA_V1: &str = "ee.curate.duplicate_rule_check.v1";
+pub const DUPLICATE_RULE_EXACT_CODE: &str = "duplicate_rule_exact";
+pub const DUPLICATE_RULE_NEAR_CODE: &str = "duplicate_rule_near";
+pub const DUPLICATE_RULE_INSUFFICIENT_SIGNAL_CODE: &str = "duplicate_rule_insufficient_signal";
 
 const SCORE_SCALE: f32 = 10_000.0;
+const DEFAULT_DUPLICATE_RULE_NEAR_THRESHOLD: f32 = 0.82;
+const DEFAULT_DUPLICATE_RULE_MIN_TOKENS: usize = 3;
 const KNOWN_COMMANDS: &[&str] = &[
     "br", "bv", "cargo", "cass", "ee", "gh", "git", "rch", "rustfmt", "ubs",
 ];
@@ -528,6 +537,279 @@ impl CandidateStatus {
     }
 }
 
+/// Review queue state used to triage candidate review work.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ReviewQueueState {
+    /// Candidate has not been reviewed yet.
+    New,
+    /// Candidate needs more provenance before it can be accepted.
+    NeedsEvidence,
+    /// Candidate needs tighter scope before it can be accepted.
+    NeedsScope,
+    /// Candidate appears to duplicate another candidate or rule.
+    Duplicate,
+    /// Candidate is intentionally hidden until a later review.
+    Snoozed,
+    /// Candidate was accepted and is ready for apply.
+    Accepted,
+    /// Candidate was rejected by review.
+    Rejected,
+    /// Candidate was merged into another memory or candidate.
+    Merged,
+    /// Candidate was superseded by a newer proposal.
+    Superseded,
+    /// Candidate expired before review completed.
+    Expired,
+    /// Candidate's durable mutation has already been applied.
+    Applied,
+}
+
+impl ReviewQueueState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::NeedsEvidence => "needs_evidence",
+            Self::NeedsScope => "needs_scope",
+            Self::Duplicate => "duplicate",
+            Self::Snoozed => "snoozed",
+            Self::Accepted => "accepted",
+            Self::Rejected => "rejected",
+            Self::Merged => "merged",
+            Self::Superseded => "superseded",
+            Self::Expired => "expired",
+            Self::Applied => "applied",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 11] {
+        [
+            Self::New,
+            Self::NeedsEvidence,
+            Self::NeedsScope,
+            Self::Duplicate,
+            Self::Snoozed,
+            Self::Accepted,
+            Self::Rejected,
+            Self::Merged,
+            Self::Superseded,
+            Self::Expired,
+            Self::Applied,
+        ]
+    }
+
+    #[must_use]
+    pub const fn from_candidate_status(status: CandidateStatus) -> Self {
+        match status {
+            CandidateStatus::Pending => Self::New,
+            CandidateStatus::Approved => Self::Accepted,
+            CandidateStatus::Rejected => Self::Rejected,
+            CandidateStatus::Expired => Self::Expired,
+            CandidateStatus::Applied => Self::Applied,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Rejected | Self::Merged | Self::Superseded | Self::Expired | Self::Applied
+        )
+    }
+
+    #[must_use]
+    pub const fn hidden_from_default_queue(self) -> bool {
+        matches!(
+            self,
+            Self::Snoozed
+                | Self::Rejected
+                | Self::Merged
+                | Self::Superseded
+                | Self::Expired
+                | Self::Applied
+        )
+    }
+
+    #[must_use]
+    pub const fn requires_validation(self) -> bool {
+        matches!(
+            self,
+            Self::New | Self::NeedsEvidence | Self::NeedsScope | Self::Duplicate
+        )
+    }
+
+    #[must_use]
+    pub const fn requires_apply(self) -> bool {
+        matches!(self, Self::Accepted)
+    }
+
+    #[must_use]
+    pub const fn queue_rank(self) -> u8 {
+        match self {
+            Self::Duplicate => 0,
+            Self::NeedsEvidence => 10,
+            Self::NeedsScope => 20,
+            Self::New => 30,
+            Self::Accepted => 40,
+            Self::Snoozed => 80,
+            Self::Rejected | Self::Merged | Self::Superseded | Self::Expired | Self::Applied => 90,
+        }
+    }
+
+    #[must_use]
+    pub fn next_action(self, candidate_id: &str) -> String {
+        match self {
+            Self::New | Self::NeedsEvidence | Self::NeedsScope | Self::Duplicate => {
+                format!("ee curate show {candidate_id} --json")
+            }
+            Self::Snoozed => {
+                format!("ee curate snooze {candidate_id} --until <DATE> --json")
+            }
+            Self::Accepted => format!("ee curate apply {candidate_id} --json"),
+            Self::Rejected | Self::Merged | Self::Superseded | Self::Expired | Self::Applied => {
+                "no action required".to_owned()
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn can_transition_to(self, target: Self) -> bool {
+        if self as u8 == target as u8 {
+            return true;
+        }
+        if self.is_terminal() {
+            return false;
+        }
+        match self {
+            Self::New | Self::NeedsEvidence | Self::NeedsScope | Self::Duplicate => matches!(
+                target,
+                Self::NeedsEvidence
+                    | Self::NeedsScope
+                    | Self::Duplicate
+                    | Self::Snoozed
+                    | Self::Accepted
+                    | Self::Rejected
+                    | Self::Merged
+                    | Self::Superseded
+                    | Self::Expired
+            ),
+            Self::Snoozed => matches!(
+                target,
+                Self::New
+                    | Self::NeedsEvidence
+                    | Self::NeedsScope
+                    | Self::Duplicate
+                    | Self::Accepted
+                    | Self::Rejected
+                    | Self::Merged
+                    | Self::Superseded
+                    | Self::Expired
+            ),
+            Self::Accepted => matches!(
+                target,
+                Self::Rejected | Self::Merged | Self::Superseded | Self::Expired | Self::Applied
+            ),
+            Self::Rejected | Self::Merged | Self::Superseded | Self::Expired | Self::Applied => {
+                false
+            }
+        }
+    }
+}
+
+impl fmt::Display for ReviewQueueState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Error when parsing an invalid review queue state string.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseReviewQueueStateError {
+    input: String,
+}
+
+impl ParseReviewQueueStateError {
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+}
+
+impl fmt::Display for ParseReviewQueueStateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unknown review queue state `{}`; expected one of new, needs_evidence, needs_scope, duplicate, snoozed, accepted, rejected, merged, superseded, expired, applied",
+            self.input
+        )
+    }
+}
+
+impl std::error::Error for ParseReviewQueueStateError {}
+
+impl FromStr for ReviewQueueState {
+    type Err = ParseReviewQueueStateError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "new" => Ok(Self::New),
+            "needs_evidence" => Ok(Self::NeedsEvidence),
+            "needs_scope" => Ok(Self::NeedsScope),
+            "duplicate" => Ok(Self::Duplicate),
+            "snoozed" => Ok(Self::Snoozed),
+            "accepted" => Ok(Self::Accepted),
+            "rejected" => Ok(Self::Rejected),
+            "merged" => Ok(Self::Merged),
+            "superseded" => Ok(Self::Superseded),
+            "expired" => Ok(Self::Expired),
+            "applied" => Ok(Self::Applied),
+            _ => Err(ParseReviewQueueStateError {
+                input: input.to_owned(),
+            }),
+        }
+    }
+}
+
+/// Error when a review queue state transition is not allowed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReviewQueueTransitionError {
+    pub from: ReviewQueueState,
+    pub to: ReviewQueueState,
+}
+
+impl ReviewQueueTransitionError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        REVIEW_QUEUE_INVALID_TRANSITION_CODE
+    }
+}
+
+impl fmt::Display for ReviewQueueTransitionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "cannot transition curation review queue state from {} to {}",
+            self.from, self.to
+        )
+    }
+}
+
+impl std::error::Error for ReviewQueueTransitionError {}
+
+pub fn validate_review_queue_transition(
+    current: ReviewQueueState,
+    target: ReviewQueueState,
+) -> Result<(), ReviewQueueTransitionError> {
+    if current.can_transition_to(target) {
+        Ok(())
+    } else {
+        Err(ReviewQueueTransitionError {
+            from: current,
+            to: target,
+        })
+    }
+}
+
 /// Weights used by the deterministic curation specificity scorer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpecificityWeights {
@@ -668,6 +950,217 @@ pub struct SpecificityReport {
     pub structural_signals: SpecificityStructuralSignals,
     pub platform: Option<SpecificityPlatform>,
     pub rejected_reasons: Vec<&'static str>,
+}
+
+/// Existing procedural rule record used by the duplicate check.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DuplicateRuleRecord {
+    pub rule_id: String,
+    pub content: String,
+    pub scope: String,
+    pub scope_pattern: Option<String>,
+    pub maturity: String,
+}
+
+impl DuplicateRuleRecord {
+    #[must_use]
+    pub fn new(
+        rule_id: impl Into<String>,
+        content: impl Into<String>,
+        scope: impl Into<String>,
+        scope_pattern: Option<String>,
+        maturity: impl Into<String>,
+    ) -> Self {
+        Self {
+            rule_id: rule_id.into(),
+            content: content.into(),
+            scope: scope.into(),
+            scope_pattern,
+            maturity: maturity.into(),
+        }
+    }
+}
+
+/// Configuration for duplicate procedural-rule detection.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DuplicateRuleCheckConfig {
+    pub near_duplicate_threshold: f32,
+    pub minimum_signal_tokens: usize,
+}
+
+impl Default for DuplicateRuleCheckConfig {
+    fn default() -> Self {
+        Self {
+            near_duplicate_threshold: DEFAULT_DUPLICATE_RULE_NEAR_THRESHOLD,
+            minimum_signal_tokens: DEFAULT_DUPLICATE_RULE_MIN_TOKENS,
+        }
+    }
+}
+
+/// Duplicate check disposition for a proposed procedural rule.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DuplicateRuleDecision {
+    Unique,
+    Review,
+    Reject,
+}
+
+impl DuplicateRuleDecision {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unique => "unique",
+            Self::Review => "review",
+            Self::Reject => "reject",
+        }
+    }
+}
+
+/// Kind of duplicate match found against an existing rule.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DuplicateRuleMatchKind {
+    Exact,
+    Near,
+}
+
+impl DuplicateRuleMatchKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Near => "near",
+        }
+    }
+
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Exact => DUPLICATE_RULE_EXACT_CODE,
+            Self::Near => DUPLICATE_RULE_NEAR_CODE,
+        }
+    }
+
+    const fn sort_rank(self) -> u8 {
+        match self {
+            Self::Exact => 0,
+            Self::Near => 1,
+        }
+    }
+}
+
+/// Deterministic match record for a duplicate procedural rule.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DuplicateRuleMatch {
+    pub rule_id: String,
+    pub match_kind: DuplicateRuleMatchKind,
+    pub code: &'static str,
+    pub similarity: f32,
+    pub shared_token_count: usize,
+    pub scope: String,
+    pub scope_pattern: Option<String>,
+    pub maturity: String,
+}
+
+/// Report emitted by the pure duplicate-rule check.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DuplicateRuleCheckReport {
+    pub schema: &'static str,
+    pub decision: DuplicateRuleDecision,
+    pub proposed_token_count: usize,
+    pub compared_rule_count: usize,
+    pub scope_filtered_count: usize,
+    pub matches: Vec<DuplicateRuleMatch>,
+    pub degraded_codes: Vec<&'static str>,
+}
+
+impl DuplicateRuleCheckReport {
+    #[must_use]
+    pub fn has_duplicates(&self) -> bool {
+        !self.matches.is_empty()
+    }
+}
+
+/// Check a proposed procedural rule against existing rules using the default
+/// duplicate-detection contract.
+#[must_use]
+pub fn check_duplicate_rule(
+    proposed_content: &str,
+    proposed_scope: &str,
+    proposed_scope_pattern: Option<&str>,
+    existing_rules: &[DuplicateRuleRecord],
+) -> DuplicateRuleCheckReport {
+    check_duplicate_rule_with_config(
+        proposed_content,
+        proposed_scope,
+        proposed_scope_pattern,
+        existing_rules,
+        &DuplicateRuleCheckConfig::default(),
+    )
+}
+
+/// Check a proposed procedural rule against existing rules with explicit
+/// duplicate-detection thresholds.
+#[must_use]
+pub fn check_duplicate_rule_with_config(
+    proposed_content: &str,
+    proposed_scope: &str,
+    proposed_scope_pattern: Option<&str>,
+    existing_rules: &[DuplicateRuleRecord],
+    config: &DuplicateRuleCheckConfig,
+) -> DuplicateRuleCheckReport {
+    let proposed_normalized = normalize_rule_for_duplicate_check(proposed_content);
+    let proposed_tokens = duplicate_rule_tokens(&proposed_normalized);
+    let proposed_scope_key = duplicate_rule_scope_key(proposed_scope, proposed_scope_pattern);
+    let mut degraded_codes = Vec::new();
+    if proposed_tokens.len() < config.minimum_signal_tokens {
+        degraded_codes.push(DUPLICATE_RULE_INSUFFICIENT_SIGNAL_CODE);
+    }
+
+    let mut matches = Vec::new();
+    let mut scope_filtered_count = 0usize;
+    for rule in existing_rules {
+        if duplicate_rule_scope_key(&rule.scope, rule.scope_pattern.as_deref())
+            != proposed_scope_key
+        {
+            scope_filtered_count += 1;
+            continue;
+        }
+        let existing_normalized = normalize_rule_for_duplicate_check(&rule.content);
+        let existing_tokens = duplicate_rule_tokens(&existing_normalized);
+        let shared_token_count = proposed_tokens.intersection(&existing_tokens).count();
+        let similarity = duplicate_rule_similarity(&proposed_tokens, &existing_tokens);
+        let match_kind =
+            if !proposed_normalized.is_empty() && proposed_normalized == existing_normalized {
+                Some(DuplicateRuleMatchKind::Exact)
+            } else if proposed_tokens.len() >= config.minimum_signal_tokens
+                && existing_tokens.len() >= config.minimum_signal_tokens
+                && similarity >= config.near_duplicate_threshold
+            {
+                Some(DuplicateRuleMatchKind::Near)
+            } else {
+                None
+            };
+        if let Some(match_kind) = match_kind {
+            matches.push(duplicate_rule_match_from_record(
+                rule,
+                match_kind,
+                similarity,
+                shared_token_count,
+            ));
+        }
+    }
+
+    sort_duplicate_rule_matches(&mut matches);
+    let decision = duplicate_rule_decision(&matches, &degraded_codes);
+    DuplicateRuleCheckReport {
+        schema: DUPLICATE_RULE_CHECK_SCHEMA_V1,
+        decision,
+        proposed_token_count: proposed_tokens.len(),
+        compared_rule_count: existing_rules.len().saturating_sub(scope_filtered_count),
+        scope_filtered_count,
+        matches,
+        degraded_codes,
+    }
 }
 
 /// Score proposed curation content using the default specificity contract.
@@ -1129,6 +1622,101 @@ fn round_score(score: f32) -> f32 {
     (score * SCORE_SCALE).round() / SCORE_SCALE
 }
 
+fn normalize_rule_for_duplicate_check(content: &str) -> String {
+    lexical_tokens(content)
+        .into_iter()
+        .map(|token| {
+            token
+                .chars()
+                .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn duplicate_rule_tokens(normalized_content: &str) -> BTreeSet<String> {
+    normalized_content
+        .split_whitespace()
+        .filter(|token| !GENERIC_TOKENS.contains(token))
+        .map(str::to_string)
+        .collect()
+}
+
+fn duplicate_rule_scope_key(scope: &str, scope_pattern: Option<&str>) -> (String, Option<String>) {
+    (
+        scope.trim().to_ascii_lowercase(),
+        scope_pattern
+            .map(str::trim)
+            .filter(|pattern| !pattern.is_empty())
+            .map(str::to_ascii_lowercase),
+    )
+}
+
+fn duplicate_rule_similarity(
+    proposed_tokens: &BTreeSet<String>,
+    existing_tokens: &BTreeSet<String>,
+) -> f32 {
+    let union_count = proposed_tokens.union(existing_tokens).count();
+    if union_count == 0 {
+        return 0.0;
+    }
+    let intersection_count = proposed_tokens.intersection(existing_tokens).count();
+    round_score(intersection_count as f32 / union_count as f32)
+}
+
+fn sort_duplicate_rule_matches(matches: &mut [DuplicateRuleMatch]) {
+    matches.sort_by(|left, right| {
+        left.match_kind
+            .sort_rank()
+            .cmp(&right.match_kind.sort_rank())
+            .then_with(|| {
+                right
+                    .similarity
+                    .partial_cmp(&left.similarity)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| right.shared_token_count.cmp(&left.shared_token_count))
+            .then_with(|| left.rule_id.cmp(&right.rule_id))
+    });
+}
+
+fn duplicate_rule_match_from_record(
+    rule: &DuplicateRuleRecord,
+    match_kind: DuplicateRuleMatchKind,
+    similarity: f32,
+    shared_token_count: usize,
+) -> DuplicateRuleMatch {
+    DuplicateRuleMatch {
+        rule_id: rule.rule_id.clone(),
+        match_kind,
+        code: match_kind.code(),
+        similarity,
+        shared_token_count,
+        scope: rule.scope.clone(),
+        scope_pattern: rule.scope_pattern.clone(),
+        maturity: rule.maturity.clone(),
+    }
+}
+
+fn duplicate_rule_decision(
+    matches: &[DuplicateRuleMatch],
+    degraded_codes: &[&'static str],
+) -> DuplicateRuleDecision {
+    if matches
+        .iter()
+        .any(|entry| entry.match_kind == DuplicateRuleMatchKind::Exact)
+    {
+        DuplicateRuleDecision::Reject
+    } else if !matches.is_empty() || !degraded_codes.is_empty() {
+        DuplicateRuleDecision::Review
+    } else {
+        DuplicateRuleDecision::Unique
+    }
+}
+
 /// Validate a candidate input and produce a validated candidate.
 pub fn validate_candidate(
     input: CandidateInput,
@@ -1257,6 +1845,7 @@ pub fn validate_status_transition(
 
 /// Schema identifier for curation risk certificates.
 pub const RISK_CERTIFICATE_SCHEMA_V1: &str = "ee.curate.risk_certificate.v1";
+pub const RISK_CALIBRATION_MIN_COUNT: u32 = 30;
 
 /// Calibrated risk level for a curation action.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -1511,6 +2100,20 @@ pub struct RiskCertificate {
     pub probabilities: OutcomeProbabilities,
     /// Primary recommendation.
     pub recommendation: RiskRecommendation,
+    /// Calibration window used to estimate the risk threshold.
+    pub calibration_window_id: String,
+    /// Calibration stratum used for comparable candidates.
+    pub stratum: String,
+    /// Number of comparable outcomes in the calibration window.
+    pub calibration_count: u32,
+    /// Candidate nonconformity score within the calibration stratum.
+    pub nonconformity_score: f32,
+    /// Calibrated decision threshold for the stratum.
+    pub threshold: f32,
+    /// Action selected after applying calibration.
+    pub action: String,
+    /// Reason for abstaining when the calibration window is insufficient.
+    pub abstain_reason: Option<String>,
     /// Whether this certificate is in report-only mode.
     pub report_only: bool,
     /// Timestamp when the certificate was generated.
@@ -1532,6 +2135,11 @@ impl RiskCertificate {
     pub fn is_actionable(&self) -> bool {
         !self.report_only && !self.requires_human_review()
     }
+
+    #[must_use]
+    pub const fn is_under_calibrated(&self) -> bool {
+        self.calibration_count < RISK_CALIBRATION_MIN_COUNT
+    }
 }
 
 /// Builder for constructing risk certificates.
@@ -1541,6 +2149,13 @@ pub struct RiskCertificateBuilder {
     target_memory_id: Option<String>,
     factors: Vec<RiskFactor>,
     probabilities: OutcomeProbabilities,
+    calibration_window_id: Option<String>,
+    stratum: Option<String>,
+    calibration_count: Option<u32>,
+    nonconformity_score: Option<f32>,
+    threshold: Option<f32>,
+    action: Option<String>,
+    abstain_reason: Option<String>,
     report_only: bool,
     generated_at: Option<String>,
 }
@@ -1571,6 +2186,48 @@ impl RiskCertificateBuilder {
     }
 
     #[must_use]
+    pub fn calibration_window_id(mut self, id: impl Into<String>) -> Self {
+        self.calibration_window_id = Some(id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn stratum(mut self, stratum: impl Into<String>) -> Self {
+        self.stratum = Some(stratum.into());
+        self
+    }
+
+    #[must_use]
+    pub fn calibration_count(mut self, count: u32) -> Self {
+        self.calibration_count = Some(count);
+        self
+    }
+
+    #[must_use]
+    pub fn nonconformity_score(mut self, score: f32) -> Self {
+        self.nonconformity_score = Some(score.clamp(0.0, 1.0));
+        self
+    }
+
+    #[must_use]
+    pub fn threshold(mut self, threshold: f32) -> Self {
+        self.threshold = Some(threshold.clamp(0.0, 1.0));
+        self
+    }
+
+    #[must_use]
+    pub fn action(mut self, action: impl Into<String>) -> Self {
+        self.action = Some(action.into());
+        self
+    }
+
+    #[must_use]
+    pub fn abstain_reason(mut self, reason: impl Into<String>) -> Self {
+        self.abstain_reason = Some(reason.into());
+        self
+    }
+
+    #[must_use]
     pub fn report_only(mut self, report_only: bool) -> Self {
         self.report_only = report_only;
         self
@@ -1587,6 +2244,15 @@ impl RiskCertificateBuilder {
         let risk_score = calculate_risk_score(&self.factors);
         let risk_level = risk_level_from_score(risk_score);
         let recommendation = generate_recommendation(risk_level, risk_score, &self.probabilities);
+        let calibration_count = self.calibration_count.unwrap_or(RISK_CALIBRATION_MIN_COUNT);
+        let threshold = self.threshold.unwrap_or(0.50);
+        let action = self.action.unwrap_or_else(|| recommendation.action.clone());
+        let abstain_reason =
+            if calibration_count < RISK_CALIBRATION_MIN_COUNT && self.abstain_reason.is_none() {
+                Some("under_calibrated".to_owned())
+            } else {
+                self.abstain_reason
+            };
 
         RiskCertificate {
             schema: RISK_CERTIFICATE_SCHEMA_V1.to_owned(),
@@ -1597,6 +2263,15 @@ impl RiskCertificateBuilder {
             factors: self.factors,
             probabilities: self.probabilities,
             recommendation,
+            calibration_window_id: self
+                .calibration_window_id
+                .unwrap_or_else(|| "cal_window_default".to_owned()),
+            stratum: self.stratum.unwrap_or_else(|| "global".to_owned()),
+            calibration_count,
+            nonconformity_score: self.nonconformity_score.unwrap_or(risk_score),
+            threshold,
+            action,
+            abstain_reason,
             report_only: self.report_only,
             generated_at: self.generated_at.unwrap_or_default(),
         }
@@ -2506,9 +3181,15 @@ mod tests {
 
     use super::{
         CANDIDATE_TOO_GENERIC_CODE, CandidateInput, CandidateSource, CandidateStatus,
-        CandidateType, CandidateValidationError, ParseCandidateSourceError,
-        ParseCandidateStatusError, ParseCandidateTypeError, SpecificityPlatform, specificity_score,
-        subsystem_name, validate_candidate, validate_status_transition,
+        CandidateType, CandidateValidationError, DUPLICATE_RULE_CHECK_SCHEMA_V1,
+        DUPLICATE_RULE_EXACT_CODE, DUPLICATE_RULE_INSUFFICIENT_SIGNAL_CODE,
+        DUPLICATE_RULE_NEAR_CODE, DuplicateRuleCheckConfig, DuplicateRuleDecision,
+        DuplicateRuleMatchKind, DuplicateRuleRecord, ParseCandidateSourceError,
+        ParseCandidateStatusError, ParseCandidateTypeError, ParseReviewQueueStateError,
+        REVIEW_QUEUE_INVALID_TRANSITION_CODE, REVIEW_QUEUE_STATE_SCHEMA_V1, ReviewQueueState,
+        SpecificityPlatform, check_duplicate_rule, check_duplicate_rule_with_config,
+        specificity_score, subsystem_name, validate_candidate, validate_review_queue_transition,
+        validate_status_transition,
     };
 
     #[test]
@@ -2747,6 +3428,272 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
         assert!(CandidateStatus::Rejected.is_terminal());
         assert!(CandidateStatus::Expired.is_terminal());
         assert!(CandidateStatus::Applied.is_terminal());
+    }
+
+    #[test]
+    fn review_queue_state_schema_is_stable() {
+        assert_eq!(
+            REVIEW_QUEUE_STATE_SCHEMA_V1,
+            "ee.curate.review_queue_state.v1"
+        );
+    }
+
+    #[test]
+    fn review_queue_state_round_trip_for_every_variant() {
+        for state in ReviewQueueState::all() {
+            let rendered = state.to_string();
+            let parsed = ReviewQueueState::from_str(&rendered)
+                .unwrap_or_else(|error| panic!("state {state:?} failed round trip: {error}"));
+            assert_eq!(parsed, state);
+        }
+    }
+
+    #[test]
+    fn review_queue_state_rejects_unknown_input() {
+        let error = ReviewQueueState::from_str("parked");
+        assert!(matches!(error, Err(ParseReviewQueueStateError { .. })));
+    }
+
+    #[test]
+    fn review_queue_state_maps_existing_storage_statuses() {
+        assert_eq!(
+            ReviewQueueState::from_candidate_status(CandidateStatus::Pending),
+            ReviewQueueState::New
+        );
+        assert_eq!(
+            ReviewQueueState::from_candidate_status(CandidateStatus::Approved),
+            ReviewQueueState::Accepted
+        );
+        assert_eq!(
+            ReviewQueueState::from_candidate_status(CandidateStatus::Rejected),
+            ReviewQueueState::Rejected
+        );
+        assert_eq!(
+            ReviewQueueState::from_candidate_status(CandidateStatus::Expired),
+            ReviewQueueState::Expired
+        );
+        assert_eq!(
+            ReviewQueueState::from_candidate_status(CandidateStatus::Applied),
+            ReviewQueueState::Applied
+        );
+    }
+
+    #[test]
+    fn review_queue_state_exposes_queue_semantics() {
+        assert!(ReviewQueueState::New.requires_validation());
+        assert!(ReviewQueueState::NeedsEvidence.requires_validation());
+        assert!(ReviewQueueState::Duplicate.requires_validation());
+        assert!(ReviewQueueState::Accepted.requires_apply());
+        assert!(ReviewQueueState::Snoozed.hidden_from_default_queue());
+        assert!(ReviewQueueState::Rejected.is_terminal());
+        assert!(ReviewQueueState::Merged.is_terminal());
+        assert!(ReviewQueueState::Applied.is_terminal());
+        assert!(
+            ReviewQueueState::Duplicate.queue_rank() < ReviewQueueState::NeedsEvidence.queue_rank()
+        );
+    }
+
+    #[test]
+    fn review_queue_state_next_actions_are_stable() {
+        assert_eq!(
+            ReviewQueueState::New.next_action("curate_abc"),
+            "ee curate show curate_abc --json"
+        );
+        assert_eq!(
+            ReviewQueueState::Accepted.next_action("curate_abc"),
+            "ee curate apply curate_abc --json"
+        );
+        assert_eq!(
+            ReviewQueueState::Snoozed.next_action("curate_abc"),
+            "ee curate snooze curate_abc --until <DATE> --json"
+        );
+        assert_eq!(
+            ReviewQueueState::Rejected.next_action("curate_abc"),
+            "no action required"
+        );
+    }
+
+    #[test]
+    fn review_queue_state_allows_review_lifecycle_transitions() {
+        let result = validate_review_queue_transition(
+            ReviewQueueState::New,
+            ReviewQueueState::NeedsEvidence,
+        );
+        assert!(result.is_ok(), "{result:?}");
+
+        let result = validate_review_queue_transition(
+            ReviewQueueState::NeedsScope,
+            ReviewQueueState::Snoozed,
+        );
+        assert!(result.is_ok(), "{result:?}");
+
+        let result =
+            validate_review_queue_transition(ReviewQueueState::Duplicate, ReviewQueueState::Merged);
+        assert!(result.is_ok(), "{result:?}");
+
+        let result =
+            validate_review_queue_transition(ReviewQueueState::Accepted, ReviewQueueState::Applied);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn review_queue_state_rejects_terminal_source_transitions() {
+        let result =
+            validate_review_queue_transition(ReviewQueueState::Rejected, ReviewQueueState::New);
+        match result {
+            Ok(()) => panic!("rejected candidates must be terminal"),
+            Err(error) => {
+                assert_eq!(error.code(), REVIEW_QUEUE_INVALID_TRANSITION_CODE);
+                assert_eq!(error.from, ReviewQueueState::Rejected);
+                assert_eq!(error.to, ReviewQueueState::New);
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_rule_check_schema_is_stable() {
+        assert_eq!(
+            DUPLICATE_RULE_CHECK_SCHEMA_V1,
+            "ee.curate.duplicate_rule_check.v1"
+        );
+    }
+
+    #[test]
+    fn duplicate_rule_check_rejects_exact_normalized_duplicate() {
+        let existing = vec![DuplicateRuleRecord::new(
+            "rule_00000000000000000000000001",
+            "Run `cargo fmt --check` before release.",
+            "workspace",
+            None,
+            "validated",
+        )];
+
+        let report = check_duplicate_rule(
+            "  run   cargo fmt --check before release!  ",
+            "workspace",
+            None,
+            &existing,
+        );
+
+        assert_eq!(report.schema, DUPLICATE_RULE_CHECK_SCHEMA_V1);
+        assert_eq!(report.decision, DuplicateRuleDecision::Reject);
+        assert!(report.has_duplicates());
+        assert_eq!(report.matches.len(), 1);
+        assert_eq!(report.matches[0].match_kind, DuplicateRuleMatchKind::Exact);
+        assert_eq!(report.matches[0].code, DUPLICATE_RULE_EXACT_CODE);
+        assert_eq!(report.matches[0].similarity, 1.0);
+    }
+
+    #[test]
+    fn duplicate_rule_check_reviews_near_duplicate() {
+        let existing = vec![DuplicateRuleRecord::new(
+            "rule_00000000000000000000000002",
+            "Before release run cargo fmt --check on main.",
+            "workspace",
+            None,
+            "candidate",
+        )];
+
+        let report = check_duplicate_rule(
+            "Run cargo fmt --check before release on main.",
+            "workspace",
+            None,
+            &existing,
+        );
+
+        assert_eq!(report.decision, DuplicateRuleDecision::Review);
+        assert_eq!(report.matches.len(), 1);
+        assert_eq!(report.matches[0].match_kind, DuplicateRuleMatchKind::Near);
+        assert_eq!(report.matches[0].code, DUPLICATE_RULE_NEAR_CODE);
+        assert!(report.matches[0].similarity >= 0.82);
+    }
+
+    #[test]
+    fn duplicate_rule_check_filters_different_scope() {
+        let existing = vec![DuplicateRuleRecord::new(
+            "rule_00000000000000000000000003",
+            "Run cargo fmt --check before release.",
+            "directory",
+            Some("src/db".to_string()),
+            "validated",
+        )];
+
+        let report = check_duplicate_rule(
+            "Run cargo fmt --check before release.",
+            "directory",
+            Some("src/curate"),
+            &existing,
+        );
+
+        assert_eq!(report.decision, DuplicateRuleDecision::Unique);
+        assert!(report.matches.is_empty());
+        assert_eq!(report.compared_rule_count, 0);
+        assert_eq!(report.scope_filtered_count, 1);
+    }
+
+    #[test]
+    fn duplicate_rule_check_orders_matches_deterministically() {
+        let existing = vec![
+            DuplicateRuleRecord::new(
+                "rule_00000000000000000000000009",
+                "Run cargo fmt --check before release on main.",
+                "workspace",
+                None,
+                "candidate",
+            ),
+            DuplicateRuleRecord::new(
+                "rule_00000000000000000000000001",
+                "Before release on main run cargo fmt --check.",
+                "workspace",
+                None,
+                "validated",
+            ),
+            DuplicateRuleRecord::new(
+                "rule_00000000000000000000000002",
+                "Before release run cargo fmt --check on main.",
+                "workspace",
+                None,
+                "candidate",
+            ),
+        ];
+
+        let report = check_duplicate_rule(
+            "Run cargo fmt --check before release on main.",
+            "workspace",
+            None,
+            &existing,
+        );
+
+        let ids = report
+            .matches
+            .iter()
+            .map(|entry| entry.rule_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "rule_00000000000000000000000009",
+                "rule_00000000000000000000000001",
+                "rule_00000000000000000000000002",
+            ]
+        );
+        assert_eq!(report.matches[0].match_kind, DuplicateRuleMatchKind::Exact);
+    }
+
+    #[test]
+    fn duplicate_rule_check_reviews_insufficient_signal() {
+        let config = DuplicateRuleCheckConfig {
+            near_duplicate_threshold: 0.90,
+            minimum_signal_tokens: 4,
+        };
+        let report = check_duplicate_rule_with_config("fmt", "workspace", None, &[], &config);
+
+        assert_eq!(report.decision, DuplicateRuleDecision::Review);
+        assert_eq!(
+            report.degraded_codes,
+            vec![DUPLICATE_RULE_INSUFFICIENT_SIGNAL_CODE]
+        );
+        assert!(report.matches.is_empty());
     }
 
     fn valid_input() -> CandidateInput {

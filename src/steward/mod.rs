@@ -9,7 +9,13 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
+use chrono::{DateTime, Utc};
 use serde_json::{Value as JsonValue, json};
+
+use crate::db::{
+    ApplyMemoryScoreUpdateInput, DbConnection, FeedbackCounts, StoredFeedbackEvent, StoredMemory,
+    feedback_scoring,
+};
 
 pub const SUBSYSTEM: &str = "steward";
 
@@ -1072,6 +1078,412 @@ pub fn create_custom_budget(
 }
 
 // ============================================================================
+// EE-206: Score Decay Job
+// ============================================================================
+
+/// Schema identifier for score decay job reports.
+pub const SCORE_DECAY_JOB_SCHEMA_V1: &str = "ee.steward.score_decay.v1";
+
+/// Default age after which a memory becomes eligible for time-based decay.
+pub const DEFAULT_SCORE_DECAY_STALE_AFTER_DAYS: u32 = 30;
+
+/// Default interval for each staleness decay step.
+pub const DEFAULT_SCORE_DECAY_INTERVAL_DAYS: u32 = 30;
+
+/// Default minimum confidence delta before a score update is persisted.
+pub const DEFAULT_SCORE_DECAY_MIN_DELTA: f32 = 0.0001;
+
+/// Options for the explicit score decay maintenance job.
+#[derive(Clone, Debug)]
+pub struct ScoreDecayJobOptions {
+    pub workspace_id: String,
+    pub as_of: Option<String>,
+    pub item_limit: Option<u32>,
+    pub stale_after_days: u32,
+    pub decay_interval_days: u32,
+    pub min_delta: f32,
+    pub dry_run: bool,
+    pub actor: Option<String>,
+}
+
+impl ScoreDecayJobOptions {
+    #[must_use]
+    pub fn new(workspace_id: impl Into<String>) -> Self {
+        Self {
+            workspace_id: workspace_id.into(),
+            as_of: None,
+            item_limit: None,
+            stale_after_days: DEFAULT_SCORE_DECAY_STALE_AFTER_DAYS,
+            decay_interval_days: DEFAULT_SCORE_DECAY_INTERVAL_DAYS,
+            min_delta: DEFAULT_SCORE_DECAY_MIN_DELTA,
+            dry_run: false,
+            actor: None,
+        }
+    }
+}
+
+/// One memory score considered by the decay job.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScoreDecayMemoryChange {
+    pub memory_id: String,
+    pub old_confidence: f32,
+    pub new_confidence: f32,
+    pub delta: f32,
+    pub age_days: u32,
+    pub stale_periods: u32,
+    pub feedback_total_count: u32,
+    pub feedback_event_ids: Vec<String>,
+    pub applied: bool,
+    pub audit_id: Option<String>,
+}
+
+impl ScoreDecayMemoryChange {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "memoryId": self.memory_id,
+            "oldConfidence": score_json(self.old_confidence),
+            "newConfidence": score_json(self.new_confidence),
+            "delta": score_json(self.delta),
+            "ageDays": self.age_days,
+            "stalePeriods": self.stale_periods,
+            "feedbackTotalCount": self.feedback_total_count,
+            "feedbackEventIds": self.feedback_event_ids,
+            "applied": self.applied,
+            "auditId": self.audit_id,
+        })
+    }
+}
+
+/// Report produced by the score decay job.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScoreDecayJobReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub workspace_id: String,
+    pub as_of: String,
+    pub dry_run: bool,
+    pub durable_mutation: bool,
+    pub scanned_count: usize,
+    pub changed_count: usize,
+    pub applied_count: usize,
+    pub skipped_count: usize,
+    pub stale_after_days: u32,
+    pub decay_interval_days: u32,
+    pub min_delta: f32,
+    pub changes: Vec<ScoreDecayMemoryChange>,
+}
+
+impl ScoreDecayJobReport {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "schema": self.schema,
+            "command": self.command,
+            "workspaceId": self.workspace_id,
+            "asOf": self.as_of,
+            "dryRun": self.dry_run,
+            "durableMutation": self.durable_mutation,
+            "policy": {
+                "staleAfterDays": self.stale_after_days,
+                "decayIntervalDays": self.decay_interval_days,
+                "minDelta": score_json(self.min_delta),
+            },
+            "summary": {
+                "scannedCount": self.scanned_count,
+                "changedCount": self.changed_count,
+                "appliedCount": self.applied_count,
+                "skippedCount": self.skipped_count,
+            },
+            "changes": self
+                .changes
+                .iter()
+                .map(ScoreDecayMemoryChange::data_json)
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut output = String::new();
+        output.push_str("Score Decay Job\n");
+        output.push_str("================\n\n");
+        output.push_str(&format!("Workspace: {}\n", self.workspace_id));
+        output.push_str(&format!("As of:     {}\n", self.as_of));
+        output.push_str(&format!("Dry run:   {}\n\n", self.dry_run));
+        output.push_str("Summary:\n");
+        output.push_str(&format!("  Scanned: {}\n", self.scanned_count));
+        output.push_str(&format!("  Changed: {}\n", self.changed_count));
+        output.push_str(&format!("  Applied: {}\n", self.applied_count));
+        output.push_str(&format!("  Skipped: {}\n", self.skipped_count));
+        if !self.changes.is_empty() {
+            output.push_str("\nChanges:\n");
+            for change in &self.changes {
+                output.push_str(&format!(
+                    "  {}: {:.4} -> {:.4} ({:.4})\n",
+                    change.memory_id, change.old_confidence, change.new_confidence, change.delta
+                ));
+            }
+        }
+        output
+    }
+}
+
+/// Run the explicit score decay maintenance job over active memories.
+///
+/// The job is report-only in dry-run mode. In mutating mode it applies bounded
+/// confidence decreases and records an audit entry for each changed memory.
+/// Feedback events that contributed to an applied decrease are marked applied in
+/// the same transaction so rerunning the job is idempotent for those signals.
+pub fn run_score_decay_job(
+    conn: &DbConnection,
+    options: &ScoreDecayJobOptions,
+) -> Result<ScoreDecayJobReport, String> {
+    validate_score_decay_options(options)?;
+    let as_of = options
+        .as_of
+        .clone()
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let as_of_timestamp = parse_score_decay_timestamp(&as_of, "as_of")?;
+
+    let mut memories = conn
+        .list_memories(&options.workspace_id, None, false)
+        .map_err(|error| format!("Failed to list memories for score decay: {error}"))?;
+    if let Some(limit) = options.item_limit {
+        memories.truncate(
+            usize::try_from(limit)
+                .map_err(|_| "Score decay item limit exceeds platform usize".to_owned())?,
+        );
+    }
+
+    let mut scanned_count = 0usize;
+    let mut changes = Vec::new();
+
+    for memory in memories {
+        scanned_count = scanned_count.saturating_add(1);
+        let feedback_events = conn
+            .list_feedback_events_for_target("memory", &memory.id)
+            .map_err(|error| {
+                format!(
+                    "Failed to list feedback events for memory {}: {error}",
+                    memory.id
+                )
+            })?
+            .into_iter()
+            .filter(|event| event.applied_at.is_none())
+            .collect::<Vec<_>>();
+        let feedback_counts = feedback_counts_from_events(&feedback_events);
+        let Some(mut change) = score_decay_change_for_memory(
+            &memory,
+            &feedback_counts,
+            &feedback_events,
+            &as_of_timestamp,
+            options,
+        )?
+        else {
+            continue;
+        };
+
+        if !options.dry_run {
+            let details = score_decay_audit_details(&change, &as_of);
+            change.audit_id = conn
+                .apply_memory_score_update_audited(
+                    &memory.id,
+                    &ApplyMemoryScoreUpdateInput {
+                        workspace_id: options.workspace_id.clone(),
+                        confidence: change.new_confidence,
+                        utility: memory.utility,
+                        importance: memory.importance,
+                        updated_at: as_of.clone(),
+                        actor: options.actor.clone(),
+                        details,
+                        feedback_event_ids: change.feedback_event_ids.clone(),
+                    },
+                )
+                .map_err(|error| {
+                    format!(
+                        "Failed to apply score decay for memory {}: {error}",
+                        memory.id
+                    )
+                })?;
+            change.applied = change.audit_id.is_some();
+        }
+
+        changes.push(change);
+    }
+
+    let applied_count = changes.iter().filter(|change| change.applied).count();
+    let changed_count = changes.len();
+    let skipped_count = scanned_count.saturating_sub(changed_count);
+
+    Ok(ScoreDecayJobReport {
+        schema: SCORE_DECAY_JOB_SCHEMA_V1,
+        command: "steward score-decay",
+        workspace_id: options.workspace_id.clone(),
+        as_of,
+        dry_run: options.dry_run,
+        durable_mutation: applied_count > 0,
+        scanned_count,
+        changed_count,
+        applied_count,
+        skipped_count,
+        stale_after_days: options.stale_after_days,
+        decay_interval_days: options.decay_interval_days,
+        min_delta: options.min_delta,
+        changes,
+    })
+}
+
+fn validate_score_decay_options(options: &ScoreDecayJobOptions) -> Result<(), String> {
+    if options.workspace_id.trim().is_empty() {
+        return Err("Score decay workspace_id must not be empty".to_owned());
+    }
+    if options.decay_interval_days == 0 {
+        return Err("Score decay interval must be at least one day".to_owned());
+    }
+    if !options.min_delta.is_finite() || options.min_delta < 0.0 {
+        return Err("Score decay min_delta must be a finite non-negative number".to_owned());
+    }
+    Ok(())
+}
+
+fn score_decay_change_for_memory(
+    memory: &StoredMemory,
+    feedback_counts: &FeedbackCounts,
+    feedback_events: &[StoredFeedbackEvent],
+    as_of: &DateTime<Utc>,
+    options: &ScoreDecayJobOptions,
+) -> Result<Option<ScoreDecayMemoryChange>, String> {
+    let age_days = score_age_days(&memory.updated_at, as_of)?;
+    let stale_periods = score_decay_stale_periods(age_days, options);
+    let new_confidence =
+        decayed_confidence(memory.confidence, feedback_counts, age_days, stale_periods);
+    let old_confidence = round_score(memory.confidence);
+    let new_confidence = round_score(new_confidence);
+    let delta = round_score(new_confidence - old_confidence);
+
+    if delta.abs() < options.min_delta {
+        return Ok(None);
+    }
+
+    Ok(Some(ScoreDecayMemoryChange {
+        memory_id: memory.id.clone(),
+        old_confidence,
+        new_confidence,
+        delta,
+        age_days,
+        stale_periods,
+        feedback_total_count: feedback_counts.total_count(),
+        feedback_event_ids: feedback_events
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<Vec<_>>(),
+        applied: false,
+        audit_id: None,
+    }))
+}
+
+fn decayed_confidence(
+    current_confidence: f32,
+    feedback_counts: &FeedbackCounts,
+    age_days: u32,
+    stale_periods: u32,
+) -> f32 {
+    let stale_factor = feedback_scoring::STALENESS_DECAY_RATE
+        .powi(i32::try_from(stale_periods).unwrap_or(i32::MAX));
+    let time_decayed = (current_confidence * stale_factor).clamp(
+        feedback_scoring::CONFIDENCE_FLOOR,
+        feedback_scoring::CONFIDENCE_CEILING,
+    );
+    feedback_counts
+        .apply_to_confidence_at_age(time_decayed, age_days)
+        .min(current_confidence)
+        .clamp(
+            feedback_scoring::CONFIDENCE_FLOOR,
+            feedback_scoring::CONFIDENCE_CEILING,
+        )
+}
+
+fn score_decay_stale_periods(age_days: u32, options: &ScoreDecayJobOptions) -> u32 {
+    if age_days < options.stale_after_days {
+        return 0;
+    }
+    age_days
+        .saturating_sub(options.stale_after_days)
+        .checked_div(options.decay_interval_days)
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+fn score_age_days(updated_at: &str, as_of: &DateTime<Utc>) -> Result<u32, String> {
+    let updated_at = parse_score_decay_timestamp(updated_at, "memory.updated_at")?;
+    let seconds = as_of.signed_duration_since(updated_at).num_seconds().max(0);
+    u32::try_from(seconds / 86_400)
+        .map_err(|_| "Score decay age exceeds supported u32 day range".to_owned())
+}
+
+fn parse_score_decay_timestamp(raw: &str, field: &str) -> Result<DateTime<Utc>, String> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|error| format!("Invalid score decay {field} timestamp: {error}"))
+}
+
+fn feedback_counts_from_events(events: &[StoredFeedbackEvent]) -> FeedbackCounts {
+    let mut counts = FeedbackCounts::default();
+    for event in events {
+        match event.signal.as_str() {
+            "positive" | "helpful" | "confirmation" => {
+                counts.positive_weight += event.weight;
+                counts.positive_count = counts.positive_count.saturating_add(1);
+            }
+            "negative" | "harmful" | "contradiction" | "inaccurate" => {
+                counts.negative_weight += event.weight;
+                counts.negative_count = counts.negative_count.saturating_add(1);
+            }
+            "stale" | "outdated" => {
+                counts.decay_weight += event.weight;
+                counts.decay_count = counts.decay_count.saturating_add(1);
+            }
+            _ => {
+                counts.neutral_weight += event.weight;
+                counts.neutral_count = counts.neutral_count.saturating_add(1);
+            }
+        }
+    }
+    counts
+}
+
+fn score_decay_audit_details(change: &ScoreDecayMemoryChange, as_of: &str) -> String {
+    json!({
+        "schema": "ee.audit.memory_score_decay.v1",
+        "command": "steward score-decay",
+        "memoryId": change.memory_id,
+        "asOf": as_of,
+        "oldConfidence": score_json(change.old_confidence),
+        "newConfidence": score_json(change.new_confidence),
+        "delta": score_json(change.delta),
+        "ageDays": change.age_days,
+        "stalePeriods": change.stale_periods,
+        "feedbackTotalCount": change.feedback_total_count,
+        "feedbackEventIds": change.feedback_event_ids,
+    })
+    .to_string()
+}
+
+fn round_score(value: f32) -> f32 {
+    if value.is_finite() {
+        (value * 1_000_000.0).round() / 1_000_000.0
+    } else {
+        feedback_scoring::CONFIDENCE_FLOOR
+    }
+}
+
+fn score_json(value: f32) -> JsonValue {
+    serde_json::Number::from_f64(f64::from(round_score(value)))
+        .map_or(JsonValue::Null, JsonValue::Number)
+}
+
+// ============================================================================
 // EE-203: Manual Steward Runner
 // ============================================================================
 
@@ -1525,6 +1937,245 @@ impl ManualRunner {
 }
 
 // ============================================================================
+// EE-207: Foreground Daemon Mode
+// ============================================================================
+
+/// Schema identifier for foreground daemon reports.
+pub const DAEMON_FOREGROUND_SCHEMA_V1: &str = "ee.steward.daemon_foreground.v1";
+
+/// Default number of daemon ticks for bounded foreground runs.
+pub const DEFAULT_DAEMON_FOREGROUND_TICK_LIMIT: u32 = 1;
+
+/// Default delay between foreground daemon ticks.
+pub const DEFAULT_DAEMON_FOREGROUND_INTERVAL_MS: u64 = 1_000;
+
+/// Options for running the optional daemon in the foreground.
+#[derive(Clone, Debug)]
+pub struct DaemonForegroundOptions {
+    pub workspace: String,
+    pub tick_limit: u32,
+    pub interval_ms: u64,
+    pub dry_run: bool,
+    pub job_types: Vec<JobType>,
+    pub runner_options: RunnerOptions,
+}
+
+impl DaemonForegroundOptions {
+    #[must_use]
+    pub fn new(workspace: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            tick_limit: DEFAULT_DAEMON_FOREGROUND_TICK_LIMIT,
+            interval_ms: DEFAULT_DAEMON_FOREGROUND_INTERVAL_MS,
+            dry_run: false,
+            job_types: vec![JobType::HealthCheck],
+            runner_options: RunnerOptions::new(),
+        }
+    }
+}
+
+/// One foreground daemon scheduler tick.
+#[derive(Clone, Debug)]
+pub struct DaemonForegroundTick {
+    pub tick: u32,
+    pub started_at: String,
+    pub completed_at: String,
+    pub report: RunnerReport,
+}
+
+impl DaemonForegroundTick {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "tick": self.tick,
+            "startedAt": self.started_at,
+            "completedAt": self.completed_at,
+            "runner": self.report.data_json(),
+        })
+    }
+}
+
+/// Report from a bounded foreground daemon run.
+#[derive(Clone, Debug)]
+pub struct DaemonForegroundReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub mode: &'static str,
+    pub workspace: String,
+    pub daemonized: bool,
+    pub supervisor: &'static str,
+    pub started_at: String,
+    pub completed_at: String,
+    pub tick_limit: u32,
+    pub interval_ms: u64,
+    pub dry_run: bool,
+    pub job_types: Vec<JobType>,
+    pub ticks: Vec<DaemonForegroundTick>,
+}
+
+impl DaemonForegroundReport {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "schema": self.schema,
+            "command": self.command,
+            "mode": self.mode,
+            "workspace": self.workspace,
+            "daemonized": self.daemonized,
+            "supervisor": self.supervisor,
+            "startedAt": self.started_at,
+            "completedAt": self.completed_at,
+            "requestedTickLimit": self.tick_limit,
+            "intervalMs": self.interval_ms,
+            "dryRun": self.dry_run,
+            "jobTypes": self
+                .job_types
+                .iter()
+                .map(|job_type| job_type.as_str())
+                .collect::<Vec<_>>(),
+            "summary": {
+                "tickCount": self.ticks.len(),
+                "jobsRun": self.jobs_run(),
+                "succeeded": self.succeeded_count(),
+                "failed": self.failed_count(),
+                "skipped": self.skipped_count(),
+                "wasCancelled": self.was_cancelled(),
+            },
+            "ticks": self
+                .ticks
+                .iter()
+                .map(DaemonForegroundTick::data_json)
+                .collect::<Vec<_>>(),
+            "degraded": [
+                {
+                    "code": "daemon_background_mode_unimplemented",
+                    "severity": "low",
+                    "message": "Only bounded foreground daemon mode is implemented.",
+                    "repair": "Run ee daemon --foreground with an explicit tick limit."
+                }
+            ],
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut output = String::new();
+        output.push_str("ee daemon foreground\n");
+        output.push_str("====================\n\n");
+        output.push_str(&format!("Workspace:  {}\n", self.workspace));
+        output.push_str(&format!("Started:    {}\n", self.started_at));
+        output.push_str(&format!("Completed:  {}\n", self.completed_at));
+        output.push_str(&format!("Ticks:      {}\n", self.ticks.len()));
+        output.push_str(&format!("Jobs run:   {}\n", self.jobs_run()));
+        output.push_str(&format!("Succeeded:  {}\n", self.succeeded_count()));
+        output.push_str(&format!("Failed:     {}\n", self.failed_count()));
+        output.push_str(&format!("Skipped:    {}\n", self.skipped_count()));
+        output.push_str(&format!("Dry run:    {}\n", self.dry_run));
+        output.push_str("\nMode:\n  Foreground, bounded, current process.\n");
+        output.push_str("\nNext:\n  ee daemon --foreground --once --json\n");
+        output
+    }
+
+    #[must_use]
+    pub fn jobs_run(&self) -> usize {
+        self.ticks
+            .iter()
+            .map(|tick| tick.report.results.len())
+            .sum()
+    }
+
+    #[must_use]
+    pub fn succeeded_count(&self) -> u32 {
+        self.ticks.iter().map(|tick| tick.report.succeeded).sum()
+    }
+
+    #[must_use]
+    pub fn failed_count(&self) -> u32 {
+        self.ticks.iter().map(|tick| tick.report.failed).sum()
+    }
+
+    #[must_use]
+    pub fn skipped_count(&self) -> u32 {
+        self.ticks.iter().map(|tick| tick.report.skipped).sum()
+    }
+
+    #[must_use]
+    pub fn was_cancelled(&self) -> bool {
+        self.ticks.iter().any(|tick| tick.report.was_cancelled)
+    }
+}
+
+/// Run a bounded foreground daemon loop in the current process.
+///
+/// This intentionally does not fork, daemonize, or claim to be the write owner.
+/// It gives agents a deterministic supervised loop surface while keeping the
+/// CLI-first invariant intact.
+pub fn run_daemon_foreground(
+    options: &DaemonForegroundOptions,
+) -> Result<DaemonForegroundReport, String> {
+    validate_daemon_foreground_options(options)?;
+
+    let started_at = chrono::Utc::now().to_rfc3339();
+    let mut ticks = Vec::new();
+
+    for tick in 1..=options.tick_limit {
+        let tick_started_at = chrono::Utc::now().to_rfc3339();
+        let mut runner_options = options.runner_options.clone();
+        runner_options.dry_run = options.dry_run;
+        let mut runner = ManualRunner::new(runner_options);
+
+        for job_type in &options.job_types {
+            runner.schedule(
+                *job_type,
+                JobPriority::Normal,
+                Some(format!("daemon foreground tick {tick}")),
+            );
+        }
+
+        let report = runner.run_pending();
+        ticks.push(DaemonForegroundTick {
+            tick,
+            started_at: tick_started_at,
+            completed_at: report.completed_at.clone(),
+            report,
+        });
+
+        if tick < options.tick_limit && options.interval_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(options.interval_ms));
+        }
+    }
+
+    Ok(DaemonForegroundReport {
+        schema: DAEMON_FOREGROUND_SCHEMA_V1,
+        command: "daemon",
+        mode: "foreground",
+        workspace: options.workspace.clone(),
+        daemonized: false,
+        supervisor: "current_process",
+        started_at,
+        completed_at: chrono::Utc::now().to_rfc3339(),
+        tick_limit: options.tick_limit,
+        interval_ms: options.interval_ms,
+        dry_run: options.dry_run,
+        job_types: options.job_types.clone(),
+        ticks,
+    })
+}
+
+fn validate_daemon_foreground_options(options: &DaemonForegroundOptions) -> Result<(), String> {
+    if options.workspace.trim().is_empty() {
+        return Err("Daemon workspace must not be empty".to_owned());
+    }
+    if options.tick_limit == 0 {
+        return Err("Daemon foreground tick limit must be at least one".to_owned());
+    }
+    if options.job_types.is_empty() {
+        return Err("Daemon foreground mode requires at least one steward job type".to_owned());
+    }
+    Ok(())
+}
+
+// ============================================================================
 // EE-244: Job Diagnostic Output
 // ============================================================================
 
@@ -1907,8 +2558,16 @@ pub fn diagnose_job(job: &Job) -> Vec<JobDiagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{
+        CreateFeedbackEventInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
+        audit_actions,
+    };
 
     type TestResult = Result<(), String>;
+
+    const SCORE_WORKSPACE_ID: &str = "wsp_scoredecay0000000000000000";
+    const SCORE_MEMORY_A: &str = "mem_scoredecay0000000000000001";
+    const SCORE_MEMORY_B: &str = "mem_scoredecay0000000000000002";
 
     fn ensure<T: std::fmt::Debug + PartialEq>(actual: T, expected: T, ctx: &str) -> TestResult {
         if actual == expected {
@@ -1916,6 +2575,74 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn open_score_decay_db() -> Result<DbConnection, String> {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                SCORE_WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-score-decay".to_owned(),
+                    name: Some("score-decay".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(connection)
+    }
+
+    fn insert_score_memory(
+        connection: &DbConnection,
+        memory_id: &str,
+        confidence: f32,
+    ) -> Result<(), String> {
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: SCORE_WORKSPACE_ID.to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: format!("score decay fixture {memory_id}"),
+                    confidence,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("test://score-decay".to_owned()),
+                    trust_class: "agent_validated".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["decay".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn insert_score_feedback(
+        connection: &DbConnection,
+        event_id: &str,
+        memory_id: &str,
+        signal: &str,
+        weight: f32,
+    ) -> Result<(), String> {
+        connection
+            .insert_feedback_event(
+                event_id,
+                &CreateFeedbackEventInput {
+                    workspace_id: SCORE_WORKSPACE_ID.to_owned(),
+                    target_type: "memory".to_owned(),
+                    target_id: memory_id.to_owned(),
+                    signal: signal.to_owned(),
+                    weight,
+                    source_type: "outcome_observed".to_owned(),
+                    source_id: Some("test-run".to_owned()),
+                    reason: Some("score decay fixture".to_owned()),
+                    evidence_json: Some(r#"{"redacted":true}"#.to_owned()),
+                    session_id: None,
+                },
+            )
+            .map_err(|error| error.to_string())
     }
 
     #[test]
@@ -2380,6 +3107,198 @@ mod tests {
         assert!(opts.verbose);
         assert_eq!(opts.time_limit_ms, Some(5000));
         assert_eq!(opts.item_limit, Some(100));
+    }
+
+    // ========================================================================
+    // EE-206: Score Decay Job Tests
+    // ========================================================================
+
+    #[test]
+    fn score_decay_job_dry_run_does_not_mutate_memory_or_feedback() -> TestResult {
+        let connection = open_score_decay_db()?;
+        insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+        insert_score_feedback(
+            &connection,
+            "fb_decaydry000000000000000001",
+            SCORE_MEMORY_A,
+            "harmful",
+            1.0,
+        )?;
+        insert_score_feedback(
+            &connection,
+            "fb_decaydry000000000000000002",
+            SCORE_MEMORY_A,
+            "harmful",
+            1.0,
+        )?;
+
+        let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+        options.as_of = Some("2099-01-01T00:00:00Z".to_owned());
+        options.dry_run = true;
+        let report = run_score_decay_job(&connection, &options)?;
+
+        ensure(report.schema, SCORE_DECAY_JOB_SCHEMA_V1, "schema")?;
+        ensure(report.dry_run, true, "dry run flag")?;
+        ensure(report.durable_mutation, false, "dry run mutation flag")?;
+        ensure(report.scanned_count, 1, "scanned count")?;
+        ensure(report.changed_count, 1, "changed count")?;
+        ensure(report.applied_count, 0, "applied count")?;
+        ensure(report.changes[0].applied, false, "change not applied")?;
+        ensure(
+            report.changes[0].new_confidence < report.changes[0].old_confidence,
+            true,
+            "dry run reports decrease",
+        )?;
+
+        let memory = connection
+            .get_memory(SCORE_MEMORY_A)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory missing".to_owned())?;
+        ensure((memory.confidence - 0.8).abs() < 0.0001, true, "unchanged")?;
+        let events = connection
+            .list_feedback_events_for_target("memory", SCORE_MEMORY_A)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            events.iter().all(|event| event.applied_at.is_none()),
+            true,
+            "feedback remains unapplied",
+        )
+    }
+
+    #[test]
+    fn score_decay_job_applies_negative_feedback_and_is_idempotent() -> TestResult {
+        let connection = open_score_decay_db()?;
+        insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+        insert_score_feedback(
+            &connection,
+            "fb_decayapply0000000000000001",
+            SCORE_MEMORY_A,
+            "harmful",
+            1.0,
+        )?;
+        insert_score_feedback(
+            &connection,
+            "fb_decayapply0000000000000002",
+            SCORE_MEMORY_A,
+            "harmful",
+            1.0,
+        )?;
+
+        let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+        options.as_of = Some("2099-01-01T00:00:00Z".to_owned());
+        options.actor = Some("score-decay-test".to_owned());
+        let first = run_score_decay_job(&connection, &options)?;
+
+        ensure(first.changed_count, 1, "first changed")?;
+        ensure(first.applied_count, 1, "first applied")?;
+        ensure(first.durable_mutation, true, "durable mutation")?;
+        ensure(first.changes[0].audit_id.is_some(), true, "audit id")?;
+
+        let memory = connection
+            .get_memory(SCORE_MEMORY_A)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory missing".to_owned())?;
+        ensure(
+            memory.confidence < 0.8,
+            true,
+            "confidence decreased after job",
+        )?;
+        ensure(
+            memory.provenance_verification_status,
+            "unverified".to_owned(),
+            "score update invalidates provenance verification",
+        )?;
+        let audit = connection
+            .list_audit_by_target("memory", SCORE_MEMORY_A, None)
+            .map_err(|error| error.to_string())?;
+        ensure(audit.len(), 1, "audit count")?;
+        ensure(
+            audit[0].action.as_str(),
+            audit_actions::MEMORY_SCORE_DECAY,
+            "audit action",
+        )?;
+        let events = connection
+            .list_feedback_events_for_target("memory", SCORE_MEMORY_A)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            events.iter().all(|event| event.applied_at.is_some()),
+            true,
+            "feedback marked applied",
+        )?;
+
+        let second = run_score_decay_job(&connection, &options)?;
+        ensure(second.changed_count, 0, "second changed count")?;
+        ensure(second.applied_count, 0, "second applied count")
+    }
+
+    #[test]
+    fn score_decay_job_decays_stale_memory_without_feedback() -> TestResult {
+        let connection = open_score_decay_db()?;
+        insert_score_memory(&connection, SCORE_MEMORY_B, 0.6)?;
+
+        let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+        options.as_of = Some("2099-01-01T00:00:00Z".to_owned());
+        options.item_limit = Some(1);
+        let report = run_score_decay_job(&connection, &options)?;
+
+        ensure(report.scanned_count, 1, "scanned count")?;
+        ensure(report.changed_count, 1, "changed count")?;
+        ensure(report.changes[0].feedback_total_count, 0, "feedback count")?;
+        ensure(
+            report.changes[0].stale_periods > 0,
+            true,
+            "stale periods present",
+        )?;
+        ensure(
+            report.changes[0].new_confidence < 0.6,
+            true,
+            "stale memory decayed",
+        )
+    }
+
+    // ========================================================================
+    // EE-207: Foreground Daemon Tests
+    // ========================================================================
+
+    #[test]
+    fn daemon_foreground_once_runs_configured_job() -> TestResult {
+        let mut options = DaemonForegroundOptions::new("/tmp/ee-daemon");
+        options.interval_ms = 0;
+        options.job_types = vec![JobType::HealthCheck];
+
+        let report = run_daemon_foreground(&options)?;
+
+        ensure(report.schema, DAEMON_FOREGROUND_SCHEMA_V1, "schema")?;
+        ensure(report.command, "daemon", "command")?;
+        ensure(report.mode, "foreground", "mode")?;
+        ensure(report.daemonized, false, "daemonized")?;
+        ensure(report.ticks.len(), 1, "tick count")?;
+        ensure(report.jobs_run(), 1, "jobs run")?;
+        ensure(report.succeeded_count(), 1, "succeeded")?;
+        ensure(report.failed_count(), 0, "failed")?;
+        let json = report.data_json();
+        ensure(
+            json["summary"]["tickCount"].as_u64(),
+            Some(1),
+            "json tick count",
+        )?;
+        ensure(
+            json["jobTypes"][0].as_str(),
+            Some("health_check"),
+            "json job type",
+        )
+    }
+
+    #[test]
+    fn daemon_foreground_rejects_zero_tick_limit() -> TestResult {
+        let mut options = DaemonForegroundOptions::new("/tmp/ee-daemon");
+        options.tick_limit = 0;
+
+        ensure(
+            run_daemon_foreground(&options).is_err(),
+            true,
+            "zero tick limit rejected",
+        )
     }
 
     #[test]

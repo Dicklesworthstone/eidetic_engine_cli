@@ -352,8 +352,11 @@ impl ImportCursor {
 
     /// Mark a session as fully imported.
     pub fn record_imported(&mut self, source_path: &str) {
+        let line_belongs_to_session = self.last_source_path.as_deref() == Some(source_path);
         self.last_source_path = Some(source_path.to_owned());
-        self.last_line = None;
+        if !line_belongs_to_session {
+            self.last_line = None;
+        }
         self.sessions_imported = self.sessions_imported.saturating_add(1);
     }
 
@@ -621,6 +624,22 @@ mod tests {
         cursor.record_imported("/session2.jsonl");
         assert!(cursor.is_complete());
         assert!((cursor.completion_percent() - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn import_cursor_preserves_line_for_completed_session() {
+        let mut cursor = ImportCursor::new();
+
+        cursor.record_discovered();
+        cursor.record_span("/session1.jsonl", 42);
+        cursor.record_imported("/session1.jsonl");
+        assert_eq!(cursor.last_source_path.as_deref(), Some("/session1.jsonl"));
+        assert_eq!(cursor.last_line, Some(42));
+
+        cursor.record_discovered();
+        cursor.record_imported("/session2.jsonl");
+        assert_eq!(cursor.last_source_path.as_deref(), Some("/session2.jsonl"));
+        assert_eq!(cursor.last_line, None);
     }
 
     #[test]

@@ -181,12 +181,12 @@ impl LeakPattern {
             }
             PatternKind::Prefix(prefix) => {
                 for word in output.split_whitespace() {
-                    if word.starts_with(prefix) && word.len() > prefix.len() {
+                    if let Some(token) = prefixed_token(word, prefix) {
                         detections.push(LeakDetection {
                             class: self.class,
                             pattern_name: self.name,
-                            matched_text: word.to_string(),
-                            context: extract_context(output, word),
+                            matched_text: token.to_string(),
+                            context: extract_context(output, token),
                         });
                     }
                 }
@@ -217,6 +217,31 @@ impl LeakPattern {
 
         detections
     }
+}
+
+fn prefixed_token<'a>(word: &'a str, prefix: &str) -> Option<&'a str> {
+    for (index, _) in word.match_indices(prefix) {
+        let (before_prefix, prefixed_fragment) = word.split_at(index);
+        let prefix_is_token_start = before_prefix.chars().last().is_none_or(is_token_delimiter);
+        if prefix_is_token_start {
+            let candidate = trim_token_delimiters(prefixed_fragment);
+            if candidate.starts_with(prefix) && candidate.len() > prefix.len() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn trim_token_delimiters(fragment: &str) -> &str {
+    fragment.trim_matches(is_token_delimiter)
+}
+
+fn is_token_delimiter(ch: char) -> bool {
+    matches!(
+        ch,
+        '"' | '\'' | '`' | '{' | '}' | '[' | ']' | '(' | ')' | '<' | '>' | ',' | ':' | ';' | '='
+    )
 }
 
 /// A detected potential leak.
