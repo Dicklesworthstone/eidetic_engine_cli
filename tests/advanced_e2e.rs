@@ -1266,7 +1266,7 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
         "--tags",
         "release,cargo,verification",
         "--source",
-        "file://tests/fixtures/eval/release_failure/source_memory.json#memory-1",
+        "file://tests/fixtures/eval/release_failure/source_memory.json#L1",
         "--json",
     ])?;
     let rule_stderr = String::from_utf8_lossy(&rule.stderr);
@@ -1297,7 +1297,7 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
         "--tags",
         "release,clippy,workflow",
         "--source",
-        "file://tests/fixtures/eval/release_failure/source_memory.json#memory-2",
+        "file://tests/fixtures/eval/release_failure/source_memory.json#L10",
         "--json",
     ])?;
     let failure_stderr = String::from_utf8_lossy(&failure.stderr);

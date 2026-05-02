@@ -248,6 +248,9 @@ pub enum Command {
     /// Detect and manage coding agent installations.
     #[command(subcommand)]
     Agent(AgentCommand),
+    /// Analyze subsystem readiness and diagnostic posture.
+    #[command(subcommand)]
+    Analyze(AnalyzeCommand),
     /// Agent-oriented documentation for ee commands, contracts, and usage.
     AgentDocs(AgentDocsArgs),
     /// Operation audit timeline and inspection commands.
@@ -3025,6 +3028,13 @@ pub enum EvalCommand {
     List,
 }
 
+/// Subcommands for `ee analyze`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum AnalyzeCommand {
+    /// Report science analytics availability and degraded posture.
+    ScienceStatus,
+}
+
 /// Subcommands for `ee economy`.
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum EconomyCommand {
@@ -3575,6 +3585,9 @@ where
         None | Some(Command::Help) => write_help(stdout),
         Some(Command::Agent(AgentCommand::Detect(ref args))) => {
             handle_agent_detect(&cli, args, stdout, stderr)
+        }
+        Some(Command::Analyze(AnalyzeCommand::ScienceStatus)) => {
+            handle_analyze_science_status(&cli, stdout)
         }
         Some(Command::Agent(AgentCommand::Status(ref args))) => {
             handle_agent_status(&cli, args, stdout, stderr)
@@ -4452,6 +4465,125 @@ where
     };
     let report = plan_install(&options);
     render_install_plan(cli, &report, stdout)
+}
+
+fn handle_analyze_science_status<W>(cli: &Cli, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let report = crate::science::science_status_report();
+    let data = science_status_data_json(&report);
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &science_status_human(&report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(
+                &serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": data,
+                })
+                .to_string(),
+            ) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": data,
+            })
+            .to_string()
+                + "\n"),
+        ),
+    }
+}
+
+fn science_status_data_json(report: &crate::science::ScienceStatusReport) -> serde_json::Value {
+    let capabilities: Vec<_> = report
+        .capabilities
+        .iter()
+        .map(|capability| {
+            serde_json::json!({
+                "name": capability.name,
+                "state": capability.state.as_str(),
+                "requiredFeature": capability.required_feature,
+                "degradationCode": capability.degradation_code,
+                "description": capability.description,
+            })
+        })
+        .collect();
+    let degradations: Vec<_> = report
+        .degradations
+        .iter()
+        .map(|degradation| {
+            serde_json::json!({
+                "code": degradation.code,
+                "message": degradation.message,
+                "repair": degradation.repair,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "command": report.command,
+        "schema": report.schema,
+        "subsystem": report.subsystem,
+        "status": report.status.as_str(),
+        "available": report.available,
+        "feature": {
+            "name": report.feature.name,
+            "enabled": report.feature.enabled,
+            "description": report.feature.description,
+        },
+        "capabilities": capabilities,
+        "degradations": degradations,
+        "nextActions": report.next_actions,
+    })
+}
+
+fn science_status_human(report: &crate::science::ScienceStatusReport) -> String {
+    let mut out = String::from("ee analyze science-status\n\n");
+    out.push_str(&format!("Status: {}\n", report.status.as_str()));
+    out.push_str(&format!("Available: {}\n", report.available));
+    out.push_str(&format!(
+        "Feature: {} ({})\n",
+        report.feature.name,
+        if report.feature.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    ));
+    out.push_str("\nCapabilities:\n");
+    for capability in &report.capabilities {
+        out.push_str(&format!(
+            "  - {}: {} ({})\n",
+            capability.name,
+            capability.state.as_str(),
+            capability.description
+        ));
+    }
+    if !report.degradations.is_empty() {
+        out.push_str("\nDegraded:\n");
+        for degradation in &report.degradations {
+            out.push_str(&format!(
+                "  - {}: {} (repair: {})\n",
+                degradation.code, degradation.message, degradation.repair
+            ));
+        }
+    }
+    if !report.next_actions.is_empty() {
+        out.push_str("\nNext:\n");
+        for action in &report.next_actions {
+            out.push_str(&format!("  {}\n", action));
+        }
+    }
+    out
 }
 
 fn handle_backup_create<W, E>(
@@ -12312,6 +12444,7 @@ where
 const COMMAND_NAMES: &[&str] = &[
     "agent",
     "agent-docs",
+    "analyze",
     "artifact",
     "audit",
     "backup",
@@ -12350,6 +12483,7 @@ const COMMAND_NAMES: &[&str] = &[
 
 /// Subcommand names for nested commands.
 const AGENT_SUBCOMMANDS: &[&str] = &["detect", "status", "sources", "scan"];
+const ANALYZE_SUBCOMMANDS: &[&str] = &["science-status"];
 const ARTIFACT_SUBCOMMANDS: &[&str] = &["register", "inspect", "list"];
 const BACKUP_SUBCOMMANDS: &[&str] = &["create"];
 const CLAIM_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
@@ -12416,6 +12550,9 @@ impl NormalizedInvocation {
                     AgentCommand::Status(_) => "agent status".to_string(),
                     AgentCommand::Sources(_) => "agent sources".to_string(),
                     AgentCommand::Scan(_) => "agent scan".to_string(),
+                },
+                Command::Analyze(analyze) => match analyze {
+                    AnalyzeCommand::ScienceStatus => "analyze science-status".to_string(),
                 },
                 Command::AgentDocs(_) => "agent-docs".to_string(),
                 Command::Audit(audit) => match audit {
@@ -12675,6 +12812,7 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
 pub fn did_you_mean(input: &str, parent_command: Option<&str>) -> Option<String> {
     let candidates: &[&str] = match parent_command {
         Some("agent") => AGENT_SUBCOMMANDS,
+        Some("analyze") => ANALYZE_SUBCOMMANDS,
         Some("artifact") => ARTIFACT_SUBCOMMANDS,
         Some("backup") => BACKUP_SUBCOMMANDS,
         Some("claim") => CLAIM_SUBCOMMANDS,
@@ -12726,6 +12864,7 @@ fn extract_invalid_subcommand(args: &[OsString]) -> Option<(String, Option<Strin
                 if !next.starts_with('-') {
                     let subcommands = match *arg {
                         "agent" => Some(AGENT_SUBCOMMANDS),
+                        "analyze" => Some(ANALYZE_SUBCOMMANDS),
                         "artifact" => Some(ARTIFACT_SUBCOMMANDS),
                         "backup" => Some(BACKUP_SUBCOMMANDS),
                         "claim" => Some(CLAIM_SUBCOMMANDS),
@@ -13098,10 +13237,10 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        AgentCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli, Command, CurateCommand,
-        DiagCommand, EconomyCommand, FieldsLevel, GraphCommand, ImportCommand, LearnCommand,
-        LearnExperimentCommand, MemoryCommand, OutputFormat, RuleCommand, ShadowMode,
-        SituationCommand, run,
+        AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli,
+        Command, CurateCommand, DiagCommand, EconomyCommand, FieldsLevel, GraphCommand,
+        ImportCommand, LearnCommand, LearnExperimentCommand, MemoryCommand, OutputFormat,
+        RuleCommand, ShadowMode, SituationCommand, run,
     };
     use crate::models::ProcessExitCode;
     use crate::output;
@@ -13213,6 +13352,66 @@ mod tests {
             }
             other => Err(format!("expected agent sources command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn parser_accepts_analyze_science_status() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "--json", "analyze", "science-status"]).map_err(
+            |error| format!("failed to parse analyze science-status: {:?}", error.kind()),
+        )?;
+        match parsed.command {
+            Some(Command::Analyze(AnalyzeCommand::ScienceStatus)) => Ok(()),
+            other => Err(format!(
+                "expected analyze science-status command, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn analyze_science_status_json_is_response_enveloped() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--json", "analyze", "science-status"]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "analyze science-status exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "analyze science-status JSON stderr clean",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["command"],
+            &serde_json::json!("analyze science-status"),
+            "command path",
+        )?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!("ee.science.status.v1"),
+            "science status schema",
+        )?;
+        ensure_equal(
+            &value["data"]["subsystem"],
+            &serde_json::json!("science"),
+            "science subsystem",
+        )?;
+        ensure_equal(
+            &value["data"]["feature"]["name"],
+            &serde_json::json!("science-analytics"),
+            "science feature name",
+        )?;
+        ensure(
+            value["data"]["capabilities"]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty()),
+            "science capabilities must be present",
+        )
     }
 
     #[test]
@@ -16418,6 +16617,16 @@ mod tests {
     }
 
     #[test]
+    fn did_you_mean_subcommand_analyze_science_status() -> TestResult {
+        let suggestion = super::did_you_mean("science-stats", Some("analyze"));
+        ensure_equal(
+            &suggestion,
+            &Some("science-status".to_string()),
+            "science-stats -> science-status",
+        )
+    }
+
+    #[test]
     fn normalized_invocation_extracts_command_path() -> TestResult {
         let cli = Cli::try_parse_from(["ee", "status", "--json"])
             .map_err(|e| format!("parse error: {e}"))?;
@@ -16567,6 +16776,21 @@ mod tests {
             &Some("status".to_string()),
             "detected command",
         )
+    }
+
+    #[test]
+    fn invocation_hints_detects_analyze_command_path() -> TestResult {
+        let args: Vec<OsString> = ["ee", "--json", "analyze", "science-status"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let hints = super::InvocationHints::analyze(&args);
+        ensure_equal(
+            &hints.detected_command,
+            &Some("analyze".to_string()),
+            "detect analyze command",
+        )?;
+        ensure_equal(&hints.flag_before_command, &true, "flag before command")
     }
 
     #[test]

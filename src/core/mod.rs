@@ -33,6 +33,7 @@ pub mod lab;
 pub mod learn;
 pub mod legacy_import;
 pub mod memory;
+pub mod model;
 pub mod outcome;
 pub mod plan;
 pub mod preflight;
