@@ -1,4 +1,13 @@
-use asupersync::{CancelKind, CancelReason, Outcome, OutcomeError, PanicPayload};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU8, Ordering},
+};
+
+use asupersync::runtime::yield_now::yield_now;
+use asupersync::{
+    Budget, CancelKind, CancelReason, Cx, LabConfig, LabRuntime, Outcome, OutcomeError,
+    PanicPayload,
+};
 use ee::core::{
     CliCancelReason, CliOutcomeClass, CliOutcomeSummary, EXIT_CANCELLED, EXIT_PANICKED,
     outcome_class, outcome_exit_code, run_cli_future,
@@ -44,6 +53,98 @@ async fn command_layer() -> Outcome<&'static str, DomainError> {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct LabCancelProbeReport {
+    seed: u64,
+    steps_delta: u64,
+    steps_total: u64,
+    trace_fingerprint: u64,
+    trace_event_count: u64,
+    schedule_hash: u64,
+    quiescent: bool,
+    invariant_violations: Vec<String>,
+    observed_cancel: bool,
+    exit_code: u8,
+    post_cancel_mutations: u8,
+}
+
+fn run_lab_cancel_probe(seed: u64) -> Result<LabCancelProbeReport, String> {
+    let mut lab = LabRuntime::new(LabConfig::new(seed).max_steps(64));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let started = Arc::new(AtomicBool::new(false));
+    let observed_cancel = Arc::new(AtomicBool::new(false));
+    let exit_code = Arc::new(AtomicU8::new(0));
+    let post_cancel_mutations = Arc::new(AtomicU8::new(0));
+
+    let task_started = Arc::clone(&started);
+    let task_observed_cancel = Arc::clone(&observed_cancel);
+    let task_exit_code = Arc::clone(&exit_code);
+    let task_post_cancel_mutations = Arc::clone(&post_cancel_mutations);
+
+    let (task_id, _handle) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let Some(cx) = Cx::current() else {
+                return Outcome::cancelled(CancelReason::user(
+                    "missing current Cx in LabRuntime task",
+                ));
+            };
+
+            task_started.store(true, Ordering::SeqCst);
+            yield_now().await;
+
+            if cx.checkpoint().is_err() {
+                let reason = cx
+                    .cancel_reason()
+                    .unwrap_or_else(CancelReason::parent_cancelled);
+                let outcome: Outcome<(), DomainError> = Outcome::cancelled(reason);
+                task_exit_code.store(outcome_exit_code(&outcome), Ordering::SeqCst);
+                task_observed_cancel.store(true, Ordering::SeqCst);
+                return outcome;
+            }
+
+            task_post_cancel_mutations.fetch_add(1, Ordering::SeqCst);
+            Outcome::Ok(())
+        })
+        .map_err(|error| format!("failed to create lab cancellation task: {error}"))?;
+    lab.scheduler.lock().schedule(task_id, 0);
+
+    lab.step_for_test();
+    ensure(
+        started.load(Ordering::SeqCst),
+        "lab task must reach the first await point before cancellation",
+    )?;
+    ensure_equal(
+        &post_cancel_mutations.load(Ordering::SeqCst),
+        &0,
+        "pre-cancel mutation count",
+    )?;
+
+    let reason = CancelReason::timeout().with_message("EE-208 LabRuntime cancellation");
+    let tasks_to_cancel = lab.state.cancel_request(root, &reason, None);
+    {
+        let mut scheduler = lab.scheduler.lock();
+        for (task_id, priority) in tasks_to_cancel {
+            scheduler.schedule_cancel(task_id, priority);
+        }
+    }
+
+    let report = lab.run_until_quiescent_with_report();
+    Ok(LabCancelProbeReport {
+        seed: report.seed,
+        steps_delta: report.steps_delta,
+        steps_total: report.steps_total,
+        trace_fingerprint: report.trace_fingerprint,
+        trace_event_count: report.trace_certificate.event_count,
+        schedule_hash: report.trace_certificate.schedule_hash,
+        quiescent: report.quiescent,
+        invariant_violations: report.invariant_violations,
+        observed_cancel: observed_cancel.load(Ordering::SeqCst),
+        exit_code: exit_code.load(Ordering::SeqCst),
+        post_cancel_mutations: post_cancel_mutations.load(Ordering::SeqCst),
+    })
+}
+
 #[test]
 fn outcome_cancelled_survives_service_layers_and_maps_to_cli_exit() -> TestResult {
     let outcome = run_cli_future(command_layer())
@@ -85,6 +186,46 @@ fn outcome_cancelled_survives_service_layers_and_maps_to_cli_exit() -> TestResul
     )?;
 
     Ok(())
+}
+
+#[test]
+fn lab_runtime_region_cancel_hits_checkpoint_without_partial_mutation() -> TestResult {
+    let report = run_lab_cancel_probe(0xEE_208)?;
+
+    ensure(report.quiescent, "cancelled lab run must quiesce")?;
+    ensure(
+        report.invariant_violations.is_empty(),
+        format!(
+            "cancelled lab run must preserve runtime invariants: {:?}",
+            report.invariant_violations
+        ),
+    )?;
+    ensure(
+        report.steps_delta > 0,
+        "cancelled lab run must execute scheduler steps after cancellation",
+    )?;
+    ensure(
+        report.observed_cancel,
+        "task checkpoint must observe region cancellation",
+    )?;
+    ensure_equal(
+        &report.exit_code,
+        &EXIT_CANCELLED,
+        "checkpoint cancellation maps to CLI exit",
+    )?;
+    ensure_equal(
+        &report.post_cancel_mutations,
+        &0,
+        "cancelled task must not mutate after checkpoint",
+    )
+}
+
+#[test]
+fn lab_runtime_cancellation_report_is_seed_deterministic() -> TestResult {
+    let first = run_lab_cancel_probe(0xEE_208)?;
+    let second = run_lab_cancel_probe(0xEE_208)?;
+
+    ensure_equal(&first, &second, "same-seed lab cancellation report")
 }
 
 #[test]

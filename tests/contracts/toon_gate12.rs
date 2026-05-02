@@ -291,7 +291,43 @@ fn capabilities_toon_has_expected_structure() -> TestResult {
     )?;
     ensure_contains(&stdout, "schema: ee.response.v1", "response schema")?;
     ensure_contains(&stdout, "command: capabilities", "command field")?;
-    ensure_contains(&stdout, "subsystems", "subsystems field")
+    ensure_contains(&stdout, "subsystems", "subsystems field")?;
+    ensure_contains(&stdout, "output:", "output metadata section")?;
+    ensure_contains(&stdout, "toon:", "toon metadata section")?;
+    ensure_contains(&stdout, "package: tru", "toon dependency package")?;
+    ensure_contains(
+        &stdout,
+        "supportedOutputProfiles",
+        "toon supported output profiles",
+    )?;
+    ensure_contains(&stdout, "sizeDiagnostics", "output size diagnostics")
+}
+
+#[test]
+fn capabilities_json_reports_toon_readiness_metadata() -> TestResult {
+    let output = run_ee(&["capabilities", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    ensure(
+        output.status.success(),
+        "ee capabilities --json should succeed",
+    )?;
+    ensure_contains(&stdout, "\"output\":", "output metadata")?;
+    ensure_contains(&stdout, "\"toon\":", "toon metadata")?;
+    ensure_contains(&stdout, "\"available\":true", "toon availability")?;
+    ensure_contains(&stdout, "\"package\":\"tru\"", "toon package")?;
+    ensure_contains(
+        &stdout,
+        "\"path\":\"/data/projects/toon_rust\"",
+        "toon source path",
+    )?;
+    ensure_contains(
+        &stdout,
+        "\"supportedOutputProfiles\":[",
+        "supported output profiles",
+    )?;
+    ensure_contains(&stdout, "\"sizeDiagnostics\":[", "size diagnostics")?;
+    ensure_contains(&stdout, "\"estimatedTokens\":", "token estimates")
 }
 
 #[test]

@@ -43,6 +43,7 @@ pub enum SchemaCategory {
     Context,
     Search,
     Memory,
+    Economy,
     Procedure,
     Graph,
     Preflight,
@@ -52,6 +53,7 @@ pub enum SchemaCategory {
     Plan,
     Doctor,
     Install,
+    Backup,
     Hooks,
     Eval,
 }
@@ -69,6 +71,7 @@ impl SchemaCategory {
             Self::Context => "context",
             Self::Search => "search",
             Self::Memory => "memory",
+            Self::Economy => "economy",
             Self::Procedure => "procedure",
             Self::Graph => "graph",
             Self::Preflight => "preflight",
@@ -78,6 +81,7 @@ impl SchemaCategory {
             Self::Plan => "plan",
             Self::Doctor => "doctor",
             Self::Install => "install",
+            Self::Backup => "backup",
             Self::Hooks => "hooks",
             Self::Eval => "eval",
         }
@@ -131,11 +135,75 @@ pub const CONTEXT_SCHEMAS: &[SchemaEntry] = &[
         "ee.context.pack.v1",
         SchemaCategory::Context,
     ),
+    SchemaEntry::new(
+        "context_profile",
+        "ee.context.profile.v1",
+        SchemaCategory::Context,
+    ),
+    SchemaEntry::new(
+        "context_profile_schema_catalog",
+        "ee.context.profile.schemas.v1",
+        SchemaCategory::Context,
+    ),
     SchemaEntry::new("query", "ee.query.v1", SchemaCategory::Context),
     SchemaEntry::new(
         "search_results",
         "ee.search.results.v1",
         SchemaCategory::Search,
+    ),
+];
+
+/// Economy and attention-budget schemas.
+pub const ECONOMY_SCHEMAS: &[SchemaEntry] = &[
+    SchemaEntry::new(
+        "economy_utility_value",
+        "ee.economy.utility_value.v1",
+        SchemaCategory::Economy,
+    ),
+    SchemaEntry::new(
+        "economy_attention_cost",
+        "ee.economy.attention_cost.v1",
+        SchemaCategory::Economy,
+    ),
+    SchemaEntry::new(
+        "economy_attention_budget",
+        "ee.economy.attention_budget.v1",
+        SchemaCategory::Economy,
+    ),
+    SchemaEntry::new(
+        "economy_risk_reserve",
+        "ee.economy.risk_reserve.v1",
+        SchemaCategory::Economy,
+    ),
+    SchemaEntry::new(
+        "economy_tail_risk_reserve_rule",
+        "ee.economy.tail_risk_reserve_rule.v1",
+        SchemaCategory::Economy,
+    ),
+    SchemaEntry::new(
+        "economy_maintenance_debt",
+        "ee.economy.maintenance_debt.v1",
+        SchemaCategory::Economy,
+    ),
+    SchemaEntry::new(
+        "economy_recommendation",
+        "ee.economy.recommendation.v1",
+        SchemaCategory::Economy,
+    ),
+    SchemaEntry::new(
+        "economy_report",
+        "ee.economy.report.v1",
+        SchemaCategory::Economy,
+    ),
+    SchemaEntry::new(
+        "economy_simulation",
+        "ee.economy.simulation.v1",
+        SchemaCategory::Economy,
+    ),
+    SchemaEntry::new(
+        "economy_schema_catalog",
+        "ee.economy.schemas.v1",
+        SchemaCategory::Economy,
     ),
 ];
 
@@ -181,6 +249,7 @@ pub const GRAPH_SCHEMAS: &[SchemaEntry] = &[
         "ee.graph.snapshot_validation.v1",
         SchemaCategory::Graph,
     ),
+    SchemaEntry::new("graph_export", "ee.graph.export.v1", SchemaCategory::Graph),
 ];
 
 /// Preflight and recorder schemas.
@@ -250,6 +319,32 @@ pub const SITUATION_SCHEMAS: &[SchemaEntry] = &[
         "ee.situation.explain.v1",
         SchemaCategory::Situation,
     ),
+    SchemaEntry::new("situation", "ee.situation.v1", SchemaCategory::Situation),
+    SchemaEntry::new(
+        "task_signature",
+        "ee.task_signature.v1",
+        SchemaCategory::Situation,
+    ),
+    SchemaEntry::new(
+        "feature_evidence",
+        "ee.situation.feature_evidence.v1",
+        SchemaCategory::Situation,
+    ),
+    SchemaEntry::new(
+        "routing_decision",
+        "ee.situation.routing_decision.v1",
+        SchemaCategory::Situation,
+    ),
+    SchemaEntry::new(
+        "situation_link",
+        "ee.situation.link.v1",
+        SchemaCategory::Situation,
+    ),
+    SchemaEntry::new(
+        "situation_schema_catalog",
+        "ee.situation.schemas.v1",
+        SchemaCategory::Situation,
+    ),
     SchemaEntry::new("goal_plan", "ee.plan.goal.v1", SchemaCategory::Plan),
     SchemaEntry::new(
         "recipe_list",
@@ -307,6 +402,24 @@ pub const LEARN_SCHEMAS: &[SchemaEntry] = &[
         "ee.learn.experiment_proposal.v1",
         SchemaCategory::Memory,
     ),
+    SchemaEntry::new(
+        "learn_experiment_run",
+        "ee.learn.experiment_run.v1",
+        SchemaCategory::Memory,
+    ),
+    SchemaEntry::new(
+        "learn_observe",
+        "ee.learn.observe.v1",
+        SchemaCategory::Memory,
+    ),
+    SchemaEntry::new("learn_close", "ee.learn.close.v1", SchemaCategory::Memory),
+];
+
+/// Rule management schemas.
+pub const RULE_SCHEMAS: &[SchemaEntry] = &[
+    SchemaEntry::new("rule_add", "ee.rule.add.v1", SchemaCategory::Memory),
+    SchemaEntry::new("rule_list", "ee.rule.list.v1", SchemaCategory::Memory),
+    SchemaEntry::new("rule_show", "ee.rule.show.v1", SchemaCategory::Memory),
 ];
 
 /// Audit schemas.
@@ -336,12 +449,27 @@ pub const EVAL_SCHEMAS: &[SchemaEntry] = &[
     ),
 ];
 
+/// Backup schemas.
+pub const BACKUP_SCHEMAS: &[SchemaEntry] = &[
+    SchemaEntry::new(
+        "backup_create",
+        "ee.backup.create.v1",
+        SchemaCategory::Backup,
+    ),
+    SchemaEntry::new(
+        "backup_manifest",
+        "ee.backup.manifest.v1",
+        SchemaCategory::Backup,
+    ),
+];
+
 /// All registered schemas.
 pub fn all_schemas() -> Vec<&'static SchemaEntry> {
     let mut schemas = Vec::new();
     schemas.extend(CORE_SCHEMAS.iter());
     schemas.extend(HANDOFF_SCHEMAS.iter());
     schemas.extend(CONTEXT_SCHEMAS.iter());
+    schemas.extend(ECONOMY_SCHEMAS.iter());
     schemas.extend(PROCEDURE_SCHEMAS.iter());
     schemas.extend(GRAPH_SCHEMAS.iter());
     schemas.extend(PREFLIGHT_SCHEMAS.iter());
@@ -350,8 +478,10 @@ pub fn all_schemas() -> Vec<&'static SchemaEntry> {
     schemas.extend(DOCTOR_SCHEMAS.iter());
     schemas.extend(HOOKS_SCHEMAS.iter());
     schemas.extend(LEARN_SCHEMAS.iter());
+    schemas.extend(RULE_SCHEMAS.iter());
     schemas.extend(AUDIT_SCHEMAS.iter());
     schemas.extend(EVAL_SCHEMAS.iter());
+    schemas.extend(BACKUP_SCHEMAS.iter());
     schemas
 }
 
@@ -478,6 +608,10 @@ mod tests {
             "must have Procedure category schemas",
         )?;
         ensure(
+            coverage.contains_key(&SchemaCategory::Economy),
+            "must have Economy category schemas",
+        )?;
+        ensure(
             coverage.contains_key(&SchemaCategory::Graph),
             "must have Graph category schemas",
         )?;
@@ -529,6 +663,15 @@ mod tests {
         ensure(
             versions.contains(&"ee.graph.snapshot_validation.v1"),
             "graph schemas must include snapshot_validation (EE-268)",
+        )
+    }
+
+    #[test]
+    fn graph_schemas_include_mermaid_export() -> TestResult {
+        let versions: Vec<&str> = GRAPH_SCHEMAS.iter().map(|s| s.version).collect();
+        ensure(
+            versions.contains(&"ee.graph.export.v1"),
+            "graph schemas must include export (EE-169)",
         )
     }
 
@@ -595,6 +738,7 @@ mod tests {
         ensure_equal(&SchemaCategory::Context.as_str(), &"context", "context")?;
         ensure_equal(&SchemaCategory::Search.as_str(), &"search", "search")?;
         ensure_equal(&SchemaCategory::Memory.as_str(), &"memory", "memory")?;
+        ensure_equal(&SchemaCategory::Economy.as_str(), &"economy", "economy")?;
         ensure_equal(
             &SchemaCategory::Procedure.as_str(),
             &"procedure",

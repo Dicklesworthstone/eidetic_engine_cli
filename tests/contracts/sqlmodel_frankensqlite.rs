@@ -9,7 +9,10 @@
 //!
 //! This test imports from the ee crate to exercise the actual storage layer.
 
-use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+use ee::db::{
+    CreateAgentHistorySourceInput, CreateAgentInstallationInput, CreateMemoryInput,
+    CreateWorkspaceInput, DbConnection,
+};
 
 type TestResult = Result<(), String>;
 
@@ -32,6 +35,8 @@ fn ensure_equal<T: std::fmt::Debug + PartialEq>(actual: &T, expected: &T, ctx: &
 const TEST_WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
 const TEST_MEMORY_ID: &str = "mem_00000000000000000000000001";
 const TEST_MEMORY_ID_2: &str = "mem_00000000000000000000000002";
+const TEST_AGENT_INSTALLATION_ID: &str = "agi_01234567890123456789012345";
+const TEST_AGENT_HISTORY_SOURCE_ID: &str = "ahs_01234567890123456789012345";
 
 fn open_test_db() -> Result<DbConnection, String> {
     DbConnection::open_memory().map_err(|e| e.to_string())
@@ -214,6 +219,69 @@ fn memory_tags_can_be_added_and_fetched() -> TestResult {
         tags.contains(&"gate2".to_string()),
         "should contain 'gate2' tag",
     )?;
+
+    conn.close().map_err(|e| e.to_string())
+}
+
+#[test]
+fn agent_detection_repositories_persist_installations_and_sources() -> TestResult {
+    let conn = open_test_db()?;
+    conn.migrate().map_err(|e| e.to_string())?;
+    setup_workspace(&conn)?;
+
+    conn.upsert_agent_installation(
+        TEST_AGENT_INSTALLATION_ID,
+        &CreateAgentInstallationInput {
+            workspace_id: TEST_WORKSPACE_ID.to_string(),
+            slug: "codex".to_string(),
+            detected: true,
+            detection_format_version: 1,
+            evidence: vec!["root_exists".to_string()],
+            root_paths: vec!["/home/test/.codex/sessions".to_string()],
+            observed_at: "2026-01-01T00:00:00Z".to_string(),
+            metadata_json: Some(r#"{"source":"contract"}"#.to_string()),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.upsert_agent_history_source(
+        TEST_AGENT_HISTORY_SOURCE_ID,
+        &CreateAgentHistorySourceInput {
+            workspace_id: TEST_WORKSPACE_ID.to_string(),
+            installation_id: Some(TEST_AGENT_INSTALLATION_ID.to_string()),
+            agent_slug: "codex".to_string(),
+            source_kind: "probe_path".to_string(),
+            source_path: "~/.codex/sessions".to_string(),
+            path_exists: true,
+            observed_at: "2026-01-01T00:00:00Z".to_string(),
+            metadata_json: None,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    let installations = conn
+        .list_agent_installations(TEST_WORKSPACE_ID)
+        .map_err(|e| e.to_string())?;
+    ensure_equal(&installations.len(), &1, "installation count")?;
+    let installation = installations
+        .first()
+        .ok_or_else(|| "installation should exist after count check".to_string())?;
+    ensure_equal(&installation.slug, &"codex".to_string(), "slug")?;
+    ensure(installation.detected, "installation detected")?;
+
+    let sources = conn
+        .list_agent_history_sources_for_agent(TEST_WORKSPACE_ID, "codex")
+        .map_err(|e| e.to_string())?;
+    ensure_equal(&sources.len(), &1, "history source count")?;
+    let source = sources
+        .first()
+        .ok_or_else(|| "history source should exist after count check".to_string())?;
+    ensure_equal(
+        &source.source_path,
+        &"~/.codex/sessions".to_string(),
+        "source path",
+    )?;
+    ensure(source.path_exists, "source exists")?;
 
     conn.close().map_err(|e| e.to_string())
 }

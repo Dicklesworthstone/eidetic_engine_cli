@@ -9,6 +9,7 @@ type TestResult = Result<(), String>;
 const MATRIX_SCHEMA: &str = "ee.dependency_contract_matrix.v1";
 const GOLDEN_PATH: &str = "tests/fixtures/golden/dependencies/contract_matrix.json.golden";
 const DOC_PATH: &str = "docs/dependency-contract-matrix.md";
+const CARGO_TOML_PATH: &str = "Cargo.toml";
 const FORBIDDEN_CRATES: &[&str] = &[
     "tokio",
     "tokio-util",
@@ -37,6 +38,17 @@ fn read_text(relative: &str) -> Result<String, String> {
 fn load_matrix() -> Result<Value, String> {
     let text = read_text(GOLDEN_PATH)?;
     serde_json::from_str(&text).map_err(|error| format!("{GOLDEN_PATH} is invalid JSON: {error}"))
+}
+
+fn find_entry<'a>(matrix: &'a Value, name: &str) -> Result<&'a Map<String, Value>, String> {
+    let root = object(matrix, "matrix root")?;
+    for (index, entry) in array(root, "entries")?.iter().enumerate() {
+        let entry = object(entry, &format!("entries[{index}]"))?;
+        if string(entry, "name")? == name {
+            return Ok(entry);
+        }
+    }
+    Err(format!("matrix is missing dependency row `{name}`"))
 }
 
 fn object<'a>(value: &'a Value, context: &str) -> Result<&'a Map<String, Value>, String> {
@@ -171,6 +183,7 @@ fn dependency_contract_matrix_golden_has_required_shape() -> TestResult {
         "franken_networkx",
         "coding_agent_session_search",
         "toon_rust",
+        "franken_mermaid",
         "franken_agent_detection",
         "fastmcp-rust",
     ] {
@@ -181,6 +194,75 @@ fn dependency_contract_matrix_golden_has_required_shape() -> TestResult {
     }
 
     Ok(())
+}
+
+#[test]
+fn franken_mermaid_adapter_is_repository_and_audit_gated() -> TestResult {
+    let matrix = load_matrix()?;
+    let entry = find_entry(&matrix, "franken_mermaid")?;
+
+    ensure(
+        string(entry, "owning_surface")? == "ee-diagram",
+        "FrankenMermaid must be isolated behind the future ee-diagram surface",
+    )?;
+    ensure(
+        string(entry, "status")? == "planned_not_linked",
+        "FrankenMermaid must stay planned/not linked until the repository and API are audited",
+    )?;
+    ensure(
+        !boolean(entry, "enabled_by_default")?,
+        "FrankenMermaid must never be enabled in the default feature profile",
+    )?;
+
+    let source = object(
+        entry
+            .get("source")
+            .ok_or_else(|| "franken_mermaid.source is required".to_string())?,
+        "franken_mermaid.source",
+    )?;
+    ensure(
+        string(source, "kind")? == "not_linked",
+        "FrankenMermaid source must remain not_linked before repository/API audit",
+    )?;
+    ensure(
+        string(source, "path")? == "/dp/franken_mermaid",
+        "FrankenMermaid gate must point at the canonical repository path",
+    )?;
+
+    let optional_profiles = array(entry, "optional_feature_profiles")?;
+    ensure(
+        optional_profiles.len() == 1,
+        "FrankenMermaid must have exactly one future adapter profile gate",
+    )?;
+    let adapter_profile = object(
+        optional_profiles
+            .first()
+            .ok_or_else(|| "franken_mermaid optional profile missing".to_string())?,
+        "franken_mermaid.optional_feature_profiles[0]",
+    )?;
+    ensure(
+        string(adapter_profile, "name")? == "franken-mermaid-adapter",
+        "FrankenMermaid optional profile name changed",
+    )?;
+    ensure(
+        string(adapter_profile, "status")? == "blocked_until_repository_api_and_dependency_audit",
+        "FrankenMermaid adapter must remain blocked until repository/API and dependency audits pass",
+    )?;
+
+    ensure(
+        string(entry, "degradation_code")? == "diagram_backend_unavailable",
+        "FrankenMermaid gate must expose the stable diagram backend degradation code",
+    )?;
+    ensure(
+        string(entry, "diagnostic_command")? == "ee doctor --json",
+        "FrankenMermaid gate must name the diagnostic command for adapter readiness",
+    )?;
+
+    let cargo_toml = read_text(CARGO_TOML_PATH)?;
+    ensure(
+        !cargo_toml.contains("franken_mermaid") && !cargo_toml.contains("franken-mermaid"),
+        "Cargo.toml must not link FrankenMermaid before the adapter audit passes",
+    )
 }
 
 #[test]

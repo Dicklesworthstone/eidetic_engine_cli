@@ -18,6 +18,7 @@ use ee::core::lab::{
     ReplayOptions, ReplayStatus, capture_episode, reconstruct_episode, replay_episode,
     run_counterfactual,
 };
+use ee::output::{render_lab_capture_json, render_lab_counterfactual_json, render_lab_replay_json};
 
 use std::env;
 use std::fs;
@@ -69,6 +70,8 @@ fn assert_golden(name: &str, actual: &str) -> TestResult {
         )
     })?;
 
+    let expected = expected.strip_suffix('\n').unwrap_or(&expected);
+
     if actual == expected {
         Ok(())
     } else {
@@ -77,6 +80,41 @@ fn assert_golden(name: &str, actual: &str) -> TestResult {
             path.display()
         ))
     }
+}
+
+fn lab_golden_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("golden")
+        .join("lab")
+        .join(format!("{name}.json.golden"))
+}
+
+fn assert_lab_golden(name: &str, actual: &str) -> TestResult {
+    let update_mode = env::var("UPDATE_GOLDEN").is_ok();
+    let path = lab_golden_path(name);
+
+    if update_mode {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("failed to create dir: {e}"))?;
+        }
+        fs::write(&path, actual).map_err(|e| format!("failed to write golden: {e}"))?;
+        eprintln!("Updated golden file: {}", path.display());
+        return Ok(());
+    }
+
+    let expected = fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "Lab golden file not found: {}\nRun with UPDATE_GOLDEN=1 to create it.\nError: {e}",
+            path.display()
+        )
+    })?;
+
+    ensure(
+        actual == expected,
+        format!("lab golden mismatch for {name}\n--- expected\n{expected}\n+++ actual\n{actual}"),
+    )
 }
 
 // ============================================================================
@@ -179,6 +217,37 @@ fn capture_dry_run_omits_hash() -> TestResult {
     ensure(report.episode_hash.is_none(), "dry run omits hash")
 }
 
+#[test]
+fn gate15_capture_records_redacted_episode_evidence() -> TestResult {
+    let options = CaptureOptions {
+        workspace: PathBuf::from("/repo/ee"),
+        session_id: Some("session_gate15".to_string()),
+        task_input: Some("fix failing release workflow".to_string()),
+        dry_run: false,
+        ..Default::default()
+    };
+
+    let report = capture_episode(&options).map_err(|e| e.message())?;
+
+    ensure(report.stored, "non-dry capture stores an episode")?;
+    ensure(
+        report.redaction_status == "redacted",
+        "capture enforces redaction before storage",
+    )?;
+    ensure(report.pack_hash.is_some(), "pack hash is present")?;
+    ensure(!report.policy_ids.is_empty(), "policy IDs are present")?;
+    ensure(report.outcome_ref.is_some(), "outcome reference is present")?;
+    ensure(
+        report.repository_fingerprint.is_some(),
+        "repository fingerprint is present",
+    )?;
+
+    let json = render_lab_capture_json(&report);
+    ensure_contains(&json, "\"packHash\":", "rendered pack hash")?;
+    ensure_contains(&json, "\"policyIds\":", "rendered policy IDs")?;
+    ensure_contains(&json, "\"redactionStatus\":\"redacted\"", "redaction")
+}
+
 // ============================================================================
 // Core Replay Contract
 // ============================================================================
@@ -279,6 +348,36 @@ fn replay_non_dry_run_reports_outcome_match() -> TestResult {
     ensure(
         report.outcome_matches,
         "outcome matches for baseline replay",
+    )
+}
+
+#[test]
+fn gate15_replay_uses_frozen_inputs_and_reports_mutable_state_access() -> TestResult {
+    let options = ReplayOptions {
+        episode_id: "ep_frozen_inputs".to_string(),
+        dry_run: false,
+        verify_hash: true,
+        ..Default::default()
+    };
+
+    let report = replay_episode(&options).map_err(|e| e.message())?;
+
+    ensure(report.frozen_inputs, "replay defaults to frozen inputs")?;
+    ensure(
+        report.mutable_current_state_access.is_empty(),
+        "no mutable current-state access is reported",
+    )?;
+    ensure(
+        report.episode_hash_verified,
+        "episode hash is verified for non-dry replay",
+    )?;
+
+    let json = render_lab_replay_json(&report);
+    ensure_contains(&json, "\"frozenInputs\":true", "frozen input field")?;
+    ensure_contains(
+        &json,
+        "\"mutableCurrentStateAccess\":[]",
+        "mutable access field",
     )
 }
 
@@ -430,6 +529,89 @@ fn counterfactual_includes_confidence() -> TestResult {
     ensure(
         (0.0..=1.0).contains(&confidence),
         "confidence in valid range",
+    )
+}
+
+#[test]
+fn gate15_counterfactual_is_non_mutating_and_explains_hypothesis() -> TestResult {
+    let options = CounterfactualOptions {
+        episode_id: "ep_gate15_failure".to_string(),
+        interventions: vec![
+            InterventionSpec::add_memory("remember release workflow needs fmt and clippy")
+                .with_hypothesis("The missing warning would have entered the context pack"),
+        ],
+        generate_regret: true,
+        dry_run: false,
+        ..Default::default()
+    };
+
+    let report = run_counterfactual(&options).map_err(|e| e.message())?;
+
+    ensure(
+        !report.durable_mutation,
+        "counterfactual never mutates durable state",
+    )?;
+    ensure(report.observed_pack_hash.is_some(), "observed pack hash")?;
+    ensure(
+        report.counterfactual_pack_hash.is_some(),
+        "counterfactual pack hash",
+    )?;
+    ensure(
+        !report.changed_items.is_empty(),
+        "changed items are explicit",
+    )?;
+    ensure(!report.assumptions.is_empty(), "assumptions are explicit")?;
+    ensure(
+        report.next_action.contains("validate"),
+        "next action requires validation",
+    )?;
+    ensure(
+        report.claim_status == "hypothesis",
+        "claim remains hypothesis until externally verified",
+    )?;
+    ensure(
+        report.would_have_surfaced,
+        "wouldHaveSurfaced records pack inclusion only",
+    )?;
+    ensure(
+        report.curation_candidates.iter().all(|candidate| {
+            candidate.requires_validate && candidate.requires_apply && !candidate.applied
+        }),
+        "generated candidates require normal validate/apply steps",
+    )?;
+
+    let json = render_lab_counterfactual_json(&report);
+    ensure_contains(&json, "\"durableMutation\":false", "no mutation")?;
+    ensure_contains(&json, "\"claimStatus\":\"hypothesis\"", "claim posture")?;
+    ensure_contains(&json, "\"wouldHaveSurfaced\":true", "surfaced semantics")
+}
+
+#[test]
+fn gate15_regret_kinds_distinguish_failure_modes() -> TestResult {
+    let options = CounterfactualOptions {
+        episode_id: "ep_gate15_regret_taxonomy".to_string(),
+        interventions: vec![
+            InterventionSpec::add_memory("missed warning"),
+            InterventionSpec::strengthen_memory("mem_stale", 0.4),
+            InterventionSpec::remove_memory("mem_noisy"),
+            InterventionSpec::weaken_memory("mem_harmful", 0.3),
+            InterventionSpec::add_memory("overfit policy correction"),
+        ],
+        generate_regret: true,
+        dry_run: false,
+        ..Default::default()
+    };
+
+    let report = run_counterfactual(&options).map_err(|e| e.message())?;
+    let kinds = report
+        .regret_entries
+        .iter()
+        .map(|entry| entry.regret_kind.as_str())
+        .collect::<Vec<_>>();
+
+    ensure(
+        kinds == vec!["missed", "stale", "noisy", "harmful", "overfit_policy"],
+        format!("regret kinds distinguish failure modes: {kinds:?}"),
     )
 }
 
@@ -785,6 +967,35 @@ fn capture_dry_run_matches_golden() -> TestResult {
 }
 
 #[test]
+fn gate15_capture_episode_lab_golden_matches() -> TestResult {
+    let options = CaptureOptions {
+        workspace: PathBuf::from("/test/workspace"),
+        task_input: Some("fix the bug".to_string()),
+        session_id: Some("session_golden".to_string()),
+        dry_run: false,
+        ..Default::default()
+    };
+
+    let report = capture_episode(&options).map_err(|e| e.message())?;
+    let normalized = normalize_for_golden(&render_lab_capture_json(&report));
+    assert_lab_golden("capture_episode", &(normalized + "\n"))
+}
+
+#[test]
+fn gate15_replay_baseline_lab_golden_matches() -> TestResult {
+    let options = ReplayOptions {
+        episode_id: "ep_golden_test".to_string(),
+        dry_run: false,
+        verify_hash: true,
+        ..Default::default()
+    };
+
+    let report = replay_episode(&options).map_err(|e| e.message())?;
+    let normalized = normalize_for_golden(&render_lab_replay_json(&report));
+    assert_lab_golden("replay_baseline", &(normalized + "\n"))
+}
+
+#[test]
 fn counterfactual_with_interventions_matches_golden() -> TestResult {
     let options = CounterfactualOptions {
         episode_id: "ep_golden_test".to_string(),
@@ -802,6 +1013,77 @@ fn counterfactual_with_interventions_matches_golden() -> TestResult {
 
     let normalized = normalize_for_golden(&report.to_json());
     assert_golden("counterfactual_with_interventions", &normalized)
+}
+
+#[test]
+fn gate15_counterfactual_add_memory_lab_golden_matches() -> TestResult {
+    let options = CounterfactualOptions {
+        episode_id: "ep_golden_test".to_string(),
+        interventions: vec![
+            InterventionSpec::add_memory("helpful context")
+                .with_hypothesis("Adding context prevents failure"),
+        ],
+        generate_regret: true,
+        dry_run: false,
+        ..Default::default()
+    };
+
+    let report = run_counterfactual(&options).map_err(|e| e.message())?;
+    let normalized = normalize_for_golden(&render_lab_counterfactual_json(&report));
+    assert_lab_golden("counterfactual_add_memory", &(normalized + "\n"))
+}
+
+#[test]
+fn gate15_regret_report_lab_golden_matches() -> TestResult {
+    let options = CounterfactualOptions {
+        episode_id: "ep_golden_test".to_string(),
+        interventions: vec![
+            InterventionSpec::add_memory("missed warning"),
+            InterventionSpec::strengthen_memory("mem_stale", 0.4),
+            InterventionSpec::remove_memory("mem_noisy"),
+            InterventionSpec::weaken_memory("mem_harmful", 0.3),
+            InterventionSpec::add_memory("overfit policy correction"),
+        ],
+        generate_regret: true,
+        dry_run: false,
+        ..Default::default()
+    };
+
+    let report = run_counterfactual(&options).map_err(|e| e.message())?;
+    let json = serde_json::json!({
+        "schema": "ee.lab.regret_report.v1",
+        "episode_id": report.episode_id,
+        "regret_entries": report.regret_entries,
+    });
+    let rendered = serde_json::to_string_pretty(&json).map_err(|error| error.to_string())?;
+    let normalized = normalize_for_golden(&rendered);
+    assert_lab_golden("regret_report", &(normalized + "\n"))
+}
+
+#[test]
+fn gate15_promote_candidates_dry_run_lab_golden_matches() -> TestResult {
+    let options = CounterfactualOptions {
+        episode_id: "ep_golden_test".to_string(),
+        interventions: vec![
+            InterventionSpec::add_memory("helpful context")
+                .with_hypothesis("Adding context prevents failure"),
+        ],
+        generate_regret: true,
+        dry_run: false,
+        ..Default::default()
+    };
+
+    let report = run_counterfactual(&options).map_err(|e| e.message())?;
+    let json = serde_json::json!({
+        "schema": "ee.lab.promote_candidates_dry_run.v1",
+        "episode_id": report.episode_id,
+        "dry_run": true,
+        "candidates": report.curation_candidates,
+        "next_action": report.next_action,
+    });
+    let rendered = serde_json::to_string_pretty(&json).map_err(|error| error.to_string())?;
+    let normalized = normalize_for_golden(&rendered);
+    assert_lab_golden("promote_candidates_dry_run", &(normalized + "\n"))
 }
 
 #[test]
@@ -852,6 +1134,11 @@ fn normalize_for_golden(json: &str) -> String {
     );
     normalized = regex_replace(
         &normalized,
+        r#""candidate_id"\s*:\s*"cand_[a-f0-9_]+""#,
+        r#""candidate_id": "cand_NORMALIZED""#,
+    );
+    normalized = regex_replace(
+        &normalized,
         r#""captured_at"\s*:\s*"[^"]+""#,
         r#""captured_at": "TIMESTAMP""#,
     );
@@ -879,6 +1166,51 @@ fn normalize_for_golden(json: &str) -> String {
         &normalized,
         r#""episode_hash"\s*:\s*"blake3:[a-f0-9]+""#,
         r#""episode_hash": "blake3:NORMALIZED""#,
+    );
+    normalized = regex_replace(
+        &normalized,
+        r#""pack_hash"\s*:\s*"blake3:[a-f0-9]+""#,
+        r#""pack_hash": "blake3:NORMALIZED""#,
+    );
+    normalized = regex_replace(
+        &normalized,
+        r#""observed_pack_hash"\s*:\s*"blake3:[a-f0-9]+""#,
+        r#""observed_pack_hash": "blake3:NORMALIZED""#,
+    );
+    normalized = regex_replace(
+        &normalized,
+        r#""counterfactual_pack_hash"\s*:\s*"blake3:[a-f0-9]+""#,
+        r#""counterfactual_pack_hash": "blake3:NORMALIZED""#,
+    );
+    normalized = regex_replace(
+        &normalized,
+        r#""repository_fingerprint"\s*:\s*"repo:[a-f0-9]+""#,
+        r#""repository_fingerprint": "repo:NORMALIZED""#,
+    );
+    normalized = regex_replace(
+        &normalized,
+        r#""episodeHash"\s*:\s*"blake3:[a-f0-9]+""#,
+        r#""episodeHash": "blake3:NORMALIZED""#,
+    );
+    normalized = regex_replace(
+        &normalized,
+        r#""packHash"\s*:\s*"blake3:[a-f0-9]+""#,
+        r#""packHash": "blake3:NORMALIZED""#,
+    );
+    normalized = regex_replace(
+        &normalized,
+        r#""observedPackHash"\s*:\s*"blake3:[a-f0-9]+""#,
+        r#""observedPackHash": "blake3:NORMALIZED""#,
+    );
+    normalized = regex_replace(
+        &normalized,
+        r#""counterfactualPackHash"\s*:\s*"blake3:[a-f0-9]+""#,
+        r#""counterfactualPackHash": "blake3:NORMALIZED""#,
+    );
+    normalized = regex_replace(
+        &normalized,
+        r#""repositoryFingerprint"\s*:\s*"repo:[a-f0-9]+""#,
+        r#""repositoryFingerprint": "repo:NORMALIZED""#,
     );
 
     normalized
