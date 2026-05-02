@@ -1,0 +1,6 @@
+{
+  "schema": "ee.science.input_too_large.v1",
+  "code": "science_input_too_large",
+  "message": "Science analytics input exceeds the supported size.",
+  "repair": "Reduce the science analytics input size and retry."
+}

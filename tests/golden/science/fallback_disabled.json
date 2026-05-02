@@ -1,0 +1,8 @@
+{
+  "schema": "ee.science.fallback_disabled.v1",
+  "command": "eval run --science",
+  "status": "not_compiled",
+  "available": false,
+  "degradationCode": "science_not_compiled",
+  "fallback": "simple_metrics"
+}

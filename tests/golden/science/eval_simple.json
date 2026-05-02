@@ -1,0 +1,1 @@
+{"schema":"ee.response.v1","success":true,"data":{"command":"eval run","status":"no_scenarios","scenariosRun":0,"scenariosPassed":0,"scenariosFailed":0,"elapsedMs":0.00,"message":"No evaluation scenarios configured. Add fixtures to tests/fixtures/eval/.","results":[]}}

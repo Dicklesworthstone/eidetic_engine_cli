@@ -93,3 +93,6 @@ mod fastmcp_rust_adapter;
 
 #[path = "contracts/eval_science.rs"]
 mod eval_science;
+
+#[path = "contracts/science_analytics.rs"]
+mod science_analytics;
