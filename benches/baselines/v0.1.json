@@ -1,0 +1,70 @@
+{
+  "schema": "ee.perf.baseline.v1",
+  "version": "v0.1",
+  "operations": {
+    "ee_remember": {
+      "p50_ms": 8.0,
+      "p99_ms": 22.0,
+      "scales": {
+        "empty": {
+          "p50_ms": 6.0,
+          "p99_ms": 18.0
+        },
+        "100_memories": {
+          "p50_ms": 7.0,
+          "p99_ms": 20.0
+        },
+        "5000_memories": {
+          "p50_ms": 8.0,
+          "p99_ms": 22.0
+        },
+        "dry_run": {
+          "p50_ms": 0.5,
+          "p99_ms": 2.0
+        }
+      }
+    },
+    "ee_search": {
+      "p50_ms": 38.0,
+      "p99_ms": 110.0,
+      "scales": {
+        "empty": {
+          "p50_ms": 12.0,
+          "p99_ms": 30.0
+        },
+        "100_memories": {
+          "p50_ms": 24.0,
+          "p99_ms": 70.0
+        },
+        "5000_memories": {
+          "p50_ms": 38.0,
+          "p99_ms": 110.0
+        }
+      }
+    },
+    "ee_why": {
+      "p50_ms": 25.0
+    },
+    "ee_status": {
+      "p50_ms": 50.0,
+      "hard_ceiling_ms": 100.0,
+      "scales": {
+        "empty": {
+          "candidate_count": 0,
+          "p50_ms": 15.0,
+          "hard_ceiling_ms": 100.0
+        },
+        "candidate_100": {
+          "candidate_count": 100,
+          "p50_ms": 25.0,
+          "hard_ceiling_ms": 100.0
+        },
+        "candidate_5000": {
+          "candidate_count": 5000,
+          "p50_ms": 75.0,
+          "hard_ceiling_ms": 100.0
+        }
+      }
+    }
+  }
+}
