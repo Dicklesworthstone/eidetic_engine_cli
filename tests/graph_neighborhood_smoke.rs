@@ -12,9 +12,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ee::db::{
-    CreateMemoryLinkInput, DbConnection, MemoryLinkRelation, MemoryLinkSource,
-};
+use ee::db::{CreateMemoryLinkInput, DbConnection, MemoryLinkRelation, MemoryLinkSource};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -81,8 +79,7 @@ fn remember(workspace_arg: &str, content: &str) -> Result<String, String> {
         })
 }
 
-fn seed_workspace_with_link()
--> Result<(PathBuf, String, String, String, String), String> {
+fn seed_workspace_with_link() -> Result<(PathBuf, String, String, String, String), String> {
     let workspace = unique_workspace("neighborhood")?;
     let workspace_arg = workspace
         .to_str()
@@ -102,8 +99,7 @@ fn seed_workspace_with_link()
     let neighbor = remember(&workspace_arg, "Neighborhood evidence memory.")?;
 
     let database_path = workspace.join(".ee").join("ee.db");
-    let connection =
-        DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
     let link_id = "link_00000000000000000000000099";
     connection
         .insert_memory_link(
@@ -166,7 +162,10 @@ fn graph_neighborhood_json_envelope_is_stable() -> TestResult {
         parsed["schema"] == Value::String("ee.graph.neighborhood.v1".to_string()),
         "schema must be ee.graph.neighborhood.v1",
     )?;
-    ensure(parsed["success"] == Value::Bool(true), "success must be true")?;
+    ensure(
+        parsed["success"] == Value::Bool(true),
+        "success must be true",
+    )?;
     ensure(
         parsed["data"]["status"] == Value::String("found".to_string()),
         "status must be found when an edge exists",
@@ -236,8 +235,7 @@ fn graph_neighborhood_json_envelope_is_stable() -> TestResult {
 
 #[test]
 fn graph_neighborhood_relation_filter_excludes_other_relations() -> TestResult {
-    let (_workspace, workspace_arg, center, _neighbor, _link_id) =
-        seed_workspace_with_link()?;
+    let (_workspace, workspace_arg, center, _neighbor, _link_id) = seed_workspace_with_link()?;
 
     let output = run_ee(&[
         "--workspace",
@@ -275,8 +273,7 @@ fn graph_neighborhood_relation_filter_excludes_other_relations() -> TestResult {
 
 #[test]
 fn graph_neighborhood_invalid_direction_is_usage_error() -> TestResult {
-    let (_workspace, workspace_arg, center, _neighbor, _link_id) =
-        seed_workspace_with_link()?;
+    let (_workspace, workspace_arg, center, _neighbor, _link_id) = seed_workspace_with_link()?;
 
     let output = run_ee(&[
         "--workspace",
@@ -288,10 +285,7 @@ fn graph_neighborhood_invalid_direction_is_usage_error() -> TestResult {
         "--direction",
         "lateral",
     ])?;
-    ensure(
-        !output.status.success(),
-        "invalid --direction must fail",
-    )?;
+    ensure(!output.status.success(), "invalid --direction must fail")?;
     let parsed: Value =
         serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
     ensure(
@@ -309,8 +303,7 @@ fn graph_neighborhood_invalid_direction_is_usage_error() -> TestResult {
 
 #[test]
 fn graph_neighborhood_human_renderer_includes_summary() -> TestResult {
-    let (_workspace, workspace_arg, center, _neighbor, _link_id) =
-        seed_workspace_with_link()?;
+    let (_workspace, workspace_arg, center, _neighbor, _link_id) = seed_workspace_with_link()?;
 
     let output = run_ee(&[
         "--workspace",
@@ -345,8 +338,6 @@ where
     if actual == expected {
         Ok(())
     } else {
-        Err(format!(
-            "{context}: expected {expected:?}, got {actual:?}"
-        ))
+        Err(format!("{context}: expected {expected:?}, got {actual:?}"))
     }
 }

@@ -13925,11 +13925,7 @@ mod tests {
             Some(Command::Graph(GraphCommand::Neighborhood(args))) => {
                 ensure_equal(&args.memory_id, &"mem_01HXX".to_string(), "memory id")?;
                 ensure_equal(&args.direction, &"outgoing".to_string(), "direction")?;
-                ensure_equal(
-                    &args.relation,
-                    &Some("supports".to_string()),
-                    "relation",
-                )?;
+                ensure_equal(&args.relation, &Some("supports".to_string()), "relation")?;
                 ensure_equal(&args.limit, &Some(5_usize), "limit")
             }
             other => Err(format!(
@@ -13943,7 +13939,10 @@ mod tests {
         let parsed = Cli::try_parse_from(["ee", "graph", "neighborhood", "mem_01HXX"])
             .map(|cli| cli.command)
             .map_err(|error| {
-                format!("failed to parse default graph neighborhood: {:?}", error.kind())
+                format!(
+                    "failed to parse default graph neighborhood: {:?}",
+                    error.kind()
+                )
             })?;
         match parsed {
             Some(Command::Graph(GraphCommand::Neighborhood(args))) => {
