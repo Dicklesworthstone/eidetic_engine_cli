@@ -288,18 +288,180 @@ impl DbConnection {
     pub fn integrity_report(&self) -> Result<IntegrityReport> {
         let integrity = self.check_integrity()?;
         let foreign_keys = self.check_foreign_keys()?;
+        let reference_check = self.check_reference_integrity()?;
         let schema_version = self.schema_version()?;
         let needs_migration = self.needs_migration()?;
 
         Ok(IntegrityReport {
             integrity_check: integrity,
             foreign_key_check: foreign_keys,
-            reference_check: ReferenceIntegrityReport {
-                issue_count: 0,
-                issues: Vec::new(),
-            },
+            reference_check,
             schema_version,
             needs_migration,
+        })
+    }
+
+    /// Run logical integrity checks for links and pack references.
+    pub fn check_reference_integrity(&self) -> Result<ReferenceIntegrityReport> {
+        let mut issues = Vec::new();
+
+        let cross_workspace_links = self.query_for(
+            DbOperation::Query,
+            "SELECT l.id, l.src_memory_id, l.dst_memory_id, src.workspace_id, dst.workspace_id
+             FROM memory_links l
+             JOIN memories src ON src.id = l.src_memory_id
+             JOIN memories dst ON dst.id = l.dst_memory_id
+             WHERE src.workspace_id <> dst.workspace_id
+             ORDER BY l.id ASC",
+            &[],
+        )?;
+        for row in cross_workspace_links {
+            let link_id = required_text(&row, 0, DbOperation::Query, "id")?.to_string();
+            let src_memory_id =
+                required_text(&row, 1, DbOperation::Query, "src_memory_id")?.to_string();
+            let dst_memory_id =
+                required_text(&row, 2, DbOperation::Query, "dst_memory_id")?.to_string();
+            let src_workspace_id =
+                required_text(&row, 3, DbOperation::Query, "src.workspace_id")?.to_string();
+            let dst_workspace_id =
+                required_text(&row, 4, DbOperation::Query, "dst.workspace_id")?.to_string();
+            issues.push(ReferenceIntegrityIssue {
+                scope: ReferenceIntegrityScope::MemoryLink,
+                code: ReferenceIntegrityCode::CrossWorkspaceMemoryLink,
+                owner_id: link_id.clone(),
+                referenced_id: Some(format!("{src_memory_id}->{dst_memory_id}")),
+                expected: Some(src_workspace_id.clone()),
+                actual: Some(dst_workspace_id.clone()),
+                detail: format!(
+                    "memory link {link_id} crosses workspace boundaries ({src_workspace_id} -> {dst_workspace_id})."
+                ),
+            });
+        }
+
+        let cross_workspace_pack_items = self.query_for(
+            DbOperation::Query,
+            "SELECT pi.pack_id, pi.memory_id, pr.workspace_id, m.workspace_id
+             FROM pack_items pi
+             JOIN pack_records pr ON pr.id = pi.pack_id
+             JOIN memories m ON m.id = pi.memory_id
+             WHERE pr.workspace_id <> m.workspace_id
+             ORDER BY pi.pack_id ASC, pi.rank ASC, pi.memory_id ASC",
+            &[],
+        )?;
+        for row in cross_workspace_pack_items {
+            let pack_id = required_text(&row, 0, DbOperation::Query, "pack_id")?.to_string();
+            let memory_id = required_text(&row, 1, DbOperation::Query, "memory_id")?.to_string();
+            let pack_workspace_id =
+                required_text(&row, 2, DbOperation::Query, "pack.workspace_id")?.to_string();
+            let memory_workspace_id =
+                required_text(&row, 3, DbOperation::Query, "memory.workspace_id")?.to_string();
+            issues.push(ReferenceIntegrityIssue {
+                scope: ReferenceIntegrityScope::PackItem,
+                code: ReferenceIntegrityCode::CrossWorkspacePackItem,
+                owner_id: pack_id,
+                referenced_id: Some(memory_id),
+                expected: Some(pack_workspace_id.clone()),
+                actual: Some(memory_workspace_id.clone()),
+                detail: format!(
+                    "pack item references memory in workspace {memory_workspace_id}, expected workspace {pack_workspace_id}."
+                ),
+            });
+        }
+
+        let cross_workspace_pack_omissions = self.query_for(
+            DbOperation::Query,
+            "SELECT po.pack_id, po.memory_id, pr.workspace_id, m.workspace_id
+             FROM pack_omissions po
+             JOIN pack_records pr ON pr.id = po.pack_id
+             JOIN memories m ON m.id = po.memory_id
+             WHERE pr.workspace_id <> m.workspace_id
+             ORDER BY po.pack_id ASC, po.memory_id ASC",
+            &[],
+        )?;
+        for row in cross_workspace_pack_omissions {
+            let pack_id = required_text(&row, 0, DbOperation::Query, "pack_id")?.to_string();
+            let memory_id = required_text(&row, 1, DbOperation::Query, "memory_id")?.to_string();
+            let pack_workspace_id =
+                required_text(&row, 2, DbOperation::Query, "pack.workspace_id")?.to_string();
+            let memory_workspace_id =
+                required_text(&row, 3, DbOperation::Query, "memory.workspace_id")?.to_string();
+            issues.push(ReferenceIntegrityIssue {
+                scope: ReferenceIntegrityScope::PackOmission,
+                code: ReferenceIntegrityCode::CrossWorkspacePackOmission,
+                owner_id: pack_id,
+                referenced_id: Some(memory_id),
+                expected: Some(pack_workspace_id.clone()),
+                actual: Some(memory_workspace_id.clone()),
+                detail: format!(
+                    "pack omission references memory in workspace {memory_workspace_id}, expected workspace {pack_workspace_id}."
+                ),
+            });
+        }
+
+        let pack_item_count_mismatches = self.query_for(
+            DbOperation::Query,
+            "SELECT pr.id, pr.item_count, COALESCE(pi.actual_count, 0)
+             FROM pack_records pr
+             LEFT JOIN (
+                SELECT pack_id, COUNT(*) AS actual_count
+                FROM pack_items
+                GROUP BY pack_id
+             ) pi ON pi.pack_id = pr.id
+             WHERE pr.item_count <> COALESCE(pi.actual_count, 0)
+             ORDER BY pr.id ASC",
+            &[],
+        )?;
+        for row in pack_item_count_mismatches {
+            let pack_id = required_text(&row, 0, DbOperation::Query, "id")?.to_string();
+            let expected_item_count = required_i64(&row, 1, DbOperation::Query, "item_count")?;
+            let actual_item_count = required_i64(&row, 2, DbOperation::Query, "actual_count")?;
+            issues.push(ReferenceIntegrityIssue {
+                scope: ReferenceIntegrityScope::PackRecord,
+                code: ReferenceIntegrityCode::PackItemCountMismatch,
+                owner_id: pack_id.clone(),
+                referenced_id: None,
+                expected: Some(expected_item_count.to_string()),
+                actual: Some(actual_item_count.to_string()),
+                detail: format!(
+                    "pack record {pack_id} declares item_count={expected_item_count} but stores {actual_item_count} pack_items row(s)."
+                ),
+            });
+        }
+
+        let pack_omission_count_mismatches = self.query_for(
+            DbOperation::Query,
+            "SELECT pr.id, pr.omitted_count, COALESCE(po.actual_count, 0)
+             FROM pack_records pr
+             LEFT JOIN (
+                SELECT pack_id, COUNT(*) AS actual_count
+                FROM pack_omissions
+                GROUP BY pack_id
+             ) po ON po.pack_id = pr.id
+             WHERE pr.omitted_count <> COALESCE(po.actual_count, 0)
+             ORDER BY pr.id ASC",
+            &[],
+        )?;
+        for row in pack_omission_count_mismatches {
+            let pack_id = required_text(&row, 0, DbOperation::Query, "id")?.to_string();
+            let expected_omission_count =
+                required_i64(&row, 1, DbOperation::Query, "omitted_count")?;
+            let actual_omission_count = required_i64(&row, 2, DbOperation::Query, "actual_count")?;
+            issues.push(ReferenceIntegrityIssue {
+                scope: ReferenceIntegrityScope::PackRecord,
+                code: ReferenceIntegrityCode::PackOmissionCountMismatch,
+                owner_id: pack_id.clone(),
+                referenced_id: None,
+                expected: Some(expected_omission_count.to_string()),
+                actual: Some(actual_omission_count.to_string()),
+                detail: format!(
+                    "pack record {pack_id} declares omitted_count={expected_omission_count} but stores {actual_omission_count} pack_omissions row(s)."
+                ),
+            });
+        }
+
+        Ok(ReferenceIntegrityReport {
+            issue_count: u32::try_from(issues.len()).unwrap_or(u32::MAX),
+            issues,
         })
     }
 
@@ -11258,6 +11420,166 @@ mod tests {
             &report.schema_version,
             &migration_versions().last().copied(),
             "schema version is latest migration",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn check_reference_integrity_is_clean_for_consistent_records() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_link_memories(&connection)?;
+
+        connection.insert_memory_link(
+            "link_00000000000000000000000021",
+            &memory_link_input(super::MemoryLinkRelation::Supports),
+        )?;
+
+        let report = connection.check_reference_integrity()?;
+        ensure_equal(
+            &report.issue_count,
+            &0,
+            "consistent references have no issues",
+        )?;
+        ensure(
+            report.issues.is_empty(),
+            "consistent references issue list is empty",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn check_reference_integrity_detects_cross_workspace_and_count_mismatches() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        connection.insert_workspace(
+            "wsp_98765432109876543210987654",
+            &super::CreateWorkspaceInput {
+                path: "/tmp/test-alt".to_string(),
+                name: Some("alt".to_string()),
+            },
+        )?;
+
+        let memory_input = |workspace_id: &str, content: &str| super::CreateMemoryInput {
+            workspace_id: workspace_id.to_string(),
+            level: "semantic".to_string(),
+            kind: "fact".to_string(),
+            content: content.to_string(),
+            confidence: 0.8,
+            utility: 0.6,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
+            tags: vec![],
+            valid_from: None,
+            valid_to: None,
+        };
+
+        connection.insert_memory(
+            "mem_00000000000000000000000101",
+            &memory_input("wsp_01234567890123456789012345", "workspace-a"),
+        )?;
+        connection.insert_memory(
+            "mem_00000000000000000000000102",
+            &memory_input("wsp_98765432109876543210987654", "workspace-b"),
+        )?;
+
+        let cross_workspace_link = super::CreateMemoryLinkInput {
+            src_memory_id: "mem_00000000000000000000000101".to_string(),
+            dst_memory_id: "mem_00000000000000000000000102".to_string(),
+            relation: super::MemoryLinkRelation::Related,
+            weight: 0.9,
+            confidence: 0.9,
+            directed: true,
+            evidence_count: 1,
+            last_reinforced_at: None,
+            source: super::MemoryLinkSource::Agent,
+            created_by: Some("agent:test".to_string()),
+            metadata_json: None,
+        };
+        connection.insert_memory_link("link_00000000000000000000000101", &cross_workspace_link)?;
+
+        let pack_id = "pack_00000000000000000000000101";
+        let pack_input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: "cross workspace pack".to_string(),
+            profile: "compact".to_string(),
+            max_tokens: 256,
+            used_tokens: 64,
+            item_count: 2,
+            omitted_count: 0,
+            pack_hash: "blake3:packhash101".to_string(),
+            degraded_json: None,
+            created_by: Some("agent:test".to_string()),
+        };
+        let pack_items = vec![super::CreatePackItemInput {
+            pack_id: pack_id.to_string(),
+            memory_id: "mem_00000000000000000000000102".to_string(),
+            rank: 1,
+            section: "evidence".to_string(),
+            estimated_tokens: 32,
+            relevance: 0.9,
+            utility: 0.7,
+            why: "cross workspace item".to_string(),
+            diversity_key: None,
+        }];
+        let pack_omissions = vec![super::CreatePackOmissionInput {
+            pack_id: pack_id.to_string(),
+            memory_id: "mem_00000000000000000000000102".to_string(),
+            estimated_tokens: 32,
+            reason: "token_budget_exceeded".to_string(),
+        }];
+        connection.insert_pack_record(pack_id, &pack_input, &pack_items, &pack_omissions)?;
+
+        let report = connection.check_reference_integrity()?;
+        ensure_equal(
+            &report.issue_count,
+            &5,
+            "cross-workspace and count mismatch findings",
+        )?;
+
+        let codes: Vec<&str> = report
+            .issues
+            .iter()
+            .map(|issue| issue.code.as_str())
+            .collect();
+        ensure(
+            codes.contains(&"cross_workspace_memory_link"),
+            "cross workspace memory link detected",
+        )?;
+        ensure(
+            codes.contains(&"cross_workspace_pack_item"),
+            "cross workspace pack item detected",
+        )?;
+        ensure(
+            codes.contains(&"cross_workspace_pack_omission"),
+            "cross workspace pack omission detected",
+        )?;
+        ensure(
+            codes.contains(&"pack_item_count_mismatch"),
+            "pack item count mismatch detected",
+        )?;
+        ensure(
+            codes.contains(&"pack_omission_count_mismatch"),
+            "pack omission count mismatch detected",
+        )?;
+
+        let integrity = connection.integrity_report()?;
+        ensure(
+            !integrity.reference_check.is_clean(),
+            "integrity report includes logical reference findings",
+        )?;
+        ensure_equal(
+            &integrity.reference_check.issue_count,
+            &5,
+            "integrity report propagates reference issue count",
         )?;
 
         connection.close()?;

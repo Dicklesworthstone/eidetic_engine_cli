@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use crate::core::agent_detect::{AgentInventoryReport, AgentInventoryStatus};
 use crate::db::{
     CreateMemoryInput, DbConnection, ForeignKeyCheckResult, IntegrityCheckResult,
-    ProvenanceSampleVerificationReport,
+    ProvenanceSampleVerificationReport, ReferenceIntegrityReport,
 };
 use crate::models::TrustClass;
 use crate::models::error_codes::{self, ErrorCode};
@@ -585,6 +585,36 @@ impl IntegrityDiagnosticsReport {
 
         checks.push(check_sqlite_integrity(&connection));
         checks.push(check_foreign_keys(&connection));
+        match connection.check_reference_integrity() {
+            Ok(reference_report) => {
+                checks.push(check_reference_integrity(&reference_report));
+                if !reference_report.is_clean() {
+                    degraded.push(IntegrityDiagnosticDegradation {
+                        code: "integrity_reference_issues",
+                        severity: "medium",
+                        message: format!(
+                            "Found {} link/pack reference integrity issue(s).",
+                            reference_report.issue_count
+                        ),
+                        repair: Some("ee diag integrity --json"),
+                    });
+                }
+            }
+            Err(error) => {
+                checks.push(IntegrityDiagnosticCheck::warning(
+                    "reference_integrity",
+                    format!("Could not evaluate link and pack reference integrity: {error}"),
+                    Some("ee diag integrity --json"),
+                ));
+                degraded.push(IntegrityDiagnosticDegradation {
+                    code: "integrity_reference_check_unavailable",
+                    severity: "medium",
+                    message: "Link and pack reference integrity checks could not be evaluated."
+                        .to_string(),
+                    repair: Some("ee diag integrity --json"),
+                });
+            }
+        }
 
         match connection.needs_migration() {
             Ok(false) => checks.push(IntegrityDiagnosticCheck::ok(
@@ -815,6 +845,24 @@ fn check_foreign_keys(connection: &DbConnection) -> IntegrityDiagnosticCheck {
             format!("Failed to run SQLite foreign_key_check: {error}"),
             Some("ee doctor --json"),
         ),
+    }
+}
+
+fn check_reference_integrity(report: &ReferenceIntegrityReport) -> IntegrityDiagnosticCheck {
+    if report.is_clean() {
+        IntegrityDiagnosticCheck::ok(
+            "reference_integrity",
+            "Link and pack references are internally consistent.",
+        )
+    } else {
+        IntegrityDiagnosticCheck::warning(
+            "reference_integrity",
+            format!(
+                "Detected {} link/pack reference integrity issue(s).",
+                report.issue_count
+            ),
+            Some("ee diag integrity --json"),
+        )
     }
 }
 
@@ -1935,6 +1983,154 @@ mod tests {
                 .any(|entry| entry.code == "integrity_schema_migration_required"),
             true,
             "schema migration degradation present",
+        )
+    }
+
+    #[test]
+    fn integrity_diagnostics_reports_reference_integrity_issues() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                TEST_WORKSPACE_ID,
+                &crate::db::CreateWorkspaceInput {
+                    path: temp.path().to_string_lossy().into_owned(),
+                    name: Some("integrity-main".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_98765432109876543210987654",
+                &crate::db::CreateWorkspaceInput {
+                    path: temp.path().join("alt").to_string_lossy().into_owned(),
+                    name: Some("integrity-alt".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let memory_input = |workspace_id: &str, content: &str| CreateMemoryInput {
+            workspace_id: workspace_id.to_string(),
+            level: "semantic".to_string(),
+            kind: "fact".to_string(),
+            content: content.to_string(),
+            confidence: TrustClass::AgentAssertion.initial_confidence(),
+            utility: 0.2,
+            importance: 0.2,
+            provenance_uri: None,
+            trust_class: TrustClass::AgentAssertion.as_str().to_string(),
+            trust_subclass: None,
+            tags: vec![],
+            valid_from: None,
+            valid_to: None,
+        };
+
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000121",
+                &memory_input(TEST_WORKSPACE_ID, "main workspace memory"),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000122",
+                &memory_input(
+                    "wsp_98765432109876543210987654",
+                    "alternate workspace memory",
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+
+        connection
+            .insert_memory_link(
+                "link_00000000000000000000000121",
+                &crate::db::CreateMemoryLinkInput {
+                    src_memory_id: "mem_00000000000000000000000121".to_string(),
+                    dst_memory_id: "mem_00000000000000000000000122".to_string(),
+                    relation: crate::db::MemoryLinkRelation::Supports,
+                    weight: 0.9,
+                    confidence: 0.9,
+                    directed: true,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: crate::db::MemoryLinkSource::Agent,
+                    created_by: Some("agent:test".to_string()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let pack_id = "pack_00000000000000000000000121";
+        connection
+            .insert_pack_record(
+                pack_id,
+                &crate::db::CreatePackRecordInput {
+                    workspace_id: TEST_WORKSPACE_ID.to_string(),
+                    query: "reference integrity test".to_string(),
+                    profile: "compact".to_string(),
+                    max_tokens: 512,
+                    used_tokens: 128,
+                    item_count: 2,
+                    omitted_count: 0,
+                    pack_hash: "blake3:ref-integrity-test".to_string(),
+                    degraded_json: None,
+                    created_by: Some("agent:test".to_string()),
+                },
+                &[crate::db::CreatePackItemInput {
+                    pack_id: pack_id.to_string(),
+                    memory_id: "mem_00000000000000000000000122".to_string(),
+                    rank: 1,
+                    section: "evidence".to_string(),
+                    estimated_tokens: 64,
+                    relevance: 0.8,
+                    utility: 0.6,
+                    why: "cross-workspace item".to_string(),
+                    diversity_key: None,
+                }],
+                &[crate::db::CreatePackOmissionInput {
+                    pack_id: pack_id.to_string(),
+                    memory_id: "mem_00000000000000000000000122".to_string(),
+                    estimated_tokens: 64,
+                    reason: "token_budget_exceeded".to_string(),
+                }],
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = IntegrityDiagnosticsReport::gather(&IntegrityDiagnosticsOptions {
+            workspace_path: temp.path().to_path_buf(),
+            database_path: Some(database_path),
+            workspace_id: TEST_WORKSPACE_ID.to_string(),
+            sample_size: 8,
+            create_canary: false,
+            dry_run: false,
+        });
+
+        ensure(
+            report.status,
+            IntegrityDiagnosticsStatus::Degraded,
+            "reference issues degrade integrity status",
+        )?;
+        let reference_check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "reference_integrity")
+            .ok_or_else(|| "missing reference_integrity check".to_string())?;
+        ensure(
+            reference_check.severity,
+            IntegrityDiagnosticSeverity::Warning,
+            "reference integrity check warns when findings exist",
+        )?;
+        ensure(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "integrity_reference_issues"),
+            true,
+            "reference integrity degradation code present",
         )
     }
 
