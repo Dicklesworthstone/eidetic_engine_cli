@@ -75,6 +75,24 @@
     "ee_why": {
       "p50_ms": 25.0
     },
+    "ee_outcome": {
+      "p50_ms": 8.0,
+      "p99_ms": 30.0,
+      "scales": {
+        "empty": {
+          "p50_ms": 6.0,
+          "p99_ms": 18.0
+        },
+        "25_memories": {
+          "p50_ms": 7.0,
+          "p99_ms": 22.0
+        },
+        "100_memories": {
+          "p50_ms": 7.0,
+          "p99_ms": 24.0
+        }
+      }
+    },
     "ee_status": {
       "p50_ms": 30.0,
       "hard_ceiling_ms": 100.0,
