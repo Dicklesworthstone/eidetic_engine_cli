@@ -12894,6 +12894,7 @@ mod tests {
         SituationCommand, run,
     };
     use crate::models::ProcessExitCode;
+    use crate::output;
 
     const SITUATION_CLASSIFY_ROUTING_GOLDEN: &str =
         include_str!("../../tests/fixtures/golden/situation/classify_release_routing.json.golden");
