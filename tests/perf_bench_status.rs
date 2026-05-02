@@ -11,7 +11,7 @@ const BASELINE_PATH: &str = "benches/baselines/v0.1.json";
 const REGRESSION_TOLERANCE: f64 = 1.30;
 const DEBUG_CEILING_MULTIPLIER: f64 = 3.0;
 
-type TestResult = Result<(), String>;
+type TestResult<T = ()> = Result<T, String>;
 
 fn format_scales(report: &StatusBenchReport) -> String {
     report
@@ -27,13 +27,12 @@ fn format_scales(report: &StatusBenchReport) -> String {
         .join("; ")
 }
 
-fn quick_report() -> &'static StatusBenchReport {
-    static REPORT: OnceLock<StatusBenchReport> = OnceLock::new();
-    REPORT.get_or_init(|| {
-        run_status_bench_quick().unwrap_or_else(|error| {
-            panic!("quick status benchmark failed: {error}");
-        })
-    })
+fn quick_report() -> TestResult<&'static StatusBenchReport> {
+    static REPORT: OnceLock<Result<StatusBenchReport, String>> = OnceLock::new();
+    match REPORT.get_or_init(run_status_bench_quick) {
+        Ok(report) => Ok(report),
+        Err(error) => Err(format!("quick status benchmark failed: {error}")),
+    }
 }
 
 fn baseline_operation() -> Result<Value, String> {
@@ -89,7 +88,7 @@ fn status_bench_source_references_canonical_group_constant() -> TestResult {
 
 #[test]
 fn status_quick_bench_p50_stays_under_hard_ceiling() -> TestResult {
-    let report = quick_report();
+    let report = quick_report()?;
     let hard_ceiling_ms = effective_hard_ceiling_ms();
     if report.aggregate_p50_ms > hard_ceiling_ms {
         return Err(format!(
@@ -119,7 +118,7 @@ fn status_quick_bench_p50_stays_under_hard_ceiling() -> TestResult {
 
 #[test]
 fn status_quick_bench_compare_mode_regression_guard() -> TestResult {
-    let report = quick_report();
+    let report = quick_report()?;
     let operation = baseline_operation()?;
 
     let baseline_p50 = baseline_f64(&operation, "p50_ms")?;
@@ -152,7 +151,7 @@ fn status_quick_bench_compare_mode_regression_guard() -> TestResult {
         let baseline_scale_p50 = baseline_f64(scale_baseline, "p50_ms")?;
         let mut allowed_scale = baseline_scale_p50 * REGRESSION_TOLERANCE;
         if cfg!(debug_assertions) {
-            allowed_scale = allowed_scale.max(scale.hard_ceiling_ms * DEBUG_CEILING_MULTIPLIER);
+            allowed_scale = allowed_scale.max(sample.hard_ceiling_ms * DEBUG_CEILING_MULTIPLIER);
         }
         if sample.p50_ms > allowed_scale {
             return Err(format!(
