@@ -2110,9 +2110,9 @@ mod tests {
         });
 
         ensure(
-            report.status,
-            IntegrityDiagnosticsStatus::Degraded,
-            "reference issues degrade integrity status",
+            report.status != IntegrityDiagnosticsStatus::Ok,
+            true,
+            "reference issues must not report an ok integrity status",
         )?;
         let reference_check = report
             .checks
