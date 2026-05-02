@@ -1,0 +1,288 @@
+[
+  {
+    "name": "initialize",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {}
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": "2024-11-05",
+        "serverInfo": {
+          "name": "ee",
+          "version": "0.1.0"
+        },
+        "capabilities": {
+          "prompts": {},
+          "resources": {},
+          "tools": {}
+        }
+      }
+    }
+  },
+  {
+    "name": "prompts_list",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": "prompts",
+      "method": "prompts/list"
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": "prompts",
+      "result": {
+        "prompts": [
+          {
+            "name": "pre-task-context",
+            "description": "Prepare an agent before a task by retrieving an ee context pack.",
+            "arguments": [
+              {
+                "name": "task",
+                "description": "Task or question to retrieve context for",
+                "required": true
+              },
+              {
+                "name": "workspace",
+                "description": "Workspace path; defaults to current directory",
+                "required": false
+              },
+              {
+                "name": "profile",
+                "description": "Context profile such as balanced or compact",
+                "required": false
+              },
+              {
+                "name": "maxTokens",
+                "description": "Maximum context token budget",
+                "required": false
+              }
+            ]
+          },
+          {
+            "name": "record-lesson",
+            "description": "Turn a durable lesson into an explicit ee remember workflow.",
+            "arguments": [
+              {
+                "name": "lesson",
+                "description": "Durable rule, fact, failure, or convention to remember",
+                "required": true
+              },
+              {
+                "name": "workspace",
+                "description": "Workspace path; defaults to current directory",
+                "required": false
+              },
+              {
+                "name": "level",
+                "description": "Memory level; defaults to procedural",
+                "required": false
+              },
+              {
+                "name": "kind",
+                "description": "Memory kind; defaults to rule",
+                "required": false
+              },
+              {
+                "name": "tags",
+                "description": "Comma-separated tags to apply",
+                "required": false
+              }
+            ]
+          },
+          {
+            "name": "review-session",
+            "description": "Review a prior session and propose curation candidates.",
+            "arguments": [
+              {
+                "name": "session",
+                "description": "CASS session path or ID; defaults to most recent",
+                "required": false
+              },
+              {
+                "name": "workspace",
+                "description": "Workspace path; defaults to current directory",
+                "required": false
+              },
+              {
+                "name": "propose",
+                "description": "Whether to ask for curation proposals",
+                "required": false
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "resources_templates_list",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": "templates",
+      "method": "resources/templates/list"
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": "templates",
+      "result": {
+        "resourceTemplates": [
+          {
+            "uriTemplate": "ee://memories/{memoryId}",
+            "name": "ee memory show",
+            "description": "Read a memory record through ee memory show --json",
+            "mimeType": "application/json"
+          },
+          {
+            "uriTemplate": "ee://context-packs/by-query?query={query}",
+            "name": "ee context pack",
+            "description": "Assemble a task-specific context pack through ee context --json",
+            "mimeType": "application/json"
+          },
+          {
+            "uriTemplate": "ee://schemas/{schemaId}",
+            "name": "ee schema export",
+            "description": "Read a public schema definition through ee schema export --json",
+            "mimeType": "application/json"
+          },
+          {
+            "uriTemplate": "ee://agent-docs/{topic}",
+            "name": "ee agent docs topic",
+            "description": "Read an agent docs topic through ee agent-docs --json",
+            "mimeType": "application/json"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "record_lesson_prompt",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": "record",
+      "method": "prompts/get",
+      "params": {
+        "name": "record-lesson",
+        "arguments": {
+          "lesson": "Run cargo fmt --check before release.",
+          "workspace": ".",
+          "level": "procedural",
+          "kind": "rule",
+          "tags": "cargo,release"
+        }
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": "record",
+      "result": {
+        "description": "Turn a durable lesson into an explicit ee remember workflow.",
+        "messages": [
+          {
+            "role": "user",
+            "content": {
+              "type": "text",
+              "text": "Record a durable ee lesson only if it is supported by evidence from the current work.\n\nLesson:\nRun cargo fmt --check before release.\n\nRecommended command:\n`ee --workspace . --json remember --level procedural --kind rule \"Run cargo fmt --check before release.\"`\n\nApply these comma-separated tags if they are supported by the evidence: cargo,release.\nDo not invent provenance. If the lesson came from a failure or decision, include the source session, command, file, or bead in the memory text before recording it."
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "unknown_tool_error",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": "bad-tool",
+      "method": "tools/call",
+      "params": {
+        "name": "ee_delete"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": "bad-tool",
+      "error": {
+        "code": -32601,
+        "message": "Unknown tool: ee_delete"
+      }
+    }
+  },
+  {
+    "name": "cancelled_notification_suppresses_response",
+    "request": {
+      "jsonrpc": "2.0",
+      "method": "notifications/cancelled",
+      "params": {
+        "requestId": "context-1",
+        "reason": "caller no longer needs the response"
+      }
+    },
+    "response": null
+  },
+  {
+    "name": "cancelled_notification_with_id_error",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": "bad-cancel",
+      "method": "notifications/cancelled",
+      "params": {
+        "requestId": "context-1"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": "bad-cancel",
+      "error": {
+        "code": -32600,
+        "message": "notifications/cancelled must be sent as a JSON-RPC notification without id"
+      }
+    }
+  },
+  {
+    "name": "remember_write_gate_error",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": "remember-gate",
+      "method": "tools/call",
+      "params": {
+        "name": "ee_remember",
+        "arguments": {
+          "content": "Persisted memory requires a gate.",
+          "dryRun": false
+        }
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": "remember-gate",
+      "error": {
+        "code": -32602,
+        "message": "Write tool ee_remember requires allowWrite=true when dryRun=false"
+      }
+    }
+  },
+  {
+    "name": "invalid_prompt_arguments_error",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": "bad-prompt",
+      "method": "prompts/get",
+      "params": {
+        "name": "pre-task-context",
+        "arguments": []
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": "bad-prompt",
+      "error": {
+        "code": -32602,
+        "message": "Prompt arguments must be an object"
+      }
+    }
+  }
+]

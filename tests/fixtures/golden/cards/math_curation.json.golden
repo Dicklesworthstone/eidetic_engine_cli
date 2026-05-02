@@ -1,0 +1,36 @@
+[
+  {
+    "id": "card_selection_score",
+    "kind": "certificate",
+    "title": "Selection Score Computation",
+    "summary": "score = 0.40×0.82 + 0.35×0.74 + 0.25×0.66 = 0.748",
+    "math": {
+      "formula": "score = α·confidence + β·utility + γ·importance",
+      "value": 0.748,
+      "confidence": 0.82,
+      "substitutedValues": "score = 0.40×0.82 + 0.35×0.74 + 0.25×0.66 = 0.748",
+      "intuition": "Higher confidence, utility, and importance raise the selected score.",
+      "assumptions": [
+        "Weights are fixed for this certificate profile."
+      ],
+      "decisionChange": "A lower confidence or utility value could move this item below the cutoff."
+    }
+  },
+  {
+    "id": "card_trust_score",
+    "kind": "certificate",
+    "title": "Trust Score Computation",
+    "summary": "trust(agent_validated) = 0.80 × 0.90 = 0.720",
+    "math": {
+      "formula": "trust = class_weight × confidence",
+      "value": 0.72,
+      "confidence": 0.9,
+      "substitutedValues": "trust(agent_validated) = 0.80 × 0.90 = 0.720",
+      "intuition": "Higher-trust sources contribute more strongly to selection.",
+      "assumptions": [
+        "Trust class weights are policy-controlled and deterministic."
+      ],
+      "decisionChange": "A lower trust class weight could demote this memory."
+    }
+  }
+]

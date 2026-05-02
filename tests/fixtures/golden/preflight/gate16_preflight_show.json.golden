@@ -1,0 +1,19 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "run": {
+      "id": "pf_gate16_contract",
+      "task_input": "(run not found in storage)",
+      "status": "completed",
+      "risk_level": "unknown",
+      "cleared": false,
+      "block_reason": "Storage not yet wired",
+      "started_at": "TIMESTAMP",
+      "completed_at": "TIMESTAMP",
+      "duration_ms": null
+    },
+    "brief": null,
+    "tripwires": []
+  }
+}

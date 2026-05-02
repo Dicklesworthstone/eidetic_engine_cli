@@ -1,0 +1,114 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "schema": "ee.procedure.drift_report.v1",
+    "command": "procedure drift",
+    "procedureId": "proc_gate18_candidate",
+    "status": "drifted",
+    "driftDetected": true,
+    "checkedAt": "2026-05-01T12:00:00Z",
+    "stalenessThresholdDays": 30,
+    "dryRun": true,
+    "mutation": {
+      "wouldMarkStale": true,
+      "wouldOpenCurationCandidate": true,
+      "wouldRecordAudit": true,
+      "applied": false
+    },
+    "counts": {
+      "total": 3,
+      "failedVerifications": 1,
+      "staleEvidence": 1,
+      "dependencyContractChanges": 1,
+      "high": 2,
+      "medium": 1,
+      "low": 0
+    },
+    "signals": [
+      {
+        "signalId": "drift_sig_001",
+        "kind": "failed_verification",
+        "severity": "high",
+        "sourceId": "ver_gate18_failed",
+        "summary": "Procedure verification failed with 1 failed source(s).",
+        "evidenceIds": [
+          "fixture_gate18_regression"
+        ],
+        "details": [
+          {
+            "name": "verificationId",
+            "value": "ver_gate18_failed"
+          },
+          {
+            "name": "overallResult",
+            "value": "failed"
+          },
+          {
+            "name": "verifiedAt",
+            "value": "2026-05-01T10:30:00Z"
+          }
+        ],
+        "recommendedAction": "Re-run or inspect verification before reusing procedure proc_gate18_candidate."
+      },
+      {
+        "signalId": "drift_sig_002",
+        "kind": "stale_evidence",
+        "severity": "medium",
+        "sourceId": "ev_gate18_ci_trace",
+        "summary": "Evidence has not been refreshed for 42 day(s), meeting the 30-day threshold.",
+        "evidenceIds": [
+          "ev_gate18_ci_trace"
+        ],
+        "details": [
+          {
+            "name": "sourceKind",
+            "value": "recorder_run"
+          },
+          {
+            "name": "lastSeenAt",
+            "value": "2026-03-20T12:00:00Z"
+          },
+          {
+            "name": "stalenessDays",
+            "value": "42"
+          }
+        ],
+        "recommendedAction": "Refresh evidence before trusting procedure proc_gate18_candidate."
+      },
+      {
+        "signalId": "drift_sig_003",
+        "kind": "dependency_contract_change",
+        "severity": "high",
+        "sourceId": "cass",
+        "summary": "cass contract changed for procedure verification import.",
+        "evidenceIds": [],
+        "details": [
+          {
+            "name": "owningSurface",
+            "value": "procedure verification import"
+          },
+          {
+            "name": "expectedContract",
+            "value": "cass.robot.v1:source-map"
+          },
+          {
+            "name": "actualContract",
+            "value": "cass.robot.v2:event-map"
+          },
+          {
+            "name": "compatibility",
+            "value": "breaking"
+          }
+        ],
+        "recommendedAction": "Review cass contract drift before reusing procedure proc_gate18_candidate."
+      }
+    ],
+    "nextActions": [
+      "ee procedure verify proc_gate18_candidate --json",
+      "ee procedure show proc_gate18_candidate --include-verification --json",
+      "ee schema export ee.procedure.schemas.v1 --json",
+      "Review drift signals before promoting or exporting this procedure."
+    ]
+  }
+}

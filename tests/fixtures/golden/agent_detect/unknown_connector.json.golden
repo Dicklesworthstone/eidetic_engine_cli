@@ -1,0 +1,8 @@
+{
+  "schema": "ee.error.v1",
+  "error": {
+    "code": "usage",
+    "message": "unknown connector(s): [\"not-a-real-agent\"]",
+    "repair": "ee agent detect --help"
+  }
+}

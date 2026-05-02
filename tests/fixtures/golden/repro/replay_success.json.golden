@@ -1,0 +1,28 @@
+{
+  "schema": "ee.repro.replay.v1",
+  "pack_path": "repro/release_context_demo",
+  "pack_name": "release_context_demo",
+  "pack_version": "1.0.0",
+  "status": "verified",
+  "artifacts_verified": 2,
+  "artifacts_failed": 0,
+  "env_compatible": true,
+  "dry_run": false,
+  "verification_results": [
+    {
+      "path": "manifest.json",
+      "expected_hash": "blake3:manifest_hash",
+      "actual_hash": "blake3:manifest_hash",
+      "passed": true,
+      "error": null
+    },
+    {
+      "path": "stdout.json",
+      "expected_hash": "blake3:stdout_hash",
+      "actual_hash": "blake3:stdout_hash",
+      "passed": true,
+      "error": null
+    }
+  ],
+  "warnings": []
+}

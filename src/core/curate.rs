@@ -3423,6 +3423,9 @@ mod tests {
             review_state: "new".to_owned(),
             snoozed_until: None,
             merged_into_candidate_id: None,
+            state_entered_at: Some("2026-05-01T00:00:00Z".to_owned()),
+            last_action_at: None,
+            ttl_policy_id: None,
         };
 
         let summary = candidate_summary_from_stored(stored, std::path::Path::new("/repo"));

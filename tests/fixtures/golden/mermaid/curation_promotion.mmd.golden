@@ -1,0 +1,12 @@
+flowchart TD
+  procedure["procedure: proc_gate11_release"]
+  curation["curation: curate_gate11_promote promote"]
+  procedure --> curation
+  verification["verification: passed pass 2 fail 0"]
+  curation --> verification
+  audit["audit: audit_gate11_promote"]
+  curation --> audit
+  effect1["procedures: update proc_gate11_release"]
+  curation --> effect1
+  effect2["curation_candidates: insert curate_gate11_promote"]
+  curation --> effect2

@@ -1,0 +1,32 @@
+{
+  "schema": "ee.cache_shadow.v1",
+  "policy": {
+    "incumbent": "no_cache",
+    "candidate": "s3_fifo"
+  },
+  "budget": {
+    "maxEntries": 4,
+    "maxBytes": 4096,
+    "sourceOfTruth": false,
+    "fallback": "no_cache"
+  },
+  "workload": {
+    "operations": 8,
+    "profile": "repeated_release_context_keys"
+  },
+  "metrics": {
+    "hitRate": 0.5,
+    "missCost": 40000,
+    "p95LatencyUs": 180,
+    "p99LatencyUs": 240,
+    "memoryBytes": 4096,
+    "evictions": 1
+  },
+  "baseline": {
+    "policy": "no_cache",
+    "hitRate": 0.0,
+    "missCost": 80000,
+    "p99LatencyUs": 900
+  },
+  "verdict": "candidate_better"
+}

@@ -1,0 +1,96 @@
+{
+  "schema": "ee.learn.experiment_proposal.v1",
+  "success": true,
+  "totalCandidates": 3,
+  "returned": 2,
+  "minExpectedValue": 0.3,
+  "maxAttentionTokens": 800,
+  "maxRuntimeSeconds": 180,
+  "proposals": [
+    {
+      "experimentId": "exp_replay_error_boundary",
+      "questionId": "gap_001",
+      "title": "Replay async error boundary failures",
+      "hypothesis": "A dry-run replay can distinguish missing propagation evidence from a weak procedural rule.",
+      "status": "proposed",
+      "topic": "error_handling",
+      "expectedValue": 0.539,
+      "uncertaintyReduction": 0.32,
+      "confidence": 0.48,
+      "budget": {
+        "attentionTokens": 800,
+        "maxRuntimeSeconds": 180,
+        "dryRunRequired": true,
+        "budgetClass": "medium"
+      },
+      "safety": {
+        "boundary": "human_review",
+        "dryRunFirst": true,
+        "mutationAllowed": false,
+        "reviewRequired": true,
+        "stopConditions": [
+          "Stop after the replay produces a pass/fail explanation or safety finding.",
+          "Stop before any durable memory mutation; close with observe/close evidence first."
+        ],
+        "deniedReasons": []
+      },
+      "decisionImpact": {
+        "decisionId": "decision_error_boundary_rule",
+        "targetArtifactIds": [
+          "mem_002"
+        ],
+        "currentDecision": "Keep async error propagation guidance at low confidence.",
+        "possibleChange": "Promote or demote the rule based on replayed failure evidence.",
+        "impactScore": 0.85
+      },
+      "evidenceIds": [
+        "gap_001",
+        "mem_002"
+      ],
+      "nextCommand": "ee learn experiment run --dry-run --id exp_replay_error_boundary --json"
+    },
+    {
+      "experimentId": "exp_database_contract_fixture",
+      "questionId": "gap_002",
+      "title": "Run database-operation contract fixture",
+      "hypothesis": "A fixture-only dry run can show whether database-operation memories need stronger integration-test evidence.",
+      "status": "proposed",
+      "topic": "testing",
+      "expectedValue": 0.392,
+      "uncertaintyReduction": 0.28,
+      "confidence": 0.55,
+      "budget": {
+        "attentionTokens": 700,
+        "maxRuntimeSeconds": 180,
+        "dryRunRequired": true,
+        "budgetClass": "medium"
+      },
+      "safety": {
+        "boundary": "human_review",
+        "dryRunFirst": true,
+        "mutationAllowed": false,
+        "reviewRequired": true,
+        "stopConditions": [
+          "Stop after fixture output records stdout/stderr separation and mutation posture.",
+          "Stop before any durable memory mutation; close with observe/close evidence first."
+        ],
+        "deniedReasons": []
+      },
+      "decisionImpact": {
+        "decisionId": "decision_database_test_pattern",
+        "targetArtifactIds": [
+          "mem_001"
+        ],
+        "currentDecision": "Treat database integration guidance as plausible but under-sampled.",
+        "possibleChange": "Increase confidence or request more evidence before promotion.",
+        "impactScore": 0.7
+      },
+      "evidenceIds": [
+        "gap_002",
+        "mem_001"
+      ],
+      "nextCommand": "ee learn experiment run --dry-run --id exp_database_contract_fixture --json"
+    }
+  ],
+  "generatedAt": "2026-01-02T03:04:05Z"
+}

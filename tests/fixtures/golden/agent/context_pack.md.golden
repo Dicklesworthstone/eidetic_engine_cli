@@ -4,11 +4,9 @@
 
 ## Advisory Memory Banner
 
-**Status:** `degraded`
+**Status:** `clear`
 
-Context includes 1 degraded signal; validate advisory memory and repair degraded sources before relying on this pack.
-
-- **low** `[degraded_context]` 1 degraded context signal present; inspect degraded[] repairs before relying on omitted or fallback sources. Action: `inspect_degraded_repairs`
+Packed memories are from high-trust classes; still verify provenance before acting.
 
 ## procedural_rules
 
@@ -23,12 +21,7 @@ Run cargo fmt --check before release.
 **Trust:** `human_explicit` / `authoritative`
 
 **Provenance:**
-- ee-mem://mem_00000000000000000000000001 (ee-mem)
-
-## Degradations
-
-- **[low]** Memory mem_00000000000000000000000001 has invalid provenance URI: provenance URI `file://AGENTS.md#compiler-checks` has an invalid line fragment `compiler-checks`; expected `L<n>` or `L<n>-<m>`
-  - *Repair:* `ee memory show mem_00000000000000000000000001 --json`
+- file://AGENTS.md#L164-173 (file)
 
 ---
 

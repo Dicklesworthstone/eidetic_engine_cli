@@ -1,0 +1,35 @@
+{
+  "tail": {
+    "schema": "ee.recorder.tail.v1",
+    "command": "recorder tail",
+    "runId": "run_gate17",
+    "events": [
+      {
+        "eventId": "evt_gate17_0001",
+        "sequence": 1,
+        "eventType": "user_message",
+        "timestamp": "2026-01-02T03:04:04Z",
+        "redacted": true
+      },
+      {
+        "eventId": "evt_gate17_0002",
+        "sequence": 2,
+        "eventType": "tool_result",
+        "timestamp": "2026-01-02T03:04:05Z",
+        "redacted": false
+      }
+    ],
+    "totalEvents": 2,
+    "hasMore": false
+  },
+  "followLine": {
+    "schema": "ee.recorder.tail_follow_event.v1",
+    "runId": "run_gate17",
+    "eventId": "evt_gate17_0003",
+    "sequence": 3,
+    "eventType": "state_change",
+    "timestamp": "2026-01-02T03:04:06Z",
+    "redacted": true,
+    "payloadPreview": "[redacted:token]"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "schema": "ee.pack.rate_distortion.v1",
+  "budgetTokens": 4000,
+  "usedTokens": 3200,
+  "slackTokens": 800,
+  "rate": 0.8,
+  "distortion": 0.2,
+  "efficiency": 0.8,
+  "omittedCandidates": 3,
+  "includedCandidates": 12,
+  "qualityScore": 0.8,
+  "utilizationPercent": 80.0,
+  "sections": []
+}

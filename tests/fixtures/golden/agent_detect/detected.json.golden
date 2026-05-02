@@ -1,0 +1,55 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "agent detect",
+    "formatVersion": 1,
+    "generatedAt": "TIMESTAMP",
+    "summary": {
+      "detectedCount": 4,
+      "totalCount": 4
+    },
+    "installedAgents": [
+      {
+        "slug": "claude",
+        "detected": true,
+        "evidence": [
+          "override root exists: __FIXTURE_PATH__/claude/projects"
+        ],
+        "rootPaths": [
+          "__FIXTURE_PATH__/claude/projects"
+        ]
+      },
+      {
+        "slug": "codex",
+        "detected": true,
+        "evidence": [
+          "override root exists: __FIXTURE_PATH__/codex/sessions"
+        ],
+        "rootPaths": [
+          "__FIXTURE_PATH__/codex/sessions"
+        ]
+      },
+      {
+        "slug": "cursor",
+        "detected": true,
+        "evidence": [
+          "override root exists: __FIXTURE_PATH__/cursor/.cursor"
+        ],
+        "rootPaths": [
+          "__FIXTURE_PATH__/cursor/.cursor"
+        ]
+      },
+      {
+        "slug": "gemini",
+        "detected": true,
+        "evidence": [
+          "override root exists: __FIXTURE_PATH__/gemini/tmp"
+        ],
+        "rootPaths": [
+          "__FIXTURE_PATH__/gemini/tmp"
+        ]
+      }
+    ]
+  }
+}

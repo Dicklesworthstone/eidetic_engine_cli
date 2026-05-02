@@ -1,0 +1,56 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "schema": "ee.economy.prune_plan.v1",
+    "generatedAt": "1970-01-01T00:00:00+00:00",
+    "dryRun": true,
+    "status": "planned",
+    "mutationStatus": "not_applied",
+    "summary": {
+      "recommendationCount": 3,
+      "totalCandidates": 15,
+      "estimatedTokenSavings": 2300,
+      "actions": [
+        "revalidate",
+        "retire",
+        "compact"
+      ]
+    },
+    "recommendations": [
+      {
+        "id": "econ_prune_revalidate_high_risk",
+        "action": "revalidate",
+        "artifactType": "memory",
+        "candidateCount": 5,
+        "priority": 95,
+        "risk": "low",
+        "rationale": "High-impact memories with stale validation should be rechecked before any demotion.",
+        "estimatedTokenSavings": 0,
+        "dryRunCommand": "ee economy prune-plan --dry-run --json"
+      },
+      {
+        "id": "econ_prune_retire_stale",
+        "action": "retire",
+        "artifactType": "memory",
+        "candidateCount": 7,
+        "priority": 88,
+        "risk": "medium",
+        "rationale": "Low-utility stale memories should be retired once provenance confirms they are obsolete.",
+        "estimatedTokenSavings": 1400,
+        "dryRunCommand": "ee economy prune-plan --dry-run --json"
+      },
+      {
+        "id": "econ_prune_compact_procedures",
+        "action": "compact",
+        "artifactType": "procedure",
+        "candidateCount": 3,
+        "priority": 82,
+        "risk": "low",
+        "rationale": "Verbose procedures with repeated setup steps can be compacted while preserving evidence links.",
+        "estimatedTokenSavings": 900,
+        "dryRunCommand": "ee economy prune-plan --dry-run --json"
+      }
+    ]
+  }
+}

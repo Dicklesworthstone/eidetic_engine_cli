@@ -1,6 +1,6 @@
 {
   "schema": "ee.degradation_matrix.v1",
-  "count": 19,
+  "count": 22,
   "codes": [
     {
       "id": "D001",
@@ -171,6 +171,33 @@
       "description": "Network access unavailable",
       "behavior_change": "Remote operations disabled; local-only mode",
       "auto_recoverable": true,
+      "repair": null
+    },
+    {
+      "id": "D800",
+      "subsystem": "science",
+      "severity": "warning",
+      "description": "Science analytics backend unavailable",
+      "behavior_change": "Optional science analytics are disabled; deterministic core diagnostics still work",
+      "auto_recoverable": false,
+      "repair": "ee doctor --json"
+    },
+    {
+      "id": "D801",
+      "subsystem": "science",
+      "severity": "warning",
+      "description": "Science analytics input too large",
+      "behavior_change": "Science analysis is skipped for oversized inputs; use a smaller sample or narrower query",
+      "auto_recoverable": false,
+      "repair": null
+    },
+    {
+      "id": "D802",
+      "subsystem": "science",
+      "severity": "warning",
+      "description": "Science analytics budget exceeded",
+      "behavior_change": "Science analysis stops at the configured budget; core command output remains available",
+      "auto_recoverable": false,
       "repair": null
     }
   ]

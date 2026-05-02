@@ -1,0 +1,48 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "run_id": "pf_gate16_contract",
+    "previous_status": "running",
+    "new_status": "completed",
+    "cleared": true,
+    "reason": "gate 16 reviewed",
+    "task_outcome": "success",
+    "feedback": {
+      "schema": "ee.feedback.record.v1",
+      "record_status": "dry_run",
+      "record_id": null,
+      "target_type": "preflight_run",
+      "target_id": "pf_gate16_contract",
+      "preflight_run_id": "pf_gate16_contract",
+      "tripwire_id": null,
+      "task_outcome": "success",
+      "evaluation": null,
+      "feedback_kind": "helped",
+      "signal": "helpful",
+      "confidence_adjustment": 0.05,
+      "utility_adjustment": 0.08,
+      "false_alarm_cost_delta": 0,
+      "score_effect": {
+        "utility_delta": 0.08,
+        "confidence_delta": 0.05,
+        "false_alarm_delta": 0,
+        "priority_multiplier": 1.05,
+        "scoring_note": "Preflight warning was useful; future matching warnings receive a small boost."
+      },
+      "counterfactual_effect": {
+        "regret_kind": null,
+        "intervention": "confirm_preflight_warning",
+        "evaluation_hint": "Observed success outcome supports keeping this warning available.",
+        "curation_candidate": false
+      },
+      "curation_candidates_generated": 0,
+      "durable_mutation": false,
+      "evidence_preserved": true,
+      "dry_run": true,
+      "recorded_at": "TIMESTAMP"
+    },
+    "dry_run": true,
+    "closed_at": "TIMESTAMP"
+  }
+}

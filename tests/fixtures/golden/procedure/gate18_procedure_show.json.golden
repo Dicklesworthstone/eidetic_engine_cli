@@ -1,0 +1,46 @@
+{
+  "schema": "ee.procedure.show_report.v1",
+  "procedure": {
+    "procedure_id": "proc_gate18_candidate",
+    "title": "Stabilize release workflow",
+    "summary": "Evidence-backed workflow for release verification.",
+    "status": "candidate",
+    "step_count": 2,
+    "source_run_ids": [
+      "run_gate18_success_001",
+      "run_gate18_success_002"
+    ],
+    "evidence_ids": [
+      "ev_gate18_release_log",
+      "ev_gate18_ci_trace"
+    ],
+    "created_at": "2026-01-02T03:04:05Z",
+    "updated_at": "2026-01-02T03:05:06Z",
+    "verified_at": null
+  },
+  "steps": [
+    {
+      "step_id": "step_gate18_prepare",
+      "sequence": 1,
+      "title": "Prepare release workspace",
+      "instruction": "Inspect workspace status and confirm no unrelated edits are staged.",
+      "command_hint": "git status --short",
+      "required": true
+    },
+    {
+      "step_id": "step_gate18_verify",
+      "sequence": 2,
+      "title": "Run verification gates",
+      "instruction": "Run formatter, clippy, focused tests, and artifact checks through RCH.",
+      "command_hint": "rch exec -- cargo test release_gate -- --test-threads=1",
+      "required": true
+    }
+  ],
+  "verification": {
+    "status": "pending",
+    "verified_at": null,
+    "verified_by": null,
+    "pass_count": 0,
+    "fail_count": 0
+  }
+}

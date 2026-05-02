@@ -1,0 +1,6 @@
+flowchart TD
+  n1["Release rule"]
+  n2["Prior incident"]
+  n3["Verification checklist"]
+  n1 -->|supported by| n2
+  n1 -->|requires| n3

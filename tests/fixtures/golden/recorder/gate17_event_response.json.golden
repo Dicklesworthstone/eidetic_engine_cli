@@ -1,0 +1,23 @@
+{
+  "schema": "ee.recorder.event_response.v1",
+  "command": "recorder event",
+  "eventId": "evt_gate17_tool_result",
+  "runId": "run_gate17",
+  "sequence": 2,
+  "eventType": "tool_result",
+  "timestamp": "2026-01-02T03:04:05Z",
+  "payloadBytes": 48,
+  "payloadAccepted": true,
+  "redactionStatus": "full",
+  "redactionClasses": [
+    "api_key",
+    "token"
+  ],
+  "placeholderCount": 2,
+  "redactedBytes": 48,
+  "previousEventHash": "blake3:previousgate17",
+  "eventHash": "blake3:eventhashgate17",
+  "chainStatus": "linked",
+  "dryRun": true,
+  "payloadHash": "blake3:payloadhashgate17"
+}

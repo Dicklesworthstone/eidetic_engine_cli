@@ -1,0 +1,35 @@
+{
+  "schema": "ee.demo_file.v1",
+  "version": 1,
+  "demos": [
+    {
+      "id": "demo_00000000000000000000000001",
+      "claimId": "claim_00000000000000000000000001",
+      "title": "Release context demo",
+      "description": "Verifies release context output against the executable claim.",
+      "commands": [
+        {
+          "command": "ee context \"prepare release\" --workspace . --json",
+          "timeoutMs": 30000,
+          "expectedExitCode": 0,
+          "expectedStdoutSchema": "ee.response.v1",
+          "expectedStdoutContains": [
+            "\"command\":\"context\""
+          ],
+          "artifactOutputs": [
+            {
+              "path": "stdout.json",
+              "blake3Hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "optional": false
+            }
+          ]
+        }
+      ],
+      "tags": [
+        "release",
+        "gate14"
+      ],
+      "ciEnabled": true
+    }
+  ]
+}

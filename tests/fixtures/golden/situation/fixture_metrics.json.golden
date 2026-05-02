@@ -1,0 +1,256 @@
+{
+  "schema": "ee.situation.fixture_metrics.v1",
+  "version": "0.1.0",
+  "caseCount": 9,
+  "classificationPrecision": 1.0,
+  "routingUsefulness": 1.0,
+  "alternativeRecall": 1.0,
+  "families": [
+    {
+      "family": "classification_precision",
+      "caseCount": 4,
+      "classificationPrecision": 1.0,
+      "routingUsefulness": 1.0,
+      "alternativeRecall": 1.0
+    },
+    {
+      "family": "routing_usefulness",
+      "caseCount": 2,
+      "classificationPrecision": 1.0,
+      "routingUsefulness": 1.0,
+      "alternativeRecall": 1.0
+    },
+    {
+      "family": "alternative_recall",
+      "caseCount": 2,
+      "classificationPrecision": 1.0,
+      "routingUsefulness": 1.0,
+      "alternativeRecall": 1.0
+    },
+    {
+      "family": "low_confidence",
+      "caseCount": 1,
+      "classificationPrecision": 1.0,
+      "routingUsefulness": 1.0,
+      "alternativeRecall": null
+    }
+  ],
+  "cases": [
+    {
+      "id": "classification_bug_fix",
+      "family": "classification_precision",
+      "taskText": "fix broken login crash",
+      "expectedCategory": "bug_fix",
+      "observedCategory": "bug_fix",
+      "classificationCorrect": true,
+      "expectedFixtureIds": [
+        "fixture.situation.bug_fix",
+        "fixture.preflight.standard"
+      ],
+      "observedFixtureIds": [
+        "fixture.situation.bug_fix",
+        "fixture.preflight.standard"
+      ],
+      "routingHits": 2,
+      "routingExpected": 2,
+      "expectedAlternativeCategories": [],
+      "observedAlternativeCategories": [],
+      "alternativeHits": 0,
+      "alternativeExpected": 0
+    },
+    {
+      "id": "classification_feature",
+      "family": "classification_precision",
+      "taskText": "implement new search feature support",
+      "expectedCategory": "feature",
+      "observedCategory": "feature",
+      "classificationCorrect": true,
+      "expectedFixtureIds": [
+        "fixture.situation.feature",
+        "fixture.preflight.standard"
+      ],
+      "observedFixtureIds": [
+        "fixture.situation.feature",
+        "fixture.preflight.standard"
+      ],
+      "routingHits": 2,
+      "routingExpected": 2,
+      "expectedAlternativeCategories": [],
+      "observedAlternativeCategories": [],
+      "alternativeHits": 0,
+      "alternativeExpected": 0
+    },
+    {
+      "id": "classification_refactor",
+      "family": "classification_precision",
+      "taskText": "refactor clean auth module",
+      "expectedCategory": "refactor",
+      "observedCategory": "refactor",
+      "classificationCorrect": true,
+      "expectedFixtureIds": [
+        "fixture.situation.refactor",
+        "fixture.preflight.standard"
+      ],
+      "observedFixtureIds": [
+        "fixture.situation.refactor",
+        "fixture.preflight.standard"
+      ],
+      "routingHits": 2,
+      "routingExpected": 2,
+      "expectedAlternativeCategories": [],
+      "observedAlternativeCategories": [],
+      "alternativeHits": 0,
+      "alternativeExpected": 0
+    },
+    {
+      "id": "classification_documentation",
+      "family": "classification_precision",
+      "taskText": "write docs to explain configuration options",
+      "expectedCategory": "documentation",
+      "observedCategory": "documentation",
+      "classificationCorrect": true,
+      "expectedFixtureIds": [
+        "fixture.situation.documentation",
+        "fixture.preflight.minimal"
+      ],
+      "observedFixtureIds": [
+        "fixture.situation.documentation",
+        "fixture.preflight.minimal"
+      ],
+      "routingHits": 2,
+      "routingExpected": 2,
+      "expectedAlternativeCategories": [
+        "configuration"
+      ],
+      "observedAlternativeCategories": [
+        "configuration"
+      ],
+      "alternativeHits": 1,
+      "alternativeExpected": 1
+    },
+    {
+      "id": "routing_deployment",
+      "family": "routing_usefulness",
+      "taskText": "release production deployment",
+      "expectedCategory": "deployment",
+      "observedCategory": "deployment",
+      "classificationCorrect": true,
+      "expectedFixtureIds": [
+        "fixture.situation.deployment",
+        "fixture.preflight.full"
+      ],
+      "observedFixtureIds": [
+        "fixture.situation.deployment",
+        "fixture.preflight.full"
+      ],
+      "routingHits": 2,
+      "routingExpected": 2,
+      "expectedAlternativeCategories": [
+        "review"
+      ],
+      "observedAlternativeCategories": [
+        "review"
+      ],
+      "alternativeHits": 1,
+      "alternativeExpected": 1
+    },
+    {
+      "id": "routing_review",
+      "family": "routing_usefulness",
+      "taskText": "review audit changed files",
+      "expectedCategory": "review",
+      "observedCategory": "review",
+      "classificationCorrect": true,
+      "expectedFixtureIds": [
+        "fixture.situation.review",
+        "fixture.preflight.standard"
+      ],
+      "observedFixtureIds": [
+        "fixture.situation.review",
+        "fixture.preflight.standard"
+      ],
+      "routingHits": 2,
+      "routingExpected": 2,
+      "expectedAlternativeCategories": [],
+      "observedAlternativeCategories": [],
+      "alternativeHits": 0,
+      "alternativeExpected": 0
+    },
+    {
+      "id": "alternative_release_bug",
+      "family": "alternative_recall",
+      "taskText": "fix failing release workflow",
+      "expectedCategory": "bug_fix",
+      "observedCategory": "bug_fix",
+      "classificationCorrect": true,
+      "expectedFixtureIds": [
+        "fixture.situation.bug_fix",
+        "fixture.preflight.standard"
+      ],
+      "observedFixtureIds": [
+        "fixture.situation.bug_fix",
+        "fixture.preflight.standard"
+      ],
+      "routingHits": 2,
+      "routingExpected": 2,
+      "expectedAlternativeCategories": [
+        "deployment"
+      ],
+      "observedAlternativeCategories": [
+        "deployment"
+      ],
+      "alternativeHits": 1,
+      "alternativeExpected": 1
+    },
+    {
+      "id": "alternative_testing_config",
+      "family": "alternative_recall",
+      "taskText": "add integration tests to verify config",
+      "expectedCategory": "testing",
+      "observedCategory": "testing",
+      "classificationCorrect": true,
+      "expectedFixtureIds": [
+        "fixture.situation.testing",
+        "fixture.preflight.summary"
+      ],
+      "observedFixtureIds": [
+        "fixture.situation.testing",
+        "fixture.preflight.summary"
+      ],
+      "routingHits": 2,
+      "routingExpected": 2,
+      "expectedAlternativeCategories": [
+        "configuration",
+        "feature"
+      ],
+      "observedAlternativeCategories": [
+        "configuration",
+        "feature"
+      ],
+      "alternativeHits": 2,
+      "alternativeExpected": 2
+    },
+    {
+      "id": "low_confidence_unknown",
+      "family": "low_confidence",
+      "taskText": "triage ambiguous work",
+      "expectedCategory": "unknown",
+      "observedCategory": "unknown",
+      "classificationCorrect": true,
+      "expectedFixtureIds": [
+        "fixture.situation.unknown",
+        "fixture.preflight.summary"
+      ],
+      "observedFixtureIds": [
+        "fixture.situation.unknown",
+        "fixture.preflight.summary"
+      ],
+      "routingHits": 2,
+      "routingExpected": 2,
+      "expectedAlternativeCategories": [],
+      "observedAlternativeCategories": [],
+      "alternativeHits": 0,
+      "alternativeExpected": 0
+    }
+  ]
+}

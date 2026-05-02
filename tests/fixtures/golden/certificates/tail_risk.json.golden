@@ -1,0 +1,16 @@
+{
+  "schema": "ee.certificate.tail_risk_gate13.v1",
+  "averageRetrievalDelta": 0.04,
+  "catastrophicWarningsBefore": 1,
+  "catastrophicWarningsAfter": 0,
+  "catastrophicMisses": 1,
+  "releaseBlocked": true,
+  "certificate": {
+    "metric": "retrieval_tail_regression",
+    "observed": 1.0,
+    "threshold": 0.0,
+    "confidenceLevel": 0.99,
+    "upperBound": 1.0,
+    "recommendedAction": "block_release"
+  }
+}

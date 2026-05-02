@@ -1,0 +1,18 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "run_id": "pf_DYNAMIC",
+    "task_input": "deploy production database migration",
+    "status": "completed",
+    "risk_level": "high",
+    "cleared": false,
+    "block_reason": "Risk level high exceeds auto-clear threshold medium",
+    "risk_brief_id": "rb_DYNAMIC",
+    "risks_identified": 0,
+    "tripwires_set": 0,
+    "dry_run": false,
+    "started_at": "TIMESTAMP",
+    "completed_at": "TIMESTAMP"
+  }
+}

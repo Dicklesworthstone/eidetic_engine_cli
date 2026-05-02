@@ -1,0 +1,14 @@
+flowchart TD
+  memory["memory: mem_gate11_release_rule"]
+  storage["storage: remember / human_explicit"]
+  memory --> storage
+  retrieval["retrieval: procedural rule confidence 0.91"]
+  storage --> retrieval
+  selection["selection: score 9.04, active true"]
+  retrieval --> selection
+  pack["pack: pack_gate11_release rank 2"]
+  selection --> pack
+  link1["outgoing supports mem_gate11_prior_incident"]
+  memory --> link1
+  degraded1["degraded: graph_snapshot_stale (medium)"]
+  memory -.-> degraded1

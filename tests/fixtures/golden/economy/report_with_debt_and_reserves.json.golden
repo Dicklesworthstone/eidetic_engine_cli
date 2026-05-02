@@ -1,0 +1,51 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "total_artifacts": 67,
+    "artifact_breakdown": [
+      {
+        "artifact_type": "memory",
+        "count": 42,
+        "avg_utility": 0.72,
+        "total_cost": 1250.0,
+        "false_alarm_rate": 0.05
+      },
+      {
+        "artifact_type": "procedure",
+        "count": 8,
+        "avg_utility": 0.85,
+        "total_cost": 320.0,
+        "false_alarm_rate": 0.02
+      },
+      {
+        "artifact_type": "tripwire",
+        "count": 5,
+        "avg_utility": 0.68,
+        "total_cost": 80.0,
+        "false_alarm_rate": 0.15
+      },
+      {
+        "artifact_type": "situation",
+        "count": 12,
+        "avg_utility": 0.78,
+        "total_cost": 450.0,
+        "false_alarm_rate": 0.08
+      }
+    ],
+    "overall_utility_score": 0.75,
+    "attention_budget_used": 2100.0,
+    "attention_budget_total": 4000.0,
+    "maintenance_debt": {
+      "stale_artifacts": 7,
+      "consolidation_candidates": 3,
+      "tombstone_pending": 2,
+      "estimated_cleanup_tokens": 1500
+    },
+    "tail_risk_reserves": {
+      "critical_memories": 5,
+      "fallback_procedures": 2,
+      "degradation_coverage": 0.85
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "schema": "ee.curate.risk_certificate.v1",
+  "candidateType": "promote",
+  "targetMemoryId": "mem_00000000000000000000000001",
+  "riskLevel": "low",
+  "riskScore": 0.13499999046325684,
+  "calibrationWindowId": "cal_2026w18_promotions",
+  "stratum": "procedural_rules:promotion",
+  "calibrationCount": 48,
+  "nonconformityScore": 0.18000000715255737,
+  "threshold": 0.3199999928474426,
+  "action": "promote",
+  "abstainReason": null,
+  "reportOnly": false,
+  "generatedAt": "2026-05-01T00:00:00Z"
+}

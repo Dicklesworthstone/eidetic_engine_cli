@@ -1,0 +1,1 @@
+{"schema":"ee.response.v1","success":true,"data":{"episode_id":"ep_golden_test","replay_id": "rpl_NORMALIZED","status":"replayed","frozenInputs":true,"mutableCurrentStateAccess":[],"episodeHashVerified":true,"outcome_matches":true,"dry_run":false,"warnings":[],"replayed_at": "TIMESTAMP"}}

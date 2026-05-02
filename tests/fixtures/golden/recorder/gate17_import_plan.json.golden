@@ -1,0 +1,86 @@
+{
+  "schema": "ee.recorder.import_plan.v1",
+  "command": "recorder import",
+  "dryRun": true,
+  "source": {
+    "type": "cass",
+    "sourceId": "cass://gate17-session",
+    "inputPath": "fixtures/cass/gate17-view.json",
+    "connector": "cass_view_json"
+  },
+  "run": {
+    "runId": "run_gate17_import",
+    "agentId": "codex-gate17",
+    "sessionId": "cass-gate17",
+    "workspaceId": "wsp_gate17",
+    "status": "imported",
+    "startedAt": "1970-01-01T00:00:00Z",
+    "endedAt": null,
+    "eventCount": 2,
+    "redactedCount": 1
+  },
+  "summary": {
+    "eventsDiscovered": 2,
+    "eventsMapped": 2,
+    "eventsRejected": 0,
+    "payloadBytes": 96,
+    "redactedBytes": 48,
+    "redactionClasses": [
+      "token"
+    ],
+    "chainComplete": true
+  },
+  "mutations": [
+    {
+      "action": "would_create_run",
+      "count": 1,
+      "schema": "ee.recorder.run.v1"
+    },
+    {
+      "action": "would_create_event",
+      "count": 2,
+      "schema": "ee.recorder.event.v1"
+    }
+  ],
+  "events": [
+    {
+      "action": "would_record",
+      "sourceSpanId": "cass://gate17-session:41",
+      "sourceLineStart": 41,
+      "sourceLineEnd": 41,
+      "eventId": "evt_gate17_import_0001",
+      "sequence": 1,
+      "eventType": "user_message",
+      "timestamp": "1970-01-01T00:00:00Z",
+      "payloadHash": "blake3:userpayloadgate17",
+      "payloadBytes": 48,
+      "redactionStatus": "full",
+      "redactionClasses": [
+        "token"
+      ],
+      "redactedBytes": 48,
+      "previousEventHash": null,
+      "eventHash": "blake3:importeventhash0001",
+      "chainStatus": "root"
+    },
+    {
+      "action": "would_record",
+      "sourceSpanId": "cass://gate17-session:42",
+      "sourceLineStart": 42,
+      "sourceLineEnd": 42,
+      "eventId": "evt_gate17_import_0002",
+      "sequence": 2,
+      "eventType": "tool_call",
+      "timestamp": "1970-01-01T00:00:00Z",
+      "payloadHash": "blake3:toolpayloadgate17",
+      "payloadBytes": 48,
+      "redactionStatus": "none",
+      "redactionClasses": [],
+      "redactedBytes": 0,
+      "previousEventHash": "blake3:importeventhash0001",
+      "eventHash": "blake3:importeventhash0002",
+      "chainStatus": "linked"
+    }
+  ],
+  "warnings": []
+}

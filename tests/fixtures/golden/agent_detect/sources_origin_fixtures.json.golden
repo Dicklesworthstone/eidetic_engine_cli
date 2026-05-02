@@ -1,0 +1,40 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "schema": "ee.agent.sources.v1",
+    "command": "agent sources",
+    "version": "0.1.0",
+    "totalCount": 1,
+    "includePaths": true,
+    "sources": [
+      {
+        "slug": "codex",
+        "probePaths": [
+          "~/.codex/sessions"
+        ]
+      }
+    ],
+    "originFixtures": [
+      {
+        "originId": "fixture-ssh-csd",
+        "kind": "ssh",
+        "host": "csd",
+        "remoteRoot": "/home/agent",
+        "localRoot": "__FIXTURE_PATH__/remote_mirror/ssh-csd/home/agent",
+        "connectorSlugs": [
+          "codex"
+        ],
+        "description": "Deterministic remote-home mirror for SSH or rsync-collected agent source tests."
+      }
+    ],
+    "pathRewrites": [
+      {
+        "originId": "fixture-ssh-csd",
+        "connectorSlug": "codex",
+        "from": "/home/agent/.codex/sessions",
+        "to": "__FIXTURE_PATH__/remote_mirror/ssh-csd/home/agent/.codex/sessions"
+      }
+    ]
+  }
+}

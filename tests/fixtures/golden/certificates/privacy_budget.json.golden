@@ -1,0 +1,11 @@
+{
+  "schema": "ee.aggregate.shareable.v1",
+  "reportId": "agg_release_rules_001",
+  "shareable": true,
+  "privacyBudgetCertificate": {
+    "category": "aggregate_export",
+    "consumed": 0.2,
+    "remaining": 0.4,
+    "validationCount": 1
+  }
+}

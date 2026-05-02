@@ -1,0 +1,30 @@
+{
+  "schema": "ee.learn.agenda.v1",
+  "success": true,
+  "totalGaps": 2,
+  "highPriorityCount": 2,
+  "resolvedCount": 0,
+  "items": [
+    {
+      "id": "gap_gate21_procedure",
+      "topic": "procedure",
+      "gap_description": "Promotion rules need replay-backed evidence.",
+      "priority": 88,
+      "uncertainty": 0.74,
+      "source": "procedure_drift_review",
+      "status": "open",
+      "created_at": "2026-01-02T02:00:00Z"
+    },
+    {
+      "id": "gap_gate21_economy",
+      "topic": "economy",
+      "gap_description": "Attention budget demotions need dry-run comparison.",
+      "priority": 73,
+      "uncertainty": 0.61,
+      "source": "budget_audit",
+      "status": "open",
+      "created_at": "2026-01-02T02:05:00Z"
+    }
+  ],
+  "generatedAt": "2026-01-02T03:04:05Z"
+}

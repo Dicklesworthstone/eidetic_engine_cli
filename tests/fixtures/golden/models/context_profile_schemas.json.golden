@@ -1,0 +1,35 @@
+{
+  "schema": "ee.context.profile.schemas.v1",
+  "schemas": [
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:context-profile:v1",
+      "eeSchema": "ee.context.profile.v1",
+      "kind": "context_profile",
+      "title": "ContextProfile",
+      "description": "Versioned context packing profile with objective and section quotas.",
+      "type": "object",
+      "required": [
+        "schema",
+        "name",
+        "displayName",
+        "objective",
+        "sectionMix",
+        "defaultCandidatePool",
+        "builtin",
+        "description"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "name", "type": "string", "required": true, "description": "Stable profile name."},
+        {"name": "displayName", "type": "string", "required": true, "description": "Human-readable profile name."},
+        {"name": "objective", "type": "string", "required": true, "description": "Selection objective used by the profile."},
+        {"name": "sectionMix", "type": "object", "required": true, "description": "Section quota mix expressed in basis points."},
+        {"name": "defaultCandidatePool", "type": "integer", "required": true, "description": "Default candidate pool size for profile-aware request builders."},
+        {"name": "builtin", "type": "boolean", "required": true, "description": "Whether the profile is shipped by ee."},
+        {"name": "description", "type": "string", "required": true, "description": "Profile purpose."}
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

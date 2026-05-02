@@ -1,0 +1,17 @@
+{
+  "schema": "ee.repro.minimize.v1",
+  "original_path": "repro/failing_release_context_demo",
+  "minimized_path": "repro/minimized_release_context_demo",
+  "original_size_bytes": 9728,
+  "minimized_size_bytes": 1536,
+  "artifacts_kept": 2,
+  "artifacts_removed": 1,
+  "dry_run": false,
+  "removed_files": [
+    {
+      "path": "trace/full-session.jsonl",
+      "size_bytes": 8192,
+      "reason": "nonessential trace detail; minimized fixture preserves failure"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "schema": "ee.procedure.export_report.v1",
+    "command": "procedure export",
+    "exportId": "exp_gate18_skill",
+    "procedureId": "proc_gate18_candidate",
+    "format": "skill_capsule",
+    "artifactKind": "skill_capsule",
+    "outputPath": null,
+    "content": "---\nschema: \"ee.skill_capsule.v1\"\ncapsule_id: \"capsule_gate18_release\"\nprocedure_id: \"proc_gate18_candidate\"\ninstall_mode: \"render_only\"\n---\n\n# Stabilize release workflow\n\nRender-only capsule. No automatic installation occurs.\n",
+    "contentLength": 227,
+    "contentHash": "blake3:gate18skillcapsulehash",
+    "includesEvidence": true,
+    "redactionStatus": "not_required",
+    "installMode": "render_only",
+    "warnings": [
+      "skill capsule is render-only; no files are installed",
+      "manual review is required before copying into a skill directory"
+    ],
+    "exportedAt": "2026-01-02T03:06:07Z"
+  }
+}

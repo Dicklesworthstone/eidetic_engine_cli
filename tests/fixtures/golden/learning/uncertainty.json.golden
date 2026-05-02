@@ -1,0 +1,28 @@
+{
+  "schema": "ee.learn.uncertainty.v1",
+  "success": true,
+  "meanUncertainty": 0.755,
+  "highUncertaintyCount": 1,
+  "samplingCandidates": 2,
+  "items": [
+    {
+      "memory_id": "mem_gate21_procedure",
+      "content_preview": "Procedure promotion passed once but lacks replay evidence.",
+      "kind": "procedural",
+      "uncertainty": 0.82,
+      "confidence": 0.42,
+      "retrieval_count": 4,
+      "last_accessed": "2026-01-02T02:15:00Z"
+    },
+    {
+      "memory_id": "mem_gate21_budget",
+      "content_preview": "Budget pruning recommendation has no counterfactual baseline.",
+      "kind": "economic",
+      "uncertainty": 0.69,
+      "confidence": 0.51,
+      "retrieval_count": 2,
+      "last_accessed": null
+    }
+  ],
+  "generatedAt": "2026-01-02T03:04:05Z"
+}

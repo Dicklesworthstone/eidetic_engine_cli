@@ -1,0 +1,15 @@
+{
+  "schema": "ee.lab.promote_candidates_dry_run.v1",
+  "episode_id": "ep_golden_test",
+  "dry_run": true,
+  "candidates": [
+    {
+      "candidate_id": "cand_NORMALIZED",
+      "intervention_type": "add",
+      "requires_validate": true,
+      "requires_apply": true,
+      "applied": false
+    }
+  ],
+  "next_action": "validate generated curation candidates, then apply explicitly"
+}

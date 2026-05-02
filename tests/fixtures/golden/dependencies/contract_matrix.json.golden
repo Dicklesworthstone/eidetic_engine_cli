@@ -1,6 +1,6 @@
 {
   "schema": "ee.dependency_contract_matrix.v1",
-  "matrix_revision": 1,
+  "matrix_revision": 2,
   "source_bead": "eidetic_engine_cli-ilcq",
   "source_plan_item": "EE-307",
   "default_feature_profile": "default",
@@ -302,6 +302,53 @@
       ],
       "diagnostic_command": "ee status --json",
       "release_pin_decision": "Local path dependency is accepted only for development; release must record a registry pin or ADR-backed local source policy."
+    },
+    {
+      "name": "franken_mermaid",
+      "kind": "planned_rust_crate",
+      "owning_surface": "ee-diagram",
+      "status": "planned_not_linked",
+      "enabled_by_default": false,
+      "source": {
+        "kind": "not_linked",
+        "version": "unresolved",
+        "path": "/dp/franken_mermaid"
+      },
+      "default_feature_profile": {
+        "default_features": false,
+        "features": []
+      },
+      "optional_feature_profiles": [
+        {
+          "name": "franken-mermaid-adapter",
+          "features": [
+            "diagram-validation"
+          ],
+          "status": "blocked_until_repository_api_and_dependency_audit"
+        }
+      ],
+      "blocked_features": [
+        {
+          "name": "browser-or-network-renderer",
+          "forbidden_crates": [
+            "tokio",
+            "hyper",
+            "axum",
+            "tower",
+            "reqwest"
+          ],
+          "action": "plain_mermaid_text_remains_the_default_until_adapter_tree_is_clean"
+        }
+      ],
+      "forbidden_transitive_dependencies": [],
+      "minimum_smoke_test": "Gate 11 Mermaid goldens plus future FrankenMermaid adapter cargo-tree audit",
+      "degradation_code": "diagram_backend_unavailable",
+      "status_fields": [
+        "capabilities.output.diagram",
+        "degraded[].code"
+      ],
+      "diagnostic_command": "ee doctor --json",
+      "release_pin_decision": "Do not link before /dp/franken_mermaid exists, its API is audited, and a forbidden-dependency cargo-tree gate passes."
     },
     {
       "name": "franken_agent_detection",

@@ -1,0 +1,12 @@
+{
+  "schema": "ee.procedure.propose_report.v1",
+  "success": true,
+  "procedureId": "proc_gate18_candidate",
+  "title": "Stabilize release workflow",
+  "summary": "Evidence-backed workflow for release verification.",
+  "status": "candidate",
+  "sourceRunCount": 2,
+  "evidenceCount": 3,
+  "dryRun": true,
+  "createdAt": "2026-01-02T03:04:05Z"
+}

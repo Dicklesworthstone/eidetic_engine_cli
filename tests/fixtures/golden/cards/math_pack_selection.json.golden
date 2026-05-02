@@ -1,0 +1,36 @@
+[
+  {
+    "id": "card_selection_score",
+    "kind": "certificate",
+    "title": "Selection Score Computation",
+    "summary": "score = 0.40×0.95 + 0.35×0.70 + 0.25×0.80 = 0.825",
+    "math": {
+      "formula": "score = α·confidence + β·utility + γ·importance",
+      "value": 0.825,
+      "confidence": 0.95,
+      "substitutedValues": "score = 0.40×0.95 + 0.35×0.70 + 0.25×0.80 = 0.825",
+      "intuition": "Higher confidence, utility, and importance raise the selected score.",
+      "assumptions": [
+        "Weights are fixed for this certificate profile."
+      ],
+      "decisionChange": "A lower confidence or utility value could move this item below the cutoff."
+    }
+  },
+  {
+    "id": "card_pack_budget",
+    "kind": "audit",
+    "title": "Pack Token Budget",
+    "summary": "20/100 tokens (20.0%), 2 items packed, 1 omitted",
+    "math": {
+      "formula": "utilization = used_tokens / max_tokens",
+      "value": 20.0,
+      "unit": "%",
+      "substitutedValues": "20/100 tokens (20.0%), 2 items packed, 1 omitted",
+      "intuition": "Higher utilization means less room remains for additional memories.",
+      "assumptions": [
+        "Token estimates use the active deterministic estimator."
+      ],
+      "decisionChange": "A larger max token budget could admit omitted items."
+    }
+  }
+]

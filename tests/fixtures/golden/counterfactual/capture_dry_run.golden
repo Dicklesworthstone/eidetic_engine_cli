@@ -4,9 +4,18 @@
   "workspace": "/test/workspace",
   "session_id": "session_golden",
   "task_input": "fix the bug",
+  "pack_hash": "blake3:NORMALIZED",
+  "policy_ids": [
+    "pack.default_context",
+    "search.lexical_fallback"
+  ],
+  "outcome_ref": "cass:session_golden:outcome",
+  "repository_fingerprint": "repo:NORMALIZED",
+  "redaction_status": "redacted",
   "memories_captured": 0,
   "actions_captured": 0,
   "episode_hash": null,
+  "stored": false,
   "dry_run": true,
   "captured_at": "TIMESTAMP"
 }

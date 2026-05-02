@@ -1,0 +1,12 @@
+flowchart TD
+  doctor["ee doctor: needs repair"]
+  check1["database: ok"]
+  doctor --> check1
+  check2["search_index: warning"]
+  doctor --> check2
+  repair2["ee index rebuild --workspace ."]
+  check2 -. repair .-> repair2
+  check3["cass: error"]
+  doctor --> check3
+  repair3["install cass or disable cass.enabled"]
+  check3 -. repair .-> repair3

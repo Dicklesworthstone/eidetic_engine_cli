@@ -1,0 +1,39 @@
+{
+  "schema": "ee.procedure.verify_report.v1",
+  "procedure_id": "proc_gate18_candidate",
+  "verification_id": "ver_gate18_release",
+  "status": "passed",
+  "source_kind": "eval_fixture",
+  "sources_checked": [
+    {
+      "source_id": "fixture_gate18_release",
+      "source_kind": "eval_fixture",
+      "result": "passed",
+      "step_results": [
+        {
+          "step_id": "step_gate18_prepare",
+          "sequence": 1,
+          "result": "passed",
+          "expected": "workspace inspected",
+          "actual": "workspace inspected"
+        },
+        {
+          "step_id": "step_gate18_verify",
+          "sequence": 2,
+          "result": "passed",
+          "expected": "verification gates passed",
+          "actual": "verification gates passed"
+        }
+      ],
+      "message": null
+    }
+  ],
+  "pass_count": 1,
+  "fail_count": 0,
+  "skip_count": 0,
+  "overall_result": "passed",
+  "verified_at": "2026-01-02T03:07:08Z",
+  "dry_run": true,
+  "confidence": 1.0,
+  "next_actions": []
+}

@@ -1,0 +1,121 @@
+{
+  "schema": "ee.lifecycle.automaton.gate13.v1",
+  "cases": [
+    {
+      "name": "cancellation",
+      "state": "cancelled",
+      "terminal": true,
+      "operationsCancelled": 2,
+      "transitions": [
+        {
+          "from": "idle",
+          "to": "running",
+          "trigger": "start",
+          "timestamp": "2026-05-01T00:00:00Z",
+          "metadata": null
+        },
+        {
+          "from": "running",
+          "to": "cancelled",
+          "trigger": "cancel",
+          "timestamp": "2026-05-01T00:00:00Z",
+          "metadata": null
+        }
+      ]
+    },
+    {
+      "name": "failed_validation",
+      "state": "failed",
+      "validationPassed": false,
+      "successful": false,
+      "transitions": [
+        {
+          "from": "idle",
+          "to": "running",
+          "trigger": "start",
+          "timestamp": "2026-05-01T00:00:00Z",
+          "metadata": null
+        },
+        {
+          "from": "running",
+          "to": "failed",
+          "trigger": "validation_failed",
+          "timestamp": "2026-05-01T00:00:00Z",
+          "metadata": null
+        }
+      ]
+    },
+    {
+      "name": "interrupted_publish",
+      "state": "failed",
+      "consistencyCheck": false,
+      "generationsMatch": true,
+      "transitions": [
+        {
+          "from": "idle",
+          "to": "running",
+          "trigger": "publish",
+          "timestamp": "2026-05-01T00:00:00Z",
+          "metadata": null
+        },
+        {
+          "from": "running",
+          "to": "rollback",
+          "trigger": "interrupted",
+          "timestamp": "2026-05-01T00:00:00Z",
+          "metadata": null
+        },
+        {
+          "from": "rollback",
+          "to": "failed",
+          "trigger": "rollback_done",
+          "timestamp": "2026-05-01T00:00:00Z",
+          "metadata": null
+        }
+      ]
+    },
+    {
+      "name": "duplicate_apply",
+      "state": "failed",
+      "idempotencyFingerprint": "idem:note-001",
+      "transitions": [
+        {
+          "from": "idle",
+          "to": "running",
+          "trigger": "apply",
+          "timestamp": "2026-05-01T00:00:00Z",
+          "metadata": null
+        },
+        {
+          "from": "running",
+          "to": "failed",
+          "trigger": "duplicate_apply",
+          "timestamp": "2026-05-01T00:00:00Z",
+          "metadata": null
+        }
+      ]
+    },
+    {
+      "name": "normal_completion",
+      "state": "completed",
+      "verified": true,
+      "checksum": "blake3:abc123",
+      "transitions": [
+        {
+          "from": "idle",
+          "to": "running",
+          "trigger": "start",
+          "timestamp": "2026-05-01T00:00:00Z",
+          "metadata": null
+        },
+        {
+          "from": "running",
+          "to": "completed",
+          "trigger": "verified",
+          "timestamp": "2026-05-01T00:00:00Z",
+          "metadata": null
+        }
+      ]
+    }
+  ]
+}

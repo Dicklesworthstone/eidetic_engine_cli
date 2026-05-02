@@ -17,7 +17,7 @@ data:
     lexical-bm25,true,BM25 lexical scoring
     mcp,false,MCP server adapter
     serve,false,HTTP serve adapter
-  commands[16]{name,available,description}:
+  commands[17]{name,available,description}:
     capabilities,true,Report feature availability
     check,true,Quick posture summary
     doctor,true,Health checks
@@ -25,6 +25,7 @@ data:
     help,true,Command help
     import,true,Import from external sources
     remember,true,Store memories
+    rule,true,Manage procedural rules
     schema,true,Schema registry
     status,true,Subsystem readiness
     version,true,Version info
@@ -34,10 +35,59 @@ data:
     init,false,Workspace initialization
     index,false,Search index management
     curate,false,Rule curation
+  output:
+    formats[7]{name,available,machineReadable,description}:
+      json,true,true,Canonical stable response envelope
+      toon,true,false,TOON renderer over canonical JSON
+      human,true,false,Human-readable terminal output
+      markdown,true,false,Markdown context output
+      jsonl,true,true,Line-delimited JSON stream output
+      compact,true,true,Compact machine-readable output
+      hook,true,true,Hook protocol output
+    toon:
+      available: true
+      canonicalSourceFormat: json
+      dependency:
+        crate: toon
+        package: tru
+        version: 0.2.3
+        sourceKind: path
+        path: /data/projects/toon_rust
+        defaultFeatures: false
+      supportedOutputProfiles[4]: minimal,summary,standard,full
+      defaultFormatEnv: TOON_DEFAULT_FORMAT
+      errorCodes[2]: toon_decode_failed,toon_encoding_failed
+    sizeDiagnostics[2]:
+      - command: status
+        diagnostic:
+          schema: ee.output_size_diagnostic.v1
+          json:
+            bytes: 1747
+            estimatedTokens: 64
+          toon:
+            bytes: 1596
+            estimatedTokens: 165
+          savings:
+            bytes: 151
+            tokens: -101
+            compressionRatio: 0.914
+      - command: health
+        diagnostic:
+          schema: ee.output_size_diagnostic.v1
+          json:
+            bytes: 492
+            estimatedTokens: 14
+          toon:
+            bytes: 439
+            estimatedTokens: 50
+          savings:
+            bytes: 53
+            tokens: -36
+            compressionRatio: 0.892
   summary:
     readySubsystems: 1
     totalSubsystems: 5
     enabledFeatures: 4
     totalFeatures: 7
-    availableCommands: 10
-    totalCommands: 16
+    availableCommands: 11
+    totalCommands: 17

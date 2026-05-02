@@ -14,7 +14,7 @@
       "id": "memory-2",
       "level": "episodic",
       "kind": "failure",
-      "content": "A production migration failed when the async backfill job was started without checking queue depth. The job queue had 50k pending items and the new migration jobs timed out. Rollback required manual intervention to clear the stuck migration state.",
+      "content": "A production migration failed when the async backfill job was started without checking queue depth. The job queue had 50k pending items and the new migration jobs hit a timeout. Rollback required manual intervention to clear the stuck migration state.",
       "tags": ["migration", "async", "production", "incident"],
       "provenance_uri": "file://incidents/2026-03-15-migration-timeout.md#L12"
     },

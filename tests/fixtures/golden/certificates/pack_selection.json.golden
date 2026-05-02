@@ -1,0 +1,71 @@
+{
+  "profile": "submodular",
+  "objective": "facility_location",
+  "algorithm": "deterministic_greedy_facility_location_gain_per_token",
+  "guarantee": "monotone submodular facility-location objective; deterministic budgeted greedy certificate, exact optimum not claimed",
+  "guaranteeStatus": "conditional",
+  "guaranteeEvidence": {
+    "status": "conditional",
+    "certificateId": null,
+    "identityValid": true,
+    "summary": "monotone submodular facility-location objective; deterministic budgeted greedy certificate, exact optimum not claimed"
+  },
+  "candidateCount": 3,
+  "selectedCount": 2,
+  "omittedCount": 1,
+  "budgetLimit": 100,
+  "budgetUsed": 20,
+  "totalObjectiveValue": 1.784,
+  "monotone": true,
+  "submodular": true,
+  "selectedItems": [
+    {
+      "rank": 1,
+      "memoryId": "mem_00000000000000000000000001",
+      "tokenCost": 10,
+      "feasible": true
+    },
+    {
+      "rank": 2,
+      "memoryId": "mem_00000000000000000000000003",
+      "tokenCost": 10,
+      "feasible": true
+    }
+  ],
+  "rejectedFrontier": [
+    {
+      "memoryId": "mem_00000000000000000000000002",
+      "tokenCost": 10,
+      "reason": "token_budget_exceeded",
+      "feasible": false
+    }
+  ],
+  "steps": [
+    {
+      "rank": 1,
+      "memoryId": "mem_00000000000000000000000001",
+      "marginalGain": 1.107636,
+      "objectiveValue": 1.107636,
+      "tokenCost": 10,
+      "feasible": true,
+      "coveredFeatures": [
+        "section:procedural_rules",
+        "diversity:formatting",
+        "memory:mem_00000000000000000000000001"
+      ]
+    },
+    {
+      "rank": 2,
+      "memoryId": "mem_00000000000000000000000003",
+      "marginalGain": 0.676364,
+      "objectiveValue": 1.784,
+      "tokenCost": 10,
+      "feasible": true,
+      "coveredFeatures": [
+        "section:procedural_rules",
+        "diversity:release-artifacts",
+        "memory:mem_00000000000000000000000003"
+      ]
+    }
+  ]
+}
