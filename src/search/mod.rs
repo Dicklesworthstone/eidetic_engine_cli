@@ -20,6 +20,7 @@ pub enum DocumentSource {
     Session,
     Rule,
     Import,
+    Artifact,
 }
 
 impl DocumentSource {
@@ -30,6 +31,7 @@ impl DocumentSource {
             Self::Session => "session",
             Self::Rule => "rule",
             Self::Import => "import",
+            Self::Artifact => "artifact",
         }
     }
 }
@@ -413,6 +415,103 @@ pub fn session_to_document_with_context(
     }
 
     builder.build(session)
+}
+
+/// Builder for converting registered coding artifacts to canonical documents.
+///
+/// Artifact rows are the source of truth; the search document is a derived,
+/// rebuildable projection containing only safe metadata and optional snippets.
+pub struct ArtifactDocumentBuilder {
+    workspace_path: Option<String>,
+}
+
+impl ArtifactDocumentBuilder {
+    /// Create a new artifact document builder.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            workspace_path: None,
+        }
+    }
+
+    /// Set the workspace path for document metadata.
+    #[must_use]
+    pub fn with_workspace_path(mut self, path: impl Into<String>) -> Self {
+        self.workspace_path = Some(path.into());
+        self
+    }
+
+    /// Build a canonical search document from a stored artifact row.
+    #[must_use]
+    pub fn build(self, artifact: &crate::db::StoredArtifact) -> CanonicalSearchDocument {
+        let mut lines = vec![
+            format!("Artifact: {}", artifact.id),
+            format!("Artifact type: {}", artifact.artifact_type),
+            format!("Source kind: {}", artifact.source_kind),
+            format!("Media type: {}", artifact.media_type),
+            format!("Redaction status: {}", artifact.redaction_status),
+            format!("Content hash: {}", artifact.content_hash),
+        ];
+        if let Some(path) = &artifact.original_path {
+            push_labeled_line(&mut lines, "Path", path);
+        }
+        if let Some(external_ref) = &artifact.external_ref {
+            push_labeled_line(&mut lines, "External ref", external_ref);
+        }
+        if let Some(snippet) = &artifact.snippet {
+            push_labeled_line(&mut lines, "Snippet", snippet);
+        }
+
+        let title = artifact
+            .original_path
+            .as_deref()
+            .or(artifact.external_ref.as_deref())
+            .unwrap_or(artifact.id.as_str());
+
+        let mut doc =
+            CanonicalSearchDocument::new(&artifact.id, lines.join("\n"), DocumentSource::Artifact)
+                .with_title(format!("Artifact {title}"))
+                .with_kind(&artifact.artifact_type)
+                .with_created_at(&artifact.created_at)
+                .with_metadata_entry("workspace_id", &artifact.workspace_id)
+                .with_metadata_entry("artifact_type", &artifact.artifact_type)
+                .with_metadata_entry("source_kind", &artifact.source_kind)
+                .with_metadata_entry("content_hash", &artifact.content_hash)
+                .with_metadata_entry("media_type", &artifact.media_type)
+                .with_metadata_entry("size_bytes", artifact.size_bytes.to_string())
+                .with_metadata_entry("redaction_status", &artifact.redaction_status)
+                .with_metadata_entry("updated_at", &artifact.updated_at);
+
+        if let Some(workspace) = self.workspace_path {
+            doc = doc.with_workspace(workspace);
+        }
+        if let Some(path) = &artifact.original_path {
+            doc = doc.with_metadata_entry("path", path);
+        }
+        if let Some(external_ref) = &artifact.external_ref {
+            doc = doc.with_metadata_entry("external_ref", external_ref);
+        }
+        if let Some(provenance_uri) = &artifact.provenance_uri {
+            doc = doc.with_metadata_entry("provenance_uri", provenance_uri);
+        }
+        if let Some(snippet_hash) = &artifact.snippet_hash {
+            doc = doc.with_metadata_entry("snippet_hash", snippet_hash);
+        }
+
+        doc
+    }
+}
+
+impl Default for ArtifactDocumentBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Convert a stored artifact directly to a canonical search document.
+#[must_use]
+pub fn artifact_to_document(artifact: &crate::db::StoredArtifact) -> CanonicalSearchDocument {
+    ArtifactDocumentBuilder::new().build(artifact)
 }
 
 pub const MODULE_CONTRACT: &str = SEARCH_MODULE_SCHEMA_V1;
@@ -1156,6 +1255,7 @@ mod tests {
         assert_eq!(DocumentSource::Session.as_str(), "session");
         assert_eq!(DocumentSource::Rule.as_str(), "rule");
         assert_eq!(DocumentSource::Import.as_str(), "import");
+        assert_eq!(DocumentSource::Artifact.as_str(), "artifact");
     }
 
     #[test]
@@ -1215,6 +1315,32 @@ mod tests {
             metadata_json: Some(r#"{"source":"cass","schema":"cass.session.v1"}"#.to_string()),
             imported_at: "2026-04-29T12:31:00Z".to_string(),
             updated_at: "2026-04-29T12:31:00Z".to_string(),
+        }
+    }
+
+    fn make_test_artifact() -> crate::db::StoredArtifact {
+        crate::db::StoredArtifact {
+            id: "art_01234567890123456789012345".to_string(),
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            source_kind: "file".to_string(),
+            artifact_type: "log".to_string(),
+            original_path: Some("logs/build.log".to_string()),
+            canonical_path: Some("/workspace/project/logs/build.log".to_string()),
+            external_ref: None,
+            content_hash: "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            media_type: "text/plain".to_string(),
+            size_bytes: 256,
+            redaction_status: "checked".to_string(),
+            snippet: Some("cargo fmt passed".to_string()),
+            snippet_hash: Some(
+                "blake3:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    .to_string(),
+            ),
+            provenance_uri: Some("file:///workspace/project/logs/build.log".to_string()),
+            metadata_json: r#"{"title":"build log"}"#.to_string(),
+            created_at: "2026-04-29T12:00:00Z".to_string(),
+            updated_at: "2026-04-29T12:01:00Z".to_string(),
         }
     }
 
@@ -1431,6 +1557,69 @@ mod tests {
 
         assert_eq!(doc.id(), session.id);
         assert_eq!(doc.source(), DocumentSource::Session);
+    }
+
+    #[test]
+    fn artifact_document_builder_indexes_safe_registry_projection() {
+        let artifact = make_test_artifact();
+        let doc = super::artifact_to_document(&artifact);
+
+        assert_eq!(doc.id(), "art_01234567890123456789012345");
+        assert_eq!(doc.source(), DocumentSource::Artifact);
+        assert!(doc.content().contains("Artifact type: log"));
+        assert!(doc.content().contains("Path: logs/build.log"));
+        assert!(doc.content().contains("Snippet: cargo fmt passed"));
+
+        let indexable = doc.into_indexable();
+        assert_eq!(indexable.title.as_deref(), Some("Artifact logs/build.log"));
+        assert_eq!(
+            indexable.metadata.get("source"),
+            Some(&"artifact".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("workspace_id"),
+            Some(&"wsp_01234567890123456789012345".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("artifact_type"),
+            Some(&"log".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("redaction_status"),
+            Some(&"checked".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("path"),
+            Some(&"logs/build.log".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("snippet_hash"),
+            Some(
+                &"blake3:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn artifact_document_builder_with_workspace_context() {
+        let artifact = make_test_artifact();
+        let doc = super::ArtifactDocumentBuilder::new()
+            .with_workspace_path("/workspace/project")
+            .build(&artifact);
+
+        let indexable = doc.into_indexable();
+        assert_eq!(
+            indexable.metadata.get("workspace"),
+            Some(&"/workspace/project".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("content_hash"),
+            Some(
+                &"blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_owned()
+            )
+        );
     }
 
     // =========================================================================
