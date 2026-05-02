@@ -153,6 +153,21 @@ fn gate20_economy_report_json_matches_golden() -> TestResult {
         serde_json::json!(67),
         "report total artifact count",
     )?;
+    ensure_json_equal(
+        actual.pointer("/data/overall_utility_score"),
+        serde_json::json!(0.75),
+        "report overall utility score",
+    )?;
+    ensure_json_equal(
+        actual.pointer("/data/attention_budget_used"),
+        serde_json::json!(2100.0),
+        "report attention budget used",
+    )?;
+    ensure_json_equal(
+        actual.pointer("/data/attention_budget_total"),
+        serde_json::json!(4000.0),
+        "report attention budget total",
+    )?;
     ensure(
         actual.pointer("/data/maintenance_debt").is_some(),
         "report must include maintenance debt when requested",
@@ -160,6 +175,11 @@ fn gate20_economy_report_json_matches_golden() -> TestResult {
     ensure(
         actual.pointer("/data/tail_risk_reserves").is_some(),
         "report must include tail-risk reserves when requested",
+    )?;
+    ensure_json_equal(
+        actual.pointer("/data/tail_risk_reserves/degradation_coverage"),
+        serde_json::json!(0.85),
+        "report tail-risk reserve coverage",
     )?;
 
     assert_json_golden("report_with_debt_and_reserves", &actual)
@@ -191,6 +211,21 @@ fn gate20_economy_score_json_matches_golden() -> TestResult {
         actual.pointer("/data/artifact_id"),
         JsonValue::String("mem_gate20_release_rule".to_string()),
         "score artifact id",
+    )?;
+    ensure_json_equal(
+        actual.pointer("/data/utility_score"),
+        serde_json::json!(0.82),
+        "score utility score",
+    )?;
+    ensure_json_equal(
+        actual.pointer("/data/cost_score"),
+        serde_json::json!(0.65),
+        "score cost score",
+    )?;
+    ensure_json_equal(
+        actual.pointer("/data/confidence_score"),
+        serde_json::json!(0.75),
+        "score confidence score",
     )?;
     ensure(
         actual.pointer("/data/breakdown/retrieval_frequency") == Some(&serde_json::json!(12)),
@@ -233,9 +268,28 @@ fn gate20_economy_prune_plan_dry_run_matches_golden() -> TestResult {
         "prune-plan mutation status",
     )?;
     ensure_json_equal(
+        actual.pointer("/data/status"),
+        JsonValue::String("planned".to_string()),
+        "prune-plan status",
+    )?;
+    ensure_json_equal(
         actual.pointer("/data/summary/actions"),
         serde_json::json!(["revalidate", "retire", "compact"]),
         "prune-plan action ordering",
+    )?;
+    ensure(
+        actual
+            .pointer("/data/recommendations")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|recommendations| {
+                recommendations.iter().all(|entry| {
+                    entry.pointer("/dryRunCommand")
+                        == Some(&JsonValue::String(
+                            "ee economy prune-plan --dry-run --json".to_string(),
+                        ))
+                })
+            }),
+        "prune-plan recommendations must include dry-run commands",
     )?;
 
     assert_json_golden("prune_plan_dry_run_top3", &actual)
