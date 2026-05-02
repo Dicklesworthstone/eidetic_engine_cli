@@ -13,17 +13,20 @@ use chrono::Utc;
 use serde_json::{Value as JsonValue, json};
 
 use crate::config::WORKSPACE_MARKER;
+use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use crate::db::{DatabaseConfig, DbConnection, StoredAuditEntry, StoredMemory, StoredMemoryLink};
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
-    BACKUP_MANIFEST_SCHEMA_V1, BACKUP_VERIFY_SCHEMA_V1, BackupId, DomainError, ExportAuditRecord,
-    ExportFooter, ExportHeader, ExportLinkRecord, ExportMemoryRecord, ExportScope, ExportTagRecord,
-    ExportWorkspaceRecord, ImportSource, RedactionLevel, TrustLevel,
+    BACKUP_MANIFEST_SCHEMA_V1, BACKUP_RESTORE_SCHEMA_V1, BACKUP_VERIFY_SCHEMA_V1, BackupId,
+    DomainError, ExportAuditRecord, ExportFooter, ExportHeader, ExportLinkRecord,
+    ExportMemoryRecord, ExportScope, ExportTagRecord, ExportWorkspaceRecord, ImportSource,
+    RedactionLevel, TrustLevel,
 };
 use crate::output::jsonl_export::{ExportStats, JsonlExporter};
 
 const DEFAULT_DB_FILE: &str = "ee.db";
 const DEFAULT_BACKUP_DIR: &str = "backups";
+const DEFAULT_RESTORE_DIR: &str = "restores";
 const RECORDS_FILE: &str = "records.jsonl";
 const MANIFEST_FILE: &str = "manifest.json";
 
@@ -55,6 +58,15 @@ pub struct BackupInspectOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackupVerifyOptions {
     pub backup_path: PathBuf,
+}
+
+/// Options for restoring one backup into an isolated side path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackupRestoreOptions {
+    pub workspace_path: PathBuf,
+    pub backup_path: PathBuf,
+    pub side_path: PathBuf,
+    pub dry_run: bool,
 }
 
 /// Stable report returned by `ee backup create`.
@@ -332,6 +344,76 @@ pub struct BackupVerifyReport {
     pub manifest_hash: String,
     pub checked_artifacts: Vec<BackupArtifactReport>,
     pub issues: Vec<BackupVerificationIssue>,
+}
+
+/// Stable report returned by `ee backup restore`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackupRestoreReport {
+    pub schema: &'static str,
+    pub backup_id: String,
+    pub status: String,
+    pub dry_run: bool,
+    pub backup_path: String,
+    pub side_path: String,
+    pub restore_artifact_dir: String,
+    pub source_manifest_path: String,
+    pub source_records_path: String,
+    pub source_manifest_hash: String,
+    pub restored_database_path: String,
+    pub import_status: String,
+    pub imported_memory_count: u32,
+    pub skipped_duplicate_count: u32,
+    pub issue_count: u32,
+    pub next_actions: Vec<String>,
+}
+
+impl BackupRestoreReport {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "schema": self.schema,
+            "command": "backup restore",
+            "backupId": self.backup_id,
+            "status": self.status,
+            "dryRun": self.dry_run,
+            "backupPath": self.backup_path,
+            "sidePath": self.side_path,
+            "restoreArtifactDir": self.restore_artifact_dir,
+            "sourceManifestPath": self.source_manifest_path,
+            "sourceRecordsPath": self.source_records_path,
+            "sourceManifestHash": self.source_manifest_hash,
+            "restoredDatabasePath": self.restored_database_path,
+            "importStatus": self.import_status,
+            "counts": {
+                "memoriesImported": self.imported_memory_count,
+                "memoriesSkippedDuplicate": self.skipped_duplicate_count,
+                "issues": self.issue_count,
+            },
+            "nextActions": self.next_actions,
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let prefix = if self.dry_run { "DRY RUN: " } else { "" };
+        format!(
+            "{prefix}backup restore {status}: {backup_id}\n  side path: {side_path}\n  restored db: {database}\n  imported memories: {imported} (duplicates: {duplicates})\n",
+            status = self.status,
+            backup_id = self.backup_id,
+            side_path = self.side_path,
+            database = self.restored_database_path,
+            imported = self.imported_memory_count,
+            duplicates = self.skipped_duplicate_count,
+        )
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        format!(
+            "BACKUP_RESTORE|{}|{}|{}|{}",
+            self.backup_id, self.status, self.imported_memory_count, self.issue_count
+        )
+    }
 }
 
 impl BackupVerifyReport {
@@ -765,6 +847,184 @@ pub fn verify_backup(options: &BackupVerifyOptions) -> Result<BackupVerifyReport
         checked_artifacts,
         issues,
     })
+}
+
+/// Restore one verified backup into an isolated side path.
+///
+/// # Errors
+///
+/// Returns a [`DomainError`] if the backup cannot be verified, the side path is
+/// not isolated, or JSONL records cannot be imported into the restored database.
+pub fn restore_backup_to_side_path(
+    options: &BackupRestoreOptions,
+) -> Result<BackupRestoreReport, DomainError> {
+    let workspace_path = normalize_path(&options.workspace_path);
+    let backup_path = normalize_path(&options.backup_path);
+    let side_path = normalize_path(&options.side_path);
+    if workspace_path == side_path {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "side path '{}' must differ from source workspace '{}'",
+                side_path.display(),
+                workspace_path.display()
+            ),
+            repair: Some("choose a separate --side-path target".to_owned()),
+        });
+    }
+
+    let inspect = inspect_backup(&BackupInspectOptions {
+        backup_path: backup_path.clone(),
+    })?;
+    let verify = verify_backup(&BackupVerifyOptions {
+        backup_path: backup_path.clone(),
+    })?;
+    if verify.status != "verified" {
+        return Err(DomainError::Import {
+            message: format!(
+                "backup '{}' failed integrity verification with {} issue(s)",
+                inspect.backup_id,
+                verify.issues.len()
+            ),
+            repair: Some("run ee backup verify <id-or-path> --json and repair issues".to_owned()),
+        });
+    }
+
+    let source_records_path = backup_artifact_path(&backup_path, &inspect, RECORDS_FILE)?;
+    let source_manifest_path = backup_path.join(MANIFEST_FILE);
+    let restore_artifact_dir = side_path
+        .join(WORKSPACE_MARKER)
+        .join(DEFAULT_RESTORE_DIR)
+        .join(&inspect.backup_id);
+    let restore_records_path = restore_artifact_dir.join(RECORDS_FILE);
+    let restore_manifest_path = restore_artifact_dir.join(MANIFEST_FILE);
+    let restored_database_path = side_path.join(WORKSPACE_MARKER).join(DEFAULT_DB_FILE);
+    let next_actions = vec![
+        format!("ee backup inspect {} --json", inspect.backup_id),
+        format!(
+            "ee search \"<query>\" --workspace {} --json",
+            side_path.to_string_lossy()
+        ),
+    ];
+
+    if options.dry_run {
+        return Ok(BackupRestoreReport {
+            schema: BACKUP_RESTORE_SCHEMA_V1,
+            backup_id: inspect.backup_id,
+            status: "dry_run".to_owned(),
+            dry_run: true,
+            backup_path: backup_path.to_string_lossy().into_owned(),
+            side_path: side_path.to_string_lossy().into_owned(),
+            restore_artifact_dir: restore_artifact_dir.to_string_lossy().into_owned(),
+            source_manifest_path: source_manifest_path.to_string_lossy().into_owned(),
+            source_records_path: source_records_path.to_string_lossy().into_owned(),
+            source_manifest_hash: inspect.manifest_hash,
+            restored_database_path: restored_database_path.to_string_lossy().into_owned(),
+            import_status: "dry_run".to_owned(),
+            imported_memory_count: 0,
+            skipped_duplicate_count: 0,
+            issue_count: 0,
+            next_actions,
+        });
+    }
+
+    ensure_side_path_is_isolated(&side_path)?;
+    fs::create_dir_all(&restore_artifact_dir).map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to create restore artifact directory '{}': {error}",
+            restore_artifact_dir.display()
+        ),
+        repair: Some("choose a writable --side-path".to_owned()),
+    })?;
+
+    let manifest_bytes = fs::read(&source_manifest_path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to read backup manifest '{}': {error}",
+            source_manifest_path.display()
+        ),
+        repair: Some("verify the backup directory and retry restore".to_owned()),
+    })?;
+    write_new_file(&restore_manifest_path, &manifest_bytes)?;
+
+    let records_bytes = fs::read(&source_records_path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to read backup records '{}': {error}",
+            source_records_path.display()
+        ),
+        repair: Some("verify the backup records artifact and retry restore".to_owned()),
+    })?;
+    write_new_file(&restore_records_path, &records_bytes)?;
+
+    let import_report = import_jsonl_records(&JsonlImportOptions {
+        workspace_path: side_path.clone(),
+        database_path: Some(restored_database_path.clone()),
+        source_path: restore_records_path,
+        dry_run: false,
+    })
+    .map_err(|error| DomainError::Import {
+        message: format!(
+            "failed importing backup '{}' records into side path '{}': {error}",
+            inspect.backup_id,
+            side_path.display()
+        ),
+        repair: Some(
+            "inspect the copied records.jsonl and retry with a fresh --side-path".to_owned(),
+        ),
+    })?;
+    let restore_status = if import_report.status == "completed" {
+        "completed"
+    } else {
+        "degraded"
+    };
+
+    Ok(BackupRestoreReport {
+        schema: BACKUP_RESTORE_SCHEMA_V1,
+        backup_id: inspect.backup_id,
+        status: restore_status.to_owned(),
+        dry_run: false,
+        backup_path: backup_path.to_string_lossy().into_owned(),
+        side_path: side_path.to_string_lossy().into_owned(),
+        restore_artifact_dir: restore_artifact_dir.to_string_lossy().into_owned(),
+        source_manifest_path: source_manifest_path.to_string_lossy().into_owned(),
+        source_records_path: source_records_path.to_string_lossy().into_owned(),
+        source_manifest_hash: inspect.manifest_hash,
+        restored_database_path: restored_database_path.to_string_lossy().into_owned(),
+        import_status: import_report.status.clone(),
+        imported_memory_count: import_report.memories_imported,
+        skipped_duplicate_count: import_report.memories_skipped_duplicate,
+        issue_count: u32::try_from(import_report.issues.len()).unwrap_or(u32::MAX),
+        next_actions,
+    })
+}
+
+fn backup_artifact_path(
+    backup_path: &Path,
+    inspect: &BackupInspectReport,
+    expected_path: &str,
+) -> Result<PathBuf, DomainError> {
+    let artifact = inspect
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.path == expected_path)
+        .ok_or_else(|| DomainError::Import {
+            message: format!(
+                "backup '{}' is missing required artifact '{}'",
+                inspect.backup_id, expected_path
+            ),
+            repair: Some("recreate the backup using ee backup create".to_owned()),
+        })?;
+
+    let mut issues = Vec::new();
+    let Some(path) = safe_artifact_path(backup_path, &artifact.path, &mut issues) else {
+        let message = issues
+            .first()
+            .map(|issue| issue.message.clone())
+            .unwrap_or_else(|| "backup artifact path is invalid".to_owned());
+        return Err(DomainError::Import {
+            message,
+            repair: Some("recreate the backup in a safe filesystem path".to_owned()),
+        });
+    };
+    Ok(path)
 }
 
 fn inspect_manifest(
@@ -1217,6 +1477,39 @@ fn ensure_backup_directory(backup_root: &Path, backup_path: &Path) -> Result<(),
     })
 }
 
+fn ensure_side_path_is_isolated(side_path: &Path) -> Result<(), DomainError> {
+    if side_path.exists() && !side_path.is_dir() {
+        return Err(DomainError::Storage {
+            message: format!(
+                "side path '{}' exists but is not a directory",
+                side_path.display()
+            ),
+            repair: Some("choose a directory path for --side-path".to_owned()),
+        });
+    }
+    if !side_path.exists() {
+        return Ok(());
+    }
+
+    let mut entries = fs::read_dir(side_path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to read side path '{}': {error}",
+            side_path.display()
+        ),
+        repair: Some("inspect filesystem permissions or choose another --side-path".to_owned()),
+    })?;
+    if entries.next().is_some() {
+        return Err(DomainError::Storage {
+            message: format!(
+                "side path '{}' is not empty; restore refuses to overwrite existing data",
+                side_path.display()
+            ),
+            repair: Some("choose a new empty --side-path target".to_owned()),
+        });
+    }
+    Ok(())
+}
+
 fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), DomainError> {
     let mut file = OpenOptions::new()
         .write(true)
@@ -1646,6 +1939,144 @@ mod tests {
                 .any(|issue| issue.code == "artifact_hash_mismatch"),
             "verify detects hash mismatch",
         )
+    }
+
+    #[test]
+    fn restore_backup_to_side_path_imports_memories() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let out = workspace.join("backups");
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("restore".to_owned()),
+            redaction_level: RedactionLevel::None,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let side_path = tempdir.path().join("restore-side-path");
+
+        let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path: side_path.clone(),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure_equal(
+            restored.schema,
+            BACKUP_RESTORE_SCHEMA_V1,
+            "restore report schema",
+        )?;
+        ensure_equal(restored.status.as_str(), "completed", "restore status")?;
+        ensure_equal(
+            restored.imported_memory_count,
+            1,
+            "restore imported memory count",
+        )?;
+        ensure(
+            Path::new(&restored.restored_database_path).is_file(),
+            "restored database file exists",
+        )?;
+        ensure(
+            Path::new(&restored.restore_artifact_dir)
+                .join(RECORDS_FILE)
+                .is_file(),
+            "records artifact copied into side path",
+        )?;
+
+        let restored_connection = DbConnection::open(DatabaseConfig::file(PathBuf::from(
+            &restored.restored_database_path,
+        )))
+        .map_err(|error| error.to_string())?;
+        let workspaces = restored_connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?;
+        ensure(
+            !workspaces.is_empty(),
+            "restored workspace count is non-zero",
+        )?;
+        let total_memories = workspaces
+            .iter()
+            .map(|workspace| {
+                restored_connection
+                    .list_memories(&workspace.id, None, true)
+                    .map(|memories| memories.len())
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .sum::<usize>();
+        ensure_equal(total_memories, 1, "restored memory count")
+    }
+
+    #[test]
+    fn restore_backup_dry_run_does_not_create_side_path() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let out = workspace.join("backups");
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("restore-dry-run".to_owned()),
+            redaction_level: RedactionLevel::None,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let side_path = tempdir.path().join("restore-dry-run-side-path");
+
+        let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path: side_path.clone(),
+            dry_run: true,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure_equal(
+            restored.status.as_str(),
+            "dry_run",
+            "restore dry-run status",
+        )?;
+        ensure(
+            !side_path.exists(),
+            "dry-run restore keeps side path untouched",
+        )
+    }
+
+    #[test]
+    fn restore_backup_rejects_non_empty_side_path() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let out = workspace.join("backups");
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("restore-non-empty".to_owned()),
+            redaction_level: RedactionLevel::None,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let side_path = tempdir.path().join("restore-non-empty-side-path");
+        fs::create_dir_all(&side_path).map_err(|error| error.to_string())?;
+        fs::write(side_path.join("occupied.txt"), b"occupied")
+            .map_err(|error| error.to_string())?;
+
+        let result = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path,
+            dry_run: false,
+        });
+
+        match result {
+            Err(DomainError::Storage { message, .. }) => ensure(
+                message.contains("not empty"),
+                "non-empty side path is rejected",
+            ),
+            other => Err(format!("expected storage error, got {other:?}")),
+        }
     }
 
     #[test]

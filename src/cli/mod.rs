@@ -18,8 +18,9 @@ use crate::core::artifact::{
     list_artifacts as list_artifact_registry, register_artifact,
 };
 use crate::core::backup::{
-    BackupCreateOptions, BackupInspectOptions, BackupListOptions, BackupVerifyOptions,
-    create_backup, inspect_backup, list_backups, verify_backup,
+    BackupCreateOptions, BackupInspectOptions, BackupListOptions, BackupRestoreOptions,
+    BackupVerifyOptions, create_backup, inspect_backup, list_backups, restore_backup_to_side_path,
+    verify_backup,
 };
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::causal::{
@@ -327,6 +328,9 @@ pub enum Command {
     /// Inspect the optional MCP adapter manifest.
     #[command(subcommand)]
     Mcp(McpCommand),
+    /// Inspect the workspace model registry.
+    #[command(subcommand)]
+    Model(ModelCommand),
     /// Record observed feedback about a memory or related target.
     Outcome(OutcomeArgs),
     /// Build a context pack from an explicit query document.
@@ -494,6 +498,8 @@ pub enum BackupCommand {
     List(BackupListArgs),
     /// Inspect a backup's manifest and contents.
     Inspect(BackupInspectArgs),
+    /// Restore a backup into an isolated side path.
+    Restore(BackupRestoreArgs),
     /// Verify a backup's integrity.
     Verify(BackupVerifyArgs),
 }
@@ -552,6 +558,26 @@ pub struct BackupVerifyArgs {
     /// Backup root directory. Defaults to <workspace>/.ee/backups/.
     #[arg(long, value_name = "PATH")]
     pub output_dir: Option<PathBuf>,
+}
+
+/// Arguments for `ee backup restore`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct BackupRestoreArgs {
+    /// Backup ID or path to restore from.
+    #[arg(value_name = "BACKUP_ID_OR_PATH")]
+    pub backup: String,
+
+    /// Side path where restored state will be materialized.
+    #[arg(long = "side-path", value_name = "PATH")]
+    pub side_path: PathBuf,
+
+    /// Backup root directory. Defaults to <workspace>/.ee/backups/.
+    #[arg(long, value_name = "PATH")]
+    pub output_dir: Option<PathBuf>,
+
+    /// Validate and report restore plan without writing files.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// CLI redaction levels for backup output.
@@ -3098,6 +3124,31 @@ pub enum McpCommand {
     Manifest,
 }
 
+/// Subcommands for `ee model`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum ModelCommand {
+    /// Show the active embedding model and registry posture for the workspace.
+    Status(ModelStatusArgs),
+    /// List all registered models for the workspace.
+    List(ModelListArgs),
+}
+
+/// Arguments for `ee model status`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ModelStatusArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee model list`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ModelListArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum ReviewCommand {
     /// Review a session and propose curation candidates.
@@ -3564,6 +3615,9 @@ where
         }
         Some(Command::Backup(BackupCommand::Inspect(ref args))) => {
             handle_backup_inspect(&cli, args, stdout, stderr)
+        }
+        Some(Command::Backup(BackupCommand::Restore(ref args))) => {
+            handle_backup_restore(&cli, args, stdout, stderr)
         }
         Some(Command::Backup(BackupCommand::Verify(ref args))) => {
             handle_backup_verify(&cli, args, stdout, stderr)
@@ -4150,6 +4204,9 @@ where
                 write_stdout(stdout, &(output::render_mcp_manifest_json() + "\n"))
             }
         },
+        Some(Command::Model(ref model_cmd)) => {
+            handle_model_command(&cli, model_cmd, stdout, stderr)
+        }
         Some(Command::Schema(ref schema_cmd)) => match schema_cmd {
             SchemaCommand::List => match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
@@ -4617,6 +4674,48 @@ where
     }
 }
 
+fn handle_backup_restore<W, E>(
+    cli: &Cli,
+    args: &BackupRestoreArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let backup_path =
+        resolve_backup_path(&workspace_path, &args.backup, args.output_dir.as_deref());
+    let options = BackupRestoreOptions {
+        workspace_path,
+        backup_path,
+        side_path: args.side_path.clone(),
+        dry_run: args.dry_run,
+    };
+
+    match restore_backup_to_side_path(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json(),
+                });
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn resolve_backup_path(workspace_path: &Path, backup: &str, output_dir: Option<&Path>) -> PathBuf {
     let backup_root = output_dir
         .map(PathBuf::from)
@@ -4683,6 +4782,108 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             write_stdout(stdout, &(output::render_install_plan_json(report) + "\n"))
+        }
+    }
+}
+
+fn handle_model_command<W, E>(
+    cli: &Cli,
+    cmd: &ModelCommand,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    match cmd {
+        ModelCommand::Status(args) => {
+            let options = crate::core::model::ModelStatusOptions {
+                workspace_path: &workspace_path,
+                database_path: args.database.as_deref(),
+            };
+            match crate::core::model::build_model_status_report(&options) {
+                Ok(report) => render_model_status(cli, &report, stdout),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            }
+        }
+        ModelCommand::List(args) => {
+            let options = crate::core::model::ModelListOptions {
+                workspace_path: &workspace_path,
+                database_path: args.database.as_deref(),
+            };
+            match crate::core::model::build_model_list_report(&options) {
+                Ok(report) => render_model_list(cli, &report, stdout),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            }
+        }
+    }
+}
+
+fn render_model_status<W>(
+    cli: &Cli,
+    report: &crate::core::model::ModelStatusReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &format!(
+                "MODEL_STATUS|{}|registered={}|available={}\n",
+                report.active.fast_model_id, report.registered_count, report.available_count,
+            ),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": report.data_json(),
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn render_model_list<W>(
+    cli: &Cli,
+    report: &crate::core::model::ModelListReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &format!(
+                "MODEL_LIST|{}|count={}\n",
+                report.workspace_id,
+                report.entries.len(),
+            ),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": report.data_json(),
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
         }
     }
 }
@@ -12133,6 +12334,7 @@ const COMMAND_NAMES: &[&str] = &[
     "introspect",
     "memory",
     "mcp",
+    "model",
     "outcome",
     "remember",
     "review",
@@ -12165,6 +12367,7 @@ const INDEX_SUBCOMMANDS: &[&str] = &["rebuild", "status"];
 const INSTALL_SUBCOMMANDS: &[&str] = &["check", "plan"];
 const MEMORY_SUBCOMMANDS: &[&str] = &["list", "show", "history"];
 const MCP_SUBCOMMANDS: &[&str] = &["manifest"];
+const MODEL_SUBCOMMANDS: &[&str] = &["status", "list"];
 const REVIEW_SUBCOMMANDS: &[&str] = &["session"];
 const SCHEMA_SUBCOMMANDS: &[&str] = &["list", "export"];
 const SITUATION_SUBCOMMANDS: &[&str] = &["classify", "compare", "link", "show", "explain"];
@@ -12230,6 +12433,7 @@ impl NormalizedInvocation {
                     BackupCommand::Create(_) => "backup create".to_string(),
                     BackupCommand::List(_) => "backup list".to_string(),
                     BackupCommand::Inspect(_) => "backup inspect".to_string(),
+                    BackupCommand::Restore(_) => "backup restore".to_string(),
                     BackupCommand::Verify(_) => "backup verify".to_string(),
                 },
                 Command::Capabilities => "capabilities".to_string(),
@@ -12338,6 +12542,10 @@ impl NormalizedInvocation {
                 },
                 Command::Mcp(mcp) => match mcp {
                     McpCommand::Manifest => "mcp manifest".to_string(),
+                },
+                Command::Model(model) => match model {
+                    ModelCommand::Status(_) => "model status".to_string(),
+                    ModelCommand::List(_) => "model list".to_string(),
                 },
                 Command::Outcome(_) => "outcome".to_string(),
                 Command::Pack(_) => "pack".to_string(),
@@ -12478,6 +12686,7 @@ pub fn did_you_mean(input: &str, parent_command: Option<&str>) -> Option<String>
         Some("install") => INSTALL_SUBCOMMANDS,
         Some("memory") => MEMORY_SUBCOMMANDS,
         Some("mcp") => MCP_SUBCOMMANDS,
+        Some("model") => MODEL_SUBCOMMANDS,
         Some("review") => REVIEW_SUBCOMMANDS,
         Some("schema") => SCHEMA_SUBCOMMANDS,
         Some("situation") => SITUATION_SUBCOMMANDS,
@@ -12528,6 +12737,7 @@ fn extract_invalid_subcommand(args: &[OsString]) -> Option<(String, Option<Strin
                         "install" => Some(INSTALL_SUBCOMMANDS),
                         "memory" => Some(MEMORY_SUBCOMMANDS),
                         "mcp" => Some(MCP_SUBCOMMANDS),
+                        "model" => Some(MODEL_SUBCOMMANDS),
                         "review" => Some(REVIEW_SUBCOMMANDS),
                         "schema" => Some(SCHEMA_SUBCOMMANDS),
                         "situation" => Some(SITUATION_SUBCOMMANDS),
@@ -13040,6 +13250,40 @@ mod tests {
                 ensure_equal(&args.dry_run, &true, "dry run")
             }
             other => Err(format!("expected backup create command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_backup_restore_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "backup",
+            "restore",
+            "backup_123",
+            "--side-path",
+            "/tmp/ee-restore",
+            "--output-dir",
+            "out",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse backup restore: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Backup(BackupCommand::Restore(args))) => {
+                ensure_equal(&args.backup, &"backup_123".to_string(), "backup id")?;
+                ensure_equal(
+                    &args.side_path,
+                    &std::path::PathBuf::from("/tmp/ee-restore"),
+                    "side path",
+                )?;
+                ensure_equal(
+                    &args.output_dir,
+                    &Some(std::path::PathBuf::from("out")),
+                    "output dir",
+                )?;
+                ensure_equal(&args.dry_run, &true, "dry run")
+            }
+            other => Err(format!("expected backup restore command, got {other:?}")),
         }
     }
 
