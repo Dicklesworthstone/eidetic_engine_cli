@@ -19,7 +19,10 @@ use crate::core::artifact::{
 };
 use crate::core::backup::{BackupCreateOptions, create_backup};
 use crate::core::capabilities::CapabilitiesReport;
-use crate::core::causal::{TraceOptions as CausalTraceOptions, trace_causal_chains};
+use crate::core::causal::{
+    CAUSAL_ESTIMATE_SCHEMA_V1, EstimateOptions as CausalEstimateOptions,
+    TraceOptions as CausalTraceOptions, estimate_causal_uplift, trace_causal_chains,
+};
 use crate::core::check::CheckReport;
 use crate::core::context::{ContextPackError, ContextPackOptions, run_context_pack};
 use crate::core::curate::{
@@ -1636,6 +1639,8 @@ pub struct CertificateVerifyArgs {
 pub enum CausalCommand {
     /// Trace causal chains from memories through exposures to outcomes.
     Trace(CausalTraceArgs),
+    /// Estimate causal uplift with evidence tiers, assumptions, and confounders.
+    Estimate(CausalEstimateArgs),
 }
 
 /// Arguments for `ee causal trace`.
@@ -1682,6 +1687,42 @@ pub struct CausalTraceArgs {
     pub include_outcomes: bool,
 
     /// Show trace plan without executing queries.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee causal estimate`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct CausalEstimateArgs {
+    /// Artifact ID to estimate uplift for.
+    #[arg(long, value_name = "ARTIFACT_ID")]
+    pub artifact_id: Option<String>,
+
+    /// Decision ID to scope estimation.
+    #[arg(long, value_name = "DECISION_ID")]
+    pub decision_id: Option<String>,
+
+    /// Causal chain ID to base estimate on.
+    #[arg(long, value_name = "CHAIN_ID")]
+    pub chain_id: Option<String>,
+
+    /// Agent ID to filter by.
+    #[arg(long, value_name = "AGENT_ID")]
+    pub agent_id: Option<String>,
+
+    /// Method to use for estimation (naive, matching, replay, experiment).
+    #[arg(long, value_name = "METHOD", default_value = "naive")]
+    pub method: String,
+
+    /// Include identified confounders in output.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_confounders: bool,
+
+    /// Include assumptions made during estimation.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_assumptions: bool,
+
+    /// Show estimation plan without computing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 }
@@ -3452,6 +3493,7 @@ where
         },
         Some(Command::Causal(ref causal_cmd)) => match causal_cmd {
             CausalCommand::Trace(args) => handle_causal_trace(&cli, args, stdout, stderr),
+            CausalCommand::Estimate(args) => handle_causal_estimate(&cli, args, stdout, stderr),
         },
         Some(Command::Claim(ref claim_cmd)) => match claim_cmd {
             ClaimCommand::List(args) => handle_claim_list(&cli, args, stdout, stderr),
@@ -10679,6 +10721,71 @@ where
     }
 }
 
+fn handle_causal_estimate<W, E>(
+    cli: &Cli,
+    args: &CausalEstimateArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let mut options = CausalEstimateOptions::default();
+
+    if let Some(ref artifact_id) = args.artifact_id {
+        options = options.with_artifact_id(artifact_id);
+    }
+    if let Some(ref decision_id) = args.decision_id {
+        options = options.with_decision_id(decision_id);
+    }
+    if let Some(ref chain_id) = args.chain_id {
+        options = options.with_chain_id(chain_id);
+    }
+    if let Some(ref agent_id) = args.agent_id {
+        options = options.with_agent_id(agent_id);
+    }
+    options = options.with_method(&args.method);
+    if args.include_confounders {
+        options = options.with_confounders();
+    }
+    if args.include_assumptions {
+        options = options.with_assumptions();
+    }
+    if args.dry_run {
+        options = options.dry_run();
+    }
+
+    let report = estimate_causal_uplift(&options);
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => {
+            let toon = format!(
+                "causal_estimate estimates={} method={} assumptions={} confounders={}\n",
+                report.estimates.len(),
+                report.method_used,
+                report.assumptions.len(),
+                report.confounders.len()
+            );
+            write_stdout(stdout, &toon)
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": CAUSAL_ESTIMATE_SCHEMA_V1,
+                "success": true,
+                "data": report.data_json(),
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
 // ============================================================================
 // EE-362: Claim verification handlers
 // ============================================================================
@@ -11728,6 +11835,7 @@ impl NormalizedInvocation {
                 },
                 Command::Causal(causal) => match causal {
                     CausalCommand::Trace(_) => "causal trace".to_string(),
+                    CausalCommand::Estimate(_) => "causal estimate".to_string(),
                 },
                 Command::Claim(claim) => match claim {
                     ClaimCommand::List(_) => "claim list".to_string(),
