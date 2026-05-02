@@ -757,6 +757,7 @@ pub struct PackDraft {
     pub items: Vec<PackDraftItem>,
     pub omitted: Vec<PackOmission>,
     pub selection_certificate: PackSelectionCertificate,
+    pub hash: Option<String>,
 }
 
 impl PackDraft {
@@ -1504,6 +1505,7 @@ fn assemble_mmr_draft(
         },
         items,
         omitted,
+        hash: None,
     })
 }
 
@@ -1613,6 +1615,7 @@ fn assemble_facility_location_draft(
         },
         items,
         omitted,
+        hash: None,
     })
 }
 

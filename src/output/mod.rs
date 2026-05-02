@@ -1342,6 +1342,10 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
         });
         d.field_object("pack", |pack| {
             pack.field_str("query", &response.data.pack.query);
+            match &response.data.pack.hash {
+                Some(hash) => pack.field_str("hash", hash),
+                None => pack.field_raw("hash", "null"),
+            };
             pack.field_object("budget", |budget| {
                 budget.field_u32("maxTokens", response.data.pack.budget.max_tokens());
                 budget.field_u32("usedTokens", response.data.pack.used_tokens);
@@ -2361,6 +2365,13 @@ pub fn render_fix_plan_json(plan: &FixPlan) -> String {
                 &plan.cass_import_guidance.suggested_commands,
             );
         });
+        let mut all_suggested: Vec<String> = plan
+            .steps
+            .iter()
+            .map(|step| step.command.to_string())
+            .collect();
+        all_suggested.extend(plan.cass_import_guidance.suggested_commands.iter().cloned());
+        d.field_array_of_strings("suggestedCommands", &all_suggested);
     });
     b.finish()
 }

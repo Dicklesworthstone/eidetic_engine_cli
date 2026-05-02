@@ -354,9 +354,11 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
             .map_err(|error| ContextPackError::Pack(error.to_string()))?,
         None => TokenBudget::default_context(),
     };
-    let draft =
+    let mut draft =
         assemble_draft_with_profile(request.profile, request.query.clone(), budget, candidates)
             .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+
+    draft.hash = Some(compute_pack_hash(&request, &draft));
 
     let mut response_degraded = degraded;
 
@@ -388,7 +390,10 @@ fn persist_pack_record(
         .ok_or_else(|| "workspace not found".to_string())?;
 
     let pack_id = PackId::now();
-    let pack_hash = compute_pack_hash(request, draft);
+    let pack_hash = draft
+        .hash
+        .clone()
+        .unwrap_or_else(|| compute_pack_hash(request, draft));
 
     let input = CreatePackRecordInput {
         workspace_id: workspace.id.clone(),

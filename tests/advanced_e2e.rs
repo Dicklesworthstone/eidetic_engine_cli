@@ -2167,8 +2167,21 @@ fn post_task_outcome_scenario_commands_emit_machine_data() -> TestResult {
             stdout_is_json(&output),
             format!("ee {} must emit JSON to stdout", args.join(" ")),
         )?;
+        let json = stdout_json(&output)?;
+        let schema = json.get("schema").and_then(|value| value.as_str());
+        ensure(
+            schema.is_some_and(|value| !value.trim().is_empty()),
+            format!("ee {} must include a schema in JSON mode", args.join(" ")),
+        )?;
 
         if output.status.code() == Some(0) {
+            ensure(
+                schema != Some("ee.error.v1"),
+                format!(
+                    "ee {} should not emit ee.error.v1 on success",
+                    args.join(" ")
+                ),
+            )?;
             ensure(
                 String::from_utf8_lossy(&output.stderr).trim().is_empty(),
                 format!(
@@ -2345,5 +2358,59 @@ fn all_rehearse_commands_produce_stdout_only_data() -> TestResult {
             )?;
         }
     }
+    Ok(())
+}
+
+// ============================================================================
+// Agent-Native UX Epic (cat-agent-native-ux)
+// ============================================================================
+
+#[test]
+fn agent_native_ux_surfaces_emit_machine_clean_json() -> TestResult {
+    let commands = [
+        vec!["capabilities", "--json"],
+        vec!["schema", "list", "--json"],
+        vec!["introspect", "--json"],
+        vec!["agent-docs", "commands", "--json"],
+        vec!["diag", "streams", "--json"],
+        vec!["analyze", "science-status", "--json"],
+    ];
+
+    for args in &commands {
+        let output = run_ee(args)?;
+        ensure_equal(
+            &output.status.code(),
+            &Some(0),
+            &format!("ee {} exit code", args.join(" ")),
+        )?;
+        ensure(
+            stdout_is_json(&output),
+            format!("ee {} must emit JSON to stdout", args.join(" ")),
+        )?;
+        ensure(
+            stdout_is_clean(&output),
+            format!("ee {} must keep stdout machine clean", args.join(" ")),
+        )?;
+        if args.first() == Some(&"diag") {
+            ensure(
+                stdout_contains(&output, "\"stderrReceivedProbe\":true"),
+                "diag streams must report stderr probe capture",
+            )?;
+            ensure(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("stderr probe for stream isolation verification"),
+                "diag streams must emit stderr probe",
+            )?;
+        } else {
+            ensure(
+                String::from_utf8_lossy(&output.stderr).trim().is_empty(),
+                format!(
+                    "ee {} must keep diagnostics off stderr in JSON mode",
+                    args.join(" ")
+                ),
+            )?;
+        }
+    }
+
     Ok(())
 }

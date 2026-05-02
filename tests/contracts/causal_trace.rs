@@ -14,6 +14,9 @@ use serde_json::Value as JsonValue;
 
 type TestResult = Result<(), String>;
 
+const CAUSAL_COMPARE_ALL_SOURCES_GOLDEN: &str =
+    include_str!("../fixtures/golden/causal/compare_all_sources.json.golden");
+
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
         Ok(())
@@ -38,6 +41,27 @@ fn assert_has_field(json: &JsonValue, field: &str, context: &str) -> TestResult 
         json.get(field).is_some(),
         format!("{context}: missing required field '{field}'"),
     )
+}
+
+fn normalize_compare_numeric_fields(value: &mut JsonValue) {
+    let Some(comparisons) = value
+        .get_mut("comparisons")
+        .and_then(JsonValue::as_array_mut)
+    else {
+        return;
+    };
+    for comparison in comparisons {
+        for field in ["baselineUplift", "candidateUplift", "upliftDelta"] {
+            let Some(number) = comparison
+                .get_mut(field)
+                .and_then(|value| value.as_f64())
+                .map(|raw| (raw * 1_000_000.0).round() / 1_000_000.0)
+            else {
+                continue;
+            };
+            comparison[field] = serde_json::json!(number);
+        }
+    }
 }
 
 // ============================================================================
@@ -473,6 +497,31 @@ fn compare_with_sources_records_verdicts() -> TestResult {
         "summary should report four comparisons",
     )?;
     Ok(())
+}
+
+#[test]
+fn compare_all_sources_matches_golden_fixture() -> TestResult {
+    let mut expected: JsonValue = serde_json::from_str(CAUSAL_COMPARE_ALL_SOURCES_GOLDEN)
+        .map_err(|error| format!("compare golden must be valid json: {error}"))?;
+    let report = compare_causal_evidence(
+        &CompareOptions::new()
+            .with_fixture_replay_id("fixture-001")
+            .with_shadow_run_id("shadow-001")
+            .with_counterfactual_episode_id("counterfactual-001")
+            .with_experiment_id("exp-001")
+            .with_method("experiment"),
+    );
+    let mut actual = report.data_json();
+    normalize_compare_numeric_fields(&mut expected);
+    normalize_compare_numeric_fields(&mut actual);
+
+    ensure(
+        actual == expected,
+        format!(
+            "compare report drifted from golden\nactual: {}\nexpected: {}",
+            actual, expected
+        ),
+    )
 }
 
 #[test]
