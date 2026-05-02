@@ -12,7 +12,11 @@
 
 # Agent swarm / coordination state
 .ntm/
-.beads/
+
+# Beads (br) state — track JSONL + project config; per-machine state
+# (database, locks, history, sync caches) is excluded by .beads/.gitignore.
+# The blanket .beads/ exclusion that used to live here also hid issues.jsonl,
+# which is the canonical task-tracking source of truth and MUST be committed.
 
 # Modes-of-reasoning analysis artifacts
 MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md

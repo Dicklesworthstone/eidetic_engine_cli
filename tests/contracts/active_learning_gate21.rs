@@ -515,6 +515,13 @@ fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
         JsonValue::Bool(true),
         "close dryRun",
     )?;
+    ensure(
+        close_value
+            .pointer("/outcome/safetyNotes")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|notes| notes.iter().any(|note| note == "ask_before_acting")),
+        "learn close dry-run must preserve ask_before_acting safety note",
+    )?;
 
     ensure(
         !workspace.join(".ee").exists(),
