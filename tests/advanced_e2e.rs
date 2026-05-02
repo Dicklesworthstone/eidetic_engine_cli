@@ -1239,6 +1239,253 @@ fn rule_add_persists_rule_with_source_memory() -> TestResult {
     )
 }
 
+#[test]
+fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    let init_stderr = String::from_utf8_lossy(&init.stderr);
+    ensure_equal(&init.status.code(), &Some(0), "init exit")?;
+    ensure(
+        init.stderr.is_empty(),
+        format!("init stderr must be empty: {init_stderr}"),
+    )?;
+    ensure(stdout_is_json(&init), "init stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&init), "init stdout must be clean")?;
+
+    let rule = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "Before release, run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`; verify GitHub release assets before pushing to main.",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--tag",
+        "release",
+        "--tag",
+        "cargo",
+        "--tag",
+        "verification",
+        "--provenance",
+        "file://tests/fixtures/eval/release_failure/source_memory.json#memory-1",
+        "--json",
+    ])?;
+    let rule_stderr = String::from_utf8_lossy(&rule.stderr);
+    ensure_equal(&rule.status.code(), &Some(0), "rule remember exit")?;
+    ensure(
+        rule.stderr.is_empty(),
+        format!("rule remember stderr must be empty: {rule_stderr}"),
+    )?;
+    ensure(
+        stdout_is_json(&rule),
+        "rule remember stdout must be valid JSON",
+    )?;
+    ensure(stdout_is_clean(&rule), "rule remember stdout must be clean")?;
+    let rule_json = stdout_json(&rule)?;
+    let rule_id = rule_json["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "rule memory_id must be a string".to_string())?;
+
+    let failure = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "A previous release attempt failed because clippy was skipped after a formatting-only change; the release workflow rejected `cargo clippy --all-targets -- -D warnings` with an unused import before artifacts could be published.",
+        "--level",
+        "episodic",
+        "--kind",
+        "failure",
+        "--tag",
+        "release",
+        "--tag",
+        "clippy",
+        "--tag",
+        "workflow",
+        "--provenance",
+        "file://tests/fixtures/eval/release_failure/source_memory.json#memory-2",
+        "--json",
+    ])?;
+    let failure_stderr = String::from_utf8_lossy(&failure.stderr);
+    ensure_equal(&failure.status.code(), &Some(0), "failure remember exit")?;
+    ensure(
+        failure.stderr.is_empty(),
+        format!("failure remember stderr must be empty: {failure_stderr}"),
+    )?;
+    ensure(
+        stdout_is_json(&failure),
+        "failure remember stdout must be valid JSON",
+    )?;
+    ensure(
+        stdout_is_clean(&failure),
+        "failure remember stdout must be clean",
+    )?;
+    let failure_json = stdout_json(&failure)?;
+    let failure_id = failure_json["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "failure memory_id must be a string".to_string())?;
+
+    let rebuild = run_ee(&["--workspace", &workspace, "index", "rebuild", "--json"])?;
+    let rebuild_stderr = String::from_utf8_lossy(&rebuild.stderr);
+    ensure_equal(&rebuild.status.code(), &Some(0), "index rebuild exit")?;
+    ensure(
+        rebuild.stderr.is_empty(),
+        format!("index rebuild stderr must be empty: {rebuild_stderr}"),
+    )?;
+    ensure(
+        stdout_is_json(&rebuild),
+        "index rebuild stdout must be valid JSON",
+    )?;
+    ensure(
+        stdout_is_clean(&rebuild),
+        "index rebuild stdout must be clean",
+    )?;
+    let rebuild_json = stdout_json(&rebuild)?;
+    ensure_equal(
+        &rebuild_json["data"]["memories_indexed"],
+        &serde_json::json!(2),
+        "indexed memory count",
+    )?;
+
+    let search = run_ee(&[
+        "--workspace",
+        &workspace,
+        "search",
+        "clippy release",
+        "--json",
+    ])?;
+    let search_stderr = String::from_utf8_lossy(&search.stderr);
+    ensure_equal(&search.status.code(), &Some(0), "search exit")?;
+    ensure(
+        search.stderr.is_empty(),
+        format!("search stderr must be empty: {search_stderr}"),
+    )?;
+    ensure(stdout_is_json(&search), "search stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&search), "search stdout must be clean")?;
+    let search_json = stdout_json(&search)?;
+    let search_results = search_json["data"]["results"]
+        .as_array()
+        .ok_or_else(|| "search results must be an array".to_string())?;
+    ensure(
+        search_results
+            .iter()
+            .any(|hit| hit["doc_id"].as_str() == Some(rule_id)),
+        "search results must include the release rule memory",
+    )?;
+    ensure(
+        search_results
+            .iter()
+            .any(|hit| hit["doc_id"].as_str() == Some(failure_id)),
+        "search results must include the release failure memory",
+    )?;
+
+    let context = run_ee(&[
+        "--workspace",
+        &workspace,
+        "context",
+        "prepare release",
+        "--max-tokens",
+        "4000",
+        "--json",
+    ])?;
+    let context_stderr = String::from_utf8_lossy(&context.stderr);
+    ensure_equal(&context.status.code(), &Some(0), "context exit")?;
+    ensure(
+        context.stderr.is_empty(),
+        format!("context stderr must be empty: {context_stderr}"),
+    )?;
+    ensure(
+        stdout_is_json(&context),
+        "context stdout must be valid JSON",
+    )?;
+    ensure(stdout_is_clean(&context), "context stdout must be clean")?;
+    let context_json = stdout_json(&context)?;
+    ensure_equal(
+        &context_json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "context response schema",
+    )?;
+    let pack_items = context_json["data"]["pack"]["items"]
+        .as_array()
+        .ok_or_else(|| "context pack items must be an array".to_string())?;
+    ensure(
+        pack_items
+            .iter()
+            .any(|item| item["memoryId"].as_str() == Some(rule_id)),
+        "context pack must include the release rule memory",
+    )?;
+    ensure(
+        pack_items
+            .iter()
+            .any(|item| item["memoryId"].as_str() == Some(failure_id)),
+        "context pack must include the release failure memory",
+    )?;
+    ensure(
+        context_json["data"]["pack"]["hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("blake3:")),
+        "context pack must persist a blake3 hash",
+    )?;
+
+    let why = run_ee(&["--workspace", &workspace, "why", rule_id, "--json"])?;
+    let why_stderr = String::from_utf8_lossy(&why.stderr);
+    ensure_equal(&why.status.code(), &Some(0), "why exit")?;
+    ensure(
+        why.stderr.is_empty(),
+        format!("why stderr must be empty: {why_stderr}"),
+    )?;
+    ensure(stdout_is_json(&why), "why stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&why), "why stdout must be clean")?;
+    let why_json = stdout_json(&why)?;
+    ensure_equal(
+        &why_json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "why response schema",
+    )?;
+    ensure_equal(
+        &why_json["data"]["selection"]["latestPackSelection"]["query"],
+        &serde_json::json!("prepare release"),
+        "why latest pack query",
+    )?;
+    ensure(
+        why_json["data"]["selection"]["latestPackSelection"]["packId"]
+            .as_str()
+            .is_some_and(|pack_id| pack_id.starts_with("pack_")),
+        "why latest pack selection must include a persisted pack id",
+    )?;
+
+    let doctor = run_ee(&["--workspace", &workspace, "doctor", "--fix-plan", "--json"])?;
+    let doctor_stderr = String::from_utf8_lossy(&doctor.stderr);
+    ensure_equal(&doctor.status.code(), &Some(0), "doctor exit")?;
+    ensure(
+        doctor.stderr.is_empty(),
+        format!("doctor stderr must be empty: {doctor_stderr}"),
+    )?;
+    ensure(stdout_is_json(&doctor), "doctor stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&doctor), "doctor stdout must be clean")?;
+    let doctor_json = stdout_json(&doctor)?;
+    ensure_equal(
+        &doctor_json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "doctor response schema",
+    )?;
+    ensure_equal(
+        &doctor_json["data"]["mode"],
+        &serde_json::json!("fix-plan"),
+        "doctor mode",
+    )?;
+    ensure(
+        doctor_json["data"]["steps"].is_array(),
+        "doctor fix-plan must include steps",
+    )?;
+    ensure(
+        doctor_json["data"]["suggestedCommands"].is_array(),
+        "doctor fix-plan must include suggested commands",
+    )
+}
+
 // ============================================================================
 // Preflight Tests (EE-391 - Stub tests for when implemented)
 // ============================================================================
@@ -1309,6 +1556,258 @@ fn recorder_commands_support_human_output() -> TestResult {
     let stdout = String::from_utf8_lossy(&output.stdout);
     ensure(
         stdout.contains("Recording Session"),
+        "human output must contain header",
+    )
+}
+
+// ============================================================================
+// Causal Trace Tests (EE-451)
+// ============================================================================
+
+#[test]
+fn causal_trace_dry_run_returns_valid_json() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "trace",
+        "--run-id",
+        "run-test-001",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        stdout_contains(&output, "ee.causal.trace"),
+        "must have causal trace schema",
+    )?;
+    ensure(stdout_contains(&output, "dryRun"), "must contain dryRun")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")
+}
+
+#[test]
+fn causal_trace_shows_filters_applied() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "trace",
+        "--memory-id",
+        "mem-001",
+        "--agent-id",
+        "agent-test",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        stdout_contains(&output, "filtersApplied"),
+        "must contain filtersApplied",
+    )?;
+    ensure(
+        stdout_contains(&output, "memory_id"),
+        "must show memory_id filter",
+    )
+}
+
+#[test]
+fn causal_trace_returns_chains_and_summary() -> TestResult {
+    let output = run_ee(&["causal", "trace", "--procedure-id", "proc-001", "--json"])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    let json = stdout_json(&output)?;
+    let data = json.get("data").unwrap_or(&json);
+    ensure(data.get("chains").is_some(), "must contain chains")?;
+    ensure(data.get("summary").is_some(), "must contain summary")
+}
+
+#[test]
+fn causal_trace_no_filters_returns_degradation() -> TestResult {
+    let output = run_ee(&["causal", "trace", "--json"])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    let json = stdout_json(&output)?;
+    let data = json.get("data").unwrap_or(&json);
+    let degradations = data.get("degradations").and_then(|v| v.as_array());
+    ensure(
+        degradations.is_some_and(|d| !d.is_empty()),
+        "should have degradation when no filters",
+    )
+}
+
+// ============================================================================
+// Causal Estimate Tests (EE-452)
+// ============================================================================
+
+#[test]
+fn causal_estimate_dry_run_returns_valid_json() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "estimate",
+        "--artifact-id",
+        "art-001",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        stdout_contains(&output, "ee.causal.estimate"),
+        "must have causal estimate schema",
+    )?;
+    ensure(stdout_contains(&output, "dryRun"), "must contain dryRun")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")
+}
+
+#[test]
+fn causal_estimate_naive_method_returns_insufficient_confidence() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "estimate",
+        "--artifact-id",
+        "art-001",
+        "--method",
+        "naive",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        stdout_contains(&output, "\"insufficient\""),
+        "naive method should have insufficient confidence",
+    )
+}
+
+#[test]
+fn causal_estimate_replay_method_returns_medium_confidence() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "estimate",
+        "--artifact-id",
+        "art-001",
+        "--method",
+        "replay",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        stdout_contains(&output, "\"medium\""),
+        "replay method should have medium confidence",
+    )
+}
+
+#[test]
+fn causal_estimate_experiment_method_returns_high_confidence() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "estimate",
+        "--artifact-id",
+        "art-001",
+        "--method",
+        "experiment",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        stdout_contains(&output, "\"high\""),
+        "experiment method should have high confidence",
+    )
+}
+
+#[test]
+fn causal_estimate_includes_assumptions_when_requested() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "estimate",
+        "--artifact-id",
+        "art-001",
+        "--include-assumptions",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    let json = stdout_json(&output)?;
+    let data = json.get("data").unwrap_or(&json);
+    let assumptions = data.get("assumptions").and_then(|v| v.as_array());
+    ensure(
+        assumptions.is_some_and(|a| !a.is_empty()),
+        "should include assumptions when requested",
+    )
+}
+
+#[test]
+fn causal_estimate_includes_confounders_when_requested() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "estimate",
+        "--artifact-id",
+        "art-001",
+        "--include-confounders",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    let json = stdout_json(&output)?;
+    let data = json.get("data").unwrap_or(&json);
+    let confounders = data.get("confounders").and_then(|v| v.as_array());
+    ensure(
+        confounders.is_some_and(|c| !c.is_empty()),
+        "should include confounders when requested",
+    )
+}
+
+#[test]
+fn causal_estimate_summary_contains_method_used() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "estimate",
+        "--artifact-id",
+        "art-001",
+        "--method",
+        "matching",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    let json = stdout_json(&output)?;
+    let data = json.get("data").unwrap_or(&json);
+    let method = data
+        .get("summary")
+        .and_then(|s| s.get("methodUsed"))
+        .and_then(|m| m.as_str());
+    ensure(
+        method == Some("matching"),
+        "summary must contain methodUsed",
+    )
+}
+
+#[test]
+fn all_causal_commands_produce_stdout_only_data() -> TestResult {
+    let commands = [
+        vec!["causal", "trace", "--run-id", "test", "--dry-run", "--json"],
+        vec![
+            "causal",
+            "estimate",
+            "--artifact-id",
+            "art-001",
+            "--dry-run",
+            "--json",
+        ],
+    ];
+
+    for args in &commands {
+        let output = run_ee(args)?;
+        if output.status.code() == Some(0) {
+            ensure(
+                stdout_is_clean(&output),
+                format!("ee {} must have clean stdout", args.join(" ")),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn causal_commands_support_human_output() -> TestResult {
+    let output = run_ee(&["causal", "trace", "--run-id", "test", "--dry-run"])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    ensure(
+        stdout.contains("Causal Trace"),
         "human output must contain header",
     )
 }
