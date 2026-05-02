@@ -1,6 +1,7 @@
 # Dependency Contract Matrix
 
-Status: accepted contract artifact for EE-307.
+Status: accepted contract artifact for EE-307; amended by EE-178 for the
+planned FrankenMermaid adapter gate.
 
 This matrix freezes the dependency contract for the default `ee` feature
 profile. The machine-checkable source for this document is
@@ -38,6 +39,7 @@ a later ADR explicitly quarantines a feature with a removal plan:
 | `franken_networkx` | `ee-graph` | disabled by default; `graph` feature enables `fnx-runtime`, `fnx-classes`, and `fnx-algorithms` | `ftui-integration` is not part of `ee`; graph remains feature-gated until contract gates pass | graph projection and centrality tests | `graph_unavailable` | `capabilities.graph`, `graph.snapshot_generation` | `ee graph status --json` |
 | `coding_agent_session_search` | `ee-cass` | external `cass` process; no Rust crate dependency | bare interactive output is blocked; only `--robot` and `--json` contracts are consumed | CASS fixture parsing for `capabilities`, `health`, and API version | `cass_unavailable` | `capabilities.cass`, `degraded[].code` | `ee import cass --dry-run --json` |
 | `toon_rust` | `ee-output` | local `/data/projects/toon_rust` as package `tru`, `default-features = false` | TOON is a renderer only; JSON remains the canonical schema surface | TOON renderer round-trip/golden parity tests | `toon_unavailable` | `capabilities.output.toon` | `ee status --json` |
+| `franken_mermaid` | `ee-diagram` | not linked; plain Mermaid text remains owned by `ee-output` and `ee-graph` | future `franken-mermaid-adapter` profile is blocked until `/dp/franken_mermaid` exists, its API is audited, and `cargo tree -e features` proves no forbidden crates | Gate 11 Mermaid goldens plus a future adapter cargo-tree audit | `diagram_backend_unavailable` | `capabilities.output.diagram`, `degraded[].code` | `ee doctor --json` |
 | `franken_agent_detection` | `ee-agent-detect` | local `/data/projects/franken_agent_detection`, `default-features = false` | connector-backed scans are blocked from the default profile until privacy and dependency gates pass | agent detection fixture tests with root overrides | `agent_detection_unavailable` | `capabilities.agent_detection` | `ee agent sources --json` |
 | `fastmcp-rust` | `ee-mcp` | not linked in the default profile; `mcp` feature is currently an empty adapter gate | stdio MCP support must prove no forbidden async/network stack before linking | MCP stdio initialize/tools/resources golden tests | `mcp_unavailable` | `capabilities.mcp` | `ee doctor --json` |
 

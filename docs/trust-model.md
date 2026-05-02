@@ -92,6 +92,21 @@ early:
 | `deprecated` | Retained for history but no longer recommended. |
 | `superseded` | Replaced by a newer rule or procedure. |
 
+Rule lifecycle transitions are planned by a deterministic evaluator before any
+durable mutation occurs. Supported triggers are `propose_validation`,
+`outcome_helpful`, `outcome_harmful`, `validation_passed`,
+`validation_contradicted`, `review_approved`, `deprecate`, and `supersede`.
+The evaluator emits one action: `retain`, `promote`, `demote`, `deprecate`,
+`supersede`, or `reject`.
+
+A candidate-to-validated transition requires helpful outcome evidence,
+validation evidence, and explicit review. Helpful outcomes adjust confidence and
+utility with no silent promotion. Harmful outcomes require a distinct-source
+quorum before deprecation is proposed for curation. Supersession requires a
+non-empty replacement rule id, and terminal states reject non-supersession
+triggers. Every transition plan carries an audit requirement, score deltas, and
+a reason string so curation can persist or reject it explicitly.
+
 Operational lifecycle certificates cover durable maintenance events:
 `import`, `index_publish`, `hook_execution`, `backup`, `shutdown`, `migration`,
 and `maintenance`. These certificates prove that long-running lifecycle events
