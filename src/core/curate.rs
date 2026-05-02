@@ -1267,12 +1267,13 @@ pub fn run_curation_disposition(
             message: format!("Failed to list curation candidates: {error}"),
             repair: Some("ee curate candidates --all --json".to_owned()),
         })?;
-    let policies = connection
-        .list_curation_ttl_policies()
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to list curation TTL policies: {error}"),
-            repair: Some("ee doctor --json".to_owned()),
-        })?;
+    let policies =
+        connection
+            .list_curation_ttl_policies()
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to list curation TTL policies: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
     let policy_map = policies
         .iter()
         .map(|policy| (policy.id.as_str(), policy))
@@ -1299,9 +1300,12 @@ pub fn run_curation_disposition(
     });
 
     let summary = disposition_summary(&decisions, candidates.len());
-    let durable_mutation = decisions
-        .iter()
-        .any(|decision| decision.planned_transition.as_ref().is_some_and(|t| t.persisted));
+    let durable_mutation = decisions.iter().any(|decision| {
+        decision
+            .planned_transition
+            .as_ref()
+            .is_some_and(|t| t.persisted)
+    });
     let next_action = if options.apply {
         "ee status --json".to_owned()
     } else if summary.due_count > 0 {
@@ -2089,7 +2093,10 @@ fn evaluate_candidate_for_disposition(
         degraded.push(CurateCandidatesDegradation {
             code: "curation_ttl_policy_missing".to_owned(),
             severity: "medium".to_owned(),
-            message: format!("Candidate {} references missing TTL policy {policy_id}.", stored.id),
+            message: format!(
+                "Candidate {} references missing TTL policy {policy_id}.",
+                stored.id
+            ),
             repair: "Run ee db migrate --json or recreate the curation policy table.".to_owned(),
         });
         return Ok(blocked_disposition(
@@ -2190,7 +2197,11 @@ fn evaluate_candidate_for_disposition(
             Some((
                 CandidateStatus::Pending.as_str(),
                 ReviewQueueState::Snoozed.as_str(),
-                Some((now.to_owned() + duration_from_seconds(DEFAULT_SNOOZE_SECONDS, "default_snooze_seconds")?).to_rfc3339()),
+                Some(
+                    (now.to_owned()
+                        + duration_from_seconds(DEFAULT_SNOOZE_SECONDS, "default_snooze_seconds")?)
+                    .to_rfc3339(),
+                ),
                 default_curation_ttl_policy_id_for_review_state(ReviewQueueState::Snoozed.as_str()),
             )),
         ),
@@ -2209,7 +2220,10 @@ fn evaluate_candidate_for_disposition(
                 warnings.push(validation_issue(
                     "auto_promote_disabled",
                     "Validated candidate reached its TTL, but auto-promote is disabled by policy.",
-                    format!("Review manually with `ee curate apply {} --json`.", stored.id),
+                    format!(
+                        "Review manually with `ee curate apply {} --json`.",
+                        stored.id
+                    ),
                 ));
             } else if evidence_count < policy.requires_evidence_count
                 || distinct_session_count < policy.requires_distinct_sessions
@@ -2226,8 +2240,14 @@ fn evaluate_candidate_for_disposition(
             degraded.push(CurateCandidatesDegradation {
                 code: "curation_harmful_candidate_escalated".to_owned(),
                 severity: "high".to_owned(),
-                message: format!("Curation candidate {} requires harmful-feedback review.", stored.id),
-                repair: format!("Resolve with `ee curate reject {} --json` or a replacement candidate.", stored.id),
+                message: format!(
+                    "Curation candidate {} requires harmful-feedback review.",
+                    stored.id
+                ),
+                repair: format!(
+                    "Resolve with `ee curate reject {} --json` or a replacement candidate.",
+                    stored.id
+                ),
             });
             ("escalated", "requires_human", None)
         }
@@ -2434,7 +2454,10 @@ fn persist_candidate_disposition_inner(
         .state_entered_at
         .as_deref()
         .and_then(|entered| DateTime::parse_from_rfc3339(entered).ok())
-        .map(|entered| now.signed_duration_since(entered.with_timezone(&Utc)).num_milliseconds())
+        .map(|entered| {
+            now.signed_duration_since(entered.with_timezone(&Utc))
+                .num_milliseconds()
+        })
         .unwrap_or(0);
     let audit_id = generate_audit_id();
     let details = serde_json::json!({
@@ -2634,11 +2657,9 @@ fn parse_or_current_time(raw: Option<&str>) -> Result<DateTime<Utc>, DomainError
 }
 
 fn duration_from_seconds(seconds: u64, field: &str) -> Result<chrono::Duration, DomainError> {
-    let seconds = i64::try_from(seconds).map_err(|_| {
-        DomainError::Storage {
-            message: format!("Curation TTL {field} exceeds supported duration range."),
-            repair: Some("Repair the curation_ttl_policies table.".to_owned()),
-        }
+    let seconds = i64::try_from(seconds).map_err(|_| DomainError::Storage {
+        message: format!("Curation TTL {field} exceeds supported duration range."),
+        repair: Some("Repair the curation_ttl_policies table.".to_owned()),
     })?;
     Ok(chrono::Duration::seconds(seconds))
 }

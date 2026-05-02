@@ -475,11 +475,12 @@ mod tests {
     #[test]
     fn all_decision_planes_covered() {
         let all = DecisionPlane::all();
-        assert_eq!(all.len(), 5);
+        assert_eq!(all.len(), 6);
         assert!(all.contains(&DecisionPlane::Packing));
         assert!(all.contains(&DecisionPlane::Ranking));
         assert!(all.contains(&DecisionPlane::Curation));
         assert!(all.contains(&DecisionPlane::RepairOrder));
         assert!(all.contains(&DecisionPlane::CacheAdmission));
+        assert!(all.contains(&DecisionPlane::Observe));
     }
 }

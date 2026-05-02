@@ -12,6 +12,7 @@ pub mod audit;
 pub mod backup;
 pub mod budget;
 pub mod capabilities;
+pub mod causal;
 pub mod certificate;
 pub mod check;
 pub mod claims;

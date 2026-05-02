@@ -1479,19 +1479,161 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
 }
 
 // ============================================================================
-// Preflight Tests (EE-391 - Stub tests for when implemented)
+// Preflight Tests (EE-391)
 // ============================================================================
 
 #[test]
-fn preflight_show_returns_valid_json() -> TestResult {
-    let output = run_ee(&["preflight", "show", "--json"])?;
-    // May succeed or indicate no active preflight
-    if output.status.code() == Some(0) {
-        ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
-        ensure(stdout_is_clean(&output), "stdout must be clean")
-    } else {
-        Ok(())
-    }
+fn preflight_run_blocks_high_risk_deploy_task() -> TestResult {
+    let output = run_ee(&[
+        "preflight",
+        "run",
+        "deploy production database migration",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
+    ensure(
+        output.stderr.is_empty(),
+        "json command must keep diagnostics off stderr",
+    )?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "preflight run response schema",
+    )?;
+    ensure_equal(
+        &json["data"]["status"],
+        &serde_json::json!("completed"),
+        "preflight run status",
+    )?;
+    ensure_equal(
+        &json["data"]["risk_level"],
+        &serde_json::json!("high"),
+        "preflight run risk level",
+    )?;
+    ensure_equal(
+        &json["data"]["cleared"],
+        &serde_json::json!(false),
+        "preflight run clearance",
+    )?;
+    ensure(
+        json["data"]["block_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("exceeds auto-clear threshold")),
+        "preflight run must include block reason",
+    )
+}
+
+#[test]
+fn preflight_show_returns_stubbed_storage_details() -> TestResult {
+    let output = run_ee(&["preflight", "show", "pf_gate16_contract", "--json"])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
+    ensure(
+        output.stderr.is_empty(),
+        "json command must keep diagnostics off stderr",
+    )?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "preflight show response schema",
+    )?;
+    ensure_equal(
+        &json["data"]["run"]["id"],
+        &serde_json::json!("pf_gate16_contract"),
+        "preflight show run id",
+    )?;
+    ensure_equal(
+        &json["data"]["run"]["block_reason"],
+        &serde_json::json!("Storage not yet wired"),
+        "preflight show degraded storage reason",
+    )
+}
+
+#[test]
+fn preflight_close_dry_run_records_feedback_shape() -> TestResult {
+    let output = run_ee(&[
+        "preflight",
+        "close",
+        "pf_gate16_contract",
+        "--cleared",
+        "--reason",
+        "advanced e2e preflight closure",
+        "--task-outcome",
+        "success",
+        "--feedback",
+        "helped",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
+    ensure(
+        output.stderr.is_empty(),
+        "json command must keep diagnostics off stderr",
+    )?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "preflight close response schema",
+    )?;
+    ensure_equal(
+        &json["data"]["dry_run"],
+        &serde_json::json!(true),
+        "preflight close dry-run",
+    )?;
+    ensure_equal(
+        &json["data"]["new_status"],
+        &serde_json::json!("completed"),
+        "preflight close status",
+    )?;
+    ensure_equal(
+        &json["data"]["feedback"]["signal"],
+        &serde_json::json!("helpful"),
+        "preflight close feedback signal",
+    )
+}
+
+#[test]
+fn preflight_show_rejects_invalid_run_id_with_usage_error() -> TestResult {
+    let output = run_ee(&["preflight", "show", "invalid", "--json"])?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
+    ensure(
+        output.stderr.is_empty(),
+        "json errors must keep diagnostics off stderr",
+    )?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.error.v1"),
+        "error schema",
+    )?;
+    ensure_equal(
+        &json["error"]["code"],
+        &serde_json::json!("usage"),
+        "error code",
+    )?;
+    ensure(
+        output.status.code() == Some(0) || output.status.code() == Some(1),
+        "json usage errors must return a process exit code",
+    )?;
+    ensure(
+        json["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| repair.contains("pf_<uuid>")),
+        "usage error should include repair guidance",
+    )
 }
 
 // ============================================================================

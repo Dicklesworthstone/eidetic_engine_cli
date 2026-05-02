@@ -1608,13 +1608,17 @@ pub fn get_index_status(
     // Check index directory
     let (index_exists, index_file_count, index_size_bytes) = inspect_index_dir(&index_dir)?;
 
-    // Get database stats
-    let (db_memory_count, db_session_count, db_generation) = if database_path.exists() {
-        let db = DbConnection::open_file(&database_path)?;
-        get_db_stats(&db)?
-    } else {
-        (0, 0, None)
-    };
+    // Fast-path degraded states: when the index is missing/corrupt, we can
+    // report health without scanning DB tables for counts/generation.
+    let (db_memory_count, db_session_count, db_generation) =
+        if !index_exists || index_file_count == 0 {
+            (0, 0, None)
+        } else if database_path.exists() {
+            let db = DbConnection::open_file(&database_path)?;
+            get_db_stats(&db)?
+        } else {
+            (0, 0, None)
+        };
 
     // Read index metadata if available
     let (index_generation, last_rebuild_at) = read_index_metadata(&index_dir);

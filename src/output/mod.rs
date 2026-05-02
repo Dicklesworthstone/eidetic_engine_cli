@@ -1819,6 +1819,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
             r.field_str("asyncBoundary", report.runtime.async_boundary);
         });
         render_memory_health_json(d, &report.memory_health);
+        render_curation_health_json(d, &report.curation_health);
         render_derived_assets_json(d, &report.derived_assets, true);
         render_agent_inventory_json(d, "agentInventory", &report.agent_inventory, false);
         d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
@@ -1928,6 +1929,38 @@ fn render_memory_health_json(
                 field_optional_score(components, "tombstonePenalty", None);
             }
         });
+    });
+}
+
+fn render_curation_health_json(
+    parent: &mut JsonBuilder,
+    health: &crate::core::status::CurationHealthReport,
+) {
+    parent.field_object("curationHealth", |h| {
+        h.field_str("status", health.status.as_str());
+        h.field_u32("totalCount", health.total_count);
+        h.field_u32("pendingCount", health.pending_count);
+        h.field_u32("acceptedCount", health.accepted_count);
+        h.field_u32("snoozedCount", health.snoozed_count);
+        h.field_u32("rejectedCount", health.rejected_count);
+        h.field_u32("dueCount", health.due_count);
+        h.field_u32("promptCount", health.prompt_count);
+        h.field_u32("escalationCount", health.escalation_count);
+        h.field_u32("blockedCount", health.blocked_count);
+        h.field_u32("policyCount", health.policy_count);
+        h.field_u32("autoPromoteEnabledCount", health.auto_promote_enabled_count);
+        match health.oldest_pending_age_days {
+            Some(days) => h.field_raw("oldestPendingAgeDays", &days.to_string()),
+            None => h.field_raw("oldestPendingAgeDays", "null"),
+        };
+        match health.mean_review_latency_days {
+            Some(days) => h.field_raw("meanReviewLatencyDays", &days.to_string()),
+            None => h.field_raw("meanReviewLatencyDays", "null"),
+        };
+        match health.next_scheduled_at.as_deref() {
+            Some(next) => h.field_str("nextScheduledAt", next),
+            None => h.field_raw("nextScheduledAt", "null"),
+        };
     });
 }
 
@@ -5666,6 +5699,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
                 r.field_str("asyncBoundary", report.runtime.async_boundary);
             });
             render_memory_health_json(d, &report.memory_health);
+            render_curation_health_json(d, &report.curation_health);
             render_derived_assets_json(
                 d,
                 &report.derived_assets,

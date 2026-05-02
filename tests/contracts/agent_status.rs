@@ -162,6 +162,11 @@ fn status_json_embeds_deferred_agent_inventory() -> TestResult {
         JsonValue::String("ee agent status --json".to_string()),
         "inspection command",
     )?;
+    ensure_json_equal(
+        value.pointer("/data/curationHealth/status"),
+        JsonValue::String("not_inspected".to_string()),
+        "curation health status",
+    )?;
     ensure(
         value
             .pointer("/data/agentInventory/installedAgents")

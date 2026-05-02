@@ -15,6 +15,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+use serde_json::Value as JsonValue;
+
 type TestResult = Result<(), String>;
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
@@ -44,6 +46,31 @@ fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn run_ee_with_env(
+    args: &[&str],
+    env_overrides: &[(&str, &str)],
+) -> Result<std::process::Output, String> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    command.args(args);
+    for (key, value) in env_overrides {
+        command.env(key, value);
+    }
+    command
+        .output()
+        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn parse_response_schema(stdout: &[u8], context: &str) -> Result<String, String> {
+    let raw = String::from_utf8_lossy(stdout);
+    let parsed: JsonValue = serde_json::from_str(&raw)
+        .map_err(|error| format!("{context}: stdout is not valid JSON: {error}\nstdout:\n{raw}"))?;
+    parsed
+        .get("schema")
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{context}: stdout JSON missing string field `schema`\n{raw}"))
 }
 
 fn golden_path(name: &str) -> PathBuf {
@@ -433,6 +460,67 @@ fn toon_format_flag_aliases_work() -> TestResult {
 
     let stdout = String::from_utf8_lossy(&output_format.stdout);
     ensure_contains(&stdout, "schema:", "output is TOON format")
+}
+
+// ============================================================================
+// EE-336: TOON_DEFAULT_FORMAT precedence for machine JSON contracts
+// ============================================================================
+
+#[test]
+fn toon_default_format_does_not_override_json_flag_machine_contract() -> TestResult {
+    let output = run_ee_with_env(&["status", "--json"], &[("TOON_DEFAULT_FORMAT", "toon")])?;
+    ensure(
+        output.status.success(),
+        "ee status --json should succeed with TOON_DEFAULT_FORMAT=toon",
+    )?;
+    let schema = parse_response_schema(
+        &output.stdout,
+        "ee status --json with TOON_DEFAULT_FORMAT=toon",
+    )?;
+    ensure(
+        schema == "ee.response.v1",
+        format!("expected ee.response.v1 schema, got {schema}"),
+    )
+}
+
+#[test]
+fn toon_default_format_does_not_override_hook_mode_machine_contract() -> TestResult {
+    let output = run_ee_with_env(
+        &["status"],
+        &[("TOON_DEFAULT_FORMAT", "toon"), ("EE_HOOK_MODE", "1")],
+    )?;
+    ensure(
+        output.status.success(),
+        "ee status should succeed with EE_HOOK_MODE=1 and TOON_DEFAULT_FORMAT=toon",
+    )?;
+    let schema = parse_response_schema(
+        &output.stdout,
+        "ee status with EE_HOOK_MODE=1 and TOON_DEFAULT_FORMAT=toon",
+    )?;
+    ensure(
+        schema == "ee.response.v1",
+        format!("expected ee.response.v1 schema in hook mode, got {schema}"),
+    )
+}
+
+#[test]
+fn toon_default_format_does_not_override_mcp_mode_machine_contract() -> TestResult {
+    let output = run_ee_with_env(
+        &["status"],
+        &[("TOON_DEFAULT_FORMAT", "toon"), ("EE_AGENT_MODE", "1")],
+    )?;
+    ensure(
+        output.status.success(),
+        "ee status should succeed with EE_AGENT_MODE=1 and TOON_DEFAULT_FORMAT=toon",
+    )?;
+    let schema = parse_response_schema(
+        &output.stdout,
+        "ee status with EE_AGENT_MODE=1 and TOON_DEFAULT_FORMAT=toon",
+    )?;
+    ensure(
+        schema == "ee.response.v1",
+        format!("expected ee.response.v1 schema in agent mode, got {schema}"),
+    )
 }
 
 // ============================================================================

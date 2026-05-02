@@ -34,6 +34,9 @@ pub const PROMOTION_PLAN_SCHEMA_V1: &str = "ee.causal.promotion_plan.v1";
 /// Schema for the causal schema catalog.
 pub const CAUSAL_SCHEMA_CATALOG_V1: &str = "ee.causal.schemas.v1";
 
+/// Schema for causal trace reports.
+pub const CAUSAL_TRACE_SCHEMA_V1: &str = "ee.causal.trace.v1";
+
 const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 
 fn bounded_unit(value: f64) -> f64 {
@@ -1537,6 +1540,7 @@ mod tests {
 
     #[test]
     fn causal_schema_constants_are_stable() -> TestResult {
+        ensure(CAUSAL_TRACE_SCHEMA_V1, "ee.causal.trace.v1", "trace report")?;
         ensure(
             CAUSAL_EXPOSURE_SCHEMA_V1,
             "ee.causal.exposure.v1",

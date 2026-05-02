@@ -76,22 +76,22 @@
       "p50_ms": 25.0
     },
     "ee_status": {
-      "p50_ms": 50.0,
+      "p50_ms": 30.0,
       "hard_ceiling_ms": 100.0,
       "scales": {
         "empty": {
-          "candidate_count": 0,
-          "p50_ms": 15.0,
+          "memory_count": 0,
+          "p50_ms": 20.0,
           "hard_ceiling_ms": 100.0
         },
-        "candidate_100": {
-          "candidate_count": 100,
+        "memory_100": {
+          "memory_count": 100,
           "p50_ms": 25.0,
           "hard_ceiling_ms": 100.0
         },
-        "candidate_5000": {
-          "candidate_count": 5000,
-          "p50_ms": 75.0,
+        "memory_5000": {
+          "memory_count": 5000,
+          "p50_ms": 30.0,
           "hard_ceiling_ms": 100.0
         }
       }

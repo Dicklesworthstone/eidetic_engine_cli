@@ -17,7 +17,10 @@ use crate::core::artifact::{
     ArtifactInspectOptions, ArtifactListOptions, ArtifactRegisterOptions, inspect_artifact,
     list_artifacts as list_artifact_registry, register_artifact,
 };
-use crate::core::backup::{BackupCreateOptions, create_backup};
+use crate::core::backup::{
+    BackupCreateOptions, BackupInspectOptions, BackupListOptions, BackupVerifyOptions,
+    create_backup, inspect_backup, list_backups, verify_backup,
+};
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::causal::{
     CAUSAL_ESTIMATE_SCHEMA_V1, EstimateOptions as CausalEstimateOptions,
@@ -165,24 +168,20 @@ pub struct Cli {
 
 impl Cli {
     #[must_use]
-    pub const fn wants_json(&self) -> bool {
-        self.json || self.robot || self.format.is_machine_readable()
+    pub fn wants_json(&self) -> bool {
+        self.renderer().is_machine_readable()
     }
 
     #[must_use]
-    pub const fn renderer(&self) -> output::Renderer {
-        match self.format {
-            OutputFormat::Human if self.json || self.robot => output::Renderer::Json,
-            OutputFormat::Human => output::Renderer::Human,
-            OutputFormat::Json => output::Renderer::Json,
-            OutputFormat::Toon => output::Renderer::Toon,
-            OutputFormat::Jsonl => output::Renderer::Jsonl,
-            OutputFormat::Compact => output::Renderer::Compact,
-            OutputFormat::Hook => output::Renderer::Hook,
-            OutputFormat::Markdown => output::Renderer::Markdown,
-            OutputFormat::Mermaid if self.json || self.robot => output::Renderer::Json,
-            OutputFormat::Mermaid => output::Renderer::Markdown,
-        }
+    pub fn renderer(&self) -> output::Renderer {
+        let format_override = match self.format {
+            OutputFormat::Human => None,
+            OutputFormat::Mermaid if self.json || self.robot => Some(output::Renderer::Json),
+            OutputFormat::Mermaid => Some(output::Renderer::Markdown),
+            _ => Some(self.format.to_renderer()),
+        };
+
+        output::OutputContext::detect_with_hints(self.json, self.robot, format_override).renderer
     }
 
     #[must_use]
@@ -464,6 +463,12 @@ pub struct ArtifactListArgs {
 pub enum BackupCommand {
     /// Create a redacted JSONL backup with a verified manifest.
     Create(BackupCreateArgs),
+    /// List available backups in the workspace.
+    List(BackupListArgs),
+    /// Inspect a backup's manifest and contents.
+    Inspect(BackupInspectArgs),
+    /// Verify a backup's integrity.
+    Verify(BackupVerifyArgs),
 }
 
 /// Arguments for `ee backup create`.
@@ -488,6 +493,38 @@ pub struct BackupCreateArgs {
     /// Report the backup plan without creating files.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+/// Arguments for `ee backup list`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct BackupListArgs {
+    /// Backup root directory. Defaults to <workspace>/.ee/backups/.
+    #[arg(long, value_name = "PATH")]
+    pub output_dir: Option<PathBuf>,
+}
+
+/// Arguments for `ee backup inspect`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct BackupInspectArgs {
+    /// Backup ID or path to inspect.
+    #[arg(value_name = "BACKUP_ID_OR_PATH")]
+    pub backup: String,
+
+    /// Backup root directory. Defaults to <workspace>/.ee/backups/.
+    #[arg(long, value_name = "PATH")]
+    pub output_dir: Option<PathBuf>,
+}
+
+/// Arguments for `ee backup verify`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct BackupVerifyArgs {
+    /// Backup ID or path to verify.
+    #[arg(value_name = "BACKUP_ID_OR_PATH")]
+    pub backup: String,
+
+    /// Backup root directory. Defaults to <workspace>/.ee/backups/.
+    #[arg(long, value_name = "PATH")]
+    pub output_dir: Option<PathBuf>,
 }
 
 /// CLI redaction levels for backup output.
@@ -3446,6 +3483,15 @@ where
         Some(Command::Backup(BackupCommand::Create(ref args))) => {
             handle_backup_create(&cli, args, stdout, stderr)
         }
+        Some(Command::Backup(BackupCommand::List(ref args))) => {
+            handle_backup_list(&cli, args, stdout, stderr)
+        }
+        Some(Command::Backup(BackupCommand::Inspect(ref args))) => {
+            handle_backup_inspect(&cli, args, stdout, stderr)
+        }
+        Some(Command::Backup(BackupCommand::Verify(ref args))) => {
+            handle_backup_verify(&cli, args, stdout, stderr)
+        }
         Some(Command::Capabilities) => {
             let report = CapabilitiesReport::gather();
             let profile = cli.fields_level().to_field_profile();
@@ -4307,6 +4353,196 @@ where
             }
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_backup_list<W, E>(
+    cli: &Cli,
+    args: &BackupListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = BackupListOptions {
+        workspace_path,
+        output_dir: args.output_dir.clone(),
+    };
+
+    match list_backups(&options) {
+        Ok(report) => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": report.data_json(),
+            });
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    let count = report.backups.len();
+                    let mut out =
+                        format!("Found {} backup(s) in {}\n\n", count, report.backup_root);
+                    for backup in &report.backups {
+                        out.push_str(&format!(
+                            "  {} - {} ({})\n",
+                            backup.backup_id,
+                            backup.label.as_deref().unwrap_or("-"),
+                            backup.created_at.as_deref().unwrap_or("-")
+                        ));
+                    }
+                    write_stdout(stdout, &out)
+                }
+                output::Renderer::Toon => {
+                    let json_str = json.to_string();
+                    write_stdout(stdout, &(output::render_toon_from_json(&json_str) + "\n"))
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => write_stdout(stdout, &(json.to_string() + "\n")),
+            }
+        }
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_backup_inspect<W, E>(
+    cli: &Cli,
+    args: &BackupInspectArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let backup_path =
+        resolve_backup_path(&workspace_path, &args.backup, args.output_dir.as_deref());
+    let options = BackupInspectOptions { backup_path };
+
+    match inspect_backup(&options) {
+        Ok(report) => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": report.data_json(),
+            });
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    let mut out = format!("Backup: {}\n", report.backup_id);
+                    if let Some(ref label) = report.label {
+                        out.push_str(&format!("Label: {}\n", label));
+                    }
+                    out.push_str(&format!(
+                        "Created: {}\n",
+                        report.created_at.as_deref().unwrap_or("-")
+                    ));
+                    out.push_str(&format!(
+                        "EE Version: {}\n",
+                        report.ee_version.as_deref().unwrap_or("-")
+                    ));
+                    out.push_str(&format!(
+                        "Workspace: {} ({})\n",
+                        report.workspace_id.as_deref().unwrap_or("-"),
+                        report.workspace_path.as_deref().unwrap_or("-")
+                    ));
+                    out.push_str(&format!(
+                        "Redaction: {}\n",
+                        report.redaction_level.as_deref().unwrap_or("-")
+                    ));
+                    out.push_str(&format!(
+                        "Counts: {} total, {} memories, {} links, {} tags, {} audits\n",
+                        report.counts.total_records,
+                        report.counts.memory_count,
+                        report.counts.link_count,
+                        report.counts.tag_count,
+                        report.counts.audit_count
+                    ));
+                    write_stdout(stdout, &out)
+                }
+                output::Renderer::Toon => {
+                    let json_str = json.to_string();
+                    write_stdout(stdout, &(output::render_toon_from_json(&json_str) + "\n"))
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => write_stdout(stdout, &(json.to_string() + "\n")),
+            }
+        }
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_backup_verify<W, E>(
+    cli: &Cli,
+    args: &BackupVerifyArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let backup_path =
+        resolve_backup_path(&workspace_path, &args.backup, args.output_dir.as_deref());
+    let options = BackupVerifyOptions { backup_path };
+
+    match verify_backup(&options) {
+        Ok(report) => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": report.data_json(),
+            });
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    let mut out = format!("Backup: {} - {}\n", report.backup_id, report.status);
+                    out.push_str(&format!(
+                        "Checked {} artifacts\n",
+                        report.checked_artifacts.len()
+                    ));
+                    if !report.issues.is_empty() {
+                        out.push_str(&format!("Issues: {}\n", report.issues.len()));
+                        for issue in &report.issues {
+                            out.push_str(&format!(
+                                "  - {} ({}) {} [{}]\n",
+                                issue.code,
+                                issue.severity,
+                                issue.message,
+                                issue.path.as_deref().unwrap_or("-")
+                            ));
+                        }
+                    }
+                    write_stdout(stdout, &out)
+                }
+                output::Renderer::Toon => {
+                    let json_str = json.to_string();
+                    write_stdout(stdout, &(output::render_toon_from_json(&json_str) + "\n"))
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => write_stdout(stdout, &(json.to_string() + "\n")),
+            }
+        }
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn resolve_backup_path(workspace_path: &Path, backup: &str, output_dir: Option<&Path>) -> PathBuf {
+    let backup_root = output_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_path.join(".ee/backups"));
+
+    if backup.contains('/') || backup.contains('\\') {
+        PathBuf::from(backup)
+    } else {
+        backup_root.join(backup)
     }
 }
 
@@ -11825,6 +12061,9 @@ impl NormalizedInvocation {
                 },
                 Command::Backup(backup) => match backup {
                     BackupCommand::Create(_) => "backup create".to_string(),
+                    BackupCommand::List(_) => "backup list".to_string(),
+                    BackupCommand::Inspect(_) => "backup inspect".to_string(),
+                    BackupCommand::Verify(_) => "backup verify".to_string(),
                 },
                 Command::Capabilities => "capabilities".to_string(),
                 Command::Check => "check".to_string(),

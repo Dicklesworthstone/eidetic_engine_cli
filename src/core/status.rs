@@ -17,10 +17,10 @@ use crate::config::{
     resolve_workspace,
 };
 use crate::db::{
-    CreateCurationCandidateInput, DbConnection, StoredCurationCandidate, StoredCurationTtlPolicy,
-    default_curation_ttl_policy_id_for_review_state,
+    CreateMemoryInput, CreateWorkspaceInput, DbConnection, StoredCurationCandidate,
+    StoredCurationTtlPolicy, default_curation_ttl_policy_id_for_review_state,
 };
-use crate::models::CapabilityStatus;
+use crate::models::{CapabilityStatus, MemoryId};
 
 use super::agent_detect::AgentInventoryReport;
 use super::curate::stable_workspace_id;
@@ -925,22 +925,22 @@ pub const STATUS_BENCH_QUICK_ITERATIONS: u32 = 5;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StatusBenchScale {
     pub name: &'static str,
-    pub candidate_count: usize,
+    pub memory_count: usize,
 }
 
 /// Required scale set for `ee status` benchmark runs.
 pub const STATUS_BENCH_SCALES: [StatusBenchScale; 3] = [
     StatusBenchScale {
         name: "empty",
-        candidate_count: 0,
+        memory_count: 0,
     },
     StatusBenchScale {
-        name: "candidate_100",
-        candidate_count: 100,
+        name: "memory_100",
+        memory_count: 100,
     },
     StatusBenchScale {
-        name: "candidate_5000",
-        candidate_count: 5_000,
+        name: "memory_5000",
+        memory_count: 5_000,
     },
 ];
 
@@ -952,7 +952,7 @@ pub struct StatusBenchFixture {
 }
 
 impl StatusBenchFixture {
-    /// Build a deterministic local workspace fixture and seed curation rows.
+    /// Build a deterministic local workspace fixture and seed memory rows.
     pub fn prepare(scale: StatusBenchScale) -> Result<Self, String> {
         let workspace_path = status_bench_workspace_path(scale);
         let ee_dir = workspace_path.join(".ee");
@@ -974,7 +974,12 @@ impl StatusBenchFixture {
             .canonicalize()
             .unwrap_or_else(|_| workspace_path.clone());
         let workspace_id = stable_workspace_id(&canonical_workspace);
-        seed_status_bench_candidates(&connection, &workspace_id, scale.candidate_count)?;
+        seed_status_bench_memories(
+            &connection,
+            &workspace_path,
+            &workspace_id,
+            scale.memory_count,
+        )?;
 
         Ok(Self {
             scale,
@@ -998,11 +1003,10 @@ impl StatusBenchFixture {
         let report = StatusReport::gather_for_workspace(&self.workspace_path);
         let elapsed = started_at.elapsed();
 
-        let expected = capped_u32(self.scale.candidate_count);
-        if report.curation_health.total_count != expected {
+        if report.curation_health.total_count != 0 {
             return Err(format!(
-                "status benchmark expected {} curation candidates for scale `{}`, got {}",
-                expected, self.scale.name, report.curation_health.total_count
+                "status benchmark expected 0 curation candidates for scale `{}`, got {}",
+                self.scale.name, report.curation_health.total_count
             ));
         }
 
@@ -1027,7 +1031,7 @@ impl StatusBenchFixture {
 
         Ok(StatusBenchSample {
             scale_name: self.scale.name,
-            candidate_count: self.scale.candidate_count,
+            memory_count: self.scale.memory_count,
             iterations,
             p50_ms,
             max_ms,
@@ -1041,7 +1045,7 @@ impl StatusBenchFixture {
 #[derive(Clone, Debug)]
 pub struct StatusBenchSample {
     pub scale_name: &'static str,
-    pub candidate_count: usize,
+    pub memory_count: usize,
     pub iterations: u32,
     pub p50_ms: f64,
     pub max_ms: f64,
@@ -1108,48 +1112,58 @@ fn status_bench_workspace_path(scale: StatusBenchScale) -> PathBuf {
     path.push(format!(
         "ee_status_bench_{}_{}_{}",
         std::process::id(),
-        scale.candidate_count,
+        scale.memory_count,
         token
     ));
     path
 }
 
-fn seed_status_bench_candidates(
+fn seed_status_bench_memories(
     connection: &DbConnection,
+    workspace_path: &Path,
     workspace_id: &str,
-    candidate_count: usize,
+    memory_count: usize,
 ) -> Result<(), String> {
-    let base_time = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
-        .map_err(|error| format!("invalid benchmark timestamp literal: {error}"))?
-        .with_timezone(&Utc);
+    connection
+        .insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: workspace_path.to_string_lossy().to_string(),
+                name: Some("status benchmark workspace".to_owned()),
+            },
+        )
+        .map_err(|error| format!("failed to insert benchmark workspace: {error}"))?;
 
-    for index in 0..candidate_count {
-        let created_at = (base_time + chrono::Duration::seconds(index as i64)).to_rfc3339();
-        let candidate_id = format!("cand_bench_{candidate_count}_{index:05}");
-        let memory_id = format!("mem_bench_{candidate_count}_{index:05}");
-        let input = CreateCurationCandidateInput {
+    for index in 0..memory_count {
+        let memory_id = status_bench_memory_id(memory_count, index);
+        let input = CreateMemoryInput {
             workspace_id: workspace_id.to_owned(),
-            candidate_type: "promote".to_owned(),
-            target_memory_id: memory_id,
-            proposed_content: Some("Status benchmark fixture candidate".to_owned()),
-            proposed_confidence: Some(0.60),
-            proposed_trust_class: Some("agent_assertion".to_owned()),
-            source_type: "benchmark".to_owned(),
-            source_id: Some("ee_status_bench".to_owned()),
-            reason: "status benchmark fixture".to_owned(),
+            level: "semantic".to_owned(),
+            kind: "fact".to_owned(),
+            content: format!(
+                "Status benchmark memory {index}: deterministic fixture for scale {memory_count}."
+            ),
             confidence: 0.60,
-            status: Some("pending".to_owned()),
-            created_at: Some(created_at),
-            ttl_expires_at: None,
+            utility: 0.50,
+            importance: 0.50,
+            provenance_uri: Some("bench://ee_status".to_owned()),
+            trust_class: "agent_assertion".to_owned(),
+            trust_subclass: Some("benchmark_fixture".to_owned()),
+            tags: vec!["bench".to_owned(), "status".to_owned()],
+            valid_from: None,
+            valid_to: None,
         };
         connection
-            .insert_curation_candidate(&candidate_id, &input)
-            .map_err(|error| {
-                format!("failed to insert benchmark candidate {candidate_id}: {error}")
-            })?;
+            .insert_memory(&memory_id, &input)
+            .map_err(|error| format!("failed to insert benchmark memory {memory_id}: {error}"))?;
     }
 
     Ok(())
+}
+
+fn status_bench_memory_id(memory_count: usize, index: usize) -> String {
+    let seed = ((memory_count as u128) << 64) | (index as u128 + 1);
+    MemoryId::from_uuid(uuid::Uuid::from_u128(seed)).to_string()
 }
 
 fn duration_ms(duration: Duration) -> f64 {

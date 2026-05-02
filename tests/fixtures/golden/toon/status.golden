@@ -29,6 +29,22 @@ data:
       confidenceScore: null
       provenanceScore: null
       tombstonePenalty: null
+  curationHealth:
+    status: not_inspected
+    totalCount: 0
+    pendingCount: 0
+    acceptedCount: 0
+    snoozedCount: 0
+    rejectedCount: 0
+    dueCount: 0
+    promptCount: 0
+    escalationCount: 0
+    blockedCount: 0
+    policyCount: 0
+    autoPromoteEnabledCount: 0
+    oldestPendingAgeDays: null
+    meanReviewLatencyDays: null
+    nextScheduledAt: null
   derivedAssets[2]{name,status,sourceHighWatermark,assetHighWatermark,highWatermarkLag,path}:
     search_index,not_inspected,null,null,null,.ee/index
     graph_snapshot,unimplemented,null,null,null,.ee/graph
