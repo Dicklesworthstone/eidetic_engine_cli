@@ -54,6 +54,19 @@ uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
 tempfile = { version = "3.27.0" }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "remember"
+harness = false
+
+[[bench]]
+name = "why"
+harness = false
+
+[[bench]]
+name = "outcome"
+harness = false
 
 [patch.crates-io]
 fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
