@@ -4819,6 +4819,16 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         }],
     },
     CommandEntry {
+        name: "analyze",
+        description: "Analyze subsystem readiness and diagnostic posture",
+        available: true,
+        subcommands: &[SubcommandEntry {
+            name: "science-status",
+            description: "Report science analytics availability and degraded posture",
+        }],
+        args: &[],
+    },
+    CommandEntry {
         name: "capabilities",
         description: "Report feature availability, commands, and subsystem status",
         available: true,
