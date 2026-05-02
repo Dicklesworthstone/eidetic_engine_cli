@@ -385,6 +385,7 @@ That's the core loop.
 | Command | Purpose |
 |---|---|
 | `ee eval run` / `report` | Run retrieval-quality evaluation on shipped fixtures |
+| `ee analyze science-status --json` | Report optional science analytics feature posture and degradations |
 | `ee job list` / `show <id>` | Inspect indexing/import/steward jobs |
 | `ee daemon` | Optional supervised maintenance daemon |
 | `ee completion <shell>` | Generate shell completions |

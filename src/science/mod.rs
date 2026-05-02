@@ -136,6 +136,76 @@ impl ScienceStatusReport {
             next_actions: science_next_actions(status),
         }
     }
+
+    /// Stable machine-readable payload for response envelopes.
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": self.schema,
+            "command": self.command,
+            "subsystem": self.subsystem,
+            "status": self.status.as_str(),
+            "available": self.available,
+            "feature": self.feature.data_json(),
+            "capabilities": self
+                .capabilities
+                .iter()
+                .map(ScienceCapabilityStatus::data_json)
+                .collect::<Vec<_>>(),
+            "degradations": self
+                .degradations
+                .iter()
+                .map(ScienceDegradation::data_json)
+                .collect::<Vec<_>>(),
+            "nextActions": self.next_actions,
+        })
+    }
+
+    /// Human-readable diagnostics summary for terminal usage.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "Science analytics: {} (available={})\n",
+            self.status.as_str(),
+            self.available
+        ));
+        out.push_str(&format!(
+            "Feature: {} (enabled={})\n",
+            self.feature.name, self.feature.enabled
+        ));
+        out.push_str("Capabilities:\n");
+        for capability in &self.capabilities {
+            match capability.degradation_code {
+                Some(code) => out.push_str(&format!(
+                    "  - {}: {} ({code})\n",
+                    capability.name,
+                    capability.state.as_str()
+                )),
+                None => out.push_str(&format!(
+                    "  - {}: {}\n",
+                    capability.name,
+                    capability.state.as_str()
+                )),
+            }
+        }
+        if !self.degradations.is_empty() {
+            out.push_str("Degradations:\n");
+            for degradation in &self.degradations {
+                out.push_str(&format!(
+                    "  - [{}] {} -> {}\n",
+                    degradation.code, degradation.message, degradation.repair
+                ));
+            }
+        }
+        if !self.next_actions.is_empty() {
+            out.push_str("Next:\n");
+            for action in &self.next_actions {
+                out.push_str(&format!("  - {action}\n"));
+            }
+        }
+        out
+    }
 }
 
 /// Compile-time science feature state.
@@ -154,6 +224,15 @@ impl ScienceFeatureStatus {
             enabled: cfg!(feature = "science-analytics"),
             description: "Optional offline analytics for evaluation metrics and diagnostics.",
         }
+    }
+
+    #[must_use]
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "enabled": self.enabled,
+            "description": self.description,
+        })
     }
 }
 
@@ -208,6 +287,17 @@ impl ScienceCapabilityStatus {
             description,
         }
     }
+
+    #[must_use]
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "state": self.state.as_str(),
+            "requiredFeature": self.required_feature,
+            "degradationCode": self.degradation_code,
+            "description": self.description,
+        })
+    }
 }
 
 /// Stable degradation entry for science status diagnostics.
@@ -253,6 +343,15 @@ impl ScienceDegradation {
             message: "Science analytics budget was exhausted.",
             repair: "Increase the science analytics budget or use a smaller input.",
         }
+    }
+
+    #[must_use]
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "code": self.code,
+            "message": self.message,
+            "repair": self.repair,
+        })
     }
 }
 
@@ -602,6 +701,14 @@ mod tests {
         }
     }
 
+    fn ensure_json_str(actual: Option<&str>, expected: &str, ctx: &str) -> TestResult {
+        match actual {
+            Some(actual) if actual == expected => Ok(()),
+            Some(actual) => Err(format!("{ctx}: expected {expected:?}, got {actual:?}")),
+            None => Err(format!("{ctx}: expected {expected:?}, got None")),
+        }
+    }
+
     fn capability<'a>(
         report: &'a ScienceStatusReport,
         name: &str,
@@ -729,6 +836,60 @@ mod tests {
             capability(&report, "evaluation_metrics")?.required_feature,
             SCIENCE_ANALYTICS_FEATURE,
             "metrics required feature",
+        )
+    }
+
+    #[test]
+    fn science_status_report_json_shape_is_stable() -> TestResult {
+        let report = science_status_report();
+        let json = report.data_json();
+        ensure_json_str(
+            json.get("schema").and_then(serde_json::Value::as_str),
+            SCIENCE_STATUS_SCHEMA_V1,
+            "json schema",
+        )?;
+        ensure_json_str(
+            json.get("command").and_then(serde_json::Value::as_str),
+            SCIENCE_STATUS_COMMAND,
+            "json command",
+        )?;
+        ensure_json_str(
+            json.get("subsystem").and_then(serde_json::Value::as_str),
+            SUBSYSTEM,
+            "json subsystem",
+        )?;
+        ensure_json_str(
+            json.get("status").and_then(serde_json::Value::as_str),
+            report.status.as_str(),
+            "json status",
+        )?;
+        ensure(
+            json.get("available").and_then(serde_json::Value::as_bool),
+            Some(report.available),
+            "json available",
+        )?;
+        ensure(
+            json.get("capabilities")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|entries| entries.len() == 2),
+            true,
+            "json capabilities count",
+        )
+    }
+
+    #[test]
+    fn science_status_report_human_summary_contains_status_line() -> TestResult {
+        let report = science_status_report();
+        let summary = report.human_summary();
+        ensure(
+            summary.starts_with("Science analytics: "),
+            true,
+            "summary starts with status line",
+        )?;
+        ensure(
+            summary.contains("Capabilities:"),
+            true,
+            "summary includes capabilities",
         )
     }
 
