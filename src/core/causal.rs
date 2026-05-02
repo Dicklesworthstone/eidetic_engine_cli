@@ -495,6 +495,9 @@ fn build_sample_chains(options: &TraceOptions) -> Vec<CausalChain> {
 /// Schema for causal estimate response.
 pub const CAUSAL_ESTIMATE_SCHEMA_V1: &str = "ee.causal.estimate.v1";
 
+/// Schema for causal comparison response.
+pub const CAUSAL_COMPARE_SCHEMA_V1: &str = "ee.causal.compare.v1";
+
 /// Schema for causal promotion plan response.
 pub const CAUSAL_PROMOTE_PLAN_SCHEMA_V1: &str = "ee.causal.promote_plan.v1";
 
@@ -994,6 +997,359 @@ fn build_sample_confounders(options: &EstimateOptions) -> Vec<EstimateConfounder
             mitigation: "Include agent-level fixed effects".to_string(),
         },
     ]
+}
+
+// ============================================================================
+// Compare Options and Report (EE-453)
+// ============================================================================
+
+/// Options for comparing causal evidence across fixture replay, shadow runs,
+/// counterfactual episodes, and active-learning experiments.
+#[derive(Clone, Debug, Default)]
+pub struct CompareOptions {
+    /// Optional artifact scope.
+    pub artifact_id: Option<String>,
+    /// Optional decision scope.
+    pub decision_id: Option<String>,
+    /// Fixture replay record ID.
+    pub fixture_replay_id: Option<String>,
+    /// Shadow-run output ID.
+    pub shadow_run_id: Option<String>,
+    /// Counterfactual episode ID.
+    pub counterfactual_episode_id: Option<String>,
+    /// Active-learning experiment ID.
+    pub experiment_id: Option<String>,
+    /// Estimation method (naive, matching, replay, experiment).
+    pub method: Option<String>,
+    /// Dry-run mode (plan only).
+    pub dry_run: bool,
+}
+
+impl CompareOptions {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_artifact_id(mut self, id: impl Into<String>) -> Self {
+        self.artifact_id = Some(id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_decision_id(mut self, id: impl Into<String>) -> Self {
+        self.decision_id = Some(id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_fixture_replay_id(mut self, id: impl Into<String>) -> Self {
+        self.fixture_replay_id = Some(id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_shadow_run_id(mut self, id: impl Into<String>) -> Self {
+        self.shadow_run_id = Some(id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_counterfactual_episode_id(mut self, id: impl Into<String>) -> Self {
+        self.counterfactual_episode_id = Some(id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_experiment_id(mut self, id: impl Into<String>) -> Self {
+        self.experiment_id = Some(id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_method(mut self, method: impl Into<String>) -> Self {
+        self.method = Some(method.into());
+        self
+    }
+
+    #[must_use]
+    pub fn dry_run(mut self) -> Self {
+        self.dry_run = true;
+        self
+    }
+
+    fn has_any_scope(&self) -> bool {
+        self.artifact_id.is_some()
+            || self.decision_id.is_some()
+            || self.fixture_replay_id.is_some()
+            || self.shadow_run_id.is_some()
+            || self.counterfactual_episode_id.is_some()
+            || self.experiment_id.is_some()
+    }
+
+    fn selected_sources(&self) -> Vec<(&'static str, &str)> {
+        let mut selected = Vec::new();
+        if let Some(source_id) = self.fixture_replay_id.as_deref() {
+            selected.push(("fixture_replay", source_id));
+        }
+        if let Some(source_id) = self.shadow_run_id.as_deref() {
+            selected.push(("shadow_run", source_id));
+        }
+        if let Some(source_id) = self.counterfactual_episode_id.as_deref() {
+            selected.push(("counterfactual_episode", source_id));
+        }
+        if let Some(source_id) = self.experiment_id.as_deref() {
+            selected.push(("active_learning_experiment", source_id));
+        }
+        selected
+    }
+}
+
+/// Per-source comparison record.
+#[derive(Clone, Debug)]
+pub struct CausalComparison {
+    pub comparison_id: String,
+    pub source_kind: String,
+    pub source_id: String,
+    pub baseline_uplift: f64,
+    pub candidate_uplift: f64,
+    pub uplift_delta: f64,
+    pub confidence_state: ConfidenceState,
+    pub evidence_strength: String,
+    pub verdict: String,
+}
+
+impl CausalComparison {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "comparisonId": self.comparison_id,
+            "sourceKind": self.source_kind,
+            "sourceId": self.source_id,
+            "baselineUplift": self.baseline_uplift,
+            "candidateUplift": self.candidate_uplift,
+            "upliftDelta": self.uplift_delta,
+            "confidenceState": self.confidence_state.as_str(),
+            "evidenceStrength": self.evidence_strength,
+            "verdict": self.verdict,
+        })
+    }
+}
+
+/// Report from `ee causal compare`.
+#[derive(Clone, Debug)]
+pub struct CompareReport {
+    pub schema: &'static str,
+    pub comparisons: Vec<CausalComparison>,
+    pub filters_applied: Vec<String>,
+    pub degradations: Vec<TraceDegradation>,
+    pub method_used: String,
+    pub dry_run: bool,
+}
+
+impl CompareReport {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        let (improved, regressed, flat) =
+            self.comparisons
+                .iter()
+                .fold(
+                    (0usize, 0usize, 0usize),
+                    |acc, comparison| match comparison.verdict.as_str() {
+                        "improves" => (acc.0 + 1, acc.1, acc.2),
+                        "regresses" => (acc.0, acc.1 + 1, acc.2),
+                        _ => (acc.0, acc.1, acc.2 + 1),
+                    },
+                );
+
+        json!({
+            "schema": self.schema,
+            "command": "causal compare",
+            "comparisons": self.comparisons.iter().map(CausalComparison::data_json).collect::<Vec<_>>(),
+            "summary": {
+                "totalComparisons": self.comparisons.len(),
+                "improvesCount": improved,
+                "regressesCount": regressed,
+                "flatCount": flat,
+                "methodUsed": self.method_used,
+            },
+            "filtersApplied": self.filters_applied,
+            "degradations": self.degradations.iter().map(TraceDegradation::data_json).collect::<Vec<_>>(),
+            "dryRun": self.dry_run,
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut out = String::with_capacity(1024);
+        if self.dry_run {
+            out.push_str("Causal Compare [DRY RUN]\n");
+        } else {
+            out.push_str("Causal Compare Report\n");
+        }
+        out.push_str("====================\n\n");
+        out.push_str(&format!("Method: {}\n", self.method_used));
+        out.push_str(&format!("Comparisons: {}\n", self.comparisons.len()));
+        if !self.comparisons.is_empty() {
+            out.push_str("\nResults:\n");
+            for (index, comparison) in self.comparisons.iter().enumerate() {
+                out.push_str(&format!(
+                    "  {}. {}:{} -> {} (delta: {:+.3}, confidence: {})\n",
+                    index + 1,
+                    comparison.source_kind,
+                    comparison.source_id,
+                    comparison.verdict,
+                    comparison.uplift_delta,
+                    comparison.confidence_state.as_str(),
+                ));
+            }
+        }
+        if !self.degradations.is_empty() {
+            out.push_str("\nDegradations:\n");
+            for degradation in &self.degradations {
+                out.push_str(&format!(
+                    "  - [{}] {}: {}\n",
+                    degradation.severity, degradation.code, degradation.message
+                ));
+            }
+        }
+        out
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.comparisons.is_empty()
+    }
+}
+
+/// Compare causal uplift evidence across multiple evidence sources.
+#[must_use]
+pub fn compare_causal_evidence(options: &CompareOptions) -> CompareReport {
+    let mut filters_applied = Vec::new();
+    let mut degradations = Vec::new();
+
+    if let Some(artifact_id) = options.artifact_id.as_ref() {
+        filters_applied.push(format!("artifact_id={artifact_id}"));
+    }
+    if let Some(decision_id) = options.decision_id.as_ref() {
+        filters_applied.push(format!("decision_id={decision_id}"));
+    }
+    if let Some(source_id) = options.fixture_replay_id.as_ref() {
+        filters_applied.push(format!("fixture_replay_id={source_id}"));
+    }
+    if let Some(source_id) = options.shadow_run_id.as_ref() {
+        filters_applied.push(format!("shadow_run_id={source_id}"));
+    }
+    if let Some(source_id) = options.counterfactual_episode_id.as_ref() {
+        filters_applied.push(format!("counterfactual_episode_id={source_id}"));
+    }
+    if let Some(source_id) = options.experiment_id.as_ref() {
+        filters_applied.push(format!("experiment_id={source_id}"));
+    }
+
+    let requested_method = options
+        .method
+        .clone()
+        .unwrap_or_else(|| "replay".to_string());
+    let method_used = normalize_method(&requested_method, &mut degradations);
+
+    if !options.has_any_scope() {
+        degradations.push(TraceDegradation {
+            code: "no_filters".to_string(),
+            message: "No comparison scope provided; add at least one source or scope filter."
+                .to_string(),
+            severity: "warning".to_string(),
+        });
+        return CompareReport {
+            schema: CAUSAL_COMPARE_SCHEMA_V1,
+            comparisons: Vec::new(),
+            filters_applied,
+            degradations,
+            method_used,
+            dry_run: options.dry_run,
+        };
+    }
+
+    let selected_sources = options.selected_sources();
+    if selected_sources.is_empty() {
+        degradations.push(TraceDegradation {
+            code: "no_sources".to_string(),
+            message: "No source IDs provided; add fixture replay, shadow run, counterfactual episode, or experiment ID."
+                .to_string(),
+            severity: "warning".to_string(),
+        });
+        return CompareReport {
+            schema: CAUSAL_COMPARE_SCHEMA_V1,
+            comparisons: Vec::new(),
+            filters_applied,
+            degradations,
+            method_used,
+            dry_run: options.dry_run,
+        };
+    }
+
+    if options.dry_run {
+        return CompareReport {
+            schema: CAUSAL_COMPARE_SCHEMA_V1,
+            comparisons: Vec::new(),
+            filters_applied,
+            degradations,
+            method_used,
+            dry_run: true,
+        };
+    }
+
+    let (strength, method_uplift) = method_signal(&method_used);
+    let confidence = ConfidenceState::from_evidence_strength(strength);
+
+    let comparisons = selected_sources
+        .into_iter()
+        .map(|(source_kind, source_id)| {
+            let offset = deterministic_uplift_offset(source_kind, source_id);
+            let baseline_uplift = (method_uplift - 0.03_f64).clamp(-1.0, 1.0);
+            let candidate_uplift = (method_uplift + offset).clamp(-1.0, 1.0);
+            let uplift_delta = candidate_uplift - baseline_uplift;
+            let verdict = if uplift_delta > 0.01 {
+                "improves"
+            } else if uplift_delta < -0.01 {
+                "regresses"
+            } else {
+                "flat"
+            };
+
+            CausalComparison {
+                comparison_id: format!("cmp-{source_kind}-{source_id}"),
+                source_kind: source_kind.to_string(),
+                source_id: source_id.to_string(),
+                baseline_uplift,
+                candidate_uplift,
+                uplift_delta,
+                confidence_state: confidence,
+                evidence_strength: strength.as_str().to_string(),
+                verdict: verdict.to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    CompareReport {
+        schema: CAUSAL_COMPARE_SCHEMA_V1,
+        comparisons,
+        filters_applied,
+        degradations,
+        method_used,
+        dry_run: false,
+    }
+}
+
+fn deterministic_uplift_offset(source_kind: &str, source_id: &str) -> f64 {
+    let mut hash: u64 = 1469598103934665603;
+    for byte in source_kind.bytes().chain(source_id.bytes()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    let normalized = (hash % 21) as f64 - 10.0;
+    normalized / 100.0
 }
 
 /// Options for producing a dry-run-first causal promotion plan.
@@ -1688,6 +2044,124 @@ mod tests {
             ConfidenceState::from_evidence_strength(CausalEvidenceStrength::Rejected),
             ConfidenceState::Rejected
         );
+    }
+
+    #[test]
+    fn compare_options_builder_works() {
+        let options = CompareOptions::new()
+            .with_artifact_id("mem-001")
+            .with_decision_id("dec-001")
+            .with_fixture_replay_id("fixture-001")
+            .with_shadow_run_id("shadow-001")
+            .with_counterfactual_episode_id("counterfactual-001")
+            .with_experiment_id("exp-001")
+            .with_method("replay")
+            .dry_run();
+
+        assert_eq!(options.artifact_id, Some("mem-001".to_string()));
+        assert_eq!(options.decision_id, Some("dec-001".to_string()));
+        assert_eq!(options.fixture_replay_id, Some("fixture-001".to_string()));
+        assert_eq!(options.shadow_run_id, Some("shadow-001".to_string()));
+        assert_eq!(
+            options.counterfactual_episode_id,
+            Some("counterfactual-001".to_string())
+        );
+        assert_eq!(options.experiment_id, Some("exp-001".to_string()));
+        assert_eq!(options.method, Some("replay".to_string()));
+        assert!(options.dry_run);
+    }
+
+    #[test]
+    fn compare_without_filters_returns_degradation() {
+        let report = compare_causal_evidence(&CompareOptions::new());
+        assert!(report.is_empty());
+        assert!(
+            report
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "no_filters")
+        );
+    }
+
+    #[test]
+    fn compare_without_sources_returns_no_sources_degradation() {
+        let report = compare_causal_evidence(&CompareOptions::new().with_artifact_id("mem-001"));
+        assert!(report.is_empty());
+        assert!(
+            report
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "no_sources")
+        );
+    }
+
+    #[test]
+    fn compare_with_sources_returns_comparisons() {
+        let report = compare_causal_evidence(
+            &CompareOptions::new()
+                .with_artifact_id("mem-001")
+                .with_fixture_replay_id("fixture-001")
+                .with_shadow_run_id("shadow-001")
+                .with_counterfactual_episode_id("counterfactual-001")
+                .with_experiment_id("exp-001")
+                .with_method("experiment"),
+        );
+
+        assert_eq!(report.schema, CAUSAL_COMPARE_SCHEMA_V1);
+        assert_eq!(report.method_used, "experiment");
+        assert_eq!(report.comparisons.len(), 4);
+        assert!(
+            report
+                .comparisons
+                .iter()
+                .all(|comparison| !comparison.verdict.is_empty())
+        );
+    }
+
+    #[test]
+    fn compare_dry_run_returns_empty_output() {
+        let report = compare_causal_evidence(
+            &CompareOptions::new()
+                .with_fixture_replay_id("fixture-001")
+                .with_method("matching")
+                .dry_run(),
+        );
+
+        assert!(report.is_empty());
+        assert!(report.dry_run);
+        assert!(report.degradations.is_empty());
+    }
+
+    #[test]
+    fn compare_unknown_method_degrades_to_naive() {
+        let report = compare_causal_evidence(
+            &CompareOptions::new()
+                .with_fixture_replay_id("fixture-001")
+                .with_method("mystery"),
+        );
+
+        assert_eq!(report.method_used, "naive");
+        assert!(
+            report
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "unknown_method")
+        );
+    }
+
+    #[test]
+    fn compare_report_json_has_correct_schema() {
+        let report = compare_causal_evidence(
+            &CompareOptions::new()
+                .with_fixture_replay_id("fixture-001")
+                .with_shadow_run_id("shadow-001"),
+        );
+        let json = report.data_json();
+
+        assert_eq!(json["schema"], CAUSAL_COMPARE_SCHEMA_V1);
+        assert_eq!(json["command"], "causal compare");
+        assert!(json["comparisons"].is_array());
+        assert!(json["summary"]["totalComparisons"].is_number());
     }
 
     #[test]

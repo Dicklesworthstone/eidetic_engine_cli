@@ -24,10 +24,10 @@ use crate::core::backup::{
 };
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::causal::{
-    CAUSAL_ESTIMATE_SCHEMA_V1, CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
-    EstimateOptions as CausalEstimateOptions, PromotePlanOptions as CausalPromotePlanOptions,
-    TraceOptions as CausalTraceOptions, estimate_causal_uplift, promote_causal_plan,
-    trace_causal_chains,
+    CAUSAL_COMPARE_SCHEMA_V1, CAUSAL_ESTIMATE_SCHEMA_V1, CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
+    CompareOptions as CausalCompareOptions, EstimateOptions as CausalEstimateOptions,
+    PromotePlanOptions as CausalPromotePlanOptions, TraceOptions as CausalTraceOptions,
+    compare_causal_evidence, estimate_causal_uplift, promote_causal_plan, trace_causal_chains,
 };
 use crate::core::check::CheckReport;
 use crate::core::context::{ContextPackError, ContextPackOptions, run_context_pack};
@@ -1732,6 +1732,8 @@ pub struct CertificateVerifyArgs {
 pub enum CausalCommand {
     /// Trace causal chains from memories through exposures to outcomes.
     Trace(CausalTraceArgs),
+    /// Compare evidence from fixture replay, shadow-run, counterfactual, and experiment sources.
+    Compare(CausalCompareArgs),
     /// Estimate causal uplift with evidence tiers, assumptions, and confounders.
     Estimate(CausalEstimateArgs),
     /// Produce dry-run-first promotion plans for memory posture changes.
@@ -1782,6 +1784,42 @@ pub struct CausalTraceArgs {
     pub include_outcomes: bool,
 
     /// Show trace plan without executing queries.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee causal compare`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct CausalCompareArgs {
+    /// Fixture replay ID to include in comparison.
+    #[arg(long, value_name = "FIXTURE_REPLAY_ID")]
+    pub fixture_replay_id: Option<String>,
+
+    /// Shadow-run output ID to include in comparison.
+    #[arg(long, value_name = "SHADOW_RUN_ID")]
+    pub shadow_run_id: Option<String>,
+
+    /// Counterfactual episode ID to include in comparison.
+    #[arg(long, value_name = "COUNTERFACTUAL_EPISODE_ID")]
+    pub counterfactual_episode_id: Option<String>,
+
+    /// Active-learning experiment ID to include in comparison.
+    #[arg(long, value_name = "EXPERIMENT_ID")]
+    pub experiment_id: Option<String>,
+
+    /// Optional artifact scope for comparison.
+    #[arg(long, value_name = "ARTIFACT_ID")]
+    pub artifact_id: Option<String>,
+
+    /// Optional decision scope for comparison.
+    #[arg(long, value_name = "DECISION_ID")]
+    pub decision_id: Option<String>,
+
+    /// Comparison method (naive, matching, replay, experiment).
+    #[arg(long, value_name = "METHOD", default_value = "replay")]
+    pub method: String,
+
+    /// Show comparison plan without generating concrete comparisons.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 }
@@ -2635,6 +2673,14 @@ pub struct CurateCandidatesArgs {
     /// Number of filtered candidates to skip.
     #[arg(long, default_value_t = 0)]
     pub offset: u32,
+
+    /// Sort mode: review_state, created_at, or confidence.
+    #[arg(long, default_value = "review_state")]
+    pub sort: String,
+
+    /// Group likely duplicate candidates together in queue output.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub group_duplicates: bool,
 }
 
 /// Arguments for `ee curate validate`.
@@ -3682,6 +3728,7 @@ where
         },
         Some(Command::Causal(ref causal_cmd)) => match causal_cmd {
             CausalCommand::Trace(args) => handle_causal_trace(&cli, args, stdout, stderr),
+            CausalCommand::Compare(args) => handle_causal_compare(&cli, args, stdout, stderr),
             CausalCommand::Estimate(args) => handle_causal_estimate(&cli, args, stdout, stderr),
             CausalCommand::PromotePlan(args) => {
                 handle_causal_promote_plan(&cli, args, stdout, stderr)
@@ -10144,6 +10191,8 @@ where
         target_memory_id: args.target_memory_id.as_deref(),
         limit: args.limit,
         offset: args.offset,
+        sort: &args.sort,
+        group_duplicates: args.group_duplicates,
     };
 
     match list_curation_candidates(&options) {
@@ -11438,6 +11487,81 @@ where
     }
 }
 
+fn handle_causal_compare<W, E>(
+    cli: &Cli,
+    args: &CausalCompareArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let mut options = CausalCompareOptions::default();
+
+    if let Some(ref fixture_replay_id) = args.fixture_replay_id {
+        options = options.with_fixture_replay_id(fixture_replay_id);
+    }
+    if let Some(ref shadow_run_id) = args.shadow_run_id {
+        options = options.with_shadow_run_id(shadow_run_id);
+    }
+    if let Some(ref counterfactual_episode_id) = args.counterfactual_episode_id {
+        options = options.with_counterfactual_episode_id(counterfactual_episode_id);
+    }
+    if let Some(ref experiment_id) = args.experiment_id {
+        options = options.with_experiment_id(experiment_id);
+    }
+    if let Some(ref artifact_id) = args.artifact_id {
+        options = options.with_artifact_id(artifact_id);
+    }
+    if let Some(ref decision_id) = args.decision_id {
+        options = options.with_decision_id(decision_id);
+    }
+    options = options.with_method(&args.method);
+    if args.dry_run {
+        options = options.dry_run();
+    }
+
+    let report = compare_causal_evidence(&options);
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => {
+            let improved = report
+                .comparisons
+                .iter()
+                .filter(|comparison| comparison.verdict == "improves")
+                .count();
+            let regressed = report
+                .comparisons
+                .iter()
+                .filter(|comparison| comparison.verdict == "regresses")
+                .count();
+            let toon = format!(
+                "causal_compare comparisons={} method={} improves={} regresses={}\n",
+                report.comparisons.len(),
+                report.method_used,
+                improved,
+                regressed
+            );
+            write_stdout(stdout, &toon)
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": CAUSAL_COMPARE_SCHEMA_V1,
+                "success": true,
+                "data": report.data_json(),
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
 fn handle_causal_promote_plan<W, E>(
     cli: &Cli,
     args: &CausalPromotePlanArgs,
@@ -12582,6 +12706,7 @@ impl NormalizedInvocation {
                 },
                 Command::Causal(causal) => match causal {
                     CausalCommand::Trace(_) => "causal trace".to_string(),
+                    CausalCommand::Compare(_) => "causal compare".to_string(),
                     CausalCommand::Estimate(_) => "causal estimate".to_string(),
                     CausalCommand::PromotePlan(_) => "causal promote-plan".to_string(),
                 },
@@ -16064,7 +16189,36 @@ mod tests {
                 ensure_equal(&args.target_memory_id, &Some(memory_id), "target memory id")?;
                 ensure_equal(&args.limit, &25, "limit")?;
                 ensure_equal(&args.offset, &5, "offset")?;
-                ensure_equal(&args.all, &false, "all statuses")
+                ensure_equal(&args.all, &false, "all statuses")?;
+                ensure_equal(&args.sort, &"review_state".to_string(), "default sort")?;
+                ensure_equal(&args.group_duplicates, &false, "default duplicate grouping")
+            }
+            _ => Err("expected Curate Candidates command".to_string()),
+        }
+    }
+
+    #[test]
+    fn curate_candidates_command_parses_sort_and_duplicate_grouping() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "curate",
+            "candidates",
+            "--sort",
+            "confidence",
+            "--group-duplicates",
+        ])
+        .map_err(|error| {
+            format!(
+                "failed to parse curate candidates sort/group: {:?}",
+                error.kind()
+            )
+        })?;
+
+        match parsed.command {
+            Some(Command::Curate(CurateCommand::Candidates(ref args))) => {
+                ensure_equal(&args.sort, &"confidence".to_string(), "sort mode")?;
+                ensure_equal(&args.group_duplicates, &true, "duplicate grouping")?;
+                ensure_equal(&args.status, &None, "status absent before defaulting")
             }
             _ => Err("expected Curate Candidates command".to_string()),
         }

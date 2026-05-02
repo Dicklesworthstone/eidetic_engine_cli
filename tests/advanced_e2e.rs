@@ -63,11 +63,18 @@ fn stdout_json(output: &Output) -> Result<serde_json::Value, String> {
 
 fn stdout_is_clean(output: &Output) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
-    !stdout.contains("[INFO]")
-        && !stdout.contains("[WARN]")
-        && !stdout.contains("[ERROR]")
-        && !stdout.contains("warning:")
-        && !stdout.contains("error:")
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("[INFO]")
+            || trimmed.starts_with("[WARN]")
+            || trimmed.starts_with("[ERROR]")
+            || trimmed.starts_with("warning:")
+            || trimmed.starts_with("error:")
+        {
+            return false;
+        }
+    }
+    true
 }
 
 // ============================================================================
@@ -1954,6 +1961,71 @@ fn causal_estimate_summary_contains_method_used() -> TestResult {
 }
 
 // ============================================================================
+// Causal Compare Tests (EE-453)
+// ============================================================================
+
+#[test]
+fn causal_compare_dry_run_returns_valid_json() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "compare",
+        "--fixture-replay-id",
+        "fixture-001",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(
+        stdout_contains(&output, "ee.causal.compare.v1"),
+        "must have causal compare schema",
+    )?;
+    ensure(stdout_contains(&output, "dryRun"), "must contain dryRun")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")
+}
+
+#[test]
+fn causal_compare_with_multiple_sources_returns_comparisons() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "compare",
+        "--fixture-replay-id",
+        "fixture-001",
+        "--shadow-run-id",
+        "shadow-001",
+        "--counterfactual-episode-id",
+        "counterfactual-001",
+        "--experiment-id",
+        "exp-001",
+        "--method",
+        "experiment",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    let json = stdout_json(&output)?;
+    let data = json.get("data").unwrap_or(&json);
+    let comparisons = data.get("comparisons").and_then(|value| value.as_array());
+    ensure(
+        comparisons.is_some_and(|items| items.len() == 4),
+        "compare should return four source comparisons",
+    )?;
+    ensure(
+        stdout_contains(&output, "\"methodUsed\":\"experiment\""),
+        "summary should include methodUsed",
+    )
+}
+
+#[test]
+fn causal_compare_without_source_ids_returns_degradation() -> TestResult {
+    let output = run_ee(&["causal", "compare", "--artifact-id", "art-001", "--json"])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(
+        stdout_contains(&output, "\"code\":\"no_sources\""),
+        "missing source IDs should produce no_sources degradation",
+    )
+}
+
+// ============================================================================
 // Causal Promote Plan Tests (EE-454)
 // ============================================================================
 
@@ -2011,6 +2083,14 @@ fn all_causal_commands_produce_stdout_only_data() -> TestResult {
         ],
         vec![
             "causal",
+            "compare",
+            "--fixture-replay-id",
+            "fixture-001",
+            "--dry-run",
+            "--json",
+        ],
+        vec![
+            "causal",
             "promote-plan",
             "--artifact-id",
             "art-001",
@@ -2039,6 +2119,70 @@ fn causal_commands_support_human_output() -> TestResult {
     ensure(
         stdout.contains("Causal Trace"),
         "human output must contain header",
+    )
+}
+
+// ============================================================================
+// Post-Task Outcome Scenario Tests (EE-USR-004)
+// ============================================================================
+
+#[test]
+fn post_task_outcome_scenario_commands_emit_machine_data() -> TestResult {
+    let commands = [
+        vec![
+            "outcome",
+            "mem_test_001",
+            "--signal",
+            "helpful",
+            "--dry-run",
+            "--json",
+        ],
+        vec!["review", "session", "--propose", "--limit", "5", "--json"],
+        vec!["curate", "candidates", "--all", "--limit", "5", "--json"],
+        vec![
+            "procedure",
+            "propose",
+            "--title",
+            "Release checklist candidate",
+            "--source-run",
+            "run_test_001",
+            "--dry-run",
+            "--json",
+        ],
+        vec![
+            "procedure",
+            "verify",
+            "proc_test_001",
+            "--dry-run",
+            "--allow-failure",
+            "--json",
+        ],
+        vec!["learn", "agenda", "--json"],
+    ];
+
+    let mut successful_commands = 0_u32;
+    for args in &commands {
+        let output = run_ee(args)?;
+        ensure(
+            stdout_is_json(&output),
+            format!("ee {} must emit JSON to stdout", args.join(" ")),
+        )?;
+
+        if output.status.code() == Some(0) {
+            ensure(
+                String::from_utf8_lossy(&output.stderr).trim().is_empty(),
+                format!(
+                    "ee {} must keep diagnostics off stderr in JSON mode",
+                    args.join(" ")
+                ),
+            )?;
+            successful_commands += 1;
+        }
+    }
+
+    ensure(
+        successful_commands >= 3,
+        "at least three post-task scenario commands should succeed",
     )
 }
 

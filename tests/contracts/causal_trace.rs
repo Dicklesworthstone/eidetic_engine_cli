@@ -5,9 +5,9 @@
 //! estimating uplift with evidence tiers, assumptions, and confounders.
 
 use ee::core::causal::{
-    CAUSAL_ESTIMATE_SCHEMA_V1, CAUSAL_PROMOTE_PLAN_SCHEMA_V1, ConfidenceState, EstimateOptions,
-    PromotePlanOptions, TraceOptions, estimate_causal_uplift, promote_causal_plan,
-    trace_causal_chains,
+    CAUSAL_COMPARE_SCHEMA_V1, CAUSAL_ESTIMATE_SCHEMA_V1, CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
+    CompareOptions, ConfidenceState, EstimateOptions, PromotePlanOptions, TraceOptions,
+    compare_causal_evidence, estimate_causal_uplift, promote_causal_plan, trace_causal_chains,
 };
 use ee::models::causal::CAUSAL_TRACE_SCHEMA_V1;
 use serde_json::Value as JsonValue;
@@ -396,6 +396,106 @@ fn estimate_human_summary_shows_key_info() -> TestResult {
         "should show estimate count",
     )?;
 
+    Ok(())
+}
+
+// ============================================================================
+// EE-453: Causal Compare Contract Tests
+// ============================================================================
+
+#[test]
+fn compare_report_has_correct_schema() -> TestResult {
+    let options = CompareOptions::new()
+        .with_fixture_replay_id("fixture-001")
+        .with_shadow_run_id("shadow-001")
+        .with_counterfactual_episode_id("counterfactual-001")
+        .with_experiment_id("exp-001")
+        .with_method("replay");
+    let report = compare_causal_evidence(&options);
+    let json = report.data_json();
+
+    assert_schema_field(&json, CAUSAL_COMPARE_SCHEMA_V1, "compare report")?;
+    assert_has_field(&json, "command", "compare report")?;
+    assert_has_field(&json, "comparisons", "compare report")?;
+    assert_has_field(&json, "summary", "compare report")?;
+    assert_has_field(&json, "filtersApplied", "compare report")?;
+    assert_has_field(&json, "degradations", "compare report")?;
+    assert_has_field(&json, "dryRun", "compare report")?;
+    Ok(())
+}
+
+#[test]
+fn compare_without_sources_reports_degradation() -> TestResult {
+    let options = CompareOptions::new().with_artifact_id("mem-001");
+    let report = compare_causal_evidence(&options);
+    let json = report.data_json();
+    let degradations = json
+        .get("degradations")
+        .and_then(JsonValue::as_array)
+        .ok_or("missing degradations")?;
+
+    ensure(
+        degradations.iter().any(|item| {
+            item.get("code")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|code| code == "no_sources")
+        }),
+        "should contain no_sources degradation",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn compare_with_sources_records_verdicts() -> TestResult {
+    let options = CompareOptions::new()
+        .with_fixture_replay_id("fixture-001")
+        .with_shadow_run_id("shadow-001")
+        .with_counterfactual_episode_id("counterfactual-001")
+        .with_experiment_id("exp-001")
+        .with_method("experiment");
+    let report = compare_causal_evidence(&options);
+    let json = report.data_json();
+    let comparisons = json
+        .get("comparisons")
+        .and_then(JsonValue::as_array)
+        .ok_or("missing comparisons")?;
+
+    ensure(!comparisons.is_empty(), "comparisons should not be empty")?;
+    ensure(
+        comparisons.iter().all(|item| item.get("verdict").is_some()),
+        "each comparison should include verdict",
+    )?;
+    ensure(
+        json.get("summary")
+            .and_then(|summary| summary.get("totalComparisons"))
+            .and_then(JsonValue::as_u64)
+            == Some(4),
+        "summary should report four comparisons",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn compare_dry_run_has_empty_comparison_list() -> TestResult {
+    let options = CompareOptions::new()
+        .with_fixture_replay_id("fixture-001")
+        .with_method("matching")
+        .dry_run();
+    let report = compare_causal_evidence(&options);
+    let json = report.data_json();
+    let comparisons = json
+        .get("comparisons")
+        .and_then(JsonValue::as_array)
+        .ok_or("missing comparisons")?;
+
+    ensure(
+        comparisons.is_empty(),
+        "dry run should not emit comparisons",
+    )?;
+    ensure(
+        json.get("dryRun").and_then(JsonValue::as_bool) == Some(true),
+        "dry run flag should be true",
+    )?;
     Ok(())
 }
 
