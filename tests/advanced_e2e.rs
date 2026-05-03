@@ -2097,23 +2097,52 @@ fn post_task_outcome_scenario_commands_emit_machine_data() -> TestResult {
 // ============================================================================
 
 #[test]
-fn rehearse_plan_returns_valid_json() -> TestResult {
+fn rehearse_plan_degrades_until_real_sandbox_exists() -> TestResult {
     let output = run_ee(&["rehearse", "plan", "--json"])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
+        "exit code",
+    )?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
-        stdout_contains(&output, "ee.rehearse.plan.v1"),
-        "must have rehearse plan schema",
+        output.stderr.is_empty(),
+        "rehearse plan JSON degraded response must keep stderr empty",
+    )?;
+    let value = stdout_json(&output)?;
+    ensure_equal(
+        &value["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "schema",
+    )?;
+    ensure_equal(&value["success"], &serde_json::json!(false), "success")?;
+    ensure_equal(
+        &value["data"]["command"],
+        &serde_json::json!("rehearse plan"),
+        "command",
+    )?;
+    ensure_equal(
+        &value["data"]["code"],
+        &serde_json::json!("rehearsal_unavailable"),
+        "degraded code",
+    )?;
+    ensure_equal(
+        &value["data"]["repair"],
+        &serde_json::json!("ee status --json"),
+        "repair command",
     )?;
     ensure(
-        stdout_contains(&output, "can_proceed"),
-        "must contain can_proceed",
-    )?;
-    ensure(stdout_is_clean(&output), "stdout must be clean")
+        value.get("plan_id").is_none()
+            && value.get("estimated_artifacts").is_none()
+            && value.get("can_proceed").is_none()
+            && value.get("next_actions").is_none(),
+        "degraded plan must not emit generated plan artifacts or proceed guidance",
+    )
 }
 
 #[test]
-fn rehearse_plan_reports_non_rehearsable_command() -> TestResult {
+fn rehearse_plan_with_command_spec_degrades_before_claiming_artifacts() -> TestResult {
     let command_spec = r#"[{
       "id":"cmd_non_rehearsable",
       "command":"serve",
@@ -2131,23 +2160,40 @@ fn rehearse_plan_reports_non_rehearsable_command() -> TestResult {
         "full",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    let value = stdout_json(&output)?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
+        "exit code",
+    )?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
-        value["non_rehearsable"]
-            .as_array()
-            .is_some_and(|entries| !entries.is_empty()),
-        "must include non_rehearsable entries",
+        output.stderr.is_empty(),
+        "rehearse plan JSON degraded response must keep stderr empty",
+    )?;
+    let value = stdout_json(&output)?;
+    ensure_equal(
+        &value["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "schema",
+    )?;
+    ensure_equal(&value["success"], &serde_json::json!(false), "success")?;
+    ensure_equal(
+        &value["data"]["code"],
+        &serde_json::json!("rehearsal_unavailable"),
+        "degraded code",
     )?;
     ensure_equal(
-        &value["non_rehearsable"][0]["reason_code"],
-        &serde_json::json!("external_io"),
-        "reason code",
+        &value["data"]["repair"],
+        &serde_json::json!("ee status --json"),
+        "repair command",
     )?;
-    ensure_equal(
-        &value["can_proceed"],
-        &serde_json::json!(false),
-        "can proceed",
+    ensure(
+        value.get("non_rehearsable").is_none()
+            && value.get("can_proceed").is_none()
+            && value.get("estimated_artifacts").is_none()
+            && value.get("next_actions").is_none(),
+        "degraded plan must not emit command-classification or artifact claims",
     )
 }
 

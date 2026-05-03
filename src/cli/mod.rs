@@ -7392,7 +7392,7 @@ where
 
 const REHEARSAL_UNAVAILABLE_CODE: &str = "rehearsal_unavailable";
 const REHEARSAL_UNAVAILABLE_MESSAGE: &str = "Rehearsal sandbox execution and artifact inspection are unavailable until real isolated dry-run artifacts are implemented.";
-const REHEARSAL_UNAVAILABLE_REPAIR: &str = "ee rehearse plan --json";
+const REHEARSAL_UNAVAILABLE_REPAIR: &str = "ee status --json";
 const REHEARSAL_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-nd65";
 
 fn write_rehearsal_unavailable<W, E>(
@@ -7443,48 +7443,14 @@ fn handle_rehearse_plan<W, E>(
     cli: &Cli,
     args: &RehearsePlanArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let profile =
-        crate::core::rehearse::RehearsalProfile::from_str(&args.profile).unwrap_or_default();
-
-    let commands = parse_command_specs(args.commands.as_ref(), args.commands_json.as_ref());
-
-    let options = crate::core::rehearse::RehearsePlanOptions {
-        workspace: workspace_path,
-        commands,
-        profile,
-    };
-
-    match crate::core::rehearse::plan_rehearsal(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &report.human_summary())
-            }
-            output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(stdout, &(report.to_json() + "\n")),
-        },
-        Err(error) => {
-            let json = serde_json::json!({
-                "schema": crate::models::ERROR_SCHEMA_V1,
-                "success": false,
-                "error": {
-                    "code": error.code(),
-                    "message": error.message(),
-                    "repair": error.repair(),
-                }
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
-    }
+    let _ = args;
+    write_rehearsal_unavailable(cli, "rehearse plan", stdout, stderr)
 }
 
 fn handle_rehearse_run<W, E>(
@@ -7527,29 +7493,6 @@ where
 {
     let _ = args;
     write_rehearsal_unavailable(cli, "rehearse promote-plan", stdout, stderr)
-}
-
-fn parse_command_specs(
-    file_path: Option<&PathBuf>,
-    json_str: Option<&String>,
-) -> Vec<crate::core::rehearse::CommandSpec> {
-    if let Some(json) = json_str {
-        serde_json::from_str(json).unwrap_or_default()
-    } else if let Some(path) = file_path {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|content| serde_json::from_str(&content).ok())
-            .unwrap_or_default()
-    } else {
-        vec![crate::core::rehearse::CommandSpec {
-            id: "cmd_1".to_string(),
-            command: "status".to_string(),
-            args: vec!["--json".to_string()],
-            expected_effect: "read_only".to_string(),
-            stop_on_failure: false,
-            idempotency_key: None,
-        }]
-    }
 }
 
 // ============================================================================
