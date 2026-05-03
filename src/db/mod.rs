@@ -26,6 +26,9 @@ pub const PROVENANCE_STATUS_SKIPPED: &str = "skipped";
 pub mod audit_actions {
     pub const ARTIFACT_REGISTER: &str = "artifact.register";
     pub const FEEDBACK_RECORD: &str = "feedback.record";
+    pub const FEEDBACK_QUARANTINE: &str = "feedback.quarantine";
+    pub const FEEDBACK_QUARANTINE_RELEASE: &str = "feedback.quarantine.release";
+    pub const FEEDBACK_QUARANTINE_REJECT: &str = "feedback.quarantine.reject";
     pub const MEMORY_CREATE: &str = "memory.create";
     pub const MEMORY_SCORE_DECAY: &str = "memory.score_decay";
     pub const MEMORY_UPDATE: &str = "memory.update";
@@ -42,6 +45,7 @@ pub mod audit_actions {
     pub const CURATION_CANDIDATE_MERGE: &str = "curation_candidate.merge";
     pub const CURATION_CANDIDATE_DISPOSITION: &str = "curation_candidate.disposition";
     pub const RULE_CREATE: &str = "rule.create";
+    pub const RULE_PROTECT: &str = "rule.protect";
 }
 
 const MIGRATION_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS ee_schema_migrations (
@@ -2011,6 +2015,45 @@ CREATE INDEX idx_curation_ttl_policies_state ON curation_ttl_policies(review_sta
     "blake3:v021_curation_ttl_policy_2026_05_02",
 );
 
+/// V022: Add harmful-feedback quarantine and protected procedural rules.
+pub const V022_FEEDBACK_RATE_PROTECTION: Migration = Migration::new(
+    22,
+    "feedback_rate_protection",
+    r#"
+-- Harmful feedback rate limits and protected procedural rules (EE-FEEDBACK-RATE-001).
+ALTER TABLE procedural_rules ADD COLUMN protected INTEGER NOT NULL DEFAULT 0
+    CHECK (protected IN (0, 1));
+CREATE INDEX idx_procedural_rules_protected ON procedural_rules(protected);
+
+CREATE TABLE feedback_quarantine (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'fq_*' AND length(id) = 29),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL CHECK (length(trim(source_id)) > 0),
+    target_type TEXT NOT NULL CHECK (target_type IN (
+        'memory', 'rule', 'session', 'source', 'pack', 'candidate'
+    )),
+    target_id TEXT NOT NULL CHECK (length(trim(target_id)) > 0),
+    signal TEXT NOT NULL CHECK (signal IN (
+        'negative', 'contradiction', 'harmful', 'inaccurate'
+    )),
+    proposed_event_id TEXT CHECK (proposed_event_id IS NULL OR proposed_event_id GLOB 'fb_*'),
+    recorded_at TEXT NOT NULL CHECK (length(trim(recorded_at)) > 0),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    raw_event_hash TEXT NOT NULL CHECK (raw_event_hash GLOB 'blake3:*'),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'released', 'rejected')),
+    reviewed_at TEXT CHECK (reviewed_at IS NULL OR length(trim(reviewed_at)) > 0),
+    reviewed_by TEXT CHECK (reviewed_by IS NULL OR length(trim(reviewed_by)) > 0),
+    released_feedback_event_id TEXT REFERENCES feedback_events(id) ON DELETE SET NULL
+);
+
+CREATE INDEX idx_feedback_quarantine_workspace ON feedback_quarantine(workspace_id);
+CREATE INDEX idx_feedback_quarantine_source ON feedback_quarantine(workspace_id, source_id, recorded_at);
+CREATE INDEX idx_feedback_quarantine_target ON feedback_quarantine(target_type, target_id);
+CREATE INDEX idx_feedback_quarantine_status ON feedback_quarantine(status, recorded_at);
+"#,
+    "blake3:v022_feedback_rate_protection_2026_05_03",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -2034,6 +2077,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V019_ARTIFACT_REGISTRY,
     V020_CURATION_REVIEW_STATE,
     V021_CURATION_TTL_POLICY,
+    V022_FEEDBACK_RATE_PROTECTION,
 ];
 
 /// Result of applying migrations.
@@ -3676,6 +3720,46 @@ pub struct StoredFeedbackEvent {
     pub created_at: String,
 }
 
+/// Input for recording a quarantined harmful feedback event.
+#[derive(Debug, Clone)]
+pub struct CreateFeedbackQuarantineInput {
+    pub workspace_id: String,
+    pub source_id: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub signal: String,
+    pub proposed_event_id: Option<String>,
+    pub recorded_at: String,
+    pub reason: String,
+    pub raw_event_hash: String,
+}
+
+/// A stored feedback_quarantine row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredFeedbackQuarantine {
+    pub id: String,
+    pub workspace_id: String,
+    pub source_id: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub signal: String,
+    pub proposed_event_id: Option<String>,
+    pub recorded_at: String,
+    pub reason: String,
+    pub raw_event_hash: String,
+    pub status: String,
+    pub reviewed_at: Option<String>,
+    pub reviewed_by: Option<String>,
+    pub released_feedback_event_id: Option<String>,
+}
+
+/// Harmful feedback counts grouped by source for status reporting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedbackSourceHarmfulCount {
+    pub source_id: String,
+    pub harmful_count: u32,
+}
+
 /// Input for audited feedback event recording (EE-083).
 #[derive(Debug, Clone)]
 pub struct AuditedFeedbackEventInput {
@@ -3843,6 +3927,155 @@ impl DbConnection {
         }
 
         Ok(counts)
+    }
+
+    /// Count harmful feedback events from one source in a bounded time window.
+    pub fn count_harmful_feedback_for_source_since(
+        &self,
+        workspace_id: &str,
+        source_id: &str,
+        since: &str,
+    ) -> Result<u32> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT COUNT(*) FROM feedback_events WHERE workspace_id = ?1 AND source_id = ?2 AND signal IN ('negative', 'contradiction', 'harmful', 'inaccurate') AND created_at >= ?3",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(source_id.to_string()),
+                Value::Text(since.to_string()),
+            ],
+        )?;
+        rows.first().map_or(Ok(0), |row| {
+            required_u32(row, 0, DbOperation::Query, "count")
+        })
+    }
+
+    /// Count pending quarantined harmful feedback events from one source.
+    pub fn count_pending_quarantine_for_source_since(
+        &self,
+        workspace_id: &str,
+        source_id: &str,
+        since: &str,
+    ) -> Result<u32> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT COUNT(*) FROM feedback_quarantine WHERE workspace_id = ?1 AND source_id = ?2 AND status = 'pending' AND recorded_at >= ?3",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(source_id.to_string()),
+                Value::Text(since.to_string()),
+            ],
+        )?;
+        rows.first().map_or(Ok(0), |row| {
+            required_u32(row, 0, DbOperation::Query, "count")
+        })
+    }
+
+    /// List harmful feedback counts by source in a bounded time window.
+    pub fn list_harmful_feedback_source_counts_since(
+        &self,
+        workspace_id: &str,
+        since: &str,
+    ) -> Result<Vec<FeedbackSourceHarmfulCount>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT COALESCE(source_id, 'source:unknown') AS source_id, COUNT(*) AS harmful_count FROM feedback_events WHERE workspace_id = ?1 AND signal IN ('negative', 'contradiction', 'harmful', 'inaccurate') AND created_at >= ?2 GROUP BY COALESCE(source_id, 'source:unknown') ORDER BY harmful_count DESC, source_id ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(since.to_string()),
+            ],
+        )?;
+        rows.iter()
+            .map(|row| {
+                Ok(FeedbackSourceHarmfulCount {
+                    source_id: required_text(row, 0, DbOperation::Query, "source_id")?.to_string(),
+                    harmful_count: required_u32(row, 1, DbOperation::Query, "harmful_count")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Insert a quarantined feedback event without applying it to scoring.
+    pub fn insert_feedback_quarantine(
+        &self,
+        id: &str,
+        input: &CreateFeedbackQuarantineInput,
+    ) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO feedback_quarantine (id, workspace_id, source_id, target_type, target_id, signal, proposed_event_id, recorded_at, reason, raw_event_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.source_id.clone()),
+                Value::Text(input.target_type.clone()),
+                Value::Text(input.target_id.clone()),
+                Value::Text(input.signal.clone()),
+                input
+                    .proposed_event_id
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(input.recorded_at.clone()),
+                Value::Text(input.reason.clone()),
+                Value::Text(input.raw_event_hash.clone()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get one feedback quarantine row by ID.
+    pub fn get_feedback_quarantine(&self, id: &str) -> Result<Option<StoredFeedbackQuarantine>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, source_id, target_type, target_id, signal, proposed_event_id, recorded_at, reason, raw_event_hash, status, reviewed_at, reviewed_by, released_feedback_event_id FROM feedback_quarantine WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+        rows.first()
+            .map(stored_feedback_quarantine_from_row)
+            .transpose()
+    }
+
+    /// List feedback quarantine rows for one workspace in deterministic order.
+    pub fn list_feedback_quarantine(
+        &self,
+        workspace_id: &str,
+        status: Option<&str>,
+    ) -> Result<Vec<StoredFeedbackQuarantine>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, source_id, target_type, target_id, signal, proposed_event_id, recorded_at, reason, raw_event_hash, status, reviewed_at, reviewed_by, released_feedback_event_id FROM feedback_quarantine WHERE workspace_id = ?1 AND (?2 IS NULL OR status = ?2) ORDER BY recorded_at ASC, id ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                status.map_or(Value::Null, |value| Value::Text(value.to_string())),
+            ],
+        )?;
+        rows.iter()
+            .map(stored_feedback_quarantine_from_row)
+            .collect()
+    }
+
+    /// Mark a quarantine row released or rejected without deleting evidence.
+    pub fn update_feedback_quarantine_status(
+        &self,
+        id: &str,
+        status: &str,
+        reviewed_by: Option<&str>,
+        released_feedback_event_id: Option<&str>,
+    ) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE feedback_quarantine SET status = ?1, reviewed_at = ?2, reviewed_by = ?3, released_feedback_event_id = ?4 WHERE id = ?5 AND status = 'pending'",
+            &[
+                Value::Text(status.to_string()),
+                Value::Text(now),
+                reviewed_by.map_or(Value::Null, |value| Value::Text(value.to_string())),
+                released_feedback_event_id
+                    .map_or(Value::Null, |value| Value::Text(value.to_string())),
+                Value::Text(id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
     }
 
     /// Insert a feedback event and audit entry in one transaction (EE-083).
@@ -4147,6 +4380,25 @@ fn stored_feedback_event_from_row(row: &Row) -> Result<StoredFeedbackEvent> {
         session_id: optional_text(row, 10)?.map(str::to_string),
         applied_at: optional_text(row, 11)?.map(str::to_string),
         created_at: required_text(row, 12, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
+fn stored_feedback_quarantine_from_row(row: &Row) -> Result<StoredFeedbackQuarantine> {
+    Ok(StoredFeedbackQuarantine {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        source_id: required_text(row, 2, DbOperation::Query, "source_id")?.to_string(),
+        target_type: required_text(row, 3, DbOperation::Query, "target_type")?.to_string(),
+        target_id: required_text(row, 4, DbOperation::Query, "target_id")?.to_string(),
+        signal: required_text(row, 5, DbOperation::Query, "signal")?.to_string(),
+        proposed_event_id: optional_text(row, 6)?.map(str::to_string),
+        recorded_at: required_text(row, 7, DbOperation::Query, "recorded_at")?.to_string(),
+        reason: required_text(row, 8, DbOperation::Query, "reason")?.to_string(),
+        raw_event_hash: required_text(row, 9, DbOperation::Query, "raw_event_hash")?.to_string(),
+        status: required_text(row, 10, DbOperation::Query, "status")?.to_string(),
+        reviewed_at: optional_text(row, 11)?.map(str::to_string),
+        reviewed_by: optional_text(row, 12)?.map(str::to_string),
+        released_feedback_event_id: optional_text(row, 13)?.map(str::to_string),
     })
 }
 
@@ -4796,6 +5048,7 @@ pub struct CreateProceduralRuleInput {
     pub scope: String,
     pub scope_pattern: Option<String>,
     pub maturity: String,
+    pub protected: bool,
     pub source_memory_ids: Vec<String>,
     pub tags: Vec<String>,
 }
@@ -4813,6 +5066,7 @@ pub struct StoredProceduralRule {
     pub scope: String,
     pub scope_pattern: Option<String>,
     pub maturity: String,
+    pub protected: bool,
     pub positive_feedback_count: u32,
     pub negative_feedback_count: u32,
     pub last_applied_at: Option<String>,
@@ -5239,7 +5493,7 @@ impl DbConnection {
 
         self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO procedural_rules (id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO procedural_rules (id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, protected, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             &[
                 Value::Text(id.to_string()),
                 Value::Text(input.workspace_id.clone()),
@@ -5254,6 +5508,7 @@ impl DbConnection {
                     .as_ref()
                     .map_or(Value::Null, |pattern| Value::Text(pattern.clone())),
                 Value::Text(input.maturity.clone()),
+                bool_value(input.protected),
                 Value::Text(now.clone()),
                 Value::Text(now),
             ],
@@ -5282,7 +5537,7 @@ impl DbConnection {
     pub fn get_procedural_rule(&self, id: &str) -> Result<Option<StoredProceduralRule>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, positive_feedback_count, negative_feedback_count, last_applied_at, last_validated_at, superseded_by, created_at, updated_at, tombstoned_at FROM procedural_rules WHERE id = ?1",
+            "SELECT id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, protected, positive_feedback_count, negative_feedback_count, last_applied_at, last_validated_at, superseded_by, created_at, updated_at, tombstoned_at FROM procedural_rules WHERE id = ?1",
             &[Value::Text(id.to_string())],
         )?;
 
@@ -5302,7 +5557,7 @@ impl DbConnection {
     ) -> Result<Vec<StoredProceduralRule>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, positive_feedback_count, negative_feedback_count, last_applied_at, last_validated_at, superseded_by, created_at, updated_at, tombstoned_at FROM procedural_rules WHERE workspace_id = ?1 AND (?2 IS NULL OR maturity = ?2) AND (?3 IS NULL OR scope = ?3) AND (?4 = 1 OR tombstoned_at IS NULL) ORDER BY updated_at DESC, id ASC",
+            "SELECT id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, protected, positive_feedback_count, negative_feedback_count, last_applied_at, last_validated_at, superseded_by, created_at, updated_at, tombstoned_at FROM procedural_rules WHERE workspace_id = ?1 AND (?2 IS NULL OR maturity = ?2) AND (?3 IS NULL OR scope = ?3) AND (?4 = 1 OR tombstoned_at IS NULL) ORDER BY updated_at DESC, id ASC",
             &[
                 Value::Text(workspace_id.to_string()),
                 maturity.map_or(Value::Null, |value| Value::Text(value.to_string())),
@@ -5312,6 +5567,39 @@ impl DbConnection {
         )?;
 
         rows.iter().map(stored_procedural_rule_from_row).collect()
+    }
+
+    /// Toggle the protected marker for one active procedural rule.
+    pub fn update_procedural_rule_protected(
+        &self,
+        rule_id: &str,
+        workspace_id: &str,
+        protected: bool,
+    ) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE procedural_rules SET protected = ?1, updated_at = ?2 WHERE id = ?3 AND workspace_id = ?4 AND tombstoned_at IS NULL",
+            &[
+                bool_value(protected),
+                Value::Text(now),
+                Value::Text(rule_id.to_string()),
+                Value::Text(workspace_id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Count protected active procedural rules in a workspace.
+    pub fn count_protected_procedural_rules(&self, workspace_id: &str) -> Result<u32> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT COUNT(*) FROM procedural_rules WHERE workspace_id = ?1 AND protected = 1 AND tombstoned_at IS NULL",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+        rows.first().map_or(Ok(0), |row| {
+            required_u32(row, 0, DbOperation::Query, "count")
+        })
     }
 
     /// Get tags for a procedural rule in stable order.
@@ -5353,24 +5641,25 @@ fn stored_procedural_rule_from_row(row: &Row) -> Result<StoredProceduralRule> {
         scope: required_text(row, 7, DbOperation::Query, "scope")?.to_string(),
         scope_pattern: optional_text(row, 8)?.map(str::to_string),
         maturity: required_text(row, 9, DbOperation::Query, "maturity")?.to_string(),
+        protected: required_bool(row, 10, DbOperation::Query, "protected")?,
         positive_feedback_count: required_u32(
             row,
-            10,
+            11,
             DbOperation::Query,
             "positive_feedback_count",
         )?,
         negative_feedback_count: required_u32(
             row,
-            11,
+            12,
             DbOperation::Query,
             "negative_feedback_count",
         )?,
-        last_applied_at: optional_text(row, 12)?.map(str::to_string),
-        last_validated_at: optional_text(row, 13)?.map(str::to_string),
-        superseded_by: optional_text(row, 14)?.map(str::to_string),
-        created_at: required_text(row, 15, DbOperation::Query, "created_at")?.to_string(),
-        updated_at: required_text(row, 16, DbOperation::Query, "updated_at")?.to_string(),
-        tombstoned_at: optional_text(row, 17)?.map(str::to_string),
+        last_applied_at: optional_text(row, 13)?.map(str::to_string),
+        last_validated_at: optional_text(row, 14)?.map(str::to_string),
+        superseded_by: optional_text(row, 15)?.map(str::to_string),
+        created_at: required_text(row, 16, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 17, DbOperation::Query, "updated_at")?.to_string(),
+        tombstoned_at: optional_text(row, 18)?.map(str::to_string),
     })
 }
 

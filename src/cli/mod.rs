@@ -71,15 +71,21 @@ use crate::core::memory::{
     GetMemoryOptions, ListMemoriesOptions, RememberMemoryOptions, RememberMemoryReport,
     get_memory_details, list_memories, remember_memory,
 };
-use crate::core::outcome::{OutcomeRecordOptions, record_outcome};
+use crate::core::outcome::{
+    DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+    OutcomeQuarantineListOptions, OutcomeQuarantineListReport, OutcomeQuarantineReviewOptions,
+    OutcomeQuarantineReviewReport, OutcomeRecordOptions, list_feedback_quarantine, record_outcome,
+    review_feedback_quarantine,
+};
 use crate::core::preflight::{
     CloseOptions as PreflightCloseOptions, RunOptions as PreflightRunOptions,
     ShowOptions as PreflightShowOptions, close_preflight, run_preflight, show_preflight,
 };
 use crate::core::quarantine::QuarantineReport;
 use crate::core::rule::{
-    RuleAddOptions, RuleAddReport, RuleListOptions, RuleListReport, RuleShowOptions,
-    RuleShowReport, add_rule, list_rules, show_rule,
+    RuleAddOptions, RuleAddReport, RuleListOptions, RuleListReport, RuleProtectOptions,
+    RuleProtectReport, RuleShowOptions, RuleShowReport, add_rule, list_rules, protect_rule,
+    show_rule,
 };
 use crate::core::search::{SearchOptions, run_search};
 use crate::core::situation::{
@@ -336,6 +342,9 @@ pub enum Command {
     Model(ModelCommand),
     /// Record observed feedback about a memory or related target.
     Outcome(OutcomeArgs),
+    /// Review harmful-feedback quarantine rows.
+    #[command(name = "outcome-quarantine", subcommand)]
+    OutcomeQuarantine(OutcomeQuarantineCommand),
     /// Build a context pack from an explicit query document.
     Pack(PackArgs),
     /// Run, show, or close preflight risk assessments.
@@ -2878,6 +2887,8 @@ pub enum RuleCommand {
     List(RuleListArgs),
     /// Show one procedural rule.
     Show(RuleShowArgs),
+    /// Protect or unprotect a procedural rule.
+    Protect(RuleProtectArgs),
 }
 
 /// Arguments for `ee rule add`.
@@ -2914,6 +2925,10 @@ pub struct RuleAddArgs {
     /// Trust class for the rule.
     #[arg(long, default_value = "human_explicit")]
     pub trust_class: String,
+
+    /// Protect the rule against automatic harmful-feedback inversion.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub protect: bool,
 
     /// Tags to apply. May be repeated or comma-separated.
     #[arg(long = "tag", short = 't')]
@@ -2984,6 +2999,30 @@ pub struct RuleShowArgs {
     pub include_tombstoned: bool,
 }
 
+/// Arguments for `ee rule protect`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct RuleProtectArgs {
+    /// Rule ID.
+    #[arg(value_name = "RULE_ID")]
+    pub rule_id: String,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Remove the protected marker instead of setting it.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub unprotect: bool,
+
+    /// Audit actor.
+    #[arg(long)]
+    pub actor: Option<String>,
+
+    /// Validate and render without mutating storage.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
 /// Arguments for `ee outcome`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct OutcomeArgs {
@@ -3036,6 +3075,59 @@ pub struct OutcomeArgs {
     pub actor: Option<String>,
 
     /// Validate and render the event without writing storage.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Maximum harmful events from one source in the burst window before quarantine.
+    #[arg(long, default_value_t = DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR)]
+    pub harmful_per_source_per_hour: u32,
+
+    /// Burst window for harmful feedback rate limiting.
+    #[arg(long, default_value_t = DEFAULT_HARMFUL_BURST_WINDOW_SECONDS)]
+    pub harmful_burst_window_seconds: u32,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee outcome quarantine`.
+#[derive(Clone, Debug, Subcommand, PartialEq)]
+pub enum OutcomeQuarantineCommand {
+    /// List quarantined feedback events.
+    List(OutcomeQuarantineListArgs),
+    /// Release or reject one quarantined feedback event.
+    Release(OutcomeQuarantineReleaseArgs),
+}
+
+/// Arguments for `ee outcome quarantine list`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct OutcomeQuarantineListArgs {
+    /// Optional status filter: pending, released, rejected, or all.
+    #[arg(long, default_value = "pending")]
+    pub status: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee outcome quarantine release`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct OutcomeQuarantineReleaseArgs {
+    /// Quarantine ID.
+    #[arg(value_name = "QUARANTINE_ID")]
+    pub quarantine_id: String,
+
+    /// Reject the quarantined event instead of releasing it to live feedback.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub reject: bool,
+
+    /// Audit actor.
+    #[arg(long)]
+    pub actor: Option<String>,
+
+    /// Validate and render without mutating storage.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 
@@ -3674,7 +3766,7 @@ where
     W: Write,
     E: Write,
 {
-    let args: Vec<OsString> = args.into_iter().collect();
+    let args: Vec<OsString> = normalize_outcome_quarantine_args(args.into_iter().collect());
     let mut cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(error) => return write_parse_error(error, &args, stdout, stderr),
@@ -4250,6 +4342,12 @@ where
             handle_graph_neighborhood(&cli, args, stdout, stderr)
         }
         Some(Command::Outcome(ref args)) => handle_outcome(&cli, args, stdout, stderr),
+        Some(Command::OutcomeQuarantine(OutcomeQuarantineCommand::List(ref args))) => {
+            handle_outcome_quarantine_list(&cli, args, stdout, stderr)
+        }
+        Some(Command::OutcomeQuarantine(OutcomeQuarantineCommand::Release(ref args))) => {
+            handle_outcome_quarantine_release(&cli, args, stdout, stderr)
+        }
         Some(Command::Pack(ref args)) => handle_pack(&cli, args, stdout, stderr),
         Some(Command::Preflight(PreflightCommand::Run(ref args))) => {
             handle_preflight_run(&cli, args, stdout, stderr)
@@ -4452,6 +4550,9 @@ where
         Some(Command::Rule(RuleCommand::Show(ref args))) => {
             handle_rule_show(&cli, args, stdout, stderr)
         }
+        Some(Command::Rule(RuleCommand::Protect(ref args))) => {
+            handle_rule_protect(&cli, args, stdout, stderr)
+        }
         Some(Command::Review(ReviewCommand::Session(ref args))) => {
             handle_review_session(&cli, args, stdout, stderr)
         }
@@ -4533,6 +4634,19 @@ where
         Some(Command::Update(ref args)) => handle_update(&cli, args, stdout, stderr),
         Some(Command::Why(ref args)) => handle_why(&cli, args, stdout, stderr),
     }
+}
+
+fn normalize_outcome_quarantine_args(mut args: Vec<OsString>) -> Vec<OsString> {
+    let mut index = 0;
+    while index + 1 < args.len() {
+        if args[index] == "outcome" && args[index + 1] == "quarantine" {
+            args[index] = OsString::from("outcome-quarantine");
+            args.remove(index + 1);
+            break;
+        }
+        index += 1;
+    }
+    args
 }
 
 fn handle_install_check<W>(cli: &Cli, args: &InstallCheckArgs, stdout: &mut W) -> ProcessExitCode
@@ -9985,6 +10099,8 @@ where
         event_id: args.event_id.clone(),
         actor: args.actor.clone(),
         dry_run: args.dry_run,
+        harmful_per_source_per_hour: args.harmful_per_source_per_hour,
+        harmful_burst_window_seconds: args.harmful_burst_window_seconds,
     };
 
     match record_outcome(&options) {
@@ -10015,6 +10131,109 @@ where
             }
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_outcome_quarantine_list<W, E>(
+    cli: &Cli,
+    args: &OutcomeQuarantineListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = OutcomeQuarantineListOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        status: Some(args.status.as_str()),
+    };
+
+    match list_feedback_quarantine(&options) {
+        Ok(report) => write_outcome_quarantine_list_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_outcome_quarantine_list_report<W>(
+    cli: &Cli,
+    report: &OutcomeQuarantineListReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &output::render_outcome_quarantine_list_human(report),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_outcome_quarantine_list_toon(report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_outcome_quarantine_list_json(report) + "\n"),
+        ),
+    }
+}
+
+fn handle_outcome_quarantine_release<W, E>(
+    cli: &Cli,
+    args: &OutcomeQuarantineReleaseArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = OutcomeQuarantineReviewOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        quarantine_id: &args.quarantine_id,
+        reject: args.reject,
+        actor: args.actor.as_deref(),
+        dry_run: args.dry_run,
+    };
+
+    match review_feedback_quarantine(&options) {
+        Ok(report) => write_outcome_quarantine_review_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_outcome_quarantine_review_report<W>(
+    cli: &Cli,
+    report: &OutcomeQuarantineReviewReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &output::render_outcome_quarantine_review_human(report),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_outcome_quarantine_review_toon(report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_outcome_quarantine_review_json(report) + "\n"),
+        ),
     }
 }
 
@@ -10831,6 +11050,7 @@ where
         utility: args.utility,
         importance: args.importance,
         trust_class: &args.trust_class,
+        protected: args.protect,
         tags: &args.tags,
         source_memory_ids: &args.source_memory_ids,
         dry_run: args.dry_run,
@@ -10951,6 +11171,56 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             write_stdout(stdout, &(output::render_rule_show_json(report) + "\n"))
+        }
+    }
+}
+
+fn handle_rule_protect<W, E>(
+    cli: &Cli,
+    args: &RuleProtectArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = RuleProtectOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        rule_id: &args.rule_id,
+        protected: !args.unprotect,
+        dry_run: args.dry_run,
+        actor: args.actor.as_deref(),
+    };
+
+    match protect_rule(&options) {
+        Ok(report) => write_rule_protect_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_rule_protect_report<W>(
+    cli: &Cli,
+    report: &RuleProtectReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_rule_protect_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_rule_protect_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_rule_protect_json(report) + "\n"))
         }
     }
 }
@@ -13184,6 +13454,12 @@ impl NormalizedInvocation {
                     ModelCommand::List(_) => "model list".to_string(),
                 },
                 Command::Outcome(_) => "outcome".to_string(),
+                Command::OutcomeQuarantine(command) => match command {
+                    OutcomeQuarantineCommand::List(_) => "outcome quarantine list".to_string(),
+                    OutcomeQuarantineCommand::Release(_) => {
+                        "outcome quarantine release".to_string()
+                    }
+                },
                 Command::Pack(_) => "pack".to_string(),
                 Command::Preflight(preflight) => match preflight {
                     PreflightCommand::Run(_) => "preflight run".to_string(),
@@ -13230,6 +13506,7 @@ impl NormalizedInvocation {
                     RuleCommand::Add(_) => "rule add".to_string(),
                     RuleCommand::List(_) => "rule list".to_string(),
                     RuleCommand::Show(_) => "rule show".to_string(),
+                    RuleCommand::Protect(_) => "rule protect".to_string(),
                 },
                 Command::Schema(schema) => match schema {
                     SchemaCommand::List => "schema list".to_string(),
@@ -13738,8 +14015,8 @@ mod tests {
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli,
         Command, CurateCommand, DiagCommand, EconomyCommand, FieldsLevel, GraphCommand,
-        ImportCommand, LearnCommand, LearnExperimentCommand, MemoryCommand, OutputFormat,
-        RuleCommand, ShadowMode, SituationCommand, run,
+        ImportCommand, LearnCommand, LearnExperimentCommand, MemoryCommand,
+        OutcomeQuarantineCommand, OutputFormat, RuleCommand, ShadowMode, SituationCommand, run,
     };
     use crate::models::ProcessExitCode;
     use crate::output;
@@ -16136,6 +16413,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn outcome_quarantine_legacy_nested_form_normalizes() -> TestResult {
+        let normalized = super::normalize_outcome_quarantine_args(vec![
+            OsString::from("ee"),
+            OsString::from("--json"),
+            OsString::from("outcome"),
+            OsString::from("quarantine"),
+            OsString::from("list"),
+        ]);
+        let parsed = Cli::try_parse_from(normalized)
+            .map_err(|e| format!("failed to parse outcome quarantine: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::OutcomeQuarantine(OutcomeQuarantineCommand::List(ref args))) => {
+                ensure_equal(&args.status, &"pending".to_string(), "status")
+            }
+            _ => Err("expected Outcome Quarantine List command".to_string()),
+        }
+    }
+
     // ========================================================================
     // Context Command Tests (EE-147)
     // ========================================================================
@@ -17126,6 +17423,29 @@ mod tests {
                 ensure_equal(&args.include_tombstoned, &true, "include tombstoned")
             }
             _ => Err("expected Rule Show command".to_string()),
+        }
+    }
+
+    #[test]
+    fn rule_protect_command_parses_unprotect_and_dry_run() -> TestResult {
+        let rule_id = crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(10)).to_string();
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "rule",
+            "protect",
+            rule_id.as_str(),
+            "--unprotect",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse rule protect: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Rule(RuleCommand::Protect(ref args))) => {
+                ensure_equal(&args.rule_id, &rule_id, "rule id")?;
+                ensure_equal(&args.unprotect, &true, "unprotect")?;
+                ensure_equal(&args.dry_run, &true, "dry run")
+            }
+            _ => Err("expected Rule Protect command".to_string()),
         }
     }
 

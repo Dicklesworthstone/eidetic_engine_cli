@@ -26,6 +26,8 @@ pub const RULE_ADD_SCHEMA_V1: &str = "ee.rule.add.v1";
 pub const RULE_LIST_SCHEMA_V1: &str = "ee.rule.list.v1";
 /// Stable schema for `ee rule show` response data.
 pub const RULE_SHOW_SCHEMA_V1: &str = "ee.rule.show.v1";
+/// Stable schema for `ee rule protect` response data.
+pub const RULE_PROTECT_SCHEMA_V1: &str = "ee.rule.protect.v1";
 
 const MAX_RULE_CONTENT_BYTES: usize = 8192;
 const MAX_RULE_LIST_LIMIT: u32 = 1000;
@@ -53,6 +55,8 @@ pub struct RuleAddOptions<'a> {
     pub importance: f32,
     /// Trust class.
     pub trust_class: &'a str,
+    /// Protect the rule against automatic harmful-feedback inversion.
+    pub protected: bool,
     /// Tags, allowing repeated flags and comma-separated values.
     pub tags: &'a [String],
     /// Source memory IDs used as explicit evidence.
@@ -97,6 +101,23 @@ pub struct RuleShowOptions<'a> {
     pub include_tombstoned: bool,
 }
 
+/// Options for toggling a procedural rule's protected marker.
+#[derive(Clone, Debug)]
+pub struct RuleProtectOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Rule ID to protect or unprotect.
+    pub rule_id: &'a str,
+    /// Desired protected state. `false` implements `--unprotect`.
+    pub protected: bool,
+    /// Validate and render the write without mutating storage.
+    pub dry_run: bool,
+    /// Optional audit actor.
+    pub actor: Option<&'a str>,
+}
+
 /// Result of creating or previewing a procedural rule.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,6 +136,7 @@ pub struct RuleAddReport {
     pub maturity: String,
     pub lifecycle: RuleAddLifecycle,
     pub trust_class: String,
+    pub protected: bool,
     pub confidence: f32,
     pub utility: f32,
     pub importance: f32,
@@ -304,6 +326,7 @@ impl RuleShowReport {
             rule.confidence, rule.utility, rule.importance
         ));
         output.push_str(&format!("  Trust: {}\n", rule.trust_class));
+        output.push_str(&format!("  Protected: {}\n", rule.protected));
         output.push_str(&format!(
             "  Feedback: +{} / -{}\n",
             rule.positive_feedback_count, rule.negative_feedback_count
@@ -326,6 +349,71 @@ impl RuleShowReport {
     }
 }
 
+/// Result of protecting or unprotecting one procedural rule.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleProtectReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub status: String,
+    pub rule_id: String,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub protected: bool,
+    pub previous_protected: bool,
+    pub changed: bool,
+    pub dry_run: bool,
+    pub audit_id: Option<String>,
+    pub degraded: Vec<RuleAddDegradation>,
+}
+
+impl RuleProtectReport {
+    /// Serialize response data without the outer response envelope.
+    #[must_use]
+    pub fn data_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                r#"{{"schema":"{}","command":"rule protect","status":"serialization_failed"}}"#,
+                RULE_PROTECT_SCHEMA_V1
+            )
+        })
+    }
+
+    /// Human-readable summary.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let verb = if self.protected {
+            "Protected"
+        } else {
+            "Unprotected"
+        };
+        if self.dry_run {
+            format!(
+                "DRY RUN: Would set procedural rule protection\n  ID: {}\n  Protected: {}\n",
+                self.rule_id, self.protected
+            )
+        } else {
+            format!(
+                "{verb} procedural rule\n  ID: {}\n  Changed: {}\n  Audit: {}\n",
+                self.rule_id,
+                self.changed,
+                self.audit_id.as_deref().unwrap_or("none")
+            )
+        }
+    }
+
+    /// Compact TOON-like summary.
+    #[must_use]
+    pub fn toon_summary(&self) -> String {
+        format!(
+            "RULE_PROTECT|status={}|id={}|protected={}|changed={}",
+            self.status, self.rule_id, self.protected, self.changed
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuleListFilter {
@@ -345,6 +433,7 @@ pub struct RuleSummary {
     pub scope: String,
     pub scope_pattern: Option<String>,
     pub trust_class: String,
+    pub protected: bool,
     pub confidence: f32,
     pub utility: f32,
     pub importance: f32,
@@ -368,6 +457,7 @@ pub struct RuleDetails {
     pub scope: String,
     pub scope_pattern: Option<String>,
     pub maturity: String,
+    pub protected: bool,
     pub lifecycle: RuleLifecycle,
     pub positive_feedback_count: u32,
     pub negative_feedback_count: u32,
@@ -416,6 +506,7 @@ struct PreparedRuleAdd {
     importance: f32,
     tags: Vec<String>,
     source_memory_ids: Vec<String>,
+    protected: bool,
     actor: Option<String>,
 }
 
@@ -469,6 +560,7 @@ pub fn add_rule(options: &RuleAddOptions<'_>) -> Result<RuleAddReport, DomainErr
         scope: prepared.scope.as_str().to_owned(),
         scope_pattern: prepared.scope_pattern.clone(),
         maturity: prepared.maturity.as_str().to_owned(),
+        protected: prepared.protected,
         source_memory_ids: prepared.source_memory_ids.clone(),
         tags: prepared.tags.clone(),
     };
@@ -640,6 +732,92 @@ pub fn show_rule(options: &RuleShowOptions<'_>) -> Result<RuleShowReport, Domain
     })
 }
 
+/// Protect or unprotect one procedural rule.
+pub fn protect_rule(options: &RuleProtectOptions<'_>) -> Result<RuleProtectReport, DomainError> {
+    let prepared = prepare_rule_read(
+        options.workspace_path,
+        options.database_path,
+        Some("ee rule protect <RULE_ID> --json"),
+    )?;
+    let rule_id = RuleId::from_str(options.rule_id)
+        .map_err(|error| {
+            rule_read_usage_error(
+                format!("invalid rule ID: {error}"),
+                "ee rule protect --help",
+            )
+        })?
+        .to_string();
+    let connection = open_existing_database(&prepared.database_path)?;
+    let Some(rule) =
+        connection
+            .get_procedural_rule(&rule_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query procedural rule: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            })?
+    else {
+        return Err(rule_not_found(&rule_id));
+    };
+    if rule.workspace_id != prepared.workspace_id || rule.tombstoned_at.is_some() {
+        return Err(rule_not_found(&rule_id));
+    }
+
+    let previous_protected = rule.protected;
+    let changed = previous_protected != options.protected;
+    if options.dry_run {
+        return Ok(rule_protect_report(
+            &prepared,
+            &rule_id,
+            options.protected,
+            previous_protected,
+            changed,
+            true,
+            None,
+        ));
+    }
+
+    let audit_id = generate_audit_id();
+    let details = rule_protect_audit_details(&rule_id, previous_protected, options.protected);
+    connection
+        .with_transaction(|| {
+            if changed {
+                connection.update_procedural_rule_protected(
+                    &rule_id,
+                    &prepared.workspace_id,
+                    options.protected,
+                )?;
+            }
+            connection.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(prepared.workspace_id.clone()),
+                    actor: options
+                        .actor
+                        .map(str::to_owned)
+                        .or_else(|| Some("ee rule protect".to_owned())),
+                    action: audit_actions::RULE_PROTECT.to_owned(),
+                    target_type: Some("rule".to_owned()),
+                    target_id: Some(rule_id.clone()),
+                    details: Some(details.clone()),
+                },
+            )
+        })
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to update procedural rule protection: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+
+    Ok(rule_protect_report(
+        &prepared,
+        &rule_id,
+        options.protected,
+        previous_protected,
+        changed,
+        false,
+        Some(audit_id),
+    ))
+}
+
 fn prepare_rule_read(
     workspace_path: &Path,
     database_path: Option<&Path>,
@@ -755,6 +933,7 @@ fn load_rule_details(
         scope: stored.scope,
         scope_pattern: stored.scope_pattern,
         maturity: stored.maturity,
+        protected: stored.protected,
         lifecycle,
         positive_feedback_count: stored.positive_feedback_count,
         negative_feedback_count: stored.negative_feedback_count,
@@ -779,6 +958,7 @@ fn rule_summary_from_details(details: RuleDetails) -> RuleSummary {
         scope: details.scope,
         scope_pattern: details.scope_pattern,
         trust_class: details.trust_class,
+        protected: details.protected,
         confidence: details.confidence,
         utility: details.utility,
         importance: details.importance,
@@ -928,6 +1108,7 @@ fn prepare_rule_add(options: &RuleAddOptions<'_>) -> Result<PreparedRuleAdd, Dom
         importance,
         tags,
         source_memory_ids,
+        protected: options.protected,
         actor,
     })
 }
@@ -1054,6 +1235,7 @@ fn rule_add_report(
             },
         },
         trust_class: prepared.trust_class.as_str().to_owned(),
+        protected: prepared.protected,
         confidence: prepared.confidence,
         utility: prepared.utility,
         importance: prepared.importance,
@@ -1171,11 +1353,57 @@ fn rule_add_audit_details(rule_id: &str, input: &CreateProceduralRuleInput) -> S
         "scope": input.scope,
         "scopePattern": input.scope_pattern,
         "trustClass": input.trust_class,
+        "protected": input.protected,
         "confidence": input.confidence,
         "utility": input.utility,
         "importance": input.importance,
         "tagCount": input.tags.len(),
         "sourceMemoryCount": input.source_memory_ids.len(),
+    })
+    .to_string()
+}
+
+fn rule_protect_report(
+    prepared: &PreparedRuleRead,
+    rule_id: &str,
+    protected: bool,
+    previous_protected: bool,
+    changed: bool,
+    dry_run: bool,
+    audit_id: Option<String>,
+) -> RuleProtectReport {
+    RuleProtectReport {
+        schema: RULE_PROTECT_SCHEMA_V1,
+        command: "rule protect",
+        version: env!("CARGO_PKG_VERSION"),
+        status: if dry_run {
+            "dry_run".to_owned()
+        } else if changed {
+            "updated".to_owned()
+        } else {
+            "unchanged".to_owned()
+        },
+        rule_id: rule_id.to_owned(),
+        workspace_id: prepared.workspace_id.clone(),
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        protected,
+        previous_protected,
+        changed,
+        dry_run,
+        audit_id,
+        degraded: Vec::new(),
+    }
+}
+
+fn rule_protect_audit_details(rule_id: &str, previous_protected: bool, protected: bool) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.rule_protect.v1",
+        "command": "ee rule protect",
+        "ruleId": rule_id,
+        "previousProtected": previous_protected,
+        "protected": protected,
+        "changed": previous_protected != protected,
     })
     .to_string()
 }
@@ -1261,6 +1489,7 @@ mod tests {
             utility: 0.5,
             importance: 0.5,
             trust_class: "human_explicit",
+            protected: false,
             tags: &tags,
             source_memory_ids: &sources,
             dry_run: true,
@@ -1289,6 +1518,7 @@ mod tests {
             utility: 0.5,
             importance: 0.5,
             trust_class: "human_explicit",
+            protected: false,
             tags: &[],
             source_memory_ids: &[],
             dry_run: true,
@@ -1317,6 +1547,7 @@ mod tests {
             utility: 0.5,
             importance: 0.5,
             trust_class: "human_explicit",
+            protected: false,
             tags: &[],
             source_memory_ids: &[],
             dry_run: true,
