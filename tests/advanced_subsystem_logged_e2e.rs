@@ -317,8 +317,8 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "ee-tst-005-agent".to_owned(),
                 "--dry-run".to_owned(),
             ],
-            expected_schema_contains: "ee.recorder.start.v1",
-            expected_exit_code: 0,
+            expected_schema_contains: "ee.response.v1",
+            expected_exit_code: 7,
             expect_clean_stderr: true,
         },
         StepSpec {
@@ -333,7 +333,7 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "deploy production database migration".to_owned(),
             ],
             expected_schema_contains: "ee.response.v1",
-            expected_exit_code: 0,
+            expected_exit_code: 7,
             expect_clean_stderr: true,
         },
         StepSpec {
@@ -379,8 +379,8 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "exp_database_contract_fixture".to_owned(),
                 "--dry-run".to_owned(),
             ],
-            expected_schema_contains: "ee.learn.experiment_run.v1",
-            expected_exit_code: 0,
+            expected_schema_contains: "ee.response.v1",
+            expected_exit_code: 7,
             expect_clean_stderr: true,
         },
         StepSpec {

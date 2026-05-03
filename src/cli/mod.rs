@@ -4257,7 +4257,7 @@ where
             handle_procedure_drift(&cli, args, stdout, stderr)
         }
         Some(Command::Recorder(RecorderCommand::Start(ref args))) => {
-            handle_recorder_start(&cli, args, stdout)
+            handle_recorder_start(&cli, args, stdout, stderr)
         }
         Some(Command::Recorder(RecorderCommand::Event(ref args))) => {
             handle_recorder_event(&cli, args, stdout, stderr)
@@ -7059,29 +7059,18 @@ where
 // EE-401: Recorder Handlers
 // ============================================================================
 
-fn handle_recorder_start<W>(cli: &Cli, args: &RecorderStartArgs, stdout: &mut W) -> ProcessExitCode
+fn handle_recorder_start<W, E>(
+    cli: &Cli,
+    args: &RecorderStartArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
 where
     W: Write,
+    E: Write,
 {
-    let options = crate::core::recorder::RecorderStartOptions {
-        agent_id: args.agent_id.clone(),
-        session_id: args.session_id.clone(),
-        workspace_id: args.workspace_id.clone(),
-        dry_run: args.dry_run,
-    };
-
-    let report = crate::core::recorder::start_recording(&options);
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &report.human_summary())
-        }
-        output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(stdout, &(report.data_json().to_string() + "\n")),
-    }
+    let _ = args;
+    write_recorder_store_unavailable(cli, "recorder start", stdout, stderr)
 }
 
 fn handle_recorder_event<W, E>(
@@ -7094,7 +7083,7 @@ where
     W: Write,
     E: Write,
 {
-    let event_type = match args.event_type.parse::<crate::models::RecorderEventType>() {
+    let _event_type = match args.event_type.parse::<crate::models::RecorderEventType>() {
         Ok(t) => t,
         Err(_) => {
             return write_recorder_event_usage_error(
@@ -7111,44 +7100,28 @@ where
         }
     };
 
-    let options = crate::core::recorder::RecorderEventOptions {
-        run_id: args.run_id.clone(),
-        event_type,
-        payload: args.payload.clone(),
-        redact: args.redact,
-        previous_event_hash: args.previous_event_hash.clone(),
-        max_payload_bytes: args.max_payload_bytes,
-        dry_run: args.dry_run,
-    };
-
-    let report = match crate::core::recorder::record_event(&options, 1) {
-        Ok(report) => report,
-        Err(error) => {
-            let message = error.message.clone();
-            let repair = error.repair.clone();
-            let details = error.data_json()["details"].clone();
+    if let Some(payload) = args.payload.as_deref() {
+        let payload_bytes = payload.len();
+        if payload_bytes > args.max_payload_bytes {
             return write_recorder_event_usage_error(
                 cli.wants_json(),
                 stdout,
                 stderr,
-                error.code.as_str(),
-                message,
-                &repair,
-                details,
+                "recorder_payload_too_large",
+                format!(
+                    "Recorder event payload is {payload_bytes} bytes, exceeding the {} byte limit.",
+                    args.max_payload_bytes
+                ),
+                "Use a smaller payload, attach evidence by hash, or raise --max-payload-bytes intentionally.",
+                serde_json::json!({
+                    "payloadBytes": payload_bytes,
+                    "maxPayloadBytes": args.max_payload_bytes,
+                }),
             );
         }
-    };
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &report.human_summary())
-        }
-        output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(stdout, &(report.data_json().to_string() + "\n")),
     }
+
+    write_recorder_store_unavailable(cli, "recorder event", stdout, stderr)
 }
 
 fn write_recorder_event_usage_error<W, E>(
@@ -7194,7 +7167,7 @@ where
     W: Write,
     E: Write,
 {
-    let status = match args.status.parse::<crate::models::RecorderRunStatus>() {
+    let _status = match args.status.parse::<crate::models::RecorderRunStatus>() {
         Ok(s) => s,
         Err(_) => {
             let _ = writeln!(
@@ -7206,24 +7179,58 @@ where
         }
     };
 
-    let options = crate::core::recorder::RecorderFinishOptions {
-        run_id: args.run_id.clone(),
-        status,
-        dry_run: args.dry_run,
-    };
+    write_recorder_store_unavailable(cli, "recorder finish", stdout, stderr)
+}
 
-    let report = crate::core::recorder::finish_recording(&options, 0);
+const RECORDER_STORE_UNAVAILABLE_CODE: &str = "recorder_store_unavailable";
+const RECORDER_STORE_UNAVAILABLE_MESSAGE: &str = "Recorder start, event, and finish are unavailable until recorder commands persist sessions and events through the recorder event store instead of generated in-memory reports.";
+const RECORDER_STORE_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const RECORDER_STORE_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-6xzc";
+const RECORDER_STORE_UNAVAILABLE_SIDE_EFFECT: &str =
+    "conservative abstention; no recorder session, event, hash-chain, or finish mutation";
 
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &report.human_summary())
-        }
-        output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(stdout, &(report.data_json().to_string() + "\n")),
+fn write_recorder_store_unavailable<W, E>(
+    cli: &Cli,
+    command: &'static str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": RECORDER_STORE_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": RECORDER_STORE_UNAVAILABLE_MESSAGE,
+                "repair": RECORDER_STORE_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": RECORDER_STORE_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": RECORDER_STORE_UNAVAILABLE_MESSAGE,
+                        "repair": RECORDER_STORE_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": RECORDER_STORE_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": RECORDER_STORE_UNAVAILABLE_SIDE_EFFECT
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
     }
+
+    let _ = writeln!(stderr, "error: {RECORDER_STORE_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {RECORDER_STORE_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
 }
 
 const RECORDER_TAIL_UNAVAILABLE_CODE: &str = "recorder_tail_unavailable";
@@ -13968,7 +13975,7 @@ mod tests {
 
         ensure_equal(
             &exit,
-            &ProcessExitCode::Success,
+            &ProcessExitCode::UnsatisfiedDegradedMode,
             "learn experiment propose JSON exit",
         )?;
         ensure(stderr.is_empty(), "learn experiment propose stderr clean")?;
@@ -13977,27 +13984,24 @@ mod tests {
             .map_err(|error| format!("learn experiment propose stdout must be JSON: {error}"))?;
         ensure_equal(
             &json["schema"],
-            &serde_json::json!("ee.learn.experiment_proposal.v1"),
-            "proposal schema",
+            &serde_json::json!("ee.response.v1"),
+            "response schema",
         )?;
-        ensure_equal(&json["success"], &serde_json::json!(true), "success flag")?;
-        ensure_equal(&json["returned"], &serde_json::json!(1), "returned count")?;
-        ensure(
-            json["proposals"][0]["expectedValue"].is_number(),
-            "proposal expectedValue must be numeric",
-        )?;
-        ensure(
-            json["proposals"][0]["budget"].is_object(),
-            "proposal budget must be present",
+        ensure_equal(&json["success"], &serde_json::json!(false), "success flag")?;
+        ensure_equal(
+            &json["data"]["command"],
+            &serde_json::json!("learn experiment propose"),
+            "command",
         )?;
         ensure_equal(
-            &json["proposals"][0]["safety"]["boundary"],
-            &serde_json::json!("human_review"),
-            "proposal safety boundary",
+            &json["data"]["code"],
+            &serde_json::json!("learning_records_unavailable"),
+            "degraded code",
         )?;
-        ensure(
-            json["proposals"][0]["decisionImpact"].is_object(),
-            "proposal decisionImpact must be present",
+        ensure_equal(
+            &json["data"]["followUpBead"],
+            &serde_json::json!("eidetic_engine_cli-evah"),
+            "follow-up bead",
         )
     }
 
@@ -14020,7 +14024,7 @@ mod tests {
 
         ensure_equal(
             &exit,
-            &ProcessExitCode::Success,
+            &ProcessExitCode::UnsatisfiedDegradedMode,
             "learn experiment run JSON exit",
         )?;
         ensure(stderr.is_empty(), "learn experiment run stderr clean")?;
@@ -14029,30 +14033,26 @@ mod tests {
             .map_err(|error| format!("learn experiment run stdout must be JSON: {error}"))?;
         ensure_equal(
             &json["schema"],
-            &serde_json::json!("ee.learn.experiment_run.v1"),
-            "run schema",
+            &serde_json::json!("ee.response.v1"),
+            "response schema",
         )?;
-        ensure_equal(&json["success"], &serde_json::json!(true), "success flag")?;
+        ensure_equal(&json["success"], &serde_json::json!(false), "success flag")?;
         ensure_equal(
-            &json["dryRun"],
-            &serde_json::json!(true),
-            "run dry-run flag",
-        )?;
-        ensure_equal(
-            &json["experimentKind"],
-            &serde_json::json!("procedure_revalidation"),
-            "experiment kind",
+            &json["data"]["command"],
+            &serde_json::json!("learn experiment run"),
+            "command",
         )?;
         ensure_equal(
-            &json["budget"]["plannedAttentionTokens"],
-            &serde_json::json!(600),
-            "planned attention budget",
+            &json["data"]["code"],
+            &serde_json::json!("learning_records_unavailable"),
+            "degraded code",
         )?;
-        ensure(
-            json["steps"]
-                .as_array()
-                .is_some_and(|steps| !steps.is_empty()),
-            "steps must be present",
+        ensure_equal(
+            &json["data"]["sideEffectClass"],
+            &serde_json::json!(
+                "conservative abstention; no learning agenda, uncertainty, summary, proposal, or experiment template emitted"
+            ),
+            "side effect class",
         )
     }
 

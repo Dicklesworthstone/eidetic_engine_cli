@@ -189,7 +189,11 @@ fn side_effect_class(args: &[String]) -> &'static str {
     } else if args.iter().any(|arg| arg == "handoff") {
         "conservative abstention; no continuity capsule write"
     } else if args.iter().any(|arg| arg == "recorder") {
-        "read-only, conservative abstention; no recorder tail or follow snapshot"
+        if args.iter().any(|arg| arg == "tail") {
+            "read-only, conservative abstention; no recorder tail or follow snapshot"
+        } else {
+            "conservative abstention; no recorder session, event, hash-chain, or finish mutation"
+        }
     } else if args.iter().any(|arg| arg == "demo") {
         "conservative abstention; no demo execution, verification, or artifact write"
     } else {
@@ -2273,6 +2277,169 @@ fn handoff_create_degrades_instead_of_writing_placeholder_capsule() -> TestResul
         json!("conservative abstention; no continuity capsule write"),
         "logged handoff side-effect class",
     )
+}
+
+#[test]
+fn recorder_start_event_finish_degrade_instead_of_reporting_generated_state() -> TestResult {
+    let cases = [
+        (
+            "recorder-start-store-unavailable",
+            vec![
+                "--json".to_owned(),
+                "recorder".to_owned(),
+                "start".to_owned(),
+                "--agent-id".to_owned(),
+                "agent_fixture".to_owned(),
+                "--session-id".to_owned(),
+                "session_fixture".to_owned(),
+                "--workspace-id".to_owned(),
+                "workspace_fixture".to_owned(),
+            ],
+            "recorder start",
+        ),
+        (
+            "recorder-event-store-unavailable",
+            vec![
+                "--json".to_owned(),
+                "recorder".to_owned(),
+                "event".to_owned(),
+                "run_fixture_001".to_owned(),
+                "--event-type".to_owned(),
+                "tool_result".to_owned(),
+                "--payload".to_owned(),
+                "ok".to_owned(),
+                "--previous-event-hash".to_owned(),
+                "blake3:previous".to_owned(),
+            ],
+            "recorder event",
+        ),
+        (
+            "recorder-finish-store-unavailable",
+            vec![
+                "--json".to_owned(),
+                "recorder".to_owned(),
+                "finish".to_owned(),
+                "run_fixture_001".to_owned(),
+                "--status".to_owned(),
+                "completed".to_owned(),
+            ],
+            "recorder finish",
+        ),
+    ];
+
+    for (name, args, command) in cases {
+        let result = run_ee_logged(name, None, args)?;
+
+        ensure_equal(
+            &result.exit_code,
+            &UNSATISFIED_DEGRADED_MODE_EXIT,
+            &format!("{command} unavailable exit code"),
+        )?;
+        ensure(
+            result.stderr.is_empty(),
+            format!("{command} JSON degraded response must keep stderr empty"),
+        )?;
+        ensure_no_ansi(&result.stdout, &format!("{command} degraded stdout"))?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/schema",
+            json!("ee.response.v1"),
+            &format!("{command} degraded response schema"),
+        )?;
+        ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/command",
+            json!(command),
+            &format!("{command} command field"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/code",
+            json!("recorder_store_unavailable"),
+            &format!("{command} degraded code"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/degraded/0/code",
+            json!("recorder_store_unavailable"),
+            &format!("{command} degraded array code"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/followUpBead",
+            json!("eidetic_engine_cli-6xzc"),
+            &format!("{command} follow-up bead"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/sideEffectClass",
+            json!(
+                "conservative abstention; no recorder session, event, hash-chain, or finish mutation"
+            ),
+            &format!("{command} side-effect class"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/evidenceIds",
+            json!([]),
+            &format!("{command} evidence ids"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/sourceIds",
+            json!([]),
+            &format!("{command} source ids"),
+        )?;
+
+        let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
+        ensure(
+            fake_success.passed,
+            format!("{command} degraded output should not be fake success: {fake_success:?}"),
+        )?;
+
+        let unsupported_claims =
+            validate_no_unsupported_evidence_claims(command, false, false, &result.stdout);
+        ensure(
+            unsupported_claims.passed,
+            format!(
+                "{command} degraded output should not count as unsupported success: {unsupported_claims:?}"
+            ),
+        )?;
+
+        let log_text = fs::read_to_string(&result.log_path)
+            .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+        let log_json: Value = serde_json::from_str(&log_text)
+            .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+        ensure_json_pointer(
+            &log_json,
+            "/degradationCodes",
+            json!(["recorder_store_unavailable"]),
+            &format!("logged {command} degradation code"),
+        )?;
+        ensure_json_pointer(
+            &log_json,
+            "/repairCommand",
+            json!("ee status --json"),
+            &format!("logged {command} repair command"),
+        )?;
+        ensure_json_pointer(
+            &log_json,
+            "/commandBoundaryMatrixRow",
+            json!("recorder"),
+            &format!("logged {command} boundary matrix row"),
+        )?;
+        ensure_json_pointer(
+            &log_json,
+            "/sideEffectClass",
+            json!(
+                "conservative abstention; no recorder session, event, hash-chain, or finish mutation"
+            ),
+            &format!("logged {command} side-effect class"),
+        )?;
+    }
+
+    Ok(())
 }
 
 #[test]
