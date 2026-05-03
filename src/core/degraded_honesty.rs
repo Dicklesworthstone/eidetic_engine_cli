@@ -86,7 +86,8 @@ impl HonestyReport {
     /// Create a report from check results.
     #[must_use]
     pub fn from_checks(checks: Vec<HonestyCheckResult>) -> Self {
-        let issue_count = checks.iter().filter(|c| !c.passed).count() as u32;
+        let failed_checks = checks.iter().filter(|c| !c.passed).count();
+        let issue_count = u32::try_from(failed_checks).unwrap_or(u32::MAX);
         let passed = issue_count == 0;
         Self {
             checks,
@@ -282,6 +283,69 @@ pub fn validate_degraded_response(
     HonestyReport::from_checks(checks)
 }
 
+/// Markers that should never appear in normal successful production output.
+///
+/// Fixture and eval commands may intentionally mention fixture identifiers, but
+/// ordinary successful command output must not look like it came from a sample,
+/// mock, or stub path. The list is intentionally small and literal so it is
+/// explainable when a contract fails.
+pub const FORBIDDEN_SUCCESS_MARKERS: &[&str] = &[
+    "[sample]",
+    "example_",
+    "mock_",
+    "sample_",
+    "stub_",
+    "stubbed",
+    "stub success",
+    "fixture_",
+    "tests/fixtures/",
+];
+
+/// Validate that a successful production command did not return fake data.
+///
+/// Failed/degraded commands are allowed to explain that behavior is unavailable.
+/// Fixture-mode commands are allowed to identify fixtures explicitly. Everything
+/// else that reports success must not include sample/mock/stub markers.
+#[must_use]
+pub fn validate_no_fake_success_output(
+    command_path: &str,
+    success: bool,
+    fixture_mode: bool,
+    output: &str,
+) -> HonestyReport {
+    if !success {
+        return HonestyReport::from_checks(vec![HonestyCheckResult::pass_for(
+            "fake_success_not_applicable_for_failure",
+            command_path,
+        )]);
+    }
+
+    if fixture_mode {
+        return HonestyReport::from_checks(vec![HonestyCheckResult::pass_for(
+            "fake_success_allowed_in_fixture_mode",
+            command_path,
+        )]);
+    }
+
+    let lower_output = output.to_ascii_lowercase();
+    let checks = FORBIDDEN_SUCCESS_MARKERS
+        .iter()
+        .map(|marker| {
+            if lower_output.contains(marker) {
+                HonestyCheckResult::fail_for(
+                    "no_fake_success_output",
+                    command_path,
+                    format!("Successful production output contains fake-data marker `{marker}`"),
+                )
+            } else {
+                HonestyCheckResult::pass_for("no_fake_success_output", command_path)
+            }
+        })
+        .collect();
+
+    HonestyReport::from_checks(checks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,5 +509,42 @@ mod tests {
 
         let result = validate_message_quality(&code);
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn fake_success_output_rejects_stub_marker() {
+        let report = validate_no_fake_success_output(
+            "preflight show",
+            true,
+            false,
+            r#"{"schema":"ee.response.v1","success":true,"data":{"status":"stubbed"}}"#,
+        );
+
+        assert!(!report.passed);
+        assert_eq!(report.issue_count, 1);
+    }
+
+    #[test]
+    fn fake_success_output_allows_fixture_mode() {
+        let report = validate_no_fake_success_output(
+            "eval run",
+            true,
+            true,
+            r#"{"schema":"ee.response.v1","success":true,"data":{"fixtureId":"fixture_release"}}"#,
+        );
+
+        assert!(report.passed);
+    }
+
+    #[test]
+    fn fake_success_output_ignores_degraded_failure() {
+        let report = validate_no_fake_success_output(
+            "context",
+            false,
+            false,
+            r#"{"schema":"ee.error.v1","error":{"message":"stub store unavailable"}}"#,
+        );
+
+        assert!(report.passed);
     }
 }
