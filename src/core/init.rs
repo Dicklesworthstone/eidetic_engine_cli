@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 
 use super::build_info;
+use crate::db::DbConnection;
 
 /// Status of the init operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -334,6 +335,39 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
         });
     }
 
+    if !database_path.exists() {
+        match initialize_database(&database_path) {
+            Ok(()) => {
+                actions.push(InitAction {
+                    action: "create_file",
+                    path: database_path.clone(),
+                    status: "created",
+                });
+                any_created = true;
+            }
+            Err(_) => {
+                actions.push(InitAction {
+                    action: "create_file",
+                    path: database_path.clone(),
+                    status: "failed",
+                });
+            }
+        }
+    } else {
+        match initialize_database(&database_path) {
+            Ok(()) => actions.push(InitAction {
+                action: "check_file",
+                path: database_path.clone(),
+                status: "exists",
+            }),
+            Err(_) => actions.push(InitAction {
+                action: "check_file",
+                path: database_path.clone(),
+                status: "failed",
+            }),
+        }
+    }
+
     let status = if any_created {
         InitStatus::Created
     } else if options.force {
@@ -352,6 +386,15 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
         actions,
         dry_run: false,
     }
+}
+
+fn initialize_database(database_path: &PathBuf) -> Result<(), String> {
+    let connection = DbConnection::open_file(database_path)
+        .map_err(|error| format!("failed to open database: {error}"))?;
+    connection
+        .migrate()
+        .map_err(|error| format!("failed to migrate database: {error}"))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -455,6 +498,11 @@ mod tests {
             temp_dir.join(".ee").join("index").exists(),
             true,
             "index dir should exist",
+        )?;
+        ensure(
+            temp_dir.join(".ee").join("ee.db").exists(),
+            true,
+            "database file should exist",
         )?;
 
         let _ = std::fs::remove_dir_all(&temp_dir);
