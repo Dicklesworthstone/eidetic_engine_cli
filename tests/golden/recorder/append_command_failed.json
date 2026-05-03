@@ -1,0 +1,20 @@
+{
+  "schema": "ee.recorder.event_response.v1",
+  "command": "recorder event",
+  "eventId": "evt_DYNAMIC",
+  "runId": "run_DYNAMIC",
+  "sequence": 1,
+  "eventType": "tool_result",
+  "timestamp": "TIMESTAMP",
+  "payloadBytes": 90,
+  "payloadAccepted": true,
+  "redactionStatus": "none",
+  "redactionClasses": [],
+  "placeholderCount": 0,
+  "redactedBytes": 0,
+  "previousEventHash": null,
+  "eventHash": "blake3:DYNAMIC",
+  "chainStatus": "root",
+  "dryRun": true,
+  "payloadHash": "blake3:DYNAMIC"
+}

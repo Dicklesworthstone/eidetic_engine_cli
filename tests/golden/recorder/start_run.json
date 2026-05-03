@@ -1,0 +1,10 @@
+{
+  "schema": "ee.recorder.start.v1",
+  "command": "recorder start",
+  "runId": "run_DYNAMIC",
+  "agentId": "codex-gate17",
+  "startedAt": "TIMESTAMP",
+  "dryRun": true,
+  "sessionId": "session-gate17",
+  "workspaceId": "wsp_gate17"
+}

@@ -1,0 +1,9 @@
+{
+  "schema": "ee.recorder.finish.v1",
+  "command": "recorder finish",
+  "runId": "run_DYNAMIC",
+  "status": "completed",
+  "endedAt": "TIMESTAMP",
+  "eventCount": 2,
+  "dryRun": true
+}

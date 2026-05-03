@@ -6,10 +6,11 @@
 //! fields without depending on wall-clock IDs.
 
 use ee::core::recorder::{
-    RECORDER_EVENT_RESPONSE_SCHEMA_V1, RECORDER_IMPORT_PLAN_SCHEMA_V1,
-    RECORDER_TAIL_FOLLOW_EVENT_SCHEMA_V1, RECORDER_TAIL_SCHEMA_V1, RecorderEventReport,
-    RecorderEventSummary, RecorderImportEventPlan, RecorderImportPlanReport,
-    RecorderTailFollowEvent, RecorderTailReport,
+    DEFAULT_MAX_RECORDER_PAYLOAD_BYTES, RECORDER_EVENT_RESPONSE_SCHEMA_V1,
+    RECORDER_IMPORT_PLAN_SCHEMA_V1, RECORDER_TAIL_FOLLOW_EVENT_SCHEMA_V1, RECORDER_TAIL_SCHEMA_V1,
+    RecorderEventOptions, RecorderEventRejectionCode, RecorderEventReport, RecorderEventSummary,
+    RecorderImportEventPlan, RecorderImportPlanReport, RecorderTailFollowEvent, RecorderTailReport,
+    record_event,
 };
 use ee::models::{ImportSourceType, RecorderEventChainStatus, RecorderEventType, RedactionStatus};
 use serde_json::Value as JsonValue;
@@ -190,6 +191,99 @@ fn recorder_tail_report_fixture() -> RecorderTailReport {
         total_events: 2,
         has_more: false,
     }
+}
+
+#[test]
+fn gate17_corrections_and_redactions_are_append_only_events() -> TestResult {
+    let first = record_event(
+        &RecorderEventOptions {
+            run_id: "run_gate17_append_only".to_string(),
+            event_type: RecorderEventType::ToolResult,
+            payload: Some("cargo test failed with exit 101".to_string()),
+            redact: false,
+            previous_event_hash: None,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: true,
+        },
+        1,
+    )
+    .map_err(|error| error.to_string())?;
+    let correction = record_event(
+        &RecorderEventOptions {
+            run_id: "run_gate17_append_only".to_string(),
+            event_type: RecorderEventType::StateChange,
+            payload: Some("correction: SECRET_TOKEN=gate17 rotated".to_string()),
+            redact: false,
+            previous_event_hash: Some(first.event_hash.clone()),
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: true,
+        },
+        2,
+    )
+    .map_err(|error| error.to_string())?;
+
+    ensure_equal(&first.sequence, &1, "initial event sequence")?;
+    ensure_equal(&correction.sequence, &2, "correction event sequence")?;
+    ensure_equal(
+        &correction.previous_event_hash,
+        &Some(first.event_hash.clone()),
+        "correction links to prior event hash",
+    )?;
+    ensure(
+        first.event_id != correction.event_id,
+        "corrections must be represented as new events",
+    )?;
+    ensure(
+        first.event_hash != correction.event_hash,
+        "corrections must not rewrite the original event hash",
+    )?;
+    ensure_equal(
+        &correction.chain_status,
+        &RecorderEventChainStatus::Linked,
+        "correction chain status",
+    )?;
+    ensure_equal(
+        &correction.redaction_status,
+        &RedactionStatus::Full,
+        "correction payload redaction status",
+    )
+}
+
+#[test]
+fn gate17_oversize_payload_rejection_has_stable_code() -> TestResult {
+    let error = match record_event(
+        &RecorderEventOptions {
+            run_id: "run_gate17_oversize".to_string(),
+            event_type: RecorderEventType::ToolResult,
+            payload: Some("0123456789".to_string()),
+            redact: false,
+            previous_event_hash: None,
+            max_payload_bytes: 4,
+            dry_run: true,
+        },
+        1,
+    ) {
+        Ok(_) => return Err("payload larger than max_payload_bytes must be rejected".to_string()),
+        Err(error) => error,
+    };
+    let json = error.data_json();
+
+    ensure_equal(
+        &error.code,
+        &RecorderEventRejectionCode::PayloadTooLarge,
+        "oversize rejection enum",
+    )?;
+    ensure_json_equal(
+        json.get("code"),
+        serde_json::json!("recorder_payload_too_large"),
+        "oversize rejection code",
+    )?;
+    ensure_json_equal(
+        json.get("details")
+            .and_then(|details| details.get("maxPayloadBytes")),
+        serde_json::json!(4),
+        "oversize rejection max bytes",
+    )
 }
 
 #[test]

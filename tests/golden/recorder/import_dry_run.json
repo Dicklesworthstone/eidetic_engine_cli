@@ -1,0 +1,90 @@
+{
+  "schema": "ee.recorder.import_plan.v1",
+  "command": "recorder import",
+  "dryRun": true,
+  "source": {
+    "type": "cass",
+    "sourceId": "cass://gate17-session",
+    "inputPath": "tests/fixtures/cass/gate17-view.json",
+    "connector": "cass_view_json"
+  },
+  "run": {
+    "runId": "run_DYNAMIC",
+    "agentId": "codex-gate17",
+    "sessionId": "session-gate17",
+    "workspaceId": "wsp_gate17",
+    "status": "imported",
+    "startedAt": "TIMESTAMP",
+    "endedAt": null,
+    "eventCount": 2,
+    "redactedCount": 1
+  },
+  "summary": {
+    "eventsDiscovered": 3,
+    "eventsMapped": 2,
+    "eventsRejected": 1,
+    "payloadBytes": 167,
+    "redactedBytes": 99,
+    "redactionClasses": [
+      "secret",
+      "token"
+    ],
+    "chainComplete": true
+  },
+  "mutations": [
+    {
+      "action": "would_create_run",
+      "count": 1,
+      "schema": "ee.recorder.run.v1"
+    },
+    {
+      "action": "would_create_event",
+      "count": 2,
+      "schema": "ee.recorder.event.v1"
+    }
+  ],
+  "events": [
+    {
+      "action": "would_record",
+      "sourceSpanId": "cass://gate17-session:41",
+      "sourceLineStart": 41,
+      "sourceLineEnd": 41,
+      "eventId": "evt_DYNAMIC",
+      "sequence": 1,
+      "eventType": "user_message",
+      "timestamp": "TIMESTAMP",
+      "payloadHash": "blake3:DYNAMIC",
+      "payloadBytes": 99,
+      "redactionStatus": "full",
+      "redactionClasses": [
+        "secret",
+        "token"
+      ],
+      "redactedBytes": 99,
+      "previousEventHash": null,
+      "eventHash": "blake3:DYNAMIC",
+      "chainStatus": "root"
+    },
+    {
+      "action": "would_record",
+      "sourceSpanId": "cass://gate17-session:42",
+      "sourceLineStart": 42,
+      "sourceLineEnd": 42,
+      "eventId": "evt_DYNAMIC",
+      "sequence": 2,
+      "eventType": "tool_call",
+      "timestamp": "TIMESTAMP",
+      "payloadHash": "blake3:DYNAMIC",
+      "payloadBytes": 68,
+      "redactionStatus": "none",
+      "redactionClasses": [],
+      "redactedBytes": 0,
+      "previousEventHash": "blake3:DYNAMIC",
+      "eventHash": "blake3:DYNAMIC",
+      "chainStatus": "linked"
+    }
+  ],
+  "warnings": [
+    "source contained 3 events but maxEvents limited mapping to 2"
+  ]
+}

@@ -1,0 +1,97 @@
+{
+  "reconstruction": {
+    "schema": "ee.lab.reconstruct.v1",
+    "episode_id": "ep_DYNAMIC",
+    "run_id": "run_DYNAMIC",
+    "status": "reconstructed",
+    "events": [
+      {
+        "sequence": 1,
+        "event_type": "user_message",
+        "timestamp": "TIMESTAMP",
+        "payload_hash": null,
+        "redacted": false
+      },
+      {
+        "sequence": 2,
+        "event_type": "memory_retrieval",
+        "timestamp": "TIMESTAMP",
+        "payload_hash": null,
+        "redacted": false
+      },
+      {
+        "sequence": 3,
+        "event_type": "tool_call",
+        "timestamp": "TIMESTAMP",
+        "payload_hash": null,
+        "redacted": false
+      },
+      {
+        "sequence": 4,
+        "event_type": "assistant_response",
+        "timestamp": "TIMESTAMP",
+        "payload_hash": null,
+        "redacted": false
+      }
+    ],
+    "event_count": 4,
+    "memory_events": 1,
+    "tool_call_events": 1,
+    "message_events": 2,
+    "episode_hash": "blake3:DYNAMIC",
+    "original_agent_id": "reconstructed_agent",
+    "original_session_id": null,
+    "run_started_at": null,
+    "run_ended_at": null,
+    "dry_run": false,
+    "reconstructed_at": "TIMESTAMP",
+    "warnings": []
+  },
+  "evidenceLinks": [
+    {
+      "linkId": "link_pack_gate17",
+      "runId": "run_DYNAMIC",
+      "linkType": "context_pack",
+      "artifactId": "pack_gate17",
+      "createdAt": "2026-01-02T03:04:05Z",
+      "metadata": "selected_context"
+    },
+    {
+      "linkId": "link_preflight_gate17",
+      "runId": "run_DYNAMIC",
+      "linkType": "preflight_run",
+      "artifactId": "pf_gate17",
+      "createdAt": "2026-01-02T03:04:06Z",
+      "metadata": "risk_snapshot"
+    },
+    {
+      "linkId": "link_outcome_gate17",
+      "runId": "run_DYNAMIC",
+      "linkType": "outcome",
+      "artifactId": "out_gate17",
+      "createdAt": "2026-01-02T03:04:07Z",
+      "metadata": "completed"
+    },
+    {
+      "linkId": "link_tripwire_gate17",
+      "runId": "run_DYNAMIC",
+      "linkType": "tripwire",
+      "artifactId": "tw_gate17",
+      "createdAt": "2026-01-02T03:04:08Z",
+      "metadata": "checked"
+    },
+    {
+      "linkId": "link_episode_gate17",
+      "runId": "run_DYNAMIC",
+      "linkType": "task_episode",
+      "artifactId": "ep_gate17",
+      "createdAt": "2026-01-02T03:04:09Z",
+      "metadata": "reconstructed"
+    }
+  ],
+  "payloadPolicy": {
+    "payloadsAreEvidence": true,
+    "payloadsAreInstructions": false,
+    "rendererLabel": "recorder_trace_evidence"
+  }
+}
