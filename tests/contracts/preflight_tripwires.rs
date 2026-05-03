@@ -12,8 +12,9 @@ use ee::core::preflight::{
     run_preflight, show_preflight,
 };
 use ee::core::tripwire::{
-    CheckOptions as TripwireCheckOptions, ListOptions as TripwireListOptions, check_tripwire,
-    list_tripwires,
+    CheckOptions as TripwireCheckOptions, ConditionEvaluationResult,
+    ListOptions as TripwireListOptions, TripwireEventPayload, check_tripwire,
+    evaluate_tripwire_condition, list_tripwires,
 };
 use ee::models::preflight::TripwireState;
 use serde_json::Value as JsonValue;
@@ -265,16 +266,10 @@ fn tripwire_list_matches_exact_gate_golden() -> TestResult {
     })
     .map_err(|error| error.message())?;
 
-    ensure_equal(&report.triggered_count, &1, "triggered count")?;
-    let triggered_tripwire = report
-        .tripwires
-        .iter()
-        .find(|tripwire| tripwire.state == "triggered")
-        .ok_or_else(|| "triggered tripwire missing from projection".to_owned())?;
-    ensure_equal(
-        &triggered_tripwire.action,
-        &"halt".to_owned(),
-        "high-severity action survives projection",
+    ensure_equal(&report.triggered_count, &0, "triggered count")?;
+    ensure(
+        report.tripwires.is_empty(),
+        "unwired tripwire store must return an empty list, not samples",
     )?;
 
     let actual = normalized(serde_json::to_value(report).map_err(|error| error.to_string())?)?;
@@ -282,7 +277,7 @@ fn tripwire_list_matches_exact_gate_golden() -> TestResult {
 }
 
 #[test]
-fn tripwire_check_match_matches_exact_gate_golden() -> TestResult {
+fn tripwire_check_sample_id_reports_not_found_without_feedback() -> TestResult {
     let report = check_tripwire(&TripwireCheckOptions {
         tripwire_id: "tw_004".to_owned(),
         task_outcome: Some(TaskOutcome::Success),
@@ -291,19 +286,18 @@ fn tripwire_check_match_matches_exact_gate_golden() -> TestResult {
     })
     .map_err(|error| error.message())?;
 
-    ensure_equal(
-        &report.result.as_str(),
-        &"triggered",
-        "triggered tripwire result",
-    )?;
-    ensure_equal(&report.should_halt, &true, "halt decision")?;
+    ensure_equal(&report.result.as_str(), &"not_found", "sample id rejected")?;
+    ensure_equal(&report.should_halt, &false, "no halt without tripwire")?;
     ensure(
-        report.feedback.as_ref().is_some_and(|feedback| {
-            feedback.evaluation.as_deref() == Some("false_alarm")
-                && !feedback.durable_mutation
-                && feedback.evidence_preserved
-        }),
-        "match check must preserve false-alarm dry-run feedback",
+        report.feedback.is_none(),
+        "not-found checks must not record feedback against sample data",
+    )?;
+    ensure(
+        report
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "tripwire_inputs_incomplete"),
+        "sample ID must expose tripwire_inputs_incomplete",
     )?;
 
     let actual = normalized(serde_json::to_value(report).map_err(|error| error.to_string())?)?;
@@ -330,6 +324,46 @@ fn tripwire_check_no_match_matches_exact_gate_golden() -> TestResult {
 
     let actual = normalized(serde_json::to_value(report).map_err(|error| error.to_string())?)?;
     assert_exact_golden("tripwire/check_no_match.json", &actual)
+}
+
+#[test]
+fn tripwire_condition_evaluator_uses_explicit_payloads() -> TestResult {
+    let payload =
+        TripwireEventPayload::default().with_task_input("deploy production database migration");
+    let generated_condition = "task_contains_any(\"deploy\", \"migration\")";
+
+    let matched = evaluate_tripwire_condition(generated_condition, &payload);
+    let repeated = evaluate_tripwire_condition(generated_condition, &payload);
+
+    ensure_equal(
+        &matched.result,
+        &ConditionEvaluationResult::Satisfied,
+        "generated task-term condition result",
+    )?;
+    ensure_equal(
+        &matched.matched_terms,
+        &vec!["deploy".to_owned(), "migration".to_owned()],
+        "matched generated terms",
+    )?;
+    ensure_equal(&matched, &repeated, "deterministic repeated evaluation")?;
+
+    let missing =
+        evaluate_tripwire_condition(generated_condition, &TripwireEventPayload::default());
+    ensure_equal(
+        &missing.result,
+        &ConditionEvaluationResult::MissingInput,
+        "missing task input result",
+    )?;
+
+    let unsupported = evaluate_tripwire_condition(
+        "error_count < 3",
+        &TripwireEventPayload::default().with_task_input("deploy"),
+    );
+    ensure_equal(
+        &unsupported.result,
+        &ConditionEvaluationResult::UnsupportedCondition,
+        "unsupported condition result",
+    )
 }
 
 #[test]

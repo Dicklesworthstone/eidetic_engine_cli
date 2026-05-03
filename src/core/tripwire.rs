@@ -9,7 +9,9 @@
 //! - **list**: List all tripwires, optionally filtered by state or preflight run
 //! - **check**: Evaluate a specific tripwire and return its current state
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -17,8 +19,9 @@ use serde::{Deserialize, Serialize};
 use crate::core::feedback::{
     RecordFeedbackReport, RecordTripwireFeedbackOptions, TaskOutcome, record_tripwire_feedback,
 };
-use crate::models::DomainError;
+use crate::db::{CreateTripwireCheckEventInput, DbConnection, StoredTripwire};
 use crate::models::preflight::{Tripwire, TripwireAction, TripwireState, TripwireType};
+use crate::models::{DomainError, WorkspaceId};
 
 /// Schema for tripwire list report.
 pub const TRIPWIRE_LIST_SCHEMA_V1: &str = "ee.tripwire.list.v1";
@@ -31,6 +34,8 @@ pub const TRIPWIRE_CHECK_SCHEMA_V1: &str = "ee.tripwire.check.v1";
 pub struct ListOptions {
     /// Workspace path.
     pub workspace: PathBuf,
+    /// Optional database path. When absent, returns an honest empty projection.
+    pub database_path: Option<PathBuf>,
     /// Filter by tripwire state.
     pub state: Option<TripwireState>,
     /// Filter by preflight run ID.
@@ -127,14 +132,110 @@ impl Default for ListReport {
 pub struct CheckOptions {
     /// Workspace path.
     pub workspace: PathBuf,
+    /// Optional database path. When absent, reports not found without guessing.
+    pub database_path: Option<PathBuf>,
     /// Tripwire ID to check.
     pub tripwire_id: String,
+    /// Explicit event data for deterministic condition evaluation.
+    pub event_payload: TripwireEventPayload,
     /// Update the last_checked_at timestamp.
     pub update_timestamp: bool,
     /// Observed task outcome for optional scoring feedback.
     pub task_outcome: Option<TaskOutcome>,
     /// Perform a dry-run check without persisting.
     pub dry_run: bool,
+}
+
+/// Explicit event data supplied by a tripwire check caller.
+///
+/// The evaluator intentionally accepts concrete fields instead of reading
+/// ambient task state. This keeps condition outcomes replayable and makes
+/// missing inputs visible to callers.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TripwireEventPayload {
+    /// Current task text to evaluate against generated task-term conditions.
+    pub task_input: Option<String>,
+    /// Explicit source relevance answers keyed as `<source-kind>:<source-id>`.
+    pub source_relevance: BTreeMap<String, bool>,
+}
+
+impl TripwireEventPayload {
+    #[must_use]
+    pub fn with_task_input(mut self, task_input: impl Into<String>) -> Self {
+        self.task_input = Some(task_input.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_source_relevance(
+        mut self,
+        source_kind: impl AsRef<str>,
+        source_id: impl AsRef<str>,
+        relevant: bool,
+    ) -> Self {
+        self.source_relevance.insert(
+            source_relevance_key(source_kind.as_ref(), source_id.as_ref()),
+            relevant,
+        );
+        self
+    }
+}
+
+/// Deterministic result from evaluating a supported tripwire condition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConditionEvaluationResult {
+    /// The explicit event payload satisfied the condition.
+    Satisfied,
+    /// The explicit event payload did not satisfy the condition.
+    Unsatisfied,
+    /// The condition form is not supported by the deterministic evaluator.
+    UnsupportedCondition,
+    /// The condition is supported, but required event payload fields are absent.
+    MissingInput,
+}
+
+impl ConditionEvaluationResult {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Satisfied => "satisfied",
+            Self::Unsatisfied => "unsatisfied",
+            Self::UnsupportedCondition => "unsupported_condition",
+            Self::MissingInput => "missing_input",
+        }
+    }
+}
+
+/// Explanation for a tripwire condition evaluation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TripwireConditionEvaluation {
+    pub result: ConditionEvaluationResult,
+    pub condition: String,
+    pub details: String,
+    pub matched_terms: Vec<String>,
+    pub source_key: Option<String>,
+}
+
+impl TripwireConditionEvaluation {
+    fn new(
+        result: ConditionEvaluationResult,
+        condition: impl Into<String>,
+        details: impl Into<String>,
+    ) -> Self {
+        Self {
+            result,
+            condition: condition.into(),
+            details: details.into(),
+            matched_terms: Vec::new(),
+            source_key: None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_satisfied(&self) -> bool {
+        self.result == ConditionEvaluationResult::Satisfied
+    }
 }
 
 /// Result of a tripwire check.
@@ -186,6 +287,10 @@ pub struct CheckReport {
     pub dry_run: bool,
     pub checked_at: String,
     pub details: Option<String>,
+    pub condition_evaluation: Option<TripwireConditionEvaluation>,
+    pub event_payload_hash: Option<String>,
+    pub durable_mutation: bool,
+    pub mutation_posture: String,
     pub feedback: Option<RecordFeedbackReport>,
     pub degraded: Vec<TripwireDegradation>,
 }
@@ -206,6 +311,10 @@ impl CheckReport {
             dry_run: false,
             checked_at: Utc::now().to_rfc3339(),
             details: None,
+            condition_evaluation: None,
+            event_payload_hash: None,
+            durable_mutation: false,
+            mutation_posture: "no_persisted_tripwire".to_owned(),
             feedback: None,
             degraded: Vec::new(),
         }
@@ -241,125 +350,201 @@ impl TripwireDegradation {
             repair: Some("ee tripwire list --json".to_owned()),
         }
     }
+
+    #[must_use]
+    pub fn unsupported_condition(message: impl Into<String>) -> Self {
+        Self {
+            code: "unsupported_condition".to_owned(),
+            severity: "warning".to_owned(),
+            message: message.into(),
+            repair: Some(
+                "provide a generated task_contains_any(...) or source:<kind>:<id> remains relevant condition"
+                    .to_owned(),
+            ),
+        }
+    }
 }
 
 /// List tripwires matching the given options.
 pub fn list_tripwires(options: &ListOptions) -> Result<ListReport, DomainError> {
+    if let Some(database_path) = options.database_path.as_deref() {
+        return list_tripwires_from_database(options, database_path);
+    }
+
+    Ok(list_tripwires_from_records(&[], options))
+}
+
+/// Project stored tripwire records into a filtered list report.
+#[must_use]
+pub fn list_tripwires_from_records(tripwires: &[Tripwire], options: &ListOptions) -> ListReport {
     let mut report = ListReport::new();
 
-    let mut tripwires = generate_sample_tripwires();
-
     if let Some(ref state) = options.state {
-        tripwires.retain(|tw| tw.state == *state);
         report
             .filters_applied
             .push(format!("state={}", state.as_str()));
     }
 
     if let Some(ref run_id) = options.preflight_run_id {
-        tripwires.retain(|tw| tw.preflight_run_id == *run_id);
         report
             .filters_applied
             .push(format!("preflight_run_id={run_id}"));
     }
 
     if let Some(ref tw_type) = options.tripwire_type {
-        tripwires.retain(|tw| tw.tripwire_type == *tw_type);
         report
             .filters_applied
             .push(format!("type={}", tw_type.as_str()));
     }
 
     if !options.include_disarmed {
-        tripwires.retain(|tw| tw.state != TripwireState::Disarmed);
+        report
+            .filters_applied
+            .push("include_disarmed=false".to_owned());
     }
-
-    report.armed_count = tripwires
-        .iter()
-        .filter(|tw| tw.state == TripwireState::Armed)
-        .count();
-    report.triggered_count = tripwires
-        .iter()
-        .filter(|tw| tw.state == TripwireState::Triggered)
-        .count();
-    report.disarmed_count = tripwires
-        .iter()
-        .filter(|tw| tw.state == TripwireState::Disarmed)
-        .count();
-    report.error_count = tripwires
-        .iter()
-        .filter(|tw| tw.state == TripwireState::Error)
-        .count();
 
     if let Some(limit) = options.limit {
-        tripwires.truncate(limit);
+        report.filters_applied.push(format!("limit={limit}"));
     }
 
-    report.total_count = tripwires.len();
-    report.tripwires = tripwires.iter().map(TripwireSummary::from).collect();
+    let mut filtered: Vec<_> = tripwires
+        .iter()
+        .filter(|tripwire| options.state.is_none_or(|state| tripwire.state == state))
+        .filter(|tripwire| {
+            options
+                .preflight_run_id
+                .as_ref()
+                .is_none_or(|run_id| &tripwire.preflight_run_id == run_id)
+        })
+        .filter(|tripwire| {
+            options
+                .tripwire_type
+                .is_none_or(|tripwire_type| tripwire.tripwire_type == tripwire_type)
+        })
+        .filter(|tripwire| options.include_disarmed || tripwire.state != TripwireState::Disarmed)
+        .cloned()
+        .collect();
 
-    Ok(report)
+    filtered.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    if let Some(limit) = options.limit {
+        filtered.truncate(limit);
+    }
+
+    report.tripwires = filtered.iter().map(TripwireSummary::from).collect();
+    report.total_count = report.tripwires.len();
+    report.armed_count = filtered
+        .iter()
+        .filter(|tripwire| tripwire.state == TripwireState::Armed)
+        .count();
+    report.triggered_count = filtered
+        .iter()
+        .filter(|tripwire| tripwire.state == TripwireState::Triggered)
+        .count();
+    report.disarmed_count = filtered
+        .iter()
+        .filter(|tripwire| tripwire.state == TripwireState::Disarmed)
+        .count();
+    report.error_count = filtered
+        .iter()
+        .filter(|tripwire| tripwire.state == TripwireState::Error)
+        .count();
+    report
 }
 
 /// Check a specific tripwire.
 pub fn check_tripwire(options: &CheckOptions) -> Result<CheckReport, DomainError> {
+    if let Some(database_path) = options.database_path.as_deref() {
+        return check_tripwire_from_database(options, database_path);
+    }
+
     let mut report = CheckReport::new(&options.tripwire_id);
     report.dry_run = options.dry_run;
 
-    let tripwires = generate_sample_tripwires();
-    let tripwire = tripwires.iter().find(|tw| tw.id == options.tripwire_id);
+    report.result = CheckResult::NotFound;
+    report.details = Some(format!(
+        "Tripwire '{}' not found in persisted tripwire store",
+        options.tripwire_id
+    ));
+    report.degraded.push(TripwireDegradation::inputs_incomplete(
+        "No persisted tripwire matched the requested ID, so the check could not evaluate a concrete event payload.",
+    ));
+    Ok(report)
+}
 
-    let Some(tw) = tripwire else {
-        report.result = CheckResult::NotFound;
-        report.details = Some(format!(
-            "Tripwire '{}' not found in workspace",
-            options.tripwire_id
-        ));
-        report.degraded.push(TripwireDegradation::inputs_incomplete(
-            "No tripwire matched the requested ID, so the check could not evaluate a concrete event payload.",
-        ));
-        return Ok(report);
+/// Evaluate a concrete tripwire record without opening storage.
+pub fn check_tripwire_record(
+    tripwire: &Tripwire,
+    options: &CheckOptions,
+) -> Result<CheckReport, DomainError> {
+    let checked_at = Utc::now().to_rfc3339();
+    let event_payload_hash = hash_event_payload(&options.event_payload);
+    let mut report = CheckReport::new(&tripwire.id);
+    report.preflight_run_id = Some(tripwire.preflight_run_id.clone());
+    report.action = tripwire.action.as_str().to_owned();
+    report.condition = tripwire.condition.clone();
+    report.message = tripwire.message.clone();
+    report.dry_run = options.dry_run;
+    report.checked_at = checked_at.clone();
+    report.event_payload_hash = Some(event_payload_hash);
+    report.state = tripwire.state.as_str().to_owned();
+    report.mutation_posture = if options.dry_run {
+        "dry_run_no_mutation".to_owned()
+    } else {
+        "evaluated_without_store_mutation".to_owned()
     };
 
-    report.condition = tw.condition.clone();
-    report.action = tw.action.as_str().to_string();
-    report.state = tw.state.as_str().to_string();
-    report.message = tw.message.clone();
-    report.preflight_run_id = Some(tw.preflight_run_id.clone());
+    if tripwire.state == TripwireState::Disarmed {
+        report.result = CheckResult::Disarmed;
+        report.details = Some("Tripwire is disarmed; condition was not evaluated.".to_owned());
+        return Ok(report);
+    }
 
-    match tw.state {
-        TripwireState::Disarmed => {
-            report.result = CheckResult::Disarmed;
-            report.details = Some("Tripwire is disarmed and will not fire".to_string());
-        }
-        TripwireState::Triggered => {
+    let evaluation = evaluate_tripwire_condition(&tripwire.condition, &options.event_payload);
+    report.condition_evaluation = Some(evaluation.clone());
+    report.details = Some(evaluation.details.clone());
+
+    match evaluation.result {
+        ConditionEvaluationResult::Satisfied => {
             report.result = CheckResult::Triggered;
-            report.should_halt = tw.action.stops_execution();
-            report.details = Some("Tripwire was previously triggered".to_string());
+            report.state = TripwireState::Triggered.as_str().to_owned();
+            report.should_halt = tripwire.action.stops_execution();
         }
-        TripwireState::Error => {
+        ConditionEvaluationResult::Unsatisfied => {
+            report.result = CheckResult::Passed;
+            report.state = TripwireState::Armed.as_str().to_owned();
+            report.should_halt = false;
+        }
+        ConditionEvaluationResult::MissingInput => {
             report.result = CheckResult::Error;
-            report.details = Some("Tripwire is in error state".to_string());
+            report.state = TripwireState::Error.as_str().to_owned();
+            report.should_halt = false;
+            report.degraded.push(TripwireDegradation::inputs_incomplete(
+                evaluation.details.clone(),
+            ));
         }
-        TripwireState::Armed => {
-            let passes = evaluate_condition(&tw.condition);
-            if passes {
-                report.result = CheckResult::Passed;
-                report.details = Some("Condition evaluated to true (safe)".to_string());
-            } else {
-                report.result = CheckResult::Triggered;
-                report.should_halt = tw.action.stops_execution();
-                report.details = Some("Condition evaluated to false (triggered)".to_string());
-            }
+        ConditionEvaluationResult::UnsupportedCondition => {
+            report.result = CheckResult::Error;
+            report.state = TripwireState::Error.as_str().to_owned();
+            report.should_halt = false;
+            report
+                .degraded
+                .push(TripwireDegradation::unsupported_condition(
+                    evaluation.details.clone(),
+                ));
         }
     }
 
     if let Some(task_outcome) = options.task_outcome {
         report.feedback = Some(record_tripwire_feedback(&RecordTripwireFeedbackOptions {
             workspace: options.workspace.clone(),
-            preflight_run_id: tw.preflight_run_id.clone(),
-            tripwire_id: tw.id.clone(),
-            tripwire_fired: matches!(report.result, CheckResult::Triggered),
+            preflight_run_id: tripwire.preflight_run_id.clone(),
+            tripwire_id: tripwire.id.clone(),
+            tripwire_fired: report.result == CheckResult::Triggered,
             task_outcome,
             notes: report.details.clone(),
             dry_run: options.dry_run,
@@ -369,51 +554,375 @@ pub fn check_tripwire(options: &CheckOptions) -> Result<CheckReport, DomainError
     Ok(report)
 }
 
-fn evaluate_condition(condition: &str) -> bool {
-    !condition.contains("TRIGGER")
+fn list_tripwires_from_database(
+    options: &ListOptions,
+    database_path: &Path,
+) -> Result<ListReport, DomainError> {
+    let connection = open_tripwire_database(database_path)?;
+    let workspace_path = resolve_workspace_path(&options.workspace);
+    let workspace_id = resolve_workspace_id(&connection, &workspace_path)?;
+    let stored = connection
+        .list_tripwires(
+            &workspace_id,
+            options.state.map(TripwireState::as_str),
+            options.preflight_run_id.as_deref(),
+            options.tripwire_type.map(TripwireType::as_str),
+            options.include_disarmed,
+            options.limit,
+        )
+        .map_err(storage_error("Failed to list tripwires"))?;
+    let tripwires = stored
+        .iter()
+        .map(tripwire_from_stored)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(list_tripwires_from_records(&tripwires, options))
 }
 
-fn generate_sample_tripwires() -> Vec<Tripwire> {
-    let now = Utc::now().to_rfc3339();
-    vec![
-        Tripwire::new(
-            "tw_001",
-            "pfl_run_001",
-            TripwireType::FileChange,
-            "!modified(Cargo.lock)",
-            TripwireAction::Warn,
-            &now,
+fn check_tripwire_from_database(
+    options: &CheckOptions,
+    database_path: &Path,
+) -> Result<CheckReport, DomainError> {
+    let connection = open_tripwire_database(database_path)?;
+    let Some(stored) = connection
+        .get_tripwire(&options.tripwire_id)
+        .map_err(storage_error("Failed to read tripwire"))?
+    else {
+        return check_tripwire(&CheckOptions {
+            database_path: None,
+            ..options.clone()
+        });
+    };
+
+    let tripwire = tripwire_from_stored(&stored)?;
+    let mut report = check_tripwire_record(&tripwire, options)?;
+    if options.dry_run {
+        return Ok(report);
+    }
+
+    let durable_state_update = options.update_timestamp
+        && matches!(report.result, CheckResult::Passed | CheckResult::Triggered);
+    if durable_state_update {
+        let triggered_at =
+            (report.result == CheckResult::Triggered).then_some(report.checked_at.as_str());
+        connection
+            .update_tripwire_check_state(
+                &stored.id,
+                &report.state,
+                &report.checked_at,
+                triggered_at,
+            )
+            .map_err(storage_error("Failed to update tripwire state"))?;
+    }
+
+    let mutation_posture = if durable_state_update {
+        "state_update_and_check_event_persisted"
+    } else {
+        "check_event_persisted"
+    };
+    report.durable_mutation = true;
+    report.mutation_posture = mutation_posture.to_owned();
+    let event_id = stable_check_event_id(
+        &stored.id,
+        &report.checked_at,
+        report
+            .event_payload_hash
+            .as_deref()
+            .unwrap_or("blake3:missing"),
+    );
+    connection
+        .insert_tripwire_check_event(
+            &event_id,
+            &CreateTripwireCheckEventInput {
+                workspace_id: stored.workspace_id.clone(),
+                tripwire_id: stored.id.clone(),
+                preflight_run_id: stored.preflight_run_id.clone(),
+                checked_at: report.checked_at.clone(),
+                event_payload_hash: report
+                    .event_payload_hash
+                    .clone()
+                    .unwrap_or_else(|| "blake3:missing".to_owned()),
+                condition_result: report
+                    .condition_evaluation
+                    .as_ref()
+                    .map_or("missing_input", |evaluation| evaluation.result.as_str())
+                    .to_owned(),
+                check_result: report.result.as_str().to_owned(),
+                should_halt: report.should_halt,
+                dry_run: report.dry_run,
+                durable_mutation: report.durable_mutation,
+                mutation_posture: report.mutation_posture.clone(),
+                details: report.details.clone(),
+                schema: report.schema.clone(),
+            },
         )
-        .with_message("Cargo.lock should not be modified during task"),
-        Tripwire::new(
-            "tw_002",
-            "pfl_run_001",
-            TripwireType::ErrorThreshold,
-            "error_count < 3",
-            TripwireAction::Halt,
-            &now,
-        )
-        .with_message("Halt if more than 3 errors occur"),
-        Tripwire::new(
-            "tw_003",
-            "pfl_run_002",
-            TripwireType::TimeLimit,
-            "elapsed_minutes < 30",
-            TripwireAction::Pause,
-            &now,
-        )
-        .with_message("Pause if task runs longer than 30 minutes"),
-        Tripwire::new(
-            "tw_004",
-            "pfl_run_002",
-            TripwireType::Custom,
-            "TRIGGER:forbidden_dep_check",
-            TripwireAction::Halt,
-            &now,
-        )
-        .with_message("Check for forbidden dependencies")
-        .triggered(&now),
-    ]
+        .map_err(storage_error("Failed to record tripwire check event"))?;
+
+    Ok(report)
+}
+
+fn open_tripwire_database(database_path: &Path) -> Result<DbConnection, DomainError> {
+    DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
+        message: format!("Failed to open tripwire database: {error}"),
+        repair: Some("ee init --workspace .".to_owned()),
+    })
+}
+
+fn storage_error(
+    context: &'static str,
+) -> impl Fn(crate::db::DbError) -> DomainError + Copy + 'static {
+    move |error| DomainError::Storage {
+        message: format!("{context}: {error}"),
+        repair: Some("ee doctor".to_owned()),
+    }
+}
+
+fn resolve_workspace_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    absolute.canonicalize().unwrap_or(absolute)
+}
+
+fn resolve_workspace_id(
+    connection: &DbConnection,
+    workspace_path: &Path,
+) -> Result<String, DomainError> {
+    let path = workspace_path.to_string_lossy().into_owned();
+    let stored = connection
+        .get_workspace_by_path(&path)
+        .map_err(storage_error("Failed to query tripwire workspace"))?;
+    Ok(stored.map_or_else(
+        || stable_workspace_id(workspace_path),
+        |workspace| workspace.id,
+    ))
+}
+
+fn stable_workspace_id(path: &Path) -> String {
+    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+}
+
+fn tripwire_from_stored(stored: &StoredTripwire) -> Result<Tripwire, DomainError> {
+    let tripwire_type =
+        TripwireType::from_str(&stored.tripwire_type).map_err(|error| DomainError::Storage {
+            message: format!("Stored tripwire {} has invalid type: {error}", stored.id),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    let action =
+        TripwireAction::from_str(&stored.action).map_err(|error| DomainError::Storage {
+            message: format!("Stored tripwire {} has invalid action: {error}", stored.id),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    let state = TripwireState::from_str(&stored.state).map_err(|error| DomainError::Storage {
+        message: format!("Stored tripwire {} has invalid state: {error}", stored.id),
+        repair: Some("ee doctor".to_owned()),
+    })?;
+
+    let mut tripwire = Tripwire::new(
+        &stored.id,
+        &stored.preflight_run_id,
+        tripwire_type,
+        &stored.condition,
+        action,
+        &stored.created_at,
+    );
+    tripwire.state = state;
+    tripwire.message = stored.message.clone();
+    tripwire.last_checked_at = stored.last_checked_at.clone();
+    tripwire.triggered_at = stored.triggered_at.clone();
+    Ok(tripwire)
+}
+
+fn hash_event_payload(payload: &TripwireEventPayload) -> String {
+    let encoded = serde_json::to_vec(payload).unwrap_or_else(|_| b"{}".to_vec());
+    format!("blake3:{}", blake3::hash(&encoded).to_hex())
+}
+
+fn stable_check_event_id(tripwire_id: &str, checked_at: &str, event_payload_hash: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(tripwire_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(checked_at.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(event_payload_hash.as_bytes());
+    let digest = hasher.finalize().to_hex().to_string();
+    format!("tchk_{}", &digest[..26])
+}
+
+/// Evaluate a generated tripwire condition against explicit event data.
+///
+/// Supported condition forms are the deterministic strings emitted by
+/// `core::preflight`: `task_contains_any("term", ...)` and
+/// `source:<kind>:<source-id> remains relevant`. Unknown or malformed forms
+/// return `unsupported_condition` instead of guessing.
+#[must_use]
+pub fn evaluate_tripwire_condition(
+    condition: &str,
+    payload: &TripwireEventPayload,
+) -> TripwireConditionEvaluation {
+    let condition = condition.trim();
+
+    if let Some(parsed) = parse_task_contains_any_condition(condition) {
+        return match parsed {
+            Ok(terms) => evaluate_task_contains_any(condition, &terms, payload),
+            Err(details) => TripwireConditionEvaluation::new(
+                ConditionEvaluationResult::UnsupportedCondition,
+                condition,
+                details,
+            ),
+        };
+    }
+
+    if let Some(parsed) = parse_source_relevance_condition(condition) {
+        return match parsed {
+            Ok((source_kind, source_id)) => {
+                evaluate_source_relevance(condition, &source_kind, &source_id, payload)
+            }
+            Err(details) => TripwireConditionEvaluation::new(
+                ConditionEvaluationResult::UnsupportedCondition,
+                condition,
+                details,
+            ),
+        };
+    }
+
+    TripwireConditionEvaluation::new(
+        ConditionEvaluationResult::UnsupportedCondition,
+        condition,
+        "Condition form is not supported by the deterministic tripwire evaluator",
+    )
+}
+
+fn evaluate_task_contains_any(
+    condition: &str,
+    terms: &[String],
+    payload: &TripwireEventPayload,
+) -> TripwireConditionEvaluation {
+    let Some(task_input) = payload.task_input.as_ref() else {
+        return TripwireConditionEvaluation::new(
+            ConditionEvaluationResult::MissingInput,
+            condition,
+            "Condition requires event payload field `task_input`",
+        );
+    };
+
+    let task_input = task_input.to_lowercase();
+    let matched_terms: Vec<_> = terms
+        .iter()
+        .filter(|term| task_input.contains(term.as_str()))
+        .cloned()
+        .collect();
+
+    let result = if matched_terms.is_empty() {
+        ConditionEvaluationResult::Unsatisfied
+    } else {
+        ConditionEvaluationResult::Satisfied
+    };
+    let mut evaluation = TripwireConditionEvaluation::new(
+        result,
+        condition,
+        if matched_terms.is_empty() {
+            "No generated tripwire terms matched the explicit task input"
+        } else {
+            "At least one generated tripwire term matched the explicit task input"
+        },
+    );
+    evaluation.matched_terms = matched_terms;
+    evaluation
+}
+
+fn evaluate_source_relevance(
+    condition: &str,
+    source_kind: &str,
+    source_id: &str,
+    payload: &TripwireEventPayload,
+) -> TripwireConditionEvaluation {
+    let source_key = source_relevance_key(source_kind, source_id);
+    let Some(relevant) = payload.source_relevance.get(&source_key) else {
+        let mut evaluation = TripwireConditionEvaluation::new(
+            ConditionEvaluationResult::MissingInput,
+            condition,
+            format!("Condition requires source relevance input for `{source_key}`"),
+        );
+        evaluation.source_key = Some(source_key);
+        return evaluation;
+    };
+
+    let result = if *relevant {
+        ConditionEvaluationResult::Satisfied
+    } else {
+        ConditionEvaluationResult::Unsatisfied
+    };
+    let mut evaluation = TripwireConditionEvaluation::new(
+        result,
+        condition,
+        if *relevant {
+            "Explicit event payload marks the source as still relevant"
+        } else {
+            "Explicit event payload marks the source as not relevant"
+        },
+    );
+    evaluation.source_key = Some(source_key);
+    evaluation
+}
+
+fn parse_task_contains_any_condition(condition: &str) -> Option<Result<Vec<String>, String>> {
+    let raw_args = condition
+        .strip_prefix("task_contains_any(")?
+        .strip_suffix(')')?;
+    let json_args = format!("[{raw_args}]");
+    let parsed = serde_json::from_str::<Vec<String>>(&json_args)
+        .map_err(|error| format!("Malformed task_contains_any condition arguments: {error}"));
+
+    Some(parsed.and_then(|terms| {
+        let normalized = normalize_condition_terms(terms);
+        if normalized.is_empty() {
+            Err("task_contains_any condition must include at least one term".to_owned())
+        } else {
+            Ok(normalized)
+        }
+    }))
+}
+
+fn normalize_condition_terms(terms: Vec<String>) -> Vec<String> {
+    let mut normalized: Vec<_> = terms
+        .into_iter()
+        .map(|term| term.trim().to_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn parse_source_relevance_condition(condition: &str) -> Option<Result<(String, String), String>> {
+    let raw = condition
+        .strip_prefix("source:")?
+        .strip_suffix(" remains relevant")?;
+    let Some((source_kind, source_id)) = raw.split_once(':') else {
+        return Some(Err(
+            "source relevance condition must include source kind and source id".to_owned(),
+        ));
+    };
+    let source_kind = source_kind.trim();
+    let source_id = source_id.trim();
+    if source_kind.is_empty() || source_id.is_empty() {
+        return Some(Err(
+            "source relevance condition must include non-empty source kind and source id"
+                .to_owned(),
+        ));
+    }
+    Some(Ok((source_kind.to_owned(), source_id.to_owned())))
+}
+
+fn source_relevance_key(source_kind: &str, source_id: &str) -> String {
+    format!("{}:{}", source_kind.trim(), source_id.trim())
 }
 
 #[cfg(test)]
@@ -443,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn list_tripwires_returns_samples() -> TestResult {
+    fn list_tripwires_returns_empty_state_without_samples() -> TestResult {
         let options = ListOptions {
             workspace: PathBuf::from("."),
             ..Default::default()
@@ -451,7 +960,8 @@ mod tests {
 
         let report = list_tripwires(&options).map_err(|e| e.message())?;
 
-        ensure(report.total_count > 0, true, "has tripwires")?;
+        ensure(report.total_count, 0, "no tripwires")?;
+        ensure(report.tripwires.is_empty(), true, "empty tripwire list")?;
         ensure(report.schema, TRIPWIRE_LIST_SCHEMA_V1.to_string(), "schema")
     }
 
@@ -519,33 +1029,6 @@ mod tests {
     }
 
     #[test]
-    fn check_tripwire_armed_passes() -> TestResult {
-        let options = CheckOptions {
-            workspace: PathBuf::from("."),
-            tripwire_id: "tw_001".to_string(),
-            ..Default::default()
-        };
-
-        let report = check_tripwire(&options).map_err(|e| e.message())?;
-
-        ensure(report.result, CheckResult::Passed, "result")?;
-        ensure(report.should_halt, false, "should not halt")
-    }
-
-    #[test]
-    fn check_tripwire_triggered() -> TestResult {
-        let options = CheckOptions {
-            workspace: PathBuf::from("."),
-            tripwire_id: "tw_004".to_string(),
-            ..Default::default()
-        };
-
-        let report = check_tripwire(&options).map_err(|e| e.message())?;
-
-        ensure(report.result, CheckResult::Triggered, "result")
-    }
-
-    #[test]
     fn check_result_variants_stable() {
         assert_eq!(CheckResult::Passed.as_str(), "passed");
         assert_eq!(CheckResult::Triggered.as_str(), "triggered");
@@ -561,6 +1044,214 @@ mod tests {
         assert!(!CheckResult::Triggered.is_ok());
         assert!(!CheckResult::Error.is_ok());
         assert!(!CheckResult::NotFound.is_ok());
+    }
+
+    #[test]
+    fn task_contains_any_condition_is_satisfied_from_explicit_payload() -> TestResult {
+        let payload = TripwireEventPayload::default()
+            .with_task_input("Prepare deploy migration release notes");
+
+        let evaluation =
+            evaluate_tripwire_condition("task_contains_any(\"deploy\", \"migration\")", &payload);
+
+        ensure(
+            evaluation.result,
+            ConditionEvaluationResult::Satisfied,
+            "result",
+        )?;
+        ensure(
+            evaluation.matched_terms,
+            vec!["deploy".to_owned(), "migration".to_owned()],
+            "matched terms",
+        )
+    }
+
+    #[test]
+    fn task_contains_any_condition_reports_unsatisfied() -> TestResult {
+        let payload = TripwireEventPayload::default().with_task_input("format docs");
+
+        let evaluation =
+            evaluate_tripwire_condition("task_contains_any(\"deploy\", \"migration\")", &payload);
+
+        ensure(
+            evaluation.result,
+            ConditionEvaluationResult::Unsatisfied,
+            "result",
+        )?;
+        ensure(evaluation.matched_terms.is_empty(), true, "matched terms")
+    }
+
+    #[test]
+    fn task_contains_any_condition_requires_task_input() -> TestResult {
+        let evaluation = evaluate_tripwire_condition(
+            "task_contains_any(\"deploy\", \"migration\")",
+            &TripwireEventPayload::default(),
+        );
+
+        ensure(
+            evaluation.result,
+            ConditionEvaluationResult::MissingInput,
+            "result",
+        )
+    }
+
+    #[test]
+    fn source_relevance_condition_uses_explicit_payload() -> TestResult {
+        let payload = TripwireEventPayload::default().with_source_relevance(
+            "dependency_contract",
+            "dep_no_tokio",
+            false,
+        );
+
+        let evaluation = evaluate_tripwire_condition(
+            "source:dependency_contract:dep_no_tokio remains relevant",
+            &payload,
+        );
+
+        ensure(
+            evaluation.result,
+            ConditionEvaluationResult::Unsatisfied,
+            "result",
+        )?;
+        ensure(
+            evaluation.source_key,
+            Some("dependency_contract:dep_no_tokio".to_owned()),
+            "source key",
+        )
+    }
+
+    #[test]
+    fn unsupported_condition_is_reported_without_guessing() -> TestResult {
+        let evaluation = evaluate_tripwire_condition(
+            "error_count < 3",
+            &TripwireEventPayload::default().with_task_input("deploy"),
+        );
+
+        ensure(
+            evaluation.result,
+            ConditionEvaluationResult::UnsupportedCondition,
+            "result",
+        )
+    }
+
+    #[test]
+    fn list_tripwires_from_records_filters_counts_and_orders() -> TestResult {
+        let first = Tripwire::new(
+            "tw_b",
+            "pf_release",
+            TripwireType::Custom,
+            "task_contains_any(\"deploy\")",
+            TripwireAction::Warn,
+            "2026-05-03T20:01:00Z",
+        )
+        .triggered("2026-05-03T20:02:00Z");
+        let second = Tripwire::new(
+            "tw_a",
+            "pf_release",
+            TripwireType::Custom,
+            "task_contains_any(\"format\")",
+            TripwireAction::Audit,
+            "2026-05-03T20:00:00Z",
+        );
+        let third = Tripwire::new(
+            "tw_c",
+            "pf_other",
+            TripwireType::Custom,
+            "task_contains_any(\"other\")",
+            TripwireAction::Warn,
+            "2026-05-03T20:03:00Z",
+        )
+        .disarmed();
+
+        let report = list_tripwires_from_records(
+            &[first, second, third],
+            &ListOptions {
+                workspace: PathBuf::from("."),
+                preflight_run_id: Some("pf_release".to_owned()),
+                include_disarmed: true,
+                limit: Some(2),
+                ..Default::default()
+            },
+        );
+
+        ensure(report.total_count, 2, "total count")?;
+        ensure(report.armed_count, 1, "armed count")?;
+        ensure(report.triggered_count, 1, "triggered count")?;
+        ensure(report.tripwires[0].id.as_str(), "tw_a", "stable order")?;
+        ensure(report.tripwires[1].id.as_str(), "tw_b", "stable order")
+    }
+
+    #[test]
+    fn check_tripwire_record_triggers_from_explicit_payload_and_records_feedback() -> TestResult {
+        let tripwire = Tripwire::new(
+            "tw_release",
+            "pf_release",
+            TripwireType::Custom,
+            "task_contains_any(\"deploy\")",
+            TripwireAction::Halt,
+            "2026-05-03T20:00:00Z",
+        );
+        let report = check_tripwire_record(
+            &tripwire,
+            &CheckOptions {
+                workspace: PathBuf::from("."),
+                tripwire_id: "tw_release".to_owned(),
+                event_payload: TripwireEventPayload::default().with_task_input("deploy release"),
+                task_outcome: Some(TaskOutcome::Success),
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .map_err(|error| error.message())?;
+
+        ensure(report.result, CheckResult::Triggered, "result")?;
+        ensure(report.should_halt, true, "halt decision")?;
+        ensure(
+            report
+                .event_payload_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            true,
+            "payload hash",
+        )?;
+        ensure(
+            report.feedback.is_some(),
+            true,
+            "task outcome records feedback projection",
+        )
+    }
+
+    #[test]
+    fn check_tripwire_record_reports_unsupported_condition() -> TestResult {
+        let tripwire = Tripwire::new(
+            "tw_unsupported",
+            "pf_release",
+            TripwireType::Custom,
+            "error_count < 3",
+            TripwireAction::Warn,
+            "2026-05-03T20:00:00Z",
+        );
+        let report = check_tripwire_record(
+            &tripwire,
+            &CheckOptions {
+                workspace: PathBuf::from("."),
+                tripwire_id: "tw_unsupported".to_owned(),
+                event_payload: TripwireEventPayload::default().with_task_input("deploy"),
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .map_err(|error| error.message())?;
+
+        ensure(report.result, CheckResult::Error, "result")?;
+        ensure(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "unsupported_condition"),
+            true,
+            "unsupported degradation",
+        )
     }
 
     #[test]

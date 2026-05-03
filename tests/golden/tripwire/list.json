@@ -1,22 +1,9 @@
 {
   "schema": "ee.tripwire.list.v1",
-  "tripwires": [
-    {
-      "id": "tw_004",
-      "preflight_run_id": "pfl_run_002",
-      "tripwire_type": "custom",
-      "condition": "TRIGGER:forbidden_dep_check",
-      "action": "halt",
-      "state": "triggered",
-      "message": "Check for forbidden dependencies",
-      "created_at": "TIMESTAMP",
-      "last_checked_at": null,
-      "triggered_at": "TIMESTAMP"
-    }
-  ],
-  "total_count": 1,
+  "tripwires": [],
+  "total_count": 0,
   "armed_count": 0,
-  "triggered_count": 1,
+  "triggered_count": 0,
   "disarmed_count": 0,
   "error_count": 0,
   "filters_applied": [

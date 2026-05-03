@@ -10,13 +10,13 @@
   "should_halt": false,
   "dry_run": true,
   "checked_at": "TIMESTAMP",
-  "details": "Tripwire 'tw_missing' not found in workspace",
+  "details": "Tripwire 'tw_missing' not found in persisted tripwire store",
   "feedback": null,
   "degraded": [
     {
       "code": "tripwire_inputs_incomplete",
       "severity": "warning",
-      "message": "No tripwire matched the requested ID, so the check could not evaluate a concrete event payload.",
+      "message": "No persisted tripwire matched the requested ID, so the check could not evaluate a concrete event payload.",
       "repair": "ee tripwire list --json"
     }
   ]
