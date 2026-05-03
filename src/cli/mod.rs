@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -72,8 +73,13 @@ use crate::core::rule::{
 };
 use crate::core::search::{SearchOptions, run_search};
 use crate::core::status::StatusReport;
+use crate::core::tripwire::{
+    CheckOptions as TripwireCheckOptions, ListOptions as TripwireListOptions, TripwireEventPayload,
+    check_tripwire, list_tripwires,
+};
 use crate::core::why::{WhyOptions, explain_memory};
 use crate::core::workspace as workspace_core;
+use crate::models::preflight::{TripwireState, TripwireType};
 use crate::models::{
     DEMO_FILE_SCHEMA_V1, DemoEntry, DemoFile, DemoId, DemoStatus, DomainError,
     ExperimentOutcomeStatus, ExperimentSafetyBoundary, InstallOperation, LearningObservationSignal,
@@ -2041,6 +2047,10 @@ pub enum TripwireCommand {
 /// Arguments for `ee tripwire list`.
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
 pub struct TripwireListArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
     /// Filter by tripwire state (armed, triggered, disarmed, error).
     #[arg(long, value_name = "STATE")]
     pub state: Option<String>,
@@ -2068,6 +2078,18 @@ pub struct TripwireCheckArgs {
     /// Tripwire ID to check.
     #[arg(value_name = "ID")]
     pub tripwire_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Explicit current task text for task_contains_any(...) conditions.
+    #[arg(long, value_name = "TEXT")]
+    pub task_input: Option<String>,
+
+    /// Explicit source relevance as <kind>:<id>=true|false.
+    #[arg(long = "source-relevance", value_name = "KIND:ID=BOOL")]
+    pub source_relevance: Vec<String>,
 
     /// Update the last_checked_at timestamp.
     #[arg(long, action = ArgAction::SetTrue)]
@@ -13160,57 +13182,6 @@ impl InvocationHints {
 // EE-393: Tripwire List and Check Commands
 // ============================================================================
 
-const TRIPWIRE_UNAVAILABLE_CODE: &str = "tripwire_store_unavailable";
-const TRIPWIRE_UNAVAILABLE_MESSAGE: &str = "Tripwire list and check are unavailable until tripwires are read from persisted rules and evaluated against explicit event payloads instead of generated samples.";
-const TRIPWIRE_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const TRIPWIRE_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-qmu0";
-const TRIPWIRE_UNAVAILABLE_SIDE_EFFECT: &str =
-    "read-only, conservative abstention; no tripwire store read or event evaluation";
-
-fn write_tripwire_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": TRIPWIRE_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": TRIPWIRE_UNAVAILABLE_MESSAGE,
-                "repair": TRIPWIRE_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": TRIPWIRE_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": TRIPWIRE_UNAVAILABLE_MESSAGE,
-                        "repair": TRIPWIRE_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": TRIPWIRE_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": TRIPWIRE_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
-
-    let _ = writeln!(stderr, "error: {TRIPWIRE_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {TRIPWIRE_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
-}
-
 fn handle_tripwire_list<W, E>(
     cli: &Cli,
     args: &TripwireListArgs,
@@ -13221,8 +13192,58 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_tripwire_unavailable(cli, "tripwire list", stdout, stderr)
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let state = match parse_optional_tripwire_state(args.state.as_deref()) {
+        Ok(state) => state,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let tripwire_type = match parse_optional_tripwire_type(args.tripwire_type.as_deref()) {
+        Ok(tripwire_type) => tripwire_type,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    let report = match list_tripwires(&TripwireListOptions {
+        workspace,
+        database_path: Some(database_path),
+        state,
+        preflight_run_id: args.preflight_run_id.clone(),
+        tripwire_type,
+        limit: args.limit,
+        include_disarmed: args.include_disarmed,
+    }) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_tripwire_list_human(&report))
+        }
+        output::Renderer::Toon => {
+            let json = report.to_json();
+            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.to_json() + "\n")),
+    }
 }
 
 fn handle_tripwire_check<W, E>(
@@ -13239,8 +13260,162 @@ where
         Ok(outcome) => outcome,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    let _ = task_outcome;
-    write_tripwire_unavailable(cli, "tripwire check", stdout, stderr)
+    let event_payload = match parse_tripwire_event_payload(args) {
+        Ok(payload) => payload,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let report = match check_tripwire(&TripwireCheckOptions {
+        workspace,
+        database_path: Some(database_path),
+        tripwire_id: args.tripwire_id.clone(),
+        event_payload,
+        update_timestamp: args.update_timestamp,
+        task_outcome,
+        dry_run: args.dry_run,
+    }) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_tripwire_check_human(&report))
+        }
+        output::Renderer::Toon => {
+            let json = report.to_json();
+            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.to_json() + "\n")),
+    }
+}
+
+fn parse_optional_tripwire_state(
+    value: Option<&str>,
+) -> Result<Option<TripwireState>, DomainError> {
+    value
+        .map(|raw| {
+            TripwireState::from_str(raw).map_err(|error| DomainError::Usage {
+                message: error.to_string(),
+                repair: Some("use armed, triggered, disarmed, or error".to_owned()),
+            })
+        })
+        .transpose()
+}
+
+fn parse_optional_tripwire_type(value: Option<&str>) -> Result<Option<TripwireType>, DomainError> {
+    value
+        .map(|raw| {
+            TripwireType::from_str(raw).map_err(|error| DomainError::Usage {
+                message: error.to_string(),
+                repair: Some(
+                    "use file_change, resource_threshold, time_limit, error_threshold, service_health, or custom"
+                        .to_owned(),
+                ),
+            })
+        })
+        .transpose()
+}
+
+fn parse_tripwire_event_payload(
+    args: &TripwireCheckArgs,
+) -> Result<TripwireEventPayload, DomainError> {
+    let mut payload = TripwireEventPayload::default();
+    if let Some(task_input) = args.task_input.clone() {
+        payload = payload.with_task_input(task_input);
+    }
+    for raw in &args.source_relevance {
+        let Some((source, relevant)) = raw.split_once('=') else {
+            return Err(DomainError::Usage {
+                message: format!(
+                    "invalid --source-relevance {raw:?}; expected <kind>:<id>=true|false"
+                ),
+                repair: Some(
+                    "ee tripwire check <id> --source-relevance memory:mem_123=true".to_owned(),
+                ),
+            });
+        };
+        let relevant = parse_bool_arg(relevant).ok_or_else(|| DomainError::Usage {
+            message: format!(
+                "invalid --source-relevance value {relevant:?}; expected true or false"
+            ),
+            repair: Some("use true or false".to_owned()),
+        })?;
+        let Some((source_kind, source_id)) = source.split_once(':') else {
+            return Err(DomainError::Usage {
+                message: format!(
+                    "invalid --source-relevance source {source:?}; expected <kind>:<id>"
+                ),
+                repair: Some(
+                    "ee tripwire check <id> --source-relevance memory:mem_123=true".to_owned(),
+                ),
+            });
+        };
+        payload = payload.with_source_relevance(source_kind, source_id, relevant);
+    }
+    Ok(payload)
+}
+
+fn parse_bool_arg(raw: &str) -> Option<bool> {
+    match raw {
+        "true" | "1" | "yes" => Some(true),
+        "false" | "0" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn render_tripwire_list_human(report: &crate::core::tripwire::ListReport) -> String {
+    if report.tripwires.is_empty() {
+        return "No tripwires found.\n".to_owned();
+    }
+
+    let mut lines = vec![format!("Tripwires: {}", report.total_count)];
+    for tripwire in &report.tripwires {
+        lines.push(format!(
+            "- {} [{}] {} -> {} ({})",
+            tripwire.id,
+            tripwire.state,
+            tripwire.condition,
+            tripwire.action,
+            tripwire.preflight_run_id
+        ));
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+fn render_tripwire_check_human(report: &crate::core::tripwire::CheckReport) -> String {
+    let mut lines = vec![
+        format!("Tripwire: {}", report.tripwire_id),
+        format!("Result: {}", report.result.as_str()),
+        format!("Action: {}", report.action),
+        format!("Should halt: {}", report.should_halt),
+        format!("Mutation: {}", report.mutation_posture),
+    ];
+    if let Some(details) = &report.details {
+        lines.push(format!("Details: {details}"));
+    }
+    lines.push(String::new());
+    lines.join("\n")
 }
 
 #[cfg(test)]
