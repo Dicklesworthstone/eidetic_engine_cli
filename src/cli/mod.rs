@@ -9376,36 +9376,65 @@ fn handle_review_session<W, E>(
     cli: &Cli,
     args: &ReviewSessionArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    use std::time::Instant;
+    let _ = args;
+    write_review_unavailable(cli, "review session", stdout, stderr)
+}
 
-    let start = Instant::now();
+const REVIEW_UNAVAILABLE_CODE: &str = "review_evidence_unavailable";
+const REVIEW_UNAVAILABLE_MESSAGE: &str = "Session review is unavailable until it reads CASS session evidence and writes explicit candidate records instead of reporting an empty generated proposal set.";
+const REVIEW_UNAVAILABLE_REPAIR: &str = "ee import cass --workspace . --dry-run --json";
+const REVIEW_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-0hjw";
+const REVIEW_UNAVAILABLE_SIDE_EFFECT: &str =
+    "read-only, conservative abstention; no session review or curation candidate proposal emitted";
 
-    let candidates: Vec<ProposedCandidate> = Vec::new();
-
-    let report = ReviewSessionReport {
-        schema: crate::models::REVIEW_SESSION_SCHEMA_V1,
-        session_id: args.session.clone(),
-        propose_mode: args.propose,
-        candidates,
-        elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
-    };
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &report.human_output())
-        }
-        output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
+fn write_review_unavailable<W, E>(
+    cli: &Cli,
+    command: &'static str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": REVIEW_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": REVIEW_UNAVAILABLE_MESSAGE,
+                "repair": REVIEW_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": REVIEW_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": REVIEW_UNAVAILABLE_MESSAGE,
+                        "repair": REVIEW_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": REVIEW_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": REVIEW_UNAVAILABLE_SIDE_EFFECT
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
     }
+
+    let _ = writeln!(stderr, "error: {REVIEW_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {REVIEW_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
 }
 
 fn handle_search<W, E>(

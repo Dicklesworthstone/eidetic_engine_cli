@@ -141,6 +141,8 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "tripwire"
     } else if args.iter().any(|arg| arg == "eval") {
         "eval"
+    } else if args.iter().any(|arg| arg == "review") {
+        "review"
     } else if args.iter().any(|arg| arg == "handoff") {
         "handoff"
     } else if args.iter().any(|arg| arg == "recorder") {
@@ -186,6 +188,8 @@ fn side_effect_class(args: &[String]) -> &'static str {
         "read-only, conservative abstention; no tripwire store read or event evaluation"
     } else if args.iter().any(|arg| arg == "eval") {
         "read-only, conservative abstention; no fixture discovery, evaluation report, or science metrics emitted"
+    } else if args.iter().any(|arg| arg == "review") {
+        "read-only, conservative abstention; no session review or curation candidate proposal emitted"
     } else if args.iter().any(|arg| arg == "handoff") {
         "conservative abstention; no continuity capsule write"
     } else if args.iter().any(|arg| arg == "recorder") {
@@ -1936,6 +1940,139 @@ fn eval_run_and_list_degrade_instead_of_reporting_no_scenario_stub_success() -> 
     }
 
     Ok(())
+}
+
+#[test]
+fn review_session_degrades_instead_of_reporting_empty_proposal_success() -> TestResult {
+    let result = run_ee_logged(
+        "review-session-unavailable",
+        None,
+        vec![
+            "--json".to_owned(),
+            "review".to_owned(),
+            "session".to_owned(),
+            "--propose".to_owned(),
+        ],
+    )?;
+
+    ensure_equal(
+        &result.exit_code,
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "review session unavailable exit code",
+    )?;
+    ensure(
+        result.stderr.is_empty(),
+        "review session JSON degraded response must keep stderr empty",
+    )?;
+    ensure_no_ansi(&result.stdout, "review session degraded stdout")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/schema",
+        json!("ee.response.v1"),
+        "review session degraded response schema",
+    )?;
+    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/command",
+        json!("review session"),
+        "review session command label",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/code",
+        json!("review_evidence_unavailable"),
+        "review session degraded code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/degraded/0/code",
+        json!("review_evidence_unavailable"),
+        "review session degraded array code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/repair",
+        json!("ee import cass --workspace . --dry-run --json"),
+        "review session repair command",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/followUpBead",
+        json!("eidetic_engine_cli-0hjw"),
+        "review session follow-up bead",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sideEffectClass",
+        json!(
+            "read-only, conservative abstention; no session review or curation candidate proposal emitted"
+        ),
+        "review session side-effect class",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/evidenceIds",
+        json!([]),
+        "review session evidence ids",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sourceIds",
+        json!([]),
+        "review session source ids",
+    )?;
+    ensure(
+        result.parsed.pointer("/data/candidates").is_none(),
+        "review session must not emit empty candidate proposals without CASS evidence",
+    )?;
+
+    let fake_success =
+        validate_no_fake_success_output("review session", false, false, &result.stdout);
+    ensure(
+        fake_success.passed,
+        format!("degraded review session output should not be fake success: {fake_success:?}"),
+    )?;
+
+    let unsupported_claims =
+        validate_no_unsupported_evidence_claims("review session", false, false, &result.stdout);
+    ensure(
+        unsupported_claims.passed,
+        format!(
+            "degraded review session output should not count as unsupported success: {unsupported_claims:?}"
+        ),
+    )?;
+
+    let log_text = fs::read_to_string(&result.log_path)
+        .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+    let log_json: Value = serde_json::from_str(&log_text)
+        .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+    ensure_json_pointer(
+        &log_json,
+        "/degradationCodes",
+        json!(["review_evidence_unavailable"]),
+        "logged review session degradation code",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/repairCommand",
+        json!("ee import cass --workspace . --dry-run --json"),
+        "logged review session repair command",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/commandBoundaryMatrixRow",
+        json!("review"),
+        "logged review session boundary matrix row",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/sideEffectClass",
+        json!(
+            "read-only, conservative abstention; no session review or curation candidate proposal emitted"
+        ),
+        "logged review session side-effect class",
+    )
 }
 
 #[test]
