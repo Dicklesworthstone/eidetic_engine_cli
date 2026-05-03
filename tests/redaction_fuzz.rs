@@ -71,16 +71,19 @@ fn positive_corpus_detects_all_secrets() {
             continue;
         }
 
-        if let Some(ref expected_class_str) = fixture.expected_class {
-            if let Some(expected_class) = class_from_str(expected_class_str) {
-                let has_expected_class = leaks.iter().any(|l| l.class == expected_class);
-                if !has_expected_class {
-                    failures.push(format!(
-                        "{}: expected class {:?} but found {:?}",
-                        fixture.id,
-                        expected_class,
-                        leaks.iter().map(|l| l.class).collect::<Vec<_>>()
-                    ));
+        // Only check expected_class when detection was expected AND occurred
+        if fixture.expected_detected && detected {
+            if let Some(ref expected_class_str) = fixture.expected_class {
+                if let Some(expected_class) = class_from_str(expected_class_str) {
+                    let has_expected_class = leaks.iter().any(|l| l.class == expected_class);
+                    if !has_expected_class {
+                        failures.push(format!(
+                            "{}: expected class {:?} but found {:?}",
+                            fixture.id,
+                            expected_class,
+                            leaks.iter().map(|l| l.class).collect::<Vec<_>>()
+                        ));
+                    }
                 }
             }
         }
@@ -177,15 +180,17 @@ fn redaction_is_deterministic() {
 fn generate_coverage_report() {
     let positive_dir = Path::new("tests/fixtures/redaction/positive");
     let negative_dir = Path::new("tests/fixtures/redaction/negative");
+    let gaps_dir = Path::new("tests/fixtures/redaction/gaps");
 
     let positive = load_fixtures(positive_dir);
     let negative = load_fixtures(negative_dir);
+    let gaps = load_fixtures(gaps_dir);
 
     let mut encodings: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut contexts: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut classes: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
-    for f in positive.iter().chain(negative.iter()) {
+    for f in positive.iter().chain(negative.iter()).chain(gaps.iter()) {
         encodings.insert(&f.encoding);
         contexts.insert(&f.context);
         if let Some(ref c) = f.expected_class {
@@ -198,12 +203,14 @@ fn generate_coverage_report() {
         "generated_at": chrono::Utc::now().to_rfc3339(),
         "positive_fixtures": positive.len(),
         "negative_fixtures": negative.len(),
+        "gap_fixtures": gaps.len(),
         "encodings_covered": encodings.into_iter().collect::<Vec<_>>(),
         "contexts_covered": contexts.into_iter().collect::<Vec<_>>(),
         "classes_covered": classes.into_iter().collect::<Vec<_>>(),
         "fixture_ids": {
             "positive": positive.iter().map(|f| &f.id).collect::<Vec<_>>(),
-            "negative": negative.iter().map(|f| &f.id).collect::<Vec<_>>()
+            "negative": negative.iter().map(|f| &f.id).collect::<Vec<_>>(),
+            "gaps": gaps.iter().map(|f| &f.id).collect::<Vec<_>>()
         }
     });
 

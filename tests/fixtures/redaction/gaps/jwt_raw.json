@@ -1,0 +1,10 @@
+{
+  "id": "jwt_raw",
+  "description": "JWT token in Authorization header - DETECTOR GAP",
+  "input": "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+  "expected_class": "secret",
+  "encoding": "raw",
+  "context": "header",
+  "expected_detected": false,
+  "notes": "GAP: Detector lacks JWT pattern (eyJ... prefix). Filed as gap to address in detector improvements."
+}

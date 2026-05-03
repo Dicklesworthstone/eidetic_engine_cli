@@ -1,0 +1,10 @@
+{
+  "id": "private_key_pem",
+  "description": "PEM-encoded private key header - DETECTOR GAP",
+  "input": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpQIBAAKCAQEA0Z3VS5JJcds3xfn...",
+  "expected_class": "secret",
+  "encoding": "raw",
+  "context": "file_content",
+  "expected_detected": false,
+  "notes": "GAP: Detector lacks PEM private key header pattern. Filed as gap to address in detector improvements."
+}

@@ -1,0 +1,10 @@
+{
+  "id": "api_key_base64",
+  "description": "API key that happens to contain base64-looking content",
+  "input": "key: sk-aW5jbHVkZV9iYXNlNjQ=",
+  "expected_class": "secret",
+  "encoding": "raw",
+  "context": "yaml_value",
+  "expected_detected": true,
+  "notes": "sk- prefix should trigger even with base64-ish suffix"
+}
