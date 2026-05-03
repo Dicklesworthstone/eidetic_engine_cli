@@ -245,6 +245,11 @@ pub const GRAPH_SCHEMAS: &[SchemaEntry] = &[
         SchemaCategory::Graph,
     ),
     SchemaEntry::new(
+        "feature_enrichment",
+        "ee.graph.feature_enrichment.v1",
+        SchemaCategory::Graph,
+    ),
+    SchemaEntry::new(
         "snapshot_validation",
         "ee.graph.snapshot_validation.v1",
         SchemaCategory::Graph,
@@ -668,6 +673,15 @@ mod tests {
         ensure(
             versions.contains(&"ee.graph.snapshot_validation.v1"),
             "graph schemas must include snapshot_validation (EE-268)",
+        )
+    }
+
+    #[test]
+    fn graph_schemas_include_feature_enrichment() -> TestResult {
+        let versions: Vec<&str> = GRAPH_SCHEMAS.iter().map(|s| s.version).collect();
+        ensure(
+            versions.contains(&"ee.graph.feature_enrichment.v1"),
+            "graph schemas must include feature_enrichment (EE-167)",
         )
     }
 

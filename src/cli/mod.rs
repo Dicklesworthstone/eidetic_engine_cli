@@ -970,6 +970,8 @@ pub enum GraphCommand {
     Export(GraphExportArgs),
     /// Refresh centrality metrics (PageRank, betweenness) for memory graph.
     CentralityRefresh(GraphCentralityRefreshArgs),
+    /// Enrich retrieval candidates with bounded graph-derived features.
+    FeatureEnrichment(GraphFeatureEnrichmentArgs),
     /// Show the deterministic memory-link neighborhood for a memory.
     Neighborhood(GraphNeighborhoodArgs),
 }
@@ -1021,6 +1023,42 @@ pub struct GraphCentralityRefreshArgs {
     /// Maximum number of links to process.
     #[arg(long, value_name = "COUNT")]
     pub link_limit: Option<u32>,
+}
+
+/// Arguments for `ee graph feature-enrichment`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct GraphFeatureEnrichmentArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Compute only the projection plan; enriched features will be degraded.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Minimum link weight to include (0.0 - 1.0).
+    #[arg(long, value_name = "WEIGHT")]
+    pub min_weight: Option<f32>,
+
+    /// Minimum link confidence to include (0.0 - 1.0).
+    #[arg(long, value_name = "CONFIDENCE")]
+    pub min_confidence: Option<f32>,
+
+    /// Maximum number of links to process for centrality.
+    #[arg(long, value_name = "COUNT")]
+    pub link_limit: Option<u32>,
+
+    /// Maximum number of enriched features to emit.
+    #[arg(long, value_name = "COUNT")]
+    pub max_features: Option<usize>,
+
+    /// Drop graph features below this combined score threshold (0.0 - 1.0).
+    #[arg(long, value_name = "SCORE")]
+    pub min_combined_score: Option<f64>,
+
+    /// Cap applied to derived selection boosts.
+    #[arg(long, value_name = "BOOST")]
+    pub max_selection_boost: Option<f64>,
 }
 
 /// Arguments for `ee graph neighborhood`.
@@ -4204,6 +4242,9 @@ where
         }
         Some(Command::Graph(GraphCommand::CentralityRefresh(ref args))) => {
             handle_graph_centrality_refresh(&cli, args, stdout, stderr)
+        }
+        Some(Command::Graph(GraphCommand::FeatureEnrichment(ref args))) => {
+            handle_graph_feature_enrichment(&cli, args, stdout, stderr)
         }
         Some(Command::Graph(GraphCommand::Neighborhood(ref args))) => {
             handle_graph_neighborhood(&cli, args, stdout, stderr)
@@ -8251,6 +8292,180 @@ where
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
     }
+}
+
+fn handle_graph_feature_enrichment<W, E>(
+    cli: &Cli,
+    args: &GraphFeatureEnrichmentArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if matches!(args.max_features, Some(0)) {
+        let domain_error = DomainError::Usage {
+            message: "--max-features must be greater than zero".to_string(),
+            repair: Some("Omit --max-features to use the default cap.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    if let Some(min_combined_score) = args.min_combined_score {
+        if !min_combined_score.is_finite() || !(0.0..=1.0).contains(&min_combined_score) {
+            let domain_error = DomainError::Usage {
+                message: "--min-combined-score must be a finite value in [0.0, 1.0]".to_string(),
+                repair: Some("Use a value like 0.01 or omit the flag.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    }
+
+    if let Some(max_selection_boost) = args.max_selection_boost {
+        if !max_selection_boost.is_finite() || max_selection_boost < 0.0 {
+            let domain_error = DomainError::Usage {
+                message: "--max-selection-boost must be a finite non-negative value".to_string(),
+                repair: Some("Use a value like 0.15 or omit the flag.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    }
+
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let centrality_options = crate::graph::CentralityRefreshOptions {
+        dry_run: args.dry_run,
+        min_weight: args.min_weight,
+        min_confidence: args.min_confidence,
+        link_limit: args.link_limit,
+    };
+
+    let centrality = match crate::graph::refresh_centrality(&conn, &centrality_options) {
+        Ok(centrality) => centrality,
+        Err(error) => {
+            let domain_error = DomainError::Graph {
+                message: error,
+                repair: Some("ee graph centrality-refresh --dry-run".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let mut enrichment_options = crate::graph::GraphFeatureEnrichmentOptions::default();
+    if let Some(max_features) = args.max_features {
+        enrichment_options.max_features = max_features;
+    }
+    if let Some(min_combined_score) = args.min_combined_score {
+        enrichment_options.min_combined_score = min_combined_score;
+    }
+    if let Some(max_selection_boost) = args.max_selection_boost {
+        enrichment_options.max_selection_boost = max_selection_boost;
+    }
+
+    let report = crate::graph::enrich_graph_features(&centrality, &enrichment_options);
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &graph_feature_enrichment_human_output(&report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(graph_feature_enrichment_toon_output(&report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": report.data_json(),
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn graph_feature_enrichment_human_output(
+    report: &crate::graph::GraphFeatureEnrichmentReport,
+) -> String {
+    let mut output = format!(
+        "Graph feature enrichment ({})\n\n  Source status: {}\n  Feature count: {}\n  Max features: {}\n  Max selection boost: {:.4}\n",
+        report.status.as_str(),
+        report.source_status.as_str(),
+        report.features.len(),
+        report.max_features,
+        report.max_selection_boost,
+    );
+
+    if report.limited {
+        output.push_str("  Output was truncated by max feature cap.\n");
+    }
+
+    if !report.features.is_empty() {
+        output.push_str("\nTop enriched memories:\n");
+        for (index, feature) in report.features.iter().take(5).enumerate() {
+            output.push_str(&format!(
+                "  {}. {} (combined {:.4}, boost {:.4})\n",
+                index + 1,
+                feature.memory_id,
+                feature.combined_score,
+                feature.selection_boost,
+            ));
+        }
+    }
+
+    if !report.degraded.is_empty() {
+        output.push_str("\nDegraded:\n");
+        for entry in &report.degraded {
+            output.push_str(&format!(
+                "  - {}: {}\n    Next: {}\n",
+                entry.code, entry.message, entry.repair
+            ));
+        }
+    }
+
+    output
+}
+
+fn graph_feature_enrichment_toon_output(
+    report: &crate::graph::GraphFeatureEnrichmentReport,
+) -> String {
+    format!(
+        "schema: {}\nsuccess: true\ndata:\n  command: graph feature-enrichment\n  status: {}\n  sourceStatus: {}\n  featureCount: {}\n  degradedCount: {}\n  maxFeatures: {}\n  limited: {}",
+        crate::models::RESPONSE_SCHEMA_V1,
+        report.status.as_str(),
+        report.source_status.as_str(),
+        report.features.len(),
+        report.degraded.len(),
+        report.max_features,
+        report.limited,
+    )
 }
 
 fn handle_graph_export<W, E>(
@@ -12929,6 +13144,7 @@ impl NormalizedInvocation {
                 Command::Graph(graph) => match graph {
                     GraphCommand::Export(_) => "graph export".to_string(),
                     GraphCommand::CentralityRefresh(_) => "graph centrality-refresh".to_string(),
+                    GraphCommand::FeatureEnrichment(_) => "graph feature-enrichment".to_string(),
                     GraphCommand::Neighborhood(_) => "graph neighborhood".to_string(),
                 },
                 Command::Index(index) => match index {
@@ -13954,6 +14170,156 @@ mod tests {
                 "expected graph neighborhood command, got {other:?}"
             )),
         }
+    }
+
+    #[test]
+    fn parser_accepts_graph_feature_enrichment_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "graph",
+            "feature-enrichment",
+            "--dry-run",
+            "--min-weight",
+            "0.2",
+            "--min-confidence",
+            "0.7",
+            "--link-limit",
+            "128",
+            "--max-features",
+            "6",
+            "--min-combined-score",
+            "0.15",
+            "--max-selection-boost",
+            "0.2",
+        ])
+        .map(|cli| cli.command)
+        .map_err(|error| {
+            format!(
+                "failed to parse graph feature-enrichment: {:?}",
+                error.kind()
+            )
+        })?;
+
+        match parsed {
+            Some(Command::Graph(GraphCommand::FeatureEnrichment(args))) => {
+                ensure(args.dry_run, "dry-run parsed")?;
+                ensure_equal(&args.min_weight, &Some(0.2_f32), "min weight")?;
+                ensure_equal(&args.min_confidence, &Some(0.7_f32), "min confidence")?;
+                ensure_equal(&args.link_limit, &Some(128_u32), "link limit")?;
+                ensure_equal(&args.max_features, &Some(6_usize), "max features")?;
+                ensure_equal(
+                    &args.min_combined_score,
+                    &Some(0.15_f64),
+                    "min combined score",
+                )?;
+                ensure_equal(
+                    &args.max_selection_boost,
+                    &Some(0.2_f64),
+                    "max selection boost",
+                )
+            }
+            other => Err(format!(
+                "expected graph feature-enrichment command, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn parser_graph_feature_enrichment_defaults() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "graph", "feature-enrichment"])
+            .map(|cli| cli.command)
+            .map_err(|error| {
+                format!(
+                    "failed to parse default graph feature-enrichment: {:?}",
+                    error.kind()
+                )
+            })?;
+
+        match parsed {
+            Some(Command::Graph(GraphCommand::FeatureEnrichment(args))) => {
+                ensure(!args.dry_run, "dry-run defaults false")?;
+                ensure(args.min_weight.is_none(), "no min-weight by default")?;
+                ensure(
+                    args.min_confidence.is_none(),
+                    "no min-confidence by default",
+                )?;
+                ensure(args.link_limit.is_none(), "no link-limit by default")?;
+                ensure(args.max_features.is_none(), "no max-features by default")?;
+                ensure(
+                    args.min_combined_score.is_none(),
+                    "no min-combined-score by default",
+                )?;
+                ensure(
+                    args.max_selection_boost.is_none(),
+                    "no max-selection-boost by default",
+                )
+            }
+            other => Err(format!(
+                "expected graph feature-enrichment command, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn graph_feature_enrichment_json_is_response_enveloped() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().to_string_lossy().into_owned();
+
+        let (init_exit, _init_stdout, init_stderr) =
+            invoke(&["ee", "--workspace", &workspace, "init", "--json"]);
+        ensure_equal(&init_exit, &ProcessExitCode::Success, "init for graph test")?;
+        ensure(init_stderr.is_empty(), "init JSON stderr clean")?;
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--json",
+            "graph",
+            "feature-enrichment",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "graph feature-enrichment exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "graph feature-enrichment JSON stderr clean",
+        )?;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!("ee.graph.feature_enrichment.v1"),
+            "graph feature data schema",
+        )?;
+        ensure_equal(
+            &value["data"]["status"],
+            &serde_json::json!("scores_unavailable"),
+            "degraded status on fresh workspace",
+        )?;
+
+        let degraded_code = value["data"]["degraded"][0]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if cfg!(feature = "graph") {
+            ensure_equal(&degraded_code, &"empty_graph".to_string(), "degraded code")?;
+        } else {
+            ensure_equal(
+                &degraded_code,
+                &"graph_feature_disabled".to_string(),
+                "degraded code",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
