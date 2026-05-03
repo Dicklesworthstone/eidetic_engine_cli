@@ -8,7 +8,7 @@
 //! - Lock-contention behavior
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -42,7 +42,7 @@ fn unique_workspace(prefix: &str) -> Result<PathBuf, String> {
         .join(format!("{prefix}-{}-{now}", std::process::id())))
 }
 
-fn workspace_arg(path: &PathBuf) -> Result<String, String> {
+fn workspace_arg(path: &Path) -> Result<String, String> {
     path.to_str()
         .map(String::from)
         .ok_or_else(|| "workspace path not valid UTF-8".to_owned())
@@ -60,15 +60,13 @@ fn parse_json_output(output: &Output, context: &str) -> Result<JsonValue, String
         ),
     )?;
 
-    serde_json::from_str(stdout)
-        .map_err(|e| format!("{context} stdout must parse as JSON: {e}"))
+    serde_json::from_str(stdout).map_err(|e| format!("{context} stdout must parse as JSON: {e}"))
 }
 
 #[test]
 fn m1_init_creates_workspace_database() -> TestResult {
     let workspace = unique_workspace("m1-init")?;
-    fs::create_dir_all(&workspace)
-        .map_err(|e| format!("failed to create workspace: {e}"))?;
+    fs::create_dir_all(&workspace).map_err(|e| format!("failed to create workspace: {e}"))?;
 
     let output = run_ee(&["--workspace", &workspace_arg(&workspace)?, "--json", "init"])?;
     let json = parse_json_output(&output, "ee init")?;
@@ -91,12 +89,16 @@ fn m1_init_creates_workspace_database() -> TestResult {
 #[test]
 fn m1_status_reports_workspace_state() -> TestResult {
     let workspace = unique_workspace("m1-status")?;
-    fs::create_dir_all(&workspace)
-        .map_err(|e| format!("failed to create workspace: {e}"))?;
+    fs::create_dir_all(&workspace).map_err(|e| format!("failed to create workspace: {e}"))?;
 
     run_ee(&["--workspace", &workspace_arg(&workspace)?, "--json", "init"])?;
 
-    let output = run_ee(&["--workspace", &workspace_arg(&workspace)?, "--json", "status"])?;
+    let output = run_ee(&[
+        "--workspace",
+        &workspace_arg(&workspace)?,
+        "--json",
+        "status",
+    ])?;
     let json = parse_json_output(&output, "ee status")?;
 
     ensure(
@@ -121,12 +123,16 @@ fn m1_status_reports_workspace_state() -> TestResult {
 #[test]
 fn m1_health_returns_overall_verdict() -> TestResult {
     let workspace = unique_workspace("m1-health")?;
-    fs::create_dir_all(&workspace)
-        .map_err(|e| format!("failed to create workspace: {e}"))?;
+    fs::create_dir_all(&workspace).map_err(|e| format!("failed to create workspace: {e}"))?;
 
     run_ee(&["--workspace", &workspace_arg(&workspace)?, "--json", "init"])?;
 
-    let output = run_ee(&["--workspace", &workspace_arg(&workspace)?, "--json", "health"])?;
+    let output = run_ee(&[
+        "--workspace",
+        &workspace_arg(&workspace)?,
+        "--json",
+        "health",
+    ])?;
     let json = parse_json_output(&output, "ee health")?;
 
     ensure(
@@ -154,7 +160,9 @@ fn m1_capabilities_reports_feature_availability() -> TestResult {
         "capabilities response must use ee.response.v1 schema",
     )?;
 
-    let data = json.get("data").ok_or("capabilities must have data field")?;
+    let data = json
+        .get("data")
+        .ok_or("capabilities must have data field")?;
     ensure(
         data.get("commands").is_some() || data.get("features").is_some(),
         "capabilities data must include commands or features",
