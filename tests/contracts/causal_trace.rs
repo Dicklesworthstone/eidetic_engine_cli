@@ -10,6 +10,10 @@ use ee::core::causal::{
     compare_causal_evidence, estimate_causal_uplift, promote_causal_plan, trace_causal_chains,
 };
 use ee::models::causal::CAUSAL_TRACE_SCHEMA_V1;
+use ee::models::{
+    RATIONALE_TRACE_SCHEMA_V1, RationaleTrace, RationaleTraceKind, RationaleTracePosture,
+    RationaleTraceValidationErrorKind, validate_rationale_summary,
+};
 use serde_json::Value as JsonValue;
 use std::process::{Command, Output};
 
@@ -369,6 +373,44 @@ fn trace_chain_has_required_fields() -> TestResult {
     assert_has_field(&json, "procedureIds", "chain")?;
 
     Ok(())
+}
+
+#[test]
+fn rationale_trace_schema_links_to_causal_trace_without_private_reasoning() -> TestResult {
+    let trace = RationaleTrace::new(
+        "rat_causal_001",
+        RationaleTraceKind::Hypothesis,
+        "ProudBasin",
+        "Replay evidence supports a recorder-link explanation for the outcome.",
+        "2026-05-03T18:30:00Z",
+    )
+    .map_err(|error| error.to_string())?
+    .with_posture(RationaleTracePosture::Supported)
+    .with_causal_trace_id("causal_trace_001")
+    .with_evidence_uri("agent-mail://eidetic_engine_cli-kz1.2/1477");
+
+    ensure(
+        trace.schema == RATIONALE_TRACE_SCHEMA_V1,
+        "rationale trace schema must be stable",
+    )?;
+    ensure(
+        trace
+            .linked_causal_trace_ids
+            .iter()
+            .any(|id| id == "causal_trace_001"),
+        "rationale trace must link to causal trace IDs",
+    )?;
+    ensure(
+        trace.posture == RationaleTracePosture::Supported,
+        "rationale trace must carry support posture",
+    )?;
+
+    let private = validate_rationale_summary("private chain-of-thought says this would work");
+    ensure(
+        private.map_err(|error| error.kind)
+            == Err(RationaleTraceValidationErrorKind::PrivateReasoningMaterial),
+        "private chain-of-thought markers must be rejected",
+    )
 }
 
 #[test]

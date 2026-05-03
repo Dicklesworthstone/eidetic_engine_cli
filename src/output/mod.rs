@@ -2338,6 +2338,20 @@ pub fn render_why_mermaid(report: &WhyReport) -> String {
         output.push_str(&format!("  memory --> {}\n", node_id));
     }
 
+    for (index, trace) in report.rationale_traces.iter().enumerate() {
+        let node_id = format!("rationale{}", index + 1);
+        let label = format!(
+            "rationale: {} {} {}",
+            trace.kind, trace.posture, trace.summary
+        );
+        output.push_str(&format!(
+            "  {}[\"{}\"]\n",
+            node_id,
+            escape_mermaid_label(&label)
+        ));
+        output.push_str(&format!("  memory --> {}\n", node_id));
+    }
+
     for (index, degraded) in report.degraded.iter().enumerate() {
         let node_id = format!("degraded{}", index + 1);
         let label = format!("degraded: {} ({})", degraded.code, degraded.severity);

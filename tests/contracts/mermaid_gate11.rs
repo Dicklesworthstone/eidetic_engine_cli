@@ -13,8 +13,8 @@ use ee::core::procedure::{
     ProcedurePromotionVerificationSummary,
 };
 use ee::core::why::{
-    MemoryLinkSummary, PackSelectionExplanation, RetrievalExplanation, SelectionExplanation,
-    StorageExplanation, WhyDegradation, WhyReport,
+    MemoryLinkSummary, PackSelectionExplanation, RationaleTraceSummary, RetrievalExplanation,
+    SelectionExplanation, StorageExplanation, WhyDegradation, WhyReport,
 };
 use ee::graph::{
     GRAPH_EXPORT_SCHEMA_V1, GraphExportFormat, GraphExportReport, GraphExportSnapshot,
@@ -152,6 +152,25 @@ fn why_fixture() -> WhyReport {
         evidence_count: 3,
         source: "agent".to_string(),
         created_at: "2026-01-02T03:06:07Z".to_string(),
+    }])
+    .with_rationale_traces(vec![RationaleTraceSummary {
+        schema: ee::models::RATIONALE_TRACE_SCHEMA_V1,
+        trace_id: "rat_gate11_release_decision".to_string(),
+        kind: "decision".to_string(),
+        posture: "supported".to_string(),
+        visibility: "public".to_string(),
+        author: "agent:gate11".to_string(),
+        summary: "Visible release evidence explains why the rule was selected.".to_string(),
+        confidence_basis_points: 8400,
+        evidence_uris: vec!["cass://session-gate11#L40-L44".to_string()],
+        linked_memory_ids: vec!["mem_gate11_release_rule".to_string()],
+        linked_context_pack_ids: vec!["pack_gate11_release".to_string()],
+        linked_recorder_run_ids: Vec::new(),
+        linked_recorder_event_ids: Vec::new(),
+        linked_causal_trace_ids: Vec::new(),
+        supersedes_trace_ids: Vec::new(),
+        contradicted_by_trace_ids: Vec::new(),
+        created_at: "2026-01-02T03:06:30Z".to_string(),
     }])
     .with_degradation(WhyDegradation {
         code: "graph_snapshot_stale",

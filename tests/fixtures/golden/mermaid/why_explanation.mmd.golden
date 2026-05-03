@@ -10,5 +10,7 @@ flowchart TD
   selection --> pack
   link1["outgoing supports mem_gate11_prior_incident"]
   memory --> link1
+  rationale1["rationale: decision supported Visible release evidence explains why the rule was selected."]
+  memory --> rationale1
   degraded1["degraded: graph_snapshot_stale (medium)"]
   memory -.-> degraded1

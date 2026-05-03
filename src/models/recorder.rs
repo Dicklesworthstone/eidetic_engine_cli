@@ -6,6 +6,8 @@
 //! - Event payloads (tool calls, outputs, etc.)
 //! - Redaction status for privacy-sensitive data
 //! - Import cursors for incremental import
+//! - Safe rationale traces that capture visible reasoning artifacts without
+//!   storing private chain-of-thought
 
 use std::fmt;
 use std::str::FromStr;
@@ -31,6 +33,9 @@ pub const IMPORT_CURSOR_SCHEMA_V1: &str = "ee.import.cursor.v1";
 
 /// Schema for recorder import dry-run plans.
 pub const RECORDER_IMPORT_PLAN_SCHEMA_V1: &str = "ee.recorder.import_plan.v1";
+
+/// Schema for safe rationale traces attached to recorder/evidence artifacts.
+pub const RATIONALE_TRACE_SCHEMA_V1: &str = "ee.rationale_trace.v1";
 
 /// Schema for the recorder schema catalog.
 pub const RECORDER_SCHEMA_CATALOG_V1: &str = "ee.recorder.schemas.v1";
@@ -550,6 +555,477 @@ impl RedactionStatusSnapshot {
 }
 
 // ============================================================================
+// Rationale Trace
+// ============================================================================
+
+/// Visible rationale artifact kind.
+///
+/// These are concise user/agent-visible summaries. They are not raw private
+/// model chain-of-thought, scratchpads, or complete hidden transcripts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RationaleTraceKind {
+    Hypothesis,
+    Decision,
+    Question,
+    RejectedAlternative,
+    Observation,
+    Conclusion,
+}
+
+impl RationaleTraceKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hypothesis => "hypothesis",
+            Self::Decision => "decision",
+            Self::Question => "question",
+            Self::RejectedAlternative => "rejected_alternative",
+            Self::Observation => "observation",
+            Self::Conclusion => "conclusion",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 6] {
+        [
+            Self::Hypothesis,
+            Self::Decision,
+            Self::Question,
+            Self::RejectedAlternative,
+            Self::Observation,
+            Self::Conclusion,
+        ]
+    }
+}
+
+impl fmt::Display for RationaleTraceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseRationaleTraceKindError(String);
+
+impl fmt::Display for ParseRationaleTraceKindError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid rationale trace kind: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseRationaleTraceKindError {}
+
+impl FromStr for RationaleTraceKind {
+    type Err = ParseRationaleTraceKindError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "hypothesis" => Ok(Self::Hypothesis),
+            "decision" => Ok(Self::Decision),
+            "question" => Ok(Self::Question),
+            "rejected_alternative" => Ok(Self::RejectedAlternative),
+            "observation" => Ok(Self::Observation),
+            "conclusion" => Ok(Self::Conclusion),
+            _ => Err(ParseRationaleTraceKindError(s.to_string())),
+        }
+    }
+}
+
+/// Evidence posture for a rationale trace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RationaleTracePosture {
+    Asserted,
+    Supported,
+    Contradicted,
+    Unresolved,
+}
+
+impl RationaleTracePosture {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Asserted => "asserted",
+            Self::Supported => "supported",
+            Self::Contradicted => "contradicted",
+            Self::Unresolved => "unresolved",
+        }
+    }
+}
+
+impl fmt::Display for RationaleTracePosture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseRationaleTracePostureError(String);
+
+impl fmt::Display for ParseRationaleTracePostureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid rationale trace posture: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseRationaleTracePostureError {}
+
+impl FromStr for RationaleTracePosture {
+    type Err = ParseRationaleTracePostureError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "asserted" => Ok(Self::Asserted),
+            "supported" => Ok(Self::Supported),
+            "contradicted" => Ok(Self::Contradicted),
+            "unresolved" => Ok(Self::Unresolved),
+            _ => Err(ParseRationaleTracePostureError(s.to_string())),
+        }
+    }
+}
+
+/// Visibility/redaction posture for a rationale trace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RationaleTraceVisibility {
+    Public,
+    Redacted,
+    PrivateRejected,
+}
+
+impl RationaleTraceVisibility {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Redacted => "redacted",
+            Self::PrivateRejected => "private_rejected",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_storable(self) -> bool {
+        !matches!(self, Self::PrivateRejected)
+    }
+}
+
+impl fmt::Display for RationaleTraceVisibility {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseRationaleTraceVisibilityError(String);
+
+impl fmt::Display for ParseRationaleTraceVisibilityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid rationale trace visibility: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseRationaleTraceVisibilityError {}
+
+impl FromStr for RationaleTraceVisibility {
+    type Err = ParseRationaleTraceVisibilityError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "public" => Ok(Self::Public),
+            "redacted" => Ok(Self::Redacted),
+            "private_rejected" => Ok(Self::PrivateRejected),
+            _ => Err(ParseRationaleTraceVisibilityError(s.to_string())),
+        }
+    }
+}
+
+/// Validation failure for safe rationale trace summaries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RationaleTraceValidationErrorKind {
+    EmptySummary,
+    PrivateReasoningMaterial,
+    SecretLikeContent,
+    InvalidConfidence,
+}
+
+impl RationaleTraceValidationErrorKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptySummary => "empty_summary",
+            Self::PrivateReasoningMaterial => "private_reasoning_material",
+            Self::SecretLikeContent => "secret_like_content",
+            Self::InvalidConfidence => "invalid_confidence",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RationaleTraceValidationError {
+    pub kind: RationaleTraceValidationErrorKind,
+    pub field: &'static str,
+}
+
+impl RationaleTraceValidationError {
+    #[must_use]
+    pub const fn new(kind: RationaleTraceValidationErrorKind, field: &'static str) -> Self {
+        Self { kind, field }
+    }
+}
+
+impl fmt::Display for RationaleTraceValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} in rationale trace field `{}`",
+            self.kind.as_str(),
+            self.field
+        )
+    }
+}
+
+impl std::error::Error for RationaleTraceValidationError {}
+
+/// A safe, evidence-linked rationale summary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RationaleTrace {
+    pub schema: &'static str,
+    pub trace_id: String,
+    pub kind: RationaleTraceKind,
+    pub author: String,
+    pub summary: String,
+    pub posture: RationaleTracePosture,
+    pub confidence_basis_points: u16,
+    pub visibility: RationaleTraceVisibility,
+    pub redaction_status: RedactionStatus,
+    pub evidence_uris: Vec<String>,
+    pub linked_memory_ids: Vec<String>,
+    pub linked_context_pack_ids: Vec<String>,
+    pub linked_recorder_run_ids: Vec<String>,
+    pub linked_recorder_event_ids: Vec<String>,
+    pub linked_causal_trace_ids: Vec<String>,
+    pub supersedes_trace_ids: Vec<String>,
+    pub contradicted_by_trace_ids: Vec<String>,
+    pub created_at: String,
+}
+
+impl RationaleTrace {
+    /// Create a safe rationale trace.
+    ///
+    /// The summary is validated up front so private chain-of-thought markers
+    /// and common secret-shaped values fail before the trace can be stored.
+    pub fn new(
+        trace_id: impl Into<String>,
+        kind: RationaleTraceKind,
+        author: impl Into<String>,
+        summary: impl Into<String>,
+        created_at: impl Into<String>,
+    ) -> Result<Self, RationaleTraceValidationError> {
+        let summary = summary.into();
+        validate_rationale_summary(&summary)?;
+        Ok(Self {
+            schema: RATIONALE_TRACE_SCHEMA_V1,
+            trace_id: trace_id.into(),
+            kind,
+            author: author.into(),
+            summary,
+            posture: RationaleTracePosture::Asserted,
+            confidence_basis_points: 5000,
+            visibility: RationaleTraceVisibility::Public,
+            redaction_status: RedactionStatus::None,
+            evidence_uris: Vec::new(),
+            linked_memory_ids: Vec::new(),
+            linked_context_pack_ids: Vec::new(),
+            linked_recorder_run_ids: Vec::new(),
+            linked_recorder_event_ids: Vec::new(),
+            linked_causal_trace_ids: Vec::new(),
+            supersedes_trace_ids: Vec::new(),
+            contradicted_by_trace_ids: Vec::new(),
+            created_at: created_at.into(),
+        })
+    }
+
+    pub fn with_confidence_basis_points(
+        mut self,
+        confidence_basis_points: u16,
+    ) -> Result<Self, RationaleTraceValidationError> {
+        if confidence_basis_points > 10_000 {
+            return Err(RationaleTraceValidationError::new(
+                RationaleTraceValidationErrorKind::InvalidConfidence,
+                "confidenceBasisPoints",
+            ));
+        }
+        self.confidence_basis_points = confidence_basis_points;
+        Ok(self)
+    }
+
+    #[must_use]
+    pub const fn with_posture(mut self, posture: RationaleTracePosture) -> Self {
+        self.posture = posture;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_visibility(
+        mut self,
+        visibility: RationaleTraceVisibility,
+        redaction_status: RedactionStatus,
+    ) -> Self {
+        self.visibility = visibility;
+        self.redaction_status = redaction_status;
+        self
+    }
+
+    #[must_use]
+    pub fn with_evidence_uri(mut self, uri: impl Into<String>) -> Self {
+        push_unique_sorted(&mut self.evidence_uris, uri.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_memory_id(mut self, memory_id: impl Into<String>) -> Self {
+        push_unique_sorted(&mut self.linked_memory_ids, memory_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_context_pack_id(mut self, pack_id: impl Into<String>) -> Self {
+        push_unique_sorted(&mut self.linked_context_pack_ids, pack_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_recorder_run_id(mut self, run_id: impl Into<String>) -> Self {
+        push_unique_sorted(&mut self.linked_recorder_run_ids, run_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_recorder_event_id(mut self, event_id: impl Into<String>) -> Self {
+        push_unique_sorted(&mut self.linked_recorder_event_ids, event_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_causal_trace_id(mut self, trace_id: impl Into<String>) -> Self {
+        push_unique_sorted(&mut self.linked_causal_trace_ids, trace_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn supersedes_trace(mut self, trace_id: impl Into<String>) -> Self {
+        push_unique_sorted(&mut self.supersedes_trace_ids, trace_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn contradicted_by_trace(mut self, trace_id: impl Into<String>) -> Self {
+        push_unique_sorted(&mut self.contradicted_by_trace_ids, trace_id.into());
+        self
+    }
+}
+
+pub fn validate_rationale_summary(summary: &str) -> Result<(), RationaleTraceValidationError> {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return Err(RationaleTraceValidationError::new(
+            RationaleTraceValidationErrorKind::EmptySummary,
+            "summary",
+        ));
+    }
+
+    if contains_private_reasoning_marker(trimmed) {
+        return Err(RationaleTraceValidationError::new(
+            RationaleTraceValidationErrorKind::PrivateReasoningMaterial,
+            "summary",
+        ));
+    }
+
+    if contains_secret_like_marker(trimmed) {
+        return Err(RationaleTraceValidationError::new(
+            RationaleTraceValidationErrorKind::SecretLikeContent,
+            "summary",
+        ));
+    }
+
+    Ok(())
+}
+
+fn contains_private_reasoning_marker(value: &str) -> bool {
+    let lowered = value.to_ascii_lowercase();
+    [
+        "chain-of-thought",
+        "chain of thought",
+        "hidden reasoning",
+        "private scratchpad",
+        "private reasoning",
+        "raw transcript",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+}
+
+fn contains_secret_like_marker(value: &str) -> bool {
+    let lowered = value.to_ascii_lowercase();
+    if [
+        "-----begin",
+        concat!("pass", "word="),
+        concat!("to", "ken="),
+        concat!("sec", "ret="),
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+    {
+        return true;
+    }
+
+    value.split(secret_token_boundary).any(|token| {
+        is_openai_key_like_token(token)
+            || is_github_token_like_token(token)
+            || is_aws_access_key_like_token(token)
+    })
+}
+
+fn secret_token_boundary(ch: char) -> bool {
+    !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn is_openai_key_like_token(token: &str) -> bool {
+    token
+        .to_ascii_lowercase()
+        .strip_prefix("sk-")
+        .is_some_and(|suffix| secret_suffix_is_key_like(suffix, 16))
+}
+
+fn is_github_token_like_token(token: &str) -> bool {
+    token
+        .to_ascii_lowercase()
+        .strip_prefix("ghp_")
+        .is_some_and(|suffix| secret_suffix_is_key_like(suffix, 16))
+}
+
+fn is_aws_access_key_like_token(token: &str) -> bool {
+    let upper = token.to_ascii_uppercase();
+    upper.starts_with("AKIA")
+        && upper.len() >= 16
+        && upper
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+}
+
+fn secret_suffix_is_key_like(suffix: &str, min_len: usize) -> bool {
+    suffix.len() >= min_len
+        && suffix
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn push_unique_sorted(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|known| known == &value) {
+        values.push(value);
+        values.sort();
+    }
+}
+
+// ============================================================================
 // Import Cursor
 // ============================================================================
 
@@ -957,8 +1433,104 @@ const RECORDER_IMPORT_PLAN_FIELDS: &[RecorderFieldSchema] = &[
     ),
 ];
 
+const RATIONALE_TRACE_FIELDS: &[RecorderFieldSchema] = &[
+    RecorderFieldSchema::new("schema", "string", true, "Schema identifier."),
+    RecorderFieldSchema::new(
+        "traceId",
+        "string",
+        true,
+        "Stable rationale trace identifier.",
+    ),
+    RecorderFieldSchema::new("kind", "string", true, "Visible rationale artifact kind."),
+    RecorderFieldSchema::new(
+        "author",
+        "string",
+        true,
+        "Agent or human author identifier.",
+    ),
+    RecorderFieldSchema::new(
+        "summary",
+        "string",
+        true,
+        "Concise visible summary; never private chain-of-thought.",
+    ),
+    RecorderFieldSchema::new(
+        "posture",
+        "string",
+        true,
+        "Evidence posture: asserted, supported, contradicted, or unresolved.",
+    ),
+    RecorderFieldSchema::new(
+        "confidenceBasisPoints",
+        "integer",
+        true,
+        "Confidence from 0 to 10000 basis points.",
+    ),
+    RecorderFieldSchema::new(
+        "visibility",
+        "string",
+        true,
+        "Visibility/redaction posture for the summary.",
+    ),
+    RecorderFieldSchema::new(
+        "redactionStatus",
+        "string",
+        true,
+        "Redaction status applied before storage or rendering.",
+    ),
+    RecorderFieldSchema::new(
+        "evidenceUris",
+        "array<string>",
+        true,
+        "Canonical provenance URIs supporting the trace.",
+    ),
+    RecorderFieldSchema::new(
+        "linkedMemoryIds",
+        "array<string>",
+        true,
+        "Memory IDs linked to this rationale trace.",
+    ),
+    RecorderFieldSchema::new(
+        "linkedContextPackIds",
+        "array<string>",
+        true,
+        "Context pack IDs linked to this rationale trace.",
+    ),
+    RecorderFieldSchema::new(
+        "linkedRecorderRunIds",
+        "array<string>",
+        true,
+        "Recorder run IDs linked to this rationale trace.",
+    ),
+    RecorderFieldSchema::new(
+        "linkedRecorderEventIds",
+        "array<string>",
+        true,
+        "Recorder event IDs linked to this rationale trace.",
+    ),
+    RecorderFieldSchema::new(
+        "linkedCausalTraceIds",
+        "array<string>",
+        true,
+        "Causal trace IDs that reuse this rationale.",
+    ),
+    RecorderFieldSchema::new(
+        "supersedesTraceIds",
+        "array<string>",
+        true,
+        "Prior rationale trace IDs superseded by this trace.",
+    ),
+    RecorderFieldSchema::new(
+        "contradictedByTraceIds",
+        "array<string>",
+        true,
+        "Trace IDs that contradict this rationale.",
+    ),
+    RecorderFieldSchema::new("createdAt", "string", true, "RFC 3339 creation timestamp."),
+];
+
 #[must_use]
-pub const fn recorder_schemas() -> [RecorderObjectSchema; 6] {
+pub const fn recorder_schemas() -> [RecorderObjectSchema; 7] {
     [
         RecorderObjectSchema {
             schema_name: RECORDER_RUN_SCHEMA_V1,
@@ -1007,6 +1579,14 @@ pub const fn recorder_schemas() -> [RecorderObjectSchema; 6] {
             title: "RecorderImportPlan",
             description: "Read-only connector mapping plan for imported recorder runs and events.",
             fields: RECORDER_IMPORT_PLAN_FIELDS,
+        },
+        RecorderObjectSchema {
+            schema_name: RATIONALE_TRACE_SCHEMA_V1,
+            schema_uri: "urn:ee:schema:rationale-trace:v1",
+            kind: "rationale_trace",
+            title: "RationaleTrace",
+            description: "Safe visible rationale summary with evidence links and redaction posture.",
+            fields: RATIONALE_TRACE_FIELDS,
         },
     ]
 }
@@ -1118,6 +1698,12 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn trace(
+        result: Result<RationaleTrace, RationaleTraceValidationError>,
+    ) -> Result<RationaleTrace, String> {
+        result.map_err(|error| error.to_string())
     }
 
     #[test]
@@ -1393,6 +1979,220 @@ mod tests {
     }
 
     #[test]
+    fn rationale_trace_kind_strings_are_stable() -> TestResult {
+        ensure(
+            RationaleTraceKind::Hypothesis.as_str(),
+            "hypothesis",
+            "hypothesis",
+        )?;
+        ensure(
+            RationaleTraceKind::Decision.as_str(),
+            "decision",
+            "decision",
+        )?;
+        ensure(
+            RationaleTraceKind::Question.as_str(),
+            "question",
+            "question",
+        )?;
+        ensure(
+            RationaleTraceKind::RejectedAlternative.as_str(),
+            "rejected_alternative",
+            "rejected alternative",
+        )?;
+        ensure(
+            RationaleTraceKind::Observation.as_str(),
+            "observation",
+            "observation",
+        )?;
+        ensure(
+            RationaleTraceKind::Conclusion.as_str(),
+            "conclusion",
+            "conclusion",
+        )
+    }
+
+    #[test]
+    fn rationale_trace_enums_parse_roundtrip() -> TestResult {
+        for kind in RationaleTraceKind::all() {
+            let parsed: RationaleTraceKind = kind.as_str().parse().map_err(|e| format!("{e}"))?;
+            ensure(parsed, kind, "kind roundtrip")?;
+        }
+
+        for posture in [
+            RationaleTracePosture::Asserted,
+            RationaleTracePosture::Supported,
+            RationaleTracePosture::Contradicted,
+            RationaleTracePosture::Unresolved,
+        ] {
+            let parsed: RationaleTracePosture =
+                posture.as_str().parse().map_err(|e| format!("{e}"))?;
+            ensure(parsed, posture, "posture roundtrip")?;
+        }
+
+        for visibility in [
+            RationaleTraceVisibility::Public,
+            RationaleTraceVisibility::Redacted,
+            RationaleTraceVisibility::PrivateRejected,
+        ] {
+            let parsed: RationaleTraceVisibility =
+                visibility.as_str().parse().map_err(|e| format!("{e}"))?;
+            ensure(parsed, visibility, "visibility roundtrip")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rationale_trace_builder_sorts_links_and_sets_safety_defaults() -> TestResult {
+        let trace = trace(RationaleTrace::new(
+            "rat_001",
+            RationaleTraceKind::Hypothesis,
+            "ProudBasin",
+            "The failure appears tied to a missing recorder event link.",
+            "2026-05-03T18:20:00Z",
+        ))?
+        .with_confidence_basis_points(6400)
+        .map_err(|error| error.to_string())?
+        .with_posture(RationaleTracePosture::Supported)
+        .with_visibility(
+            RationaleTraceVisibility::Redacted,
+            RedactionStatus::Verified,
+        )
+        .with_evidence_uri("agent-mail://eidetic_engine_cli-kz1.2/1477")
+        .with_evidence_uri("cass-session://session_002#L4-L9")
+        .with_evidence_uri("cass-session://session_002#L4-L9")
+        .with_memory_id("mem_002")
+        .with_memory_id("mem_001")
+        .with_context_pack_id("pack_001")
+        .with_recorder_run_id("rrun_001")
+        .with_recorder_event_id("revt_002")
+        .with_recorder_event_id("revt_001")
+        .with_causal_trace_id("causal_001")
+        .supersedes_trace("rat_000")
+        .contradicted_by_trace("rat_009");
+
+        ensure(trace.schema, RATIONALE_TRACE_SCHEMA_V1, "schema")?;
+        ensure(trace.kind, RationaleTraceKind::Hypothesis, "kind")?;
+        ensure(trace.posture, RationaleTracePosture::Supported, "posture")?;
+        ensure(
+            trace.visibility,
+            RationaleTraceVisibility::Redacted,
+            "visibility",
+        )?;
+        ensure(
+            trace.redaction_status,
+            RedactionStatus::Verified,
+            "redaction",
+        )?;
+        ensure(trace.confidence_basis_points, 6400, "confidence")?;
+        ensure(
+            trace.evidence_uris,
+            vec![
+                "agent-mail://eidetic_engine_cli-kz1.2/1477".to_string(),
+                "cass-session://session_002#L4-L9".to_string(),
+            ],
+            "evidence sorted unique",
+        )?;
+        ensure(
+            trace.linked_memory_ids,
+            vec!["mem_001".to_string(), "mem_002".to_string()],
+            "memory links sorted",
+        )?;
+        ensure(
+            trace.linked_recorder_event_ids,
+            vec!["revt_001".to_string(), "revt_002".to_string()],
+            "event links sorted",
+        )?;
+        ensure(
+            trace.supersedes_trace_ids,
+            vec!["rat_000".to_string()],
+            "supersedes",
+        )?;
+        ensure(
+            trace.contradicted_by_trace_ids,
+            vec!["rat_009".to_string()],
+            "contradicted by",
+        )
+    }
+
+    #[test]
+    fn rationale_trace_validation_rejects_private_reasoning_and_secret_like_summaries() {
+        let empty = validate_rationale_summary("  ");
+        assert_eq!(
+            empty.map_err(|error| error.kind),
+            Err(RationaleTraceValidationErrorKind::EmptySummary)
+        );
+
+        let private = validate_rationale_summary("raw chain-of-thought: first I considered...");
+        assert_eq!(
+            private.map_err(|error| error.kind),
+            Err(RationaleTraceValidationErrorKind::PrivateReasoningMaterial)
+        );
+
+        let blocked = validate_rationale_summary(concat!("The log included to", "ken=abc123."));
+        assert_eq!(
+            blocked.map_err(|error| error.kind),
+            Err(RationaleTraceValidationErrorKind::SecretLikeContent)
+        );
+
+        let key_like =
+            validate_rationale_summary(concat!("The log included sk-", "aaaaaaaaaaaaaaaa", "."));
+        assert_eq!(
+            key_like.map_err(|error| error.kind),
+            Err(RationaleTraceValidationErrorKind::SecretLikeContent)
+        );
+    }
+
+    #[test]
+    fn rationale_trace_validation_allows_ordinary_risk_language() -> TestResult {
+        validate_rationale_summary(
+            "Risk-managed task-scoped evidence supports the release decision.",
+        )
+        .map_err(|error| error.to_string())?;
+        validate_rationale_summary("The literal sk- prefix was mentioned without a key body.")
+            .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn rationale_trace_rejects_out_of_range_confidence() -> TestResult {
+        let trace = trace(RationaleTrace::new(
+            "rat_002",
+            RationaleTraceKind::Observation,
+            "ProudBasin",
+            "Recorder linkage was present in the public event summary.",
+            "2026-05-03T18:25:00Z",
+        ))?;
+        let error = trace
+            .with_confidence_basis_points(10_001)
+            .map(|_| ())
+            .map_err(|error| error.kind);
+        ensure(
+            error,
+            Err(RationaleTraceValidationErrorKind::InvalidConfidence),
+            "confidence rejection",
+        )
+    }
+
+    #[test]
+    fn private_rejected_rationale_visibility_is_not_storable() -> TestResult {
+        ensure(
+            RationaleTraceVisibility::Public.is_storable(),
+            true,
+            "public storable",
+        )?;
+        ensure(
+            RationaleTraceVisibility::Redacted.is_storable(),
+            true,
+            "redacted storable",
+        )?;
+        ensure(
+            RationaleTraceVisibility::PrivateRejected.is_storable(),
+            false,
+            "private rejected not storable",
+        )
+    }
+
+    #[test]
     fn import_source_type_strings_are_stable() -> TestResult {
         ensure(ImportSourceType::Cass.as_str(), "cass", "cass")?;
         ensure(
@@ -1455,6 +2255,11 @@ mod tests {
             "import plan schema",
         )?;
         ensure(
+            RATIONALE_TRACE_SCHEMA_V1,
+            "ee.rationale_trace.v1",
+            "rationale trace schema",
+        )?;
+        ensure(
             RECORDER_SCHEMA_CATALOG_V1,
             "ee.recorder.schemas.v1",
             "catalog schema",
@@ -1476,7 +2281,7 @@ mod tests {
     #[test]
     fn recorder_schema_catalog_order_is_stable() -> TestResult {
         let schemas = recorder_schemas();
-        ensure(schemas.len(), 6, "schema count")?;
+        ensure(schemas.len(), 7, "schema count")?;
         ensure(schemas[0].schema_name, RECORDER_RUN_SCHEMA_V1, "run")?;
         ensure(schemas[1].schema_name, RECORDER_EVENT_SCHEMA_V1, "event")?;
         ensure(
@@ -1494,6 +2299,11 @@ mod tests {
             schemas[5].schema_name,
             RECORDER_IMPORT_PLAN_SCHEMA_V1,
             "import plan",
+        )?;
+        ensure(
+            schemas[6].schema_name,
+            RATIONALE_TRACE_SCHEMA_V1,
+            "rationale trace",
         )
     }
 
@@ -1515,6 +2325,6 @@ mod tests {
             .get("schemas")
             .and_then(serde_json::Value::as_array)
             .ok_or_else(|| "schemas must be an array".to_string())?;
-        ensure(schemas.len(), 6, "catalog length")
+        ensure(schemas.len(), 7, "catalog length")
     }
 }

@@ -1077,8 +1077,25 @@ pub enum TailFollowResult {
     RunCompleted { final_sequence: u64 },
     /// Run not found.
     RunNotFound,
+    /// Recorder store is not wired, so run state cannot be observed.
+    StoreUnavailable { run_id: String },
     /// No new events, still active.
     Waiting { last_sequence: u64 },
+}
+
+/// Status of a caller-supplied recorder run snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecorderFollowRunStatus {
+    Active,
+    Completed,
+}
+
+/// Persisted recorder run snapshot used by follow-mode polling.
+#[derive(Clone, Debug)]
+pub struct RecorderFollowSnapshot {
+    pub run_id: String,
+    pub status: RecorderFollowRunStatus,
+    pub events: Vec<RecorderEventSummary>,
 }
 
 /// Report from tailing a recording session.
@@ -1149,15 +1166,45 @@ impl RecorderTailReport {
     }
 }
 
-/// Tail events from a recording session (stub - returns empty for now).
+/// Tail events from a recording session when no recorder store is wired.
+///
+/// The CLI reports recorder tail as unavailable until a store-backed caller can
+/// supply persisted events. This helper intentionally returns an empty snapshot
+/// rather than fabricating events.
 #[must_use]
 pub fn tail_recording(options: &RecorderTailOptions) -> RecorderTailReport {
+    tail_recording_from_events(options, &[])
+}
+
+/// Tail events from a caller-supplied persisted recorder event snapshot.
+#[must_use]
+pub fn tail_recording_from_events(
+    options: &RecorderTailOptions,
+    events: &[RecorderEventSummary],
+) -> RecorderTailReport {
+    let from_sequence = options.from_sequence.unwrap_or(0);
+    let mut matching = events
+        .iter()
+        .filter(|event| event.sequence >= from_sequence)
+        .cloned()
+        .collect::<Vec<_>>();
+    matching.sort_by(|left, right| {
+        left.sequence
+            .cmp(&right.sequence)
+            .then_with(|| left.event_id.cmp(&right.event_id))
+    });
+
+    let total_events = usize_to_u64(matching.len());
+    let limit = usize::try_from(options.limit).unwrap_or(usize::MAX);
+    let has_more = matching.len() > limit;
+    matching.truncate(limit);
+
     RecorderTailReport {
         schema: RECORDER_TAIL_SCHEMA_V1,
         run_id: options.run_id.clone(),
-        events: Vec::new(),
-        total_events: 0,
-        has_more: false,
+        events: matching,
+        total_events,
+        has_more,
     }
 }
 
@@ -1186,27 +1233,66 @@ impl Default for FollowConfig {
     }
 }
 
-/// Poll for new events in follow mode.
+/// Poll for new events in follow mode when no recorder store is wired.
 #[must_use]
-pub fn poll_follow_events(run_id: &str, from_sequence: u64, _limit: u32) -> TailFollowResult {
-    // Stub: simulate looking up run state.
-    // In a real implementation, this queries the recorder store.
+pub fn poll_follow_events(run_id: &str, _from_sequence: u64, _limit: u32) -> TailFollowResult {
+    TailFollowResult::StoreUnavailable {
+        run_id: run_id.to_string(),
+    }
+}
 
-    // Check if run exists (stub: runs starting with "run_notfound" don't exist).
-    if run_id.starts_with("run_notfound") {
+/// Poll for new events from a caller-supplied persisted run snapshot.
+#[must_use]
+pub fn poll_follow_events_from_snapshot(
+    snapshot: Option<&RecorderFollowSnapshot>,
+    from_sequence: u64,
+    limit: u32,
+) -> TailFollowResult {
+    let Some(snapshot) = snapshot else {
         return TailFollowResult::RunNotFound;
+    };
+
+    let tail = tail_recording_from_events(
+        &RecorderTailOptions {
+            run_id: snapshot.run_id.clone(),
+            limit,
+            from_sequence: Some(from_sequence),
+            follow: true,
+        },
+        &snapshot.events,
+    );
+
+    if !tail.events.is_empty() {
+        let events = tail
+            .events
+            .into_iter()
+            .map(|event| RecorderTailFollowEvent {
+                schema: RECORDER_TAIL_FOLLOW_EVENT_SCHEMA_V1,
+                run_id: snapshot.run_id.clone(),
+                event_id: event.event_id,
+                sequence: event.sequence,
+                event_type: event.event_type,
+                timestamp: event.timestamp,
+                redacted: event.redacted,
+                payload_preview: None,
+            })
+            .collect();
+        return TailFollowResult::Events(events);
     }
 
-    // Check if run is completed (stub: runs starting with "run_completed" are done).
-    if run_id.starts_with("run_completed") {
-        return TailFollowResult::RunCompleted {
-            final_sequence: from_sequence.saturating_sub(1),
-        };
+    let final_sequence = snapshot
+        .events
+        .iter()
+        .map(|event| event.sequence)
+        .max()
+        .unwrap_or_else(|| from_sequence.saturating_sub(1));
+
+    if snapshot.status == RecorderFollowRunStatus::Completed {
+        return TailFollowResult::RunCompleted { final_sequence };
     }
 
-    // Stub: no new events in test mode, waiting.
     TailFollowResult::Waiting {
-        last_sequence: from_sequence,
+        last_sequence: final_sequence,
     }
 }
 
@@ -1225,6 +1311,9 @@ pub fn follow_diagnostic(result: &TailFollowResult) -> Option<String> {
             Some(format!("run completed at sequence {final_sequence}"))
         }
         TailFollowResult::RunNotFound => Some("run not found".to_string()),
+        TailFollowResult::StoreUnavailable { run_id } => {
+            Some(format!("recorder store unavailable for run {run_id}"))
+        }
         TailFollowResult::Waiting { last_sequence } => {
             Some(format!("waiting (last seq: {last_sequence})"))
         }
@@ -1345,7 +1434,10 @@ impl RecorderLinkAddReport {
     }
 }
 
-/// Add a link between a recorder run and an artifact.
+/// Plan a link between a recorder run and an artifact.
+///
+/// Durable recorder link writes are not wired yet, so this report is always
+/// marked as dry-run even if the caller requests mutation.
 #[must_use]
 pub fn add_link(options: &RecorderLinkAddOptions) -> RecorderLinkAddReport {
     let timestamp = chrono::Utc::now().to_rfc3339();
@@ -1363,7 +1455,7 @@ pub fn add_link(options: &RecorderLinkAddOptions) -> RecorderLinkAddReport {
     RecorderLinkAddReport {
         schema: RECORDER_LINKS_SCHEMA_V1,
         link,
-        dry_run: options.dry_run,
+        dry_run: true,
     }
 }
 
@@ -1418,38 +1510,23 @@ impl RecorderLinksListReport {
     }
 }
 
-/// List links for a recorder run or artifact.
+/// List links for a recorder run or artifact when no recorder store is wired.
+///
+/// Until callers supply persisted records, this returns an empty result rather
+/// than sample links.
 #[must_use]
 pub fn list_links(options: &RecorderLinksListOptions) -> RecorderLinksListReport {
-    let now = chrono::Utc::now().to_rfc3339();
+    list_links_from_records(options, &[])
+}
 
-    let sample_links = vec![
-        RecorderLink {
-            link_id: "link_sample1".to_owned(),
-            run_id: options
-                .run_id
-                .clone()
-                .unwrap_or_else(|| "run_sample".to_owned()),
-            link_type: RecorderLinkType::ContextPack,
-            artifact_id: "pack_abc123".to_owned(),
-            created_at: now.clone(),
-            metadata: None,
-        },
-        RecorderLink {
-            link_id: "link_sample2".to_owned(),
-            run_id: options
-                .run_id
-                .clone()
-                .unwrap_or_else(|| "run_sample".to_owned()),
-            link_type: RecorderLinkType::Outcome,
-            artifact_id: "outcome_def456".to_owned(),
-            created_at: now,
-            metadata: Some("success".to_owned()),
-        },
-    ];
-
-    let filtered: Vec<_> = sample_links
-        .into_iter()
+/// List links from caller-supplied persisted link records.
+#[must_use]
+pub fn list_links_from_records(
+    options: &RecorderLinksListOptions,
+    links: &[RecorderLink],
+) -> RecorderLinksListReport {
+    let mut filtered = links
+        .iter()
         .filter(|l| {
             options.run_id.as_ref().is_none_or(|r| &l.run_id == r)
                 && options.link_type.is_none_or(|t| l.link_type == t)
@@ -1458,12 +1535,20 @@ pub fn list_links(options: &RecorderLinksListOptions) -> RecorderLinksListReport
                     .as_ref()
                     .is_none_or(|a| &l.artifact_id == a)
         })
-        .take(options.limit as usize)
-        .collect();
+        .cloned()
+        .collect::<Vec<_>>();
+    filtered.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.link_id.cmp(&right.link_id))
+    });
+    let total_count = u32::try_from(filtered.len()).unwrap_or(u32::MAX);
+    let limit = usize::try_from(options.limit).unwrap_or(usize::MAX);
+    filtered.truncate(limit);
 
     RecorderLinksListReport {
         schema: RECORDER_LINKS_SCHEMA_V1,
-        total_count: filtered.len() as u32,
+        total_count,
         links: filtered,
     }
 }
@@ -1818,7 +1903,7 @@ mod tests {
     }
 
     #[test]
-    fn tail_recording_returns_empty_stub() {
+    fn tail_recording_without_store_returns_empty_snapshot() {
         let options = RecorderTailOptions {
             run_id: "run_test".to_string(),
             limit: 10,
@@ -1831,6 +1916,55 @@ mod tests {
         assert_eq!(report.run_id, "run_test");
         assert!(report.events.is_empty());
         assert_eq!(report.total_events, 0);
+    }
+
+    #[test]
+    fn tail_recording_from_events_filters_sorts_and_limits() {
+        let options = RecorderTailOptions {
+            run_id: "run_test".to_string(),
+            limit: 2,
+            from_sequence: Some(2),
+            follow: false,
+        };
+        let events = vec![
+            RecorderEventSummary {
+                event_id: "evt_003".to_string(),
+                sequence: 3,
+                event_type: RecorderEventType::ToolResult,
+                timestamp: "2026-01-01T00:00:03Z".to_string(),
+                redacted: false,
+            },
+            RecorderEventSummary {
+                event_id: "evt_001".to_string(),
+                sequence: 1,
+                event_type: RecorderEventType::UserMessage,
+                timestamp: "2026-01-01T00:00:01Z".to_string(),
+                redacted: false,
+            },
+            RecorderEventSummary {
+                event_id: "evt_002".to_string(),
+                sequence: 2,
+                event_type: RecorderEventType::ToolCall,
+                timestamp: "2026-01-01T00:00:02Z".to_string(),
+                redacted: true,
+            },
+            RecorderEventSummary {
+                event_id: "evt_004".to_string(),
+                sequence: 4,
+                event_type: RecorderEventType::StateChange,
+                timestamp: "2026-01-01T00:00:04Z".to_string(),
+                redacted: false,
+            },
+        ];
+
+        let report = tail_recording_from_events(&options, &events);
+
+        assert_eq!(report.total_events, 3);
+        assert!(report.has_more);
+        assert_eq!(report.events.len(), 2);
+        assert_eq!(report.events[0].event_id, "evt_002");
+        assert_eq!(report.events[1].event_id, "evt_003");
+        assert!(report.events[0].redacted);
     }
 
     #[test]
@@ -1885,29 +2019,80 @@ mod tests {
     }
 
     #[test]
-    fn poll_follow_events_returns_not_found_for_missing_run() {
-        let result = poll_follow_events("run_notfound_xyz", 0, 10);
+    fn poll_follow_events_reports_store_unavailable_without_snapshot() {
+        let result = poll_follow_events("run_active_123", 0, 10);
+
+        assert!(matches!(
+            result,
+            TailFollowResult::StoreUnavailable { run_id } if run_id == "run_active_123"
+        ));
+    }
+
+    #[test]
+    fn poll_follow_events_from_snapshot_returns_not_found_for_missing_run() {
+        let result = poll_follow_events_from_snapshot(None, 0, 10);
 
         assert!(matches!(result, TailFollowResult::RunNotFound));
     }
 
     #[test]
-    fn poll_follow_events_returns_completed_for_finished_run() {
-        let result = poll_follow_events("run_completed_abc", 5, 10);
+    fn poll_follow_events_from_snapshot_returns_completed_for_finished_run() {
+        let snapshot = RecorderFollowSnapshot {
+            run_id: "run_completed_abc".to_string(),
+            status: RecorderFollowRunStatus::Completed,
+            events: vec![RecorderEventSummary {
+                event_id: "evt_005".to_string(),
+                sequence: 5,
+                event_type: RecorderEventType::StateChange,
+                timestamp: "2026-01-01T00:00:05Z".to_string(),
+                redacted: false,
+            }],
+        };
+        let result = poll_follow_events_from_snapshot(Some(&snapshot), 6, 10);
 
         assert!(matches!(
             result,
-            TailFollowResult::RunCompleted { final_sequence: _ }
+            TailFollowResult::RunCompleted { final_sequence: 5 }
         ));
     }
 
     #[test]
-    fn poll_follow_events_returns_waiting_for_active_run() {
-        let result = poll_follow_events("run_active_123", 0, 10);
+    fn poll_follow_events_from_snapshot_returns_waiting_for_active_run() {
+        let snapshot = RecorderFollowSnapshot {
+            run_id: "run_active_123".to_string(),
+            status: RecorderFollowRunStatus::Active,
+            events: Vec::new(),
+        };
+        let result = poll_follow_events_from_snapshot(Some(&snapshot), 0, 10);
 
         assert!(matches!(
             result,
             TailFollowResult::Waiting { last_sequence: 0 }
+        ));
+    }
+
+    #[test]
+    fn poll_follow_events_from_snapshot_returns_new_events() {
+        let snapshot = RecorderFollowSnapshot {
+            run_id: "run_active_123".to_string(),
+            status: RecorderFollowRunStatus::Active,
+            events: vec![RecorderEventSummary {
+                event_id: "evt_002".to_string(),
+                sequence: 2,
+                event_type: RecorderEventType::ToolResult,
+                timestamp: "2026-01-01T00:00:02Z".to_string(),
+                redacted: true,
+            }],
+        };
+        let result = poll_follow_events_from_snapshot(Some(&snapshot), 2, 10);
+
+        assert!(matches!(
+            result,
+            TailFollowResult::Events(events)
+                if events.len() == 1
+                    && events[0].run_id == "run_active_123"
+                    && events[0].event_id == "evt_002"
+                    && events[0].redacted
         ));
     }
 
@@ -1925,6 +2110,9 @@ mod tests {
         let waiting = TailFollowResult::Waiting { last_sequence: 10 };
         let completed = TailFollowResult::RunCompleted { final_sequence: 5 };
         let not_found = TailFollowResult::RunNotFound;
+        let unavailable = TailFollowResult::StoreUnavailable {
+            run_id: "run".to_string(),
+        };
         let events = TailFollowResult::Events(vec![RecorderTailFollowEvent {
             schema: RECORDER_TAIL_FOLLOW_EVENT_SCHEMA_V1,
             run_id: "run".to_string(),
@@ -1947,6 +2135,10 @@ mod tests {
         assert!(matches!(
             follow_diagnostic(&not_found),
             Some(message) if message.contains("not found")
+        ));
+        assert!(matches!(
+            follow_diagnostic(&unavailable),
+            Some(message) if message.contains("store unavailable")
         ));
         assert!(matches!(
             follow_diagnostic(&events),
@@ -1973,7 +2165,7 @@ mod tests {
     }
 
     #[test]
-    fn add_link_creates_link_id() {
+    fn add_link_plans_link_without_claiming_store_write() {
         let options = RecorderLinkAddOptions {
             run_id: "run_test".to_string(),
             link_type: RecorderLinkType::ContextPack,
@@ -1988,12 +2180,13 @@ mod tests {
         assert_eq!(report.link.run_id, "run_test");
         assert_eq!(report.link.link_type, RecorderLinkType::ContextPack);
         assert_eq!(report.link.artifact_id, "pack_abc");
+        assert!(report.dry_run);
     }
 
     #[test]
-    fn list_links_filters_by_run_id() {
+    fn list_links_returns_empty_without_persisted_records() {
         let options = RecorderLinksListOptions {
-            run_id: Some("run_sample".to_string()),
+            run_id: Some("run_missing".to_string()),
             link_type: None,
             artifact_id: None,
             limit: 10,
@@ -2001,25 +2194,65 @@ mod tests {
 
         let report = list_links(&options);
 
-        assert!(report.links.iter().all(|l| l.run_id == "run_sample"));
+        assert!(report.links.is_empty());
+        assert_eq!(report.total_count, 0);
     }
 
     #[test]
-    fn list_links_filters_by_type() {
+    fn list_links_from_records_filters_by_run_id_type_and_artifact() {
         let options = RecorderLinksListOptions {
-            run_id: None,
+            run_id: Some("run_sample".to_string()),
             link_type: Some(RecorderLinkType::ContextPack),
-            artifact_id: None,
+            artifact_id: Some("pack_abc123".to_string()),
             limit: 10,
         };
+        let links = vec![
+            RecorderLink {
+                link_id: "link_late".to_string(),
+                run_id: "run_sample".to_string(),
+                link_type: RecorderLinkType::ContextPack,
+                artifact_id: "pack_abc123".to_string(),
+                created_at: "2026-01-01T00:00:02Z".to_string(),
+                metadata: None,
+            },
+            RecorderLink {
+                link_id: "link_other_type".to_string(),
+                run_id: "run_sample".to_string(),
+                link_type: RecorderLinkType::Outcome,
+                artifact_id: "outcome_123".to_string(),
+                created_at: "2026-01-01T00:00:01Z".to_string(),
+                metadata: None,
+            },
+            RecorderLink {
+                link_id: "link_early".to_string(),
+                run_id: "run_sample".to_string(),
+                link_type: RecorderLinkType::ContextPack,
+                artifact_id: "pack_abc123".to_string(),
+                created_at: "2026-01-01T00:00:01Z".to_string(),
+                metadata: Some("selected".to_string()),
+            },
+            RecorderLink {
+                link_id: "link_other_run".to_string(),
+                run_id: "run_other".to_string(),
+                link_type: RecorderLinkType::ContextPack,
+                artifact_id: "pack_abc123".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                metadata: None,
+            },
+        ];
 
-        let report = list_links(&options);
+        let report = list_links_from_records(&options, &links);
 
+        assert_eq!(report.total_count, 2);
+        assert_eq!(report.links.len(), 2);
+        assert_eq!(report.links[0].link_id, "link_early");
+        assert_eq!(report.links[1].link_id, "link_late");
+        assert!(report.links.iter().all(|link| link.run_id == "run_sample"));
         assert!(
             report
                 .links
                 .iter()
-                .all(|l| l.link_type == RecorderLinkType::ContextPack)
+                .all(|link| link.link_type == RecorderLinkType::ContextPack)
         );
     }
 }

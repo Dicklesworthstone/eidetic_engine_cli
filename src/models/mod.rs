@@ -182,13 +182,16 @@ pub use progress::{
 pub use provenance::{LineSpan, ProvenanceUri, ProvenanceUriError};
 pub use recorder::{
     IMPORT_CURSOR_SCHEMA_V1, ImportCursor, ImportSourceType, ParseImportSourceTypeError,
-    ParsePayloadContentTypeError, ParseRecorderEventTypeError, ParseRecorderRunStatusError,
-    ParseRedactionStatusError, PayloadContentType, RECORDER_EVENT_SCHEMA_V1,
-    RECORDER_IMPORT_PLAN_SCHEMA_V1, RECORDER_PAYLOAD_SCHEMA_V1, RECORDER_RUN_SCHEMA_V1,
-    RECORDER_SCHEMA_CATALOG_V1, REDACTION_STATUS_SCHEMA_V1, RecorderEvent,
+    ParsePayloadContentTypeError, ParseRationaleTraceKindError, ParseRationaleTracePostureError,
+    ParseRationaleTraceVisibilityError, ParseRecorderEventTypeError, ParseRecorderRunStatusError,
+    ParseRedactionStatusError, PayloadContentType, RATIONALE_TRACE_SCHEMA_V1,
+    RECORDER_EVENT_SCHEMA_V1, RECORDER_IMPORT_PLAN_SCHEMA_V1, RECORDER_PAYLOAD_SCHEMA_V1,
+    RECORDER_RUN_SCHEMA_V1, RECORDER_SCHEMA_CATALOG_V1, REDACTION_STATUS_SCHEMA_V1, RationaleTrace,
+    RationaleTraceKind, RationaleTracePosture, RationaleTraceValidationError,
+    RationaleTraceValidationErrorKind, RationaleTraceVisibility, RecorderEvent,
     RecorderEventChainStatus, RecorderEventType, RecorderFieldSchema, RecorderObjectSchema,
     RecorderPayload, RecorderRunMeta, RecorderRunStatus, RedactionStatus, RedactionStatusSnapshot,
-    recorder_schema_catalog_json, recorder_schemas,
+    recorder_schema_catalog_json, recorder_schemas, validate_rationale_summary,
 };
 pub use release::{
     RELEASE_ARTIFACT_SCHEMA_V1, RELEASE_BINARY_NAME, RELEASE_MANIFEST_SCHEMA_V1,

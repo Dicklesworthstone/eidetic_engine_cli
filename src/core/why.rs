@@ -12,6 +12,7 @@ use std::path::Path;
 
 use crate::core::memory::memory_validity;
 use crate::db::DbConnection;
+use crate::models::{RationaleTrace, RationaleTraceVisibility};
 use sqlmodel_core::{Row, Value};
 
 /// Why a memory was stored with certain characteristics.
@@ -137,6 +138,85 @@ pub struct MemoryLinkSummary {
     pub created_at: String,
 }
 
+/// Visible rationale trace evidence linked to a why report.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RationaleTraceSummary {
+    /// Rationale trace schema.
+    pub schema: &'static str,
+    /// Stable rationale trace ID.
+    pub trace_id: String,
+    /// Visible rationale kind: hypothesis, decision, question, etc.
+    pub kind: String,
+    /// Evidence posture: asserted, supported, contradicted, or unresolved.
+    pub posture: String,
+    /// Visibility/redaction class.
+    pub visibility: String,
+    /// Author or source label for the visible rationale summary.
+    pub author: String,
+    /// Concise user/agent-visible rationale summary.
+    pub summary: String,
+    /// Confidence in basis points, 0..=10000.
+    pub confidence_basis_points: u16,
+    /// Evidence URIs supporting the rationale.
+    pub evidence_uris: Vec<String>,
+    /// Memory IDs linked to the rationale.
+    pub linked_memory_ids: Vec<String>,
+    /// Context pack IDs linked to the rationale.
+    pub linked_context_pack_ids: Vec<String>,
+    /// Recorder run IDs linked to the rationale.
+    pub linked_recorder_run_ids: Vec<String>,
+    /// Recorder event IDs linked to the rationale.
+    pub linked_recorder_event_ids: Vec<String>,
+    /// Causal trace IDs that reuse this rationale.
+    pub linked_causal_trace_ids: Vec<String>,
+    /// Prior rationale trace IDs superseded by this trace.
+    pub supersedes_trace_ids: Vec<String>,
+    /// Rationale trace IDs that contradict this trace.
+    pub contradicted_by_trace_ids: Vec<String>,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
+impl RationaleTraceSummary {
+    /// Build a why-safe summary from a persisted rationale trace.
+    #[must_use]
+    pub fn from_trace(trace: &RationaleTrace) -> Option<Self> {
+        if !trace.visibility.is_storable() {
+            return None;
+        }
+
+        Some(Self {
+            schema: trace.schema,
+            trace_id: trace.trace_id.clone(),
+            kind: trace.kind.as_str().to_string(),
+            posture: trace.posture.as_str().to_string(),
+            visibility: trace.visibility.as_str().to_string(),
+            author: trace.author.clone(),
+            summary: trace.summary.clone(),
+            confidence_basis_points: trace.confidence_basis_points,
+            evidence_uris: trace.evidence_uris.clone(),
+            linked_memory_ids: trace.linked_memory_ids.clone(),
+            linked_context_pack_ids: trace.linked_context_pack_ids.clone(),
+            linked_recorder_run_ids: trace.linked_recorder_run_ids.clone(),
+            linked_recorder_event_ids: trace.linked_recorder_event_ids.clone(),
+            linked_causal_trace_ids: trace.linked_causal_trace_ids.clone(),
+            supersedes_trace_ids: trace.supersedes_trace_ids.clone(),
+            contradicted_by_trace_ids: trace.contradicted_by_trace_ids.clone(),
+            created_at: trace.created_at.clone(),
+        })
+    }
+
+    fn is_visible_for_report(&self) -> bool {
+        let Ok(visibility) = self.visibility.parse::<RationaleTraceVisibility>() else {
+            return false;
+        };
+
+        visibility.is_storable()
+            && !self.trace_id.trim().is_empty()
+            && !self.summary.trim().is_empty()
+    }
+}
+
 /// Non-fatal limitations in the why explanation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WhyDegradation {
@@ -169,6 +249,8 @@ pub struct WhyReport {
     pub contradictions: Vec<ContradictionMetadata>,
     /// Memory links: supports, contradicts, derived_from, etc. (EE-LINK-USAGE-001).
     pub links: Vec<MemoryLinkSummary>,
+    /// Safe visible rationale traces linked to this memory or latest pack.
+    pub rationale_traces: Vec<RationaleTraceSummary>,
     /// Non-fatal degradation notices.
     pub degraded: Vec<WhyDegradation>,
     /// Error message if query failed.
@@ -193,6 +275,7 @@ impl WhyReport {
             selection: Some(selection),
             contradictions: Vec::new(),
             links: Vec::new(),
+            rationale_traces: Vec::new(),
             degraded: Vec::new(),
             error: None,
         }
@@ -210,6 +293,7 @@ impl WhyReport {
             selection: None,
             contradictions: Vec::new(),
             links: Vec::new(),
+            rationale_traces: Vec::new(),
             degraded: Vec::new(),
             error: None,
         }
@@ -227,6 +311,7 @@ impl WhyReport {
             selection: None,
             contradictions: Vec::new(),
             links: Vec::new(),
+            rationale_traces: Vec::new(),
             degraded: Vec::new(),
             error: Some(message),
         }
@@ -250,6 +335,19 @@ impl WhyReport {
     #[must_use]
     pub fn with_links(mut self, links: Vec<MemoryLinkSummary>) -> Self {
         self.links = links;
+        self
+    }
+
+    /// Add safe visible rationale traces to the report.
+    #[must_use]
+    pub fn with_rationale_traces(
+        mut self,
+        mut rationale_traces: Vec<RationaleTraceSummary>,
+    ) -> Self {
+        rationale_traces.retain(RationaleTraceSummary::is_visible_for_report);
+        rationale_traces.sort_by(|left, right| left.trace_id.cmp(&right.trace_id));
+        rationale_traces.dedup_by(|left, right| left.trace_id == right.trace_id);
+        self.rationale_traces = rationale_traces;
         self
     }
 }
@@ -549,6 +647,9 @@ fn fetch_links(conn: &DbConnection, memory_id: &str) -> Vec<MemoryLinkSummary> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{
+        RationaleTraceKind, RationaleTracePosture, RationaleTraceVisibility, RedactionStatus,
+    };
 
     type TestResult = Result<(), String>;
 
@@ -772,6 +873,172 @@ mod tests {
             report.links.is_empty(),
             true,
             "links should be empty by default",
+        )
+    }
+
+    #[test]
+    fn rationale_trace_summary_uses_only_storable_visible_trace() -> TestResult {
+        let trace = RationaleTrace::new(
+            "rat_supported_release",
+            RationaleTraceKind::Decision,
+            "agent:test",
+            "Release checklist evidence supports keeping formatting verification in the pack.",
+            "2026-05-03T18:50:00Z",
+        )
+        .map_err(|error| error.to_string())?
+        .with_posture(RationaleTracePosture::Supported)
+        .with_visibility(RationaleTraceVisibility::Redacted, RedactionStatus::Partial)
+        .with_evidence_uri("cass://session#L10-L14")
+        .with_memory_id("mem_release_rule")
+        .with_context_pack_id("pack_release")
+        .with_recorder_run_id("run_release")
+        .with_recorder_event_id("event_release")
+        .with_causal_trace_id("causal_release");
+
+        let summary = RationaleTraceSummary::from_trace(&trace)
+            .ok_or_else(|| "storable rationale trace was filtered".to_string())?;
+
+        ensure(
+            summary.trace_id,
+            "rat_supported_release".to_string(),
+            "trace id",
+        )?;
+        ensure(summary.kind, "decision".to_string(), "kind")?;
+        ensure(summary.posture, "supported".to_string(), "posture")?;
+        ensure(summary.visibility, "redacted".to_string(), "visibility")?;
+        ensure(
+            summary.linked_memory_ids,
+            vec!["mem_release_rule".to_string()],
+            "linked memory ids",
+        )?;
+        ensure(
+            summary.linked_causal_trace_ids,
+            vec!["causal_release".to_string()],
+            "linked causal trace ids",
+        )
+    }
+
+    #[test]
+    fn rationale_trace_summary_rejects_private_visibility() -> TestResult {
+        let trace = RationaleTrace::new(
+            "rat_private_rejected",
+            RationaleTraceKind::Hypothesis,
+            "agent:test",
+            "Visible rejection marker for unexportable material.",
+            "2026-05-03T18:51:00Z",
+        )
+        .map_err(|error| error.to_string())?
+        .with_visibility(
+            RationaleTraceVisibility::PrivateRejected,
+            RedactionStatus::Full,
+        );
+
+        ensure(
+            RationaleTraceSummary::from_trace(&trace).is_none(),
+            true,
+            "private rejected rationale traces are not why evidence",
+        )
+    }
+
+    #[test]
+    fn why_report_rationale_traces_are_sorted_and_deduplicated() -> TestResult {
+        let report = WhyReport::not_found("mem_test".to_string()).with_rationale_traces(vec![
+            RationaleTraceSummary {
+                schema: crate::models::RATIONALE_TRACE_SCHEMA_V1,
+                trace_id: "rat_b".to_string(),
+                kind: "decision".to_string(),
+                posture: "supported".to_string(),
+                visibility: "public".to_string(),
+                author: "agent:test".to_string(),
+                summary: "Second trace.".to_string(),
+                confidence_basis_points: 7000,
+                evidence_uris: Vec::new(),
+                linked_memory_ids: Vec::new(),
+                linked_context_pack_ids: Vec::new(),
+                linked_recorder_run_ids: Vec::new(),
+                linked_recorder_event_ids: Vec::new(),
+                linked_causal_trace_ids: Vec::new(),
+                supersedes_trace_ids: Vec::new(),
+                contradicted_by_trace_ids: Vec::new(),
+                created_at: "2026-05-03T18:52:00Z".to_string(),
+            },
+            RationaleTraceSummary {
+                schema: crate::models::RATIONALE_TRACE_SCHEMA_V1,
+                trace_id: "rat_a".to_string(),
+                kind: "hypothesis".to_string(),
+                posture: "asserted".to_string(),
+                visibility: "public".to_string(),
+                author: "agent:test".to_string(),
+                summary: "First trace.".to_string(),
+                confidence_basis_points: 5000,
+                evidence_uris: Vec::new(),
+                linked_memory_ids: Vec::new(),
+                linked_context_pack_ids: Vec::new(),
+                linked_recorder_run_ids: Vec::new(),
+                linked_recorder_event_ids: Vec::new(),
+                linked_causal_trace_ids: Vec::new(),
+                supersedes_trace_ids: Vec::new(),
+                contradicted_by_trace_ids: Vec::new(),
+                created_at: "2026-05-03T18:51:00Z".to_string(),
+            },
+            RationaleTraceSummary {
+                schema: crate::models::RATIONALE_TRACE_SCHEMA_V1,
+                trace_id: "rat_a".to_string(),
+                kind: "hypothesis".to_string(),
+                posture: "asserted".to_string(),
+                visibility: "public".to_string(),
+                author: "agent:test".to_string(),
+                summary: "Duplicate trace.".to_string(),
+                confidence_basis_points: 5000,
+                evidence_uris: Vec::new(),
+                linked_memory_ids: Vec::new(),
+                linked_context_pack_ids: Vec::new(),
+                linked_recorder_run_ids: Vec::new(),
+                linked_recorder_event_ids: Vec::new(),
+                linked_causal_trace_ids: Vec::new(),
+                supersedes_trace_ids: Vec::new(),
+                contradicted_by_trace_ids: Vec::new(),
+                created_at: "2026-05-03T18:51:00Z".to_string(),
+            },
+            RationaleTraceSummary {
+                schema: crate::models::RATIONALE_TRACE_SCHEMA_V1,
+                trace_id: "rat_private".to_string(),
+                kind: "hypothesis".to_string(),
+                posture: "asserted".to_string(),
+                visibility: "private_rejected".to_string(),
+                author: "agent:test".to_string(),
+                summary: "Private rejected material should never render.".to_string(),
+                confidence_basis_points: 5000,
+                evidence_uris: Vec::new(),
+                linked_memory_ids: Vec::new(),
+                linked_context_pack_ids: Vec::new(),
+                linked_recorder_run_ids: Vec::new(),
+                linked_recorder_event_ids: Vec::new(),
+                linked_causal_trace_ids: Vec::new(),
+                supersedes_trace_ids: Vec::new(),
+                contradicted_by_trace_ids: Vec::new(),
+                created_at: "2026-05-03T18:53:00Z".to_string(),
+            },
+        ]);
+
+        ensure(report.rationale_traces.len(), 2, "rationale trace count")?;
+        ensure(
+            report
+                .rationale_traces
+                .iter()
+                .any(|trace| trace.visibility == "private_rejected"),
+            false,
+            "private rejected summaries are filtered at report boundary",
+        )?;
+        ensure(
+            report.rationale_traces[0].trace_id.clone(),
+            "rat_a".to_string(),
+            "first trace id",
+        )?;
+        ensure(
+            report.rationale_traces[1].trace_id.clone(),
+            "rat_b".to_string(),
+            "second trace id",
         )
     }
 
