@@ -31,6 +31,13 @@
     ],
     "experimentProposals": [
       "Propose controlled experiment for `mem_confounded_001` with `ee learn experiment --artifact-id mem_confounded_001 --dry-run --json`."
+    ],
+    "reviewRecommendations": [
+      "Route `mem_confounded_001` to review before promotion; `exposure_only` evidence is underpowered for direct promotion.",
+      "Review blocking confounders for `mem_confounded_001` before changing memory priority."
+    ],
+    "safetyGuards": [
+      "Safety-critical warnings remain pinned and are never randomized away for evidence collection."
     ]
   },
   "mutationGuard": "no_direct_apply"

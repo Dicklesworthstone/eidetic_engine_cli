@@ -251,6 +251,46 @@ fn causal_promote_plan_dry_run_matches_fixture() -> TestResult {
 }
 
 #[test]
+fn causal_underpowered_estimate_routes_to_review_not_promotion() -> TestResult {
+    let report = promote_causal_plan(
+        &PromotePlanOptions::new()
+            .with_artifact_id("mem_underpowered_001")
+            .with_method("matching")
+            .with_minimum_uplift(0.10)
+            .dry_run(),
+    );
+
+    ensure(!report.is_empty(), "expected one underpowered plan")?;
+    ensure(
+        report
+            .plans
+            .iter()
+            .all(|plan| plan.action == PromotionAction::Hold),
+        "underpowered correlational estimates must hold instead of promote",
+    )?;
+    ensure(
+        report
+            .recommendations
+            .review_recommendations
+            .iter()
+            .any(|recommendation| recommendation.contains("underpowered")),
+        "underpowered plan should route to review",
+    )?;
+    ensure(
+        !report.recommendations.experiment_proposals.is_empty(),
+        "underpowered plan should propose learning evidence instead of promotion",
+    )?;
+    ensure(
+        report
+            .recommendations
+            .safety_guards
+            .iter()
+            .any(|guard| guard.contains("never randomized away")),
+        "safety-critical warnings must not be randomized away",
+    )
+}
+
+#[test]
 fn causal_audit_confounded_matches_fixture_and_no_mutation_policy() -> TestResult {
     let report = promote_causal_plan(
         &PromotePlanOptions::new()

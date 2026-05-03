@@ -2130,6 +2130,88 @@ fn causal_promote_plan_projects_cross_surface_effects() -> TestResult {
 }
 
 #[test]
+fn causal_promote_plan_underpowered_evidence_routes_to_review() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "promote-plan",
+        "--artifact-id",
+        "mem-underpowered-001",
+        "--method",
+        "matching",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(output.stderr.is_empty(), "json mode stderr must be empty")?;
+    let json = stdout_json(&output)?;
+    let data = json.get("data").unwrap_or(&json);
+    ensure_equal(
+        &data["plans"][0]["action"],
+        &serde_json::json!("hold"),
+        "underpowered evidence must not promote",
+    )?;
+    ensure_equal(
+        &data["plans"][0]["evidenceStrength"],
+        &serde_json::json!("correlational"),
+        "matching method evidence strength",
+    )?;
+    ensure(
+        data["recommendations"]["reviewRecommendations"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "underpowered evidence must route to review",
+    )?;
+    ensure(
+        data["recommendations"]["experimentProposals"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "underpowered evidence must propose a learning experiment",
+    )?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")
+}
+
+#[test]
+fn causal_promote_plan_preserves_safety_guards_and_stderr_isolation() -> TestResult {
+    let output = run_ee(&[
+        "causal",
+        "promote-plan",
+        "--artifact-id",
+        "mem-safety-critical-001",
+        "--method",
+        "experiment",
+        "--dry-run",
+        "--json",
+    ])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(output.stderr.is_empty(), "json mode stderr must be empty")?;
+    let json = stdout_json(&output)?;
+    let data = json.get("data").unwrap_or(&json);
+    ensure(
+        data["recommendations"]["safetyGuards"]
+            .as_array()
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.as_str()
+                        .is_some_and(|text| text.contains("never randomized away"))
+                })
+            }),
+        "safety-critical guard must remain in causal promote-plan output",
+    )?;
+    ensure(
+        data["plans"]
+            .as_array()
+            .is_some_and(|plans| plans.iter().all(|plan| plan["dryRunFirst"] == true)),
+        "all causal plans must remain dry-run-first",
+    )?;
+    ensure_equal(
+        &data["downstreamEffects"]["audit"]["silentMutation"],
+        &serde_json::json!(false),
+        "silent mutation guard",
+    )?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")
+}
+
+#[test]
 fn all_causal_commands_produce_stdout_only_data() -> TestResult {
     let commands = [
         vec!["causal", "trace", "--run-id", "test", "--dry-run", "--json"],

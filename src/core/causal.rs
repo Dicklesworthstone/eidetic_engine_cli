@@ -1474,6 +1474,8 @@ pub struct PromotePlanRecommendations {
     pub revalidation_steps: Vec<String>,
     pub narrower_routing_steps: Vec<String>,
     pub experiment_proposals: Vec<String>,
+    pub review_recommendations: Vec<String>,
+    pub safety_guards: Vec<String>,
 }
 
 impl PromotePlanRecommendations {
@@ -1483,6 +1485,8 @@ impl PromotePlanRecommendations {
             "revalidation": self.revalidation_steps,
             "narrowerRouting": self.narrower_routing_steps,
             "experimentProposals": self.experiment_proposals,
+            "reviewRecommendations": self.review_recommendations,
+            "safetyGuards": self.safety_guards,
         })
     }
 }
@@ -1698,6 +1702,18 @@ impl PromotePlanReport {
                 out.push_str(&format!("  - {proposal}\n"));
             }
         }
+        if !self.recommendations.review_recommendations.is_empty() {
+            out.push_str("\nReview Recommendations:\n");
+            for recommendation in &self.recommendations.review_recommendations {
+                out.push_str(&format!("  - {recommendation}\n"));
+            }
+        }
+        if !self.recommendations.safety_guards.is_empty() {
+            out.push_str("\nSafety Guards:\n");
+            for guard in &self.recommendations.safety_guards {
+                out.push_str(&format!("  - {guard}\n"));
+            }
+        }
         out.push_str("\nDownstream Projections:\n");
         out.push_str(&format!(
             "  - Economy priority delta: {}\n",
@@ -1836,6 +1852,10 @@ pub fn promote_causal_plan(options: &PromotePlanOptions) -> PromotePlanReport {
     }
 
     let mut recommendations = PromotePlanRecommendations::default();
+    recommendations.safety_guards.push(
+        "Safety-critical warnings remain pinned and are never randomized away for evidence collection."
+            .to_string(),
+    );
     if options.include_revalidation
         || matches!(
             action,
@@ -1854,6 +1874,23 @@ pub fn promote_causal_plan(options: &PromotePlanOptions) -> PromotePlanReport {
     {
         recommendations.narrower_routing_steps.push(format!(
             "Narrow routing scope for `{artifact_id}` to higher-confidence task families."
+        ));
+    }
+    if !matches!(
+        evidence_strength,
+        CausalEvidenceStrength::ExperimentSupported | CausalEvidenceStrength::ReplaySupported
+    ) {
+        recommendations.review_recommendations.push(format!(
+            "Route `{artifact_id}` to review before promotion; `{}` evidence is underpowered for direct promotion.",
+            evidence_strength.as_str()
+        ));
+    }
+    if matches!(
+        action,
+        PromotionAction::Demote | PromotionAction::Archive | PromotionAction::Quarantine
+    ) {
+        recommendations.review_recommendations.push(format!(
+            "Review blocking confounders for `{artifact_id}` before changing memory priority."
         ));
     }
     if options.include_experiment_proposals

@@ -31,6 +31,10 @@
     ],
     "experimentProposals": [
       "Propose controlled experiment for `mem_fixture_001` with `ee learn experiment --artifact-id mem_fixture_001 --dry-run --json`."
+    ],
+    "reviewRecommendations": [],
+    "safetyGuards": [
+      "Safety-critical warnings remain pinned and are never randomized away for evidence collection."
     ]
   },
   "downstreamEffects": {
