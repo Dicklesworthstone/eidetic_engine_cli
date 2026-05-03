@@ -11,6 +11,10 @@
   "dry_run": true,
   "checked_at": "TIMESTAMP",
   "details": "Tripwire 'tw_missing' not found in persisted tripwire store",
+  "condition_evaluation": null,
+  "event_payload_hash": null,
+  "durable_mutation": false,
+  "mutation_posture": "no_persisted_tripwire",
   "feedback": null,
   "degraded": [
     {

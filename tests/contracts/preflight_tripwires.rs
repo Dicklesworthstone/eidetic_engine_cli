@@ -12,10 +12,11 @@ use ee::core::preflight::{
     run_preflight, show_preflight,
 };
 use ee::core::tripwire::{
-    CheckOptions as TripwireCheckOptions, ConditionEvaluationResult,
+    CheckOptions as TripwireCheckOptions, CheckResult, ConditionEvaluationResult,
     ListOptions as TripwireListOptions, TripwireEventPayload, check_tripwire,
     evaluate_tripwire_condition, list_tripwires,
 };
+use ee::db::{CreateTripwireInput, CreateWorkspaceInput, DbConnection};
 use ee::models::preflight::TripwireState;
 use serde_json::Value as JsonValue;
 use std::env;
@@ -108,6 +109,50 @@ fn assert_cli_json_stdout_clean(args: &[&str], display: &str, code: &str) -> Tes
         "public CLI degraded code",
     )?;
     Ok(())
+}
+
+fn assert_cli_tripwire_not_found_stdout_clean(args: &[&str], display: &str) -> TestResult {
+    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(args)
+        .output()
+        .map_err(|error| format!("failed to run ee {display}: {error}"))?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("stdout was not UTF-8 for ee {display}: {error}"))?;
+    let stderr = String::from_utf8(output.stderr)
+        .map_err(|error| format!("stderr was not UTF-8 for ee {display}: {error}"))?;
+
+    ensure(
+        output.status.success(),
+        format!("ee {display} should succeed, stderr: {stderr}"),
+    )?;
+    ensure(
+        stderr.is_empty(),
+        format!("ee {display} must keep diagnostics out of stderr"),
+    )?;
+    ensure(
+        stdout.starts_with('{') && stdout.ends_with('\n'),
+        format!("ee {display} stdout must be newline-terminated JSON"),
+    )?;
+    let value: JsonValue = serde_json::from_str(&stdout)
+        .map_err(|error| format!("stdout was not parseable JSON: {error}"))?;
+    ensure_equal(
+        &value["schema"],
+        &serde_json::json!("ee.tripwire.check.v1"),
+        "public CLI tripwire schema",
+    )?;
+    ensure_equal(
+        &value["result"],
+        &serde_json::json!("not_found"),
+        "public CLI tripwire result",
+    )?;
+    ensure(
+        value["degraded"].as_array().is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry["code"] == serde_json::json!("tripwire_inputs_incomplete"))
+        }),
+        "public CLI tripwire not_found must include tripwire_inputs_incomplete",
+    )
 }
 
 fn normalized(mut value: JsonValue) -> Result<String, String> {
@@ -367,6 +412,112 @@ fn tripwire_condition_evaluator_uses_explicit_payloads() -> TestResult {
 }
 
 #[test]
+fn tripwire_store_check_uses_persisted_rows_and_logs_event() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace = tempdir.path().join("workspace");
+    let ee_dir = workspace.join(".ee");
+    fs::create_dir_all(&ee_dir).map_err(|error| format!("mkdir .ee: {error}"))?;
+    let database_path = ee_dir.join("ee.db");
+    let workspace_path = workspace
+        .canonicalize()
+        .map_err(|error| format!("canonicalize workspace: {error}"))?;
+    let workspace_path_string = workspace_path.to_string_lossy().into_owned();
+
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("open tripwire test db: {error}"))?;
+    connection
+        .migrate()
+        .map_err(|error| format!("migrate tripwire test db: {error}"))?;
+    connection
+        .insert_workspace(
+            "wsp_01234567890123456789012345",
+            &CreateWorkspaceInput {
+                path: workspace_path_string,
+                name: Some("workspace".to_owned()),
+            },
+        )
+        .map_err(|error| format!("insert workspace: {error}"))?;
+    connection
+        .insert_tripwire(
+            "tw_gate16_store_001",
+            &CreateTripwireInput {
+                workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                preflight_run_id: "pf_gate16_store".to_owned(),
+                tripwire_type: "custom".to_owned(),
+                condition: "task_contains_any(\"deploy\")".to_owned(),
+                action: "halt".to_owned(),
+                state: "armed".to_owned(),
+                message: Some("deployment risk".to_owned()),
+                created_at: "2026-05-03T20:00:00Z".to_owned(),
+                last_checked_at: None,
+                triggered_at: None,
+            },
+        )
+        .map_err(|error| format!("insert tripwire: {error}"))?;
+    connection
+        .close()
+        .map_err(|error| format!("close seeded tripwire db: {error}"))?;
+
+    let listed = list_tripwires(&TripwireListOptions {
+        workspace: workspace_path.clone(),
+        database_path: Some(database_path.clone()),
+        preflight_run_id: Some("pf_gate16_store".to_owned()),
+        ..Default::default()
+    })
+    .map_err(|error| error.message())?;
+    ensure_equal(&listed.total_count, &1, "stored list count")?;
+    ensure_equal(
+        &listed.tripwires[0].id,
+        &"tw_gate16_store_001".to_owned(),
+        "stored list id",
+    )?;
+
+    let checked = check_tripwire(&TripwireCheckOptions {
+        workspace: workspace_path,
+        database_path: Some(database_path.clone()),
+        tripwire_id: "tw_gate16_store_001".to_owned(),
+        event_payload: TripwireEventPayload::default().with_task_input("deploy release"),
+        update_timestamp: true,
+        dry_run: false,
+        ..Default::default()
+    })
+    .map_err(|error| error.message())?;
+    ensure_equal(&checked.result, &CheckResult::Triggered, "check result")?;
+    ensure_equal(&checked.should_halt, &true, "halt decision")?;
+    ensure_equal(&checked.durable_mutation, &true, "durable mutation")?;
+    ensure(
+        checked
+            .event_payload_hash
+            .as_deref()
+            .is_some_and(|hash| hash.starts_with("blake3:")),
+        "event payload hash",
+    )?;
+
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("reopen tripwire test db: {error}"))?;
+    let stored = connection
+        .get_tripwire("tw_gate16_store_001")
+        .map_err(|error| format!("read updated tripwire: {error}"))?
+        .ok_or_else(|| "updated tripwire missing".to_owned())?;
+    ensure_equal(&stored.state, &"triggered".to_owned(), "persisted state")?;
+    let events = connection
+        .list_tripwire_check_events("tw_gate16_store_001")
+        .map_err(|error| format!("list check events: {error}"))?;
+    ensure_equal(&events.len(), &1, "logged check events")?;
+    ensure_equal(
+        &events[0].check_result,
+        &"triggered".to_owned(),
+        "logged result",
+    )?;
+    ensure_equal(&events[0].should_halt, &true, "logged halt decision")?;
+    ensure_equal(
+        &events[0].mutation_posture,
+        &"state_update_and_check_event_persisted".to_owned(),
+        "logged mutation posture",
+    )
+}
+
+#[test]
 fn public_cli_preflight_and_tripwire_json_keep_stdout_clean() -> TestResult {
     assert_cli_json_stdout_clean(
         &[
@@ -378,9 +529,27 @@ fn public_cli_preflight_and_tripwire_json_keep_stdout_clean() -> TestResult {
         "--json preflight run deploy production database migration",
         "preflight_evidence_unavailable",
     )?;
-    assert_cli_json_stdout_clean(
-        &["--json", "tripwire", "check", "tw_004", "--dry-run"],
-        "--json tripwire check tw_004 --dry-run",
-        "tripwire_store_unavailable",
+    let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let database_path = tempdir.path().join("ee.db");
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("open public CLI tripwire db: {error}"))?;
+    connection
+        .migrate()
+        .map_err(|error| format!("migrate public CLI tripwire db: {error}"))?;
+    connection
+        .close()
+        .map_err(|error| format!("close public CLI tripwire db: {error}"))?;
+    let database_path = database_path.to_string_lossy().into_owned();
+    assert_cli_tripwire_not_found_stdout_clean(
+        &[
+            "--json",
+            "tripwire",
+            "check",
+            "tw_004",
+            "--database",
+            &database_path,
+            "--dry-run",
+        ],
+        "--json tripwire check tw_004 --database <path> --dry-run",
     )
 }
