@@ -2053,7 +2053,6 @@ fn post_task_outcome_scenario_commands_emit_machine_data() -> TestResult {
         vec!["learn", "agenda", "--json"],
     ];
 
-    let mut successful_commands = 0_u32;
     for args in &commands {
         let output = run_ee(args)?;
         ensure(
@@ -2066,6 +2065,13 @@ fn post_task_outcome_scenario_commands_emit_machine_data() -> TestResult {
             schema.is_some_and(|value| !value.trim().is_empty()),
             format!("ee {} must include a schema in JSON mode", args.join(" ")),
         )?;
+        ensure(
+            output.stderr.is_empty(),
+            format!(
+                "ee {} must keep diagnostics off stderr in JSON mode",
+                args.join(" ")
+            ),
+        )?;
 
         if output.status.code() == Some(0) {
             ensure(
@@ -2075,21 +2081,9 @@ fn post_task_outcome_scenario_commands_emit_machine_data() -> TestResult {
                     args.join(" ")
                 ),
             )?;
-            ensure(
-                String::from_utf8_lossy(&output.stderr).trim().is_empty(),
-                format!(
-                    "ee {} must keep diagnostics off stderr in JSON mode",
-                    args.join(" ")
-                ),
-            )?;
-            successful_commands += 1;
         }
     }
-
-    ensure(
-        successful_commands >= 3,
-        "at least three post-task scenario commands should succeed",
-    )
+    Ok(())
 }
 
 // ============================================================================

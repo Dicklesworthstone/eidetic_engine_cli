@@ -64,6 +64,7 @@ fn readme_context_profiles_match_shipped_cli_profiles() -> TestResult {
         "default_profile  = \"default\"",
         "~/.config/ee/profiles/",
         "extends = \"release\"",
+        "ee curate disposition --dry-run",
     ];
     if let Some(stale_example) = stale_examples
         .iter()
@@ -77,6 +78,11 @@ fn readme_context_profiles_match_shipped_cli_profiles() -> TestResult {
         README,
         "default_profile  = \"balanced\"",
         "README config default profile",
+    )?;
+    ensure_contains(
+        README,
+        "ee curate disposition",
+        "README curate disposition command",
     )
 }
 

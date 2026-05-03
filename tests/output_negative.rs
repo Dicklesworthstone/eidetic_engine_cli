@@ -6,6 +6,8 @@
 //! These tests prove that error paths produce stable, machine-readable output
 //! suitable for programmatic error handling.
 
+use clap::Parser;
+use ee::cli::Cli;
 use ee::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
 use ee::output::{
     DegradationSeverity, FieldProfile, OutputContext, Renderer, ResponseEnvelope,
@@ -326,6 +328,66 @@ fn migration_required_produces_stable_error() -> TestResult {
 
     ensure_contains(&json, "\"code\":\"migration_required\"", "error code")?;
     ensure_contains(&json, "\"repair\":\"ee init --workspace .\"", "repair hint")
+}
+
+#[test]
+fn golden_error_fixture_repairs_parse_current_cli() -> TestResult {
+    let fixtures = [
+        ("usage", include_str!("fixtures/golden/error/usage.golden")),
+        (
+            "configuration",
+            include_str!("fixtures/golden/error/configuration.golden"),
+        ),
+        (
+            "storage",
+            include_str!("fixtures/golden/error/storage.golden"),
+        ),
+        (
+            "search_index",
+            include_str!("fixtures/golden/error/search_index.golden"),
+        ),
+        (
+            "import",
+            include_str!("fixtures/golden/error/import.golden"),
+        ),
+        (
+            "policy_denied",
+            include_str!("fixtures/golden/error/policy_denied.golden"),
+        ),
+        (
+            "migration_required",
+            include_str!("fixtures/golden/error/migration_required.golden"),
+        ),
+        (
+            "unsatisfied_degraded_mode",
+            include_str!("fixtures/golden/error/unsatisfied_degraded_mode.golden"),
+        ),
+        (
+            "no_repair",
+            include_str!("fixtures/golden/error/no_repair.golden"),
+        ),
+    ];
+
+    for (name, fixture) in fixtures {
+        let value: serde_json::Value = serde_json::from_str(fixture)
+            .map_err(|error| format!("{name} golden must be JSON: {error}"))?;
+        let Some(repair) = value
+            .pointer("/error/repair")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let args: Vec<&str> = repair.split_whitespace().collect();
+        ensure(
+            args.first(),
+            Some(&"ee"),
+            &format!("{name} repair command prefix"),
+        )?;
+        Cli::try_parse_from(args)
+            .map_err(|error| format!("{name} repair `{repair}` must parse: {:?}", error.kind()))?;
+    }
+
+    Ok(())
 }
 
 #[test]

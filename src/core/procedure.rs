@@ -132,6 +132,48 @@ pub struct ProcedureShowReport {
     pub verification: Option<VerificationDetail>,
 }
 
+/// Durable procedure projection supplied by a repository or fixture.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProcedureRecord {
+    pub procedure: ProcedureDetail,
+    pub steps: Vec<ProcedureStepDetail>,
+    pub verification: Option<VerificationDetail>,
+}
+
+impl ProcedureRecord {
+    #[must_use]
+    pub fn new(procedure: ProcedureDetail) -> Self {
+        Self {
+            procedure,
+            steps: Vec::new(),
+            verification: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_steps(mut self, steps: Vec<ProcedureStepDetail>) -> Self {
+        self.steps = steps;
+        self
+    }
+
+    #[must_use]
+    pub fn with_verification(mut self, verification: VerificationDetail) -> Self {
+        self.verification = Some(verification);
+        self
+    }
+
+    #[must_use]
+    pub fn list_item(&self) -> ProcedureListItem {
+        ProcedureListItem {
+            procedure_id: self.procedure.procedure_id.clone(),
+            title: self.procedure.title.clone(),
+            status: self.procedure.status.clone(),
+            step_count: usize_to_u32_saturating(self.steps.len()),
+            created_at: self.procedure.created_at.clone(),
+        }
+    }
+}
+
 /// Procedure detail for show report.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProcedureDetail {
@@ -177,69 +219,42 @@ impl ProcedureShowReport {
 
 /// Show details of a procedure.
 pub fn show_procedure(options: &ProcedureShowOptions) -> Result<ProcedureShowReport, DomainError> {
-    let now = Utc::now().to_rfc3339();
+    show_procedure_from_records(options, &[])
+}
 
-    let procedure = ProcedureDetail {
-        procedure_id: options.procedure_id.clone(),
-        title: format!("Procedure {}", options.procedure_id),
-        summary: "Example procedure distilled from successful task runs.".to_owned(),
-        status: ProcedureStatus::Candidate.as_str().to_owned(),
-        step_count: 3,
-        source_run_ids: vec!["run_001".to_owned(), "run_002".to_owned()],
-        evidence_ids: vec!["ev_001".to_owned()],
-        created_at: now.clone(),
-        updated_at: now.clone(),
-        verified_at: None,
-    };
+/// Show details from explicit procedure records.
+pub fn show_procedure_from_records(
+    options: &ProcedureShowOptions,
+    records: &[ProcedureRecord],
+) -> Result<ProcedureShowReport, DomainError> {
+    let procedure_id = options.procedure_id.trim();
+    if procedure_id.is_empty() {
+        return Err(DomainError::Usage {
+            message: "procedure id is required".to_owned(),
+            repair: Some("ee procedure show <procedure-id> --json".to_owned()),
+        });
+    }
 
-    let steps = if options.include_steps {
-        vec![
-            ProcedureStepDetail {
-                step_id: "step_1".to_owned(),
-                sequence: 1,
-                title: "Prepare environment".to_owned(),
-                instruction: "Ensure all dependencies are installed.".to_owned(),
-                command_hint: Some("cargo build".to_owned()),
-                required: true,
-            },
-            ProcedureStepDetail {
-                step_id: "step_2".to_owned(),
-                sequence: 2,
-                title: "Run tests".to_owned(),
-                instruction: "Execute the test suite to verify changes.".to_owned(),
-                command_hint: Some("cargo test".to_owned()),
-                required: true,
-            },
-            ProcedureStepDetail {
-                step_id: "step_3".to_owned(),
-                sequence: 3,
-                title: "Review output".to_owned(),
-                instruction: "Check test results for failures.".to_owned(),
-                command_hint: None,
-                required: false,
-            },
-        ]
-    } else {
-        Vec::new()
-    };
-
-    let verification = if options.include_verification {
-        Some(VerificationDetail {
-            status: ProcedureVerificationStatus::Pending.as_str().to_owned(),
-            verified_at: None,
-            verified_by: None,
-            pass_count: 0,
-            fail_count: 0,
-        })
-    } else {
-        None
+    let Some(record) = records
+        .iter()
+        .find(|record| record.procedure.procedure_id == procedure_id)
+    else {
+        return Err(procedure_not_found(procedure_id));
     };
 
     Ok(ProcedureShowReport {
         schema: PROCEDURE_SHOW_REPORT_SCHEMA_V1.to_owned(),
-        procedure,
-        steps,
-        verification,
+        procedure: record.procedure.clone(),
+        steps: if options.include_steps {
+            record.steps.clone()
+        } else {
+            Vec::new()
+        },
+        verification: if options.include_verification {
+            record.verification.clone()
+        } else {
+            None
+        },
     })
 }
 
@@ -284,49 +299,37 @@ impl ProcedureListReport {
 
 /// List procedures with optional filters.
 pub fn list_procedures(options: &ProcedureListOptions) -> Result<ProcedureListReport, DomainError> {
-    let now = Utc::now().to_rfc3339();
+    list_procedures_from_records(options, &[])
+}
 
-    let all_procedures = vec![
-        ProcedureListItem {
-            procedure_id: "proc_001".to_owned(),
-            title: "Build and test workflow".to_owned(),
-            status: ProcedureStatus::Verified.as_str().to_owned(),
-            step_count: 4,
-            created_at: now.clone(),
-        },
-        ProcedureListItem {
-            procedure_id: "proc_002".to_owned(),
-            title: "Code review checklist".to_owned(),
-            status: ProcedureStatus::Candidate.as_str().to_owned(),
-            step_count: 6,
-            created_at: now.clone(),
-        },
-        ProcedureListItem {
-            procedure_id: "proc_003".to_owned(),
-            title: "Release preparation".to_owned(),
-            status: ProcedureStatus::Candidate.as_str().to_owned(),
-            step_count: 8,
-            created_at: now,
-        },
-    ];
+/// List procedures from explicit records.
+pub fn list_procedures_from_records(
+    options: &ProcedureListOptions,
+    records: &[ProcedureRecord],
+) -> Result<ProcedureListReport, DomainError> {
+    let mut all_procedures: Vec<_> = records.iter().map(ProcedureRecord::list_item).collect();
+    all_procedures.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.procedure_id.cmp(&right.procedure_id))
+    });
 
-    let filtered: Vec<_> = if let Some(ref status_filter) = options.status_filter {
+    let total_count = usize_to_u32_saturating(all_procedures.len());
+    let mut filtered: Vec<_> = if let Some(ref status_filter) = options.status_filter {
         all_procedures
             .into_iter()
-            .filter(|p| p.status == *status_filter)
-            .take(options.limit as usize)
+            .filter(|procedure| procedure.status == *status_filter)
             .collect()
     } else {
         all_procedures
-            .into_iter()
-            .take(options.limit as usize)
-            .collect()
     };
+    let filtered_count = usize_to_u32_saturating(filtered.len());
+    filtered.truncate(u32_to_usize_saturating(options.limit));
 
     Ok(ProcedureListReport {
         schema: PROCEDURE_LIST_REPORT_SCHEMA_V1.to_owned(),
-        total_count: 3,
-        filtered_count: usize_to_u32_saturating(filtered.len()),
+        total_count,
+        filtered_count,
         procedures: filtered,
     })
 }
@@ -374,6 +377,14 @@ impl ProcedureExportReport {
 pub fn export_procedure(
     options: &ProcedureExportOptions,
 ) -> Result<ProcedureExportReport, DomainError> {
+    export_procedure_from_records(options, &[])
+}
+
+/// Export a procedure supplied by explicit records.
+pub fn export_procedure_from_records(
+    options: &ProcedureExportOptions,
+    records: &[ProcedureRecord],
+) -> Result<ProcedureExportReport, DomainError> {
     let format =
         ProcedureExportFormat::from_str(&options.format).map_err(|error| DomainError::Usage {
             message: error.to_string(),
@@ -385,7 +396,7 @@ pub fn export_procedure(
     let exported_at = Utc::now().to_rfc3339();
     let export_id = format!("exp_{}", generate_id());
 
-    let snapshot = procedure_export_snapshot(&options.procedure_id, &exported_at)?;
+    let snapshot = procedure_export_snapshot(&options.procedure_id, &exported_at, records)?;
     let content = render_export_content(&snapshot, format, &export_id, &exported_at)?;
     let content_hash = format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex());
     let warnings = export_warnings(format);
@@ -427,13 +438,17 @@ struct ProcedureExportSnapshot {
 fn procedure_export_snapshot(
     procedure_id: &str,
     exported_at: &str,
+    records: &[ProcedureRecord],
 ) -> Result<ProcedureExportSnapshot, DomainError> {
-    let report = show_procedure(&ProcedureShowOptions {
-        procedure_id: procedure_id.to_owned(),
-        include_steps: true,
-        include_verification: false,
-        ..Default::default()
-    })?;
+    let report = show_procedure_from_records(
+        &ProcedureShowOptions {
+            procedure_id: procedure_id.to_owned(),
+            include_steps: true,
+            include_verification: false,
+            ..Default::default()
+        },
+        records,
+    )?;
 
     let mut procedure = report.procedure;
     procedure.updated_at = exported_at.to_owned();
@@ -1163,73 +1178,71 @@ impl ProcedureVerifyReport {
 pub fn verify_procedure(
     options: &ProcedureVerifyOptions,
 ) -> Result<ProcedureVerifyReport, DomainError> {
-    let verification_id = format!("ver_{}", generate_id());
-    let verified_at = Utc::now().to_rfc3339();
-
     let source_kind = options
         .source_kind
         .clone()
         .unwrap_or_else(|| "eval_fixture".to_owned());
+    let sources_checked: Vec<_> = options
+        .source_ids
+        .iter()
+        .map(|source_id| {
+            VerificationSourceResult {
+            source_id: source_id.clone(),
+            source_kind: source_kind.clone(),
+            result: "skipped".to_owned(),
+            step_results: Vec::new(),
+            message: Some(
+                "verification evidence was named but no executable or inspected result was supplied"
+                    .to_owned(),
+            ),
+        }
+        })
+        .collect();
+    let mut report = build_verification_report(options, source_kind, sources_checked)?;
+    if report.next_actions.is_empty() {
+        report.next_actions.push(
+            "Provide explicit verification evidence before trusting or promoting this procedure."
+                .to_owned(),
+        );
+    }
+    Ok(report)
+}
 
-    // Generate mock verification results based on source IDs
-    let sources_checked: Vec<VerificationSourceResult> = if options.source_ids.is_empty() {
-        // Default to checking against mock eval fixtures
-        vec![
-            VerificationSourceResult {
-                source_id: "fixture_001".to_owned(),
-                source_kind: source_kind.clone(),
-                result: "passed".to_owned(),
-                step_results: vec![
-                    StepVerificationResult {
-                        step_id: "step_1".to_owned(),
-                        sequence: 1,
-                        result: "passed".to_owned(),
-                        expected: Some("build succeeds".to_owned()),
-                        actual: Some("build succeeds".to_owned()),
-                    },
-                    StepVerificationResult {
-                        step_id: "step_2".to_owned(),
-                        sequence: 2,
-                        result: "passed".to_owned(),
-                        expected: Some("tests pass".to_owned()),
-                        actual: Some("tests pass".to_owned()),
-                    },
-                ],
-                message: None,
-            },
-            VerificationSourceResult {
-                source_id: "fixture_002".to_owned(),
-                source_kind: source_kind.clone(),
-                result: "passed".to_owned(),
-                step_results: vec![StepVerificationResult {
-                    step_id: "step_1".to_owned(),
-                    sequence: 1,
-                    result: "passed".to_owned(),
-                    expected: Some("build succeeds".to_owned()),
-                    actual: Some("build succeeds".to_owned()),
-                }],
-                message: None,
-            },
-        ]
-    } else {
-        options
-            .source_ids
-            .iter()
-            .map(|source_id| VerificationSourceResult {
-                source_id: source_id.clone(),
-                source_kind: source_kind.clone(),
-                result: "passed".to_owned(),
-                step_results: vec![StepVerificationResult {
-                    step_id: "step_1".to_owned(),
-                    sequence: 1,
-                    result: "passed".to_owned(),
-                    expected: None,
-                    actual: None,
-                }],
-                message: None,
-            })
-            .collect()
-    };
+/// Verify a procedure from explicit source results supplied by a fixture or repository.
+pub fn verify_procedure_from_results(
+    options: &ProcedureVerifyOptions,
+    source_results: &[VerificationSourceResult],
+) -> Result<ProcedureVerifyReport, DomainError> {
+    let source_kind = options.source_kind.clone().unwrap_or_else(|| {
+        source_results
+            .first()
+            .map(|source| source.source_kind.clone())
+            .unwrap_or_else(|| "eval_fixture".to_owned())
+    });
+    let mut sources_checked = source_results.to_vec();
+    sources_checked.sort_by(|left, right| {
+        left.source_kind
+            .cmp(&right.source_kind)
+            .then_with(|| left.source_id.cmp(&right.source_id))
+    });
+    build_verification_report(options, source_kind, sources_checked)
+}
+
+fn build_verification_report(
+    options: &ProcedureVerifyOptions,
+    source_kind: String,
+    sources_checked: Vec<VerificationSourceResult>,
+) -> Result<ProcedureVerifyReport, DomainError> {
+    let procedure_id = options.procedure_id.trim();
+    if procedure_id.is_empty() {
+        return Err(DomainError::Usage {
+            message: "procedure id is required for verification".to_owned(),
+            repair: Some("ee procedure verify <procedure-id> --json".to_owned()),
+        });
+    }
+
+    let verification_id = format!("ver_{}", generate_id());
+    let verified_at = Utc::now().to_rfc3339();
 
     let pass_count = count_source_results(&sources_checked, "passed");
     let fail_count = count_source_results(&sources_checked, "failed");
@@ -1241,6 +1254,13 @@ pub fn verify_procedure(
         "passed".to_owned()
     } else {
         "skipped".to_owned()
+    };
+    let status = if fail_count > 0 {
+        ProcedureVerificationStatus::Failed
+    } else if pass_count > 0 && skip_count == 0 {
+        ProcedureVerificationStatus::Passed
+    } else {
+        ProcedureVerificationStatus::Pending
     };
 
     let confidence = if pass_count + fail_count > 0 {
@@ -1261,9 +1281,9 @@ pub fn verify_procedure(
 
     Ok(ProcedureVerifyReport {
         schema: PROCEDURE_VERIFY_REPORT_SCHEMA_V1.to_owned(),
-        procedure_id: options.procedure_id.clone(),
+        procedure_id: procedure_id.to_owned(),
         verification_id,
-        status: ProcedureVerificationStatus::Passed.as_str().to_owned(),
+        status: status.as_str().to_owned(),
         source_kind,
         sources_checked,
         pass_count,
@@ -1692,8 +1712,20 @@ fn count_source_results(sources: &[VerificationSourceResult], result: &str) -> u
     usize_to_u32_saturating(count)
 }
 
+fn procedure_not_found(procedure_id: &str) -> DomainError {
+    DomainError::NotFound {
+        resource: "procedure".to_owned(),
+        id: procedure_id.to_owned(),
+        repair: Some("create or import a procedure record before using this command".to_owned()),
+    }
+}
+
 fn usize_to_u32_saturating(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn u32_to_usize_saturating(value: u32) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
 }
 
 /// Generate a short random ID.
@@ -1712,6 +1744,70 @@ mod tests {
 
     type TestResult = Result<(), String>;
 
+    fn procedure_record(status: &str) -> ProcedureRecord {
+        ProcedureRecord::new(ProcedureDetail {
+            procedure_id: "proc_test".to_owned(),
+            title: "Stored procedure".to_owned(),
+            summary: "Procedure loaded from explicit records.".to_owned(),
+            status: status.to_owned(),
+            step_count: 2,
+            source_run_ids: vec!["run_1".to_owned()],
+            evidence_ids: vec!["ev_1".to_owned()],
+            created_at: "2026-05-01T10:00:00Z".to_owned(),
+            updated_at: "2026-05-01T11:00:00Z".to_owned(),
+            verified_at: None,
+        })
+        .with_steps(vec![
+            ProcedureStepDetail {
+                step_id: "step_1".to_owned(),
+                sequence: 1,
+                title: "Prepare".to_owned(),
+                instruction: "Prepare explicit inputs.".to_owned(),
+                command_hint: None,
+                required: true,
+            },
+            ProcedureStepDetail {
+                step_id: "step_2".to_owned(),
+                sequence: 2,
+                title: "Verify".to_owned(),
+                instruction: "Inspect explicit evidence.".to_owned(),
+                command_hint: Some("ee procedure verify proc_test --json".to_owned()),
+                required: true,
+            },
+        ])
+        .with_verification(VerificationDetail {
+            status: ProcedureVerificationStatus::Pending.as_str().to_owned(),
+            verified_at: None,
+            verified_by: None,
+            pass_count: 0,
+            fail_count: 0,
+        })
+    }
+
+    fn second_procedure_record(status: &str) -> ProcedureRecord {
+        let mut record = procedure_record(status);
+        record.procedure.procedure_id = "proc_other".to_owned();
+        record.procedure.title = "Other stored procedure".to_owned();
+        record.procedure.created_at = "2026-05-01T09:00:00Z".to_owned();
+        record
+    }
+
+    fn verification_source(source_id: &str, result: &str) -> VerificationSourceResult {
+        VerificationSourceResult {
+            source_id: source_id.to_owned(),
+            source_kind: "eval_fixture".to_owned(),
+            result: result.to_owned(),
+            step_results: vec![StepVerificationResult {
+                step_id: "step_1".to_owned(),
+                sequence: 1,
+                result: result.to_owned(),
+                expected: Some("explicit evidence expected".to_owned()),
+                actual: Some(format!("explicit evidence {result}")),
+            }],
+            message: None,
+        }
+    }
+
     #[test]
     fn propose_creates_candidate() -> TestResult {
         let options = ProcedureProposeOptions {
@@ -1729,7 +1825,7 @@ mod tests {
     }
 
     #[test]
-    fn show_includes_steps_when_requested() -> TestResult {
+    fn show_returns_not_found_without_explicit_record() -> TestResult {
         let options = ProcedureShowOptions {
             procedure_id: "proc_test".to_owned(),
             include_steps: true,
@@ -1737,24 +1833,41 @@ mod tests {
             ..Default::default()
         };
 
-        let report = show_procedure(&options).map_err(|e| e.message())?;
-        assert!(!report.steps.is_empty());
-        assert!(report.verification.is_none());
+        let Err(error) = show_procedure(&options) else {
+            return Err("show should not fabricate a procedure".to_owned());
+        };
+        assert_eq!(error.code(), "not_found");
         Ok(())
     }
 
     #[test]
-    fn show_includes_verification_when_requested() -> TestResult {
+    fn show_from_records_includes_requested_sections() -> TestResult {
         let options = ProcedureShowOptions {
             procedure_id: "proc_test".to_owned(),
-            include_steps: false,
+            include_steps: true,
             include_verification: true,
             ..Default::default()
         };
+        let records = [procedure_record("candidate")];
 
-        let report = show_procedure(&options).map_err(|e| e.message())?;
-        assert!(report.steps.is_empty());
+        let report = show_procedure_from_records(&options, &records).map_err(|e| e.message())?;
+        assert_eq!(report.procedure.procedure_id, "proc_test");
+        assert_eq!(report.steps.len(), 2);
         assert!(report.verification.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn list_returns_empty_without_explicit_records() -> TestResult {
+        let report = list_procedures(&ProcedureListOptions {
+            limit: 10,
+            ..Default::default()
+        })
+        .map_err(|e| e.message())?;
+
+        assert_eq!(report.total_count, 0);
+        assert_eq!(report.filtered_count, 0);
+        assert!(report.procedures.is_empty());
         Ok(())
     }
 
@@ -1765,25 +1878,47 @@ mod tests {
             limit: 10,
             ..Default::default()
         };
+        let records = [
+            procedure_record("candidate"),
+            second_procedure_record("verified"),
+        ];
 
-        let report = list_procedures(&options).map_err(|e| e.message())?;
+        let report = list_procedures_from_records(&options, &records).map_err(|e| e.message())?;
+        assert_eq!(report.total_count, 2);
+        assert_eq!(report.filtered_count, 1);
         assert!(report.procedures.iter().all(|p| p.status == "verified"));
+        Ok(())
+    }
+
+    #[test]
+    fn export_returns_not_found_without_explicit_record() -> TestResult {
+        let options = ProcedureExportOptions {
+            procedure_id: "proc_test".to_owned(),
+            format: "markdown".to_owned(),
+            ..Default::default()
+        };
+
+        let Err(error) = export_procedure(&options) else {
+            return Err("export should not fabricate a procedure".to_owned());
+        };
+        assert_eq!(error.code(), "not_found");
         Ok(())
     }
 
     #[test]
     fn export_markdown_format_contains_steps_and_provenance() -> TestResult {
         let options = ProcedureExportOptions {
-            procedure_id: "proc_export".to_owned(),
+            procedure_id: "proc_test".to_owned(),
             format: "markdown".to_owned(),
             ..Default::default()
         };
+        let records = [procedure_record("candidate")];
 
-        let report = export_procedure(&options).map_err(|e| e.message())?;
+        let report = export_procedure_from_records(&options, &records).map_err(|e| e.message())?;
         assert_eq!(report.format, "markdown");
         assert_eq!(report.artifact_kind, "procedure_markdown");
         assert!(report.content_length > 0);
-        assert!(report.content.contains("# Procedure proc_export"));
+        assert!(report.content.contains("# Stored procedure"));
         assert!(report.content.contains("## Steps"));
         assert!(report.content.contains("## Provenance"));
         assert!(report.content_hash.starts_with("blake3:"));
@@ -1793,12 +1928,13 @@ mod tests {
     #[test]
     fn export_playbook_format_is_yaml_like() -> TestResult {
         let options = ProcedureExportOptions {
-            procedure_id: "proc_export".to_owned(),
+            procedure_id: "proc_test".to_owned(),
             format: "playbook".to_owned(),
             ..Default::default()
         };
+        let records = [procedure_record("candidate")];
 
-        let report = export_procedure(&options).map_err(|e| e.message())?;
+        let report = export_procedure_from_records(&options, &records).map_err(|e| e.message())?;
         assert_eq!(report.format, "playbook");
         assert_eq!(report.artifact_kind, "procedure_playbook");
         assert!(
@@ -1814,12 +1950,13 @@ mod tests {
     #[test]
     fn export_skill_capsule_is_render_only() -> TestResult {
         let options = ProcedureExportOptions {
-            procedure_id: "proc_export".to_owned(),
+            procedure_id: "proc_test".to_owned(),
             format: "skill-capsule".to_owned(),
             ..Default::default()
         };
+        let records = [procedure_record("candidate")];
 
-        let report = export_procedure(&options).map_err(|e| e.message())?;
+        let report = export_procedure_from_records(&options, &records).map_err(|e| e.message())?;
         assert_eq!(report.format, "skill_capsule");
         assert_eq!(report.artifact_kind, "skill_capsule");
         assert_eq!(report.install_mode.as_deref(), Some("render_only"));
@@ -1846,7 +1983,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_dry_run_builds_curation_and_audit_plan() -> TestResult {
+    fn promote_dry_run_returns_not_found_without_record() -> TestResult {
         let options = ProcedurePromoteOptions {
             procedure_id: "proc_promote".to_owned(),
             dry_run: true,
@@ -1855,21 +1992,10 @@ mod tests {
             ..Default::default()
         };
 
-        let report = promote_procedure(&options).map_err(|e| e.message())?;
-        assert_eq!(report.schema, PROCEDURE_PROMOTE_REPORT_SCHEMA_V1);
-        assert_eq!(report.status, "dry_run");
-        assert!(report.dry_run);
-        assert_eq!(report.from_status, "candidate");
-        assert_eq!(report.to_status, "verified");
-        assert_eq!(report.curation.candidate_type, "promote");
-        assert_eq!(report.curation.target_type, "procedure");
-        assert_eq!(report.curation.status, "pending_review");
-        assert!(!report.curation.would_persist);
-        assert_eq!(report.audit.action, "procedure.promote");
-        assert_eq!(report.audit.outcome, "dry_run");
-        assert!(!report.audit.recorded);
-        assert!(report.planned_effects.iter().all(|effect| !effect.applied));
-        assert!(report.verification.pass_count > 0);
+        let Err(error) = promote_procedure(&options) else {
+            return Err("promotion should require a stored procedure".to_owned());
+        };
+        assert_eq!(error.code(), "not_found");
         Ok(())
     }
 
@@ -1895,7 +2021,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_returns_passed_for_mock_fixtures() -> TestResult {
+    fn verify_without_explicit_results_does_not_pass() -> TestResult {
         let options = ProcedureVerifyOptions {
             procedure_id: "proc_test".to_owned(),
             source_kind: Some("eval_fixture".to_owned()),
@@ -1905,9 +2031,11 @@ mod tests {
 
         let report = verify_procedure(&options).map_err(|e| e.message())?;
         assert!(report.verification_id.starts_with("ver_"));
-        assert_eq!(report.overall_result, "passed");
-        assert!(report.pass_count > 0);
+        assert_eq!(report.status, "pending");
+        assert_eq!(report.overall_result, "skipped");
+        assert_eq!(report.pass_count, 0);
         assert_eq!(report.fail_count, 0);
+        assert!(report.sources_checked.is_empty());
         Ok(())
     }
 
@@ -1940,6 +2068,33 @@ mod tests {
                 .iter()
                 .any(|s| s.source_id == "src_001")
         );
+        assert!(report.sources_checked.iter().all(|s| s.result == "skipped"));
+        assert_eq!(report.pass_count, 0);
+        assert_eq!(report.overall_result, "skipped");
+        Ok(())
+    }
+
+    #[test]
+    fn verify_from_explicit_results_can_pass_or_fail() -> TestResult {
+        let options = ProcedureVerifyOptions {
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("eval_fixture".to_owned()),
+            dry_run: true,
+            ..Default::default()
+        };
+        let passed = [verification_source("fixture_pass", "passed")];
+        let passed_report =
+            verify_procedure_from_results(&options, &passed).map_err(|e| e.message())?;
+        assert_eq!(passed_report.status, "passed");
+        assert_eq!(passed_report.overall_result, "passed");
+        assert_eq!(passed_report.pass_count, 1);
+
+        let failed = [verification_source("fixture_fail", "failed")];
+        let failed_report =
+            verify_procedure_from_results(&options, &failed).map_err(|e| e.message())?;
+        assert_eq!(failed_report.status, "failed");
+        assert_eq!(failed_report.overall_result, "failed");
+        assert_eq!(failed_report.fail_count, 1);
         Ok(())
     }
 

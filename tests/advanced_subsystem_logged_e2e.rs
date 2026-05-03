@@ -503,8 +503,8 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "exp_database_contract_fixture".to_owned(),
                 "--dry-run".to_owned(),
             ],
-            expected_schema_contains: "ee.response.v1",
-            expected_exit_code: 7,
+            expected_schema_contains: "ee.learn.experiment_run.v1",
+            expected_exit_code: 0,
             expect_clean_stderr: true,
         },
         StepSpec {

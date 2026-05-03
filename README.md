@@ -333,7 +333,7 @@ That's the core loop.
 | `ee curate candidates [--workspace .]` | List pending curation candidates |
 | `ee curate validate <id>` | Run validation (specificity, duplication, scope, evidence) |
 | `ee curate apply <id>` / `accept <id>` / `reject <id>` / `snooze <id>` / `merge <a> <b>` | Lifecycle transitions |
-| `ee curate disposition --dry-run` | Evaluate TTL disposition policy without silent mutation |
+| `ee curate disposition` | Evaluate TTL disposition policy without silent mutation (`--apply` is required to write) |
 | `ee rule add` / `list` / `show <id>` / `protect <id>` | Direct rule management |
 
 ### Memory inspection

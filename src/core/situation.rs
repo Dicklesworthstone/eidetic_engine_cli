@@ -6,6 +6,7 @@
 //! - Explaining situation context and recommendations
 
 use super::build_info;
+use crate::models::ContextProfileName;
 pub use crate::models::{
     ROUTING_DECISION_SCHEMA_V1, RoutingDecision, SITUATION_CLASSIFY_SCHEMA_V1,
     SITUATION_EXPLAIN_SCHEMA_V1, SITUATION_LINK_SCHEMA_V1, SITUATION_SHOW_SCHEMA_V1,
@@ -1223,7 +1224,7 @@ pub fn route_situation_with_alternatives(
     )
     .selected_profile(context_profile)
     .retrieval_profile(context_profile)
-    .with_reason(context_reason(category, context_profile));
+    .with_reason(context_reason(category, confidence, context_profile));
     if !broadening_categories.is_empty() {
         context_route =
             context_route.with_reason(low_confidence_broadening_reason(&broadening_categories));
@@ -1338,7 +1339,7 @@ fn transient_situation_id(category: SituationCategory) -> String {
 
 fn context_profile_for(category: SituationCategory, confidence: ConfidenceLevel) -> &'static str {
     if confidence == ConfidenceLevel::Low {
-        return "broad";
+        return ContextProfileName::Thorough.as_str();
     }
 
     match category {
@@ -1461,10 +1462,14 @@ fn replay_policy_for(
     }
 }
 
-fn context_reason(category: SituationCategory, profile: &str) -> String {
-    if profile == "broad" {
+fn context_reason(
+    category: SituationCategory,
+    confidence: ConfidenceLevel,
+    profile: &str,
+) -> String {
+    if confidence == ConfidenceLevel::Low {
         return format!(
-            "{} situations use broad context retrieval when classification confidence is low",
+            "{} situations use the thorough context profile to preserve alternatives when classification confidence is low",
             category.as_str()
         );
     }
@@ -2186,8 +2191,14 @@ mod tests {
         let context = route_for(&result, SituationRoutingSurface::ContextProfile)?;
         ensure(
             context.retrieval_profile.as_deref(),
-            Some("broad"),
-            "broad retrieval",
+            Some(ContextProfileName::Thorough.as_str()),
+            "low-confidence retrieval profile",
+        )?;
+        ensure(
+            ContextProfileName::parse(context.retrieval_profile.as_deref().unwrap_or_default())
+                .is_some(),
+            true,
+            "routing profile is accepted by ee context",
         )?;
         ensure(
             context

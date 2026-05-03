@@ -1,1 +1,1 @@
-{"schema":"ee.error.v1","error":{"code":"policy_denied","message":"Redaction policy prevents this operation.","repair":"ee policy review"}}
+{"schema":"ee.error.v1","error":{"code":"policy_denied","message":"Redaction policy prevents this operation.","repair":"ee doctor --fix-plan --json"}}

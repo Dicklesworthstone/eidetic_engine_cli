@@ -11,8 +11,8 @@ use ee::core::situation::{
     evaluate_built_in_situation_fixtures, plan_situation_link_dry_run,
 };
 use ee::models::{
-    ROUTING_DECISION_SCHEMA_V1, SITUATION_CLASSIFY_SCHEMA_V1, SITUATION_LINK_SCHEMA_V1,
-    SituationRoutingSurface,
+    ContextProfileName, ROUTING_DECISION_SCHEMA_V1, SITUATION_CLASSIFY_SCHEMA_V1,
+    SITUATION_LINK_SCHEMA_V1, SituationRoutingSurface,
 };
 use serde_json::Value as JsonValue;
 use std::env;
@@ -62,6 +62,32 @@ fn classification_envelope(text: &str) -> JsonValue {
         "success": true,
         "data": result.data_json(),
     })
+}
+
+fn ensure_context_routes_use_shipped_profiles(envelope: &JsonValue) -> TestResult {
+    let routes = envelope
+        .pointer("/data/routingDecisions")
+        .and_then(JsonValue::as_array)
+        .ok_or("routing decisions missing")?;
+
+    for route in routes {
+        if route.get("surface").and_then(JsonValue::as_str) != Some("context_profile") {
+            continue;
+        }
+
+        for field in ["selectedProfile", "retrievalProfile"] {
+            let profile = route
+                .get(field)
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| format!("context route missing {field}"))?;
+            ensure(
+                ContextProfileName::parse(profile).is_some(),
+                format!("context route emitted unsupported profile `{profile}`"),
+            )?;
+        }
+    }
+
+    Ok(())
 }
 
 fn release_bug_compare_options() -> SituationCompareOptions {
@@ -169,6 +195,7 @@ fn gate19_cli_classify_async_migration_degrades_until_boundary_rework() -> TestR
 fn gate19_low_confidence_and_high_risk_goldens_are_stable() -> TestResult {
     let low_confidence = classification_envelope("docs fix");
     let high_risk = classification_envelope("fix failing release workflow");
+    let async_migration = classification_envelope("migrate async runtime from tokio to asupersync");
 
     ensure(
         low_confidence == read_golden("low_confidence_broadening")?,
@@ -178,6 +205,13 @@ fn gate19_low_confidence_and_high_risk_goldens_are_stable() -> TestResult {
         high_risk == read_golden("high_risk_alternative")?,
         "high-risk alternative golden mismatch",
     )?;
+    ensure(
+        async_migration == read_golden("classify_async_migration")?,
+        "async migration classification golden mismatch",
+    )?;
+    ensure_context_routes_use_shipped_profiles(&low_confidence)?;
+    ensure_context_routes_use_shipped_profiles(&high_risk)?;
+    ensure_context_routes_use_shipped_profiles(&async_migration)?;
 
     let low_routes = low_confidence
         .pointer("/data/routingDecisions")

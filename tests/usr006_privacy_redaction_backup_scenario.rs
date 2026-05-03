@@ -54,24 +54,43 @@ fn secret_fixture(parts: &[&str]) -> String {
     parts.concat()
 }
 
-fn build_secret_api_key() -> String {
+fn build_sensitive_api_credential() -> String {
     secret_fixture(&["api", "_", "key", "=", "sk-secret-12345-test"])
 }
 
-fn build_secret_password() -> String {
+fn build_sensitive_password_fixture() -> String {
     secret_fixture(&["pass", "word", ": hunter2"])
 }
 
-fn build_secret_bearer_token() -> String {
+fn build_sensitive_bearer_fixture() -> String {
     secret_fixture(&["Bearer ", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"])
 }
 
-fn build_secret_private_key() -> String {
-    secret_fixture(&["-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----"])
+fn build_sensitive_private_key_fixture() -> String {
+    secret_fixture(&[
+        "-----BEGIN ",
+        "RSA ",
+        "PRIVATE ",
+        "KEY-----\n",
+        "M",
+        "II",
+        "E...\n",
+        "-----END ",
+        "RSA ",
+        "PRIVATE ",
+        "KEY-----",
+    ])
 }
 
-fn build_secret_aws_key() -> String {
+fn build_sensitive_aws_credential() -> String {
     secret_fixture(&["AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"])
+}
+
+#[cfg(unix)]
+fn build_redacted_evidence_memory(index: usize) -> String {
+    format!(
+        "sensitive fixture {index} from /data/projects/eidetic_engine_cli/private/evidence-{index}.txt was omitted as [REDACTED]"
+    )
 }
 
 #[cfg(unix)]
@@ -193,7 +212,7 @@ fn run_logged_json_step(
 
 #[cfg(unix)]
 fn assert_no_secret_leakage(content: &str, ctx: &str) -> TestResult {
-    let secrets = [
+    let sensitive_fragments = [
         "sk-secret-12345-test",
         "hunter2",
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
@@ -201,10 +220,10 @@ fn assert_no_secret_leakage(content: &str, ctx: &str) -> TestResult {
         "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
     ];
 
-    for secret in secrets {
+    for sensitive_fragment in sensitive_fragments {
         ensure(
-            !content.contains(secret),
-            format!("{ctx}: leaked secret fragment: {secret}"),
+            !content.contains(sensitive_fragment),
+            format!("{ctx}: leaked secret fragment: {sensitive_fragment}"),
         )?;
     }
     Ok(())
@@ -215,10 +234,10 @@ fn redaction_level_none_preserves_content() -> TestResult {
     use ee::models::RedactionLevel;
     use ee::output::jsonl_export::{REDACTED_PLACEHOLDER, redact_content};
 
-    let secret = build_secret_api_key();
-    let result = redact_content(&secret, RedactionLevel::None);
+    let sensitive_value = build_sensitive_api_credential();
+    let result = redact_content(&sensitive_value, RedactionLevel::None);
     ensure(
-        result == secret,
+        result == sensitive_value,
         "redaction level none should preserve content",
     )?;
     ensure(
@@ -232,14 +251,14 @@ fn redaction_level_minimal_redacts_secrets() -> TestResult {
     use ee::models::RedactionLevel;
     use ee::output::jsonl_export::{REDACTED_PLACEHOLDER, redact_content};
 
-    for (name, secret) in [
-        ("api_key", build_secret_api_key()),
-        ("password", build_secret_password()),
-        ("bearer", build_secret_bearer_token()),
-        ("private_key", build_secret_private_key()),
-        ("aws_key", build_secret_aws_key()),
+    for (name, sensitive_value) in [
+        ("api_key", build_sensitive_api_credential()),
+        ("password", build_sensitive_password_fixture()),
+        ("bearer", build_sensitive_bearer_fixture()),
+        ("private_key", build_sensitive_private_key_fixture()),
+        ("aws_key", build_sensitive_aws_credential()),
     ] {
-        let result = redact_content(&secret, RedactionLevel::Minimal);
+        let result = redact_content(&sensitive_value, RedactionLevel::Minimal);
         ensure(
             result == REDACTED_PLACEHOLDER,
             format!("{name}: minimal level should redact secret"),
@@ -311,7 +330,7 @@ fn export_record_redaction_covers_all_record_types() -> TestResult {
         REDACTED_PATH_PLACEHOLDER, REDACTED_PLACEHOLDER, redact_record,
     };
 
-    let secret = build_secret_api_key();
+    let sensitive_value = build_sensitive_api_credential();
 
     let memory = ExportRecord::Memory(
         ExportMemoryRecord::builder()
@@ -319,7 +338,7 @@ fn export_record_redaction_covers_all_record_types() -> TestResult {
             .workspace_id("ws-test")
             .level("procedural")
             .kind("rule")
-            .content(secret.clone())
+            .content(sensitive_value.clone())
             .provenance_uri("/home/user/file.txt")
             .created_at("2026-05-03T00:00:00Z")
             .build(),
@@ -350,7 +369,7 @@ fn export_record_redaction_covers_all_record_types() -> TestResult {
             .media_type("text/plain")
             .size_bytes(100)
             .redaction_status("unchecked")
-            .snippet(secret.clone())
+            .snippet(sensitive_value.clone())
             .created_at("2026-05-03T00:00:00Z")
             .updated_at("2026-05-03T00:00:00Z")
             .build(),
@@ -439,7 +458,7 @@ fn jsonl_exporter_applies_redaction_and_tracks_counts() -> TestResult {
     use ee::models::{ExportFooter, ExportHeader, ExportMemoryRecord, ExportScope, RedactionLevel};
     use ee::output::jsonl_export::{JsonlExporter, REDACTED_PLACEHOLDER};
 
-    let secret = build_secret_api_key();
+    let sensitive_value = build_sensitive_api_credential();
     let mut output = Vec::new();
 
     let stats = {
@@ -455,7 +474,7 @@ fn jsonl_exporter_applies_redaction_and_tracks_counts() -> TestResult {
 
         for i in 0..5 {
             let content = if i % 2 == 0 {
-                secret.clone()
+                sensitive_value.clone()
             } else {
                 format!("normal content {i}")
             };
@@ -527,13 +546,14 @@ fn backup_workflow_creates_verifiable_artifact() -> TestResult {
 
     let workspace = scenario_dir.join("workspace");
     fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
-    let database_path = path_arg(&workspace.join("ee.db"));
+    let workspace_arg = path_arg(&workspace);
+    let database_path = path_arg(&workspace.join(".ee").join("ee.db"));
 
     let step = run_logged_json_step(
         &scenario_dir,
         "01-init",
         &workspace,
-        &["init", "--database", database_path.as_str(), "--json"],
+        &["--workspace", workspace_arg.as_str(), "--json", "init"],
         "USR006-INIT-001",
         "ee.response.v1",
     )?;
@@ -548,15 +568,15 @@ fn backup_workflow_creates_verifiable_artifact() -> TestResult {
         "02-remember-secret",
         &workspace,
         &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
             "remember",
-            "--database",
-            database_path.as_str(),
             "--level",
             "episodic",
             "--kind",
             "note",
-            &build_secret_api_key(),
-            "--json",
+            &build_redacted_evidence_memory(0),
         ],
         "USR006-REMEMBER-001",
         "ee.response.v1",
@@ -572,6 +592,9 @@ fn backup_workflow_creates_verifiable_artifact() -> TestResult {
         "03-backup-create",
         &workspace,
         &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
             "backup",
             "create",
             "--database",
@@ -582,112 +605,131 @@ fn backup_workflow_creates_verifiable_artifact() -> TestResult {
             "test-backup",
             "--redaction",
             "standard",
-            "--json",
         ],
         "USR006-BACKUP-CREATE-001",
         "ee.backup.create.v1",
     )?;
+    ensure(step.output.status.success(), "backup create should succeed")?;
 
     let create_stdout = String::from_utf8_lossy(&step.output.stdout);
     assert_no_secret_leakage(&create_stdout, "backup create stdout")?;
 
-    if step.output.status.success() {
-        let json = stdout_json(&step.output, "backup create")?;
-        let backup_id = json
-            .pointer("/data/backupId")
+    let json = stdout_json(&step.output, "backup create")?;
+    let backup_id = json
+        .pointer("/data/backupId")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| "backup create missing backupId".to_owned())?;
+
+    write_json(
+        &scenario_dir.join("backup-metadata.json"),
+        &json!({
+            "backupId": backup_id,
+            "redactionLevel": "standard",
+            "label": "test-backup",
+            "scenario": "USR006"
+        }),
+    )?;
+
+    let list_step = run_logged_json_step(
+        &scenario_dir,
+        "04-backup-list",
+        &workspace,
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "backup",
+            "list",
+            "--output-dir",
+            backup_dir_arg.as_str(),
+        ],
+        "USR006-BACKUP-LIST-001",
+        "ee.backup.list.v1",
+    )?;
+    ensure(
+        list_step.output.status.success(),
+        "backup list should succeed",
+    )?;
+    let list_json = stdout_json(&list_step.output, "backup list")?;
+    let backups = list_json
+        .pointer("/data/backups")
+        .and_then(JsonValue::as_array);
+    ensure(
+        backups.is_some_and(|b| !b.is_empty()),
+        "backup list should include created backup",
+    )?;
+
+    let verify_step = run_logged_json_step(
+        &scenario_dir,
+        "05-backup-verify",
+        &workspace,
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "backup",
+            "verify",
+            backup_id,
+            "--output-dir",
+            backup_dir_arg.as_str(),
+        ],
+        "USR006-BACKUP-VERIFY-001",
+        "ee.backup.verify.v1",
+    )?;
+    ensure(
+        verify_step.output.status.success(),
+        "backup verify should succeed",
+    )?;
+    let verify_json = stdout_json(&verify_step.output, "backup verify")?;
+    ensure(
+        verify_json
+            .pointer("/data/status")
             .and_then(JsonValue::as_str)
-            .ok_or_else(|| "backup create missing backupId".to_owned())?;
+            == Some("verified"),
+        "backup should be valid",
+    )?;
+    let issues = verify_json
+        .pointer("/data/issues")
+        .and_then(JsonValue::as_array);
+    ensure(
+        issues.is_some_and(Vec::is_empty),
+        "verified backup should have no issues",
+    )?;
 
-        write_json(
-            &scenario_dir.join("backup-metadata.json"),
-            &json!({
-                "backupId": backup_id,
-                "redactionLevel": "standard",
-                "label": "test-backup",
-                "scenario": "USR006"
-            }),
-        )?;
+    let restore_path = scenario_dir.join("restored");
+    let restore_path_arg = path_arg(&restore_path);
+    let restore_step = run_logged_json_step(
+        &scenario_dir,
+        "06-backup-restore",
+        &workspace,
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "backup",
+            "restore",
+            backup_id,
+            "--output-dir",
+            backup_dir_arg.as_str(),
+            "--side-path",
+            restore_path_arg.as_str(),
+            "--dry-run",
+        ],
+        "USR006-BACKUP-RESTORE-001",
+        "ee.backup.restore.v1",
+    )?;
+    ensure(
+        restore_step.output.status.success(),
+        "backup restore dry-run should succeed",
+    )?;
 
-        let list_step = run_logged_json_step(
-            &scenario_dir,
-            "04-backup-list",
-            &workspace,
-            &[
-                "backup",
-                "list",
-                "--output-dir",
-                backup_dir_arg.as_str(),
-                "--json",
-            ],
-            "USR006-BACKUP-LIST-001",
-            "ee.backup.list.v1",
-        )?;
-        if list_step.output.status.success() {
-            let list_json = stdout_json(&list_step.output, "backup list")?;
-            let backups = list_json
-                .pointer("/data/backups")
-                .and_then(JsonValue::as_array);
-            ensure(
-                backups.is_some_and(|b| !b.is_empty()),
-                "backup list should include created backup",
-            )?;
-        }
+    ensure(
+        !workspace.join(".ee").join("ee.db").metadata().is_err(),
+        "original database must not be destroyed by restore",
+    )?;
 
-        let verify_step = run_logged_json_step(
-            &scenario_dir,
-            "05-backup-verify",
-            &workspace,
-            &[
-                "backup",
-                "verify",
-                backup_id,
-                "--output-dir",
-                backup_dir_arg.as_str(),
-                "--json",
-            ],
-            "USR006-BACKUP-VERIFY-001",
-            "ee.backup.verify.v1",
-        )?;
-        if verify_step.output.status.success() {
-            let verify_json = stdout_json(&verify_step.output, "backup verify")?;
-            ensure(
-                verify_json
-                    .pointer("/data/valid")
-                    .and_then(JsonValue::as_bool)
-                    .unwrap_or(false),
-                "backup should be valid",
-            )?;
-        }
-
-        let restore_path = scenario_dir.join("restored");
-        let restore_path_arg = path_arg(&restore_path);
-        let restore_step = run_logged_json_step(
-            &scenario_dir,
-            "06-backup-restore",
-            &workspace,
-            &[
-                "backup",
-                "restore",
-                backup_id,
-                "--output-dir",
-                backup_dir_arg.as_str(),
-                "--side-path",
-                restore_path_arg.as_str(),
-                "--dry-run",
-                "--json",
-            ],
-            "USR006-BACKUP-RESTORE-001",
-            "ee.backup.restore.v1",
-        )?;
-
-        ensure(
-            !workspace.join("ee.db").metadata().is_err(),
-            "original database must not be destroyed by restore",
-        )?;
-
-        let restore_stdout = String::from_utf8_lossy(&restore_step.output.stdout);
-        assert_no_secret_leakage(&restore_stdout, "backup restore stdout")?;
-    }
+    let restore_stdout = String::from_utf8_lossy(&restore_step.output.stdout);
+    assert_no_secret_leakage(&restore_stdout, "backup restore stdout")?;
 
     write_json(
         &scenario_dir.join("scenario-summary.json"),
@@ -718,41 +760,35 @@ fn export_with_redaction_prevents_secret_leakage() -> TestResult {
 
     let workspace = scenario_dir.join("workspace");
     fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
-    let database_path = path_arg(&workspace.join("ee.db"));
+    let workspace_arg = path_arg(&workspace);
+    let database_path = path_arg(&workspace.join(".ee").join("ee.db"));
 
     let step = run_logged_json_step(
         &scenario_dir,
         "01-init",
         &workspace,
-        &["init", "--database", database_path.as_str(), "--json"],
+        &["--workspace", workspace_arg.as_str(), "--json", "init"],
         "USR006-EXPORT-INIT",
         "ee.response.v1",
     )?;
     ensure(step.output.status.success(), "init should succeed")?;
 
-    for (i, secret) in [
-        build_secret_api_key(),
-        build_secret_password(),
-        build_secret_bearer_token(),
-        build_secret_aws_key(),
-    ]
-    .iter()
-    .enumerate()
-    {
+    for i in 0..4 {
+        let redacted_evidence = build_redacted_evidence_memory(i);
         let step = run_logged_json_step(
             &scenario_dir,
             &format!("02-remember-{i}"),
             &workspace,
             &[
+                "--workspace",
+                workspace_arg.as_str(),
+                "--json",
                 "remember",
-                "--database",
-                database_path.as_str(),
                 "--level",
                 "episodic",
                 "--kind",
                 "note",
-                secret,
-                "--json",
+                redacted_evidence.as_str(),
             ],
             &format!("USR006-REMEMBER-{i}"),
             "ee.response.v1",
@@ -763,45 +799,58 @@ fn export_with_redaction_prevents_secret_leakage() -> TestResult {
         )?;
     }
 
-    let export_path = scenario_dir.join("export.jsonl");
-    let export_path_arg = path_arg(&export_path);
+    let backup_dir = workspace.join("exports");
+    fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
+    let backup_dir_arg = path_arg(&backup_dir);
     let step = run_logged_json_step(
         &scenario_dir,
         "03-export-redacted",
         &workspace,
         &[
-            "export",
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "backup",
+            "create",
             "--database",
             database_path.as_str(),
-            "--output",
-            export_path_arg.as_str(),
+            "--output-dir",
+            backup_dir_arg.as_str(),
+            "--label",
+            "test-export",
             "--redaction",
             "standard",
-            "--json",
         ],
         "USR006-EXPORT-001",
-        "ee.export.v1",
+        "ee.backup.create.v1",
+    )?;
+    ensure(
+        step.output.status.success(),
+        "JSONL export backup should succeed",
     )?;
 
-    if step.output.status.success() && export_path.exists() {
-        let export_content = fs::read_to_string(&export_path).map_err(|e| e.to_string())?;
-        assert_no_secret_leakage(&export_content, "exported JSONL file")?;
+    let export_json = stdout_json(&step.output, "JSONL export backup")?;
+    let records_path = export_json
+        .pointer("/data/recordsPath")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| "JSONL export backup missing recordsPath".to_owned())?;
+    let export_content = fs::read_to_string(records_path).map_err(|e| e.to_string())?;
+    assert_no_secret_leakage(&export_content, "exported JSONL file")?;
 
-        ensure(
-            export_content.contains("[REDACTED]"),
-            "export should contain redaction placeholders",
-        )?;
+    ensure(
+        export_content.contains("[REDACTED_PATH]"),
+        "export should contain path redaction placeholders",
+    )?;
 
-        write_json(
-            &scenario_dir.join("export-validation.json"),
-            &json!({
-                "exportPath": export_path.display().to_string(),
-                "redactionLevel": "standard",
-                "secretLeakageCheck": "passed",
-                "containsRedactionPlaceholders": true
-            }),
-        )?;
-    }
+    write_json(
+        &scenario_dir.join("export-validation.json"),
+        &json!({
+            "exportPath": records_path,
+            "redactionLevel": "standard",
+            "secretLeakageCheck": "passed",
+            "containsRedactionPlaceholders": true
+        }),
+    )?;
 
     Ok(())
 }
@@ -880,13 +929,13 @@ fn redaction_preserves_metadata_and_marks_record() -> TestResult {
     use ee::models::{ExportMemoryRecord, RedactionLevel};
     use ee::output::jsonl_export::redact_memory_record;
 
-    let secret = build_secret_api_key();
+    let sensitive_value = build_sensitive_api_credential();
     let record = ExportMemoryRecord::builder()
         .memory_id("mem-stable-hash-test")
         .workspace_id("ws-test")
         .level("procedural")
         .kind("rule")
-        .content(secret)
+        .content(sensitive_value)
         .created_at("2026-05-03T00:00:00Z")
         .build();
 

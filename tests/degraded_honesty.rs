@@ -211,7 +211,15 @@ fn side_effect_class(args: &[String]) -> &'static str {
             "conservative abstention; no recorder session, event, hash-chain, or finish mutation"
         }
     } else if args.iter().any(|arg| arg == "demo") {
-        "conservative abstention; no demo execution, verification, or artifact write"
+        if args.iter().any(|arg| arg == "verify") {
+            "read-only artifact verification; no command execution or artifact write"
+        } else if args.iter().any(|arg| arg == "run") && args.iter().any(|arg| arg == "--dry-run") {
+            "dry-run plan; no command execution, audit ledger, or artifact write"
+        } else if args.iter().any(|arg| arg == "run") {
+            "conservative abstention; no demo execution, audit ledger, or artifact write"
+        } else {
+            "read-only manifest parse; no command execution or artifact write"
+        }
     } else {
         "unknown"
     }
@@ -1412,19 +1420,6 @@ fn learn_read_and_proposal_commands_degrade_instead_of_reporting_seed_templates(
             ],
         ),
         (
-            "learn-experiment-run-unavailable",
-            "learn experiment run",
-            vec![
-                "--json".to_owned(),
-                "learn".to_owned(),
-                "experiment".to_owned(),
-                "run".to_owned(),
-                "--id".to_owned(),
-                "exp_database_contract_fixture".to_owned(),
-                "--dry-run".to_owned(),
-            ],
-        ),
-        (
             "learn-summary-unavailable",
             "learn summary",
             vec![
@@ -1551,6 +1546,54 @@ fn learn_read_and_proposal_commands_degrade_instead_of_reporting_seed_templates(
             &format!("logged {command} side-effect class"),
         )?;
     }
+
+    let run_result = run_ee_logged(
+        "learn-experiment-run-dry-run",
+        None,
+        vec![
+            "--json".to_owned(),
+            "learn".to_owned(),
+            "experiment".to_owned(),
+            "run".to_owned(),
+            "--id".to_owned(),
+            "exp_database_contract_fixture".to_owned(),
+            "--dry-run".to_owned(),
+        ],
+    )?;
+    ensure_equal(
+        &run_result.exit_code,
+        &0,
+        "learn experiment run dry-run exit code",
+    )?;
+    ensure(
+        run_result.stderr.is_empty(),
+        "learn experiment run dry-run JSON stderr empty",
+    )?;
+    ensure_no_ansi(&run_result.stdout, "learn experiment run dry-run stdout")?;
+    ensure_json_pointer(
+        &run_result.parsed,
+        "/schema",
+        json!("ee.learn.experiment_run.v1"),
+        "learn experiment run dry-run schema",
+    )?;
+    ensure_json_pointer(
+        &run_result.parsed,
+        "/dryRun",
+        json!(true),
+        "learn experiment run dry-run flag",
+    )?;
+    ensure_json_pointer(
+        &run_result.parsed,
+        "/status",
+        json!("dry_run"),
+        "learn experiment run dry-run status",
+    )?;
+    let fake_success =
+        validate_no_fake_success_output("learn experiment run", true, true, &run_result.stdout);
+    ensure(
+        fake_success.passed,
+        format!("learn experiment run dry-run output should not be fake success: {fake_success:?}"),
+    )?;
 
     Ok(())
 }
@@ -3305,127 +3348,346 @@ fn recorder_tail_degrades_instead_of_reporting_stubbed_empty_events() -> TestRes
 }
 
 #[test]
-fn demo_commands_degrade_instead_of_reporting_pending_placeholders() -> TestResult {
-    let workspace_root = unique_artifact_dir("demo-unavailable-workspace")?;
+fn demo_commands_parse_manifests_and_verify_real_artifacts() -> TestResult {
+    let workspace_root = unique_artifact_dir("demo-real-workspace")?;
     let workspace = workspace_root.join("workspace");
+    let artifacts = workspace.join("artifacts");
     fs::create_dir_all(&workspace).map_err(|error| {
         format!(
             "failed to create workspace {}: {error}",
             workspace.display()
         )
     })?;
+    fs::create_dir_all(&artifacts).map_err(|error| {
+        format!(
+            "failed to create artifacts dir {}: {error}",
+            artifacts.display()
+        )
+    })?;
+    let artifact_payload = b"{\"schema\":\"ee.response.v1\",\"success\":true}\n";
+    let artifact_hash = blake3::hash(artifact_payload).to_hex().to_string();
+    fs::write(artifacts.join("stdout.json"), artifact_payload)
+        .map_err(|error| format!("failed to write artifact: {error}"))?;
     fs::write(
         workspace.join("demo.yaml"),
-        "demos:\n  - id: demo_fixture_001\n    title: placeholder execution must not pass\n",
+        format!(
+            "\
+schema: ee.demo_file.v1
+version: 1
+demos:
+  - id: demo_00000000000000000000000001
+    title: real artifact verification
+    description: verifies declared artifact bytes instead of placeholders
+    tags:
+      - gate14
+    commands:
+      - command: \"ee status --json\"
+        expected_exit_code: 0
+        artifact_outputs:
+          - path: stdout.json
+            blake3_hash: {artifact_hash}
+            size_bytes: {}
+",
+            artifact_payload.len()
+        ),
     )
     .map_err(|error| format!("failed to write demo.yaml: {error}"))?;
     let workspace_arg = workspace.display().to_string();
+    let demo_id = "demo_00000000000000000000000001".to_owned();
 
-    let cases = [
-        (
-            "demo-list-unavailable",
-            "demo list",
-            vec![
-                "--workspace".to_owned(),
-                workspace_arg.clone(),
-                "--json".to_owned(),
-                "demo".to_owned(),
-                "list".to_owned(),
-            ],
-        ),
-        (
-            "demo-run-unavailable",
-            "demo run",
-            vec![
-                "--workspace".to_owned(),
-                workspace_arg.clone(),
-                "--json".to_owned(),
-                "demo".to_owned(),
-                "run".to_owned(),
-                "demo_fixture_001".to_owned(),
-                "--dry-run".to_owned(),
-            ],
-        ),
-        (
-            "demo-verify-unavailable",
-            "demo verify",
-            vec![
-                "--workspace".to_owned(),
-                workspace_arg,
-                "--json".to_owned(),
-                "demo".to_owned(),
-                "verify".to_owned(),
-                "demo_fixture_001".to_owned(),
-            ],
-        ),
-    ];
+    let list_result = run_ee_logged(
+        "demo-list-real",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "demo".to_owned(),
+            "list".to_owned(),
+        ],
+    )?;
+    ensure_equal(&list_result.exit_code, &0, "demo list exit code")?;
+    ensure(list_result.stderr.is_empty(), "demo list JSON stderr empty")?;
+    ensure_no_ansi(&list_result.stdout, "demo list stdout")?;
+    ensure_json_pointer(
+        &list_result.parsed,
+        "/success",
+        json!(true),
+        "demo list success",
+    )?;
+    ensure_json_pointer(
+        &list_result.parsed,
+        "/data/schema",
+        json!("ee.demo.list.v1"),
+        "demo list schema",
+    )?;
+    ensure_json_pointer(
+        &list_result.parsed,
+        "/data/demos/0/id",
+        json!(demo_id.clone()),
+        "demo list id",
+    )?;
 
-    for (name, command, args) in cases {
-        let result = run_ee_logged(name, Some(&workspace), args)?;
-        ensure_equal(
-            &result.exit_code,
-            &UNSATISFIED_DEGRADED_MODE_EXIT,
-            &format!("{command} unavailable exit code"),
-        )?;
-        ensure(
-            result.stderr.is_empty(),
-            format!("{command} JSON degraded response must keep stderr empty"),
-        )?;
-        ensure_no_ansi(&result.stdout, &format!("{command} degraded stdout"))?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/schema",
-            json!("ee.response.v1"),
-            &format!("{command} degraded response schema"),
-        )?;
-        ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/command",
-            json!(command),
-            &format!("{command} command label"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/code",
-            json!("demo_execution_unavailable"),
-            &format!("{command} degraded code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/degraded/0/code",
-            json!("demo_execution_unavailable"),
-            &format!("{command} degraded array code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/followUpBead",
-            json!("eidetic_engine_cli-jp06.1"),
-            &format!("{command} follow-up bead"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sideEffectClass",
-            json!("conservative abstention; no demo execution, verification, or artifact write"),
-            &format!("{command} side-effect class"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/evidenceIds",
-            json!([]),
-            &format!("{command} evidence ids"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sourceIds",
-            json!([]),
-            &format!("{command} source ids"),
-        )?;
+    let run_plan = run_ee_logged(
+        "demo-run-dry-run-real",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "demo".to_owned(),
+            "run".to_owned(),
+            demo_id.clone(),
+            "--dry-run".to_owned(),
+        ],
+    )?;
+    ensure_equal(&run_plan.exit_code, &0, "demo run dry-run exit code")?;
+    ensure(
+        run_plan.stderr.is_empty(),
+        "demo run dry-run JSON stderr empty",
+    )?;
+    ensure_json_pointer(
+        &run_plan.parsed,
+        "/success",
+        json!(true),
+        "demo run dry-run success",
+    )?;
+    ensure_json_pointer(
+        &run_plan.parsed,
+        "/data/dryRun",
+        json!(true),
+        "demo run dry-run flag",
+    )?;
+    ensure_json_pointer(
+        &run_plan.parsed,
+        "/data/demos/0/commands/0/executed",
+        json!(false),
+        "demo run dry-run does not execute",
+    )?;
 
+    let verify_result = run_ee_logged(
+        "demo-verify-real-artifact",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "demo".to_owned(),
+            "verify".to_owned(),
+            demo_id.clone(),
+        ],
+    )?;
+    ensure_equal(&verify_result.exit_code, &0, "demo verify exit code")?;
+    ensure(
+        verify_result.stderr.is_empty(),
+        "demo verify JSON stderr empty",
+    )?;
+    ensure_json_pointer(
+        &verify_result.parsed,
+        "/success",
+        json!(true),
+        "demo verify success",
+    )?;
+    ensure_json_pointer(
+        &verify_result.parsed,
+        "/data/checkedArtifacts",
+        json!(1),
+        "demo verify checked artifact count",
+    )?;
+    ensure_json_pointer(
+        &verify_result.parsed,
+        "/data/demos/0/artifactResults/0/actualBlake3",
+        json!(artifact_hash),
+        "demo verify actual artifact hash",
+    )?;
+    ensure_json_pointer(
+        &verify_result.parsed,
+        "/data/demos/0/artifactResults/0/verified",
+        json!(true),
+        "demo verify artifact verified",
+    )?;
+
+    let execution_result = run_ee_logged(
+        "demo-run-execution-unavailable",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "demo".to_owned(),
+            "run".to_owned(),
+            demo_id.clone(),
+        ],
+    )?;
+    ensure_equal(
+        &execution_result.exit_code,
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "demo run execution unavailable exit code",
+    )?;
+    ensure_json_pointer(
+        &execution_result.parsed,
+        "/data/degraded/0/code",
+        json!("demo_command_execution_unavailable"),
+        "demo run non-dry-run unavailable code",
+    )?;
+
+    let no_artifact_demo_id = "demo_00000000000000000000000002".to_owned();
+    fs::write(
+        workspace.join("demo.yaml"),
+        "\
+schema: ee.demo_file.v1
+version: 1
+demos:
+  - id: demo_00000000000000000000000002
+    title: missing artifact evidence
+    description: verify must not report success without artifact evidence
+    commands:
+      - command: \"ee status --json\"
+        expected_exit_code: 0
+",
+    )
+    .map_err(|error| format!("failed to write no-artifact demo.yaml: {error}"))?;
+    let no_artifact_verify = run_ee_logged(
+        "demo-verify-no-artifact-evidence",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "demo".to_owned(),
+            "verify".to_owned(),
+            no_artifact_demo_id,
+        ],
+    )?;
+    ensure_equal(
+        &no_artifact_verify.exit_code,
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "demo verify without artifact evidence exit code",
+    )?;
+    ensure_json_pointer(
+        &no_artifact_verify.parsed,
+        "/success",
+        json!(false),
+        "demo verify without artifact evidence success",
+    )?;
+    ensure_json_pointer(
+        &no_artifact_verify.parsed,
+        "/data/checkedArtifacts",
+        json!(0),
+        "demo verify without artifact evidence checked artifacts",
+    )?;
+    ensure_json_pointer(
+        &no_artifact_verify.parsed,
+        "/data/failedDemos",
+        json!(1),
+        "demo verify without artifact evidence failed demos",
+    )?;
+    ensure_json_pointer(
+        &no_artifact_verify.parsed,
+        "/data/demos/0/status",
+        json!("failed"),
+        "demo verify without artifact evidence status",
+    )?;
+    ensure_json_pointer(
+        &no_artifact_verify.parsed,
+        "/data/demos/0/verificationError",
+        json!("no artifact outputs declared for selected demo"),
+        "demo verify without artifact evidence error",
+    )?;
+
+    let optional_missing_demo_id = "demo_00000000000000000000000003".to_owned();
+    fs::write(
+        workspace.join("demo.yaml"),
+        format!(
+            "\
+schema: ee.demo_file.v1
+version: 1
+demos:
+  - id: demo_00000000000000000000000003
+    title: optional missing artifact is not evidence
+    description: optional missing artifacts must not prove a demo by themselves
+    commands:
+      - command: \"ee status --json\"
+        expected_exit_code: 0
+        artifact_outputs:
+          - path: optional.json
+            optional: true
+            blake3_hash: {artifact_hash}
+            size_bytes: {}
+",
+            artifact_payload.len()
+        ),
+    )
+    .map_err(|error| format!("failed to write optional-missing demo.yaml: {error}"))?;
+    let optional_missing_verify = run_ee_logged(
+        "demo-verify-optional-missing-artifact",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg,
+            "--json".to_owned(),
+            "demo".to_owned(),
+            "verify".to_owned(),
+            optional_missing_demo_id,
+        ],
+    )?;
+    ensure_equal(
+        &optional_missing_verify.exit_code,
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "demo verify optional missing artifact exit code",
+    )?;
+    ensure_json_pointer(
+        &optional_missing_verify.parsed,
+        "/success",
+        json!(false),
+        "demo verify optional missing artifact success",
+    )?;
+    ensure_json_pointer(
+        &optional_missing_verify.parsed,
+        "/data/checkedArtifacts",
+        json!(1),
+        "demo verify optional missing artifact checked artifacts",
+    )?;
+    ensure_json_pointer(
+        &optional_missing_verify.parsed,
+        "/data/optionalMissingArtifacts",
+        json!(1),
+        "demo verify optional missing artifact count",
+    )?;
+    ensure_json_pointer(
+        &optional_missing_verify.parsed,
+        "/data/failedDemos",
+        json!(1),
+        "demo verify optional missing artifact failed demos",
+    )?;
+    ensure_json_pointer(
+        &optional_missing_verify.parsed,
+        "/data/demos/0/status",
+        json!("failed"),
+        "demo verify optional missing artifact status",
+    )?;
+    ensure_json_pointer(
+        &optional_missing_verify.parsed,
+        "/data/demos/0/verificationError",
+        json!("no artifact evidence files found for selected demo"),
+        "demo verify optional missing artifact error",
+    )?;
+
+    for (command, result) in [
+        ("demo list", &list_result),
+        ("demo run --dry-run", &run_plan),
+        ("demo verify", &verify_result),
+        ("demo run", &execution_result),
+        ("demo verify without artifacts", &no_artifact_verify),
+        (
+            "demo verify optional missing artifacts",
+            &optional_missing_verify,
+        ),
+    ] {
         let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
         ensure(
             fake_success.passed,
-            format!("degraded {command} output should not be fake success: {fake_success:?}"),
+            format!("{command} output should not be fake success: {fake_success:?}"),
         )?;
 
         let unsupported_claims =
@@ -3433,37 +3695,8 @@ fn demo_commands_degrade_instead_of_reporting_pending_placeholders() -> TestResu
         ensure(
             unsupported_claims.passed,
             format!(
-                "degraded {command} output should not count as unsupported success: {unsupported_claims:?}"
+                "{command} output should not count as unsupported success: {unsupported_claims:?}"
             ),
-        )?;
-
-        let log_text = fs::read_to_string(&result.log_path)
-            .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
-        let log_json: Value = serde_json::from_str(&log_text)
-            .map_err(|error| format!("e2e log must be JSON: {error}"))?;
-        ensure_json_pointer(
-            &log_json,
-            "/degradationCodes",
-            json!(["demo_execution_unavailable"]),
-            &format!("logged {command} degradation code"),
-        )?;
-        ensure_json_pointer(
-            &log_json,
-            "/repairCommand",
-            json!("ee status --json"),
-            &format!("logged {command} repair command"),
-        )?;
-        ensure_json_pointer(
-            &log_json,
-            "/commandBoundaryMatrixRow",
-            json!("demo"),
-            &format!("logged {command} boundary matrix row"),
-        )?;
-        ensure_json_pointer(
-            &log_json,
-            "/sideEffectClass",
-            json!("conservative abstention; no demo execution, verification, or artifact write"),
-            &format!("logged {command} side-effect class"),
         )?;
     }
 
