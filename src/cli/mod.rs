@@ -82,10 +82,6 @@ use crate::core::rule::{
     show_rule,
 };
 use crate::core::search::{SearchOptions, run_search};
-use crate::core::situation::{
-    SituationCompareOptions, classify_task, compare_situations, explain_situation,
-    plan_situation_link_dry_run, show_situation,
-};
 use crate::core::status::StatusReport;
 use crate::core::tripwire::{
     CheckOptions as TripwireCheckOptions, ListOptions as TripwireListOptions, check_tripwire,
@@ -4552,7 +4548,7 @@ where
         }
         Some(Command::Search(ref args)) => handle_search(&cli, args, stdout, stderr),
         Some(Command::Situation(SituationCommand::Classify(ref args))) => {
-            handle_situation_classify(&cli, args, stdout)
+            handle_situation_classify(&cli, args, stdout, stderr)
         }
         Some(Command::Situation(SituationCommand::Compare(ref args))) => {
             handle_situation_compare(&cli, args, stdout, stderr)
@@ -11192,57 +11188,67 @@ where
     }
 }
 
-fn handle_situation_classify<W>(
+const SITUATION_UNAVAILABLE_CODE: &str = "situation_decisioning_unavailable";
+const SITUATION_UNAVAILABLE_MESSAGE: &str = "Situation classification, comparison, link planning, show, and explain are unavailable until situation commands are re-scoped to stored evidence and mechanical boundary records instead of built-in routing fixtures.";
+const SITUATION_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const SITUATION_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-6cks";
+
+fn write_situation_unavailable<W, E>(
     cli: &Cli,
-    args: &SituationClassifyArgs,
+    command: &'static str,
     stdout: &mut W,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
+    E: Write,
 {
-    let result = classify_task(&args.text);
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &result.human_summary())
-        }
-        output::Renderer::Toon => write_stdout(stdout, &(result.toon_output() + "\n")),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            let json = serde_json::json!({
-                "schema": crate::core::situation::SITUATION_CLASSIFY_SCHEMA_V1,
-                "success": true,
-                "data": result.data_json(),
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": SITUATION_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": SITUATION_UNAVAILABLE_MESSAGE,
+                "repair": SITUATION_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": SITUATION_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": SITUATION_UNAVAILABLE_MESSAGE,
+                        "repair": SITUATION_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": SITUATION_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": "conservative abstention; no situation routing, link, or recommendation mutation"
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
     }
+
+    let _ = writeln!(stderr, "error: {SITUATION_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {SITUATION_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
 }
 
-fn situation_compare_options_from_args(
-    source_text: &str,
-    target_text: &str,
-    source_situation_id: Option<&str>,
-    target_situation_id: Option<&str>,
-    evidence_ids: &[String],
-    created_at: Option<&str>,
-) -> SituationCompareOptions {
-    let mut options = SituationCompareOptions::new(source_text, target_text);
-    if let Some(source_id) = source_situation_id {
-        options = options.source_situation_id(source_id);
-    }
-    if let Some(target_id) = target_situation_id {
-        options = options.target_situation_id(target_id);
-    }
-    for evidence_id in evidence_ids {
-        options = options.with_evidence(evidence_id.as_str());
-    }
-    if let Some(created_at_value) = created_at {
-        options = options.created_at(created_at_value);
-    }
-    options
+fn handle_situation_classify<W, E>(
+    cli: &Cli,
+    args: &SituationClassifyArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let _ = args;
+    write_situation_unavailable(cli, "situation classify", stdout, stderr)
 }
 
 fn situation_dry_run_required_error() -> DomainError {
@@ -11250,72 +11256,6 @@ fn situation_dry_run_required_error() -> DomainError {
         message: "Situation compare/link currently supports dry-run mode only.".to_string(),
         repair: Some("Re-run with `--dry-run`.".to_string()),
     }
-}
-
-fn render_situation_compare_human(
-    report: &crate::core::situation::SituationCompareReport,
-) -> String {
-    let mut out = format!(
-        "Situation Compare (dry-run)\n=============================\nSource: {} [{}]\nTarget: {} [{}]\nRelation: {}\nConfidence: {} ({:.3})\nRecommended: {}\n",
-        report.source.situation_id,
-        report.source.category.as_str(),
-        report.target.situation_id,
-        report.target.category.as_str(),
-        report.relation.as_str(),
-        report.confidence.as_str(),
-        report.confidence_score,
-        if report.recommended { "yes" } else { "no" },
-    );
-
-    if !report.evidence_ids.is_empty() {
-        out.push_str("\nEvidence IDs:\n");
-        for evidence_id in &report.evidence_ids {
-            out.push_str(&format!("- {evidence_id}\n"));
-        }
-    }
-
-    if !report.reasons.is_empty() {
-        out.push_str("\nReasons:\n");
-        for reason in &report.reasons {
-            out.push_str(&format!("- {reason}\n"));
-        }
-    }
-
-    out
-}
-
-fn render_situation_link_human(
-    report: &crate::core::situation::SituationLinkDryRunReport,
-) -> String {
-    let mut out = format!(
-        "Situation Link (dry-run)\n=========================\nWould write: {}\nRecommended: {}\nRelation: {}\nConfidence: {} ({:.3})\nCandidate: {} ({})\n",
-        if report.would_write { "yes" } else { "no" },
-        if report.compare.recommended {
-            "yes"
-        } else {
-            "no"
-        },
-        report.compare.relation.as_str(),
-        report.compare.confidence.as_str(),
-        report.compare.confidence_score,
-        report.curation_candidate.candidate_id,
-        report.curation_candidate.status,
-    );
-
-    if let Some(link) = &report.planned_link {
-        out.push_str(&format!(
-            "\nPlanned link: {} -> {} ({})\n",
-            link.source_situation_id, link.target_situation_id, link.relation
-        ));
-    } else {
-        out.push_str("\nPlanned link: none (recommendation threshold not met)\n");
-    }
-
-    out.push_str("\nReasons:\n");
-    for reason in &report.compare.reasons {
-        out.push_str(&format!("- {reason}\n"));
-    }
-    out
 }
 
 fn handle_situation_compare<W, E>(
@@ -11337,34 +11277,7 @@ where
         );
     }
 
-    let options = situation_compare_options_from_args(
-        args.source_text.as_str(),
-        args.target_text.as_str(),
-        args.source_situation_id.as_deref(),
-        args.target_situation_id.as_deref(),
-        &args.evidence_ids,
-        None,
-    );
-    let report = compare_situations(&options);
-    let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
-        "success": true,
-        "data": report.data_json(),
-    });
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &render_situation_compare_human(&report))
-        }
-        output::Renderer::Toon => {
-            let json_str = response.to_string();
-            write_stdout(stdout, &(output::render_toon_from_json(&json_str) + "\n"))
-        }
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
-    }
+    write_situation_unavailable(cli, "situation compare", stdout, stderr)
 }
 
 fn handle_situation_link<W, E>(
@@ -11386,34 +11299,7 @@ where
         );
     }
 
-    let options = situation_compare_options_from_args(
-        args.source_text.as_str(),
-        args.target_text.as_str(),
-        args.source_situation_id.as_deref(),
-        args.target_situation_id.as_deref(),
-        &args.evidence_ids,
-        args.created_at.as_deref(),
-    );
-    let report = plan_situation_link_dry_run(&options);
-    let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
-        "success": true,
-        "data": report.data_json(),
-    });
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &render_situation_link_human(&report))
-        }
-        output::Renderer::Toon => {
-            let json_str = response.to_string();
-            write_stdout(stdout, &(output::render_toon_from_json(&json_str) + "\n"))
-        }
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
-    }
+    write_situation_unavailable(cli, "situation link", stdout, stderr)
 }
 
 fn handle_situation_show<W, E>(
@@ -11426,33 +11312,8 @@ where
     W: Write,
     E: Write,
 {
-    match show_situation(&args.situation_id) {
-        Some(details) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &details.human_summary())
-            }
-            output::Renderer::Toon => write_stdout(stdout, &(details.toon_output() + "\n")),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                let json = serde_json::json!({
-                    "schema": crate::core::situation::SITUATION_SHOW_SCHEMA_V1,
-                    "success": true,
-                    "data": details.data_json(),
-                });
-                write_stdout(stdout, &(json.to_string() + "\n"))
-            }
-        },
-        None => {
-            let domain_error = DomainError::NotFound {
-                resource: "situation".to_string(),
-                id: args.situation_id.clone(),
-                repair: Some("ee situation classify <text>".to_string()),
-            };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
-        }
-    }
+    let _ = args;
+    write_situation_unavailable(cli, "situation show", stdout, stderr)
 }
 
 fn handle_situation_explain<W, E>(
@@ -11465,33 +11326,8 @@ where
     W: Write,
     E: Write,
 {
-    match explain_situation(&args.situation_id) {
-        Some(explanation) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &explanation.human_summary())
-            }
-            output::Renderer::Toon => write_stdout(stdout, &(explanation.toon_output() + "\n")),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                let json = serde_json::json!({
-                    "schema": crate::core::situation::SITUATION_EXPLAIN_SCHEMA_V1,
-                    "success": true,
-                    "data": explanation.data_json(),
-                });
-                write_stdout(stdout, &(json.to_string() + "\n"))
-            }
-        },
-        None => {
-            let domain_error = DomainError::NotFound {
-                resource: "situation".to_string(),
-                id: args.situation_id.clone(),
-                repair: Some("ee situation classify <text>".to_string()),
-            };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
-        }
-    }
+    let _ = args;
+    write_situation_unavailable(cli, "situation explain", stdout, stderr)
 }
 
 // ============================================================================
@@ -13412,15 +13248,6 @@ mod tests {
     use crate::models::ProcessExitCode;
     use crate::output;
 
-    const SITUATION_CLASSIFY_ROUTING_GOLDEN: &str =
-        include_str!("../../tests/fixtures/golden/situation/classify_release_routing.json.golden");
-    const SITUATION_COMPARE_GOLDEN: &str = include_str!(
-        "../../tests/fixtures/golden/situation/compare_release_bug_to_login_bug.json.golden"
-    );
-    const SITUATION_LINK_DRY_RUN_GOLDEN: &str = include_str!(
-        "../../tests/fixtures/golden/situation/link_dry_run_release_bug_to_login_bug.json.golden"
-    );
-
     type TestResult = Result<(), String>;
 
     fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
@@ -14133,8 +13960,52 @@ mod tests {
         )
     }
 
+    fn assert_situation_unavailable(
+        exit: ProcessExitCode,
+        stdout: &str,
+        stderr: &str,
+        command: &str,
+    ) -> TestResult {
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::UnsatisfiedDegradedMode,
+            "situation exit",
+        )?;
+        ensure(stderr.is_empty(), "situation JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "response schema",
+        )?;
+        ensure_equal(&value["success"], &serde_json::json!(false), "success flag")?;
+        ensure_equal(
+            &value["data"]["command"],
+            &serde_json::json!(command),
+            "command",
+        )?;
+        ensure_equal(
+            &value["data"]["code"],
+            &serde_json::json!("situation_decisioning_unavailable"),
+            "degraded code",
+        )?;
+        ensure_equal(
+            &value["data"]["followUpBead"],
+            &serde_json::json!("eidetic_engine_cli-6cks"),
+            "follow-up bead",
+        )?;
+        ensure_equal(
+            &value["data"]["sideEffectClass"],
+            &serde_json::json!(
+                "conservative abstention; no situation routing, link, or recommendation mutation"
+            ),
+            "side effect class",
+        )
+    }
+
     #[test]
-    fn situation_classify_json_includes_routing_golden() -> TestResult {
+    fn situation_classify_json_reports_unavailable_instead_of_routing_golden() -> TestResult {
         let (exit, stdout, stderr) = invoke(&[
             "ee",
             "--json",
@@ -14143,13 +14014,7 @@ mod tests {
             "fix failing release workflow",
         ]);
 
-        ensure_equal(&exit, &ProcessExitCode::Success, "situation exit")?;
-        ensure(stderr.is_empty(), "situation JSON stderr clean")?;
-        ensure_equal(
-            &stdout,
-            &SITUATION_CLASSIFY_ROUTING_GOLDEN.to_string(),
-            "situation routing golden",
-        )
+        assert_situation_unavailable(exit, &stdout, &stderr, "situation classify")
     }
 
     #[test]
@@ -14204,7 +14069,7 @@ mod tests {
     }
 
     #[test]
-    fn situation_compare_json_matches_gate19_golden_data() -> TestResult {
+    fn situation_compare_json_reports_unavailable_after_dry_run_guard() -> TestResult {
         let (exit, stdout, stderr) = invoke(&[
             "ee",
             "--json",
@@ -14221,22 +14086,11 @@ mod tests {
             "--dry-run",
         ]);
 
-        ensure_equal(&exit, &ProcessExitCode::Success, "situation compare exit")?;
-        ensure(stderr.is_empty(), "situation compare JSON stderr clean")?;
-        let value: serde_json::Value =
-            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
-        ensure_equal(
-            &value["schema"],
-            &serde_json::json!("ee.response.v1"),
-            "response schema",
-        )?;
-        let expected: serde_json::Value =
-            serde_json::from_str(SITUATION_COMPARE_GOLDEN).map_err(|error| error.to_string())?;
-        ensure_equal(&value["data"], &expected, "compare data golden")
+        assert_situation_unavailable(exit, &stdout, &stderr, "situation compare")
     }
 
     #[test]
-    fn situation_link_dry_run_json_matches_gate19_golden_data() -> TestResult {
+    fn situation_link_dry_run_json_reports_unavailable_after_dry_run_guard() -> TestResult {
         let (exit, stdout, stderr) = invoke(&[
             "ee",
             "--json",
@@ -14255,18 +14109,38 @@ mod tests {
             "--dry-run",
         ]);
 
-        ensure_equal(&exit, &ProcessExitCode::Success, "situation link exit")?;
-        ensure(stderr.is_empty(), "situation link JSON stderr clean")?;
+        assert_situation_unavailable(exit, &stdout, &stderr, "situation link")
+    }
+
+    #[test]
+    fn situation_compare_without_dry_run_is_policy_error() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "situation",
+            "compare",
+            "fix failing release workflow",
+            "fix broken login crash",
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::PolicyDenied,
+            "situation compare policy exit",
+        )?;
+        ensure(stderr.is_empty(), "situation compare policy stderr clean")?;
         let value: serde_json::Value =
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
-            "response schema",
+            &serde_json::json!("ee.error.v1"),
+            "error schema",
         )?;
-        let expected: serde_json::Value = serde_json::from_str(SITUATION_LINK_DRY_RUN_GOLDEN)
-            .map_err(|error| error.to_string())?;
-        ensure_equal(&value["data"], &expected, "link data golden")
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("policy_denied"),
+            "policy code",
+        )
     }
 
     #[test]

@@ -121,6 +121,8 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "causal"
     } else if args.iter().any(|arg| arg == "procedure") {
         "procedure"
+    } else if args.iter().any(|arg| arg == "situation") {
+        "situation"
     } else {
         "unknown"
     }
@@ -140,6 +142,8 @@ fn side_effect_class(args: &[String]) -> &'static str {
         "read-only, conservative abstention"
     } else if args.iter().any(|arg| arg == "procedure") {
         "conservative abstention; no procedure mutation or artifact write"
+    } else if args.iter().any(|arg| arg == "situation") {
+        "conservative abstention; no situation routing, link, or recommendation mutation"
     } else {
         "unknown"
     }
@@ -885,6 +889,119 @@ fn procedure_list_degrades_instead_of_reporting_generated_records() -> TestResul
         "/sideEffectClass",
         json!("conservative abstention; no procedure mutation or artifact write"),
         "logged procedure side-effect class",
+    )
+}
+
+#[test]
+fn situation_classify_degrades_instead_of_reporting_builtin_routing() -> TestResult {
+    let result = run_ee_logged(
+        "situation-classify-unavailable",
+        None,
+        vec![
+            "--json".to_owned(),
+            "situation".to_owned(),
+            "classify".to_owned(),
+            "fix failing release workflow".to_owned(),
+        ],
+    )?;
+
+    ensure_equal(
+        &result.exit_code,
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "situation unavailable exit code",
+    )?;
+    ensure(
+        result.stderr.is_empty(),
+        "situation JSON degraded response must keep stderr empty",
+    )?;
+    ensure_no_ansi(&result.stdout, "situation degraded stdout")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/schema",
+        json!("ee.response.v1"),
+        "situation degraded response schema",
+    )?;
+    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/code",
+        json!("situation_decisioning_unavailable"),
+        "situation degraded code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/degraded/0/code",
+        json!("situation_decisioning_unavailable"),
+        "situation degraded array code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/followUpBead",
+        json!("eidetic_engine_cli-6cks"),
+        "situation follow-up bead",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sideEffectClass",
+        json!("conservative abstention; no situation routing, link, or recommendation mutation"),
+        "situation side-effect class",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/evidenceIds",
+        json!([]),
+        "situation evidence ids",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sourceIds",
+        json!([]),
+        "situation source ids",
+    )?;
+
+    let fake_success =
+        validate_no_fake_success_output("situation classify", false, false, &result.stdout);
+    ensure(
+        fake_success.passed,
+        format!("degraded situation output should not be fake success: {fake_success:?}"),
+    )?;
+
+    let unsupported_claims =
+        validate_no_unsupported_evidence_claims("situation classify", false, false, &result.stdout);
+    ensure(
+        unsupported_claims.passed,
+        format!(
+            "degraded situation output should not count as unsupported success: {unsupported_claims:?}"
+        ),
+    )?;
+
+    let log_text = fs::read_to_string(&result.log_path)
+        .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+    let log_json: Value = serde_json::from_str(&log_text)
+        .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+    ensure_json_pointer(
+        &log_json,
+        "/degradationCodes",
+        json!(["situation_decisioning_unavailable"]),
+        "logged situation degradation code",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/repairCommand",
+        json!("ee status --json"),
+        "logged situation repair command",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/commandBoundaryMatrixRow",
+        json!("situation"),
+        "logged situation boundary matrix row",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/sideEffectClass",
+        json!("conservative abstention; no situation routing, link, or recommendation mutation"),
+        "logged situation side-effect class",
     )
 }
 
