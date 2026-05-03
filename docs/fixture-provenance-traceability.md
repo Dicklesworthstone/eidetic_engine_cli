@@ -230,16 +230,18 @@ corresponding fixture becomes executable.
 ## `scenario_traceability.v1`
 
 Each row maps an agent journey to its proof surface. `coverage_state` is
-`staged_skip` until the owning implementation and logged e2e beads land.
+`executable_e2e` when the journey has a real command or golden/schema proof
+surface, `contract_partial` when only part of the journey is executable, and
+`staged_skip` only for fixture branches that still await implementation.
 
 | Scenario ID | Coverage State | Fixture IDs | Commands | Golden / Schema Contracts | Degraded Branches | Effect Expectation | Owners / Gates |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `usr_pre_task_brief` | `staged_skip` | `fx.fresh_workspace.v1`, `fx.manual_memory.v1`, `fx.release_failure.v1`, `fx.async_migration.v1` | `init`, `remember`, `context --format markdown`, `context --json` | Markdown pack golden, `ee.context.v1`, response envelope | `semantic_disabled`, `graph_snapshot_stale`, empty memory set, reduced token budget | audited writes for init/remember/pack record; read-only context rendering | `eidetic_engine_cli-gbp2`, Gate 7, Gate 14 |
-| `usr_in_task_recovery` | `staged_skip` | `fx.stale_index.v1`, `fx.ci_clippy_failure.v1`, `fx.dangerous_cleanup.v1`, `fx.locked_writer.v1` | `search --explain --json`, `why --json`, `doctor --json`, future `preflight --json` | search result golden, `ee.why.v1`, doctor repair plan | `search_index_stale`, `lock_contention`, missing memory ID, stale graph | read-only search/why/doctor; denied destructive preflight when risky | `eidetic_engine_cli-g2jl`, Gate 4, Gate 15, Gate 16 |
-| `usr_post_task_learning` | `staged_skip` | `fx.manual_memory.v1`, `fx.procedure_drift.v1`, `fx.false_alarm.v1`, `fx.causal_confounding.v1`, `fx.conflicting_evidence.v1`, `fx.stale_rule.v1` | `outcome`, `review session`, `curate candidates`, future `procedure validate` | outcome event JSON, curation candidate JSON, audit entry | harmful feedback, contradicted evidence, duplicate candidate, stale procedure | audited writes only; no silent promotion or tombstone | `eidetic_engine_cli-1mlo`, Gate 18, Gate 21, Gate 22 |
-| `usr_degraded_offline_trust` | `staged_skip` | `fx.offline_degraded.v1`, `fx.cass_v1.v1`, `fx.graph_linked_decision.v1`, `fx.manual_memory.v1` | `status --json`, `import cass --dry-run --json`, `search --json`, `context --json` | status envelope, import dry-run report, lexical-only search golden | `cass_unavailable`, `external_adapter_schema_mismatch`, `semantic_disabled`, `agent_detector_unavailable`, `graph_snapshot_stale` | dry-run import; read-only degraded search/context | `eidetic_engine_cli-r8r0`, Gate 1, Gate 4, Gate 6 |
-| `usr_privacy_export` | `staged_skip` | `fx.secret_redaction.v1`, `fx.privacy_export.v1`, `fx.dangerous_cleanup.v1` | `remember`, `context --json`, `export jsonl`, `backup create --json` | redaction report, context golden with placeholders, backup manifest | `redaction_applied`, blocked secret storage, unsupported shareable export, backup failure | audited writes with explicit redaction; export must omit raw secrets | `eidetic_engine_cli-9sd5`, Gate 19, future export/backup beads |
-| `usr_workspace_continuity` | `staged_skip` | `fx.multi_workspace.v1`, `fx.fresh_workspace.v1`, `fx.manual_memory.v1`, `fx.cass_v1.v1` | two `init` runs, scoped `remember`, scoped `context`, `workspace list --json` | workspace registry JSON, scoped context goldens | ambiguous workspace, symlink isolation, moved workspace, missing CASS connector | audited per-workspace writes; read-only list/context | `eidetic_engine_cli-jqhn`, Gate 2, Gate 7 |
+| `usr_pre_task_brief` | `executable_e2e` | `fx.fresh_workspace.v1`, `fx.manual_memory.v1`, `fx.release_failure.v1`, `fx.async_migration.v1` | `init`, `remember`, `context --format markdown`, `context --json` | `tests/usr002_pre_task_brief_scenario.rs`, Markdown pack golden, `ee.context.v1`, response envelope | `semantic_disabled`, `graph_snapshot_stale`, empty memory set, reduced token budget | audited writes for init/remember/pack record; read-only context rendering | `eidetic_engine_cli-gbp2`, Gate 7, Gate 14 |
+| `usr_in_task_recovery` | `executable_e2e` | `fx.stale_index.v1`, `fx.ci_clippy_failure.v1`, `fx.dangerous_cleanup.v1`, `fx.locked_writer.v1` | `search --explain --json`, `why --json`, `doctor --json`, `preflight --json` contracts | `tests/usr003_in_task_scenario.rs`, search result golden, `ee.why.v1`, doctor repair plan | `search_index_stale`, `lock_contention`, missing memory ID, stale graph | read-only search/why/doctor; denied destructive preflight when risky | `eidetic_engine_cli-g2jl`, Gate 4, Gate 15, Gate 16 |
+| `usr_post_task_learning` | `executable_e2e` | `fx.manual_memory.v1`, `fx.procedure_drift.v1`, `fx.false_alarm.v1`, `fx.causal_confounding.v1`, `fx.conflicting_evidence.v1`, `fx.stale_rule.v1` | `outcome`, `review session`, `curate candidates`, `procedure verify`, `learn agenda` | `tests/advanced_e2e.rs::post_task_outcome_scenario_commands_emit_machine_data`, outcome event JSON, curation candidate JSON, audit entry | harmful feedback, contradicted evidence, duplicate candidate, stale procedure | audited writes only; no silent promotion or tombstone | `eidetic_engine_cli-1mlo`, Gate 18, Gate 21, Gate 22 |
+| `usr_degraded_offline_trust` | `executable_e2e` | `fx.offline_degraded.v1`, `fx.cass_v1.v1`, `fx.graph_linked_decision.v1`, `fx.manual_memory.v1` | `status --json`, `import cass --dry-run --json`, `search --json`, `context --json` | `tests/usr005_degraded_scenario.rs`, status envelope, import dry-run report, lexical-only search golden | `cass_unavailable`, `external_adapter_schema_mismatch`, `semantic_disabled`, `agent_detector_unavailable`, `graph_snapshot_stale` | dry-run import; read-only degraded search/context | `eidetic_engine_cli-r8r0`, Gate 1, Gate 4, Gate 6 |
+| `usr_privacy_export` | `executable_e2e` | `fx.secret_redaction.v1`, `fx.privacy_export.v1`, `fx.dangerous_cleanup.v1` | `remember`, `context --json`, `export jsonl`, `backup create --json`, backup list/verify/restore | `tests/usr006_privacy_redaction_backup_scenario.rs`, redaction report, context golden with placeholders, backup manifest | `redaction_applied`, blocked secret storage, unsupported shareable export, backup failure | audited writes with explicit redaction; export must omit raw secrets | `eidetic_engine_cli-9sd5`, Gate 19, export/backup gates |
+| `usr_workspace_continuity` | `executable_e2e` | `fx.multi_workspace.v1`, `fx.fresh_workspace.v1`, `fx.manual_memory.v1`, `fx.cass_v1.v1` | two `init` runs, scoped `remember`, scoped `context`, `workspace list --json` | `tests/smoke.rs::workspace_continuity_scenario_keeps_context_scoped`, workspace registry JSON, scoped context goldens | ambiguous workspace, symlink isolation, moved workspace, missing CASS connector | audited per-workspace writes; read-only list/context | `eidetic_engine_cli-jqhn`, Gate 2, Gate 7 |
 
 ## Artifact Requirements
 
@@ -268,12 +270,12 @@ release evidence.
 
 ## Closure And Follow-Up
 
-This bead is complete when this contract exists and the closeout points to the
-future executable work. No executable test is appropriate in this bead because
-the repository does not yet have the manifest parser, validator command, logged
-e2e runner, or fixture directories.
+This contract has graduated from future-only traceability to an executable
+acceptance-pack index. Closeout should cite the `scenario_traceability.v1` rows
+above and the scenario matrix in `docs/agent-outcome-scenarios.md`.
 
-Nearest executable follow-ups:
+Remaining follow-ups are validator and orchestration hardening, not blockers for
+the scenario acceptance pack:
 
 - `eidetic_engine_cli-4wj5` / EE-TST-003: golden/schema contract runner
 - `eidetic_engine_cli-57k1` / EE-TST-004: logged walking-skeleton e2e script

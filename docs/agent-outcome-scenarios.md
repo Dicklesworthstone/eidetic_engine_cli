@@ -1,9 +1,9 @@
 # Agent Outcome Scenario Matrix
 
 This matrix defines the agent-facing scenarios that make `ee` useful rather
-than merely implemented. Each scenario is written as a future fixture contract:
-it names the journey, the command sequence, the expected artifacts, degraded
-branches, and the beads or gates that own executable coverage.
+than merely implemented. Each scenario names the journey, command sequence,
+expected artifacts, degraded branches, and the beads or gates that own the
+current executable coverage or staged fixture contract.
 
 No scenario may rely on network access, hidden user-global state, a mutable
 ambient CASS corpus, paid model APIs, or unredacted secrets. Fixtures must be
@@ -37,6 +37,21 @@ redaction status, degradation status, fixture IDs, and first-failure diagnosis.
 | `usr_privacy_export` | Privacy, redaction, export, and backup | `secret_redaction`, `privacy_export`, `dangerous_cleanup` | `ee remember --workspace <tmp> --level episodic --kind fact "<secret fixture>" --json`; `ee context "shareable support summary" --workspace <tmp> --json`; `ee export jsonl --workspace <tmp>`; `ee backup create --workspace <tmp> --label fixture --json` | Redaction report, context golden with placeholders, JSONL export, backup manifest, secret absence assertions | `redaction_applied`, blocked secret storage, unsupported shareable export, backup verification failure | `eidetic_engine_cli-9sd5` / EE-USR-006, Gate 19 situation model where privacy affects routing, future backup/export beads | The agent can produce useful support or handoff artifacts without leaking secrets or private evidence. |
 | `usr_workspace_continuity` | Multi-workspace and session continuity | `multi_workspace`, `fresh_workspace`, `manual_memory`, `cass/v1` | `ee init --workspace <tmp/a> --json`; `ee init --workspace <tmp/b> --json`; `ee remember --workspace <tmp/a> ... --json`; `ee context "same task" --workspace <tmp/a> --json`; `ee context "same task" --workspace <tmp/b> --json`; `ee workspace list --json` | Workspace registry JSON, two context pack goldens, provenance scoped to the selected workspace, workspace identity hashes | ambiguous workspace, symlink isolation, moved workspace, missing CASS connector, conflicting project-local config | `eidetic_engine_cli-jqhn` / EE-USR-007, Gate 2 SQLModel/FrankenSQLite, Gate 7 walking skeleton, future workspace/config beads | The agent gets project-specific memory for the selected workspace and does not cross-contaminate unrelated repositories. |
 
+## Executable Evidence Status
+
+The acceptance pack now has executable proof surfaces for every agent journey.
+Fixture families may still contain staged branches, but the scenario closeout is
+no longer docs-only.
+
+| Scenario ID | Current Evidence | Notes |
+| --- | --- | --- |
+| `usr_pre_task_brief` | `tests/usr002_pre_task_brief_scenario.rs::pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts` | Exercises logged `init`, `remember`, and `context` commands with command dossiers under `target/ee-e2e/usr_pre_task_brief/`. |
+| `usr_in_task_recovery` | `tests/usr003_in_task_scenario.rs::in_task_recovery_scenario_explains_selection_repair_and_tripwires` | Pins search, `why`, doctor, tripwire, and degradation contracts while logging recovery artifacts. |
+| `usr_post_task_learning` | `tests/advanced_e2e.rs::post_task_outcome_scenario_commands_emit_machine_data` plus outcome/curate/procedure/learn golden tests | Verifies JSON-mode command surfaces for outcome feedback, session review, curation, procedure validation, and learning agenda. |
+| `usr_degraded_offline_trust` | `tests/usr005_degraded_scenario.rs` degraded dependency, status, import, search, and context coverage | Keeps degraded/offline responses parseable with stable repair and degradation codes. |
+| `usr_privacy_export` | `tests/usr006_privacy_redaction_backup_scenario.rs` privacy, export, and backup workflow coverage | Proves redaction levels, JSONL export, backup create/list/verify/restore, and secret absence assertions. |
+| `usr_workspace_continuity` | `tests/smoke.rs::workspace_continuity_scenario_keeps_context_scoped` | Exercises two workspaces, scoped memory, CASS fixture injection, and context isolation. |
+
 ## Required Fixture Metadata
 
 Every scenario fixture needs a manifest with:
@@ -69,10 +84,10 @@ the redaction class without exposing the secret.
 
 ## Closure Guidance
 
-This bead is a docs-only scenario contract. It does not add executable tests
-because the repository is still in the foundation slice and the executable
-scenario beads listed above own the future real-binary coverage. Closeout should
-cite this file and name the nearest executable follow-ups:
+This bead closes when the matrix above and
+`docs/fixture-provenance-traceability.md#scenario_traceabilityv1` agree on the
+scenario proof surfaces. Closeout should cite this file, the traceability table,
+and the executable scenario beads:
 
 - `eidetic_engine_cli-gbp2` / EE-USR-002
 - `eidetic_engine_cli-g2jl` / EE-USR-003
@@ -80,4 +95,3 @@ cite this file and name the nearest executable follow-ups:
 - `eidetic_engine_cli-r8r0` / EE-USR-005
 - `eidetic_engine_cli-9sd5` / EE-USR-006
 - `eidetic_engine_cli-jqhn` / EE-USR-007
-

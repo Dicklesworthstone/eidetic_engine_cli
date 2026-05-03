@@ -125,6 +125,34 @@ Before closing a bead, the agent checks:
 10. The `br close --reason` text includes the dossier summary or points to a
     tracked dossier path.
 
+## Epic Rollup Requirements
+
+An `epic_rollup` dossier is not a bigger version of a single-bead closeout. It
+must prove that the child work composes into the user-facing promise of the
+epic. For testing, fixture, and failure-logging epics, the rollup must include:
+
+- `child_beads`: every child bead ID, title, close status, and the evidence
+  profile used by that child.
+- `workflow_coverage`: implemented user-visible workflows, mapped to unit,
+  golden/schema, e2e, replay, evaluation, or scenario evidence.
+- `verification_commands`: exact final commands a future agent should run,
+  including RCH-wrapped Cargo commands and any focused test or artifact checks.
+- `artifact_roots`: generated evidence locations such as
+  `target/ee-e2e/<scenario>/<run-id>/`, plus any tracked golden, fixture, or
+  schema paths.
+- `logged_fields`: whether command, cwd/workspace, sanitized environment,
+  elapsed time, exit code, stdout/stderr artifact paths, schema/golden status,
+  redaction status, degradation codes, and first-failure diagnosis are present.
+- `degraded_states_covered`: stable degraded/offline codes covered by tests or
+  explicitly deferred.
+- `postponed_scope`: intentionally deferred work with follow-up bead IDs and a
+  reason it does not block the epic's current user-visible promise.
+
+The close reason for an epic is invalid if it only says all children are closed.
+It must summarize the aggregate user workflows, verification path, artifact/log
+locations, degraded states, and postponed scope so another agent can reproduce
+the evidence without rereading the full plan.
+
 ## Invalid Close Reasons
 
 These are invalid because they are not evidence:
@@ -296,6 +324,89 @@ offloaded = true
 status = "passed"
 artifact_paths = ["target/ee-e2e/cass_robot_contract/<run-id>/"]
 notes = "Validated capabilities, search, view, expand, and unknown schema handling."
+```
+
+## Example: Testing Harness Epic Rollup
+
+```toml
+schema = "closure_dossier.v1"
+bead_id = "eidetic_engine_cli-lp4p"
+bead_title = "Epic: Comprehensive Testing, E2E, and Failure-Logging Harness"
+profile = "epic_rollup"
+closed_by = "AgentName / codex-cli"
+closed_at = "2026-05-03T00:00:00Z"
+implementation_summary = "Rolled up the testing, fixture, logged e2e, failure diagnosis, and verification orchestration beads."
+public_surfaces_affected = ["ee test fixtures", "ee JSON contracts", "target/ee-e2e artifacts"]
+stdout_stderr_status = "logged e2e scenarios capture stdout/stderr separately and assert JSON stdout purity"
+redaction_status = "redaction fuzz and privacy/export scenarios cover secret absence in artifacts"
+degradation_coverage = "cass_unavailable, semantic_disabled, graph_snapshot_stale, and external_adapter_schema_mismatch covered or deferred with bead IDs"
+effect_expectation = "mixed: read_only contracts, dry_run reports, audited writes for fixture setup"
+artifacts = [
+  "target/ee-e2e/<scenario>/<run-id>/",
+  "tests/fixtures/golden/",
+  "docs/testing-strategy.md"
+]
+follow_up_bead_ids = []
+close_reason_summary = "Testing harness epic closed with child evidence table, scenario/golden/e2e coverage, RCH-backed verification, artifact roots, degraded states, and no silent postponed scope."
+
+[[child_beads]]
+id = "eidetic_engine_cli-57k1"
+title = "EE-TST-004: Implement logged e2e script for the walking skeleton"
+status = "closed"
+evidence_profile = "fixture_contract"
+
+[[workflow_coverage]]
+workflow = "walking skeleton context loop"
+evidence = ["unit", "golden", "e2e"]
+artifact_paths = ["target/ee-e2e/walking_skeleton/<run-id>/"]
+
+[[verification_commands]]
+kind = "build"
+command = "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_pane$(tmux display -p \"#P\") cargo check --all-targets"
+status = "passed"
+```
+
+## Example: Agent Outcome Scenario Epic Rollup
+
+```toml
+schema = "closure_dossier.v1"
+bead_id = "eidetic_engine_cli-w2lk"
+bead_title = "Epic: Agent Outcome Scenario Acceptance Pack"
+profile = "epic_rollup"
+closed_by = "AgentName / codex-cli"
+closed_at = "2026-05-03T00:00:00Z"
+implementation_summary = "Rolled up the six agent-facing acceptance scenarios across pre-task, in-task, post-task, degraded/offline, privacy/export, and workspace continuity journeys."
+public_surfaces_affected = ["ee context", "ee search", "ee why", "ee status", "ee outcome", "ee export", "ee backup"]
+scenario_ids = [
+  "usr_pre_task_brief",
+  "usr_in_task_recovery",
+  "usr_post_task_learning",
+  "usr_degraded_offline_trust",
+  "usr_privacy_export",
+  "usr_workspace_continuity"
+]
+stdout_stderr_status = "scenario tests assert JSON stdout purity and capture stderr diagnostics in command dossiers"
+redaction_status = "privacy/export scenario and redaction fuzz coverage prove secrets are absent from shareable outputs"
+degradation_coverage = "semantic_disabled, graph_snapshot_stale, cass_unavailable, external_adapter_schema_mismatch, and redaction_applied are covered or tied to named follow-up beads"
+effect_expectation = "mixed: read_only retrieval/status, dry_run import/review, audited writes for remember/outcome/backup setup"
+artifacts = [
+  "target/ee-e2e/usr_pre_task_brief/<run-id>/",
+  "target/ee-e2e/usr_in_task_recovery/<run-id>/",
+  "target/ee-e2e/usr_workspace_continuity/<run-id>/",
+  "docs/agent-outcome-scenarios.md",
+  "docs/fixture-provenance-traceability.md"
+]
+close_reason_summary = "Agent outcome scenario epic closed with executable evidence for all six journeys, artifact roots, degraded states, redaction coverage, and explicit postponed scope."
+
+[[workflow_coverage]]
+workflow = "pre-task briefing and context pack"
+evidence = ["scenario", "e2e", "golden"]
+artifact_paths = ["target/ee-e2e/usr_pre_task_brief/<run-id>/"]
+
+[[workflow_coverage]]
+workflow = "multi-workspace continuity"
+evidence = ["scenario", "e2e"]
+artifact_paths = ["target/ee-e2e/usr_workspace_continuity/<run-id>/"]
 ```
 
 ## Future Validator
