@@ -1,0 +1,9 @@
+{
+  "id": "ssn_pii",
+  "description": "Social Security Number PII",
+  "input": "SSN: 123-45-6789",
+  "expected_class": "pii",
+  "encoding": "raw",
+  "context": "text",
+  "expected_detected": true
+}

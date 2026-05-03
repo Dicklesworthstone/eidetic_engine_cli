@@ -1,0 +1,10 @@
+{
+  "id": "schema_key_word",
+  "description": "Word containing 'key' that is not a secret (should NOT trigger)",
+  "input": "The keyboard layout uses QWERTY",
+  "expected_class": null,
+  "encoding": "raw",
+  "context": "text",
+  "expected_detected": false,
+  "notes": "Common words containing 'key' should not trigger"
+}

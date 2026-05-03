@@ -1,0 +1,9 @@
+{
+  "id": "anthropic_key_raw_text",
+  "description": "Anthropic API key prefix in plain text",
+  "input": "My key is sk-ant-api03-deadbeef123",
+  "expected_class": "secret",
+  "encoding": "raw",
+  "context": "text",
+  "expected_detected": true
+}

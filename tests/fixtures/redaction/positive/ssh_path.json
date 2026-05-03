@@ -1,0 +1,9 @@
+{
+  "id": "ssh_path",
+  "description": "SSH directory path in error message",
+  "input": "Error: Cannot read /home/user/.ssh/id_rsa",
+  "expected_class": "internal_path",
+  "encoding": "raw",
+  "context": "error_message",
+  "expected_detected": true
+}

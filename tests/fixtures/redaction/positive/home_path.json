@@ -1,0 +1,9 @@
+{
+  "id": "home_path",
+  "description": "Home directory path leak",
+  "input": "Config stored at /home/ubuntu/.config/ee/settings.toml",
+  "expected_class": "internal_path",
+  "encoding": "raw",
+  "context": "text",
+  "expected_detected": true
+}

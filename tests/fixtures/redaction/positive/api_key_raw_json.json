@@ -1,0 +1,9 @@
+{
+  "id": "api_key_raw_json",
+  "description": "Raw API key in JSON value context",
+  "input": "{\"api_key\": \"sk-abc123xyz789\"}",
+  "expected_class": "secret",
+  "encoding": "raw",
+  "context": "json_value",
+  "expected_detected": true
+}

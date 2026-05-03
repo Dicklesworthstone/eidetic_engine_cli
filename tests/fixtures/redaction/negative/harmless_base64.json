@@ -1,0 +1,10 @@
+{
+  "id": "harmless_base64",
+  "description": "Base64 of harmless string (should NOT trigger)",
+  "input": "Data: aGVsbG8gd29ybGQ=",
+  "expected_class": null,
+  "encoding": "base64",
+  "context": "text",
+  "expected_detected": false,
+  "notes": "Base64('hello world') should not trigger secret detection"
+}

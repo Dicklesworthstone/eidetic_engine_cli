@@ -1,0 +1,10 @@
+{
+  "id": "safe_version_number",
+  "description": "Version number that does not match phone pattern",
+  "input": "Software version 1.2.3 released",
+  "expected_class": null,
+  "encoding": "raw",
+  "context": "text",
+  "expected_detected": false,
+  "notes": "Short version numbers should not match phone patterns"
+}

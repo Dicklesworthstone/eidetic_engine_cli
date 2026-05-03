@@ -1,0 +1,9 @@
+{
+  "id": "openai_key_yaml",
+  "description": "OpenAI project key in YAML context",
+  "input": "api:\n  key: sk-proj-abc123def456",
+  "expected_class": "secret",
+  "encoding": "raw",
+  "context": "yaml_block",
+  "expected_detected": true
+}

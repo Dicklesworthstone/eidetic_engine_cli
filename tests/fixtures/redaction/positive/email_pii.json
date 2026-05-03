@@ -1,0 +1,9 @@
+{
+  "id": "email_pii",
+  "description": "Email address PII detection",
+  "input": "Contact support at help@example.com for assistance",
+  "expected_class": "pii",
+  "encoding": "raw",
+  "context": "text",
+  "expected_detected": true
+}
