@@ -6352,10 +6352,56 @@ where
 // EE-AUDIT-001: Audit Command Handlers
 // ============================================================================
 
-use crate::core::audit::{
-    AuditDiffOptions, AuditShowOptions, AuditTimelineOptions, AuditVerifyOptions, list_timeline,
-    show_diff, show_operation, verify_audit,
-};
+const AUDIT_UNAVAILABLE_CODE: &str = "audit_log_unavailable";
+const AUDIT_UNAVAILABLE_MESSAGE: &str = "Audit timeline, operation inspection, diff, and verification are unavailable until audit commands read persisted audit log records and hash chains instead of generated sample operation data.";
+const AUDIT_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const AUDIT_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-s43e";
+const AUDIT_UNAVAILABLE_SIDE_EFFECT: &str =
+    "read-only, conservative abstention; no audit log record or hash-chain verification emitted";
+
+fn write_audit_unavailable<W, E>(
+    cli: &Cli,
+    command: &'static str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": AUDIT_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": AUDIT_UNAVAILABLE_MESSAGE,
+                "repair": AUDIT_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": AUDIT_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": AUDIT_UNAVAILABLE_MESSAGE,
+                        "repair": AUDIT_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": AUDIT_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": AUDIT_UNAVAILABLE_SIDE_EFFECT
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
+    }
+
+    let _ = writeln!(stderr, "error: {AUDIT_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {AUDIT_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
+}
 
 fn handle_audit_timeline<W, E>(
     cli: &Cli,
@@ -6367,32 +6413,8 @@ where
     W: Write,
     E: Write,
 {
-    let options = AuditTimelineOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
-        since: args.since.clone(),
-        limit: args.limit,
-        cursor: args.cursor.clone(),
-    };
-
-    match list_timeline(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_audit_timeline_human(&report))
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_audit_timeline_toon(&report) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(output::render_audit_timeline_json(&report) + "\n"),
-            ),
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    }
+    let _ = args;
+    write_audit_unavailable(cli, "audit timeline", stdout, stderr)
 }
 
 fn handle_audit_show<W, E>(
@@ -6405,28 +6427,8 @@ where
     W: Write,
     E: Write,
 {
-    let options = AuditShowOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
-        operation_id: args.operation_id.clone(),
-    };
-
-    match show_operation(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_audit_show_human(&report))
-            }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_audit_show_toon(&report) + "\n"))
-            }
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_audit_show_json(&report) + "\n"))
-            }
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    }
+    let _ = args;
+    write_audit_unavailable(cli, "audit show", stdout, stderr)
 }
 
 fn handle_audit_diff<W, E>(
@@ -6439,28 +6441,8 @@ where
     W: Write,
     E: Write,
 {
-    let options = AuditDiffOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
-        operation_id: args.operation_id.clone(),
-    };
-
-    match show_diff(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_audit_diff_human(&report))
-            }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_audit_diff_toon(&report) + "\n"))
-            }
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_audit_diff_json(&report) + "\n"))
-            }
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    }
+    let _ = args;
+    write_audit_unavailable(cli, "audit diff", stdout, stderr)
 }
 
 fn handle_audit_verify<W, E>(
@@ -6473,28 +6455,8 @@ where
     W: Write,
     E: Write,
 {
-    let options = AuditVerifyOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
-        since: args.since.clone(),
-    };
-
-    match verify_audit(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_audit_verify_human(&report))
-            }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_audit_verify_toon(&report) + "\n"))
-            }
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_audit_verify_json(&report) + "\n"))
-            }
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    }
+    let _ = args;
+    write_audit_unavailable(cli, "audit verify", stdout, stderr)
 }
 
 // ============================================================================

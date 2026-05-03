@@ -109,6 +109,8 @@ fn first_repair_command(value: &Value) -> Option<String> {
 fn command_boundary_matrix_row(args: &[String]) -> &'static str {
     if args.iter().any(|arg| arg == "context") {
         "context, pack, search, why"
+    } else if args.iter().any(|arg| arg == "audit") {
+        "audit"
     } else if args.windows(2).any(
         |window| matches!(window, [first, second] if first == "diag" && second == "quarantine"),
     ) {
@@ -157,6 +159,8 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
 fn side_effect_class(args: &[String]) -> &'static str {
     if args.iter().any(|arg| arg == "context") {
         "audited pack write when storage is available; storage error before mutation here"
+    } else if args.iter().any(|arg| arg == "audit") {
+        "read-only, conservative abstention; no audit log record or hash-chain verification emitted"
     } else if args.windows(2).any(
         |window| matches!(window, [first, second] if first == "diag" && second == "quarantine"),
     ) {
@@ -429,6 +433,178 @@ fn successful_capabilities_output_has_no_fake_success_markers() -> TestResult {
         unsupported_claims.passed,
         format!("capabilities output contains unsupported evidence claim: {unsupported_claims:?}"),
     )
+}
+
+#[test]
+fn audit_commands_degrade_instead_of_reporting_generated_operation_records() -> TestResult {
+    let cases = [
+        (
+            "audit-timeline-unavailable",
+            "audit timeline",
+            vec![
+                "--json".to_owned(),
+                "audit".to_owned(),
+                "timeline".to_owned(),
+            ],
+        ),
+        (
+            "audit-show-unavailable",
+            "audit show",
+            vec![
+                "--json".to_owned(),
+                "audit".to_owned(),
+                "show".to_owned(),
+                "op_fixture_001".to_owned(),
+            ],
+        ),
+        (
+            "audit-diff-unavailable",
+            "audit diff",
+            vec![
+                "--json".to_owned(),
+                "audit".to_owned(),
+                "diff".to_owned(),
+                "op_fixture_001".to_owned(),
+            ],
+        ),
+        (
+            "audit-verify-unavailable",
+            "audit verify",
+            vec!["--json".to_owned(), "audit".to_owned(), "verify".to_owned()],
+        ),
+    ];
+
+    for (artifact_name, command, args) in cases {
+        let result = run_ee_logged(artifact_name, None, args)?;
+
+        ensure_equal(
+            &result.exit_code,
+            &UNSATISFIED_DEGRADED_MODE_EXIT,
+            &format!("{command} unavailable exit code"),
+        )?;
+        ensure(
+            result.stderr.is_empty(),
+            format!("{command} JSON degraded response must keep stderr empty"),
+        )?;
+        ensure_no_ansi(&result.stdout, &format!("{command} degraded stdout"))?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/schema",
+            json!("ee.response.v1"),
+            &format!("{command} degraded response schema"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/success",
+            json!(false),
+            &format!("{command} success flag"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/command",
+            json!(command),
+            &format!("{command} command label"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/code",
+            json!("audit_log_unavailable"),
+            &format!("{command} degraded code"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/degraded/0/code",
+            json!("audit_log_unavailable"),
+            &format!("{command} degraded array code"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/repair",
+            json!("ee status --json"),
+            &format!("{command} repair command"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/followUpBead",
+            json!("eidetic_engine_cli-s43e"),
+            &format!("{command} follow-up bead"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/sideEffectClass",
+            json!(
+                "read-only, conservative abstention; no audit log record or hash-chain verification emitted"
+            ),
+            &format!("{command} side-effect class"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/evidenceIds",
+            json!([]),
+            &format!("{command} evidence ids"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/sourceIds",
+            json!([]),
+            &format!("{command} source ids"),
+        )?;
+        ensure(
+            result.parsed.pointer("/entries").is_none()
+                && result.parsed.pointer("/operation").is_none()
+                && result.parsed.pointer("/deltas").is_none()
+                && result.parsed.pointer("/summary").is_none(),
+            format!("{command} must not emit generated audit records or verification summary"),
+        )?;
+
+        let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
+        ensure(
+            fake_success.passed,
+            format!("degraded {command} output should not be fake success: {fake_success:?}"),
+        )?;
+
+        let unsupported_claims =
+            validate_no_unsupported_evidence_claims(command, false, false, &result.stdout);
+        ensure(
+            unsupported_claims.passed,
+            format!(
+                "degraded {command} output should not count as unsupported success: {unsupported_claims:?}"
+            ),
+        )?;
+
+        let log_text = fs::read_to_string(&result.log_path)
+            .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+        let log_json: Value = serde_json::from_str(&log_text)
+            .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+        ensure_json_pointer(
+            &log_json,
+            "/degradationCodes",
+            json!(["audit_log_unavailable"]),
+            &format!("logged {command} degradation code"),
+        )?;
+        ensure_json_pointer(
+            &log_json,
+            "/repairCommand",
+            json!("ee status --json"),
+            &format!("logged {command} repair command"),
+        )?;
+        ensure_json_pointer(
+            &log_json,
+            "/commandBoundaryMatrixRow",
+            json!("audit"),
+            &format!("logged {command} boundary matrix row"),
+        )?;
+        ensure_json_pointer(
+            &log_json,
+            "/sideEffectClass",
+            json!(
+                "read-only, conservative abstention; no audit log record or hash-chain verification emitted"
+            ),
+            &format!("logged {command} side-effect class"),
+        )?;
+    }
+
+    Ok(())
 }
 
 #[test]
