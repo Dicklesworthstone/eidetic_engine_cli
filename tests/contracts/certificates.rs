@@ -5,7 +5,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use ee::core::certificate::{VerificationResult, verify_certificate};
+use ee::core::certificate::{
+    CertificateListOptions, CertificateVerifyReport, VerificationResult, list_certificates,
+    show_certificate, verify_certificate,
+};
 use ee::models::PrivacyBudgetCertificate;
 use ee::models::TailRiskCertificate;
 use ee::models::certificate::{
@@ -84,49 +87,53 @@ fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
 }
 
 #[test]
-fn certificate_verify_detects_stale_payload_schema_and_assumptions() -> TestResult {
+fn certificate_core_reports_legacy_mock_ids_as_unavailable() -> TestResult {
+    let list = list_certificates(&CertificateListOptions::new().include_expired());
+    ensure(
+        list.certificates.is_empty(),
+        "certificate list must not surface mock certificates",
+    )?;
+    ensure_equal(&list.total_count, &0, "certificate total count")?;
+    ensure_equal(&list.usable_count, &0, "certificate usable count")?;
+    ensure_equal(&list.expired_count, &0, "certificate expired count")?;
+    ensure(
+        list.kinds_present.is_empty(),
+        "certificate kinds must be empty without a manifest store",
+    )?;
+
+    let shown = show_certificate("cert_pack_001");
+    ensure_equal(
+        &shown.verification_status,
+        &VerificationResult::NotFound,
+        "legacy certificate show status",
+    )?;
+
     let stale_payload = verify_certificate("cert_pack_stale_payload");
     ensure_equal(
         &stale_payload.result,
-        &VerificationResult::StalePayloadHash,
-        "stale payload result",
-    )?;
-    ensure(
-        !stale_payload.hash_verified,
-        "stale payload fails hash verification",
-    )?;
-    ensure(
-        !stale_payload.payload_hash_fresh,
-        "stale payload marks payload hash as stale",
+        &VerificationResult::NotFound,
+        "legacy stale payload id is not found",
     )?;
     ensure(
         stale_payload
             .failure_codes
             .iter()
-            .any(|code| code == "stale_payload_hash"),
-        "stale payload failure code",
+            .any(|code| code == "not_found"),
+        "not-found failure code",
     )?;
 
     let stale_schema = verify_certificate("cert_pack_stale_schema");
     ensure_equal(
         &stale_schema.result,
-        &VerificationResult::StaleSchemaVersion,
-        "stale schema result",
-    )?;
-    ensure(
-        !stale_schema.schema_version_valid,
-        "stale schema marks schema version invalid",
+        &VerificationResult::NotFound,
+        "legacy stale schema id is not found",
     )?;
 
     let failed_assumptions = verify_certificate("cert_pack_failed_assumptions");
     ensure_equal(
         &failed_assumptions.result,
-        &VerificationResult::FailedAssumptions,
-        "failed assumptions result",
-    )?;
-    ensure(
-        !failed_assumptions.assumptions_valid,
-        "failed assumptions are reported",
+        &VerificationResult::NotFound,
+        "legacy failed-assumptions id is not found",
     )
 }
 
@@ -197,7 +204,7 @@ fn guarantee_status_valid_requires_certificate_id() -> TestResult {
 
 #[test]
 fn certificate_verify_renderer_includes_gate13_failure_fields() -> TestResult {
-    let report = verify_certificate("cert_pack_failed_assumptions");
+    let report = CertificateVerifyReport::failed_assumptions("cert_fixture_failed_assumptions");
     let json = render_certificate_verify_json(&report);
     let value: Value = serde_json::from_str(&json).map_err(|error| error.to_string())?;
     ensure_equal(

@@ -62,15 +62,15 @@ data:
         diagnostic:
           schema: ee.output_size_diagnostic.v1
           json:
-            bytes: 1747
-            estimatedTokens: 64
+            bytes: 2348
+            estimatedTokens: 70
           toon:
-            bytes: 1596
-            estimatedTokens: 165
+            bytes: 2258
+            estimatedTokens: 234
           savings:
-            bytes: 151
-            tokens: -101
-            compressionRatio: 0.914
+            bytes: 90
+            tokens: -164
+            compressionRatio: 0.962
       - command: health
         diagnostic:
           schema: ee.output_size_diagnostic.v1

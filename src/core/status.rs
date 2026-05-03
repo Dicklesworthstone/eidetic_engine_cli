@@ -17,8 +17,8 @@ use crate::config::{
     resolve_workspace,
 };
 use crate::db::{
-    CreateMemoryInput, CreateWorkspaceInput, DbConnection, FeedbackSourceHarmfulCount,
-    StoredCurationCandidate, StoredCurationTtlPolicy,
+    CreateWorkspaceInput, DbConnection, FeedbackSourceHarmfulCount, PROVENANCE_CHAIN_HASH_VERSION,
+    PROVENANCE_STATUS_UNVERIFIED, StoredCurationCandidate, StoredCurationTtlPolicy,
     default_curation_ttl_policy_id_for_review_state,
 };
 use crate::models::{CapabilityStatus, MemoryId};
@@ -1308,12 +1308,12 @@ pub fn status_bench_exceeds_hard_ceiling(report: &StatusBenchReport) -> bool {
 
 fn status_bench_workspace_path(scale: StatusBenchScale) -> PathBuf {
     let mut path = std::env::temp_dir();
-    let token = uuid::Uuid::now_v7();
+    let unique_id = uuid::Uuid::now_v7();
     path.push(format!(
         "ee_status_bench_{}_{}_{}",
         std::process::id(),
         scale.memory_count,
-        token
+        unique_id
     ));
     path
 }
@@ -1325,40 +1325,101 @@ fn seed_status_bench_memories(
     memory_count: usize,
 ) -> Result<(), String> {
     connection
-        .insert_workspace(
-            workspace_id,
-            &CreateWorkspaceInput {
-                path: workspace_path.to_string_lossy().to_string(),
-                name: Some("status benchmark workspace".to_owned()),
-            },
-        )
-        .map_err(|error| format!("failed to insert benchmark workspace: {error}"))?;
-
-    for index in 0..memory_count {
-        let memory_id = status_bench_memory_id(memory_count, index);
-        let input = CreateMemoryInput {
-            workspace_id: workspace_id.to_owned(),
-            level: "semantic".to_owned(),
-            kind: "fact".to_owned(),
-            content: format!(
-                "Status benchmark memory {index}: deterministic fixture for scale {memory_count}."
-            ),
-            confidence: 0.60,
-            utility: 0.50,
-            importance: 0.50,
-            provenance_uri: Some("bench://ee_status".to_owned()),
-            trust_class: "agent_assertion".to_owned(),
-            trust_subclass: Some("benchmark_fixture".to_owned()),
-            tags: vec!["bench".to_owned(), "status".to_owned()],
-            valid_from: None,
-            valid_to: None,
-        };
+        .begin()
+        .map_err(|error| format!("failed to begin benchmark seed transaction: {error}"))?;
+    let seed_result = (|| -> Result<(), String> {
         connection
-            .insert_memory(&memory_id, &input)
-            .map_err(|error| format!("failed to insert benchmark memory {memory_id}: {error}"))?;
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().to_string(),
+                    name: Some("status benchmark workspace".to_owned()),
+                },
+            )
+            .map_err(|error| format!("failed to insert benchmark workspace: {error}"))?;
+
+        insert_status_bench_memory_rows(connection, workspace_id, memory_count)?;
+
+        Ok(())
+    })();
+
+    match seed_result {
+        Ok(()) => connection
+            .commit()
+            .map_err(|error| format!("failed to commit benchmark seed transaction: {error}")),
+        Err(error) => {
+            let _ = connection.rollback();
+            Err(error)
+        }
+    }
+}
+
+fn insert_status_bench_memory_rows(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_count: usize,
+) -> Result<(), String> {
+    const INSERT_CHUNK_SIZE: usize = 250;
+
+    let now = Utc::now().to_rfc3339();
+    for chunk_start in (0..memory_count).step_by(INSERT_CHUNK_SIZE) {
+        let chunk_end = chunk_start
+            .saturating_add(INSERT_CHUNK_SIZE)
+            .min(memory_count);
+        let mut sql = String::from(
+            "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, created_at, updated_at, valid_from, valid_to) VALUES ",
+        );
+        for index in chunk_start..chunk_end {
+            if index > chunk_start {
+                sql.push_str(", ");
+            }
+            let memory_id = status_bench_memory_id(memory_count, index);
+            let content = format!(
+                "Status benchmark memory {index}: deterministic fixture for scale {memory_count}."
+            );
+            let provenance_chain_hash = format!(
+                "blake3:{}",
+                blake3::hash(format!("status-bench:{memory_id}:{content}").as_bytes()).to_hex()
+            );
+
+            sql.push('(');
+            push_sql_text(&mut sql, &memory_id);
+            sql.push_str(", ");
+            push_sql_text(&mut sql, workspace_id);
+            sql.push_str(", 'semantic', 'fact', ");
+            push_sql_text(&mut sql, &content);
+            sql.push_str(
+                ", 0.60, 0.50, 0.50, 'bench://ee_status', 'agent_assertion', 'benchmark_fixture', ",
+            );
+            push_sql_text(&mut sql, &provenance_chain_hash);
+            sql.push_str(", ");
+            push_sql_text(&mut sql, PROVENANCE_CHAIN_HASH_VERSION);
+            sql.push_str(", ");
+            push_sql_text(&mut sql, PROVENANCE_STATUS_UNVERIFIED);
+            sql.push_str(", ");
+            push_sql_text(&mut sql, &now);
+            sql.push_str(", ");
+            push_sql_text(&mut sql, &now);
+            sql.push_str(", NULL, NULL)");
+        }
+        connection
+            .execute_raw(&sql)
+            .map_err(|error| format!("failed to insert benchmark memory rows: {error}"))?;
     }
 
     Ok(())
+}
+
+fn push_sql_text(sql: &mut String, value: &str) {
+    sql.push('\'');
+    for character in value.chars() {
+        if character == '\'' {
+            sql.push_str("''");
+        } else {
+            sql.push(character);
+        }
+    }
+    sql.push('\'');
 }
 
 fn status_bench_memory_id(memory_count: usize, index: usize) -> String {

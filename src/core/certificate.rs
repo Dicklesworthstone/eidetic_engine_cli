@@ -3,6 +3,9 @@
 //! Provides list, show, and verify operations for certificate records.
 //! Certificates are typed verification artifacts that make "alien artifact
 //! math" inspectable and auditable.
+//!
+//! The certificate manifest store is not wired in this slice. Core operations
+//! therefore return honest empty/not-found reports instead of sample records.
 
 use crate::models::{Certificate, CertificateKind, CertificateStatus, DecisionPlaneMetadata};
 
@@ -357,186 +360,20 @@ impl CertificateShowReport {
 
 /// List certificates with optional filters.
 #[must_use]
-pub fn list_certificates(options: &CertificateListOptions) -> CertificateListReport {
-    let mut report = CertificateListReport::new();
-
-    let mock_certs = create_mock_certificates();
-
-    for cert in &mock_certs {
-        if let Some(kind) = options.kind {
-            if cert.kind != kind {
-                continue;
-            }
-        }
-        if let Some(status) = options.status {
-            if cert.status != status {
-                continue;
-            }
-        }
-        if !options.include_expired && cert.status == CertificateStatus::Expired {
-            report.expired_count += 1;
-            continue;
-        }
-
-        report.certificates.push(CertificateSummary::from(cert));
-        if cert.is_usable() {
-            report.usable_count += 1;
-        }
-        if cert.status == CertificateStatus::Expired {
-            report.expired_count += 1;
-        }
-
-        if !report.kinds_present.contains(&cert.kind) {
-            report.kinds_present.push(cert.kind);
-        }
-    }
-
-    if let Some(limit) = options.limit {
-        report.certificates.truncate(limit as usize);
-    }
-
-    report.total_count = report.certificates.len() as u32;
-    report
+pub fn list_certificates(_options: &CertificateListOptions) -> CertificateListReport {
+    CertificateListReport::new()
 }
 
 /// Show a certificate by ID.
 #[must_use]
 pub fn show_certificate(certificate_id: &str) -> CertificateShowReport {
-    let mock_certs = create_mock_certificates();
-
-    for cert in mock_certs {
-        if cert.id == certificate_id {
-            return CertificateShowReport::new(cert);
-        }
-    }
-
     CertificateShowReport::not_found(certificate_id)
 }
 
 /// Verify a certificate by ID.
 #[must_use]
 pub fn verify_certificate(certificate_id: &str) -> CertificateVerifyReport {
-    let mock_certs = create_mock_certificates();
-
-    for cert in mock_certs {
-        if cert.id == certificate_id {
-            if cert.id == "cert_pack_stale_payload" {
-                return CertificateVerifyReport::stale_payload_hash(&cert.id);
-            }
-            if cert.id == "cert_pack_stale_schema" {
-                return CertificateVerifyReport::stale_schema_version(&cert.id);
-            }
-            if cert.id == "cert_pack_failed_assumptions" {
-                return CertificateVerifyReport::failed_assumptions(&cert.id);
-            }
-            if cert.is_usable() {
-                return CertificateVerifyReport::valid(&cert.id);
-            } else if cert.is_expired() {
-                return CertificateVerifyReport::expired(&cert.id);
-            } else {
-                return CertificateVerifyReport {
-                    certificate_id: cert.id.clone(),
-                    result: VerificationResult::InvalidStatus,
-                    checked_at: chrono::Utc::now().to_rfc3339(),
-                    hash_verified: true,
-                    payload_hash_fresh: true,
-                    schema_version_valid: true,
-                    assumptions_valid: true,
-                    status_valid: false,
-                    expiry_valid: true,
-                    failure_codes: vec!["invalid_status".to_owned()],
-                    message: format!("Certificate status is {}", cert.status.as_str()),
-                };
-            }
-        }
-    }
-
     CertificateVerifyReport::not_found(certificate_id)
-}
-
-fn create_mock_certificates() -> Vec<Certificate> {
-    vec![
-        Certificate {
-            id: "cert_pack_001".to_string(),
-            kind: CertificateKind::Pack,
-            status: CertificateStatus::Valid,
-            workspace_id: "wsp_default".to_string(),
-            issued_at: "2026-04-29T10:00:00Z".to_string(),
-            expires_at: Some("2026-05-29T10:00:00Z".to_string()),
-            payload_hash: "b3a4c5d6e7f8".to_string(),
-            decision_metadata: DecisionPlaneMetadata::empty(),
-        },
-        Certificate {
-            id: "cert_pack_stale_payload".to_string(),
-            kind: CertificateKind::Pack,
-            status: CertificateStatus::Valid,
-            workspace_id: "wsp_default".to_string(),
-            issued_at: "2026-04-29T10:05:00Z".to_string(),
-            expires_at: Some("2026-05-29T10:05:00Z".to_string()),
-            payload_hash: "stale_payload_hash".to_string(),
-            decision_metadata: DecisionPlaneMetadata::empty(),
-        },
-        Certificate {
-            id: "cert_pack_stale_schema".to_string(),
-            kind: CertificateKind::Pack,
-            status: CertificateStatus::Valid,
-            workspace_id: "wsp_default".to_string(),
-            issued_at: "2026-04-29T10:10:00Z".to_string(),
-            expires_at: Some("2026-05-29T10:10:00Z".to_string()),
-            payload_hash: "stale_schema_payload".to_string(),
-            decision_metadata: DecisionPlaneMetadata::empty(),
-        },
-        Certificate {
-            id: "cert_pack_failed_assumptions".to_string(),
-            kind: CertificateKind::Pack,
-            status: CertificateStatus::Valid,
-            workspace_id: "wsp_default".to_string(),
-            issued_at: "2026-04-29T10:15:00Z".to_string(),
-            expires_at: Some("2026-05-29T10:15:00Z".to_string()),
-            payload_hash: "failed_assumptions_payload".to_string(),
-            decision_metadata: DecisionPlaneMetadata::empty(),
-        },
-        Certificate {
-            id: "cert_curation_001".to_string(),
-            kind: CertificateKind::Curation,
-            status: CertificateStatus::Valid,
-            workspace_id: "wsp_default".to_string(),
-            issued_at: "2026-04-28T15:30:00Z".to_string(),
-            expires_at: None,
-            payload_hash: "a1b2c3d4e5f6".to_string(),
-            decision_metadata: DecisionPlaneMetadata::empty(),
-        },
-        Certificate {
-            id: "cert_tailrisk_001".to_string(),
-            kind: CertificateKind::TailRisk,
-            status: CertificateStatus::Pending,
-            workspace_id: "wsp_default".to_string(),
-            issued_at: "2026-04-30T08:00:00Z".to_string(),
-            expires_at: None,
-            payload_hash: "c3d4e5f6g7h8".to_string(),
-            decision_metadata: DecisionPlaneMetadata::empty(),
-        },
-        Certificate {
-            id: "cert_privacy_001".to_string(),
-            kind: CertificateKind::PrivacyBudget,
-            status: CertificateStatus::Expired,
-            workspace_id: "wsp_default".to_string(),
-            issued_at: "2026-04-01T12:00:00Z".to_string(),
-            expires_at: Some("2026-04-15T12:00:00Z".to_string()),
-            payload_hash: "d4e5f6g7h8i9".to_string(),
-            decision_metadata: DecisionPlaneMetadata::empty(),
-        },
-        Certificate {
-            id: "cert_lifecycle_001".to_string(),
-            kind: CertificateKind::Lifecycle,
-            status: CertificateStatus::Valid,
-            workspace_id: "wsp_default".to_string(),
-            issued_at: "2026-04-30T06:00:00Z".to_string(),
-            expires_at: None,
-            payload_hash: "e5f6g7h8i9j0".to_string(),
-            decision_metadata: DecisionPlaneMetadata::empty(),
-        },
-    ]
 }
 
 #[cfg(test)]
@@ -679,81 +516,61 @@ mod tests {
     }
 
     #[test]
-    fn list_certificates_returns_all_by_default() -> TestResult {
+    fn list_certificates_returns_honest_empty_report_until_store_exists() -> TestResult {
         let options = CertificateListOptions::new();
         let report = list_certificates(&options);
-        ensure(!report.is_empty(), "should have certificates")?;
+        ensure(report.is_empty(), "certificate store is not wired yet")?;
+        ensure_equal(&report.total_count, &0, "total count")?;
+        ensure_equal(&report.usable_count, &0, "usable count")?;
+        ensure_equal(&report.expired_count, &0, "expired count")?;
         ensure(
-            report.total_count >= 4,
-            "should have at least 4 certificates",
+            report.kinds_present.is_empty(),
+            "empty store must not advertise certificate kinds",
         )
     }
 
     #[test]
-    fn list_certificates_filters_by_kind() -> TestResult {
+    fn list_certificates_filters_do_not_create_records() -> TestResult {
         let options = CertificateListOptions::new().with_kind(CertificateKind::Pack);
         let report = list_certificates(&options);
-        for cert in &report.certificates {
-            ensure_equal(&cert.kind, &CertificateKind::Pack, "kind filter")?;
-        }
-        Ok(())
-    }
+        ensure(report.certificates.is_empty(), "kind filter remains empty")?;
 
-    #[test]
-    fn list_certificates_filters_by_status() -> TestResult {
         let options = CertificateListOptions::new().with_status(CertificateStatus::Valid);
         let report = list_certificates(&options);
-        for cert in &report.certificates {
-            ensure_equal(&cert.status, &CertificateStatus::Valid, "status filter")?;
-        }
-        Ok(())
+        ensure(
+            report.certificates.is_empty(),
+            "status filter remains empty",
+        )
     }
 
     #[test]
-    fn list_certificates_excludes_expired_by_default() -> TestResult {
-        let options = CertificateListOptions::new();
-        let report = list_certificates(&options);
-        for cert in &report.certificates {
-            ensure(
-                cert.status != CertificateStatus::Expired,
-                "should exclude expired by default",
-            )?;
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn list_certificates_includes_expired_when_requested() -> TestResult {
+    fn list_certificates_include_expired_and_limit_remain_empty() -> TestResult {
         let options = CertificateListOptions::new().include_expired();
         let report = list_certificates(&options);
-        let has_expired = report
-            .certificates
-            .iter()
-            .any(|c| c.status == CertificateStatus::Expired);
-        ensure(has_expired, "should include expired when requested")
-    }
+        ensure(
+            report.certificates.is_empty(),
+            "include expired does not synthesize records",
+        )?;
 
-    #[test]
-    fn list_certificates_respects_limit() -> TestResult {
         let options = CertificateListOptions::new()
             .with_limit(2)
             .include_expired();
         let report = list_certificates(&options);
-        ensure(report.certificates.len() <= 2, "should respect limit")
+        ensure(report.certificates.is_empty(), "limit remains empty")
     }
 
     #[test]
-    fn show_certificate_returns_details_for_valid_id() -> TestResult {
+    fn show_certificate_returns_not_found_for_legacy_mock_id() -> TestResult {
         let report = show_certificate("cert_pack_001");
         ensure_equal(
             &report.verification_status,
-            &VerificationResult::Valid,
-            "should be valid",
+            &VerificationResult::NotFound,
+            "legacy mock id is not found",
         )?;
         ensure_equal(
-            &report.certificate.kind,
-            &CertificateKind::Pack,
-            "should be pack certificate",
+            &report.payload_summary,
+            &"Certificate not found".to_owned(),
+            "not-found summary",
         )
     }
 
@@ -768,22 +585,24 @@ mod tests {
     }
 
     #[test]
-    fn verify_certificate_passes_for_valid_cert() -> TestResult {
+    fn verify_certificate_reports_not_found_for_legacy_mock_ids() -> TestResult {
         let report = verify_certificate("cert_pack_001");
-        ensure(report.is_valid(), "should verify successfully")?;
-        ensure(report.hash_verified, "hash should be verified")?;
-        ensure(report.status_valid, "status should be valid")?;
-        ensure(report.expiry_valid, "expiry should be valid")
-    }
-
-    #[test]
-    fn verify_certificate_fails_for_expired_cert() -> TestResult {
-        let report = verify_certificate("cert_privacy_001");
         ensure(!report.is_valid(), "should not be valid")?;
         ensure_equal(
             &report.result,
-            &VerificationResult::Expired,
-            "should be expired",
+            &VerificationResult::NotFound,
+            "legacy mock id is not found",
+        )?;
+        ensure(
+            report.failure_codes.iter().any(|code| code == "not_found"),
+            "not-found failure code",
+        )?;
+
+        let stale_payload = verify_certificate("cert_pack_stale_payload");
+        ensure_equal(
+            &stale_payload.result,
+            &VerificationResult::NotFound,
+            "legacy stale-payload fixture is not found",
         )
     }
 
