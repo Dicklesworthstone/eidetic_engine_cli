@@ -113,6 +113,8 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "capabilities, check, health, status"
     } else if args.iter().any(|arg| arg == "certificate") {
         "certificate"
+    } else if args.iter().any(|arg| arg == "claim") {
+        "claim"
     } else if args.iter().any(|arg| arg == "rehearse") {
         "rehearse"
     } else if args.iter().any(|arg| arg == "lab") {
@@ -144,6 +146,8 @@ fn side_effect_class(args: &[String]) -> &'static str {
         .any(|arg| arg == "capabilities" || arg == "certificate")
     {
         "read-only, idempotent"
+    } else if args.iter().any(|arg| arg == "claim") {
+        "read-only, conservative abstention; no claim manifest parse or verification result"
     } else if args.iter().any(|arg| arg == "rehearse") {
         "unavailable before sandbox mutation"
     } else if args.iter().any(|arg| arg == "lab") {
@@ -484,6 +488,175 @@ fn certificate_verify_degrades_instead_of_reporting_mock_success() -> TestResult
         json!("read-only, idempotent"),
         "logged certificate side-effect class",
     )
+}
+
+#[test]
+fn claim_commands_degrade_instead_of_reporting_empty_placeholder_results() -> TestResult {
+    let workspace_root = unique_artifact_dir("claim-unavailable-workspace")?;
+    let workspace = workspace_root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    fs::write(
+        workspace.join("claims.yaml"),
+        "claims:\n  - id: claim_fixture_001\n    title: placeholder verification must not pass\n",
+    )
+    .map_err(|error| format!("failed to write claims.yaml: {error}"))?;
+    let workspace_arg = workspace.display().to_string();
+
+    let cases = [
+        (
+            "claim-list-unavailable",
+            "claim list",
+            vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "claim".to_owned(),
+                "list".to_owned(),
+            ],
+        ),
+        (
+            "claim-show-unavailable",
+            "claim show",
+            vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "claim".to_owned(),
+                "show".to_owned(),
+                "claim_fixture_001".to_owned(),
+            ],
+        ),
+        (
+            "claim-verify-unavailable",
+            "claim verify",
+            vec![
+                "--workspace".to_owned(),
+                workspace_arg,
+                "--json".to_owned(),
+                "claim".to_owned(),
+                "verify".to_owned(),
+                "claim_fixture_001".to_owned(),
+            ],
+        ),
+    ];
+
+    for (name, command, args) in cases {
+        let result = run_ee_logged(name, Some(&workspace), args)?;
+        ensure_equal(
+            &result.exit_code,
+            &UNSATISFIED_DEGRADED_MODE_EXIT,
+            &format!("{command} unavailable exit code"),
+        )?;
+        ensure(
+            result.stderr.is_empty(),
+            format!("{command} JSON degraded response must keep stderr empty"),
+        )?;
+        ensure_no_ansi(&result.stdout, &format!("{command} degraded stdout"))?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/schema",
+            json!("ee.response.v1"),
+            &format!("{command} degraded response schema"),
+        )?;
+        ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/command",
+            json!(command),
+            &format!("{command} command label"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/code",
+            json!("claim_verification_unavailable"),
+            &format!("{command} degraded code"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/degraded/0/code",
+            json!("claim_verification_unavailable"),
+            &format!("{command} degraded array code"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/followUpBead",
+            json!("eidetic_engine_cli-v76q"),
+            &format!("{command} follow-up bead"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/sideEffectClass",
+            json!(
+                "read-only, conservative abstention; no claim manifest parse or verification result"
+            ),
+            &format!("{command} side-effect class"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/evidenceIds",
+            json!([]),
+            &format!("{command} evidence ids"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/sourceIds",
+            json!([]),
+            &format!("{command} source ids"),
+        )?;
+
+        let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
+        ensure(
+            fake_success.passed,
+            format!("degraded {command} output should not be fake success: {fake_success:?}"),
+        )?;
+
+        let unsupported_claims =
+            validate_no_unsupported_evidence_claims(command, false, false, &result.stdout);
+        ensure(
+            unsupported_claims.passed,
+            format!(
+                "degraded {command} output should not count as unsupported success: {unsupported_claims:?}"
+            ),
+        )?;
+
+        let log_text = fs::read_to_string(&result.log_path)
+            .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+        let log_json: Value = serde_json::from_str(&log_text)
+            .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+        ensure_json_pointer(
+            &log_json,
+            "/degradationCodes",
+            json!(["claim_verification_unavailable"]),
+            &format!("logged {command} degradation code"),
+        )?;
+        ensure_json_pointer(
+            &log_json,
+            "/repairCommand",
+            json!("ee status --json"),
+            &format!("logged {command} repair command"),
+        )?;
+        ensure_json_pointer(
+            &log_json,
+            "/commandBoundaryMatrixRow",
+            json!("claim"),
+            &format!("logged {command} boundary matrix row"),
+        )?;
+        ensure_json_pointer(
+            &log_json,
+            "/sideEffectClass",
+            json!(
+                "read-only, conservative abstention; no claim manifest parse or verification result"
+            ),
+            &format!("logged {command} side-effect class"),
+        )?;
+    }
+
+    Ok(())
 }
 
 #[test]

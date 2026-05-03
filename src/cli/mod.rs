@@ -11457,57 +11457,73 @@ where
 // EE-362: Claim verification handlers
 // ============================================================================
 
-fn handle_claim_list<W, E>(
+const CLAIM_UNAVAILABLE_CODE: &str = "claim_verification_unavailable";
+const CLAIM_UNAVAILABLE_MESSAGE: &str = "Claim listing, manifest inspection, and verification are unavailable until claims.yaml is parsed and checked against real evidence artifacts instead of empty placeholder reports.";
+const CLAIM_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const CLAIM_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-v76q";
+const CLAIM_UNAVAILABLE_SIDE_EFFECT: &str =
+    "read-only, conservative abstention; no claim manifest parse or verification result";
+
+fn write_claim_unavailable<W, E>(
     cli: &Cli,
-    args: &ClaimListArgs,
+    command: &'static str,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    let claims_file = args
-        .claims_file
-        .clone()
-        .unwrap_or_else(|| workspace.join("claims.yaml"));
-
-    let report = crate::core::claims::ClaimListReport {
-        schema: crate::models::RESPONSE_SCHEMA_V1,
-        claims_file: claims_file.display().to_string(),
-        claims_file_exists: claims_file.exists(),
-        total_count: 0,
-        filtered_count: 0,
-        claims: Vec::new(),
-        filter_status: args.status.clone(),
-        filter_frequency: args.frequency.clone(),
-        filter_tag: args.tag.clone(),
-    };
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &output::render_claim_list_human(&report))
-        }
-        output::Renderer::Toon => {
-            write_stdout(stdout, &(output::render_claim_list_toon(&report) + "\n"))
-        }
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            write_stdout(stdout, &(output::render_claim_list_json(&report) + "\n"))
-        }
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": CLAIM_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": CLAIM_UNAVAILABLE_MESSAGE,
+                "repair": CLAIM_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": CLAIM_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": CLAIM_UNAVAILABLE_MESSAGE,
+                        "repair": CLAIM_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": CLAIM_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": CLAIM_UNAVAILABLE_SIDE_EFFECT
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
     }
+
+    let _ = writeln!(stderr, "error: {CLAIM_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {CLAIM_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
+}
+
+fn handle_claim_list<W, E>(
+    cli: &Cli,
+    _args: &ClaimListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    write_claim_unavailable(cli, "claim list", stdout, stderr)
 }
 
 fn handle_claim_show<W, E>(
     cli: &Cli,
-    args: &ClaimShowArgs,
+    _args: &ClaimShowArgs,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -11515,53 +11531,12 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    let claims_file = args
-        .claims_file
-        .clone()
-        .unwrap_or_else(|| workspace.join("claims.yaml"));
-
-    if !claims_file.exists() {
-        let domain_error = DomainError::NotFound {
-            resource: "claims.yaml".to_string(),
-            id: claims_file.display().to_string(),
-            repair: Some("Create claims.yaml in workspace root".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
-
-    let report = crate::core::claims::ClaimShowReport {
-        schema: crate::models::RESPONSE_SCHEMA_V1,
-        claim_id: args.claim_id.clone(),
-        found: false,
-        claim: None,
-        manifest: None,
-        include_manifest: args.include_manifest,
-    };
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &output::render_claim_show_human(&report))
-        }
-        output::Renderer::Toon => {
-            write_stdout(stdout, &(output::render_claim_show_toon(&report) + "\n"))
-        }
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            write_stdout(stdout, &(output::render_claim_show_json(&report) + "\n"))
-        }
-    }
+    write_claim_unavailable(cli, "claim show", stdout, stderr)
 }
 
 fn handle_claim_verify<W, E>(
     cli: &Cli,
-    args: &ClaimVerifyArgs,
+    _args: &ClaimVerifyArgs,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -11569,58 +11544,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    let claims_file = args
-        .claims_file
-        .clone()
-        .unwrap_or_else(|| workspace.join("claims.yaml"));
-
-    let artifacts_dir = args
-        .artifacts_dir
-        .clone()
-        .unwrap_or_else(|| workspace.join("artifacts"));
-
-    if !claims_file.exists() {
-        let domain_error = DomainError::NotFound {
-            resource: "claims.yaml".to_string(),
-            id: claims_file.display().to_string(),
-            repair: Some("Create claims.yaml in workspace root".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
-
-    let report = crate::core::claims::ClaimVerifyReport {
-        schema: crate::models::RESPONSE_SCHEMA_V1,
-        claim_id: args.claim_id.clone(),
-        verify_all: args.claim_id == "all",
-        claims_file: claims_file.display().to_string(),
-        artifacts_dir: artifacts_dir.display().to_string(),
-        total_claims: 0,
-        verified_count: 0,
-        failed_count: 0,
-        skipped_count: 0,
-        results: Vec::new(),
-        fail_fast: args.fail_fast,
-    };
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &output::render_claim_verify_human(&report))
-        }
-        output::Renderer::Toon => {
-            write_stdout(stdout, &(output::render_claim_verify_toon(&report) + "\n"))
-        }
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            write_stdout(stdout, &(output::render_claim_verify_json(&report) + "\n"))
-        }
-    }
+    write_claim_unavailable(cli, "claim verify", stdout, stderr)
 }
 
 // ============================================================================
