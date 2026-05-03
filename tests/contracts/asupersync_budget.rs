@@ -68,6 +68,52 @@ fn budget_exhaustion_maps_to_documented_cli_outcome() -> TestResult {
 }
 
 #[test]
+fn wall_clock_deadline_math_has_stable_remaining_and_failure_shape() -> TestResult {
+    let now = Instant::now();
+    let budget = RequestBudget::unbounded_at(now).with_wall_clock(Duration::from_millis(250));
+
+    ensure_equal(
+        &budget.remaining_wall_clock_at(now),
+        &Some(Duration::from_millis(250)),
+        "initial remaining wall-clock budget",
+    )?;
+    ensure_equal(
+        &budget.remaining_wall_clock_at(now + Duration::from_millis(125)),
+        &Some(Duration::from_millis(125)),
+        "midpoint remaining wall-clock budget",
+    )?;
+    ensure_equal(
+        &budget.remaining_wall_clock_at(now + Duration::from_millis(250)),
+        &Some(Duration::ZERO),
+        "deadline remaining wall-clock budget",
+    )?;
+    ensure_equal(
+        &budget.check_at(now + Duration::from_millis(250)).is_ok(),
+        &true,
+        "exact deadline remains within budget",
+    )?;
+
+    let err = budget
+        .check_at(now + Duration::from_millis(251))
+        .err()
+        .ok_or("deadline breach must be reported")?;
+    ensure_equal(
+        &err.dimension,
+        &BudgetDimension::WallClock,
+        "deadline breach dimension",
+    )?;
+    ensure_equal(&err.limit, &250, "deadline breach limit")?;
+    ensure_equal(&err.used, &251, "deadline breach used")?;
+    ensure_equal(
+        &format!("{err}"),
+        &"request budget exceeded: dimension=wall_clock limit=250 used=251".to_string(),
+        "deadline breach diagnostic",
+    )?;
+
+    Ok(())
+}
+
+#[test]
 fn budget_dimensions_report_in_deterministic_order() -> TestResult {
     let now = Instant::now();
     let mut budget = RequestBudget::unbounded_at(now)

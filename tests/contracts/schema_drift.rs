@@ -289,6 +289,11 @@ pub const PREFLIGHT_SCHEMAS: &[SchemaEntry] = &[
         "ee.recorder.links.v1",
         SchemaCategory::Recorder,
     ),
+    SchemaEntry::new(
+        "rationale_trace",
+        "ee.rationale_trace.v1",
+        SchemaCategory::Recorder,
+    ),
 ];
 
 /// Lab schemas.
