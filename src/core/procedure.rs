@@ -86,13 +86,18 @@ impl ProcedureProposeReport {
 pub fn propose_procedure(
     options: &ProcedureProposeOptions,
 ) -> Result<ProcedureProposeReport, DomainError> {
+    if !options.dry_run {
+        return Err(DomainError::PolicyDenied {
+            message: "procedure proposal is dry-run-only until procedure records are backed by persisted evidence".to_owned(),
+            repair: Some("ee procedure propose <title> --dry-run --json".to_owned()),
+        });
+    }
+
     let procedure_id = format!("proc_{}", generate_id());
     let created_at = Utc::now().to_rfc3339();
     let summary = options.summary.clone().unwrap_or_else(|| {
-        format!(
-            "Procedure distilled from {} source runs",
-            options.source_run_ids.len()
-        )
+        "Procedure candidate request from explicit evidence; ee did not distill steps or claims."
+            .to_owned()
     });
 
     let report = ProcedureProposeReport {
@@ -421,7 +426,7 @@ pub fn export_procedure_from_records(
         content,
         content_length,
         content_hash,
-        includes_evidence: true,
+        includes_evidence: snapshot.includes_evidence(),
         redaction_status: "not_required".to_owned(),
         install_mode: install_mode(format),
         warnings,
@@ -433,6 +438,12 @@ pub fn export_procedure_from_records(
 struct ProcedureExportSnapshot {
     procedure: ProcedureDetail,
     steps: Vec<ProcedureStepDetail>,
+}
+
+impl ProcedureExportSnapshot {
+    fn includes_evidence(&self) -> bool {
+        !self.procedure.source_run_ids.is_empty() || !self.procedure.evidence_ids.is_empty()
+    }
 }
 
 fn procedure_export_snapshot(
@@ -601,7 +612,7 @@ fn render_procedure_export_manifest(
         "procedureId": snapshot.procedure.procedure_id,
         "format": format.as_str(),
         "generatedAt": exported_at,
-        "includesEvidence": true,
+        "includesEvidence": snapshot.includes_evidence(),
         "redactionStatus": "not_required",
         "procedure": snapshot.procedure,
         "steps": snapshot.steps,
@@ -1814,6 +1825,7 @@ mod tests {
             title: "Test procedure".to_owned(),
             summary: Some("A test summary".to_owned()),
             source_run_ids: vec!["run_1".to_owned()],
+            dry_run: true,
             ..Default::default()
         };
 
@@ -1821,6 +1833,23 @@ mod tests {
         assert!(report.procedure_id.starts_with("proc_"));
         assert_eq!(report.status, "candidate");
         assert_eq!(report.source_run_count, 1);
+        assert!(report.dry_run);
+        Ok(())
+    }
+
+    #[test]
+    fn propose_without_dry_run_is_policy_denied() -> TestResult {
+        let options = ProcedureProposeOptions {
+            title: "Test procedure".to_owned(),
+            source_run_ids: vec!["run_1".to_owned()],
+            dry_run: false,
+            ..Default::default()
+        };
+
+        let Err(error) = propose_procedure(&options) else {
+            return Err("non-dry-run proposal should be denied".to_owned());
+        };
+        assert_eq!(error.code(), "policy_denied");
         Ok(())
     }
 
