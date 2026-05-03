@@ -18,6 +18,7 @@
     },
     "pack": {
       "query": "format before release",
+      "hash": "blake3:9f86e424d01a1080b8e91b3417a53c5e80a8749d6cbc8cb66d2a5752ceb625b6",
       "budget": {
         "maxTokens": 4000,
         "usedTokens": 11
