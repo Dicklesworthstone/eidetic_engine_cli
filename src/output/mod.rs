@@ -7277,8 +7277,15 @@ pub fn render_preflight_run_json(report: &RunReport) -> String {
             "cleared": report.cleared,
             "block_reason": report.block_reason,
             "risk_brief_id": report.risk_brief_id,
+            "top_risks": report.top_risks,
+            "ask_now_prompts": report.ask_now_prompts,
+            "must_verify_checks": report.must_verify_checks,
+            "evidence_ids": report.evidence_ids,
+            "next_action": report.next_action,
             "risks_identified": report.risks_identified,
             "tripwires_set": report.tripwires_set,
+            "tripwires": report.tripwires,
+            "degraded": report.degraded,
             "dry_run": report.dry_run,
             "started_at": report.started_at,
             "completed_at": report.completed_at,
@@ -7334,6 +7341,7 @@ pub fn render_preflight_show_json(report: &ShowReport) -> String {
             "run": report.run,
             "brief": report.brief,
             "tripwires": report.tripwires,
+            "degraded": report.degraded,
         }
     });
     json.to_string()

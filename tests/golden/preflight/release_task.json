@@ -1,0 +1,45 @@
+{
+  "schema": "ee.preflight.report.v1",
+  "run_id": "pf_DYNAMIC",
+  "task_input": "deploy production database migration",
+  "status": "completed",
+  "risk_level": "high",
+  "cleared": false,
+  "block_reason": "Risk level high exceeds auto-clear threshold medium",
+  "risk_brief_id": "rb_DYNAMIC",
+  "top_risks": [
+    "high-risk task language requires explicit preflight review.",
+    "Deployment or production wording can hide irreversible side effects.",
+    "Migration wording requires schema and data-safety checks."
+  ],
+  "ask_now_prompts": [
+    "Confirm the exact target environment and rollback point before proceeding.",
+    "Ask whether this action touches production state or release artifacts."
+  ],
+  "must_verify_checks": [
+    "Verify current branch, workspace, and durable evidence scope.",
+    "Run the relevant release/deployment verification before execution.",
+    "Verify migration dry-run or rollback evidence before applying."
+  ],
+  "evidence_ids": [
+    "dep_no_tokio"
+  ],
+  "next_action": "verify_must_checks_before_proceeding",
+  "risks_identified": 0,
+  "tripwires_set": 1,
+  "tripwires": [
+    {
+      "id": "tw_DYNAMIC",
+      "name": "critical [dependency_contract:dep_no_tokio]: Forbidden async runtime dependency must not appear in release work",
+      "status": "armed",
+      "tripwire_type": "file_change",
+      "action": "halt",
+      "condition": "task_contains_any(\"deploy\", \"migration\", \"production\")",
+      "message": "critical [dependency_contract:dep_no_tokio]: Forbidden async runtime dependency must not appear in release work"
+    }
+  ],
+  "degraded": [],
+  "dry_run": false,
+  "started_at": "TIMESTAMP",
+  "completed_at": "TIMESTAMP"
+}

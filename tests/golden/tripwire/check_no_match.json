@@ -1,0 +1,23 @@
+{
+  "schema": "ee.tripwire.check.v1",
+  "tripwire_id": "tw_missing",
+  "preflight_run_id": null,
+  "result": "not_found",
+  "state": "armed",
+  "action": "warn",
+  "condition": "",
+  "message": null,
+  "should_halt": false,
+  "dry_run": true,
+  "checked_at": "TIMESTAMP",
+  "details": "Tripwire 'tw_missing' not found in workspace",
+  "feedback": null,
+  "degraded": [
+    {
+      "code": "tripwire_inputs_incomplete",
+      "severity": "warning",
+      "message": "No tripwire matched the requested ID, so the check could not evaluate a concrete event payload.",
+      "repair": "ee tripwire list --json"
+    }
+  ]
+}

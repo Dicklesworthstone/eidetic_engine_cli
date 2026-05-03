@@ -14,6 +14,14 @@
       "duration_ms": null
     },
     "brief": null,
-    "tripwires": []
+    "tripwires": [],
+    "degraded": [
+      {
+        "code": "preflight_evidence_stale",
+        "severity": "warning",
+        "message": "Preflight persistence is not wired yet; stored risk brief evidence may be stale or unavailable.",
+        "repair": "ee preflight run <task> --json"
+      }
+    ]
   }
 }

@@ -187,6 +187,7 @@ pub struct CheckReport {
     pub checked_at: String,
     pub details: Option<String>,
     pub feedback: Option<RecordFeedbackReport>,
+    pub degraded: Vec<TripwireDegradation>,
 }
 
 impl CheckReport {
@@ -206,6 +207,7 @@ impl CheckReport {
             checked_at: Utc::now().to_rfc3339(),
             details: None,
             feedback: None,
+            degraded: Vec::new(),
         }
     }
 
@@ -217,6 +219,27 @@ impl CheckReport {
     #[must_use]
     pub fn to_json_pretty(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
+    }
+}
+
+/// Honest degraded-mode marker for tripwire readiness contracts.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TripwireDegradation {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    pub repair: Option<String>,
+}
+
+impl TripwireDegradation {
+    #[must_use]
+    pub fn inputs_incomplete(message: impl Into<String>) -> Self {
+        Self {
+            code: "tripwire_inputs_incomplete".to_owned(),
+            severity: "warning".to_owned(),
+            message: message.into(),
+            repair: Some("ee tripwire list --json".to_owned()),
+        }
     }
 }
 
@@ -291,6 +314,9 @@ pub fn check_tripwire(options: &CheckOptions) -> Result<CheckReport, DomainError
         report.details = Some(format!(
             "Tripwire '{}' not found in workspace",
             options.tripwire_id
+        ));
+        report.degraded.push(TripwireDegradation::inputs_incomplete(
+            "No tripwire matched the requested ID, so the check could not evaluate a concrete event payload.",
         ));
         return Ok(report);
     };

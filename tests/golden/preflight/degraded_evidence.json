@@ -1,0 +1,24 @@
+{
+  "schema": "ee.preflight.report.v1",
+  "run": {
+    "id": "pf_gate16_contract",
+    "task_input": "(run not found in storage)",
+    "status": "completed",
+    "risk_level": "unknown",
+    "cleared": false,
+    "block_reason": "Storage not yet wired",
+    "started_at": "TIMESTAMP",
+    "completed_at": "TIMESTAMP",
+    "duration_ms": null
+  },
+  "brief": null,
+  "tripwires": [],
+  "degraded": [
+    {
+      "code": "preflight_evidence_stale",
+      "severity": "warning",
+      "message": "Preflight persistence is not wired yet; stored risk brief evidence may be stale or unavailable.",
+      "repair": "ee preflight run <task> --json"
+    }
+  ]
+}

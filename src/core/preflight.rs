@@ -373,9 +373,15 @@ pub struct RunReport {
     pub cleared: bool,
     pub block_reason: Option<String>,
     pub risk_brief_id: Option<String>,
+    pub top_risks: Vec<String>,
+    pub ask_now_prompts: Vec<String>,
+    pub must_verify_checks: Vec<String>,
+    pub evidence_ids: Vec<String>,
+    pub next_action: String,
     pub risks_identified: usize,
     pub tripwires_set: usize,
     pub tripwires: Vec<TripwireView>,
+    pub degraded: Vec<PreflightDegradation>,
     pub dry_run: bool,
     pub started_at: String,
     pub completed_at: Option<String>,
@@ -393,9 +399,15 @@ impl RunReport {
             cleared: false,
             block_reason: None,
             risk_brief_id: None,
+            top_risks: Vec::new(),
+            ask_now_prompts: Vec::new(),
+            must_verify_checks: Vec::new(),
+            evidence_ids: Vec::new(),
+            next_action: "assess_risk".to_owned(),
             risks_identified: 0,
             tripwires_set: 0,
             tripwires: Vec::new(),
+            degraded: Vec::new(),
             dry_run: false,
             started_at: Utc::now().to_rfc3339(),
             completed_at: None,
@@ -415,6 +427,7 @@ pub struct ShowReport {
     pub run: PreflightRunView,
     pub brief: Option<RiskBriefView>,
     pub tripwires: Vec<TripwireView>,
+    pub degraded: Vec<PreflightDegradation>,
 }
 
 impl ShowReport {
@@ -425,6 +438,7 @@ impl ShowReport {
             run,
             brief: None,
             tripwires: Vec::new(),
+            degraded: Vec::new(),
         }
     }
 
@@ -570,6 +584,27 @@ impl CloseReport {
     #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+/// Honest degraded-mode marker for preflight readiness contracts.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PreflightDegradation {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    pub repair: Option<String>,
+}
+
+impl PreflightDegradation {
+    #[must_use]
+    pub fn evidence_stale(message: impl Into<String>) -> Self {
+        Self {
+            code: "preflight_evidence_stale".to_owned(),
+            severity: "warning".to_owned(),
+            message: message.into(),
+            repair: Some("ee preflight run <task> --json".to_owned()),
+        }
     }
 }
 
@@ -779,6 +814,10 @@ pub fn run_preflight(options: &RunOptions) -> Result<RunReport, DomainError> {
     // Generate risk brief
     let brief_id = format!("{}{}", RISK_BRIEF_ID_PREFIX, generate_id());
     report.risk_brief_id = Some(brief_id);
+    let readiness = readiness_brief_fields(&options.task_input, risk_level);
+    report.top_risks = readiness.top_risks;
+    report.ask_now_prompts = readiness.ask_now_prompts;
+    report.must_verify_checks = readiness.must_verify_checks;
 
     if options.check_tripwires {
         let tripwires = generate_tripwires_from_sources(
@@ -793,6 +832,15 @@ pub fn run_preflight(options: &RunOptions) -> Result<RunReport, DomainError> {
             .iter()
             .map(|generated| TripwireView::from(&generated.tripwire))
             .collect();
+        report.evidence_ids = tripwires
+            .iter()
+            .map(|generated| generated.source_id.clone())
+            .collect();
+        if options.tripwire_sources.is_empty() && risk_level.requires_confirmation() {
+            report.degraded.push(PreflightDegradation::evidence_stale(
+                "No persisted evidence sources were available, so the preflight brief relies on task text only.",
+            ));
+        }
     }
 
     // Determine clearance
@@ -807,6 +855,11 @@ pub fn run_preflight(options: &RunOptions) -> Result<RunReport, DomainError> {
             auto_clear_threshold.as_str()
         ));
     }
+    report.next_action = if report.cleared {
+        "proceed_after_standard_checks".to_owned()
+    } else {
+        "verify_must_checks_before_proceeding".to_owned()
+    };
 
     report.status = PreflightStatus::Completed.as_str().to_owned();
     report.completed_at = Some(Utc::now().to_rfc3339());
@@ -843,7 +896,11 @@ pub fn show_preflight(options: &ShowOptions) -> Result<ShowReport, DomainError> 
         duration_ms: None,
     };
 
-    Ok(ShowReport::new(run))
+    let mut report = ShowReport::new(run);
+    report.degraded.push(PreflightDegradation::evidence_stale(
+        "Preflight persistence is not wired yet; stored risk brief evidence may be stale or unavailable.",
+    ));
+    Ok(report)
 }
 
 /// Close a preflight run.
@@ -935,6 +992,59 @@ fn assess_task_risk(task_input: &str) -> RiskLevel {
     }
 
     RiskLevel::None
+}
+
+struct ReadinessBriefFields {
+    top_risks: Vec<String>,
+    ask_now_prompts: Vec<String>,
+    must_verify_checks: Vec<String>,
+}
+
+fn readiness_brief_fields(task_input: &str, risk_level: RiskLevel) -> ReadinessBriefFields {
+    let lower = task_input.to_lowercase();
+    let mut top_risks = Vec::new();
+    let mut ask_now_prompts = Vec::new();
+    let mut must_verify_checks = Vec::new();
+
+    if risk_level.requires_confirmation() {
+        top_risks.push(format!(
+            "{}-risk task language requires explicit preflight review.",
+            risk_level.as_str()
+        ));
+        ask_now_prompts.push(
+            "Confirm the exact target environment and rollback point before proceeding.".to_owned(),
+        );
+        must_verify_checks
+            .push("Verify current branch, workspace, and durable evidence scope.".to_owned());
+    }
+
+    if lower.contains("production") || lower.contains("deploy") {
+        top_risks.push(
+            "Deployment or production wording can hide irreversible side effects.".to_owned(),
+        );
+        ask_now_prompts.push(
+            "Ask whether this action touches production state or release artifacts.".to_owned(),
+        );
+        must_verify_checks
+            .push("Run the relevant release/deployment verification before execution.".to_owned());
+    }
+
+    if lower.contains("migrate") || lower.contains("migration") {
+        top_risks.push("Migration wording requires schema and data-safety checks.".to_owned());
+        must_verify_checks
+            .push("Verify migration dry-run or rollback evidence before applying.".to_owned());
+    }
+
+    if top_risks.is_empty() {
+        top_risks.push("No high-severity task pattern matched.".to_owned());
+        must_verify_checks.push("Proceed with standard project verification.".to_owned());
+    }
+
+    ReadinessBriefFields {
+        top_risks,
+        ask_now_prompts,
+        must_verify_checks,
+    }
 }
 
 #[cfg(test)]

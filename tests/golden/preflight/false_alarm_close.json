@@ -1,0 +1,45 @@
+{
+  "schema": "ee.preflight.report.v1",
+  "run_id": "pf_gate16_contract",
+  "previous_status": "running",
+  "new_status": "completed",
+  "cleared": true,
+  "reason": "task completed without needing the warning",
+  "task_outcome": "success",
+  "feedback": {
+    "schema": "ee.feedback.record.v1",
+    "record_status": "dry_run",
+    "record_id": null,
+    "target_type": "preflight_run",
+    "target_id": "pf_gate16_contract",
+    "preflight_run_id": "pf_gate16_contract",
+    "tripwire_id": null,
+    "task_outcome": "success",
+    "evaluation": null,
+    "feedback_kind": "false_alarm",
+    "signal": "inaccurate",
+    "confidence_adjustment": -0.12,
+    "utility_adjustment": -0.15,
+    "false_alarm_cost_delta": 1,
+    "score_effect": {
+      "utility_delta": -0.15,
+      "confidence_delta": -0.12,
+      "false_alarm_delta": 1,
+      "priority_multiplier": 0.75,
+      "scoring_note": "Warning was a false alarm; increase false-alarm cost without deleting evidence."
+    },
+    "counterfactual_effect": {
+      "regret_kind": "noisy",
+      "intervention": "demote_repeated_false_alarm",
+      "evaluation_hint": "Counterfactual evaluation should test whether suppressing this warning preserves the successful outcome.",
+      "curation_candidate": true
+    },
+    "curation_candidates_generated": 1,
+    "durable_mutation": false,
+    "evidence_preserved": true,
+    "dry_run": true,
+    "recorded_at": "TIMESTAMP"
+  },
+  "dry_run": true,
+  "closed_at": "TIMESTAMP"
+}

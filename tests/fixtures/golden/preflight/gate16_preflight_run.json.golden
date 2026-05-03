@@ -9,8 +9,33 @@
     "cleared": false,
     "block_reason": "Risk level high exceeds auto-clear threshold medium",
     "risk_brief_id": "rb_DYNAMIC",
+    "top_risks": [
+      "high-risk task language requires explicit preflight review.",
+      "Deployment or production wording can hide irreversible side effects.",
+      "Migration wording requires schema and data-safety checks."
+    ],
+    "ask_now_prompts": [
+      "Confirm the exact target environment and rollback point before proceeding.",
+      "Ask whether this action touches production state or release artifacts."
+    ],
+    "must_verify_checks": [
+      "Verify current branch, workspace, and durable evidence scope.",
+      "Run the relevant release/deployment verification before execution.",
+      "Verify migration dry-run or rollback evidence before applying."
+    ],
+    "evidence_ids": [],
+    "next_action": "verify_must_checks_before_proceeding",
     "risks_identified": 0,
     "tripwires_set": 0,
+    "tripwires": [],
+    "degraded": [
+      {
+        "code": "preflight_evidence_stale",
+        "severity": "warning",
+        "message": "No persisted evidence sources were available, so the preflight brief relies on task text only.",
+        "repair": "ee preflight run <task> --json"
+      }
+    ],
     "dry_run": false,
     "started_at": "TIMESTAMP",
     "completed_at": "TIMESTAMP"
