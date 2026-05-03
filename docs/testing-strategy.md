@@ -180,8 +180,30 @@ Required command-step fields:
 - `degradation_codes`.
 - `mutation_summary`: `read_only`, `dry_run_no_mutation_expected`,
   `durable_write_expected`, or a more specific conservative summary.
+- `side_effect_class`: stable class token from the command-boundary matrix,
+  such as `class=read_only`, `class=append_only`, or
+  `class=derived_asset_rebuild`.
+- `changed_record_ids`: durable record IDs created or updated by the step; empty
+  for read-only or failed-before-mutation steps.
+- `audit_ids`: audit records written by the step; empty unless the command's
+  side-effect contract requires an audit entry.
+- `records_rolled_back_or_audited`: changed records that were rolled back or
+  explicitly audited when cancellation, budget exhaustion, storage/index
+  failure, or supervised child failure happens after partial progress.
+- `filesystem_artifacts_created`: side-path artifacts created by the step, such
+  as backup bundles, reports, capsules, or sandbox output.
+- `forbidden_filesystem_operations_checked`: true when the harness verified that
+  the step did not delete files, create worktrees, silently overwrite outputs, or
+  mutate outside its declared side path.
 - `command_boundary_matrix_row`: reference to the command-boundary matrix row
   in `docs/mechanical-boundary-command-inventory.md`, or null if not applicable.
+- `evidence_bundle_path` and `evidence_bundle_hash`: required for project-local
+  skill handoffs using `ee.skill_evidence_bundle.v1`; null otherwise.
+- `provenance_ids`, `trust_classes`, and
+  `prompt_injection_quarantine_status`: required for skill handoffs and empty or
+  `not_applicable` for purely mechanical command steps.
+- `readme_workflow_row`: README or skill workflow row related to a handoff, or
+  null when not applicable.
 - `fixture_hashes`: map of fixture IDs to content hashes, or empty when no
   fixtures are required.
 - `db_generation_before` and `db_generation_after`: DB generation numbers
@@ -190,13 +212,19 @@ Required command-step fields:
   unbounded.
 - `cancellation_status`: `not_applicable`, `not_requested`, `requested`,
   `completed`, or `timeout`.
+- `cancellation_injection_point`: stable checkpoint name where cancellation or
+  timeout was injected, or null when not requested.
+- `observed_outcome`: deterministic runtime outcome such as `success`,
+  `cancelled`, `budget_exhausted`, `storage_error`, `index_error`, or
+  `supervised_child_failed`.
 - `reproduction_command`: stable shell command for re-running the exact step
   from `cwd` with sanitized overrides.
 - `first_failure`: null on a clean step; otherwise the shortest actionable
   diagnosis, such as `stdout_pollution`, `schema_mismatch:<schema>`,
   `missing_matrix_row:<surface>`, `unexpected_mutation`,
-  `missing_fixture_hash:<fixture_id>`, `error.code=<code>`, or the first stable
-  stderr line.
+  `missing_fixture_hash:<fixture_id>`,
+  `missing_runtime_rollback_or_audit:<outcome>`, `error.code=<code>`, or the
+  first stable stderr line.
 
 Boundary-migration e2e tests must fail if a successful JSON-mode command writes
 human diagnostics to stdout, if stdout cannot be parsed as the requested machine

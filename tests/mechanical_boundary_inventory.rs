@@ -16,6 +16,138 @@ const REQUIRED_MATRIX_HEADERS: &[&str] = &[
     "Required coverage owner",
 ];
 
+const BASELINE_LEDGER_HEADERS: &[&str] = &[
+    "Baseline surface",
+    "Actual command paths or absence finding",
+    "Mechanical source",
+    "Side-effect contract",
+    "Runtime contract",
+    "Degraded / repair posture",
+    "Evidence required",
+];
+
+const BASELINE_ACTUAL_COMMANDS: &[(&str, &[&str])] = &[
+    (
+        "workspace setup and registry",
+        &[
+            "init",
+            "workspace resolve",
+            "workspace list",
+            "workspace alias",
+        ],
+    ),
+    (
+        "manual memory write/read",
+        &["remember", "memory list", "memory show", "memory history"],
+    ),
+    (
+        "outcome feedback and quarantine",
+        &[
+            "outcome",
+            "outcome quarantine list",
+            "outcome quarantine release",
+        ],
+    ),
+    (
+        "explicit imports",
+        &["import cass", "import jsonl", "import eidetic-legacy"],
+    ),
+    (
+        "derived search index",
+        &["index status", "index rebuild", "index reembed"],
+    ),
+    (
+        "backup and restore side paths",
+        &[
+            "backup create",
+            "backup list",
+            "backup inspect",
+            "backup verify",
+            "backup restore",
+        ],
+    ),
+    (
+        "export renderers currently present",
+        &["schema export", "graph export", "procedure export"],
+    ),
+    (
+        "deterministic evaluation entrypoint",
+        &["eval run", "eval list"],
+    ),
+    (
+        "status, health, and config-sensitive probes",
+        &[
+            "status",
+            "health",
+            "check",
+            "capabilities",
+            "doctor",
+            "diag claims",
+            "diag dependencies",
+            "diag graph",
+            "diag integrity",
+            "diag quarantine",
+            "diag streams",
+        ],
+    ),
+    (
+        "static discovery and schemas",
+        &[
+            "help",
+            "version",
+            "introspect",
+            "schema list",
+            "model status",
+            "model list",
+            "mcp manifest",
+            "agent-docs",
+        ],
+    ),
+];
+
+const BASELINE_ABSENT_COMMANDS: &[&str] = &[
+    "profile list",
+    "profile show",
+    "db status",
+    "db migrate",
+    "db check",
+    "db backup",
+    "index vacuum",
+    "restore",
+    "export jsonl",
+    "eval report",
+    "completion",
+    "config",
+];
+
+const SIDE_EFFECT_CLASSES: &[&str] = &[
+    "read_only",
+    "read_only_now",
+    "report_only",
+    "read_only_or_unavailable",
+    "append_only",
+    "audited_mutation",
+    "derived_asset_rebuild",
+    "side_path_artifact",
+    "supervised_jobs",
+    "mixed",
+    "degraded_unavailable",
+    "report_only_or_append",
+    "report_only_or_audited_mutation",
+];
+
+const RUNTIME_CLASSES: &[&str] = &[
+    "immediate",
+    "bounded_read",
+    "bounded_query",
+    "bounded_write",
+    "side_path_artifact",
+    "derived_rebuild",
+    "supervised",
+    "streaming",
+    "degraded_unavailable",
+];
+
 #[test]
 fn mechanical_boundary_inventory_covers_all_cli_command_paths() -> Result<(), String> {
     let commands = command_paths_from_extract_function(CLI_SOURCE)?;
@@ -147,6 +279,321 @@ fn command_boundary_matrix_has_required_columns_and_complete_rows() -> Result<()
 }
 
 #[test]
+fn command_boundary_matrix_side_effect_contracts_are_machine_checkable() -> Result<(), String> {
+    assert!(
+        INVENTORY.contains("### Side-Effect Contract Vocabulary"),
+        "inventory must define side-effect contract vocabulary"
+    );
+    for class in SIDE_EFFECT_CLASSES {
+        assert!(
+            INVENTORY.contains(&format!("`class={class}`")),
+            "side-effect vocabulary missing class={class}"
+        );
+    }
+
+    for row in matrix_rows(INVENTORY)?.iter().skip(2) {
+        let surface = row_cell(row, 0, "surface")?;
+        let classification = row_cell(row, 1, "classification")?;
+        let degraded_code = row_cell(row, 6, "degraded code")?;
+        let side_effect = row_cell(row, 7, "side-effect")?;
+        let class = side_effect_class(side_effect)?;
+
+        assert!(
+            SIDE_EFFECT_CLASSES.contains(&class),
+            "matrix row uses unknown side-effect class `{class}`: {row:?}"
+        );
+        assert!(
+            !side_effect.contains(" may "),
+            "side-effect contract must be explicit, not permissive: {row:?}"
+        );
+
+        if classification.contains("fix backing data")
+            || classification.contains("split")
+            || classification.contains("degrade/unavailable")
+        {
+            assert_ne!(
+                degraded_code, "none",
+                "risky or unavailable rows must name a degraded code: {row:?}"
+            );
+        }
+
+        match class {
+            "read_only" | "report_only" | "read_only_or_unavailable" => {
+                assert!(
+                    side_effect.contains("mutation=none"),
+                    "read/report-only rows must state mutation=none: {row:?}"
+                );
+            }
+            "read_only_now" => {
+                assert!(
+                    side_effect.contains("future") && side_effect.contains("audit"),
+                    "read_only_now rows must constrain future writes: {row:?}"
+                );
+            }
+            "append_only" => {
+                assert!(
+                    side_effect.contains("append")
+                        || side_effect.contains("keyed")
+                        || side_effect.contains("retry returns existing"),
+                    "append-only rows must name append/idempotency behavior: {row:?}"
+                );
+                assert!(
+                    side_effect.contains("audit"),
+                    "append-only rows must name audit behavior: {row:?}"
+                );
+            }
+            "audited_mutation" => {
+                assert!(
+                    side_effect.contains("transaction") && side_effect.contains("audit"),
+                    "audited mutation rows must name transaction and audit behavior: {row:?}"
+                );
+                assert!(
+                    side_effect.contains("idempot")
+                        || side_effect.contains("dry-run")
+                        || side_effect.contains("rule key"),
+                    "audited mutation rows must name retry/idempotency or dry-run posture: {row:?}"
+                );
+            }
+            "derived_asset_rebuild" => {
+                assert!(
+                    side_effect.contains("generation")
+                        && side_effect.contains("source DB unchanged"),
+                    "derived rebuild rows must name generation and source DB immutability: {row:?}"
+                );
+            }
+            "side_path_artifact" => {
+                assert!(
+                    side_effect.contains("side path")
+                        || side_effect.contains("side-path")
+                        || side_effect.contains("sandbox"),
+                    "side-path rows must name the side-path/sandbox artifact boundary: {row:?}"
+                );
+                assert!(
+                    side_effect.contains("no-overwrite") || side_effect.contains("no-delete"),
+                    "side-path rows must name no-overwrite or no-delete behavior: {row:?}"
+                );
+            }
+            "supervised_jobs" => {
+                for required in ["job ledger", "audit", "runtime budget", "cancellation"] {
+                    assert!(
+                        side_effect.contains(required),
+                        "supervised job row missing `{required}`: {row:?}"
+                    );
+                }
+            }
+            "mixed" => {
+                assert!(
+                    side_effect.contains("append")
+                        && side_effect.contains("read-only")
+                        && side_effect.contains("rollback"),
+                    "mixed rows must split mutating, read-only, and rollback behavior: {row:?}"
+                );
+            }
+            "degraded_unavailable" => {
+                assert!(
+                    side_effect.contains("no mutation") && degraded_code != "none",
+                    "degraded rows must state no mutation and a degraded code: {row:?}"
+                );
+            }
+            "report_only_or_append" => {
+                assert!(
+                    side_effect.contains("read-only")
+                        && side_effect.contains("append_only")
+                        && side_effect.contains("audit"),
+                    "report-or-append rows must split read and candidate-write behavior: {row:?}"
+                );
+            }
+            "report_only_or_audited_mutation" => {
+                assert!(
+                    side_effect.contains("read-only")
+                        && side_effect.contains("audited transaction"),
+                    "report-or-audited rows must split read and relation-write behavior: {row:?}"
+                );
+            }
+            unknown => {
+                return Err(format!(
+                    "unhandled side-effect class `{unknown}` for surface {surface}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn command_boundary_matrix_runtime_contracts_are_machine_checkable() -> Result<(), String> {
+    assert!(
+        INVENTORY.contains("### Runtime / Cancellation Contract Vocabulary"),
+        "inventory must define runtime/cancellation contract vocabulary"
+    );
+    for class in RUNTIME_CLASSES {
+        assert!(
+            INVENTORY.contains(&format!("`runtime={class}`")),
+            "runtime vocabulary missing runtime={class}"
+        );
+    }
+
+    for row in matrix_rows(INVENTORY)?.iter().skip(2) {
+        let runtime = row_cell(row, 8, "runtime")?;
+        let class = runtime_class(runtime)?;
+
+        assert!(
+            RUNTIME_CLASSES.contains(&class),
+            "matrix row uses unknown runtime class `{class}`: {row:?}"
+        );
+        for required in ["budget=", "cancel=", "partial=", "outcome="] {
+            assert!(
+                runtime.contains(required),
+                "runtime contract missing `{required}`: {row:?}"
+            );
+        }
+        assert!(
+            !runtime.contains("cancellable"),
+            "runtime contract must use structured cancel= fields, not prose: {row:?}"
+        );
+
+        match class {
+            "immediate" => {
+                for required in ["budget=none", "cancel=not_applicable", "partial=none"] {
+                    assert!(
+                        runtime.contains(required),
+                        "immediate runtime must state `{required}`: {row:?}"
+                    );
+                }
+            }
+            "bounded_read" | "bounded_query" => {
+                assert!(
+                    runtime.contains("cancel=checkpoint"),
+                    "bounded read/query runtime must name checkpoint cancellation: {row:?}"
+                );
+            }
+            "bounded_write" => {
+                assert!(
+                    runtime.contains("pre_") || runtime.contains("cancel=checkpoint"),
+                    "bounded write runtime must name pre-commit/pre-write or checkpoint cancellation: {row:?}"
+                );
+                assert!(
+                    runtime.contains("rollback") || runtime.contains("existing_record"),
+                    "bounded write runtime must name rollback or idempotent existing-record partial state: {row:?}"
+                );
+            }
+            "side_path_artifact" => {
+                assert!(
+                    runtime.contains("side_path") || runtime.contains("blocked"),
+                    "side-path runtime must name side-path or blocked partial state: {row:?}"
+                );
+            }
+            "derived_rebuild" => {
+                assert!(
+                    runtime.contains("partial=derived_asset_discard"),
+                    "derived rebuild runtime must discard incomplete derived assets: {row:?}"
+                );
+            }
+            "supervised" => {
+                assert!(
+                    runtime.contains("cancel=job_signal") && runtime.contains("job_ledger"),
+                    "supervised runtime must name job signal and job ledger: {row:?}"
+                );
+            }
+            "streaming" => {
+                assert!(
+                    runtime.contains("cancel=job_signal") && runtime.contains("append"),
+                    "streaming runtime must name job signal and append checkpoint policy: {row:?}"
+                );
+            }
+            "degraded_unavailable" => {
+                assert!(
+                    runtime.contains("outcome=degraded"),
+                    "degraded runtime must map to degraded outcome: {row:?}"
+                );
+            }
+            unknown => {
+                return Err(format!("unhandled runtime class `{unknown}`"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn baseline_infrastructure_ledger_covers_actual_and_absent_command_paths() -> Result<(), String> {
+    let commands = command_paths_from_extract_function(CLI_SOURCE)?;
+    let rows = baseline_rows(INVENTORY)?;
+    let header = rows
+        .first()
+        .ok_or_else(|| "baseline infrastructure ledger must include a header row".to_owned())?;
+
+    assert_eq!(
+        header, BASELINE_LEDGER_HEADERS,
+        "baseline ledger headers changed; update hy6y contract tests with the docs"
+    );
+
+    for row in rows.iter().skip(2) {
+        assert_eq!(
+            row.len(),
+            header.len(),
+            "baseline ledger row has wrong cell count: {row:?}"
+        );
+
+        for index in 2..header.len() {
+            assert!(
+                !row_cell(row, index, "baseline ledger cell")?.is_empty(),
+                "baseline ledger row has an empty required cell: {row:?}"
+            );
+        }
+
+        assert!(
+            row_cell(row, 3, "baseline side-effect")?.contains("class="),
+            "baseline ledger row must name a side-effect class: {row:?}"
+        );
+        assert!(
+            row_cell(row, 4, "baseline runtime")?.contains("runtime="),
+            "baseline ledger row must name a runtime class: {row:?}"
+        );
+        let evidence = row_cell(row, 6, "baseline evidence")?;
+        assert!(
+            ["test", "e2e", "golden", "contract", "fixture"]
+                .iter()
+                .any(|needle| evidence.contains(needle)),
+            "baseline ledger row must name concrete evidence: {row:?}"
+        );
+    }
+
+    for (surface, expected_commands) in BASELINE_ACTUAL_COMMANDS {
+        let row = baseline_row_for(&rows, surface)?;
+        let command_cell = row_cell(row, 1, "baseline command paths")?;
+
+        for command in *expected_commands {
+            assert!(
+                commands.iter().any(|actual| actual == command),
+                "baseline expected command `{command}` is not in the CLI extractor"
+            );
+            assert!(
+                command_cell.contains(&format!("`{command}`")),
+                "baseline ledger row `{surface}` missing command `{command}`"
+            );
+        }
+    }
+
+    let absence_row = baseline_row_for(&rows, "non-present baseline terms")?;
+    let absence_cell = row_cell(absence_row, 1, "baseline absence findings")?;
+    for command in BASELINE_ABSENT_COMMANDS {
+        assert!(
+            !commands.iter().any(|actual| actual == command),
+            "absence finding `{command}` is now an actual CLI path; add matrix and ledger coverage"
+        );
+        assert!(
+            absence_cell.contains(&format!("`{command}`")),
+            "baseline absence row missing `{command}`"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn skill_only_matrix_rows_have_skill_handoff_and_boundary_coverage() -> Result<(), String> {
     for row in matrix_rows(INVENTORY)?.iter().skip(2) {
         let classification = row_cell(row, 1, "classification")?;
@@ -178,6 +625,14 @@ fn matrix_e2e_log_schema_records_required_fields() {
         "schema coverage summary",
         "workflow parity coverage",
         "fixture/evidence bundle hashes",
+        "runtime budget, deadline, and budget exhaustion signal",
+        "cancellation injection point and observed cancellation phase",
+        "observed `Outcome` and process exit code",
+        "before/after DB and index generation",
+        "changed record IDs and audit IDs",
+        "records written, rolled back, or audited",
+        "filesystem artifacts created",
+        "forbidden filesystem operations checked",
         "stdout and stderr artifact paths",
         "first-failure diagnosis",
     ] {
@@ -234,6 +689,41 @@ fn matrix_rows(inventory: &str) -> Result<Vec<Vec<String>>, String> {
     }
 }
 
+fn baseline_section(inventory: &str) -> Result<&str, String> {
+    let (_, after_start) = inventory
+        .split_once("## Baseline Infrastructure Coverage Ledger")
+        .ok_or_else(|| "Baseline Infrastructure Coverage Ledger section must exist".to_owned())?;
+    let (section, _) = after_start
+        .split_once("## Full Command Inventory")
+        .ok_or_else(|| "Full Command Inventory section must follow baseline ledger".to_owned())?;
+    Ok(section)
+}
+
+fn baseline_rows(inventory: &str) -> Result<Vec<Vec<String>>, String> {
+    let rows = baseline_section(inventory)?
+        .lines()
+        .filter(|line| line.starts_with('|'))
+        .map(markdown_row_cells)
+        .collect::<Vec<_>>();
+
+    if rows.len() < 3 {
+        Err(
+            "baseline infrastructure ledger must include header, delimiter, and data rows"
+                .to_owned(),
+        )
+    } else {
+        Ok(rows)
+    }
+}
+
+fn baseline_row_for<'a>(rows: &'a [Vec<String>], surface: &str) -> Result<&'a [String], String> {
+    rows.iter()
+        .skip(2)
+        .find(|row| row.first().is_some_and(|cell| cell == surface))
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("baseline ledger missing row for `{surface}`"))
+}
+
 fn markdown_row_cells(line: &str) -> Vec<String> {
     line.trim_matches('|')
         .split('|')
@@ -245,6 +735,28 @@ fn row_cell<'a>(row: &'a [String], index: usize, context: &str) -> Result<&'a st
     row.get(index)
         .map(String::as_str)
         .ok_or_else(|| format!("matrix row missing {context} cell at index {index}: {row:?}"))
+}
+
+fn side_effect_class(side_effect: &str) -> Result<&str, String> {
+    let rest = side_effect
+        .strip_prefix("class=")
+        .ok_or_else(|| format!("side-effect cell must start with class=: {side_effect}"))?;
+    rest.split(';')
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("side-effect class is empty: {side_effect}"))
+}
+
+fn runtime_class(runtime: &str) -> Result<&str, String> {
+    let rest = runtime
+        .strip_prefix("runtime=")
+        .ok_or_else(|| format!("runtime cell must start with runtime=: {runtime}"))?;
+    rest.split(';')
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("runtime class is empty: {runtime}"))
 }
 
 fn command_paths_from_extract_function(source: &str) -> Result<Vec<String>, String> {

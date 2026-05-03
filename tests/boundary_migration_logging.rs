@@ -16,12 +16,49 @@ enum BoundaryLogFailure {
     MissingRequiredField(&'static str),
     StdoutPollution,
     StdoutJsonInvalid(String),
-    SchemaMismatch { expected: String, observed: String },
-    EnvNotRedacted { key: String },
-    MissingMatrixRow { surface: String },
-    UnexpectedMutation { before: u64, after: u64 },
-    MissingFixtureHash { fixture_id: String },
+    SchemaMismatch {
+        expected: String,
+        observed: String,
+    },
+    EnvNotRedacted {
+        key: String,
+    },
+    MissingMatrixRow {
+        surface: String,
+    },
+    UnexpectedMutation {
+        before: u64,
+        after: u64,
+    },
+    ForbiddenFilesystemOperationsUnchecked,
+    MissingFixtureHash {
+        fixture_id: String,
+    },
     MissingReproductionCommand,
+    InvalidSideEffectClass {
+        observed: String,
+    },
+    InvalidRuntimeBudget,
+    InvalidCancellationStatus {
+        observed: String,
+    },
+    MissingCancellationInjectionPoint {
+        status: String,
+    },
+    InvalidObservedOutcome {
+        observed: String,
+    },
+    RuntimeOutcomeMismatch {
+        status: String,
+        outcome: String,
+    },
+    RuntimeExitCodeMismatch {
+        outcome: String,
+        exit_code: Option<i32>,
+    },
+    MissingRuntimeRollbackOrAuditEvidence {
+        outcome: String,
+    },
 }
 
 struct BoundaryLogRecord {
@@ -43,6 +80,12 @@ struct BoundaryLogRecord {
     evidence_ids: Vec<String>,
     degradation_codes: Vec<String>,
     mutation_summary: String,
+    side_effect_class: String,
+    changed_record_ids: Vec<String>,
+    audit_ids: Vec<String>,
+    records_rolled_back_or_audited: Vec<String>,
+    filesystem_artifacts_created: Vec<String>,
+    forbidden_filesystem_operations_checked: bool,
     command_boundary_matrix_row: Option<String>,
     fixture_hashes: BTreeMap<String, String>,
     db_generation_before: Option<u64>,
@@ -51,6 +94,8 @@ struct BoundaryLogRecord {
     index_generation_after: Option<u64>,
     runtime_budget: Option<u64>,
     cancellation_status: String,
+    cancellation_injection_point: Option<String>,
+    observed_outcome: String,
     reproduction_command: String,
     first_failure: Option<String>,
 }
@@ -126,6 +171,12 @@ fn write_boundary_log(dir: &Path, record: &BoundaryLogRecord) -> TestResult {
         "evidence_ids": record.evidence_ids,
         "degradation_codes": record.degradation_codes,
         "mutation_summary": record.mutation_summary,
+        "side_effect_class": record.side_effect_class,
+        "changed_record_ids": record.changed_record_ids,
+        "audit_ids": record.audit_ids,
+        "records_rolled_back_or_audited": record.records_rolled_back_or_audited,
+        "filesystem_artifacts_created": record.filesystem_artifacts_created,
+        "forbidden_filesystem_operations_checked": record.forbidden_filesystem_operations_checked,
         "command_boundary_matrix_row": record.command_boundary_matrix_row,
         "fixture_hashes": record.fixture_hashes,
         "db_generation_before": record.db_generation_before,
@@ -134,6 +185,8 @@ fn write_boundary_log(dir: &Path, record: &BoundaryLogRecord) -> TestResult {
         "index_generation_after": record.index_generation_after,
         "runtime_budget": record.runtime_budget,
         "cancellation_status": record.cancellation_status,
+        "cancellation_injection_point": record.cancellation_injection_point,
+        "observed_outcome": record.observed_outcome,
         "reproduction_command": record.reproduction_command,
         "first_failure": record.first_failure
     });
@@ -168,6 +221,12 @@ fn validate_boundary_log(log_path: &Path) -> Result<(), BoundaryLogFailure> {
         "evidence_ids",
         "degradation_codes",
         "mutation_summary",
+        "side_effect_class",
+        "changed_record_ids",
+        "audit_ids",
+        "records_rolled_back_or_audited",
+        "filesystem_artifacts_created",
+        "forbidden_filesystem_operations_checked",
         "command_boundary_matrix_row",
         "fixture_hashes",
         "db_generation_before",
@@ -176,6 +235,8 @@ fn validate_boundary_log(log_path: &Path) -> Result<(), BoundaryLogFailure> {
         "index_generation_after",
         "runtime_budget",
         "cancellation_status",
+        "cancellation_injection_point",
+        "observed_outcome",
         "reproduction_command",
         "first_failure",
     ] {
@@ -239,9 +300,42 @@ fn validate_boundary_log_extended(log_path: &Path) -> Result<(), BoundaryLogFail
                 return Err(BoundaryLogFailure::UnexpectedMutation { before, after });
             }
         }
+
+        let changed_records = log
+            .get("changed_record_ids")
+            .and_then(JsonValue::as_array)
+            .map_or(0, Vec::len);
+        let audit_ids = log
+            .get("audit_ids")
+            .and_then(JsonValue::as_array)
+            .map_or(0, Vec::len);
+        let filesystem_artifacts = log
+            .get("filesystem_artifacts_created")
+            .and_then(JsonValue::as_array)
+            .map_or(0, Vec::len);
+        if changed_records > 0 || audit_ids > 0 || filesystem_artifacts > 0 {
+            let changed_records = u64::try_from(changed_records).unwrap_or(u64::MAX);
+            let audit_ids = u64::try_from(audit_ids).unwrap_or(u64::MAX);
+            let filesystem_artifacts = u64::try_from(filesystem_artifacts).unwrap_or(u64::MAX);
+            return Err(BoundaryLogFailure::UnexpectedMutation {
+                before: changed_records,
+                after: changed_records
+                    .saturating_add(audit_ids)
+                    .saturating_add(filesystem_artifacts),
+            });
+        }
+    }
+
+    let forbidden_operations_checked = log
+        .get("forbidden_filesystem_operations_checked")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
+    if !forbidden_operations_checked {
+        return Err(BoundaryLogFailure::ForbiddenFilesystemOperationsUnchecked);
     }
 
     validate_env_redaction(&log)?;
+    validate_runtime_envelope(&log)?;
 
     let reproduction_command = log
         .get("reproduction_command")
@@ -249,6 +343,143 @@ fn validate_boundary_log_extended(log_path: &Path) -> Result<(), BoundaryLogFail
         .unwrap_or("");
     if reproduction_command.trim().is_empty() {
         return Err(BoundaryLogFailure::MissingReproductionCommand);
+    }
+
+    Ok(())
+}
+
+fn validate_runtime_envelope(log: &JsonValue) -> Result<(), BoundaryLogFailure> {
+    if log.get("runtime_budget").and_then(JsonValue::as_u64) == Some(0) {
+        return Err(BoundaryLogFailure::InvalidRuntimeBudget);
+    }
+
+    let side_effect_class = log
+        .get("side_effect_class")
+        .and_then(JsonValue::as_str)
+        .ok_or(BoundaryLogFailure::MissingRequiredField(
+            "side_effect_class",
+        ))?;
+    if !side_effect_class.starts_with("class=") {
+        return Err(BoundaryLogFailure::InvalidSideEffectClass {
+            observed: side_effect_class.to_owned(),
+        });
+    }
+
+    let cancellation_status = log
+        .get("cancellation_status")
+        .and_then(JsonValue::as_str)
+        .ok_or(BoundaryLogFailure::MissingRequiredField(
+            "cancellation_status",
+        ))?;
+    if !matches!(
+        cancellation_status,
+        "not_applicable" | "not_requested" | "requested" | "completed" | "timeout"
+    ) {
+        return Err(BoundaryLogFailure::InvalidCancellationStatus {
+            observed: cancellation_status.to_owned(),
+        });
+    }
+
+    let injection_point = log
+        .get("cancellation_injection_point")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.trim().is_empty());
+    if matches!(cancellation_status, "requested" | "completed" | "timeout")
+        && injection_point.is_none()
+    {
+        return Err(BoundaryLogFailure::MissingCancellationInjectionPoint {
+            status: cancellation_status.to_owned(),
+        });
+    }
+
+    let observed_outcome = log
+        .get("observed_outcome")
+        .and_then(JsonValue::as_str)
+        .ok_or(BoundaryLogFailure::MissingRequiredField("observed_outcome"))?;
+    if !matches!(
+        observed_outcome,
+        "success"
+            | "degraded"
+            | "cancelled"
+            | "budget_exhausted"
+            | "storage_error"
+            | "index_error"
+            | "supervised_child_failed"
+            | "not_applicable"
+    ) {
+        return Err(BoundaryLogFailure::InvalidObservedOutcome {
+            observed: observed_outcome.to_owned(),
+        });
+    }
+
+    match cancellation_status {
+        "completed" if observed_outcome != "cancelled" => {
+            return Err(BoundaryLogFailure::RuntimeOutcomeMismatch {
+                status: cancellation_status.to_owned(),
+                outcome: observed_outcome.to_owned(),
+            });
+        }
+        "timeout" if observed_outcome != "budget_exhausted" => {
+            return Err(BoundaryLogFailure::RuntimeOutcomeMismatch {
+                status: cancellation_status.to_owned(),
+                outcome: observed_outcome.to_owned(),
+            });
+        }
+        _ => {}
+    }
+
+    let exit_code = log
+        .get("exit_code")
+        .and_then(JsonValue::as_i64)
+        .and_then(|code| i32::try_from(code).ok());
+    if observed_outcome == "success" && exit_code != Some(0) {
+        return Err(BoundaryLogFailure::RuntimeExitCodeMismatch {
+            outcome: observed_outcome.to_owned(),
+            exit_code,
+        });
+    }
+    if matches!(
+        observed_outcome,
+        "cancelled"
+            | "budget_exhausted"
+            | "storage_error"
+            | "index_error"
+            | "supervised_child_failed"
+    ) && exit_code == Some(0)
+    {
+        return Err(BoundaryLogFailure::RuntimeExitCodeMismatch {
+            outcome: observed_outcome.to_owned(),
+            exit_code,
+        });
+    }
+
+    let changed_record_count = log
+        .get("changed_record_ids")
+        .and_then(JsonValue::as_array)
+        .map_or(0, Vec::len);
+    if changed_record_count > 0
+        && matches!(
+            observed_outcome,
+            "cancelled"
+                | "budget_exhausted"
+                | "storage_error"
+                | "index_error"
+                | "supervised_child_failed"
+        )
+    {
+        let audit_count = log
+            .get("audit_ids")
+            .and_then(JsonValue::as_array)
+            .map_or(0, Vec::len);
+        let rollback_count = log
+            .get("records_rolled_back_or_audited")
+            .and_then(JsonValue::as_array)
+            .map_or(0, Vec::len);
+        if audit_count == 0 && rollback_count == 0 {
+            return Err(BoundaryLogFailure::MissingRuntimeRollbackOrAuditEvidence {
+                outcome: observed_outcome.to_owned(),
+            });
+        }
     }
 
     Ok(())
@@ -295,10 +526,35 @@ fn first_failure_for_boundary_failure(failure: &BoundaryLogFailure) -> String {
             format!("missing_matrix_row:{surface}")
         }
         BoundaryLogFailure::UnexpectedMutation { .. } => "unexpected_mutation".to_owned(),
+        BoundaryLogFailure::ForbiddenFilesystemOperationsUnchecked => {
+            "forbidden_filesystem_operations_unchecked".to_owned()
+        }
         BoundaryLogFailure::MissingFixtureHash { fixture_id } => {
             format!("missing_fixture_hash:{fixture_id}")
         }
         BoundaryLogFailure::MissingReproductionCommand => "missing_reproduction_command".to_owned(),
+        BoundaryLogFailure::InvalidSideEffectClass { observed } => {
+            format!("invalid_side_effect_class:{observed}")
+        }
+        BoundaryLogFailure::InvalidRuntimeBudget => "invalid_runtime_budget".to_owned(),
+        BoundaryLogFailure::InvalidCancellationStatus { observed } => {
+            format!("invalid_cancellation_status:{observed}")
+        }
+        BoundaryLogFailure::MissingCancellationInjectionPoint { status } => {
+            format!("missing_cancellation_injection_point:{status}")
+        }
+        BoundaryLogFailure::InvalidObservedOutcome { observed } => {
+            format!("invalid_observed_outcome:{observed}")
+        }
+        BoundaryLogFailure::RuntimeOutcomeMismatch { status, outcome } => {
+            format!("runtime_outcome_mismatch:{status}:{outcome}")
+        }
+        BoundaryLogFailure::RuntimeExitCodeMismatch { outcome, .. } => {
+            format!("runtime_exit_code_mismatch:{outcome}")
+        }
+        BoundaryLogFailure::MissingRuntimeRollbackOrAuditEvidence { outcome } => {
+            format!("missing_runtime_rollback_or_audit:{outcome}")
+        }
     }
 }
 
@@ -434,6 +690,12 @@ fn make_record(
         evidence_ids: vec!["fixture.boundary_logging.status".to_owned()],
         degradation_codes: Vec::new(),
         mutation_summary: "read_only".to_owned(),
+        side_effect_class: "class=read_only".to_owned(),
+        changed_record_ids: Vec::new(),
+        audit_ids: Vec::new(),
+        records_rolled_back_or_audited: Vec::new(),
+        filesystem_artifacts_created: Vec::new(),
+        forbidden_filesystem_operations_checked: true,
         command_boundary_matrix_row: Some("status".to_owned()),
         fixture_hashes: BTreeMap::new(),
         db_generation_before: None,
@@ -442,6 +704,8 @@ fn make_record(
         index_generation_after: None,
         runtime_budget: None,
         cancellation_status: "not_applicable".to_owned(),
+        cancellation_injection_point: None,
+        observed_outcome: "success".to_owned(),
         reproduction_command: render_reproduction_command(&cwd, &command, &argv),
         first_failure: None,
     })
@@ -468,6 +732,370 @@ fn boundary_log_accepts_clean_real_binary_json_step() -> TestResult {
     ensure(
         observed_schema_from_stdout(&dir.join("stdout")) == "ee.response.v1",
         "observed stdout schema must be extracted for diagnostics",
+    )
+}
+
+#[test]
+fn boundary_log_accepts_runtime_budget_and_cancellation_envelopes() -> TestResult {
+    struct RuntimeCase {
+        name: &'static str,
+        argv: Vec<&'static str>,
+        exit_code: i32,
+        runtime_budget: Option<u64>,
+        cancellation_status: &'static str,
+        cancellation_injection_point: Option<&'static str>,
+        observed_outcome: &'static str,
+        side_effect_class: &'static str,
+        mutation_summary: &'static str,
+        changed_record_ids: Vec<&'static str>,
+        audit_ids: Vec<&'static str>,
+        records_rolled_back_or_audited: Vec<&'static str>,
+        degradation_codes: Vec<&'static str>,
+    }
+
+    let root = unique_dossier_dir("boundary-logging-runtime-accepted")?;
+    let output = run_ee(&["--json", "status"])?;
+    let cases = vec![
+        RuntimeCase {
+            name: "cancel-before-start",
+            argv: vec!["--json", "import", "cass"],
+            exit_code: 6,
+            runtime_budget: Some(500),
+            cancellation_status: "completed",
+            cancellation_injection_point: Some("before_start"),
+            observed_outcome: "cancelled",
+            side_effect_class: "class=append_only",
+            mutation_summary: "failed_before_mutation",
+            changed_record_ids: Vec::new(),
+            audit_ids: Vec::new(),
+            records_rolled_back_or_audited: Vec::new(),
+            degradation_codes: vec!["runtime_cancelled"],
+        },
+        RuntimeCase {
+            name: "cancel-mid-operation",
+            argv: vec!["--json", "import", "jsonl"],
+            exit_code: 6,
+            runtime_budget: Some(750),
+            cancellation_status: "completed",
+            cancellation_injection_point: Some("mid_operation:after_source_scan"),
+            observed_outcome: "cancelled",
+            side_effect_class: "class=append_only",
+            mutation_summary: "rollback_no_partial_state",
+            changed_record_ids: vec!["import_batch_pending"],
+            audit_ids: Vec::new(),
+            records_rolled_back_or_audited: vec!["rolled_back:import_batch_pending"],
+            degradation_codes: vec!["runtime_cancelled"],
+        },
+        RuntimeCase {
+            name: "budget-exhaustion",
+            argv: vec!["--json", "index", "rebuild"],
+            exit_code: 6,
+            runtime_budget: Some(1),
+            cancellation_status: "timeout",
+            cancellation_injection_point: Some("budget_deadline:index_publish"),
+            observed_outcome: "budget_exhausted",
+            side_effect_class: "class=derived_asset_rebuild",
+            mutation_summary: "derived_rebuild_aborted_before_publish",
+            changed_record_ids: vec!["index_generation_pending"],
+            audit_ids: Vec::new(),
+            records_rolled_back_or_audited: vec!["rolled_back:index_generation_pending"],
+            degradation_codes: vec!["runtime_budget_exceeded"],
+        },
+        RuntimeCase {
+            name: "storage-failure-after-partial-progress",
+            argv: vec!["--json", "remember", "runtime fixture"],
+            exit_code: 3,
+            runtime_budget: Some(1000),
+            cancellation_status: "not_requested",
+            cancellation_injection_point: None,
+            observed_outcome: "storage_error",
+            side_effect_class: "class=audited_mutation",
+            mutation_summary: "transaction_rolled_back_after_storage_failure",
+            changed_record_ids: vec!["memory_pending"],
+            audit_ids: Vec::new(),
+            records_rolled_back_or_audited: vec!["rolled_back:memory_pending"],
+            degradation_codes: Vec::new(),
+        },
+        RuntimeCase {
+            name: "supervised-child-failure",
+            argv: vec!["--json", "daemon", "run"],
+            exit_code: 6,
+            runtime_budget: Some(2000),
+            cancellation_status: "not_requested",
+            cancellation_injection_point: None,
+            observed_outcome: "supervised_child_failed",
+            side_effect_class: "class=supervised_jobs",
+            mutation_summary: "job_ledger_audited_failure",
+            changed_record_ids: vec!["job_runtime_1"],
+            audit_ids: vec!["audit_job_runtime_1"],
+            records_rolled_back_or_audited: vec!["audited:job_runtime_1"],
+            degradation_codes: vec!["supervised_child_failed"],
+        },
+    ];
+
+    for case in cases {
+        let dir = root.join(case.name);
+        write_step_artifacts(&dir, &output)?;
+        let mut record = make_record(&dir, &output, "ee.response.v1")?;
+        record.argv = case.argv.iter().map(|arg| (*arg).to_owned()).collect();
+        record.exit_code = Some(case.exit_code);
+        record.runtime_budget = case.runtime_budget;
+        record.cancellation_status = case.cancellation_status.to_owned();
+        record.cancellation_injection_point = case.cancellation_injection_point.map(str::to_owned);
+        record.observed_outcome = case.observed_outcome.to_owned();
+        record.side_effect_class = case.side_effect_class.to_owned();
+        record.mutation_summary = case.mutation_summary.to_owned();
+        record.changed_record_ids = case
+            .changed_record_ids
+            .iter()
+            .map(|record_id| (*record_id).to_owned())
+            .collect();
+        record.audit_ids = case
+            .audit_ids
+            .iter()
+            .map(|audit_id| (*audit_id).to_owned())
+            .collect();
+        record.records_rolled_back_or_audited = case
+            .records_rolled_back_or_audited
+            .iter()
+            .map(|record_id| (*record_id).to_owned())
+            .collect();
+        record.degradation_codes = case
+            .degradation_codes
+            .iter()
+            .map(|code| (*code).to_owned())
+            .collect();
+        record.command_boundary_matrix_row =
+            Some(case.argv.first().copied().unwrap_or("status").to_owned());
+        record.reproduction_command =
+            render_reproduction_command(&record.cwd, &record.command, &record.argv);
+        record.first_failure = (case.observed_outcome != "success")
+            .then(|| format!("outcome={}", case.observed_outcome));
+        write_boundary_log(&dir, &record)?;
+
+        validate_boundary_log_extended(&dir.join("boundary-log.json")).map_err(|failure| {
+            format!(
+                "{} runtime envelope should validate, got {failure:?}",
+                case.name
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn boundary_log_records_real_binary_budgeted_index_dry_run() -> TestResult {
+    let root = unique_dossier_dir("boundary-logging-real-binary-runtime")?;
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.display().to_string();
+
+    let init_output = run_ee(&["--workspace", &workspace_arg, "--json", "init"])?;
+    ensure(
+        init_output.status.success(),
+        format!(
+            "init must prepare workspace for index dry-run: stdout={}, stderr={}",
+            String::from_utf8_lossy(&init_output.stdout),
+            String::from_utf8_lossy(&init_output.stderr)
+        ),
+    )?;
+    let remember_output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "--json",
+        "remember",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "runtime budget fixture",
+    ])?;
+    ensure(
+        remember_output.status.success(),
+        format!(
+            "remember must seed workspace rows for index dry-run: stdout={}, stderr={}",
+            String::from_utf8_lossy(&remember_output.stdout),
+            String::from_utf8_lossy(&remember_output.stderr)
+        ),
+    )?;
+
+    let output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "--json",
+        "index",
+        "rebuild",
+        "--dry-run",
+    ])?;
+    ensure(
+        output.status.success(),
+        format!(
+            "index rebuild dry-run must succeed: stdout={}, stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+
+    let step_dir = root.join("index-rebuild-dry-run");
+    write_step_artifacts(&step_dir, &output)?;
+    let mut record = make_record(&step_dir, &output, "ee.response.v1")?;
+    record.argv = vec![
+        "--workspace".to_owned(),
+        workspace_arg,
+        "--json".to_owned(),
+        "index".to_owned(),
+        "rebuild".to_owned(),
+        "--dry-run".to_owned(),
+    ];
+    record.workspace = Some(workspace);
+    record.runtime_budget = Some(30_000);
+    record.cancellation_status = "not_requested".to_owned();
+    record.cancellation_injection_point = None;
+    record.observed_outcome = "success".to_owned();
+    record.side_effect_class = "class=derived_asset_rebuild".to_owned();
+    record.mutation_summary = "dry_run_no_mutation_expected".to_owned();
+    record.command_boundary_matrix_row = Some("index rebuild".to_owned());
+    record.reproduction_command =
+        render_reproduction_command(&record.cwd, &record.command, &record.argv);
+    write_boundary_log(&step_dir, &record)?;
+
+    validate_boundary_log_extended(&step_dir.join("boundary-log.json")).map_err(|failure| {
+        format!("real-binary index dry-run runtime log should validate, got {failure:?}")
+    })
+}
+
+#[test]
+fn boundary_log_rejects_inconsistent_runtime_envelopes() -> TestResult {
+    struct RuntimeRejection {
+        name: &'static str,
+        mutate: fn(&mut BoundaryLogRecord),
+        expected: BoundaryLogFailure,
+    }
+
+    fn invalid_side_effect(record: &mut BoundaryLogRecord) {
+        record.side_effect_class = "append_only".to_owned();
+    }
+
+    fn zero_budget(record: &mut BoundaryLogRecord) {
+        record.runtime_budget = Some(0);
+    }
+
+    fn invalid_status(record: &mut BoundaryLogRecord) {
+        record.cancellation_status = "maybe".to_owned();
+    }
+
+    fn missing_injection(record: &mut BoundaryLogRecord) {
+        record.runtime_budget = Some(500);
+        record.cancellation_status = "requested".to_owned();
+        record.cancellation_injection_point = None;
+    }
+
+    fn timeout_outcome_mismatch(record: &mut BoundaryLogRecord) {
+        record.exit_code = Some(6);
+        record.runtime_budget = Some(1);
+        record.cancellation_status = "timeout".to_owned();
+        record.cancellation_injection_point = Some("budget_deadline:index_publish".to_owned());
+        record.observed_outcome = "cancelled".to_owned();
+    }
+
+    fn cancelled_success_exit(record: &mut BoundaryLogRecord) {
+        record.exit_code = Some(0);
+        record.runtime_budget = Some(500);
+        record.cancellation_status = "completed".to_owned();
+        record.cancellation_injection_point = Some("mid_operation:pack_write".to_owned());
+        record.observed_outcome = "cancelled".to_owned();
+    }
+
+    fn unaudited_partial_failure(record: &mut BoundaryLogRecord) {
+        record.exit_code = Some(3);
+        record.runtime_budget = Some(1000);
+        record.observed_outcome = "storage_error".to_owned();
+        record.side_effect_class = "class=audited_mutation".to_owned();
+        record.mutation_summary = "transaction_failed_after_partial_progress".to_owned();
+        record.changed_record_ids = vec!["memory_pending".to_owned()];
+        record.audit_ids = Vec::new();
+        record.records_rolled_back_or_audited = Vec::new();
+    }
+
+    let root = unique_dossier_dir("boundary-logging-runtime-rejected")?;
+    let output = run_ee(&["--json", "status"])?;
+    let cases = vec![
+        RuntimeRejection {
+            name: "invalid-side-effect",
+            mutate: invalid_side_effect,
+            expected: BoundaryLogFailure::InvalidSideEffectClass {
+                observed: "append_only".to_owned(),
+            },
+        },
+        RuntimeRejection {
+            name: "zero-budget",
+            mutate: zero_budget,
+            expected: BoundaryLogFailure::InvalidRuntimeBudget,
+        },
+        RuntimeRejection {
+            name: "invalid-status",
+            mutate: invalid_status,
+            expected: BoundaryLogFailure::InvalidCancellationStatus {
+                observed: "maybe".to_owned(),
+            },
+        },
+        RuntimeRejection {
+            name: "missing-injection",
+            mutate: missing_injection,
+            expected: BoundaryLogFailure::MissingCancellationInjectionPoint {
+                status: "requested".to_owned(),
+            },
+        },
+        RuntimeRejection {
+            name: "timeout-outcome-mismatch",
+            mutate: timeout_outcome_mismatch,
+            expected: BoundaryLogFailure::RuntimeOutcomeMismatch {
+                status: "timeout".to_owned(),
+                outcome: "cancelled".to_owned(),
+            },
+        },
+        RuntimeRejection {
+            name: "cancelled-success-exit",
+            mutate: cancelled_success_exit,
+            expected: BoundaryLogFailure::RuntimeExitCodeMismatch {
+                outcome: "cancelled".to_owned(),
+                exit_code: Some(0),
+            },
+        },
+        RuntimeRejection {
+            name: "unaudited-partial-failure",
+            mutate: unaudited_partial_failure,
+            expected: BoundaryLogFailure::MissingRuntimeRollbackOrAuditEvidence {
+                outcome: "storage_error".to_owned(),
+            },
+        },
+    ];
+
+    for case in cases {
+        let dir = root.join(case.name);
+        write_step_artifacts(&dir, &output)?;
+        let mut record = make_record(&dir, &output, "ee.response.v1")?;
+        (case.mutate)(&mut record);
+        write_boundary_log(&dir, &record)?;
+
+        let result = validate_boundary_log_extended(&dir.join("boundary-log.json"));
+        ensure(
+            result == Err(case.expected),
+            format!(
+                "{} must reject invalid runtime envelope, got {result:?}",
+                case.name
+            ),
+        )?;
+    }
+
+    ensure(
+        first_failure_for_boundary_failure(
+            &BoundaryLogFailure::MissingRuntimeRollbackOrAuditEvidence {
+                outcome: "storage_error".to_owned(),
+            },
+        ) == "missing_runtime_rollback_or_audit:storage_error",
+        "runtime rollback/audit failure code must be stable",
     )
 }
 
@@ -600,6 +1228,12 @@ fn boundary_log_detects_unexpected_mutation() -> TestResult {
         evidence_ids: Vec::new(),
         degradation_codes: Vec::new(),
         mutation_summary: "read_only".to_owned(),
+        side_effect_class: "class=read_only".to_owned(),
+        changed_record_ids: Vec::new(),
+        audit_ids: Vec::new(),
+        records_rolled_back_or_audited: Vec::new(),
+        filesystem_artifacts_created: Vec::new(),
+        forbidden_filesystem_operations_checked: true,
         command_boundary_matrix_row: Some("status".to_owned()),
         fixture_hashes: BTreeMap::new(),
         db_generation_before: Some(42),
@@ -608,6 +1242,8 @@ fn boundary_log_detects_unexpected_mutation() -> TestResult {
         index_generation_after: Some(7),
         runtime_budget: None,
         cancellation_status: "not_applicable".to_owned(),
+        cancellation_injection_point: None,
+        observed_outcome: "success".to_owned(),
         reproduction_command: render_reproduction_command(
             &std::env::current_dir().map_err(|error| error.to_string())?,
             "ee",
@@ -624,6 +1260,35 @@ fn boundary_log_detects_unexpected_mutation() -> TestResult {
                 after: 43,
             }),
         format!("unexpected mutation must be rejected, got {result:?}"),
+    )
+}
+
+#[test]
+fn boundary_log_requires_forbidden_filesystem_operation_check() -> TestResult {
+    let check_dir = unique_dossier_dir("boundary-logging-forbidden-fs-check")?.join("status");
+    fs::create_dir_all(&check_dir).map_err(|error| error.to_string())?;
+    let clean_output = run_ee(&["--json", "status"])?;
+    fs::write(
+        check_dir.join("stdout"),
+        b"{\"schema\":\"ee.response.v1\",\"success\":true,\"data\":{}}\n",
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(check_dir.join("stderr"), b"").map_err(|error| error.to_string())?;
+
+    let mut record = make_record(&check_dir, &clean_output, "ee.response.v1")?;
+    record.forbidden_filesystem_operations_checked = false;
+    write_boundary_log(&check_dir, &record)?;
+
+    let result = validate_boundary_log_extended(&check_dir.join("boundary-log.json"));
+    ensure(
+        result == Err(BoundaryLogFailure::ForbiddenFilesystemOperationsUnchecked),
+        format!("unchecked forbidden filesystem operations must be rejected, got {result:?}"),
+    )?;
+    ensure(
+        first_failure_for_boundary_failure(
+            &BoundaryLogFailure::ForbiddenFilesystemOperationsUnchecked,
+        ) == "forbidden_filesystem_operations_unchecked",
+        "unchecked forbidden filesystem first failure code must be stable",
     )
 }
 
@@ -680,6 +1345,12 @@ fn boundary_log_detects_missing_matrix_row() -> TestResult {
         evidence_ids: Vec::new(),
         degradation_codes: Vec::new(),
         mutation_summary: "read_only".to_owned(),
+        side_effect_class: "class=read_only".to_owned(),
+        changed_record_ids: Vec::new(),
+        audit_ids: Vec::new(),
+        records_rolled_back_or_audited: Vec::new(),
+        filesystem_artifacts_created: Vec::new(),
+        forbidden_filesystem_operations_checked: true,
         command_boundary_matrix_row: Some("nonexistent_surface".to_owned()),
         fixture_hashes: BTreeMap::new(),
         db_generation_before: None,
@@ -688,6 +1359,8 @@ fn boundary_log_detects_missing_matrix_row() -> TestResult {
         index_generation_after: None,
         runtime_budget: None,
         cancellation_status: "not_applicable".to_owned(),
+        cancellation_injection_point: None,
+        observed_outcome: "success".to_owned(),
         reproduction_command: render_reproduction_command(
             &std::env::current_dir().map_err(|error| error.to_string())?,
             "ee",
@@ -763,6 +1436,12 @@ fn boundary_log_detects_missing_fixture_hash() -> TestResult {
         evidence_ids: vec!["eval.release_failure".to_owned()],
         degradation_codes: Vec::new(),
         mutation_summary: "read_only".to_owned(),
+        side_effect_class: "class=read_only".to_owned(),
+        changed_record_ids: Vec::new(),
+        audit_ids: Vec::new(),
+        records_rolled_back_or_audited: Vec::new(),
+        filesystem_artifacts_created: Vec::new(),
+        forbidden_filesystem_operations_checked: true,
         command_boundary_matrix_row: Some("eval".to_owned()),
         fixture_hashes: BTreeMap::new(),
         db_generation_before: None,
@@ -771,6 +1450,8 @@ fn boundary_log_detects_missing_fixture_hash() -> TestResult {
         index_generation_after: None,
         runtime_budget: None,
         cancellation_status: "not_applicable".to_owned(),
+        cancellation_injection_point: None,
+        observed_outcome: "success".to_owned(),
         reproduction_command: render_reproduction_command(
             &std::env::current_dir().map_err(|error| error.to_string())?,
             "ee",

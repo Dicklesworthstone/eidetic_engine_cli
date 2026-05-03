@@ -81,13 +81,41 @@ These commands have names or descriptions suggesting agent-skill work but may be
 | `situation *` | **Mixed** | Classification storage is mechanical; "explain" and "compare" may need interpretation | Split: storage mechanical, explanation skill |
 | `tripwire *` | **Mixed** | Tripwire matching is mechanical; "risk" language in output needs review | Keep mechanical, audit output language |
 
-## Commands Using Mock/Sample/Stub Data
+## Degraded-Honesty Migration Status
 
-Commands that currently emit placeholder or example data rather than real computed results:
+The inventory above records each command family's intended boundary. The table
+below records command paths that previously emitted, or were at risk of
+emitting, placeholder/example/stubbed data as if it were real production output.
+These paths now either return stable degraded JSON or expose a narrowed
+mechanical sub-surface with concrete evidence.
 
-| Command Path | File:Line | Issue | Action Required |
-|--------------|-----------|-------|-----------------|
-| (To be audited) | | | |
+| Command Path | Current Code Anchor | Prior Risk | Current Contract / Follow-Up |
+|--------------|---------------------|------------|------------------------------|
+| `audit timeline/show/diff/verify` | `src/cli/mod.rs` `AUDIT_UNAVAILABLE_CODE` | Generated/sample audit operation data could look persisted. | Returns `audit_log_unavailable`; follow-up `eidetic_engine_cli-s43e`. |
+| `support bundle/inspect` | `src/cli/mod.rs` `SUPPORT_BUNDLE_UNAVAILABLE_CODE` | Placeholder bundle paths and unconditional inspection success. | Returns `support_bundle_unavailable`; follow-up `eidetic_engine_cli-5g6d`. |
+| `certificate list/show/verify` | `src/cli/mod.rs` `CERTIFICATE_STORE_UNAVAILABLE_CODE` | Mock certificate validity or hash verification. | Returns `certificate_store_unavailable`; follow-up claim/certificate manifest work. |
+| `claim list/show/verify` | `src/cli/mod.rs` `CLAIM_UNAVAILABLE_CODE` | Empty placeholder claim lists and zero-result verification. | Returns `claim_verification_unavailable`; follow-up `eidetic_engine_cli-v76q`. |
+| `diag quarantine` | `src/cli/mod.rs` `DIAG_QUARANTINE_UNAVAILABLE_CODE` | Empty placeholder trust-state posture could look healthy. | Returns `quarantine_trust_state_unavailable`; follow-up `eidetic_engine_cli-5g6d`. |
+| `rehearse plan/run/inspect/promote-plan` | `src/cli/mod.rs` `REHEARSAL_UNAVAILABLE_CODE` | Simulated plan/run IDs and sandbox artifact success. | Returns `rehearsal_unavailable`; follow-up `eidetic_engine_cli-nd65`. |
+| `learn agenda/uncertainty/summary/experiment propose/run` | `src/cli/mod.rs` `LEARN_UNAVAILABLE_CODE` | Hard-coded learning templates and experiment proposals. | Returns `learning_records_unavailable`; follow-up `eidetic_engine_cli-evah`. |
+| `lab capture/replay/counterfactual` | `src/cli/mod.rs` lab unavailable handlers | Generated replay/counterfactual success without episode evidence. | Returns lab unavailable envelopes until episode capture/replay is backed by records. |
+| `economy report/score/simulate/prune-plan` | `src/cli/mod.rs` `ECONOMY_UNAVAILABLE_CODE` | Static seed metrics could look workspace-backed. | Returns `economy_metrics_unavailable`; follow-up `eidetic_engine_cli-ve0w`. |
+| `causal trace/estimate/compare/promote-plan` | `src/cli/mod.rs` `CAUSAL_UNAVAILABLE_CODE` | Fixture causal chains, uplift, and confidence claims. | Returns `causal_evidence_unavailable`; follow-up `eidetic_engine_cli-dz00`. |
+| `procedure propose/show/list/export/promote/verify/drift` | `src/cli/mod.rs` `PROCEDURE_UNAVAILABLE_CODE` | Generated lifecycle/procedure fixture records. | Returns `procedure_store_unavailable`; follow-up `eidetic_engine_cli-q5vf`. |
+| `situation classify/compare/link/show/explain` | `src/cli/mod.rs` `SITUATION_UNAVAILABLE_CODE` | Built-in routing fixture IDs could look like real situation evidence. | Returns `situation_decisioning_unavailable`; follow-up `eidetic_engine_cli-6cks`. |
+| `plan goal/explain` | `src/cli/mod.rs` `PLAN_DECISIONING_UNAVAILABLE_CODE` | Built-in goal classification and recipe reasoning. | Returns `plan_decisioning_unavailable`; recipe list/show remain mechanical catalog reads. |
+| `preflight run/show/close` | `src/cli/mod.rs` `PREFLIGHT_UNAVAILABLE_CODE` | Task-text heuristics and generated preflight run state. | Returns `preflight_evidence_unavailable`; follow-up `eidetic_engine_cli-bijm`. |
+| `tripwire list/check` | `src/cli/mod.rs` `TRIPWIRE_UNAVAILABLE_CODE` | Generated tripwire samples could look persisted. | Returns `tripwire_store_unavailable`; follow-up `eidetic_engine_cli-qmu0`. |
+| `eval run/list` | `src/cli/mod.rs` `EVAL_UNAVAILABLE_CODE` | No-scenario stub success. | Returns `eval_fixtures_unavailable`; follow-up `eidetic_engine_cli-uiy3`. |
+| `review session --propose` | `src/cli/mod.rs` `REVIEW_UNAVAILABLE_CODE` | Empty generated curation proposal set. | Returns `review_evidence_unavailable`; follow-up CASS evidence import/review work. |
+| `handoff create` | `src/cli/mod.rs` `HANDOFF_UNAVAILABLE_CODE` | Placeholder continuity capsule creation. | Returns `handoff_unavailable`; follow-up `eidetic_engine_cli-g9dq`. |
+| `daemon` | `src/cli/mod.rs` `DAEMON_UNAVAILABLE_CODE` | Simulated scheduler ticks and processed item counts. | Returns `daemon_jobs_unavailable`; follow-up `eidetic_engine_cli-5g6d`. |
+| `recorder start/event/finish/tail` | `src/cli/mod.rs` recorder unavailable handlers | Generated run/event IDs and stubbed empty tail state. | Returns `recorder_store_unavailable` or `recorder_tail_unavailable`; follow-up `eidetic_engine_cli-6xzc`. |
+| `demo list/run/verify` | `src/cli/mod.rs` demo handlers | Empty timestamped demo placeholders. | `list`, `run --dry-run`, and `verify` parse real `demo.yaml` / artifact evidence; non-dry-run execution returns `demo_command_execution_unavailable`; follow-up `eidetic_engine_cli-jp06.1`. |
+
+Executable coverage lives primarily in `tests/degraded_honesty.rs`, with
+supporting unit and contract coverage in `src/models/demo.rs` and
+`tests/contracts/demo_manifests.rs` for the real demo manifest/artifact slice.
 
 ## Summary Statistics
 
@@ -95,13 +123,15 @@ Commands that currently emit placeholder or example data rather than real comput
 - **Mechanical**: 32 (70%)
 - **Mixed (needs split)**: 9 (20%)
 - **Agent Skill (move to workflow)**: 5 (10%)
-- **Degraded/unavailable**: 0
+- **Degraded/unavailable public command families with active contracts**: 21
+  (overlaps the classification totals above; this is migration state, not a
+  separate classification bucket)
 
 ## Next Steps
 
-1. Commands classified as "Agent Skill" should have their core handlers reviewed to ensure they return `degraded` status rather than simulated intelligence.
-2. Commands classified as "Mixed" need their mechanical sub-surfaces extracted and skill components moved to documented workflows.
-3. All command outputs should be audited for language that implies judgment (recommendations, confidence, risk assessments) when the underlying computation is deterministic.
+1. Keep `tests/degraded_honesty.rs` authoritative for public false-success regressions.
+2. Close or update follow-up beads as each degraded command is backed by real persisted evidence or a narrowed mechanical contract.
+3. All new command output must be audited for language that implies judgment, verification, persistence, replay, or validity when the underlying computation has not produced concrete evidence.
 
 ---
 *This inventory is the authoritative source for command boundary classification. Update this document when adding or modifying commands.*

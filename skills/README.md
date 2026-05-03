@@ -10,6 +10,11 @@ binary remains mechanical. If a skill wants durable mutation, it must produce
 or run an explicit `ee` command, dry-run plan, or audited repair command that
 the user or harness can inspect.
 
+Skills must not scrape FrankenSQLite, Frankensearch indexes, `.ee/`, `.beads/`,
+or any other durable store directly. They consume exported evidence bundles and
+machine JSON from `ee`; if those artifacts are missing, stale, degraded, or not
+redacted, the skill stops instead of reconstructing hidden state.
+
 ## Directory Contract
 
 Each skill lives in one folder:
@@ -76,11 +81,45 @@ JSON data comes from stdout. Treat stderr as diagnostics. If a command returns
 a degraded or unavailable response, the skill must surface the degraded code,
 name the missing capability, and avoid filling the gap with invented evidence.
 
+## Evidence Bundle Contract
+
+The canonical handoff from `ee` to a project-local skill is
+`ee.skill_evidence_bundle.v1`. A bundle may be JSON for machine checks or
+Markdown only when paired with the JSON bundle hash. Allowed inputs are:
+
+- `ee.response.v1` or `ee.error.v1` JSON emitted by explicit `ee ... --json`
+  commands.
+- `ee.skill_evidence_bundle.v1` JSON side-path artifacts.
+- Redacted Markdown summaries that include the source bundle path and hash.
+
+Every bundle must include:
+
+- `bundleId`, `createdAt`, `workspace`, `sourceCommand`, and
+  `allowedInputFormats`.
+- `evidenceItems[]` with stable `id`, `kind`, `provenanceUri`, `contentHash`,
+  `redactionClasses`, `trustClass`, `degradedCodes`, and quarantine/staleness
+  flags.
+- top-level `redaction` with status, classes, and `rawSecretsIncluded=false`.
+- top-level `trust` with the governing trust class and source classes.
+- top-level `degraded` entries with stable codes and repair strings.
+- top-level `promptInjection` with quarantine status and matched signals.
+- `mutationRules` proving direct DB scraping is disallowed and durable mutation
+  requires an explicit `ee` command or audited dry-run artifact.
+
+Prompt-injection-like evidence may be referenced only by ID/hash or redacted
+snippet. If a bundle contains instruction-like content and
+`promptInjection.quarantined` is false, the skill must refuse the handoff.
+
 ## Durable Mutation
 
 Skills may recommend or prepare explicit commands, but they must not imply that
 the Rust binary performed reasoning. Any durable mutation must be visible as an
 `ee` command, dry-run plan, or audit record.
+
+Direct durable memory mutation by a skill is forbidden. Skills may not write
+memory records, audit records, graph snapshots, search indexes, or CASS imports
+except by invoking an explicit `ee` command whose JSON output and audit side
+effects are captured by the harness.
 
 ## E2E Logging Contract
 
@@ -93,8 +132,10 @@ lint log records:
 - required files
 - parsed metadata
 - referenced `ee` commands
-- evidence bundle hashes
-- redaction and degraded states
+- evidence bundle path and hash
+- provenance IDs, redaction classes, trust classes, and degraded codes
+- prompt-injection quarantine status
+- command-boundary matrix row and related README workflow row
 - output artifact path
 - first missing requirement or first failure diagnosis
 
