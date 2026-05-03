@@ -11627,76 +11627,73 @@ where
 // EE-371: Demo list/run/verify handlers
 // ============================================================================
 
-fn handle_demo_list<W, E>(
+const DEMO_UNAVAILABLE_CODE: &str = "demo_execution_unavailable";
+const DEMO_UNAVAILABLE_MESSAGE: &str = "Demo listing, execution, and verification are unavailable until demo.yaml manifests and artifact checks are parsed and executed from real evidence instead of empty timestamped placeholders.";
+const DEMO_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const DEMO_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-jp06.1";
+const DEMO_UNAVAILABLE_SIDE_EFFECT: &str =
+    "conservative abstention; no demo execution, verification, or artifact write";
+
+fn write_demo_unavailable<W, E>(
     cli: &Cli,
-    args: &DemoListArgs,
+    command: &'static str,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    let demo_file_path = args
-        .demo_file
-        .clone()
-        .unwrap_or_else(|| workspace.join("demo.yaml"));
-
-    let demo_file_exists = demo_file_path.exists();
-    let total_count: usize = 0;
-    let filtered_count: usize = 0;
-
-    let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
-        "subsystem": "demo",
-        "command": "list",
-        "data": {
-            "demo_file": demo_file_path.display().to_string(),
-            "demo_file_exists": demo_file_exists,
-            "total_count": total_count,
-            "filtered_count": filtered_count,
-            "demos": [],
-            "filter_status": args.status,
-            "filter_tag": args.tag,
-        }
-    });
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            let out = format!(
-                "Demo List\n=========\nDemo file: {}\nFile exists: {}\nTotal demos: {}\nFiltered: {}\n",
-                demo_file_path.display(),
-                demo_file_exists,
-                total_count,
-                filtered_count
-            );
-            write_stdout(stdout, &out)
-        }
-        output::Renderer::Toon => write_stdout(
-            stdout,
-            &format!(
-                "demo_list: total={} filtered={}\n",
-                total_count, filtered_count
-            ),
-        ),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(
-            stdout,
-            &(serde_json::to_string_pretty(&response).unwrap_or_default() + "\n"),
-        ),
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": DEMO_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": DEMO_UNAVAILABLE_MESSAGE,
+                "repair": DEMO_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": DEMO_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": DEMO_UNAVAILABLE_MESSAGE,
+                        "repair": DEMO_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": DEMO_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": DEMO_UNAVAILABLE_SIDE_EFFECT
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
     }
+
+    let _ = writeln!(stderr, "error: {DEMO_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {DEMO_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
+}
+
+fn handle_demo_list<W, E>(
+    cli: &Cli,
+    _args: &DemoListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    write_demo_unavailable(cli, "demo list", stdout, stderr)
 }
 
 fn handle_demo_run<W, E>(
     cli: &Cli,
-    args: &DemoRunArgs,
+    _args: &DemoRunArgs,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -11704,96 +11701,12 @@ where
     W: Write,
     E: Write,
 {
-    use crate::models::demo::DEMO_RUN_RESULT_SCHEMA_V1;
-
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    let demo_file_path = args
-        .demo_file
-        .clone()
-        .unwrap_or_else(|| workspace.join("demo.yaml"));
-
-    let demo_file_exists = demo_file_path.exists();
-
-    if !demo_file_exists {
-        let error_response = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "subsystem": "demo",
-            "command": "run",
-            "error": {
-                "code": "demo_file_not_found",
-                "message": format!("Demo file not found: {}", demo_file_path.display()),
-            }
-        });
-        if !cli.wants_json() && !cli.renderer().is_machine_readable() {
-            let _ = writeln!(
-                stderr,
-                "Error: Demo file not found: {}",
-                demo_file_path.display()
-            );
-        }
-        return match cli.renderer() {
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(serde_json::to_string_pretty(&error_response).unwrap_or_default() + "\n"),
-            ),
-            _ => write_stdout(stdout, ""),
-        };
-    }
-
-    let timestamp = chrono::Utc::now().to_rfc3339();
-    let demo_id = &args.demo_id;
-    let is_dry_run = args.dry_run;
-
-    let response = serde_json::json!({
-        "schema": DEMO_RUN_RESULT_SCHEMA_V1,
-        "subsystem": "demo",
-        "command": "run",
-        "data": {
-            "demo_id": demo_id,
-            "demo_file": demo_file_path.display().to_string(),
-            "status": if is_dry_run { "dry_run" } else { "pending" },
-            "dry_run": is_dry_run,
-            "timestamp": timestamp,
-            "command_results": [],
-        }
-    });
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            let mode = if is_dry_run { " (dry-run)" } else { "" };
-            let out = format!(
-                "Demo Run{}\n========\nDemo ID: {}\nDemo file: {}\nStatus: pending\nTimestamp: {}\n",
-                mode,
-                demo_id,
-                demo_file_path.display(),
-                timestamp
-            );
-            write_stdout(stdout, &out)
-        }
-        output::Renderer::Toon => write_stdout(
-            stdout,
-            &format!("demo_run: id={} dry_run={}\n", demo_id, is_dry_run),
-        ),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(
-            stdout,
-            &(serde_json::to_string_pretty(&response).unwrap_or_default() + "\n"),
-        ),
-    }
+    write_demo_unavailable(cli, "demo run", stdout, stderr)
 }
 
 fn handle_demo_verify<W, E>(
     cli: &Cli,
-    args: &DemoVerifyArgs,
+    _args: &DemoVerifyArgs,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -11801,93 +11714,7 @@ where
     W: Write,
     E: Write,
 {
-    use crate::models::demo::DEMO_RUN_RESULT_SCHEMA_V1;
-
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    let demo_file_path = args
-        .demo_file
-        .clone()
-        .unwrap_or_else(|| workspace.join("demo.yaml"));
-
-    let artifacts_dir = args
-        .artifacts_dir
-        .clone()
-        .unwrap_or_else(|| workspace.join("artifacts"));
-
-    let demo_file_exists = demo_file_path.exists();
-    let artifacts_dir_exists = artifacts_dir.exists();
-
-    if !demo_file_exists {
-        let error_response = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "subsystem": "demo",
-            "command": "verify",
-            "error": {
-                "code": "demo_file_not_found",
-                "message": format!("Demo file not found: {}", demo_file_path.display()),
-            }
-        });
-        if !cli.wants_json() && !cli.renderer().is_machine_readable() {
-            let _ = writeln!(
-                stderr,
-                "Error: Demo file not found: {}",
-                demo_file_path.display()
-            );
-        }
-        return match cli.renderer() {
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(serde_json::to_string_pretty(&error_response).unwrap_or_default() + "\n"),
-            ),
-            _ => write_stdout(stdout, ""),
-        };
-    }
-
-    let demo_id = &args.demo_id;
-    let timestamp = chrono::Utc::now().to_rfc3339();
-
-    let response = serde_json::json!({
-        "schema": DEMO_RUN_RESULT_SCHEMA_V1,
-        "subsystem": "demo",
-        "command": "verify",
-        "data": {
-            "demo_id": demo_id,
-            "demo_file": demo_file_path.display().to_string(),
-            "artifacts_dir": artifacts_dir.display().to_string(),
-            "artifacts_dir_exists": artifacts_dir_exists,
-            "status": "pending",
-            "timestamp": timestamp,
-            "verification_results": [],
-        }
-    });
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            let out = format!(
-                "Demo Verify\n===========\nDemo ID: {}\nDemo file: {}\nArtifacts dir: {}\nStatus: pending\nTimestamp: {}\n",
-                demo_id,
-                demo_file_path.display(),
-                artifacts_dir.display(),
-                timestamp
-            );
-            write_stdout(stdout, &out)
-        }
-        output::Renderer::Toon => write_stdout(stdout, &format!("demo_verify: id={}\n", demo_id)),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(
-            stdout,
-            &(serde_json::to_string_pretty(&response).unwrap_or_default() + "\n"),
-        ),
-    }
+    write_demo_unavailable(cli, "demo verify", stdout, stderr)
 }
 
 // ============================================================================

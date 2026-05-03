@@ -129,6 +129,8 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "handoff"
     } else if args.iter().any(|arg| arg == "recorder") {
         "recorder"
+    } else if args.iter().any(|arg| arg == "demo") {
+        "demo"
     } else {
         "unknown"
     }
@@ -156,6 +158,8 @@ fn side_effect_class(args: &[String]) -> &'static str {
         "conservative abstention; no continuity capsule write"
     } else if args.iter().any(|arg| arg == "recorder") {
         "read-only, conservative abstention; no recorder tail or follow snapshot"
+    } else if args.iter().any(|arg| arg == "demo") {
+        "conservative abstention; no demo execution, verification, or artifact write"
     } else {
         "unknown"
     }
@@ -1361,6 +1365,172 @@ fn recorder_tail_degrades_instead_of_reporting_stubbed_empty_events() -> TestRes
         json!("read-only, conservative abstention; no recorder tail or follow snapshot"),
         "logged recorder tail side-effect class",
     )
+}
+
+#[test]
+fn demo_commands_degrade_instead_of_reporting_pending_placeholders() -> TestResult {
+    let workspace_root = unique_artifact_dir("demo-unavailable-workspace")?;
+    let workspace = workspace_root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    fs::write(
+        workspace.join("demo.yaml"),
+        "demos:\n  - id: demo_fixture_001\n    title: placeholder execution must not pass\n",
+    )
+    .map_err(|error| format!("failed to write demo.yaml: {error}"))?;
+    let workspace_arg = workspace.display().to_string();
+
+    let cases = [
+        (
+            "demo-list-unavailable",
+            "demo list",
+            vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "demo".to_owned(),
+                "list".to_owned(),
+            ],
+        ),
+        (
+            "demo-run-unavailable",
+            "demo run",
+            vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "demo".to_owned(),
+                "run".to_owned(),
+                "demo_fixture_001".to_owned(),
+                "--dry-run".to_owned(),
+            ],
+        ),
+        (
+            "demo-verify-unavailable",
+            "demo verify",
+            vec![
+                "--workspace".to_owned(),
+                workspace_arg,
+                "--json".to_owned(),
+                "demo".to_owned(),
+                "verify".to_owned(),
+                "demo_fixture_001".to_owned(),
+            ],
+        ),
+    ];
+
+    for (name, command, args) in cases {
+        let result = run_ee_logged(name, Some(&workspace), args)?;
+        ensure_equal(
+            &result.exit_code,
+            &UNSATISFIED_DEGRADED_MODE_EXIT,
+            &format!("{command} unavailable exit code"),
+        )?;
+        ensure(
+            result.stderr.is_empty(),
+            format!("{command} JSON degraded response must keep stderr empty"),
+        )?;
+        ensure_no_ansi(&result.stdout, &format!("{command} degraded stdout"))?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/schema",
+            json!("ee.response.v1"),
+            &format!("{command} degraded response schema"),
+        )?;
+        ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/command",
+            json!(command),
+            &format!("{command} command label"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/code",
+            json!("demo_execution_unavailable"),
+            &format!("{command} degraded code"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/degraded/0/code",
+            json!("demo_execution_unavailable"),
+            &format!("{command} degraded array code"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/followUpBead",
+            json!("eidetic_engine_cli-jp06.1"),
+            &format!("{command} follow-up bead"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/sideEffectClass",
+            json!("conservative abstention; no demo execution, verification, or artifact write"),
+            &format!("{command} side-effect class"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/evidenceIds",
+            json!([]),
+            &format!("{command} evidence ids"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/sourceIds",
+            json!([]),
+            &format!("{command} source ids"),
+        )?;
+
+        let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
+        ensure(
+            fake_success.passed,
+            format!("degraded {command} output should not be fake success: {fake_success:?}"),
+        )?;
+
+        let unsupported_claims =
+            validate_no_unsupported_evidence_claims(command, false, false, &result.stdout);
+        ensure(
+            unsupported_claims.passed,
+            format!(
+                "degraded {command} output should not count as unsupported success: {unsupported_claims:?}"
+            ),
+        )?;
+
+        let log_text = fs::read_to_string(&result.log_path)
+            .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+        let log_json: Value = serde_json::from_str(&log_text)
+            .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+        ensure_json_pointer(
+            &log_json,
+            "/degradationCodes",
+            json!(["demo_execution_unavailable"]),
+            &format!("logged {command} degradation code"),
+        )?;
+        ensure_json_pointer(
+            &log_json,
+            "/repairCommand",
+            json!("ee status --json"),
+            &format!("logged {command} repair command"),
+        )?;
+        ensure_json_pointer(
+            &log_json,
+            "/commandBoundaryMatrixRow",
+            json!("demo"),
+            &format!("logged {command} boundary matrix row"),
+        )?;
+        ensure_json_pointer(
+            &log_json,
+            "/sideEffectClass",
+            json!("conservative abstention; no demo execution, verification, or artifact write"),
+            &format!("logged {command} side-effect class"),
+        )?;
+    }
+
+    Ok(())
 }
 
 #[test]
