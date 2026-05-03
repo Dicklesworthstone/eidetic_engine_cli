@@ -6751,95 +6751,14 @@ fn handle_plan_goal<W, E>(
     cli: &Cli,
     args: &PlanGoalArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    use crate::core::plan::{GOAL_PLAN_SCHEMA_V1, PlanGoalOptions, PlanProfile, generate_plan};
-
-    let profile = PlanProfile::from_str(&args.profile).unwrap_or(PlanProfile::Full);
-
-    let options = PlanGoalOptions {
-        goal: args.goal.clone(),
-        workspace: args.workspace.clone(),
-        profile,
-    };
-
-    let plan = generate_plan(&options);
-
-    let human_output = || {
-        let mut out = String::from("Goal Plan\n=========\n\n");
-        out.push_str(&format!("Plan ID:    {}\n", plan.plan_id));
-        out.push_str(&format!("Goal:       {}\n", plan.goal_input));
-        out.push_str(&format!(
-            "Category:   {} (confidence: {:.0}%)\n",
-            plan.classification.primary.as_str(),
-            plan.classification.confidence * 100.0
-        ));
-        out.push_str(&format!("Recipe:     {}\n", plan.recipe_id));
-        out.push_str(&format!("Profile:    {}\n\n", plan.profile.as_str()));
-
-        if plan.classification.ambiguous {
-            out.push_str("[Goal is ambiguous - consider refining]\n\n");
-        }
-
-        out.push_str("Steps:\n");
-        for step in &plan.steps {
-            let dry_run_marker = if step.dry_run_available {
-                " [dry-run available]"
-            } else {
-                ""
-            };
-            out.push_str(&format!(
-                "  {}. {}{}\n",
-                step.order, step.command, dry_run_marker
-            ));
-            out.push_str(&format!("      {}\n", step.description));
-        }
-
-        if plan.dry_run_recommended {
-            out.push_str("\n[Dry-run recommended for safe profile]\n");
-        }
-
-        out.push_str("\nNext:\n");
-        for cmd in &plan.next_inspection_commands {
-            out.push_str(&format!("  {cmd}\n"));
-        }
-        out
-    };
-
-    let toon_output = || {
-        format!(
-            "PLAN|{}|{}|{}|{}\n",
-            plan.plan_id,
-            plan.classification.primary.as_str(),
-            plan.recipe_id,
-            plan.steps.len()
-        )
-    };
-
-    let json_output = || {
-        let include_alternatives = profile == PlanProfile::Full;
-        serde_json::json!({
-            "schema": GOAL_PLAN_SCHEMA_V1,
-            "success": true,
-            "data": plan.data_json(include_alternatives),
-        })
-        .to_string()
-    };
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &human_output())
-        }
-        output::Renderer::Toon => write_stdout(stdout, &toon_output()),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(stdout, &(json_output() + "\n")),
-    }
+    let _ = args;
+    write_plan_decisioning_unavailable(cli, "plan goal", stdout, stderr)
 }
 
 fn handle_plan_recipe_list<W, E>(
@@ -7018,63 +6937,59 @@ where
     W: Write,
     E: Write,
 {
-    use crate::core::plan::{PLAN_EXPLAIN_SCHEMA_V1, explain_recipe};
+    let _ = args;
+    write_plan_decisioning_unavailable(cli, "plan explain", stdout, stderr)
+}
 
-    // Try to explain as recipe first
-    if let Some(explanation) = explain_recipe(&args.id) {
-        let human_output = || {
-            let mut out = format!("Explanation: {}\n", explanation.recipe_id);
-            out.push_str(&format!("{}\n\n", "=".repeat(40)));
-            out.push_str(&format!(
-                "Classification: {}\n",
-                explanation.classification_reasoning
-            ));
-            out.push_str(&format!(
-                "Selection:      {}\n\n",
-                explanation.selection_reasoning
-            ));
+const PLAN_DECISIONING_UNAVAILABLE_CODE: &str = "plan_decisioning_unavailable";
+const PLAN_DECISIONING_UNAVAILABLE_MESSAGE: &str = "Goal planning and recipe explanation are unavailable until plan commands are re-scoped to mechanical command catalogs or skill-facing docs instead of built-in goal classification and recipe reasoning.";
+const PLAN_DECISIONING_UNAVAILABLE_REPAIR: &str = "ee plan recipe list --json";
+const PLAN_DECISIONING_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-6cks";
+const PLAN_DECISIONING_UNAVAILABLE_SIDE_EFFECT: &str =
+    "conservative abstention; no goal classification or recipe explanation";
 
-            out.push_str("Posture Inputs:\n");
-            for input in &explanation.posture_inputs {
-                out.push_str(&format!("  - {input}\n"));
+fn write_plan_decisioning_unavailable<W, E>(
+    cli: &Cli,
+    command: &'static str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": PLAN_DECISIONING_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": PLAN_DECISIONING_UNAVAILABLE_MESSAGE,
+                "repair": PLAN_DECISIONING_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": PLAN_DECISIONING_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": PLAN_DECISIONING_UNAVAILABLE_MESSAGE,
+                        "repair": PLAN_DECISIONING_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": PLAN_DECISIONING_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": PLAN_DECISIONING_UNAVAILABLE_SIDE_EFFECT
             }
-
-            out.push_str("\nNext Inspection:\n");
-            for cmd in &explanation.next_inspection {
-                out.push_str(&format!("  {cmd}\n"));
-            }
-            out
-        };
-
-        let toon_output = || format!("EXPLAIN|{}|recipe\n", explanation.recipe_id);
-
-        let json_output = || {
-            serde_json::json!({
-                "schema": PLAN_EXPLAIN_SCHEMA_V1,
-                "success": true,
-                "data": explanation.data_json(),
-            })
-            .to_string()
-        };
-
-        match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &human_output())
-            }
-            output::Renderer::Toon => write_stdout(stdout, &toon_output()),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(stdout, &(json_output() + "\n")),
-        }
-    } else {
-        let domain_error = crate::models::DomainError::NotFound {
-            resource: "plan or recipe".to_string(),
-            id: args.id.clone(),
-            repair: Some("ee plan recipe list --json".to_string()),
-        };
-        write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
     }
+
+    let _ = writeln!(stderr, "error: {PLAN_DECISIONING_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {PLAN_DECISIONING_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
 }
 
 // ============================================================================
