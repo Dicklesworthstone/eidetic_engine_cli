@@ -6,7 +6,7 @@
 //! compare deterministic model outputs to checked-in golden files.
 
 use ee::core::situation::{
-    SITUATION_COMPARE_SCHEMA_V1, SITUATION_FIXTURE_METRICS_SCHEMA_V1,
+    SITUATION_COMPARE_SCHEMA_V1, SITUATION_EXPLAIN_SCHEMA_V1, SITUATION_FIXTURE_METRICS_SCHEMA_V1,
     SITUATION_LINK_DRY_RUN_SCHEMA_V1, SituationCompareOptions, classify_task, compare_situations,
     evaluate_built_in_situation_fixtures, plan_situation_link_dry_run,
 };
@@ -122,6 +122,63 @@ fn gate19_cli_classify_release_routing_matches_golden() -> TestResult {
 }
 
 #[test]
+fn gate19_cli_classify_async_migration_matches_golden() -> TestResult {
+    let output = run_ee(&[
+        "--json",
+        "situation",
+        "classify",
+        "migrate async runtime from tokio to asupersync",
+    ])?;
+    ensure(
+        output.status.success(),
+        format!("classify exited with {}", output.status),
+    )?;
+    ensure(
+        output.stderr.is_empty(),
+        format!(
+            "json classify must not emit diagnostics on stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("stdout must be UTF-8 JSON: {error}"))?;
+    let actual: JsonValue =
+        serde_json::from_str(&stdout).map_err(|error| format!("stdout JSON: {error}"))?;
+    let expected = read_golden("classify_async_migration")?;
+
+    ensure_json_equal(
+        actual.get("schema"),
+        JsonValue::String(SITUATION_CLASSIFY_SCHEMA_V1.to_string()),
+        "classify schema",
+    )?;
+    ensure_json_equal(
+        actual.get("success"),
+        JsonValue::Bool(true),
+        "classify success",
+    )?;
+    ensure(
+        actual
+            .pointer("/data/routingDecisions")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|routes| {
+                routes.iter().any(|route| {
+                    route.get("surface").and_then(JsonValue::as_str) == Some("context_profile")
+                        && route.get("retrievalProfile").and_then(JsonValue::as_str)
+                            == Some("broad")
+                })
+            }),
+        "low-confidence async migration classification must broaden context profile routing",
+    )?;
+    ensure(
+        actual == expected,
+        format!(
+            "async migration classification golden mismatch\nactual: {actual}\nexpected: {expected}"
+        ),
+    )
+}
+
+#[test]
 fn gate19_low_confidence_and_high_risk_goldens_are_stable() -> TestResult {
     let low_confidence = classification_envelope("docs fix");
     let high_risk = classification_envelope("fix failing release workflow");
@@ -163,6 +220,55 @@ fn gate19_low_confidence_and_high_risk_goldens_are_stable() -> TestResult {
                     })
         }),
         "high-risk alternative must add a deterministic tripwire candidate",
+    )
+}
+
+#[test]
+fn gate19_cli_explain_signature_matches_golden() -> TestResult {
+    let output = run_ee(&["--json", "situation", "explain", "sit.release_bug"])?;
+    ensure(
+        output.status.success(),
+        format!("explain exited with {}", output.status),
+    )?;
+    ensure(
+        output.stderr.is_empty(),
+        format!(
+            "json explain must not emit diagnostics on stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("stdout must be UTF-8 JSON: {error}"))?;
+    let actual: JsonValue =
+        serde_json::from_str(&stdout).map_err(|error| format!("stdout JSON: {error}"))?;
+    let expected = read_golden("explain_signature")?;
+
+    ensure_json_equal(
+        actual.get("schema"),
+        JsonValue::String(SITUATION_EXPLAIN_SCHEMA_V1.to_string()),
+        "explain schema",
+    )?;
+    ensure_json_equal(
+        actual.get("success"),
+        JsonValue::Bool(true),
+        "explain success",
+    )?;
+    ensure_json_equal(
+        actual.pointer("/data/situationId"),
+        JsonValue::String("sit.release_bug".to_string()),
+        "explain situation id",
+    )?;
+    ensure(
+        actual
+            .pointer("/data/recommendations")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|recommendations| !recommendations.is_empty()),
+        "explain output must include non-empty recommendations",
+    )?;
+    ensure(
+        actual == expected,
+        format!("explain signature golden mismatch\nactual: {actual}\nexpected: {expected}"),
     )
 }
 
