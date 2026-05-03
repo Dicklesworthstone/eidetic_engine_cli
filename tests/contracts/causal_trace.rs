@@ -6,11 +6,13 @@
 
 use ee::core::causal::{
     CAUSAL_COMPARE_SCHEMA_V1, CAUSAL_ESTIMATE_SCHEMA_V1, CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
-    CompareOptions, ConfidenceState, EstimateOptions, PromotePlanOptions, TraceOptions,
-    compare_causal_evidence, estimate_causal_uplift, promote_causal_plan, trace_causal_chains,
+    CAUSAL_TRACE_LIST_SCHEMA_V1, CompareOptions, ConfidenceState, EstimateOptions,
+    PromotePlanOptions, TraceOptions, compare_causal_evidence, estimate_causal_uplift,
+    promote_causal_plan, trace_causal_chains,
 };
 use ee::models::causal::CAUSAL_TRACE_SCHEMA_V1;
 use serde_json::Value as JsonValue;
+use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
 
@@ -24,6 +26,71 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     } else {
         Err(message.into())
     }
+}
+
+fn run_ee(args: &[&str]) -> Result<Output, String> {
+    Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(args)
+        .output()
+        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn assert_clean_machine_stdout(stdout: &str, context: &str) -> TestResult {
+    ensure(
+        stdout.starts_with('{'),
+        format!("{context}: JSON stdout must start with an object, got {stdout:?}"),
+    )?;
+    ensure(
+        stdout.ends_with('\n'),
+        format!("{context}: JSON stdout must end with a newline, got {stdout:?}"),
+    )?;
+    for line in stdout.lines() {
+        let trimmed = line.trim_start();
+        ensure(
+            !matches!(
+                trimmed.split_once(':').map(|(prefix, _)| prefix),
+                Some("warning" | "error")
+            ) && !trimmed.starts_with("[INFO]")
+                && !trimmed.starts_with("[WARN]")
+                && !trimmed.starts_with("[ERROR]"),
+            format!("{context}: diagnostics leaked to stdout line {line:?}"),
+        )?;
+    }
+    Ok(())
+}
+
+fn cli_json_success(
+    args: &[&str],
+    expected_schema: &str,
+    context: &str,
+) -> Result<JsonValue, String> {
+    let output = run_ee(args)?;
+    ensure(
+        output.status.success(),
+        format!(
+            "{context}: command failed; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    ensure(
+        output.stderr.is_empty(),
+        format!(
+            "{context}: JSON command stderr must stay empty, got {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("{context}: stdout was not UTF-8: {error}"))?;
+    assert_clean_machine_stdout(&stdout, context)?;
+    let json: JsonValue = serde_json::from_str(&stdout)
+        .map_err(|error| format!("{context}: stdout was not JSON: {error}; stdout={stdout}"))?;
+    assert_schema_field(&json, expected_schema, context)?;
+    ensure(
+        json.get("success").and_then(JsonValue::as_bool) == Some(true),
+        format!("{context}: top-level success field must be true"),
+    )?;
+    Ok(json)
 }
 
 fn assert_schema_field(json: &JsonValue, expected_schema: &str, context: &str) -> TestResult {
@@ -63,6 +130,245 @@ fn normalize_compare_numeric_fields(value: &mut JsonValue) {
             comparison[field] = serde_json::json!(number);
         }
     }
+}
+
+// ============================================================================
+// Gate 22 Public CLI Contract Tests
+// ============================================================================
+
+#[test]
+fn causal_cli_json_subcommands_preserve_stdout_stderr_contracts() -> TestResult {
+    let cases: [(&str, &[&str], &str, &str); 4] = [
+        (
+            "causal trace",
+            &[
+                "--json",
+                "causal",
+                "trace",
+                "--run-id",
+                "run_fixture_001",
+                "--pack-id",
+                "pack_fixture_001",
+                "--preflight-id",
+                "pre_fixture_001",
+                "--tripwire-id",
+                "trip_fixture_001",
+                "--procedure-id",
+                "proc_fixture_001",
+                "--agent-id",
+                "agent_fixture_001",
+            ],
+            CAUSAL_TRACE_LIST_SCHEMA_V1,
+            CAUSAL_TRACE_SCHEMA_V1,
+        ),
+        (
+            "causal estimate",
+            &[
+                "--json",
+                "causal",
+                "estimate",
+                "--artifact-id",
+                "mem_fixture_001",
+                "--decision-id",
+                "decision_fixture_001",
+                "--method",
+                "naive",
+                "--include-assumptions",
+                "--include-confounders",
+            ],
+            CAUSAL_ESTIMATE_SCHEMA_V1,
+            CAUSAL_ESTIMATE_SCHEMA_V1,
+        ),
+        (
+            "causal compare",
+            &[
+                "--json",
+                "causal",
+                "compare",
+                "--artifact-id",
+                "mem_fixture_001",
+                "--fixture-replay-id",
+                "fixture_replay_001",
+                "--shadow-run-id",
+                "shadow_run_001",
+                "--counterfactual-episode-id",
+                "counterfactual_episode_001",
+                "--experiment-id",
+                "experiment_001",
+                "--method",
+                "replay",
+            ],
+            CAUSAL_COMPARE_SCHEMA_V1,
+            CAUSAL_COMPARE_SCHEMA_V1,
+        ),
+        (
+            "causal promote-plan",
+            &[
+                "--json",
+                "causal",
+                "promote-plan",
+                "--artifact-id",
+                "mem_fixture_001",
+                "--method",
+                "replay",
+                "--minimum-uplift",
+                "0.05",
+                "--include-revalidation",
+                "--include-narrower-routing",
+                "--include-experiment-proposals",
+                "--dry-run",
+            ],
+            CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
+            CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
+        ),
+    ];
+
+    for (context, args, envelope_schema, data_schema) in cases {
+        let json = cli_json_success(args, envelope_schema, context)?;
+        let data = json
+            .get("data")
+            .ok_or_else(|| format!("{context}: missing data field"))?;
+        assert_schema_field(data, data_schema, context)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn causal_cli_promote_plan_dry_run_never_emits_direct_mutation() -> TestResult {
+    let json = cli_json_success(
+        &[
+            "--json",
+            "causal",
+            "promote-plan",
+            "--artifact-id",
+            "mem_fixture_001",
+            "--method",
+            "replay",
+            "--minimum-uplift",
+            "0.05",
+            "--include-revalidation",
+            "--include-narrower-routing",
+            "--include-experiment-proposals",
+            "--dry-run",
+        ],
+        CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
+        "causal promote-plan dry-run mutation guard",
+    )?;
+    let data = json
+        .get("data")
+        .ok_or("causal promote-plan dry-run mutation guard: missing data")?;
+    ensure(
+        data.get("dryRun").and_then(JsonValue::as_bool) == Some(true),
+        "promote-plan must report dryRun=true",
+    )?;
+    let plans = data
+        .get("plans")
+        .and_then(JsonValue::as_array)
+        .ok_or("promote-plan dry-run: missing plans")?;
+    ensure(
+        !plans.is_empty(),
+        "promote-plan dry-run should produce a plan",
+    )?;
+    ensure(
+        plans
+            .iter()
+            .all(|plan| plan.get("dryRunFirst").and_then(JsonValue::as_bool) == Some(true)),
+        "every promote-plan entry must require dry-run-first",
+    )?;
+    ensure(
+        plans
+            .iter()
+            .all(|plan| plan.get("status").and_then(JsonValue::as_str) == Some("dry_run_ready")),
+        "dry-run promote-plan entries must remain dry_run_ready",
+    )?;
+    let audit = data
+        .pointer("/downstreamEffects/audit")
+        .ok_or("promote-plan dry-run: missing downstream audit")?;
+    ensure(
+        audit.get("mutationMode").and_then(JsonValue::as_str) == Some("dry_run_projection"),
+        "downstream audit must mark dry-run projection mode",
+    )?;
+    ensure(
+        audit
+            .get("rawEvidenceReplaced")
+            .and_then(JsonValue::as_bool)
+            == Some(false),
+        "promote-plan must not replace raw evidence",
+    )?;
+    ensure(
+        audit.get("silentMutation").and_then(JsonValue::as_bool) == Some(false),
+        "promote-plan must not silently mutate state",
+    )
+}
+
+#[test]
+fn causal_cli_confounded_demote_stays_proposed_with_review_recommendations() -> TestResult {
+    let json = cli_json_success(
+        &[
+            "--json",
+            "causal",
+            "promote-plan",
+            "--artifact-id",
+            "mem_confounded_001",
+            "--method",
+            "naive",
+            "--action",
+            "demote",
+            "--include-revalidation",
+        ],
+        CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
+        "causal promote-plan confounded demotion",
+    )?;
+    let data = json
+        .get("data")
+        .ok_or("causal promote-plan confounded demotion: missing data")?;
+    let plans = data
+        .get("plans")
+        .and_then(JsonValue::as_array)
+        .ok_or("confounded demotion: missing plans")?;
+    ensure(
+        plans
+            .iter()
+            .all(|plan| plan.get("status").and_then(JsonValue::as_str) == Some("proposed")),
+        "confounded demotion must stay proposed and not auto-apply",
+    )?;
+    ensure(
+        plans.iter().all(|plan| {
+            plan.get("blockingConfounderIds")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|ids| !ids.is_empty())
+        }),
+        "confounded demotion must carry blocking confounder evidence",
+    )?;
+    let degradations = data
+        .get("degradations")
+        .and_then(JsonValue::as_array)
+        .ok_or("confounded demotion: missing degradations")?;
+    ensure(
+        degradations.iter().any(|item| {
+            item.get("code")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|code| code == "dry_run_recommended")
+        }),
+        "non-dry-run confounded demotion must recommend dry-run review",
+    )?;
+    let recommendations = data
+        .get("recommendations")
+        .ok_or("confounded demotion: missing recommendations")?;
+    ensure(
+        recommendations
+            .get("revalidation")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|steps| !steps.is_empty()),
+        "confounded demotion must emit revalidation recommendations",
+    )?;
+    ensure(
+        recommendations
+            .get("experimentProposals")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|steps| !steps.is_empty()),
+        "underpowered confounded demotion must emit learning experiment recommendations",
+    )
 }
 
 // ============================================================================
