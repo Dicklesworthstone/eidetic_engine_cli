@@ -409,7 +409,7 @@ impl OutcomeFeedbackSummary {
 }
 
 /// Stable quarantine row exposed by `ee outcome quarantine list`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutcomeQuarantineRecord {
     pub id: String,
@@ -418,9 +418,14 @@ pub struct OutcomeQuarantineRecord {
     pub target_type: String,
     pub target_id: String,
     pub signal: String,
+    pub event_weight: f32,
+    pub event_source_type: String,
     pub proposed_event_id: Option<String>,
     pub recorded_at: String,
     pub reason: String,
+    pub event_reason_present: bool,
+    pub event_evidence_json_present: bool,
+    pub event_session_id: Option<String>,
     pub raw_event_hash: String,
     pub status: String,
     pub reviewed_at: Option<String>,
@@ -429,7 +434,7 @@ pub struct OutcomeQuarantineRecord {
 }
 
 /// Result of listing quarantined feedback.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutcomeQuarantineListReport {
     pub schema: &'static str,
@@ -775,9 +780,14 @@ pub fn record_outcome(
                 target_type: target_type.clone(),
                 target_id: target_id.clone(),
                 signal: signal.clone(),
+                weight,
+                source_type: source_type.clone(),
                 proposed_event_id: Some(event_id.clone()),
                 recorded_at: Utc::now().to_rfc3339(),
                 reason,
+                event_reason: feedback_input.reason.clone(),
+                evidence_json: feedback_input.evidence_json.clone(),
+                session_id: feedback_input.session_id.clone(),
                 raw_event_hash: raw_event_hash.clone(),
             },
             options.actor.as_deref(),
@@ -958,13 +968,20 @@ pub fn review_feedback_quarantine(
         target_type: row.target_type.clone(),
         target_id: row.target_id.clone(),
         signal: row.signal.clone(),
-        weight: default_feedback_weight("outcome_observed", &row.signal),
-        source_type: "outcome_observed".to_owned(),
+        weight: row.weight,
+        source_type: row.source_type.clone(),
         source_id: Some(row.source_id.clone()),
-        reason: Some(row.reason.clone()),
-        evidence_json: None,
-        session_id: None,
+        reason: row.event_reason.clone(),
+        evidence_json: row.evidence_json.clone(),
+        session_id: row.session_id.clone(),
     };
+    let expected_hash = raw_feedback_event_hash(&event_id, &feedback_input)?;
+    if expected_hash != row.raw_event_hash {
+        return Err(DomainError::PolicyDenied {
+            message: format!("quarantined feedback payload hash mismatch for {}", row.id),
+            repair: Some(format!("ee outcome quarantine release {} --reject", row.id)),
+        });
+    }
     let audit_id = release_feedback_quarantine_audited(
         &connection,
         &row,
@@ -1072,9 +1089,14 @@ fn outcome_quarantine_record_from_row(row: StoredFeedbackQuarantine) -> OutcomeQ
         target_type: row.target_type,
         target_id: row.target_id,
         signal: row.signal,
+        event_weight: row.weight,
+        event_source_type: row.source_type,
         proposed_event_id: row.proposed_event_id,
         recorded_at: row.recorded_at,
         reason: row.reason,
+        event_reason_present: row.event_reason.is_some(),
+        event_evidence_json_present: row.evidence_json.is_some(),
+        event_session_id: row.session_id,
         raw_event_hash: row.raw_event_hash,
         status: row.status,
         reviewed_at: row.reviewed_at,
@@ -1239,6 +1261,11 @@ fn feedback_quarantine_review_audit_details(
         "targetType": &row.target_type,
         "targetId": &row.target_id,
         "sourceId": &row.source_id,
+        "eventWeight": score_json_value(row.weight),
+        "eventSourceType": &row.source_type,
+        "eventReasonPresent": row.event_reason.is_some(),
+        "eventEvidenceJsonPresent": row.evidence_json.is_some(),
+        "eventSessionId": &row.session_id,
         "rawEventHash": &row.raw_event_hash,
         "releasedFeedbackEventId": released_feedback_event_id,
     })
@@ -1582,6 +1609,11 @@ fn feedback_quarantine_audit_details(
         "targetId": &input.target_id,
         "signal": &input.signal,
         "sourceId": &input.source_id,
+        "eventWeight": score_json_value(input.weight),
+        "eventSourceType": &input.source_type,
+        "eventReasonPresent": input.event_reason.is_some(),
+        "eventEvidenceJsonPresent": input.evidence_json.is_some(),
+        "eventSessionId": &input.session_id,
         "recordedAt": &input.recorded_at,
         "reason": &input.reason,
         "rawEventHash": &input.raw_event_hash,
@@ -1656,6 +1688,14 @@ mod tests {
         }
     }
 
+    fn ensure(condition: bool, context: &str) -> TestResult {
+        if condition {
+            Ok(())
+        } else {
+            Err(context.to_string())
+        }
+    }
+
     fn test_cancel_reason(kind: CancelKind) -> CancelReason {
         CancelReason::with_origin(kind, RegionId::testing_default(), Time::ZERO)
     }
@@ -1666,10 +1706,23 @@ mod tests {
     fn seed_outcome_database(
         prefix: &str,
     ) -> Result<(tempfile::TempDir, std::path::PathBuf), String> {
+        seed_outcome_database_with_workspace_id(prefix, Some(OUTCOME_TEST_WORKSPACE_ID.to_string()))
+    }
+
+    fn seed_outcome_database_with_workspace_id(
+        prefix: &str,
+        workspace_id: Option<String>,
+    ) -> Result<(tempfile::TempDir, std::path::PathBuf), String> {
         let dir = tempfile::Builder::new()
             .prefix(prefix)
             .tempdir()
             .map_err(|error| error.to_string())?;
+        let workspace_path = dir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = workspace_id
+            .unwrap_or_else(|| crate::core::curate::stable_workspace_id(&workspace_path));
         let database = dir.path().join("ee.db");
         if let Some(parent) = database.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -1678,9 +1731,9 @@ mod tests {
         connection.migrate().map_err(|error| error.to_string())?;
         connection
             .insert_workspace(
-                OUTCOME_TEST_WORKSPACE_ID,
+                &workspace_id,
                 &CreateWorkspaceInput {
-                    path: dir.path().to_string_lossy().into_owned(),
+                    path: workspace_path.to_string_lossy().into_owned(),
                     name: Some("outcome-test".to_string()),
                 },
             )
@@ -1689,7 +1742,7 @@ mod tests {
             .insert_memory(
                 OUTCOME_TEST_MEMORY_ID,
                 &CreateMemoryInput {
-                    workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_string(),
+                    workspace_id,
                     level: "procedural".to_string(),
                     kind: "rule".to_string(),
                     content: "Run cargo fmt --check before release.".to_string(),
@@ -2127,6 +2180,114 @@ mod tests {
             &true,
             "raw event hash is stored",
         )
+    }
+
+    #[test]
+    fn releasing_quarantined_feedback_preserves_original_payload() -> TestResult {
+        let (dir, database) =
+            seed_outcome_database_with_workspace_id("ee-outcome-quarantine-release", None)?;
+
+        let first = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "harmful".to_string(),
+            weight: None,
+            source_type: "automated_check".to_string(),
+            source_id: Some("preserved-source".to_string()),
+            reason: Some("First harmful signal establishes the source count.".to_string()),
+            evidence_json: None,
+            session_id: None,
+            event_id: Some("fb_00000000000000000000000997".to_string()),
+            actor: Some("test".to_string()),
+            dry_run: false,
+            harmful_per_source_per_hour: 1,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &first.status,
+            &OutcomeRecordStatus::Recorded,
+            "first status",
+        )?;
+
+        let quarantined = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "harmful".to_string(),
+            weight: Some(7.25),
+            source_type: "automated_check".to_string(),
+            source_id: Some("preserved-source".to_string()),
+            reason: Some("Original release reason must be preserved.".to_string()),
+            evidence_json: Some(r#"{"kind":"fixture","ok":true}"#.to_string()),
+            session_id: None,
+            event_id: Some("fb_00000000000000000000000998".to_string()),
+            actor: Some("test".to_string()),
+            dry_run: false,
+            harmful_per_source_per_hour: 1,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &quarantined.status,
+            &OutcomeRecordStatus::Quarantined,
+            "second status",
+        )?;
+
+        let quarantine = quarantined
+            .quarantine
+            .as_ref()
+            .ok_or_else(|| "quarantine summary missing".to_string())?;
+        let quarantine_id = quarantine
+            .id
+            .as_ref()
+            .ok_or_else(|| "quarantine id missing".to_string())?
+            .clone();
+        let review = super::review_feedback_quarantine(&super::OutcomeQuarantineReviewOptions {
+            workspace_path: dir.path(),
+            database_path: Some(&database),
+            quarantine_id: &quarantine_id,
+            reject: false,
+            actor: Some("reviewer"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure_equal(&review.status.as_str(), &"released", "review status")?;
+        ensure_equal(
+            &review.feedback_event_id,
+            &Some("fb_00000000000000000000000998".to_string()),
+            "released event id",
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let event = connection
+            .get_feedback_event("fb_00000000000000000000000998")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "released feedback event missing".to_string())?;
+        ensure_equal(
+            &event.source_type.as_str(),
+            &"automated_check",
+            "source type",
+        )?;
+        ensure(
+            (event.weight - 7.25).abs() < 0.001,
+            "weight must preserve quarantined value",
+        )?;
+        ensure_equal(
+            &event.reason,
+            &Some("Original release reason must be preserved.".to_string()),
+            "event reason",
+        )?;
+        ensure_equal(
+            &event.evidence_json,
+            &Some(r#"{"kind":"fixture","ok":true}"#.to_string()),
+            "event evidence json",
+        )?;
+        ensure_equal(&event.session_id, &None, "event session id")
     }
 
     #[test]

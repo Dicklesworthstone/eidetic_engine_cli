@@ -46,6 +46,8 @@ pub mod audit_actions {
     pub const CURATION_CANDIDATE_DISPOSITION: &str = "curation_candidate.disposition";
     pub const RULE_CREATE: &str = "rule.create";
     pub const RULE_PROTECT: &str = "rule.protect";
+    pub const TRIPWIRE_CHECK: &str = "tripwire.check";
+    pub const TRIPWIRE_CREATE: &str = "tripwire.create";
 }
 
 const MIGRATION_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS ee_schema_migrations (
@@ -2066,6 +2068,81 @@ CREATE INDEX idx_feedback_quarantine_status ON feedback_quarantine(status, recor
     "blake3:v022_feedback_rate_protection_2026_05_03",
 );
 
+/// V023: Preserve quarantined feedback payloads for audited release.
+pub const V023_FEEDBACK_QUARANTINE_PAYLOAD: Migration = Migration::new(
+    23,
+    "feedback_quarantine_payload",
+    r#"
+-- Store the original feedback event payload beside the quarantine decision so
+-- release can preserve source, weight, reason, evidence, and session metadata.
+ALTER TABLE feedback_quarantine ADD COLUMN source_type TEXT NOT NULL DEFAULT 'outcome_observed'
+    CHECK (source_type IN (
+        'human_explicit', 'agent_inference', 'automated_check', 'outcome_observed',
+        'contradiction_detected', 'usage_pattern', 'decay_trigger'
+    ));
+ALTER TABLE feedback_quarantine ADD COLUMN weight REAL NOT NULL DEFAULT 1.0
+    CHECK (weight >= 0.0 AND weight <= 10.0);
+ALTER TABLE feedback_quarantine ADD COLUMN event_reason TEXT
+    CHECK (event_reason IS NULL OR length(trim(event_reason)) > 0);
+ALTER TABLE feedback_quarantine ADD COLUMN evidence_json TEXT
+    CHECK (evidence_json IS NULL OR json_valid(evidence_json));
+ALTER TABLE feedback_quarantine ADD COLUMN session_id TEXT
+    REFERENCES sessions(id) ON DELETE SET NULL;
+"#,
+    "blake3:v023_feedback_quarantine_payload_2026_05_03",
+);
+
+/// V024: Persist preflight tripwires and audited check events.
+pub const V024_TRIPWIRE_STORE: Migration = Migration::new(
+    24,
+    "tripwire_store",
+    r#"
+CREATE TABLE tripwires (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'tw_*' AND length(trim(id)) > 0),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    preflight_run_id TEXT NOT NULL CHECK (length(trim(preflight_run_id)) > 0),
+    tripwire_type TEXT NOT NULL CHECK (tripwire_type IN (
+        'file_change', 'resource_threshold', 'time_limit', 'error_threshold', 'service_health', 'custom'
+    )),
+    condition TEXT NOT NULL CHECK (length(trim(condition)) > 0),
+    action TEXT NOT NULL CHECK (action IN ('halt', 'pause', 'warn', 'audit')),
+    state TEXT NOT NULL CHECK (state IN ('armed', 'triggered', 'disarmed', 'error')),
+    message TEXT CHECK (message IS NULL OR length(trim(message)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    last_checked_at TEXT CHECK (last_checked_at IS NULL OR length(trim(last_checked_at)) > 0),
+    triggered_at TEXT CHECK (triggered_at IS NULL OR length(trim(triggered_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0)
+);
+CREATE INDEX idx_tripwires_workspace_state ON tripwires(workspace_id, state, created_at, id);
+CREATE INDEX idx_tripwires_preflight ON tripwires(workspace_id, preflight_run_id, created_at, id);
+CREATE INDEX idx_tripwires_type ON tripwires(workspace_id, tripwire_type, created_at, id);
+
+CREATE TABLE tripwire_check_events (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'tchk_*' AND length(trim(id)) > 0),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    tripwire_id TEXT NOT NULL REFERENCES tripwires(id) ON DELETE CASCADE,
+    preflight_run_id TEXT NOT NULL CHECK (length(trim(preflight_run_id)) > 0),
+    checked_at TEXT NOT NULL CHECK (length(trim(checked_at)) > 0),
+    event_payload_hash TEXT NOT NULL CHECK (event_payload_hash GLOB 'blake3:*'),
+    condition_result TEXT NOT NULL CHECK (condition_result IN (
+        'satisfied', 'unsatisfied', 'unsupported_condition', 'missing_input'
+    )),
+    check_result TEXT NOT NULL CHECK (check_result IN (
+        'passed', 'triggered', 'disarmed', 'error', 'not_found'
+    )),
+    should_halt INTEGER NOT NULL CHECK (should_halt IN (0, 1)),
+    dry_run INTEGER NOT NULL CHECK (dry_run IN (0, 1)),
+    durable_mutation INTEGER NOT NULL CHECK (durable_mutation IN (0, 1)),
+    mutation_posture TEXT NOT NULL CHECK (length(trim(mutation_posture)) > 0),
+    details TEXT CHECK (details IS NULL OR length(trim(details)) > 0),
+    schema TEXT NOT NULL CHECK (length(trim(schema)) > 0)
+);
+CREATE INDEX idx_tripwire_check_events_tripwire ON tripwire_check_events(tripwire_id, checked_at, id);
+CREATE INDEX idx_tripwire_check_events_workspace ON tripwire_check_events(workspace_id, checked_at, id);
+"#,
+    "blake3:v024_tripwire_store_2026_05_03",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -2090,6 +2167,8 @@ pub const MIGRATIONS: &[Migration] = &[
     V020_CURATION_REVIEW_STATE,
     V021_CURATION_TTL_POLICY,
     V022_FEEDBACK_RATE_PROTECTION,
+    V023_FEEDBACK_QUARANTINE_PAYLOAD,
+    V024_TRIPWIRE_STORE,
 ];
 
 /// Result of applying migrations.
@@ -3740,14 +3819,19 @@ pub struct CreateFeedbackQuarantineInput {
     pub target_type: String,
     pub target_id: String,
     pub signal: String,
+    pub weight: f32,
+    pub source_type: String,
     pub proposed_event_id: Option<String>,
     pub recorded_at: String,
     pub reason: String,
+    pub event_reason: Option<String>,
+    pub evidence_json: Option<String>,
+    pub session_id: Option<String>,
     pub raw_event_hash: String,
 }
 
 /// A stored feedback_quarantine row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StoredFeedbackQuarantine {
     pub id: String,
     pub workspace_id: String,
@@ -3755,9 +3839,14 @@ pub struct StoredFeedbackQuarantine {
     pub target_type: String,
     pub target_id: String,
     pub signal: String,
+    pub weight: f32,
+    pub source_type: String,
     pub proposed_event_id: Option<String>,
     pub recorded_at: String,
     pub reason: String,
+    pub event_reason: Option<String>,
+    pub evidence_json: Option<String>,
+    pub session_id: Option<String>,
     pub raw_event_hash: String,
     pub status: String,
     pub reviewed_at: Option<String>,
@@ -4015,7 +4104,7 @@ impl DbConnection {
     ) -> Result<()> {
         self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO feedback_quarantine (id, workspace_id, source_id, target_type, target_id, signal, proposed_event_id, recorded_at, reason, raw_event_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO feedback_quarantine (id, workspace_id, source_id, target_type, target_id, signal, weight, source_type, proposed_event_id, recorded_at, reason, event_reason, evidence_json, session_id, raw_event_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             &[
                 Value::Text(id.to_string()),
                 Value::Text(input.workspace_id.clone()),
@@ -4023,12 +4112,26 @@ impl DbConnection {
                 Value::Text(input.target_type.clone()),
                 Value::Text(input.target_id.clone()),
                 Value::Text(input.signal.clone()),
+                Value::Double(f64::from(input.weight)),
+                Value::Text(input.source_type.clone()),
                 input
                     .proposed_event_id
                     .as_ref()
                     .map_or(Value::Null, |value| Value::Text(value.clone())),
                 Value::Text(input.recorded_at.clone()),
                 Value::Text(input.reason.clone()),
+                input
+                    .event_reason
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .evidence_json
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .session_id
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
                 Value::Text(input.raw_event_hash.clone()),
             ],
         )?;
@@ -4039,7 +4142,7 @@ impl DbConnection {
     pub fn get_feedback_quarantine(&self, id: &str) -> Result<Option<StoredFeedbackQuarantine>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, source_id, target_type, target_id, signal, proposed_event_id, recorded_at, reason, raw_event_hash, status, reviewed_at, reviewed_by, released_feedback_event_id FROM feedback_quarantine WHERE id = ?1",
+            "SELECT id, workspace_id, source_id, target_type, target_id, signal, weight, source_type, proposed_event_id, recorded_at, reason, event_reason, evidence_json, session_id, raw_event_hash, status, reviewed_at, reviewed_by, released_feedback_event_id FROM feedback_quarantine WHERE id = ?1",
             &[Value::Text(id.to_string())],
         )?;
         rows.first()
@@ -4055,7 +4158,7 @@ impl DbConnection {
     ) -> Result<Vec<StoredFeedbackQuarantine>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, source_id, target_type, target_id, signal, proposed_event_id, recorded_at, reason, raw_event_hash, status, reviewed_at, reviewed_by, released_feedback_event_id FROM feedback_quarantine WHERE workspace_id = ?1 AND (?2 IS NULL OR status = ?2) ORDER BY recorded_at ASC, id ASC",
+            "SELECT id, workspace_id, source_id, target_type, target_id, signal, weight, source_type, proposed_event_id, recorded_at, reason, event_reason, evidence_json, session_id, raw_event_hash, status, reviewed_at, reviewed_by, released_feedback_event_id FROM feedback_quarantine WHERE workspace_id = ?1 AND (?2 IS NULL OR status = ?2) ORDER BY recorded_at ASC, id ASC",
             &[
                 Value::Text(workspace_id.to_string()),
                 status.map_or(Value::Null, |value| Value::Text(value.to_string())),
@@ -4403,14 +4506,290 @@ fn stored_feedback_quarantine_from_row(row: &Row) -> Result<StoredFeedbackQuaran
         target_type: required_text(row, 3, DbOperation::Query, "target_type")?.to_string(),
         target_id: required_text(row, 4, DbOperation::Query, "target_id")?.to_string(),
         signal: required_text(row, 5, DbOperation::Query, "signal")?.to_string(),
-        proposed_event_id: optional_text(row, 6)?.map(str::to_string),
-        recorded_at: required_text(row, 7, DbOperation::Query, "recorded_at")?.to_string(),
-        reason: required_text(row, 8, DbOperation::Query, "reason")?.to_string(),
-        raw_event_hash: required_text(row, 9, DbOperation::Query, "raw_event_hash")?.to_string(),
-        status: required_text(row, 10, DbOperation::Query, "status")?.to_string(),
-        reviewed_at: optional_text(row, 11)?.map(str::to_string),
-        reviewed_by: optional_text(row, 12)?.map(str::to_string),
-        released_feedback_event_id: optional_text(row, 13)?.map(str::to_string),
+        weight: row
+            .get(6)
+            .and_then(|value| value.as_f64())
+            .map(|value| value as f32)
+            .unwrap_or(1.0),
+        source_type: required_text(row, 7, DbOperation::Query, "source_type")?.to_string(),
+        proposed_event_id: optional_text(row, 8)?.map(str::to_string),
+        recorded_at: required_text(row, 9, DbOperation::Query, "recorded_at")?.to_string(),
+        reason: required_text(row, 10, DbOperation::Query, "reason")?.to_string(),
+        event_reason: optional_text(row, 11)?.map(str::to_string),
+        evidence_json: optional_text(row, 12)?.map(str::to_string),
+        session_id: optional_text(row, 13)?.map(str::to_string),
+        raw_event_hash: required_text(row, 14, DbOperation::Query, "raw_event_hash")?.to_string(),
+        status: required_text(row, 15, DbOperation::Query, "status")?.to_string(),
+        reviewed_at: optional_text(row, 16)?.map(str::to_string),
+        reviewed_by: optional_text(row, 17)?.map(str::to_string),
+        released_feedback_event_id: optional_text(row, 18)?.map(str::to_string),
+    })
+}
+
+/// Input for creating a tripwire row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTripwireInput {
+    pub workspace_id: String,
+    pub preflight_run_id: String,
+    pub tripwire_type: String,
+    pub condition: String,
+    pub action: String,
+    pub state: String,
+    pub message: Option<String>,
+    pub created_at: String,
+    pub last_checked_at: Option<String>,
+    pub triggered_at: Option<String>,
+}
+
+/// A stored tripwire row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTripwire {
+    pub id: String,
+    pub workspace_id: String,
+    pub preflight_run_id: String,
+    pub tripwire_type: String,
+    pub condition: String,
+    pub action: String,
+    pub state: String,
+    pub message: Option<String>,
+    pub created_at: String,
+    pub last_checked_at: Option<String>,
+    pub triggered_at: Option<String>,
+    pub updated_at: String,
+}
+
+/// Input for recording a tripwire check event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTripwireCheckEventInput {
+    pub workspace_id: String,
+    pub tripwire_id: String,
+    pub preflight_run_id: String,
+    pub checked_at: String,
+    pub event_payload_hash: String,
+    pub condition_result: String,
+    pub check_result: String,
+    pub should_halt: bool,
+    pub dry_run: bool,
+    pub durable_mutation: bool,
+    pub mutation_posture: String,
+    pub details: Option<String>,
+    pub schema: String,
+}
+
+/// A stored tripwire check event row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTripwireCheckEvent {
+    pub id: String,
+    pub workspace_id: String,
+    pub tripwire_id: String,
+    pub preflight_run_id: String,
+    pub checked_at: String,
+    pub event_payload_hash: String,
+    pub condition_result: String,
+    pub check_result: String,
+    pub should_halt: bool,
+    pub dry_run: bool,
+    pub durable_mutation: bool,
+    pub mutation_posture: String,
+    pub details: Option<String>,
+    pub schema: String,
+}
+
+impl DbConnection {
+    /// Insert a tripwire row.
+    pub fn insert_tripwire(&self, id: &str, input: &CreateTripwireInput) -> Result<()> {
+        let updated_at = Utc::now().to_rfc3339();
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO tripwires (id, workspace_id, preflight_run_id, tripwire_type, condition, action, state, message, created_at, last_checked_at, triggered_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.preflight_run_id.clone()),
+                Value::Text(input.tripwire_type.clone()),
+                Value::Text(input.condition.clone()),
+                Value::Text(input.action.clone()),
+                Value::Text(input.state.clone()),
+                input
+                    .message
+                    .as_ref()
+                    .map_or(Value::Null, |message| Value::Text(message.clone())),
+                Value::Text(input.created_at.clone()),
+                input
+                    .last_checked_at
+                    .as_ref()
+                    .map_or(Value::Null, |checked_at| Value::Text(checked_at.clone())),
+                input
+                    .triggered_at
+                    .as_ref()
+                    .map_or(Value::Null, |triggered_at| Value::Text(triggered_at.clone())),
+                Value::Text(updated_at),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get one tripwire by ID.
+    pub fn get_tripwire(&self, id: &str) -> Result<Option<StoredTripwire>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, preflight_run_id, tripwire_type, condition, action, state, message, created_at, last_checked_at, triggered_at, updated_at FROM tripwires WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first().map(stored_tripwire_from_row).transpose()
+    }
+
+    /// List tripwires in stable order with optional filters.
+    pub fn list_tripwires(
+        &self,
+        workspace_id: &str,
+        state: Option<&str>,
+        preflight_run_id: Option<&str>,
+        tripwire_type: Option<&str>,
+        include_disarmed: bool,
+        limit: Option<usize>,
+    ) -> Result<Vec<StoredTripwire>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, preflight_run_id, tripwire_type, condition, action, state, message, created_at, last_checked_at, triggered_at, updated_at
+             FROM tripwires
+             WHERE workspace_id = ?1
+               AND (?2 IS NULL OR state = ?2)
+               AND (?3 IS NULL OR preflight_run_id = ?3)
+               AND (?4 IS NULL OR tripwire_type = ?4)
+               AND (?5 = 1 OR state <> 'disarmed')
+             ORDER BY created_at ASC, id ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                state.map_or(Value::Null, |value| Value::Text(value.to_string())),
+                preflight_run_id.map_or(Value::Null, |value| Value::Text(value.to_string())),
+                tripwire_type.map_or(Value::Null, |value| Value::Text(value.to_string())),
+                Value::Int(if include_disarmed { 1 } else { 0 }),
+            ],
+        )?;
+
+        let mut tripwires = rows
+            .iter()
+            .map(stored_tripwire_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        if let Some(limit) = limit {
+            tripwires.truncate(limit);
+        }
+        Ok(tripwires)
+    }
+
+    /// Update a tripwire after a concrete check.
+    pub fn update_tripwire_check_state(
+        &self,
+        id: &str,
+        state: &str,
+        checked_at: &str,
+        triggered_at: Option<&str>,
+    ) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE tripwires SET state = ?1, last_checked_at = ?2, triggered_at = ?3, updated_at = ?2 WHERE id = ?4",
+            &[
+                Value::Text(state.to_string()),
+                Value::Text(checked_at.to_string()),
+                triggered_at.map_or(Value::Null, |value| Value::Text(value.to_string())),
+                Value::Text(id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Insert an audited tripwire check event.
+    pub fn insert_tripwire_check_event(
+        &self,
+        id: &str,
+        input: &CreateTripwireCheckEventInput,
+    ) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO tripwire_check_events (id, workspace_id, tripwire_id, preflight_run_id, checked_at, event_payload_hash, condition_result, check_result, should_halt, dry_run, durable_mutation, mutation_posture, details, schema) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.tripwire_id.clone()),
+                Value::Text(input.preflight_run_id.clone()),
+                Value::Text(input.checked_at.clone()),
+                Value::Text(input.event_payload_hash.clone()),
+                Value::Text(input.condition_result.clone()),
+                Value::Text(input.check_result.clone()),
+                Value::Int(if input.should_halt { 1 } else { 0 }),
+                Value::Int(if input.dry_run { 1 } else { 0 }),
+                Value::Int(if input.durable_mutation { 1 } else { 0 }),
+                Value::Text(input.mutation_posture.clone()),
+                input
+                    .details
+                    .as_ref()
+                    .map_or(Value::Null, |details| Value::Text(details.clone())),
+                Value::Text(input.schema.clone()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List audited check events for one tripwire.
+    pub fn list_tripwire_check_events(
+        &self,
+        tripwire_id: &str,
+    ) -> Result<Vec<StoredTripwireCheckEvent>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, tripwire_id, preflight_run_id, checked_at, event_payload_hash, condition_result, check_result, should_halt, dry_run, durable_mutation, mutation_posture, details, schema
+             FROM tripwire_check_events
+             WHERE tripwire_id = ?1
+             ORDER BY checked_at ASC, id ASC",
+            &[Value::Text(tripwire_id.to_string())],
+        )?;
+
+        rows.iter()
+            .map(stored_tripwire_check_event_from_row)
+            .collect()
+    }
+}
+
+fn stored_tripwire_from_row(row: &Row) -> Result<StoredTripwire> {
+    Ok(StoredTripwire {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        preflight_run_id: required_text(row, 2, DbOperation::Query, "preflight_run_id")?
+            .to_string(),
+        tripwire_type: required_text(row, 3, DbOperation::Query, "tripwire_type")?.to_string(),
+        condition: required_text(row, 4, DbOperation::Query, "condition")?.to_string(),
+        action: required_text(row, 5, DbOperation::Query, "action")?.to_string(),
+        state: required_text(row, 6, DbOperation::Query, "state")?.to_string(),
+        message: optional_text(row, 7)?.map(str::to_string),
+        created_at: required_text(row, 8, DbOperation::Query, "created_at")?.to_string(),
+        last_checked_at: optional_text(row, 9)?.map(str::to_string),
+        triggered_at: optional_text(row, 10)?.map(str::to_string),
+        updated_at: required_text(row, 11, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
+fn stored_tripwire_check_event_from_row(row: &Row) -> Result<StoredTripwireCheckEvent> {
+    Ok(StoredTripwireCheckEvent {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        tripwire_id: required_text(row, 2, DbOperation::Query, "tripwire_id")?.to_string(),
+        preflight_run_id: required_text(row, 3, DbOperation::Query, "preflight_run_id")?
+            .to_string(),
+        checked_at: required_text(row, 4, DbOperation::Query, "checked_at")?.to_string(),
+        event_payload_hash: required_text(row, 5, DbOperation::Query, "event_payload_hash")?
+            .to_string(),
+        condition_result: required_text(row, 6, DbOperation::Query, "condition_result")?
+            .to_string(),
+        check_result: required_text(row, 7, DbOperation::Query, "check_result")?.to_string(),
+        should_halt: required_i64(row, 8, DbOperation::Query, "should_halt")? == 1,
+        dry_run: required_i64(row, 9, DbOperation::Query, "dry_run")? == 1,
+        durable_mutation: required_i64(row, 10, DbOperation::Query, "durable_mutation")? == 1,
+        mutation_posture: required_text(row, 11, DbOperation::Query, "mutation_posture")?
+            .to_string(),
+        details: optional_text(row, 12)?.map(str::to_string),
+        schema: required_text(row, 13, DbOperation::Query, "schema")?.to_string(),
     })
 }
 
@@ -8177,6 +8556,14 @@ mod tests {
             table_names.contains(&"artifact_links"),
             "artifact_links table must exist",
         )?;
+        ensure(
+            table_names.contains(&"tripwires"),
+            "tripwires table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"tripwire_check_events"),
+            "tripwire_check_events table must exist",
+        )?;
 
         connection.close()?;
         Ok(())
@@ -8442,6 +8829,93 @@ mod tests {
         connection.execute_raw(
             "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_01234567890123456789012345', '/tmp/test', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn tripwire_store_lists_updates_and_logs_checks() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = super::CreateTripwireInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            preflight_run_id: "pf_store_test".to_string(),
+            tripwire_type: "custom".to_string(),
+            condition: "task_contains_any(\"deploy\")".to_string(),
+            action: "halt".to_string(),
+            state: "armed".to_string(),
+            message: Some("Deployment risk".to_string()),
+            created_at: "2026-05-03T20:00:00Z".to_string(),
+            last_checked_at: None,
+            triggered_at: None,
+        };
+        connection.insert_tripwire("tw_store_001", &input)?;
+        connection.insert_tripwire(
+            "tw_store_002",
+            &super::CreateTripwireInput {
+                state: "disarmed".to_string(),
+                created_at: "2026-05-03T20:01:00Z".to_string(),
+                ..input.clone()
+            },
+        )?;
+
+        let visible = connection.list_tripwires(
+            "wsp_01234567890123456789012345",
+            None,
+            Some("pf_store_test"),
+            Some("custom"),
+            false,
+            None,
+        )?;
+        ensure_equal(&visible.len(), &1, "default list excludes disarmed")?;
+        ensure_equal(&visible[0].id, &"tw_store_001".to_string(), "stable id")?;
+
+        let updated = connection.update_tripwire_check_state(
+            "tw_store_001",
+            "triggered",
+            "2026-05-03T20:02:00Z",
+            Some("2026-05-03T20:02:00Z"),
+        )?;
+        ensure(updated, "tripwire state update must affect one row")?;
+        let stored = connection
+            .get_tripwire("tw_store_001")?
+            .ok_or_else(|| TestFailure::new("tripwire missing after update"))?;
+        ensure_equal(&stored.state, &"triggered".to_string(), "updated state")?;
+        ensure_equal(
+            &stored.triggered_at,
+            &Some("2026-05-03T20:02:00Z".to_string()),
+            "triggered timestamp",
+        )?;
+
+        connection.insert_tripwire_check_event(
+            "tchk_store_001",
+            &super::CreateTripwireCheckEventInput {
+                workspace_id: "wsp_01234567890123456789012345".to_string(),
+                tripwire_id: "tw_store_001".to_string(),
+                preflight_run_id: "pf_store_test".to_string(),
+                checked_at: "2026-05-03T20:02:00Z".to_string(),
+                event_payload_hash: "blake3:tripwirepayload".to_string(),
+                condition_result: "satisfied".to_string(),
+                check_result: "triggered".to_string(),
+                should_halt: true,
+                dry_run: false,
+                durable_mutation: true,
+                mutation_posture: "state_update_persisted".to_string(),
+                details: Some("condition satisfied".to_string()),
+                schema: "ee.tripwire.check.v1".to_string(),
+            },
+        )?;
+        let events = connection.list_tripwire_check_events("tw_store_001")?;
+        ensure_equal(&events.len(), &1, "check event count")?;
+        ensure_equal(&events[0].should_halt, &true, "halt decision logged")?;
+        ensure_equal(
+            &events[0].event_payload_hash,
+            &"blake3:tripwirepayload".to_string(),
+            "payload hash logged",
+        )?;
+
+        connection.close()?;
         Ok(())
     }
 
