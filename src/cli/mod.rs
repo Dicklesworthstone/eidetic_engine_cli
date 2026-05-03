@@ -50,10 +50,6 @@ use crate::core::index::{
 use crate::core::init::{InitOptions, init_workspace};
 use crate::core::install::{InstallCheckOptions, InstallPlanOptions, check_install, plan_install};
 use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
-use crate::core::lab::{
-    CaptureOptions as LabCaptureOptions, CounterfactualOptions as LabCounterfactualOptions,
-    ReplayOptions as LabReplayOptions, capture_episode, replay_episode, run_counterfactual,
-};
 use crate::core::learn::{
     LearnAgendaOptions, LearnCloseOptions, LearnExperimentProposeOptions,
     LearnExperimentRunOptions, LearnObserveOptions, LearnSummaryOptions, LearnUncertaintyOptions,
@@ -5940,6 +5936,55 @@ where
 // EE-382: Lab Command Handlers
 // ============================================================================
 
+const LAB_UNAVAILABLE_CODE: &str = "lab_replay_unavailable";
+const LAB_UNAVAILABLE_MESSAGE: &str = "Counterfactual lab capture, replay, and intervention analysis are unavailable until lab commands are backed by stored episodes and evidence-only replay artifacts instead of generated reports.";
+const LAB_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const LAB_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-db4z";
+
+fn write_lab_unavailable<W, E>(
+    cli: &Cli,
+    command: &'static str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": LAB_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": LAB_UNAVAILABLE_MESSAGE,
+                "repair": LAB_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": LAB_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": LAB_UNAVAILABLE_MESSAGE,
+                        "repair": LAB_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": LAB_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": "unavailable before lab episode capture, replay, or counterfactual mutation"
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
+    }
+
+    let _ = writeln!(stderr, "error: {LAB_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {LAB_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
+}
+
 fn handle_lab_capture<W, E>(
     cli: &Cli,
     args: &LabCaptureArgs,
@@ -5950,33 +5995,8 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let options = LabCaptureOptions {
-        workspace: workspace_path,
-        session_id: args.session_id.clone(),
-        task_input: args.task_input.clone(),
-        include_memories: args.include_memories,
-        include_actions: args.include_actions,
-        dry_run: args.dry_run,
-    };
-
-    match capture_episode(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_lab_capture_human(&report))
-            }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_lab_capture_toon(&report) + "\n"))
-            }
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_lab_capture_json(&report) + "\n"))
-            }
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    }
+    let _ = args;
+    write_lab_unavailable(cli, "lab capture", stdout, stderr)
 }
 
 fn handle_lab_replay<W, E>(
@@ -5989,32 +6009,8 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let options = LabReplayOptions {
-        workspace: workspace_path,
-        episode_id: args.episode_id.clone(),
-        verify_hash: true,
-        record_trace: true,
-        dry_run: args.dry_run,
-    };
-
-    match replay_episode(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_lab_replay_human(&report))
-            }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_lab_replay_toon(&report) + "\n"))
-            }
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_lab_replay_json(&report) + "\n"))
-            }
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    }
+    let _ = args;
+    write_lab_unavailable(cli, "lab replay", stdout, stderr)
 }
 
 fn handle_lab_counterfactual<W, E>(
@@ -6027,56 +6023,8 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-
-    let interventions: Vec<crate::core::lab::InterventionSpec> = args
-        .add_memory
-        .iter()
-        .map(|id| crate::core::lab::InterventionSpec::add_memory(id.clone()))
-        .chain(
-            args.remove_memory
-                .iter()
-                .map(|id| crate::core::lab::InterventionSpec::remove_memory(id.clone())),
-        )
-        .chain(
-            args.strengthen_memory
-                .iter()
-                .map(|id| crate::core::lab::InterventionSpec::strengthen_memory(id.clone(), 0.5)),
-        )
-        .chain(
-            args.weaken_memory
-                .iter()
-                .map(|id| crate::core::lab::InterventionSpec::weaken_memory(id.clone(), 0.5)),
-        )
-        .collect();
-
-    let options = LabCounterfactualOptions {
-        workspace: workspace_path,
-        episode_id: args.episode_id.clone(),
-        interventions,
-        generate_regret: true,
-        dry_run: args.dry_run,
-    };
-
-    match run_counterfactual(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_lab_counterfactual_human(&report))
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_lab_counterfactual_toon(&report) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(output::render_lab_counterfactual_json(&report) + "\n"),
-            ),
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    }
+    let _ = args;
+    write_lab_unavailable(cli, "lab counterfactual", stdout, stderr)
 }
 
 // ============================================================================

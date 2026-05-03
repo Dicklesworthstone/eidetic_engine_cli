@@ -1947,6 +1947,91 @@ fn causal_promote_plan_invalid_action_still_returns_usage_error() -> TestResult 
 }
 
 // ============================================================================
+// Counterfactual Lab Tests (EE-382 - Degraded until stored episodes exist)
+// ============================================================================
+
+fn assert_lab_unavailable(output: &std::process::Output, command: &str) -> TestResult {
+    ensure_equal(
+        &output.status.code(),
+        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
+        "exit code",
+    )?;
+    ensure(stdout_is_json(output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(output), "stdout must be clean")?;
+    ensure(
+        output.stderr.is_empty(),
+        "json degraded response must keep stderr empty",
+    )?;
+    let json = stdout_json(output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "response schema",
+    )?;
+    ensure_equal(&json["success"], &serde_json::json!(false), "success")?;
+    ensure_equal(
+        &json["data"]["command"],
+        &serde_json::json!(command),
+        "command",
+    )?;
+    ensure_equal(
+        &json["data"]["code"],
+        &serde_json::json!("lab_replay_unavailable"),
+        "degraded code",
+    )?;
+    ensure_equal(
+        &json["data"]["repair"],
+        &serde_json::json!("ee status --json"),
+        "repair",
+    )?;
+    ensure_equal(
+        &json["data"]["followUpBead"],
+        &serde_json::json!("eidetic_engine_cli-db4z"),
+        "follow-up bead",
+    )?;
+    ensure_equal(
+        &json["data"]["sideEffectClass"],
+        &serde_json::json!(
+            "unavailable before lab episode capture, replay, or counterfactual mutation"
+        ),
+        "side-effect class",
+    )
+}
+
+#[test]
+fn lab_capture_degrades_until_stored_episodes_exist() -> TestResult {
+    let output = run_ee(&[
+        "lab",
+        "capture",
+        "--task-input",
+        "fix failing release workflow",
+        "--dry-run",
+        "--json",
+    ])?;
+    assert_lab_unavailable(&output, "lab capture")
+}
+
+#[test]
+fn lab_replay_degrades_until_stored_episodes_exist() -> TestResult {
+    let output = run_ee(&["lab", "replay", "ep_fixture_001", "--dry-run", "--json"])?;
+    assert_lab_unavailable(&output, "lab replay")
+}
+
+#[test]
+fn lab_counterfactual_degrades_until_evidence_only_replay_exists() -> TestResult {
+    let output = run_ee(&[
+        "lab",
+        "counterfactual",
+        "ep_fixture_001",
+        "--add-memory",
+        "mem_release_rule",
+        "--dry-run",
+        "--json",
+    ])?;
+    assert_lab_unavailable(&output, "lab counterfactual")
+}
+
+// ============================================================================
 // Post-Task Outcome Scenario Tests (EE-USR-004)
 // ============================================================================
 
