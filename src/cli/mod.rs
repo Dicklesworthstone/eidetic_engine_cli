@@ -12961,43 +12961,67 @@ where
 // EE-431: Memory Economics and Attention Budgets
 // ============================================================================
 
-fn handle_economy_report<W, E>(
+const ECONOMY_UNAVAILABLE_CODE: &str = "economy_metrics_unavailable";
+const ECONOMY_UNAVAILABLE_MESSAGE: &str = "Memory economy metrics are unavailable until economy scoring is backed by persisted workspace data instead of static seed fixtures.";
+const ECONOMY_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const ECONOMY_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-ve0w";
+
+fn write_economy_unavailable<W, E>(
     cli: &Cli,
-    args: &EconomyReportArgs,
+    command: &'static str,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    use crate::core::economy::{EconomyReportOptions, generate_economy_report};
-
-    let options = EconomyReportOptions {
-        artifact_type: args.artifact_type.clone(),
-        min_utility: args.min_utility,
-        include_debt: args.include_debt,
-        include_reserves: args.include_reserves,
-    };
-
-    let report = generate_economy_report(&options);
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &output::render_economy_report_human(&report))
-        }
-        output::Renderer::Toon => write_stdout(
-            stdout,
-            &(output::render_economy_report_toon(&report) + "\n"),
-        ),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(
-            stdout,
-            &(output::render_economy_report_json(&report) + "\n"),
-        ),
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": ECONOMY_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": ECONOMY_UNAVAILABLE_MESSAGE,
+                "repair": ECONOMY_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": ECONOMY_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": ECONOMY_UNAVAILABLE_MESSAGE,
+                        "repair": ECONOMY_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": ECONOMY_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": "read-only, conservative abstention"
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
     }
+
+    let _ = writeln!(stderr, "error: {ECONOMY_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {ECONOMY_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
+}
+
+fn handle_economy_report<W, E>(
+    cli: &Cli,
+    args: &EconomyReportArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let _ = args;
+    write_economy_unavailable(cli, "economy report", stdout, stderr)
 }
 
 fn handle_economy_score<W, E>(
@@ -13010,31 +13034,8 @@ where
     W: Write,
     E: Write,
 {
-    use crate::core::economy::{EconomyScoreOptions, score_artifact};
-
-    let options = EconomyScoreOptions {
-        artifact_id: args.artifact_id.clone(),
-        artifact_type: args.artifact_type.clone(),
-        breakdown: args.breakdown,
-    };
-
-    match score_artifact(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_economy_score_human(&report))
-            }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_economy_score_toon(&report) + "\n"))
-            }
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_economy_score_json(&report) + "\n"))
-            }
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    }
+    let _ = args;
+    write_economy_unavailable(cli, "economy score", stdout, stderr)
 }
 
 fn handle_economy_simulate<W, E>(
@@ -13047,34 +13048,15 @@ where
     W: Write,
     E: Write,
 {
-    use crate::core::economy::{EconomySimulateOptions, simulate_budgets};
-
-    let options = EconomySimulateOptions {
-        baseline_budget_tokens: args.baseline_budget,
-        budget_tokens: args.budgets.clone(),
-        context_profile: args.context_profile.clone(),
-        situation_profile: args.situation_profile.clone(),
-    };
-
-    match simulate_budgets(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_economy_simulation_human(&report))
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_economy_simulation_toon(&report) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(output::render_economy_simulation_json(&report) + "\n"),
-            ),
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    if args.baseline_budget == 0 || args.budgets.contains(&0) {
+        let error = DomainError::Usage {
+            message: "economy simulate budgets must be greater than zero".to_owned(),
+            repair: Some("ee economy simulate --budget 2000 --budget 4000 --json".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
+
+    write_economy_unavailable(cli, "economy simulate", stdout, stderr)
 }
 
 fn handle_economy_prune_plan<W, E>(
@@ -13087,32 +13069,15 @@ where
     W: Write,
     E: Write,
 {
-    use crate::core::economy::{EconomyPrunePlanOptions, generate_prune_plan};
-
-    let options = EconomyPrunePlanOptions {
-        dry_run: args.dry_run,
-        max_recommendations: args.max_recommendations,
-    };
-
-    match generate_prune_plan(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_economy_prune_plan_human(&report))
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_economy_prune_plan_toon(&report) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(output::render_economy_prune_plan_json(&report) + "\n"),
-            ),
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    if !args.dry_run {
+        let error = DomainError::PolicyDenied {
+            message: "economy prune-plan is report-only in this slice; pass --dry-run to confirm no mutation".to_owned(),
+            repair: Some("ee economy prune-plan --dry-run --json".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
+
+    write_economy_unavailable(cli, "economy prune-plan", stdout, stderr)
 }
 
 // ============================================================================

@@ -163,6 +163,15 @@ fn first_failure_diagnosis(
     if exit_code == 0 {
         return None;
     }
+    if parsed_stdout.is_some_and(|json| {
+        json.pointer("/success") == Some(&JsonValue::Bool(false))
+            && json
+                .pointer("/data/degraded")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|degraded| !degraded.is_empty())
+    }) {
+        return None;
+    }
     if let Some(code) = parsed_stdout
         .and_then(|json| json.pointer("/error/code"))
         .and_then(JsonValue::as_str)
@@ -353,7 +362,7 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "--dry-run".to_owned(),
             ],
             expected_schema_contains: "ee.response.v1",
-            expected_exit_code: 0,
+            expected_exit_code: 7,
             expect_clean_stderr: true,
         },
         StepSpec {

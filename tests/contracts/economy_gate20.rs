@@ -1,18 +1,14 @@
 //! Gate 20 memory economy contract coverage.
 //!
-//! Freezes the public JSON shape for economy report, score, and dry-run prune
-//! plan outputs. The tests exercise the real CLI binary, assert stdout/stderr
-//! isolation, and normalize the prune-plan wall-clock timestamp before golden
-//! comparison.
+//! Freezes the public degraded JSON shape for economy commands until report,
+//! score, simulation, and pruning metrics are backed by persisted workspace data
+//! instead of static seed fixtures.
 
-use chrono::DateTime;
 use serde_json::Value as JsonValue;
-use std::env;
-use std::fs;
-use std::path::PathBuf;
 use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
+const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 7;
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
@@ -30,52 +26,6 @@ fn ensure_json_equal(actual: Option<&JsonValue>, expected: JsonValue, context: &
     )
 }
 
-fn golden_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("golden")
-        .join("economy")
-        .join(format!("{name}.json.golden"))
-}
-
-fn read_golden(name: &str) -> Result<JsonValue, String> {
-    let path = golden_path(name);
-    let raw = fs::read_to_string(&path)
-        .map_err(|error| format!("missing golden {}: {error}", path.display()))?;
-    serde_json::from_str(&raw)
-        .map_err(|error| format!("golden {} must be JSON: {error}", path.display()))
-}
-
-fn pretty_json(value: &JsonValue) -> Result<String, String> {
-    serde_json::to_string_pretty(value).map_err(|error| format!("json render failed: {error}"))
-}
-
-fn assert_json_golden(name: &str, actual: &JsonValue) -> TestResult {
-    let path = golden_path(name);
-    if env::var("UPDATE_GOLDEN").is_ok() {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                format!("failed to create golden dir {}: {error}", parent.display())
-            })?;
-        }
-        fs::write(&path, pretty_json(actual)?)
-            .map_err(|error| format!("failed to write golden {}: {error}", path.display()))?;
-        eprintln!("Updated golden file: {}", path.display());
-        return Ok(());
-    }
-
-    let expected = read_golden(name)?;
-    ensure(
-        actual == &expected,
-        format!(
-            "economy golden mismatch for {name}\n--- expected\n{}\n+++ actual\n{}",
-            pretty_json(&expected)?,
-            pretty_json(actual)?
-        ),
-    )
-}
-
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
@@ -83,7 +33,7 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
-fn run_json(args: &[&str]) -> Result<JsonValue, String> {
+fn run_json_with_exit(args: &[&str], expected_exit: i32) -> Result<JsonValue, String> {
     let output = run_ee(args)?;
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("stdout was not UTF-8 for ee {}: {error}", args.join(" ")))?;
@@ -91,9 +41,9 @@ fn run_json(args: &[&str]) -> Result<JsonValue, String> {
         .map_err(|error| format!("stderr was not UTF-8 for ee {}: {error}", args.join(" ")))?;
 
     ensure(
-        output.status.success(),
+        output.status.code() == Some(expected_exit),
         format!(
-            "ee {} failed with {:?}; stderr: {stderr}",
+            "ee {} returned {:?}, expected {expected_exit}; stderr: {stderr}",
             args.join(" "),
             output.status.code()
         ),
@@ -114,183 +64,126 @@ fn run_json(args: &[&str]) -> Result<JsonValue, String> {
     })
 }
 
-fn normalize_prune_plan_timestamp(value: &mut JsonValue) -> TestResult {
-    let generated_at = value
-        .pointer("/data/generatedAt")
-        .and_then(JsonValue::as_str)
-        .ok_or("prune-plan generatedAt missing")?;
-    DateTime::parse_from_rfc3339(generated_at)
-        .map_err(|error| format!("generatedAt must be RFC 3339: {error}"))?;
-    let slot = value
-        .pointer_mut("/data/generatedAt")
-        .ok_or("prune-plan generatedAt slot missing")?;
-    *slot = JsonValue::String("1970-01-01T00:00:00+00:00".to_string());
-    Ok(())
-}
-
-#[test]
-fn gate20_economy_report_json_matches_golden() -> TestResult {
-    let actual = run_json(&[
-        "--json",
-        "economy",
-        "report",
-        "--include-debt",
-        "--include-reserves",
-    ])?;
-
+fn assert_economy_unavailable(actual: &JsonValue, command: &str) -> TestResult {
     ensure_json_equal(
         actual.get("schema"),
         JsonValue::String("ee.response.v1".to_string()),
-        "report envelope schema",
+        "economy unavailable envelope schema",
     )?;
     ensure_json_equal(
         actual.get("success"),
-        JsonValue::Bool(true),
-        "report success",
+        JsonValue::Bool(false),
+        "economy unavailable success",
     )?;
     ensure_json_equal(
-        actual.pointer("/data/total_artifacts"),
-        serde_json::json!(67),
-        "report total artifact count",
+        actual.pointer("/data/command"),
+        JsonValue::String(command.to_string()),
+        "economy unavailable command",
     )?;
     ensure_json_equal(
-        actual.pointer("/data/overall_utility_score"),
-        serde_json::json!(0.75),
-        "report overall utility score",
+        actual.pointer("/data/code"),
+        JsonValue::String("economy_metrics_unavailable".to_string()),
+        "economy unavailable code",
     )?;
     ensure_json_equal(
-        actual.pointer("/data/attention_budget_used"),
-        serde_json::json!(2100.0),
-        "report attention budget used",
+        actual.pointer("/data/degraded/0/code"),
+        JsonValue::String("economy_metrics_unavailable".to_string()),
+        "economy unavailable degraded code",
     )?;
     ensure_json_equal(
-        actual.pointer("/data/attention_budget_total"),
-        serde_json::json!(4000.0),
-        "report attention budget total",
-    )?;
-    ensure(
-        actual.pointer("/data/maintenance_debt").is_some(),
-        "report must include maintenance debt when requested",
-    )?;
-    ensure(
-        actual.pointer("/data/tail_risk_reserves").is_some(),
-        "report must include tail-risk reserves when requested",
+        actual.pointer("/data/repair"),
+        JsonValue::String("ee status --json".to_string()),
+        "economy unavailable repair",
     )?;
     ensure_json_equal(
-        actual.pointer("/data/tail_risk_reserves/degradation_coverage"),
-        serde_json::json!(0.85),
-        "report tail-risk reserve coverage",
+        actual.pointer("/data/followUpBead"),
+        JsonValue::String("eidetic_engine_cli-ve0w".to_string()),
+        "economy unavailable follow-up bead",
     )?;
-
-    assert_json_golden("report_with_debt_and_reserves", &actual)
+    ensure_json_equal(
+        actual.pointer("/data/evidenceIds"),
+        JsonValue::Array(Vec::new()),
+        "economy unavailable evidence ids",
+    )?;
+    ensure_json_equal(
+        actual.pointer("/data/sourceIds"),
+        JsonValue::Array(Vec::new()),
+        "economy unavailable source ids",
+    )?;
+    ensure_json_equal(
+        actual.pointer("/data/sideEffectClass"),
+        JsonValue::String("read-only, conservative abstention".to_string()),
+        "economy unavailable side-effect class",
+    )
 }
 
 #[test]
-fn gate20_economy_score_json_matches_golden() -> TestResult {
-    let actual = run_json(&[
-        "--json",
-        "economy",
-        "score",
-        "mem_gate20_release_rule",
-        "--artifact-type",
-        "memory",
-        "--breakdown",
-    ])?;
-
-    ensure_json_equal(
-        actual.get("schema"),
-        JsonValue::String("ee.response.v1".to_string()),
-        "score envelope schema",
-    )?;
-    ensure_json_equal(
-        actual.get("success"),
-        JsonValue::Bool(true),
-        "score success",
-    )?;
-    ensure_json_equal(
-        actual.pointer("/data/artifact_id"),
-        JsonValue::String("mem_gate20_release_rule".to_string()),
-        "score artifact id",
-    )?;
-    ensure_json_equal(
-        actual.pointer("/data/utility_score"),
-        serde_json::json!(0.82),
-        "score utility score",
-    )?;
-    ensure_json_equal(
-        actual.pointer("/data/cost_score"),
-        serde_json::json!(0.65),
-        "score cost score",
-    )?;
-    ensure_json_equal(
-        actual.pointer("/data/confidence_score"),
-        serde_json::json!(0.75),
-        "score confidence score",
-    )?;
-    ensure(
-        actual.pointer("/data/breakdown/retrieval_frequency") == Some(&serde_json::json!(12)),
-        "score breakdown must include retrieval frequency",
+fn gate20_economy_report_degrades_until_persisted_metrics_exist() -> TestResult {
+    let actual = run_json_with_exit(
+        &[
+            "--json",
+            "economy",
+            "report",
+            "--include-debt",
+            "--include-reserves",
+        ],
+        UNSATISFIED_DEGRADED_MODE_EXIT,
     )?;
 
-    assert_json_golden("score_with_breakdown", &actual)
+    assert_economy_unavailable(&actual, "economy report")
 }
 
 #[test]
-fn gate20_economy_prune_plan_dry_run_matches_golden() -> TestResult {
-    let mut actual = run_json(&[
-        "--json",
-        "economy",
-        "prune-plan",
-        "--dry-run",
-        "--max-recommendations",
-        "3",
-    ])?;
-    normalize_prune_plan_timestamp(&mut actual)?;
-
-    ensure_json_equal(
-        actual.get("schema"),
-        JsonValue::String("ee.response.v1".to_string()),
-        "prune-plan envelope schema",
-    )?;
-    ensure_json_equal(
-        actual.pointer("/data/schema"),
-        JsonValue::String("ee.economy.prune_plan.v1".to_string()),
-        "prune-plan data schema",
-    )?;
-    ensure_json_equal(
-        actual.pointer("/data/dryRun"),
-        JsonValue::Bool(true),
-        "prune-plan dry-run",
-    )?;
-    ensure_json_equal(
-        actual.pointer("/data/mutationStatus"),
-        JsonValue::String("not_applied".to_string()),
-        "prune-plan mutation status",
-    )?;
-    ensure_json_equal(
-        actual.pointer("/data/status"),
-        JsonValue::String("planned".to_string()),
-        "prune-plan status",
-    )?;
-    ensure_json_equal(
-        actual.pointer("/data/summary/actions"),
-        serde_json::json!(["revalidate", "retire", "compact"]),
-        "prune-plan action ordering",
-    )?;
-    ensure(
-        actual
-            .pointer("/data/recommendations")
-            .and_then(JsonValue::as_array)
-            .is_some_and(|recommendations| {
-                recommendations.iter().all(|entry| {
-                    entry.pointer("/dryRunCommand")
-                        == Some(&JsonValue::String(
-                            "ee economy prune-plan --dry-run --json".to_string(),
-                        ))
-                })
-            }),
-        "prune-plan recommendations must include dry-run commands",
+fn gate20_economy_score_degrades_until_persisted_metrics_exist() -> TestResult {
+    let actual = run_json_with_exit(
+        &[
+            "--json",
+            "economy",
+            "score",
+            "mem_gate20_release_rule",
+            "--artifact-type",
+            "memory",
+            "--breakdown",
+        ],
+        UNSATISFIED_DEGRADED_MODE_EXIT,
     )?;
 
-    assert_json_golden("prune_plan_dry_run_top3", &actual)
+    assert_economy_unavailable(&actual, "economy score")
+}
+
+#[test]
+fn gate20_economy_simulate_degrades_until_persisted_metrics_exist() -> TestResult {
+    let actual = run_json_with_exit(
+        &[
+            "--json",
+            "economy",
+            "simulate",
+            "--baseline-budget",
+            "4000",
+            "--budget",
+            "2000",
+            "--budget",
+            "8000",
+        ],
+        UNSATISFIED_DEGRADED_MODE_EXIT,
+    )?;
+
+    assert_economy_unavailable(&actual, "economy simulate")
+}
+
+#[test]
+fn gate20_economy_prune_plan_degrades_until_persisted_metrics_exist() -> TestResult {
+    let actual = run_json_with_exit(
+        &[
+            "--json",
+            "economy",
+            "prune-plan",
+            "--dry-run",
+            "--max-recommendations",
+            "3",
+        ],
+        UNSATISFIED_DEGRADED_MODE_EXIT,
+    )?;
+
+    assert_economy_unavailable(&actual, "economy prune-plan")
 }

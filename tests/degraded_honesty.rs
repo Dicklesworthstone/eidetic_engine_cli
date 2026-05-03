@@ -115,6 +115,8 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "certificate"
     } else if args.iter().any(|arg| arg == "rehearse") {
         "rehearse"
+    } else if args.iter().any(|arg| arg == "economy") {
+        "economy"
     } else {
         "unknown"
     }
@@ -130,6 +132,8 @@ fn side_effect_class(args: &[String]) -> &'static str {
         "read-only, idempotent"
     } else if args.iter().any(|arg| arg == "rehearse") {
         "unavailable before sandbox mutation"
+    } else if args.iter().any(|arg| arg == "economy") {
+        "read-only, conservative abstention"
     } else {
         "unknown"
     }
@@ -549,6 +553,112 @@ fn rehearse_run_degrades_instead_of_reporting_simulated_success() -> TestResult 
         "/sideEffectClass",
         json!("unavailable before sandbox mutation"),
         "logged rehearse side-effect class",
+    )
+}
+
+#[test]
+fn economy_report_degrades_instead_of_reporting_seed_metrics() -> TestResult {
+    let result = run_ee_logged(
+        "economy-report-unavailable",
+        None,
+        vec![
+            "--json".to_owned(),
+            "economy".to_owned(),
+            "report".to_owned(),
+        ],
+    )?;
+
+    ensure_equal(
+        &result.exit_code,
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "economy unavailable exit code",
+    )?;
+    ensure(
+        result.stderr.is_empty(),
+        "economy JSON degraded response must keep stderr empty",
+    )?;
+    ensure_no_ansi(&result.stdout, "economy degraded stdout")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/schema",
+        json!("ee.response.v1"),
+        "economy degraded response schema",
+    )?;
+    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/code",
+        json!("economy_metrics_unavailable"),
+        "economy degraded code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/degraded/0/code",
+        json!("economy_metrics_unavailable"),
+        "economy degraded array code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/followUpBead",
+        json!("eidetic_engine_cli-ve0w"),
+        "economy follow-up bead",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/evidenceIds",
+        json!([]),
+        "economy evidence ids",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sourceIds",
+        json!([]),
+        "economy source ids",
+    )?;
+
+    let fake_success =
+        validate_no_fake_success_output("economy report", false, false, &result.stdout);
+    ensure(
+        fake_success.passed,
+        format!("degraded economy output should not be fake success: {fake_success:?}"),
+    )?;
+
+    let unsupported_claims =
+        validate_no_unsupported_evidence_claims("economy report", false, false, &result.stdout);
+    ensure(
+        unsupported_claims.passed,
+        format!(
+            "degraded economy output should not count as unsupported success: {unsupported_claims:?}"
+        ),
+    )?;
+
+    let log_text = fs::read_to_string(&result.log_path)
+        .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+    let log_json: Value = serde_json::from_str(&log_text)
+        .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+    ensure_json_pointer(
+        &log_json,
+        "/degradationCodes",
+        json!(["economy_metrics_unavailable"]),
+        "logged economy degradation code",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/repairCommand",
+        json!("ee status --json"),
+        "logged economy repair command",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/commandBoundaryMatrixRow",
+        json!("economy"),
+        "logged economy boundary matrix row",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/sideEffectClass",
+        json!("read-only, conservative abstention"),
+        "logged economy side-effect class",
     )
 }
 

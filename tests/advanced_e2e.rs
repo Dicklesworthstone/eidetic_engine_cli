@@ -450,34 +450,52 @@ fn procedure_show_handles_not_found() -> TestResult {
 }
 
 // ============================================================================
-// Economy Tests (EE-431 - Stub tests for when implemented)
+// Economy Tests (EE-431 - Degraded until DB-backed metrics exist)
 // ============================================================================
 
 #[test]
-fn economy_report_returns_valid_json() -> TestResult {
+fn economy_report_degrades_until_db_backed_metrics_exist() -> TestResult {
     let output = run_ee(&["economy", "report", "--json"])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
-    ensure(stdout_is_clean(&output), "stdout must be clean")
-}
-
-#[test]
-fn economy_score_handles_not_found() -> TestResult {
-    let output = run_ee(&["economy", "score", "mem_nonexistent", "--json"])?;
-    // May return NotFound (10) or Success with empty result
-    ensure(
-        output.status.code() == Some(0) || output.status.code() == Some(10),
-        "exit code must be 0 or 10 (not found)",
+    ensure_equal(
+        &output.status.code(),
+        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
+        "exit code",
     )?;
-    if output.status.code() == Some(0) {
-        ensure(stdout_is_json(&output), "stdout must be valid JSON")
-    } else {
-        Ok(())
-    }
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "response schema",
+    )?;
+    ensure_equal(&json["success"], &serde_json::json!(false), "success")?;
+    ensure_equal(
+        &json["data"]["code"],
+        &serde_json::json!("economy_metrics_unavailable"),
+        "degraded code",
+    )
 }
 
 #[test]
-fn economy_simulate_compares_budgets_without_mutation() -> TestResult {
+fn economy_score_degrades_instead_of_scoring_seed_artifacts() -> TestResult {
+    let output = run_ee(&["economy", "score", "mem_nonexistent", "--json"])?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
+        "exit code",
+    )?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["data"]["code"],
+        &serde_json::json!("economy_metrics_unavailable"),
+        "degraded code",
+    )
+}
+
+#[test]
+fn economy_simulate_degrades_instead_of_ranking_seed_artifacts() -> TestResult {
     let output = run_ee(&[
         "economy",
         "simulate",
@@ -489,7 +507,11 @@ fn economy_simulate_compares_budgets_without_mutation() -> TestResult {
         "8000",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
+        "exit code",
+    )?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
@@ -499,51 +521,26 @@ fn economy_simulate_compares_budgets_without_mutation() -> TestResult {
 
     let json = stdout_json(&output)?;
     ensure_equal(
-        json.get("schema").unwrap_or(&serde_json::Value::Null),
+        &json["schema"],
         &serde_json::json!("ee.response.v1"),
         "response schema",
     )?;
+    ensure_equal(&json["success"], &serde_json::json!(false), "success")?;
     ensure_equal(
-        json.pointer("/data/schema")
-            .unwrap_or(&serde_json::Value::Null),
-        &serde_json::json!("ee.economy.simulation.v1"),
-        "simulation schema",
+        &json["data"]["code"],
+        &serde_json::json!("economy_metrics_unavailable"),
+        "degraded code",
     )?;
     ensure_equal(
-        json.pointer("/data/mutationStatus")
-            .unwrap_or(&serde_json::Value::Null),
-        &serde_json::json!("not_applied"),
-        "mutation status",
+        &json["data"]["sideEffectClass"],
+        &serde_json::json!("read-only, conservative abstention"),
+        "side effect class",
     )?;
     ensure_equal(
-        json.pointer("/data/rankingStateUnchanged")
-            .unwrap_or(&serde_json::Value::Null),
-        &serde_json::json!(true),
-        "ranking state unchanged",
-    )?;
-    let hash_before = json
-        .pointer("/data/rankingStateHashBefore")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "rankingStateHashBefore must be a string".to_string())?;
-    let hash_after = json
-        .pointer("/data/rankingStateHashAfter")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "rankingStateHashAfter must be a string".to_string())?;
-    ensure_equal(&hash_before, &hash_after, "ranking state hash")?;
-
-    let scenarios = json
-        .pointer("/data/scenarios")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "scenarios must be an array".to_string())?;
-    let budgets = scenarios
-        .iter()
-        .filter_map(|scenario| {
-            scenario
-                .pointer("/budgetTokens")
-                .and_then(serde_json::Value::as_u64)
-        })
-        .collect::<Vec<_>>();
-    ensure_equal(&budgets, &vec![2000, 4000, 8000], "scenario budgets")
+        &json["data"]["followUpBead"],
+        &serde_json::json!("eidetic_engine_cli-ve0w"),
+        "follow-up bead",
+    )
 }
 
 #[test]
@@ -570,7 +567,7 @@ fn economy_simulate_rejects_zero_budget() -> TestResult {
 }
 
 #[test]
-fn economy_prune_plan_dry_run_returns_recommendations() -> TestResult {
+fn economy_prune_plan_dry_run_degrades_until_db_backed_metrics_exist() -> TestResult {
     let output = run_ee(&[
         "economy",
         "prune-plan",
@@ -579,7 +576,11 @@ fn economy_prune_plan_dry_run_returns_recommendations() -> TestResult {
         "5",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
+        "exit code",
+    )?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
 
@@ -589,31 +590,16 @@ fn economy_prune_plan_dry_run_returns_recommendations() -> TestResult {
         &serde_json::json!("ee.response.v1"),
         "response schema",
     )?;
+    ensure_equal(&json["success"], &serde_json::json!(false), "success")?;
     ensure_equal(
-        &json["data"]["schema"],
-        &serde_json::json!("ee.economy.prune_plan.v1"),
-        "prune plan schema",
+        &json["data"]["code"],
+        &serde_json::json!("economy_metrics_unavailable"),
+        "degraded code",
     )?;
     ensure_equal(
-        &json["data"]["dryRun"],
-        &serde_json::json!(true),
-        "dry run flag",
-    )?;
-    ensure_equal(
-        &json["data"]["mutationStatus"],
-        &serde_json::json!("not_applied"),
-        "mutation status",
-    )?;
-    let actions = json["data"]["summary"]["actions"]
-        .as_array()
-        .ok_or_else(|| "actions must be an array".to_string())?
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .collect::<Vec<_>>();
-    ensure_equal(
-        &actions,
-        &vec!["revalidate", "retire", "compact", "merge", "demote"],
-        "prune actions",
+        &json["data"]["repair"],
+        &serde_json::json!("ee status --json"),
+        "repair",
     )
 }
 
