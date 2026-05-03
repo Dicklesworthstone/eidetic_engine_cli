@@ -4,8 +4,8 @@
 //! replaying, and analyzing task episodes with memory interventions:
 //!
 //! - Capture reports include episode ID, workspace, and hash
-//! - Replay reports track outcome matching and divergence
-//! - Counterfactual reports include intervention effects and regret entries
+//! - Replay reports identify missing frozen inputs instead of simulating success
+//! - Counterfactual reports include hypothesis pack diffs and validation-only entries
 //! - Reconstruct reports recover events from recorder traces
 //! - All reports serialize to stable JSON schemas
 //! - Golden fixtures verify output stability across versions
@@ -184,7 +184,7 @@ fn capture_report_includes_workspace() -> TestResult {
 }
 
 #[test]
-fn capture_non_dry_run_includes_hash() -> TestResult {
+fn capture_non_dry_run_reports_unavailable_store_without_episode_hash() -> TestResult {
     let options = CaptureOptions {
         workspace: PathBuf::from("."),
         dry_run: false,
@@ -193,15 +193,12 @@ fn capture_non_dry_run_includes_hash() -> TestResult {
 
     let report = capture_episode(&options).map_err(|e| e.message())?;
 
-    ensure(report.episode_hash.is_some(), "episode hash present")?;
-
-    let Some(hash) = report.episode_hash.as_ref() else {
-        return Err("episode hash missing".to_string());
-    };
+    ensure(!report.stored, "capture does not claim persisted storage")?;
     ensure(
-        hash.starts_with("blake3:"),
-        "hash uses blake3 algorithm prefix",
-    )
+        report.episode_hash.is_none(),
+        "episode hash is absent until a frozen episode is stored",
+    )?;
+    ensure(report.pack_hash.is_some(), "pack hash preview is present")
 }
 
 #[test]
@@ -229,7 +226,10 @@ fn gate15_capture_records_redacted_episode_evidence() -> TestResult {
 
     let report = capture_episode(&options).map_err(|e| e.message())?;
 
-    ensure(report.stored, "non-dry capture stores an episode")?;
+    ensure(
+        !report.stored,
+        "non-dry capture does not claim persisted storage until the episode store exists",
+    )?;
     ensure(
         report.redaction_status == "redacted",
         "capture enforces redaction before storage",
@@ -316,7 +316,7 @@ fn replay_status_success_semantics() {
 }
 
 #[test]
-fn replay_dry_run_is_pending() -> TestResult {
+fn replay_dry_run_reports_missing_frozen_inputs() -> TestResult {
     let options = ReplayOptions {
         episode_id: "ep_test".to_string(),
         dry_run: true,
@@ -326,13 +326,21 @@ fn replay_dry_run_is_pending() -> TestResult {
     let report = replay_episode(&options).map_err(|e| e.message())?;
 
     ensure(
-        report.status == ReplayStatus::Pending,
-        "dry run replay is pending",
+        report.status == ReplayStatus::EpisodeNotFound,
+        "dry run replay requires frozen inputs",
+    )?;
+    ensure(!report.frozen_inputs, "frozen inputs are unavailable")?;
+    ensure(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("missing frozen episode manifest")),
+        "missing manifest warning",
     )
 }
 
 #[test]
-fn replay_non_dry_run_reports_outcome_match() -> TestResult {
+fn replay_non_dry_run_reports_missing_frozen_inputs() -> TestResult {
     let options = ReplayOptions {
         episode_id: "ep_test".to_string(),
         dry_run: false,
@@ -342,17 +350,17 @@ fn replay_non_dry_run_reports_outcome_match() -> TestResult {
     let report = replay_episode(&options).map_err(|e| e.message())?;
 
     ensure(
-        report.status == ReplayStatus::Replayed,
-        "non-dry replay completes",
+        report.status == ReplayStatus::EpisodeNotFound,
+        "non-dry replay cannot complete without frozen inputs",
     )?;
     ensure(
-        report.outcome_matches,
-        "outcome matches for baseline replay",
+        !report.outcome_matches,
+        "outcome match is false without replay evidence",
     )
 }
 
 #[test]
-fn gate15_replay_uses_frozen_inputs_and_reports_mutable_state_access() -> TestResult {
+fn gate15_replay_reports_missing_frozen_inputs_without_mutable_state_access() -> TestResult {
     let options = ReplayOptions {
         episode_id: "ep_frozen_inputs".to_string(),
         dry_run: false,
@@ -362,23 +370,24 @@ fn gate15_replay_uses_frozen_inputs_and_reports_mutable_state_access() -> TestRe
 
     let report = replay_episode(&options).map_err(|e| e.message())?;
 
-    ensure(report.frozen_inputs, "replay defaults to frozen inputs")?;
+    ensure(!report.frozen_inputs, "frozen inputs are unavailable")?;
     ensure(
         report.mutable_current_state_access.is_empty(),
         "no mutable current-state access is reported",
     )?;
     ensure(
-        report.episode_hash_verified,
-        "episode hash is verified for non-dry replay",
+        !report.episode_hash_verified,
+        "episode hash is not verified without frozen inputs",
     )?;
 
     let json = render_lab_replay_json(&report);
-    ensure_contains(&json, "\"frozenInputs\":true", "frozen input field")?;
+    ensure_contains(&json, "\"frozenInputs\":false", "frozen input field")?;
     ensure_contains(
         &json,
         "\"mutableCurrentStateAccess\":[]",
         "mutable access field",
-    )
+    )?;
+    ensure_contains(&json, "lab_replay_unavailable", "degradation warning")
 }
 
 // ============================================================================
@@ -455,7 +464,7 @@ fn counterfactual_status_variants_stable() {
 }
 
 #[test]
-fn counterfactual_with_intervention_reports_outcome_change() -> TestResult {
+fn counterfactual_with_intervention_reports_no_outcome_change_without_replay() -> TestResult {
     let options = CounterfactualOptions {
         episode_id: "ep_failure".to_string(),
         interventions: vec![
@@ -469,7 +478,14 @@ fn counterfactual_with_intervention_reports_outcome_change() -> TestResult {
 
     let report = run_counterfactual(&options).map_err(|e| e.message())?;
 
-    ensure(report.outcome_changed, "outcome changed with intervention")
+    ensure(
+        !report.outcome_changed,
+        "outcome change is not claimed without replay evidence",
+    )?;
+    ensure(
+        report.status == CounterfactualStatus::Failed,
+        "missing replay evidence produces failed status",
+    )
 }
 
 #[test]
@@ -512,7 +528,7 @@ fn counterfactual_dry_run_skips_regret() -> TestResult {
 }
 
 #[test]
-fn counterfactual_includes_confidence() -> TestResult {
+fn counterfactual_omits_confidence_without_replay_evidence() -> TestResult {
     let options = CounterfactualOptions {
         episode_id: "ep_test".to_string(),
         interventions: vec![InterventionSpec::add_memory("context")],
@@ -522,13 +538,9 @@ fn counterfactual_includes_confidence() -> TestResult {
 
     let report = run_counterfactual(&options).map_err(|e| e.message())?;
 
-    ensure(report.confidence.is_some(), "confidence present")?;
-    let Some(confidence) = report.confidence else {
-        return Err("confidence missing".to_string());
-    };
     ensure(
-        (0.0..=1.0).contains(&confidence),
-        "confidence in valid range",
+        report.confidence.is_none(),
+        "confidence is absent without replay evidence",
     )
 }
 
@@ -551,7 +563,10 @@ fn gate15_counterfactual_is_non_mutating_and_explains_hypothesis() -> TestResult
         !report.durable_mutation,
         "counterfactual never mutates durable state",
     )?;
-    ensure(report.observed_pack_hash.is_some(), "observed pack hash")?;
+    ensure(
+        report.observed_pack_hash.is_none(),
+        "observed pack hash is unavailable without frozen inputs",
+    )?;
     ensure(
         report.counterfactual_pack_hash.is_some(),
         "counterfactual pack hash",
@@ -570,8 +585,8 @@ fn gate15_counterfactual_is_non_mutating_and_explains_hypothesis() -> TestResult
         "claim remains hypothesis until externally verified",
     )?;
     ensure(
-        report.would_have_surfaced,
-        "wouldHaveSurfaced records pack inclusion only",
+        !report.would_have_surfaced,
+        "wouldHaveSurfaced remains false without pack replay evidence",
     )?;
     ensure(
         report.curation_candidates.iter().all(|candidate| {
@@ -583,11 +598,16 @@ fn gate15_counterfactual_is_non_mutating_and_explains_hypothesis() -> TestResult
     let json = render_lab_counterfactual_json(&report);
     ensure_contains(&json, "\"durableMutation\":false", "no mutation")?;
     ensure_contains(&json, "\"claimStatus\":\"hypothesis\"", "claim posture")?;
-    ensure_contains(&json, "\"wouldHaveSurfaced\":true", "surfaced semantics")
+    ensure_contains(&json, "\"wouldHaveSurfaced\":false", "surfaced semantics")?;
+    ensure_contains(
+        &json,
+        "\"degradationCodes\":[\"lab_replay_unavailable\"]",
+        "missing replay degradation",
+    )
 }
 
 #[test]
-fn gate15_regret_kinds_distinguish_failure_modes() -> TestResult {
+fn gate15_regret_entries_remain_hypotheses_without_behavior_claims() -> TestResult {
     let options = CounterfactualOptions {
         episode_id: "ep_gate15_regret_taxonomy".to_string(),
         interventions: vec![
@@ -610,8 +630,22 @@ fn gate15_regret_kinds_distinguish_failure_modes() -> TestResult {
         .collect::<Vec<_>>();
 
     ensure(
-        kinds == vec!["missed", "stale", "noisy", "harmful", "overfit_policy"],
-        format!("regret kinds distinguish failure modes: {kinds:?}"),
+        kinds
+            == vec![
+                "hypothesis",
+                "hypothesis",
+                "hypothesis",
+                "hypothesis",
+                "hypothesis",
+            ],
+        format!("regret entries remain hypotheses: {kinds:?}"),
+    )?;
+    ensure(
+        report
+            .regret_entries
+            .iter()
+            .all(|entry| !entry.would_have_surfaced && !entry.would_have_changed),
+        "regret entries do not claim surfaced or changed behavior",
     )
 }
 
@@ -694,7 +728,10 @@ fn regret_entry_includes_intervention_type() -> TestResult {
     let report = run_counterfactual(&options).map_err(|e| e.message())?;
 
     ensure(!report.regret_entries.is_empty(), "has regret entries")?;
-    let entry = &report.regret_entries[0];
+    let entry = report
+        .regret_entries
+        .first()
+        .ok_or_else(|| "missing regret entry".to_string())?;
     ensure(
         entry.intervention_type == InterventionType::Add,
         "regret tracks intervention type",
@@ -717,10 +754,15 @@ fn regret_entry_has_unique_id() -> TestResult {
     let report = run_counterfactual(&options).map_err(|e| e.message())?;
 
     ensure(report.regret_entries.len() == 2, "has two entries")?;
-    ensure(
-        report.regret_entries[0].id != report.regret_entries[1].id,
-        "regret entries have unique IDs",
-    )
+    let first = report
+        .regret_entries
+        .first()
+        .ok_or_else(|| "missing first regret entry".to_string())?;
+    let second = report
+        .regret_entries
+        .get(1)
+        .ok_or_else(|| "missing second regret entry".to_string())?;
+    ensure(first.id != second.id, "regret entries have unique IDs")
 }
 
 #[test]
@@ -736,7 +778,10 @@ fn regret_entry_links_to_episode() -> TestResult {
     let report = run_counterfactual(&options).map_err(|e| e.message())?;
 
     ensure(!report.regret_entries.is_empty(), "has regret entries")?;
-    let entry = &report.regret_entries[0];
+    let entry = report
+        .regret_entries
+        .first()
+        .ok_or_else(|| "missing regret entry".to_string())?;
     ensure(
         entry.episode_id == "ep_specific_episode",
         "regret links to source episode",

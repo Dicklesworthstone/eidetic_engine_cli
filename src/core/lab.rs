@@ -1,13 +1,13 @@
 //! Counterfactual memory lab operations (EE-382).
 //!
-//! Replay frozen task episodes with alternate memory interventions to discover
-//! what would plausibly have prevented failures without mutating durable memory.
+//! Capture explicit episode metadata and render replay/counterfactual hypotheses
+//! without mutating durable memory or inventing missing evidence.
 //!
 //! # Operations
 //!
-//! - **capture**: Freeze a task episode from session history
-//! - **replay**: Re-execute an episode with the same memory state
-//! - **counterfactual**: Replay with memory interventions applied
+//! - **capture**: Record or preview redacted episode metadata from explicit inputs
+//! - **replay**: Read frozen episode inputs, or report exactly what is missing
+//! - **counterfactual**: Emit pack-diff hypotheses that require external validation
 
 use std::path::PathBuf;
 
@@ -29,6 +29,8 @@ pub const LAB_COUNTERFACTUAL_SCHEMA_V1: &str = "ee.lab.counterfactual.v1";
 
 /// Schema for lab reconstruct report.
 pub const LAB_RECONSTRUCT_SCHEMA_V1: &str = "ee.lab.reconstruct.v1";
+
+const LAB_REPLAY_UNAVAILABLE_CODE: &str = "lab_replay_unavailable";
 
 /// Options for capturing a task episode.
 #[derive(Clone, Debug)]
@@ -511,8 +513,7 @@ pub fn capture_episode(options: &CaptureOptions) -> Result<CaptureReport, Domain
     report.outcome_ref = options
         .session_id
         .as_ref()
-        .map(|session| format!("cass:{session}:outcome"))
-        .or_else(|| Some(format!("episode:{}:outcome", report.episode_id)));
+        .map(|session| format!("cass:{session}:outcome"));
     report.repository_fingerprint = Some(format!(
         "repo:{}",
         hash_content(options.workspace.display().to_string().as_bytes())
@@ -524,26 +525,11 @@ pub fn capture_episode(options: &CaptureOptions) -> Result<CaptureReport, Domain
         )
     ));
 
-    if !options.dry_run {
-        if options.include_memories {
-            report.memories_captured = 0;
-        }
-        if options.include_actions {
-            report.actions_captured = 0;
-        }
-        report.episode_hash = Some(format!(
-            "blake3:{}",
-            hash_content(
-                format!(
-                    "episode:{}:{}:{}",
-                    report.task_input,
-                    report.workspace.display(),
-                    report.session_id.as_deref().unwrap_or_default()
-                )
-                .as_bytes(),
-            )
-        ));
-        report.stored = true;
+    if options.include_memories {
+        report.memories_captured = 0;
+    }
+    if options.include_actions {
+        report.actions_captured = 0;
     }
 
     Ok(report)
@@ -554,19 +540,23 @@ pub fn replay_episode(options: &ReplayOptions) -> Result<ReplayReport, DomainErr
     let replay_id = format!("rpl_{}", generate_id());
     let mut report = ReplayReport::new(options.episode_id.clone(), replay_id);
     report.dry_run = options.dry_run;
-    report.frozen_inputs = true;
+    report.frozen_inputs = false;
     report.mutable_current_state_access = Vec::new();
-    report.episode_hash_verified = options.verify_hash && !options.dry_run;
-
-    if options.dry_run {
-        report.status = ReplayStatus::Pending;
-        report.original_outcome = "unknown".to_string();
-        report.replay_outcome = "dry_run".to_string();
-    } else {
-        report.status = ReplayStatus::Replayed;
-        report.original_outcome = "success".to_string();
-        report.replay_outcome = "success".to_string();
-        report.outcome_matches = true;
+    report.episode_hash_verified = false;
+    report.status = ReplayStatus::EpisodeNotFound;
+    report.original_outcome = "unavailable_missing_frozen_inputs".to_string();
+    report.replay_outcome = "not_replayed".to_string();
+    report.outcome_matches = false;
+    report.add_warning(format!(
+        "{LAB_REPLAY_UNAVAILABLE_CODE}: missing frozen episode manifest for {}",
+        options.episode_id
+    ));
+    report.add_warning("missing frozen memory snapshot".to_string());
+    report.add_warning("missing frozen action trace".to_string());
+    if options.verify_hash {
+        report.add_warning(
+            "episode hash was not verified because frozen inputs are missing".to_string(),
+        );
     }
 
     Ok(report)
@@ -580,105 +570,119 @@ pub fn run_counterfactual(
     let mut report = CounterfactualReport::new(options.episode_id.clone(), run_id.clone());
     report.dry_run = options.dry_run;
     report.interventions_applied = options.interventions.len();
-    report.observed_pack_hash = Some(format!(
-        "blake3:{}",
-        hash_content(format!("observed:{}", options.episode_id).as_bytes())
-    ));
+    report.observed_pack_hash = None;
     report.counterfactual_pack_hash = Some(format!(
         "blake3:{}",
-        hash_content(
-            format!(
-                "counterfactual:{}:{}",
-                options.episode_id,
-                options.interventions.len()
-            )
-            .as_bytes(),
-        )
+        hash_content(counterfactual_pack_hash_input(options).as_bytes())
     ));
     report.assumptions = vec![
-        "replay uses frozen episode inputs".to_string(),
-        "wouldHaveSurfaced means the item entered the pack, not guaranteed behavior change"
-            .to_string(),
+        "frozen episode inputs are required before replay claims can be made".to_string(),
+        "changedItems are explicit hypothesis pack-diff entries, not behavior claims".to_string(),
     ];
     report.next_action =
-        "validate generated curation candidates, then apply explicitly".to_string();
-
+        "provide frozen episode inputs, then validate candidates before apply".to_string();
+    report.status = CounterfactualStatus::Failed;
+    report.original_outcome = "unavailable_missing_frozen_inputs".to_string();
+    report.counterfactual_outcome = "not_replayed".to_string();
+    report.outcome_changed = false;
+    report.confidence = None;
+    report.confidence_state = "hypothesis_only_missing_replay_evidence".to_string();
+    report
+        .degradation_codes
+        .push(LAB_REPLAY_UNAVAILABLE_CODE.to_string());
     if options.dry_run {
-        report.status = CounterfactualStatus::Pending;
-        report.original_outcome = "unknown".to_string();
-        report.counterfactual_outcome = "dry_run".to_string();
-        report.confidence_state = "dry_run".to_string();
         report
             .degradation_codes
             .push("dry_run_no_durable_mutation".to_string());
-    } else {
-        report.status = CounterfactualStatus::Analyzed;
-        report.original_outcome = "failure".to_string();
-        report.counterfactual_outcome = "success".to_string();
-        report.outcome_changed = true;
-        report.confidence = Some(0.75);
-        report.confidence_state = "hypothesis_replay_supported".to_string();
-        report.changed_items = options
-            .interventions
-            .iter()
-            .enumerate()
-            .map(|(i, intervention)| {
-                match (&intervention.memory_id, &intervention.memory_content) {
-                    (Some(id), _) => id.clone(),
-                    (_, Some(content)) => format!("synthetic_memory_{}:{}", i + 1, content),
-                    _ => format!("intervention_{}", i + 1),
-                }
-            })
-            .collect();
-        report.would_have_surfaced = !report.changed_items.is_empty();
-        report.surfaced_item_ids = report.changed_items.clone();
-        report.curation_candidates = options
-            .interventions
-            .iter()
-            .enumerate()
-            .map(|(i, intervention)| {
-                CurationCandidateRef::new(
-                    format!(
-                        "cand_{}_{}",
-                        hash_content(options.episode_id.as_bytes()),
-                        i + 1
-                    ),
-                    intervention.intervention_type,
-                )
-            })
-            .collect();
+    }
+    report.changed_items = options
+        .interventions
+        .iter()
+        .enumerate()
+        .map(|(i, intervention)| hypothesis_item_id(i, intervention))
+        .collect();
+    report.would_have_surfaced = false;
+    report.surfaced_item_ids = Vec::new();
+    report.curation_candidates = options
+        .interventions
+        .iter()
+        .enumerate()
+        .map(|(i, intervention)| {
+            CurationCandidateRef::new(
+                format!(
+                    "cand_{}_{}",
+                    hash_content(options.episode_id.as_bytes()),
+                    i + 1
+                ),
+                intervention.intervention_type,
+            )
+        })
+        .collect();
 
-        if options.generate_regret {
-            for (i, intervention) in options.interventions.iter().enumerate() {
-                let regret_id = format!("{}{}_{}", REGRET_ENTRY_ID_PREFIX, generate_id(), i);
-                let mut entry = RegretEntry::new(
-                    &regret_id,
-                    &options.episode_id,
-                    intervention.intervention_type,
-                );
-                entry.memory_id = intervention.memory_id.clone();
-                entry.regret_kind = regret_kind_for_index(i).to_string();
-                entry.would_have_surfaced = true;
-                entry.would_have_changed = true;
-                entry.confidence = 0.75;
-                entry.explanation = intervention.hypothesis.clone().unwrap_or_else(|| {
-                    format!("Intervention {} would have changed outcome", i + 1)
-                });
-                report.add_regret(entry);
-            }
+    if !options.dry_run && options.generate_regret {
+        for (i, intervention) in options.interventions.iter().enumerate() {
+            let regret_id = format!("{}{}_{}", REGRET_ENTRY_ID_PREFIX, generate_id(), i);
+            let mut entry = RegretEntry::new(
+                &regret_id,
+                &options.episode_id,
+                intervention.intervention_type,
+            );
+            entry.memory_id.clone_from(&intervention.memory_id);
+            entry.regret_kind = "hypothesis".to_string();
+            entry.would_have_surfaced = false;
+            entry.would_have_changed = false;
+            entry.confidence = 0.0;
+            entry.explanation = match intervention.hypothesis.as_deref() {
+                Some(hypothesis) => format!("Unverified hypothesis: {hypothesis}"),
+                None => format!("Unverified hypothesis for intervention {}", i + 1),
+            };
+            report.add_regret(entry);
         }
     }
 
     Ok(report)
 }
 
-fn regret_kind_for_index(index: usize) -> &'static str {
-    match index % 5 {
-        0 => "missed",
-        1 => "stale",
-        2 => "noisy",
-        3 => "harmful",
-        _ => "overfit_policy",
+fn counterfactual_pack_hash_input(options: &CounterfactualOptions) -> String {
+    let mut input = format!("counterfactual-hypothesis:{}", options.episode_id);
+    for (index, intervention) in options.interventions.iter().enumerate() {
+        input.push('|');
+        input.push_str(&hypothesis_item_id(index, intervention));
+        input.push(':');
+        input.push_str(intervention.intervention_type.as_str());
+        input.push(':');
+        input.push_str(intervention.memory_id.as_deref().unwrap_or_default());
+        input.push(':');
+        input.push_str(intervention.memory_content.as_deref().unwrap_or_default());
+        input.push(':');
+        input.push_str(
+            &intervention
+                .strength_delta
+                .map(|delta| delta.to_string())
+                .unwrap_or_default(),
+        );
+        input.push(':');
+        input.push_str(intervention.hypothesis.as_deref().unwrap_or_default());
+    }
+    input
+}
+
+fn hypothesis_item_id(index: usize, intervention: &InterventionSpec) -> String {
+    match (&intervention.memory_id, &intervention.memory_content) {
+        (Some(id), _) => format!(
+            "hypothesis:{}:{}",
+            intervention.intervention_type.as_str(),
+            id
+        ),
+        (_, Some(content)) => format!(
+            "hypothesis:add:memory_hash:{}",
+            hash_content(content.as_bytes())
+        ),
+        _ => format!(
+            "hypothesis:{}:{}",
+            intervention.intervention_type.as_str(),
+            index + 1
+        ),
     }
 }
 
@@ -1003,13 +1007,19 @@ mod tests {
         let report = run_counterfactual(&options).map_err(|e| e.message())?;
 
         ensure(report.interventions_applied, 1, "interventions_applied")?;
-        ensure(report.outcome_changed, true, "outcome_changed")?;
-        ensure(report.regret_entries.len(), 1, "regret entries count")?;
+        ensure(report.outcome_changed, false, "outcome_changed")?;
+        ensure(report.would_have_surfaced, false, "would_have_surfaced")?;
         ensure(
-            report.regret_entries[0].would_have_changed,
-            true,
-            "regret would_have_changed",
-        )
+            report.degradation_codes,
+            vec![LAB_REPLAY_UNAVAILABLE_CODE.to_string()],
+            "degradation_codes",
+        )?;
+        ensure(report.regret_entries.len(), 1, "regret entries count")?;
+        let entry = report
+            .regret_entries
+            .first()
+            .ok_or_else(|| "missing regret entry".to_string())?;
+        ensure(entry.would_have_changed, false, "regret would_have_changed")
     }
 
     #[test]
@@ -1023,7 +1033,15 @@ mod tests {
         let report = run_counterfactual(&options).map_err(|e| e.message())?;
 
         ensure(report.dry_run, true, "dry_run")?;
-        ensure(report.status, CounterfactualStatus::Pending, "status")
+        ensure(report.status, CounterfactualStatus::Failed, "status")?;
+        ensure(
+            report.degradation_codes,
+            vec![
+                LAB_REPLAY_UNAVAILABLE_CODE.to_string(),
+                "dry_run_no_durable_mutation".to_string(),
+            ],
+            "degradation_codes",
+        )
     }
 
     #[test]

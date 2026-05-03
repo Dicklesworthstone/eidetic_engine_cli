@@ -6,56 +6,56 @@
       "id": "reg_NORMALIZED",
       "episode_id": "ep_golden_test",
       "intervention_type": "add",
-      "regret_kind": "missed",
+      "regret_kind": "hypothesis",
       "memory_id": null,
-      "would_have_surfaced": true,
-      "would_have_changed": true,
-      "confidence": 0.75,
-      "explanation": "Intervention 1 would have changed outcome"
+      "would_have_surfaced": false,
+      "would_have_changed": false,
+      "confidence": 0.0,
+      "explanation": "Unverified hypothesis for intervention 1"
     },
     {
       "id": "reg_NORMALIZED",
       "episode_id": "ep_golden_test",
       "intervention_type": "strengthen",
-      "regret_kind": "stale",
+      "regret_kind": "hypothesis",
       "memory_id": "mem_stale",
-      "would_have_surfaced": true,
-      "would_have_changed": true,
-      "confidence": 0.75,
-      "explanation": "Intervention 2 would have changed outcome"
+      "would_have_surfaced": false,
+      "would_have_changed": false,
+      "confidence": 0.0,
+      "explanation": "Unverified hypothesis for intervention 2"
     },
     {
       "id": "reg_NORMALIZED",
       "episode_id": "ep_golden_test",
       "intervention_type": "remove",
-      "regret_kind": "noisy",
+      "regret_kind": "hypothesis",
       "memory_id": "mem_noisy",
-      "would_have_surfaced": true,
-      "would_have_changed": true,
-      "confidence": 0.75,
-      "explanation": "Intervention 3 would have changed outcome"
+      "would_have_surfaced": false,
+      "would_have_changed": false,
+      "confidence": 0.0,
+      "explanation": "Unverified hypothesis for intervention 3"
     },
     {
       "id": "reg_NORMALIZED",
       "episode_id": "ep_golden_test",
       "intervention_type": "weaken",
-      "regret_kind": "harmful",
+      "regret_kind": "hypothesis",
       "memory_id": "mem_harmful",
-      "would_have_surfaced": true,
-      "would_have_changed": true,
-      "confidence": 0.75,
-      "explanation": "Intervention 4 would have changed outcome"
+      "would_have_surfaced": false,
+      "would_have_changed": false,
+      "confidence": 0.0,
+      "explanation": "Unverified hypothesis for intervention 4"
     },
     {
       "id": "reg_NORMALIZED",
       "episode_id": "ep_golden_test",
       "intervention_type": "add",
-      "regret_kind": "overfit_policy",
+      "regret_kind": "hypothesis",
       "memory_id": null,
-      "would_have_surfaced": true,
-      "would_have_changed": true,
-      "confidence": 0.75,
-      "explanation": "Intervention 5 would have changed outcome"
+      "would_have_surfaced": false,
+      "would_have_changed": false,
+      "confidence": 0.0,
+      "explanation": "Unverified hypothesis for intervention 5"
     }
   ]
 }

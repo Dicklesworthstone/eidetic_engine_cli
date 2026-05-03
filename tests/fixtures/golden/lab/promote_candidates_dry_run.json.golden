@@ -11,5 +11,5 @@
       "applied": false
     }
   ],
-  "next_action": "validate generated curation candidates, then apply explicitly"
+  "next_action": "provide frozen episode inputs, then validate candidates before apply"
 }
