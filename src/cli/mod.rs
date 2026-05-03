@@ -11853,56 +11853,67 @@ where
 // EE-342: Certificate handlers
 // ============================================================================
 
-fn handle_certificate_list<W, E>(
+const CERTIFICATE_STORE_UNAVAILABLE_CODE: &str = "certificate_store_unavailable";
+const CERTIFICATE_STORE_UNAVAILABLE_MESSAGE: &str = "Certificate manifest storage is unavailable; certificate records cannot be listed, shown, or verified from production evidence.";
+const CERTIFICATE_STORE_UNAVAILABLE_REPAIR: &str = "ee doctor --json";
+const CERTIFICATE_STORE_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-v76q";
+
+fn write_certificate_store_unavailable<W, E>(
     cli: &Cli,
-    args: &CertificateListArgs,
+    command: &'static str,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    use crate::core::certificate::{CertificateListOptions, list_certificates};
-    use crate::models::{CertificateKind, CertificateStatus};
-    use std::str::FromStr;
-
-    let mut options = CertificateListOptions::new().with_limit(args.limit);
-
-    if let Some(ref kind_str) = args.kind {
-        if let Ok(kind) = CertificateKind::from_str(kind_str) {
-            options = options.with_kind(kind);
-        }
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": CERTIFICATE_STORE_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": CERTIFICATE_STORE_UNAVAILABLE_MESSAGE,
+                "repair": CERTIFICATE_STORE_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": CERTIFICATE_STORE_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": CERTIFICATE_STORE_UNAVAILABLE_MESSAGE,
+                        "repair": CERTIFICATE_STORE_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": CERTIFICATE_STORE_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": "read-only, idempotent"
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
     }
 
-    if let Some(ref status_str) = args.status {
-        if let Ok(status) = CertificateStatus::from_str(status_str) {
-            options = options.with_status(status);
-        }
-    }
+    let _ = writeln!(stderr, "error: {CERTIFICATE_STORE_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {CERTIFICATE_STORE_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
+}
 
-    if args.include_expired {
-        options = options.include_expired();
-    }
-
-    let report = list_certificates(&options);
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &output::render_certificate_list_human(&report))
-        }
-        output::Renderer::Toon => write_stdout(
-            stdout,
-            &(output::render_certificate_list_toon(&report) + "\n"),
-        ),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(
-            stdout,
-            &(output::render_certificate_list_json(&report) + "\n"),
-        ),
-    }
+fn handle_certificate_list<W, E>(
+    cli: &Cli,
+    args: &CertificateListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let _ = args;
+    write_certificate_store_unavailable(cli, "certificate list", stdout, stderr)
 }
 
 fn handle_certificate_show<W, E>(
@@ -11915,35 +11926,8 @@ where
     W: Write,
     E: Write,
 {
-    use crate::core::certificate::{VerificationResult, show_certificate};
-
-    let report = show_certificate(&args.certificate_id);
-
-    if report.verification_status == VerificationResult::NotFound {
-        let domain_error = DomainError::NotFound {
-            resource: "certificate".to_string(),
-            id: args.certificate_id.clone(),
-            repair: Some("ee certificate list --json".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &output::render_certificate_show_human(&report))
-        }
-        output::Renderer::Toon => write_stdout(
-            stdout,
-            &(output::render_certificate_show_toon(&report) + "\n"),
-        ),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(
-            stdout,
-            &(output::render_certificate_show_json(&report) + "\n"),
-        ),
-    }
+    let _ = args;
+    write_certificate_store_unavailable(cli, "certificate show", stdout, stderr)
 }
 
 fn handle_certificate_verify<W, E>(
@@ -11956,35 +11940,8 @@ where
     W: Write,
     E: Write,
 {
-    use crate::core::certificate::{VerificationResult, verify_certificate};
-
-    let report = verify_certificate(&args.certificate_id);
-
-    if report.result == VerificationResult::NotFound {
-        let domain_error = DomainError::NotFound {
-            resource: "certificate".to_string(),
-            id: args.certificate_id.clone(),
-            repair: Some("ee certificate list --json".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &output::render_certificate_verify_human(&report))
-        }
-        output::Renderer::Toon => write_stdout(
-            stdout,
-            &(output::render_certificate_verify_toon(&report) + "\n"),
-        ),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(
-            stdout,
-            &(output::render_certificate_verify_json(&report) + "\n"),
-        ),
-    }
+    let _ = args;
+    write_certificate_store_unavailable(cli, "certificate verify", stdout, stderr)
 }
 
 // ============================================================================

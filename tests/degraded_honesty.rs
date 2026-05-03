@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
 
+const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 7;
+
 struct LoggedCommand {
     stdout: String,
     stderr: String,
@@ -109,6 +111,8 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "context, pack, search, why"
     } else if args.iter().any(|arg| arg == "capabilities") {
         "capabilities, check, health, status"
+    } else if args.iter().any(|arg| arg == "certificate") {
+        "certificate"
     } else {
         "unknown"
     }
@@ -117,7 +121,10 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
 fn side_effect_class(args: &[String]) -> &'static str {
     if args.iter().any(|arg| arg == "context") {
         "audited pack write when storage is available; storage error before mutation here"
-    } else if args.iter().any(|arg| arg == "capabilities") {
+    } else if args
+        .iter()
+        .any(|arg| arg == "capabilities" || arg == "certificate")
+    {
         "read-only, idempotent"
     } else {
         "unknown"
@@ -347,6 +354,101 @@ fn successful_capabilities_output_has_no_fake_success_markers() -> TestResult {
     ensure(
         unsupported_claims.passed,
         format!("capabilities output contains unsupported evidence claim: {unsupported_claims:?}"),
+    )
+}
+
+#[test]
+fn certificate_verify_degrades_instead_of_reporting_mock_success() -> TestResult {
+    let result = run_ee_logged(
+        "certificate-verify-unavailable",
+        None,
+        vec![
+            "--json".to_owned(),
+            "certificate".to_owned(),
+            "verify".to_owned(),
+            "cert_pack_001".to_owned(),
+        ],
+    )?;
+
+    ensure_equal(
+        &result.exit_code,
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "certificate unavailable exit code",
+    )?;
+    ensure(
+        result.stderr.is_empty(),
+        "certificate JSON degraded response must keep stderr empty",
+    )?;
+    ensure_no_ansi(&result.stdout, "certificate degraded stdout")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/schema",
+        json!("ee.response.v1"),
+        "certificate degraded response schema",
+    )?;
+    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/code",
+        json!("certificate_store_unavailable"),
+        "certificate degraded code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/degraded/0/code",
+        json!("certificate_store_unavailable"),
+        "certificate degraded array code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/followUpBead",
+        json!("eidetic_engine_cli-v76q"),
+        "certificate follow-up bead",
+    )?;
+
+    let fake_success =
+        validate_no_fake_success_output("certificate verify", false, false, &result.stdout);
+    ensure(
+        fake_success.passed,
+        format!("degraded certificate output should not be fake success: {fake_success:?}"),
+    )?;
+
+    let unsupported_claims =
+        validate_no_unsupported_evidence_claims("certificate verify", false, false, &result.stdout);
+    ensure(
+        unsupported_claims.passed,
+        format!(
+            "degraded certificate output should not count as unsupported success: {unsupported_claims:?}"
+        ),
+    )?;
+
+    let log_text = fs::read_to_string(&result.log_path)
+        .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+    let log_json: Value = serde_json::from_str(&log_text)
+        .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+    ensure_json_pointer(
+        &log_json,
+        "/degradationCodes",
+        json!(["certificate_store_unavailable"]),
+        "logged certificate degradation code",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/repairCommand",
+        json!("ee doctor --json"),
+        "logged certificate repair command",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/commandBoundaryMatrixRow",
+        json!("certificate"),
+        "logged certificate boundary matrix row",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/sideEffectClass",
+        json!("read-only, idempotent"),
+        "logged certificate side-effect class",
     )
 }
 

@@ -18,6 +18,8 @@ use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
 
+const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 7;
+
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
         Ok(())
@@ -129,9 +131,13 @@ fn certificate_verify_detects_stale_payload_schema_and_assumptions() -> TestResu
 }
 
 #[test]
-fn certificate_verify_json_stays_machine_clean() -> TestResult {
+fn certificate_verify_json_degrades_until_manifest_store_exists() -> TestResult {
     let output = run_ee(&["certificate", "verify", "cert_pack_stale_schema", "--json"])?;
-    ensure(output.status.success(), "verify command should exit 0")?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
+        "verify command unavailable exit",
+    )?;
     ensure(
         output.stderr.is_empty(),
         "json certificate verify should keep stderr clean",
@@ -143,14 +149,20 @@ fn certificate_verify_json_stays_machine_clean() -> TestResult {
         )
     })?;
     ensure_equal(
-        &value["data"]["result"],
-        &json!("stale_schema_version"),
-        "json result",
+        &value["schema"],
+        &json!("ee.response.v1"),
+        "json response schema",
+    )?;
+    ensure_equal(&value["success"], &json!(false), "success flag")?;
+    ensure_equal(
+        &value["data"]["code"],
+        &json!("certificate_store_unavailable"),
+        "degraded code",
     )?;
     ensure_equal(
-        &value["data"]["schemaVersionValid"],
-        &json!(false),
-        "schema version flag",
+        &value["data"]["degraded"][0]["code"],
+        &json!("certificate_store_unavailable"),
+        "degraded array code",
     )
 }
 
