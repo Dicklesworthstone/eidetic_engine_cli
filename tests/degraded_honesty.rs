@@ -125,6 +125,8 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "procedure"
     } else if args.iter().any(|arg| arg == "situation") {
         "situation"
+    } else if args.iter().any(|arg| arg == "handoff") {
+        "handoff"
     } else {
         "unknown"
     }
@@ -148,6 +150,8 @@ fn side_effect_class(args: &[String]) -> &'static str {
         "conservative abstention; no procedure mutation or artifact write"
     } else if args.iter().any(|arg| arg == "situation") {
         "conservative abstention; no situation routing, link, or recommendation mutation"
+    } else if args.iter().any(|arg| arg == "handoff") {
+        "conservative abstention; no continuity capsule write"
     } else {
         "unknown"
     }
@@ -1119,6 +1123,126 @@ fn situation_classify_degrades_instead_of_reporting_builtin_routing() -> TestRes
         "/sideEffectClass",
         json!("conservative abstention; no situation routing, link, or recommendation mutation"),
         "logged situation side-effect class",
+    )
+}
+
+#[test]
+fn handoff_create_degrades_instead_of_writing_placeholder_capsule() -> TestResult {
+    let output_dir = unique_artifact_dir("handoff-create-output")?;
+    let capsule_path = output_dir.join("handoff.json");
+    let result = run_ee_logged(
+        "handoff-create-unavailable",
+        None,
+        vec![
+            "--json".to_owned(),
+            "handoff".to_owned(),
+            "create".to_owned(),
+            "--out".to_owned(),
+            capsule_path.display().to_string(),
+        ],
+    )?;
+
+    ensure_equal(
+        &result.exit_code,
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "handoff unavailable exit code",
+    )?;
+    ensure(
+        result.stderr.is_empty(),
+        "handoff JSON degraded response must keep stderr empty",
+    )?;
+    ensure_no_ansi(&result.stdout, "handoff degraded stdout")?;
+    ensure(
+        !capsule_path.exists(),
+        "degraded handoff create must not write a placeholder capsule",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/schema",
+        json!("ee.response.v1"),
+        "handoff degraded response schema",
+    )?;
+    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/code",
+        json!("handoff_unavailable"),
+        "handoff degraded code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/degraded/0/code",
+        json!("handoff_unavailable"),
+        "handoff degraded array code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/followUpBead",
+        json!("eidetic_engine_cli-g9dq"),
+        "handoff follow-up bead",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sideEffectClass",
+        json!("conservative abstention; no continuity capsule write"),
+        "handoff side-effect class",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/evidenceIds",
+        json!([]),
+        "handoff evidence ids",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sourceIds",
+        json!([]),
+        "handoff source ids",
+    )?;
+
+    let fake_success =
+        validate_no_fake_success_output("handoff create", false, false, &result.stdout);
+    ensure(
+        fake_success.passed,
+        format!("degraded handoff output should not be fake success: {fake_success:?}"),
+    )?;
+
+    let unsupported_claims =
+        validate_no_unsupported_evidence_claims("handoff create", false, false, &result.stdout);
+    ensure(
+        unsupported_claims.passed,
+        format!(
+            "degraded handoff output should not count as unsupported success: {unsupported_claims:?}"
+        ),
+    )?;
+
+    let log_text = fs::read_to_string(&result.log_path)
+        .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+    let log_json: Value = serde_json::from_str(&log_text)
+        .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+    ensure_json_pointer(
+        &log_json,
+        "/degradationCodes",
+        json!(["handoff_unavailable"]),
+        "logged handoff degradation code",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/repairCommand",
+        json!("ee status --json"),
+        "logged handoff repair command",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/commandBoundaryMatrixRow",
+        json!("handoff"),
+        "logged handoff boundary matrix row",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/sideEffectClass",
+        json!("conservative abstention; no continuity capsule write"),
+        "logged handoff side-effect class",
     )
 }
 

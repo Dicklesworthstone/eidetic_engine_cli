@@ -38,9 +38,8 @@ use crate::core::doctor::{
 };
 use crate::core::feedback::{PreflightFeedbackKind, TaskOutcome};
 use crate::core::handoff::{
-    CapsuleProfile, CreateOptions as HandoffCreateOptions, InspectOptions as HandoffInspectOptions,
-    PreviewOptions as HandoffPreviewOptions, ResumeOptions as HandoffResumeOptions, create_handoff,
-    inspect_handoff, preview_handoff, resume_handoff,
+    InspectOptions as HandoffInspectOptions, ResumeOptions as HandoffResumeOptions,
+    inspect_handoff, resume_handoff,
 };
 use crate::core::health::HealthReport;
 use crate::core::index::{
@@ -4018,69 +4017,12 @@ where
         }
         Some(Command::Handoff(ref cmd)) => match cmd {
             HandoffCommand::Preview(args) => {
-                let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-                let options = HandoffPreviewOptions {
-                    workspace: workspace_path,
-                    profile: match args.profile {
-                        HandoffProfile::Compact => CapsuleProfile::Compact,
-                        HandoffProfile::Resume => CapsuleProfile::Resume,
-                        HandoffProfile::Handoff => CapsuleProfile::Handoff,
-                    },
-                    since: args.since.clone(),
-                    include_estimates: args.estimates,
-                };
-                match preview_handoff(&options) {
-                    Ok(report) => match cli.renderer() {
-                        output::Renderer::Human | output::Renderer::Markdown => {
-                            write_stdout(stdout, &output::render_handoff_preview_human(&report))
-                        }
-                        output::Renderer::Toon => write_stdout(
-                            stdout,
-                            &(output::render_handoff_preview_toon(&report) + "\n"),
-                        ),
-                        output::Renderer::Json
-                        | output::Renderer::Jsonl
-                        | output::Renderer::Compact
-                        | output::Renderer::Hook => write_stdout(
-                            stdout,
-                            &(output::render_handoff_preview_json(&report) + "\n"),
-                        ),
-                    },
-                    Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
-                }
+                let _ = args;
+                write_handoff_unavailable(&cli, "handoff preview", stdout, stderr)
             }
             HandoffCommand::Create(args) => {
-                let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-                let options = HandoffCreateOptions {
-                    workspace: workspace_path,
-                    output: args.out.clone(),
-                    profile: match args.profile {
-                        HandoffProfile::Compact => CapsuleProfile::Compact,
-                        HandoffProfile::Resume => CapsuleProfile::Resume,
-                        HandoffProfile::Handoff => CapsuleProfile::Handoff,
-                    },
-                    since: args.since.clone(),
-                    dry_run: args.dry_run,
-                };
-                match create_handoff(&options) {
-                    Ok(report) => match cli.renderer() {
-                        output::Renderer::Human | output::Renderer::Markdown => {
-                            write_stdout(stdout, &output::render_handoff_create_human(&report))
-                        }
-                        output::Renderer::Toon => write_stdout(
-                            stdout,
-                            &(output::render_handoff_create_toon(&report) + "\n"),
-                        ),
-                        output::Renderer::Json
-                        | output::Renderer::Jsonl
-                        | output::Renderer::Compact
-                        | output::Renderer::Hook => write_stdout(
-                            stdout,
-                            &(output::render_handoff_create_json(&report) + "\n"),
-                        ),
-                    },
-                    Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
-                }
+                let _ = args;
+                write_handoff_unavailable(&cli, "handoff create", stdout, stderr)
             }
             HandoffCommand::Inspect(args) => {
                 let options = HandoffInspectOptions {
@@ -4620,6 +4562,57 @@ where
         Some(Command::Update(ref args)) => handle_update(&cli, args, stdout, stderr),
         Some(Command::Why(ref args)) => handle_why(&cli, args, stdout, stderr),
     }
+}
+
+const HANDOFF_UNAVAILABLE_CODE: &str = "handoff_unavailable";
+const HANDOFF_UNAVAILABLE_MESSAGE: &str = "Handoff preview and capsule creation are unavailable until continuity capsules are backed by explicit redacted evidence instead of generated placeholder sections.";
+const HANDOFF_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const HANDOFF_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-g9dq";
+const HANDOFF_UNAVAILABLE_SIDE_EFFECT: &str =
+    "conservative abstention; no continuity capsule write";
+
+fn write_handoff_unavailable<W, E>(
+    cli: &Cli,
+    command: &'static str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": HANDOFF_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": HANDOFF_UNAVAILABLE_MESSAGE,
+                "repair": HANDOFF_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": HANDOFF_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": HANDOFF_UNAVAILABLE_MESSAGE,
+                        "repair": HANDOFF_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": HANDOFF_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": HANDOFF_UNAVAILABLE_SIDE_EFFECT
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
+    }
+
+    let _ = writeln!(stderr, "error: {HANDOFF_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {HANDOFF_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
 }
 
 fn normalize_outcome_quarantine_args(mut args: Vec<OsString>) -> Vec<OsString> {
