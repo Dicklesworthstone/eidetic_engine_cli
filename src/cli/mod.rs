@@ -23,12 +23,6 @@ use crate::core::backup::{
     verify_backup,
 };
 use crate::core::capabilities::CapabilitiesReport;
-use crate::core::causal::{
-    CAUSAL_COMPARE_SCHEMA_V1, CAUSAL_ESTIMATE_SCHEMA_V1, CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
-    CompareOptions as CausalCompareOptions, EstimateOptions as CausalEstimateOptions,
-    PromotePlanOptions as CausalPromotePlanOptions, TraceOptions as CausalTraceOptions,
-    compare_causal_evidence, estimate_causal_uplift, promote_causal_plan, trace_causal_chains,
-};
 use crate::core::check::CheckReport;
 use crate::core::context::{ContextPackError, ContextPackOptions, run_context_pack};
 use crate::core::curate::{
@@ -11904,217 +11898,95 @@ where
 // EE-451: Causal trace handlers
 // ============================================================================
 
-fn handle_causal_trace<W, E>(
+const CAUSAL_UNAVAILABLE_CODE: &str = "causal_evidence_unavailable";
+const CAUSAL_UNAVAILABLE_MESSAGE: &str = "Causal trace, estimate, compare, and promotion reports are unavailable until they are backed by real evidence ledgers instead of generated fixture data.";
+const CAUSAL_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const CAUSAL_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-dz00";
+
+fn write_causal_unavailable<W, E>(
     cli: &Cli,
-    args: &CausalTraceArgs,
+    command: &'static str,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let mut options = CausalTraceOptions::default();
-
-    if let Some(ref memory_id) = args.memory_id {
-        options = options.with_memory_id(memory_id);
-    }
-    if let Some(ref run_id) = args.run_id {
-        options = options.with_run_id(run_id);
-    }
-    if let Some(ref pack_id) = args.pack_id {
-        options = options.with_pack_id(pack_id);
-    }
-    if let Some(ref preflight_id) = args.preflight_id {
-        options = options.with_preflight_id(preflight_id);
-    }
-    if let Some(ref tripwire_id) = args.tripwire_id {
-        options = options.with_tripwire_id(tripwire_id);
-    }
-    if let Some(ref procedure_id) = args.procedure_id {
-        options = options.with_procedure_id(procedure_id);
-    }
-    if let Some(ref agent_id) = args.agent_id {
-        options = options.with_agent_id(agent_id);
-    }
-    options = options.with_limit(args.limit);
-    if args.include_exposures {
-        options = options.with_exposures();
-    }
-    if args.include_outcomes {
-        options = options.with_outcomes();
-    }
-    if args.dry_run {
-        options = options.dry_run();
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": CAUSAL_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": CAUSAL_UNAVAILABLE_MESSAGE,
+                "repair": CAUSAL_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": CAUSAL_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": CAUSAL_UNAVAILABLE_MESSAGE,
+                        "repair": CAUSAL_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": CAUSAL_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": "read-only, conservative abstention"
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
     }
 
-    let report = trace_causal_chains(&options);
+    let _ = writeln!(stderr, "error: {CAUSAL_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {CAUSAL_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
+}
 
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &report.human_summary())
-        }
-        output::Renderer::Toon => {
-            let toon = format!(
-                "causal_trace chains={} exposures={} decisions={}\n",
-                report.chains.len(),
-                report.total_exposures,
-                report.total_decisions
-            );
-            write_stdout(stdout, &toon)
-        }
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            let json = serde_json::json!({
-                "schema": crate::core::causal::CAUSAL_TRACE_LIST_SCHEMA_V1,
-                "success": true,
-                "data": report.data_json(),
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
-    }
+fn handle_causal_trace<W, E>(
+    cli: &Cli,
+    args: &CausalTraceArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let _ = args;
+    write_causal_unavailable(cli, "causal trace", stdout, stderr)
 }
 
 fn handle_causal_estimate<W, E>(
     cli: &Cli,
     args: &CausalEstimateArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let mut options = CausalEstimateOptions::default();
-
-    if let Some(ref artifact_id) = args.artifact_id {
-        options = options.with_artifact_id(artifact_id);
-    }
-    if let Some(ref decision_id) = args.decision_id {
-        options = options.with_decision_id(decision_id);
-    }
-    if let Some(ref chain_id) = args.chain_id {
-        options = options.with_chain_id(chain_id);
-    }
-    if let Some(ref agent_id) = args.agent_id {
-        options = options.with_agent_id(agent_id);
-    }
-    options = options.with_method(&args.method);
-    if args.include_confounders {
-        options = options.with_confounders();
-    }
-    if args.include_assumptions {
-        options = options.with_assumptions();
-    }
-    if args.dry_run {
-        options = options.dry_run();
-    }
-
-    let report = estimate_causal_uplift(&options);
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &report.human_summary())
-        }
-        output::Renderer::Toon => {
-            let toon = format!(
-                "causal_estimate estimates={} method={} assumptions={} confounders={}\n",
-                report.estimates.len(),
-                report.method_used,
-                report.assumptions.len(),
-                report.confounders.len()
-            );
-            write_stdout(stdout, &toon)
-        }
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            let json = serde_json::json!({
-                "schema": CAUSAL_ESTIMATE_SCHEMA_V1,
-                "success": true,
-                "data": report.data_json(),
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
-    }
+    let _ = args;
+    write_causal_unavailable(cli, "causal estimate", stdout, stderr)
 }
 
 fn handle_causal_compare<W, E>(
     cli: &Cli,
     args: &CausalCompareArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let mut options = CausalCompareOptions::default();
-
-    if let Some(ref fixture_replay_id) = args.fixture_replay_id {
-        options = options.with_fixture_replay_id(fixture_replay_id);
-    }
-    if let Some(ref shadow_run_id) = args.shadow_run_id {
-        options = options.with_shadow_run_id(shadow_run_id);
-    }
-    if let Some(ref counterfactual_episode_id) = args.counterfactual_episode_id {
-        options = options.with_counterfactual_episode_id(counterfactual_episode_id);
-    }
-    if let Some(ref experiment_id) = args.experiment_id {
-        options = options.with_experiment_id(experiment_id);
-    }
-    if let Some(ref artifact_id) = args.artifact_id {
-        options = options.with_artifact_id(artifact_id);
-    }
-    if let Some(ref decision_id) = args.decision_id {
-        options = options.with_decision_id(decision_id);
-    }
-    options = options.with_method(&args.method);
-    if args.dry_run {
-        options = options.dry_run();
-    }
-
-    let report = compare_causal_evidence(&options);
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &report.human_summary())
-        }
-        output::Renderer::Toon => {
-            let improved = report
-                .comparisons
-                .iter()
-                .filter(|comparison| comparison.verdict == "improves")
-                .count();
-            let regressed = report
-                .comparisons
-                .iter()
-                .filter(|comparison| comparison.verdict == "regresses")
-                .count();
-            let toon = format!(
-                "causal_compare comparisons={} method={} improves={} regresses={}\n",
-                report.comparisons.len(),
-                report.method_used,
-                improved,
-                regressed
-            );
-            write_stdout(stdout, &toon)
-        }
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            let json = serde_json::json!({
-                "schema": CAUSAL_COMPARE_SCHEMA_V1,
-                "success": true,
-                "data": report.data_json(),
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
-    }
+    let _ = args;
+    write_causal_unavailable(cli, "causal compare", stdout, stderr)
 }
 
 fn handle_causal_promote_plan<W, E>(
@@ -12143,62 +12015,8 @@ where
         None => None,
     };
 
-    let mut options = CausalPromotePlanOptions::default().with_method(&args.method);
-
-    if let Some(ref artifact_id) = args.artifact_id {
-        options = options.with_artifact_id(artifact_id);
-    }
-    if let Some(ref decision_id) = args.decision_id {
-        options = options.with_decision_id(decision_id);
-    }
-    if let Some(ref estimate_id) = args.estimate_id {
-        options = options.with_estimate_id(estimate_id);
-    }
-    if let Some(parsed_action) = action {
-        options = options.with_action(parsed_action);
-    }
-    options = options.with_minimum_uplift(args.minimum_uplift);
-    if args.include_revalidation {
-        options = options.with_revalidation();
-    }
-    if args.include_narrower_routing {
-        options = options.with_narrower_routing();
-    }
-    if args.include_experiment_proposals {
-        options = options.with_experiment_proposals();
-    }
-    if args.dry_run {
-        options = options.dry_run();
-    }
-
-    let report = promote_causal_plan(&options);
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &report.human_summary())
-        }
-        output::Renderer::Toon => {
-            let toon = format!(
-                "causal_promote_plan plans={} method={} experiments={} revalidation={}\n",
-                report.plans.len(),
-                report.method_used,
-                report.recommendations.experiment_proposals.len(),
-                report.recommendations.revalidation_steps.len(),
-            );
-            write_stdout(stdout, &toon)
-        }
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            let json = serde_json::json!({
-                "schema": CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
-                "success": true,
-                "data": report.data_json(),
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
-    }
+    let _ = action;
+    write_causal_unavailable(cli, "causal promote-plan", stdout, stderr)
 }
 
 // ============================================================================

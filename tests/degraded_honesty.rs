@@ -117,6 +117,8 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "rehearse"
     } else if args.iter().any(|arg| arg == "economy") {
         "economy"
+    } else if args.iter().any(|arg| arg == "causal") {
+        "causal"
     } else {
         "unknown"
     }
@@ -132,7 +134,7 @@ fn side_effect_class(args: &[String]) -> &'static str {
         "read-only, idempotent"
     } else if args.iter().any(|arg| arg == "rehearse") {
         "unavailable before sandbox mutation"
-    } else if args.iter().any(|arg| arg == "economy") {
+    } else if args.iter().any(|arg| arg == "economy" || arg == "causal") {
         "read-only, conservative abstention"
     } else {
         "unknown"
@@ -659,6 +661,114 @@ fn economy_report_degrades_instead_of_reporting_seed_metrics() -> TestResult {
         "/sideEffectClass",
         json!("read-only, conservative abstention"),
         "logged economy side-effect class",
+    )
+}
+
+#[test]
+fn causal_trace_degrades_instead_of_reporting_generated_chains() -> TestResult {
+    let result = run_ee_logged(
+        "causal-trace-unavailable",
+        None,
+        vec![
+            "--json".to_owned(),
+            "causal".to_owned(),
+            "trace".to_owned(),
+            "--run-id".to_owned(),
+            "run_fixture_001".to_owned(),
+        ],
+    )?;
+
+    ensure_equal(
+        &result.exit_code,
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "causal unavailable exit code",
+    )?;
+    ensure(
+        result.stderr.is_empty(),
+        "causal JSON degraded response must keep stderr empty",
+    )?;
+    ensure_no_ansi(&result.stdout, "causal degraded stdout")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/schema",
+        json!("ee.response.v1"),
+        "causal degraded response schema",
+    )?;
+    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/code",
+        json!("causal_evidence_unavailable"),
+        "causal degraded code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/degraded/0/code",
+        json!("causal_evidence_unavailable"),
+        "causal degraded array code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/followUpBead",
+        json!("eidetic_engine_cli-dz00"),
+        "causal follow-up bead",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/evidenceIds",
+        json!([]),
+        "causal evidence ids",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sourceIds",
+        json!([]),
+        "causal source ids",
+    )?;
+
+    let fake_success =
+        validate_no_fake_success_output("causal trace", false, false, &result.stdout);
+    ensure(
+        fake_success.passed,
+        format!("degraded causal output should not be fake success: {fake_success:?}"),
+    )?;
+
+    let unsupported_claims =
+        validate_no_unsupported_evidence_claims("causal trace", false, false, &result.stdout);
+    ensure(
+        unsupported_claims.passed,
+        format!(
+            "degraded causal output should not count as unsupported success: {unsupported_claims:?}"
+        ),
+    )?;
+
+    let log_text = fs::read_to_string(&result.log_path)
+        .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+    let log_json: Value = serde_json::from_str(&log_text)
+        .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+    ensure_json_pointer(
+        &log_json,
+        "/degradationCodes",
+        json!(["causal_evidence_unavailable"]),
+        "logged causal degradation code",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/repairCommand",
+        json!("ee status --json"),
+        "logged causal repair command",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/commandBoundaryMatrixRow",
+        json!("causal"),
+        "logged causal boundary matrix row",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/sideEffectClass",
+        json!("read-only, conservative abstention"),
+        "logged causal side-effect class",
     )
 }
 

@@ -1734,11 +1734,57 @@ fn recorder_commands_support_human_output() -> TestResult {
 }
 
 // ============================================================================
-// Causal Trace Tests (EE-451)
+// Causal Command Tests (EE-451..EE-454 - Degraded until evidence ledgers exist)
 // ============================================================================
 
+fn assert_causal_unavailable(output: &std::process::Output, command: &str) -> TestResult {
+    ensure_equal(
+        &output.status.code(),
+        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
+        "exit code",
+    )?;
+    ensure(stdout_is_json(output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(output), "stdout must be clean")?;
+    ensure(
+        output.stderr.is_empty(),
+        "json degraded response must keep stderr empty",
+    )?;
+    let json = stdout_json(output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "response schema",
+    )?;
+    ensure_equal(&json["success"], &serde_json::json!(false), "success")?;
+    ensure_equal(
+        &json["data"]["command"],
+        &serde_json::json!(command),
+        "command",
+    )?;
+    ensure_equal(
+        &json["data"]["code"],
+        &serde_json::json!("causal_evidence_unavailable"),
+        "degraded code",
+    )?;
+    ensure_equal(
+        &json["data"]["repair"],
+        &serde_json::json!("ee status --json"),
+        "repair",
+    )?;
+    ensure_equal(
+        &json["data"]["followUpBead"],
+        &serde_json::json!("eidetic_engine_cli-dz00"),
+        "follow-up bead",
+    )?;
+    ensure_equal(
+        &json["data"]["sideEffectClass"],
+        &serde_json::json!("read-only, conservative abstention"),
+        "side effect class",
+    )
+}
+
 #[test]
-fn causal_trace_dry_run_returns_valid_json() -> TestResult {
+fn causal_trace_degrades_until_evidence_ledgers_exist() -> TestResult {
     let output = run_ee(&[
         "causal",
         "trace",
@@ -1747,68 +1793,11 @@ fn causal_trace_dry_run_returns_valid_json() -> TestResult {
         "--dry-run",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
-    ensure(
-        stdout_contains(&output, "ee.causal.trace"),
-        "must have causal trace schema",
-    )?;
-    ensure(stdout_contains(&output, "dryRun"), "must contain dryRun")?;
-    ensure(stdout_is_clean(&output), "stdout must be clean")
+    assert_causal_unavailable(&output, "causal trace")
 }
 
 #[test]
-fn causal_trace_shows_filters_applied() -> TestResult {
-    let output = run_ee(&[
-        "causal",
-        "trace",
-        "--memory-id",
-        "mem-001",
-        "--agent-id",
-        "agent-test",
-        "--json",
-    ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
-    ensure(
-        stdout_contains(&output, "filtersApplied"),
-        "must contain filtersApplied",
-    )?;
-    ensure(
-        stdout_contains(&output, "memory_id"),
-        "must show memory_id filter",
-    )
-}
-
-#[test]
-fn causal_trace_returns_chains_and_summary() -> TestResult {
-    let output = run_ee(&["causal", "trace", "--procedure-id", "proc-001", "--json"])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    let json = stdout_json(&output)?;
-    let data = json.get("data").unwrap_or(&json);
-    ensure(data.get("chains").is_some(), "must contain chains")?;
-    ensure(data.get("summary").is_some(), "must contain summary")
-}
-
-#[test]
-fn causal_trace_no_filters_returns_degradation() -> TestResult {
-    let output = run_ee(&["causal", "trace", "--json"])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    let json = stdout_json(&output)?;
-    let data = json.get("data").unwrap_or(&json);
-    let degradations = data.get("degradations").and_then(|v| v.as_array());
-    ensure(
-        degradations.is_some_and(|d| !d.is_empty()),
-        "should have degradation when no filters",
-    )
-}
-
-// ============================================================================
-// Causal Estimate Tests (EE-452)
-// ============================================================================
-
-#[test]
-fn causal_estimate_dry_run_returns_valid_json() -> TestResult {
+fn causal_estimate_degrades_until_evidence_ledgers_exist() -> TestResult {
     let output = run_ee(&[
         "causal",
         "estimate",
@@ -1817,143 +1806,11 @@ fn causal_estimate_dry_run_returns_valid_json() -> TestResult {
         "--dry-run",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
-    ensure(
-        stdout_contains(&output, "ee.causal.estimate"),
-        "must have causal estimate schema",
-    )?;
-    ensure(stdout_contains(&output, "dryRun"), "must contain dryRun")?;
-    ensure(stdout_is_clean(&output), "stdout must be clean")
+    assert_causal_unavailable(&output, "causal estimate")
 }
 
 #[test]
-fn causal_estimate_naive_method_returns_insufficient_confidence() -> TestResult {
-    let output = run_ee(&[
-        "causal",
-        "estimate",
-        "--artifact-id",
-        "art-001",
-        "--method",
-        "naive",
-        "--json",
-    ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
-    ensure(
-        stdout_contains(&output, "\"insufficient\""),
-        "naive method should have insufficient confidence",
-    )
-}
-
-#[test]
-fn causal_estimate_replay_method_returns_medium_confidence() -> TestResult {
-    let output = run_ee(&[
-        "causal",
-        "estimate",
-        "--artifact-id",
-        "art-001",
-        "--method",
-        "replay",
-        "--json",
-    ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
-    ensure(
-        stdout_contains(&output, "\"medium\""),
-        "replay method should have medium confidence",
-    )
-}
-
-#[test]
-fn causal_estimate_experiment_method_returns_high_confidence() -> TestResult {
-    let output = run_ee(&[
-        "causal",
-        "estimate",
-        "--artifact-id",
-        "art-001",
-        "--method",
-        "experiment",
-        "--json",
-    ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
-    ensure(
-        stdout_contains(&output, "\"high\""),
-        "experiment method should have high confidence",
-    )
-}
-
-#[test]
-fn causal_estimate_includes_assumptions_when_requested() -> TestResult {
-    let output = run_ee(&[
-        "causal",
-        "estimate",
-        "--artifact-id",
-        "art-001",
-        "--include-assumptions",
-        "--json",
-    ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    let json = stdout_json(&output)?;
-    let data = json.get("data").unwrap_or(&json);
-    let assumptions = data.get("assumptions").and_then(|v| v.as_array());
-    ensure(
-        assumptions.is_some_and(|a| !a.is_empty()),
-        "should include assumptions when requested",
-    )
-}
-
-#[test]
-fn causal_estimate_includes_confounders_when_requested() -> TestResult {
-    let output = run_ee(&[
-        "causal",
-        "estimate",
-        "--artifact-id",
-        "art-001",
-        "--include-confounders",
-        "--json",
-    ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    let json = stdout_json(&output)?;
-    let data = json.get("data").unwrap_or(&json);
-    let confounders = data.get("confounders").and_then(|v| v.as_array());
-    ensure(
-        confounders.is_some_and(|c| !c.is_empty()),
-        "should include confounders when requested",
-    )
-}
-
-#[test]
-fn causal_estimate_summary_contains_method_used() -> TestResult {
-    let output = run_ee(&[
-        "causal",
-        "estimate",
-        "--artifact-id",
-        "art-001",
-        "--method",
-        "matching",
-        "--json",
-    ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    let json = stdout_json(&output)?;
-    let data = json.get("data").unwrap_or(&json);
-    let method = data
-        .get("summary")
-        .and_then(|s| s.get("methodUsed"))
-        .and_then(|m| m.as_str());
-    ensure(
-        method == Some("matching"),
-        "summary must contain methodUsed",
-    )
-}
-
-// ============================================================================
-// Causal Compare Tests (EE-453)
-// ============================================================================
-
-#[test]
-fn causal_compare_dry_run_returns_valid_json() -> TestResult {
+fn causal_compare_degrades_until_evidence_ledgers_exist() -> TestResult {
     let output = run_ee(&[
         "causal",
         "compare",
@@ -1962,63 +1819,11 @@ fn causal_compare_dry_run_returns_valid_json() -> TestResult {
         "--dry-run",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
-    ensure(
-        stdout_contains(&output, "ee.causal.compare.v1"),
-        "must have causal compare schema",
-    )?;
-    ensure(stdout_contains(&output, "dryRun"), "must contain dryRun")?;
-    ensure(stdout_is_clean(&output), "stdout must be clean")
+    assert_causal_unavailable(&output, "causal compare")
 }
 
 #[test]
-fn causal_compare_with_multiple_sources_returns_comparisons() -> TestResult {
-    let output = run_ee(&[
-        "causal",
-        "compare",
-        "--fixture-replay-id",
-        "fixture-001",
-        "--shadow-run-id",
-        "shadow-001",
-        "--counterfactual-episode-id",
-        "counterfactual-001",
-        "--experiment-id",
-        "exp-001",
-        "--method",
-        "experiment",
-        "--json",
-    ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    let json = stdout_json(&output)?;
-    let data = json.get("data").unwrap_or(&json);
-    let comparisons = data.get("comparisons").and_then(|value| value.as_array());
-    ensure(
-        comparisons.is_some_and(|items| items.len() == 4),
-        "compare should return four source comparisons",
-    )?;
-    ensure(
-        stdout_contains(&output, "\"methodUsed\":\"experiment\""),
-        "summary should include methodUsed",
-    )
-}
-
-#[test]
-fn causal_compare_without_source_ids_returns_degradation() -> TestResult {
-    let output = run_ee(&["causal", "compare", "--artifact-id", "art-001", "--json"])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    ensure(
-        stdout_contains(&output, "\"code\":\"no_sources\""),
-        "missing source IDs should produce no_sources degradation",
-    )
-}
-
-// ============================================================================
-// Causal Promote Plan Tests (EE-454)
-// ============================================================================
-
-#[test]
-fn causal_promote_plan_dry_run_returns_valid_json() -> TestResult {
+fn causal_promote_plan_degrades_until_evidence_ledgers_exist() -> TestResult {
     let output = run_ee(&[
         "causal",
         "promote-plan",
@@ -2027,228 +1832,33 @@ fn causal_promote_plan_dry_run_returns_valid_json() -> TestResult {
         "--dry-run",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
-    ensure(
-        stdout_contains(&output, "ee.causal.promote_plan.v1"),
-        "must have causal promote-plan schema",
-    )?;
-    ensure(stdout_contains(&output, "plans"), "must include plans")?;
-    ensure(stdout_is_clean(&output), "stdout must be clean")
+    assert_causal_unavailable(&output, "causal promote-plan")
 }
 
 #[test]
-fn causal_promote_plan_supports_explicit_action_override() -> TestResult {
+fn causal_promote_plan_invalid_action_still_returns_usage_error() -> TestResult {
     let output = run_ee(&[
         "causal",
         "promote-plan",
         "--artifact-id",
         "art-001",
         "--action",
-        "demote",
+        "not-a-real-action",
         "--dry-run",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(1), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
-    ensure(
-        stdout_contains(&output, "\"action\":\"demote\""),
-        "explicit action must be reflected in plan output",
-    )
-}
-
-#[test]
-fn causal_promote_plan_projects_cross_surface_effects() -> TestResult {
-    let output = run_ee(&[
-        "causal",
-        "promote-plan",
-        "--artifact-id",
-        "art-001",
-        "--method",
-        "experiment",
-        "--dry-run",
-        "--json",
-    ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     let json = stdout_json(&output)?;
-    let downstream = json
-        .get("downstreamEffects")
-        .or_else(|| {
-            json.get("data")
-                .and_then(|data| data.get("downstreamEffects"))
-        })
-        .ok_or_else(|| "missing downstreamEffects payload".to_string())?;
     ensure_equal(
-        &downstream["schema"],
-        &serde_json::json!("ee.causal.downstream_effects.v1"),
-        "downstream effects schema",
-    )?;
-    ensure(
-        downstream["economyScore"].is_object(),
-        "economy score projection",
-    )?;
-    ensure(
-        downstream["learningAgenda"].is_object(),
-        "learning agenda projection",
-    )?;
-    ensure(
-        downstream["preflightRouting"].is_object(),
-        "preflight routing projection",
-    )?;
-    ensure(
-        downstream["procedureVerification"].is_object(),
-        "procedure verification projection",
+        &json["schema"],
+        &serde_json::json!("ee.error.v1"),
+        "error schema",
     )?;
     ensure_equal(
-        &downstream["audit"]["mutationMode"],
-        &serde_json::json!("dry_run_projection"),
-        "downstream mutation mode",
-    )?;
-    ensure_equal(
-        &downstream["audit"]["rawEvidenceReplaced"],
-        &serde_json::json!(false),
-        "raw evidence remains immutable",
-    )?;
-    ensure_equal(
-        &downstream["audit"]["silentMutation"],
-        &serde_json::json!(false),
-        "silent mutation disabled",
-    )?;
-    ensure(stdout_is_clean(&output), "stdout must be clean")
-}
-
-#[test]
-fn causal_promote_plan_underpowered_evidence_routes_to_review() -> TestResult {
-    let output = run_ee(&[
-        "causal",
-        "promote-plan",
-        "--artifact-id",
-        "mem-underpowered-001",
-        "--method",
-        "matching",
-        "--dry-run",
-        "--json",
-    ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    ensure(output.stderr.is_empty(), "json mode stderr must be empty")?;
-    let json = stdout_json(&output)?;
-    let data = json.get("data").unwrap_or(&json);
-    ensure_equal(
-        &data["plans"][0]["action"],
-        &serde_json::json!("hold"),
-        "underpowered evidence must not promote",
-    )?;
-    ensure_equal(
-        &data["plans"][0]["evidenceStrength"],
-        &serde_json::json!("correlational"),
-        "matching method evidence strength",
-    )?;
-    ensure(
-        data["recommendations"]["reviewRecommendations"]
-            .as_array()
-            .is_some_and(|items| !items.is_empty()),
-        "underpowered evidence must route to review",
-    )?;
-    ensure(
-        data["recommendations"]["experimentProposals"]
-            .as_array()
-            .is_some_and(|items| !items.is_empty()),
-        "underpowered evidence must propose a learning experiment",
-    )?;
-    ensure(stdout_is_clean(&output), "stdout must be clean")
-}
-
-#[test]
-fn causal_promote_plan_preserves_safety_guards_and_stderr_isolation() -> TestResult {
-    let output = run_ee(&[
-        "causal",
-        "promote-plan",
-        "--artifact-id",
-        "mem-safety-critical-001",
-        "--method",
-        "experiment",
-        "--dry-run",
-        "--json",
-    ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    ensure(output.stderr.is_empty(), "json mode stderr must be empty")?;
-    let json = stdout_json(&output)?;
-    let data = json.get("data").unwrap_or(&json);
-    ensure(
-        data["recommendations"]["safetyGuards"]
-            .as_array()
-            .is_some_and(|items| {
-                items.iter().any(|item| {
-                    item.as_str()
-                        .is_some_and(|text| text.contains("never randomized away"))
-                })
-            }),
-        "safety-critical guard must remain in causal promote-plan output",
-    )?;
-    ensure(
-        data["plans"]
-            .as_array()
-            .is_some_and(|plans| plans.iter().all(|plan| plan["dryRunFirst"] == true)),
-        "all causal plans must remain dry-run-first",
-    )?;
-    ensure_equal(
-        &data["downstreamEffects"]["audit"]["silentMutation"],
-        &serde_json::json!(false),
-        "silent mutation guard",
-    )?;
-    ensure(stdout_is_clean(&output), "stdout must be clean")
-}
-
-#[test]
-fn all_causal_commands_produce_stdout_only_data() -> TestResult {
-    let commands = [
-        vec!["causal", "trace", "--run-id", "test", "--dry-run", "--json"],
-        vec![
-            "causal",
-            "estimate",
-            "--artifact-id",
-            "art-001",
-            "--dry-run",
-            "--json",
-        ],
-        vec![
-            "causal",
-            "compare",
-            "--fixture-replay-id",
-            "fixture-001",
-            "--dry-run",
-            "--json",
-        ],
-        vec![
-            "causal",
-            "promote-plan",
-            "--artifact-id",
-            "art-001",
-            "--dry-run",
-            "--json",
-        ],
-    ];
-
-    for args in &commands {
-        let output = run_ee(args)?;
-        if output.status.code() == Some(0) {
-            ensure(
-                stdout_is_clean(&output),
-                format!("ee {} must have clean stdout", args.join(" ")),
-            )?;
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn causal_commands_support_human_output() -> TestResult {
-    let output = run_ee(&["causal", "trace", "--run-id", "test", "--dry-run"])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    ensure(
-        stdout.contains("Causal Trace"),
-        "human output must contain header",
+        &json["error"]["code"],
+        &serde_json::json!("usage"),
+        "error code",
     )
 }
 

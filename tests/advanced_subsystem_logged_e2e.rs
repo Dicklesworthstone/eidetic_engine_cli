@@ -396,8 +396,8 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "run-test-001".to_owned(),
                 "--dry-run".to_owned(),
             ],
-            expected_schema_contains: "ee.causal.trace",
-            expected_exit_code: 0,
+            expected_schema_contains: "ee.response.v1",
+            expected_exit_code: 7,
             expect_clean_stderr: true,
         },
         StepSpec {
@@ -413,8 +413,8 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "art-001".to_owned(),
                 "--dry-run".to_owned(),
             ],
-            expected_schema_contains: "ee.causal.estimate",
-            expected_exit_code: 0,
+            expected_schema_contains: "ee.response.v1",
+            expected_exit_code: 7,
             expect_clean_stderr: true,
         },
     ];
