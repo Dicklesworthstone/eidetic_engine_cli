@@ -668,22 +668,24 @@ fn pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts(
         ],
         "fx.release_failure.v1",
         "ee.response.v1",
-        Some("tests/fixtures/golden/preflight/gate16_preflight_run.json.golden"),
+        None,
     )?;
     command_dossiers.push(preflight.dossier_dir.clone());
     ensure(
-        preflight.output.status.success(),
-        "preflight run should succeed",
+        !preflight.output.status.success(),
+        "preflight run should degrade until persisted evidence matching is available",
     )?;
     assert_json_machine_stdout(&preflight.output, "preflight run")?;
     let preflight_json = parse_json_stdout(&preflight.output, "preflight run")?;
     ensure(
-        preflight_json["data"]["risk_level"] == json!("high"),
-        "preflight run should classify this task as high risk",
+        preflight_json["schema"] == json!("ee.response.v1")
+            && preflight_json["data"]["code"] == json!("preflight_evidence_unavailable"),
+        "preflight run should report unavailable evidence matching",
     )?;
     ensure(
-        preflight_json["data"]["cleared"] == json!(false),
-        "preflight run should not auto-clear high-risk deploy",
+        preflight_json["data"]["evidenceIds"] == json!([])
+            && preflight_json["data"]["followUpBead"] == json!("eidetic_engine_cli-bijm"),
+        "preflight run should not claim risk evidence",
     )?;
 
     let metamorphic_fixture = include_str!("fixtures/eval/metamorphic_evaluation/scenario.json");

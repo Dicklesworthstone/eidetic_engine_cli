@@ -63,10 +63,6 @@ use crate::core::outcome::{
     OutcomeQuarantineReviewReport, OutcomeRecordOptions, list_feedback_quarantine, record_outcome,
     review_feedback_quarantine,
 };
-use crate::core::preflight::{
-    CloseOptions as PreflightCloseOptions, RunOptions as PreflightRunOptions,
-    ShowOptions as PreflightShowOptions, close_preflight, run_preflight, show_preflight,
-};
 use crate::core::rule::{
     RuleAddOptions, RuleAddReport, RuleListOptions, RuleListReport, RuleProtectOptions,
     RuleProtectReport, RuleShowOptions, RuleShowReport, add_rule, list_rules, protect_rule,
@@ -74,10 +70,6 @@ use crate::core::rule::{
 };
 use crate::core::search::{SearchOptions, run_search};
 use crate::core::status::StatusReport;
-use crate::core::tripwire::{
-    CheckOptions as TripwireCheckOptions, ListOptions as TripwireListOptions, check_tripwire,
-    list_tripwires,
-};
 use crate::core::why::{WhyOptions, explain_memory};
 use crate::core::workspace as workspace_core;
 use crate::models::{
@@ -6492,104 +6484,86 @@ where
 // EE-391: Preflight Command Handlers
 // ============================================================================
 
-fn handle_preflight_run<W, E>(
+const PREFLIGHT_UNAVAILABLE_CODE: &str = "preflight_evidence_unavailable";
+const PREFLIGHT_UNAVAILABLE_MESSAGE: &str = "Preflight risk briefs are unavailable until preflight commands are backed by persisted evidence matches and stored run records instead of task-text heuristics.";
+const PREFLIGHT_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const PREFLIGHT_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-bijm";
+const PREFLIGHT_UNAVAILABLE_SIDE_EFFECT: &str =
+    "conservative abstention; no preflight run, risk brief, or feedback ledger mutation";
+const PREFLIGHT_RUN_ID_PREFIX: &str = "pf_";
+
+fn write_preflight_unavailable<W, E>(
     cli: &Cli,
-    args: &PreflightRunArgs,
+    command: &'static str,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let options = PreflightRunOptions {
-        workspace: workspace_path,
-        task_input: args.task_input.clone(),
-        check_history: args.check_history,
-        check_tripwires: args.check_tripwires,
-        dry_run: args.dry_run,
-        ..Default::default()
-    };
-
-    match run_preflight(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_preflight_run_human(&report))
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": PREFLIGHT_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": PREFLIGHT_UNAVAILABLE_MESSAGE,
+                "repair": PREFLIGHT_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": PREFLIGHT_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": PREFLIGHT_UNAVAILABLE_MESSAGE,
+                        "repair": PREFLIGHT_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": PREFLIGHT_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": PREFLIGHT_UNAVAILABLE_SIDE_EFFECT
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_preflight_run_toon(&report) + "\n"))
-            }
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_preflight_run_json(&report) + "\n"))
-            }
-        },
-        Err(error) => {
-            let json = serde_json::json!({
-                "schema": crate::models::ERROR_SCHEMA_V1,
-                "success": false,
-                "error": {
-                    "code": error.code(),
-                    "message": error.message(),
-                    "repair": error.repair(),
-                }
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
     }
+
+    let _ = writeln!(stderr, "error: {PREFLIGHT_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {PREFLIGHT_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
+}
+
+fn handle_preflight_run<W, E>(
+    cli: &Cli,
+    args: &PreflightRunArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let _ = args;
+    write_preflight_unavailable(cli, "preflight run", stdout, stderr)
 }
 
 fn handle_preflight_show<W, E>(
     cli: &Cli,
     args: &PreflightShowArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let options = PreflightShowOptions {
-        workspace: workspace_path,
-        run_id: args.run_id.clone(),
-        include_brief: args.include_brief,
-        include_tripwires: args.include_tripwires,
-    };
-
-    match show_preflight(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_preflight_show_human(&report))
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_preflight_show_toon(&report) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(output::render_preflight_show_json(&report) + "\n"),
-            ),
-        },
-        Err(error) => {
-            let json = serde_json::json!({
-                "schema": crate::models::ERROR_SCHEMA_V1,
-                "success": false,
-                "error": {
-                    "code": error.code(),
-                    "message": error.message(),
-                    "repair": error.repair(),
-                }
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
+    if let Err(error) = validate_preflight_run_id(&args.run_id) {
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
+    write_preflight_unavailable(cli, "preflight show", stdout, stderr)
 }
 
 fn handle_preflight_close<W, E>(
@@ -6602,7 +6576,9 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    if let Err(error) = validate_preflight_run_id(&args.run_id) {
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
     let task_outcome = match parse_task_outcome_arg(args.task_outcome.as_deref()) {
         Ok(outcome) => outcome,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
@@ -6611,45 +6587,22 @@ where
         Ok(kind) => kind,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    let options = PreflightCloseOptions {
-        workspace: workspace_path,
-        run_id: args.run_id.clone(),
-        cleared: args.cleared,
-        reason: args.reason.clone(),
-        task_outcome,
-        feedback_kind,
-        dry_run: args.dry_run,
-    };
+    let _ = (task_outcome, feedback_kind);
+    write_preflight_unavailable(cli, "preflight close", stdout, stderr)
+}
 
-    match close_preflight(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_preflight_close_human(&report))
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_preflight_close_toon(&report) + "\n"),
+fn validate_preflight_run_id(raw: &str) -> Result<(), DomainError> {
+    if raw.starts_with(PREFLIGHT_RUN_ID_PREFIX) {
+        Ok(())
+    } else {
+        let prefix_preview = raw.chars().take(3).collect::<String>();
+        Err(DomainError::Usage {
+            message: format!(
+                "Invalid preflight run ID `{}`: expected prefix `{}`",
+                prefix_preview, PREFLIGHT_RUN_ID_PREFIX
             ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(output::render_preflight_close_json(&report) + "\n"),
-            ),
-        },
-        Err(error) => {
-            let json = serde_json::json!({
-                "schema": crate::models::ERROR_SCHEMA_V1,
-                "success": false,
-                "error": {
-                    "code": error.code(),
-                    "message": error.message(),
-                    "repair": error.repair(),
-                }
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
+            repair: Some("Provide a valid preflight run ID (format: pf_<uuid>)".to_owned()),
+        })
     }
 }
 
@@ -12618,6 +12571,57 @@ impl InvocationHints {
 // EE-393: Tripwire List and Check Commands
 // ============================================================================
 
+const TRIPWIRE_UNAVAILABLE_CODE: &str = "tripwire_store_unavailable";
+const TRIPWIRE_UNAVAILABLE_MESSAGE: &str = "Tripwire list and check are unavailable until tripwires are read from persisted rules and evaluated against explicit event payloads instead of generated samples.";
+const TRIPWIRE_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const TRIPWIRE_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-qmu0";
+const TRIPWIRE_UNAVAILABLE_SIDE_EFFECT: &str =
+    "read-only, conservative abstention; no tripwire store read or event evaluation";
+
+fn write_tripwire_unavailable<W, E>(
+    cli: &Cli,
+    command: &'static str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": TRIPWIRE_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": TRIPWIRE_UNAVAILABLE_MESSAGE,
+                "repair": TRIPWIRE_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": TRIPWIRE_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": TRIPWIRE_UNAVAILABLE_MESSAGE,
+                        "repair": TRIPWIRE_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": TRIPWIRE_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": TRIPWIRE_UNAVAILABLE_SIDE_EFFECT
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
+    }
+
+    let _ = writeln!(stderr, "error: {TRIPWIRE_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {TRIPWIRE_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
+}
+
 fn handle_tripwire_list<W, E>(
     cli: &Cli,
     args: &TripwireListArgs,
@@ -12628,66 +12632,8 @@ where
     W: Write,
     E: Write,
 {
-    use crate::models::preflight::{TripwireState, TripwireType};
-
-    let state = args
-        .state
-        .as_ref()
-        .and_then(|s| s.parse::<TripwireState>().ok());
-    let tripwire_type = args
-        .tripwire_type
-        .as_ref()
-        .and_then(|t| t.parse::<TripwireType>().ok());
-
-    let options = TripwireListOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
-        state,
-        preflight_run_id: args.preflight_run_id.clone(),
-        tripwire_type,
-        limit: args.limit,
-        include_disarmed: args.include_disarmed,
-    };
-
-    match list_tripwires(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                let mut buf = String::new();
-                buf.push_str(&format!(
-                    "Tripwires: {} total ({} armed, {} triggered, {} disarmed, {} error)\n\n",
-                    report.total_count,
-                    report.armed_count,
-                    report.triggered_count,
-                    report.disarmed_count,
-                    report.error_count,
-                ));
-                for tw in &report.tripwires {
-                    buf.push_str(&format!(
-                        "  {} [{}] {}: {}\n",
-                        tw.id, tw.state, tw.tripwire_type, tw.condition
-                    ));
-                    if let Some(ref msg) = tw.message {
-                        buf.push_str(&format!("    message: {msg}\n"));
-                    }
-                }
-                if !report.filters_applied.is_empty() {
-                    buf.push_str(&format!(
-                        "\nFilters: {}\n",
-                        report.filters_applied.join(", ")
-                    ));
-                }
-                write_stdout(stdout, &buf)
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_toon_from_json(&report.to_json()) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(stdout, &(report.to_json() + "\n")),
-        },
-        Err(err) => write_domain_error(&err, cli.wants_json(), stdout, stderr),
-    }
+    let _ = args;
+    write_tripwire_unavailable(cli, "tripwire list", stdout, stderr)
 }
 
 fn handle_tripwire_check<W, E>(
@@ -12704,60 +12650,8 @@ where
         Ok(outcome) => outcome,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    let options = TripwireCheckOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
-        tripwire_id: args.tripwire_id.clone(),
-        update_timestamp: args.update_timestamp,
-        task_outcome,
-        dry_run: args.dry_run,
-    };
-
-    match check_tripwire(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                let mut buf = String::new();
-                buf.push_str(&format!(
-                    "Tripwire {}: {}\n",
-                    report.tripwire_id,
-                    report.result.as_str().to_uppercase()
-                ));
-                buf.push_str(&format!("  State: {}\n", report.state));
-                buf.push_str(&format!("  Action: {}\n", report.action));
-                buf.push_str(&format!("  Condition: {}\n", report.condition));
-                if let Some(ref msg) = report.message {
-                    buf.push_str(&format!("  Message: {msg}\n"));
-                }
-                if report.should_halt {
-                    buf.push_str("  !! Should halt execution\n");
-                }
-                if let Some(ref details) = report.details {
-                    buf.push_str(&format!("  Details: {details}\n"));
-                }
-                if let Some(ref feedback) = report.feedback {
-                    buf.push_str(&format!("  Feedback: {}\n", feedback.signal));
-                    buf.push_str(&format!(
-                        "  Score effect: utility {:+.2}, confidence {:+.2}, false alarms +{}\n",
-                        feedback.score_effect.utility_delta,
-                        feedback.score_effect.confidence_delta,
-                        feedback.score_effect.false_alarm_delta
-                    ));
-                }
-                if report.dry_run {
-                    buf.push_str("  (dry-run mode)\n");
-                }
-                write_stdout(stdout, &buf)
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_toon_from_json(&report.to_json()) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(stdout, &(report.to_json() + "\n")),
-        },
-        Err(err) => write_domain_error(&err, cli.wants_json(), stdout, stderr),
-    }
+    let _ = task_outcome;
+    write_tripwire_unavailable(cli, "tripwire check", stdout, stderr)
 }
 
 #[cfg(test)]

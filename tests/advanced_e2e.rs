@@ -1589,7 +1589,7 @@ fn preflight_run_blocks_high_risk_deploy_task() -> TestResult {
         "deploy production database migration",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(7), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
@@ -1604,32 +1604,26 @@ fn preflight_run_blocks_high_risk_deploy_task() -> TestResult {
         "preflight run response schema",
     )?;
     ensure_equal(
-        &json["data"]["status"],
-        &serde_json::json!("completed"),
-        "preflight run status",
-    )?;
-    ensure_equal(
-        &json["data"]["risk_level"],
-        &serde_json::json!("high"),
-        "preflight run risk level",
-    )?;
-    ensure_equal(
-        &json["data"]["cleared"],
+        &json["success"],
         &serde_json::json!(false),
-        "preflight run clearance",
+        "preflight run success flag",
     )?;
-    ensure(
-        json["data"]["block_reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("exceeds auto-clear threshold")),
-        "preflight run must include block reason",
+    ensure_equal(
+        &json["data"]["code"],
+        &serde_json::json!("preflight_evidence_unavailable"),
+        "preflight run degraded code",
+    )?;
+    ensure_equal(
+        &json["data"]["followUpBead"],
+        &serde_json::json!("eidetic_engine_cli-bijm"),
+        "preflight run follow-up bead",
     )
 }
 
 #[test]
 fn preflight_show_returns_stubbed_storage_details() -> TestResult {
     let output = run_ee(&["preflight", "show", "pf_gate16_contract", "--json"])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(7), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
@@ -1644,14 +1638,14 @@ fn preflight_show_returns_stubbed_storage_details() -> TestResult {
         "preflight show response schema",
     )?;
     ensure_equal(
-        &json["data"]["run"]["id"],
-        &serde_json::json!("pf_gate16_contract"),
-        "preflight show run id",
+        &json["success"],
+        &serde_json::json!(false),
+        "preflight show success flag",
     )?;
     ensure_equal(
-        &json["data"]["run"]["block_reason"],
-        &serde_json::json!("Storage not yet wired"),
-        "preflight show degraded storage reason",
+        &json["data"]["code"],
+        &serde_json::json!("preflight_evidence_unavailable"),
+        "preflight show degraded code",
     )
 }
 
@@ -1671,7 +1665,7 @@ fn preflight_close_dry_run_records_feedback_shape() -> TestResult {
         "--dry-run",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(7), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
@@ -1686,19 +1680,9 @@ fn preflight_close_dry_run_records_feedback_shape() -> TestResult {
         "preflight close response schema",
     )?;
     ensure_equal(
-        &json["data"]["dry_run"],
-        &serde_json::json!(true),
-        "preflight close dry-run",
-    )?;
-    ensure_equal(
-        &json["data"]["new_status"],
-        &serde_json::json!("completed"),
-        "preflight close status",
-    )?;
-    ensure_equal(
-        &json["data"]["feedback"]["signal"],
-        &serde_json::json!("helpful"),
-        "preflight close feedback signal",
+        &json["data"]["code"],
+        &serde_json::json!("preflight_evidence_unavailable"),
+        "preflight close degraded code",
     )
 }
 
@@ -1715,7 +1699,7 @@ fn preflight_close_without_cleared_infers_false_alarm_for_success() -> TestResul
         "--dry-run",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(7), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
@@ -1730,19 +1714,9 @@ fn preflight_close_without_cleared_infers_false_alarm_for_success() -> TestResul
         "preflight close response schema",
     )?;
     ensure_equal(
-        &json["data"]["new_status"],
-        &serde_json::json!("cancelled"),
-        "uncleared preflight close status",
-    )?;
-    ensure_equal(
-        &json["data"]["feedback"]["feedback_kind"],
-        &serde_json::json!("false_alarm"),
-        "inferred feedback kind",
-    )?;
-    ensure_equal(
-        &json["data"]["feedback"]["signal"],
-        &serde_json::json!("inaccurate"),
-        "inferred feedback signal",
+        &json["data"]["code"],
+        &serde_json::json!("preflight_evidence_unavailable"),
+        "uncleared preflight close degraded code",
     )
 }
 

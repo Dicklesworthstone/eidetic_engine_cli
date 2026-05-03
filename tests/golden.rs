@@ -264,60 +264,6 @@ mod tests {
             .map_err(|error| format!("ee {} stdout must be JSON: {error}", args.join(" ")))
     }
 
-    fn normalize_gate16_json(mut value: serde_json::Value) -> String {
-        normalize_gate16_value(&mut value);
-        serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()) + "\n"
-    }
-
-    fn normalize_gate16_value(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::Object(object) => {
-                for (key, nested) in object.iter_mut() {
-                    normalize_gate16_field(key, nested);
-                    normalize_gate16_value(nested);
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    normalize_gate16_value(item);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn normalize_gate16_field(key: &str, value: &mut serde_json::Value) {
-        const TIMESTAMP_FIELDS: &[&str] = &[
-            "started_at",
-            "completed_at",
-            "closed_at",
-            "listed_at",
-            "checked_at",
-            "created_at",
-            "last_checked_at",
-            "triggered_at",
-            "recorded_at",
-        ];
-
-        if TIMESTAMP_FIELDS.contains(&key) && value.is_string() {
-            *value = serde_json::json!("TIMESTAMP");
-            return;
-        }
-
-        if key == "run_id"
-            && value
-                .as_str()
-                .is_some_and(|raw| raw.starts_with("pf_") && raw.contains('-'))
-        {
-            *value = serde_json::json!("pf_DYNAMIC");
-            return;
-        }
-
-        if key == "risk_brief_id" && value.is_string() {
-            *value = serde_json::json!("rb_DYNAMIC");
-        }
-    }
-
     fn seed_search_workspace(workspace: &Path, database: &Path) -> TestResult {
         if let Some(parent) = database.parent() {
             fs::create_dir_all(parent).map_err(|error| {
@@ -492,7 +438,7 @@ mod tests {
                 "run",
                 "deploy production database migration",
             ],
-            true,
+            false,
         )?;
         ensure_equal(
             &value["schema"],
@@ -500,66 +446,48 @@ mod tests {
             "preflight run response schema",
         )?;
         ensure_equal(
-            &value["data"]["status"],
-            &serde_json::json!("completed"),
-            "preflight run status",
-        )?;
-        ensure_equal(
-            &value["data"]["risk_level"],
-            &serde_json::json!("high"),
-            "preflight run risk level",
-        )?;
-        ensure_equal(
-            &value["data"]["cleared"],
+            &value["success"],
             &serde_json::json!(false),
-            "preflight run clearance",
+            "preflight run success flag",
         )?;
         ensure_equal(
-            &value["data"]["task_input"],
-            &serde_json::json!("deploy production database migration"),
-            "preflight run task input",
+            &value["data"]["code"],
+            &serde_json::json!("preflight_evidence_unavailable"),
+            "preflight run degraded code",
         )?;
         ensure_equal(
-            &value["data"]["dry_run"],
-            &serde_json::json!(false),
-            "preflight run persists non-dry-run provenance",
-        )?;
-
-        let normalized = normalize_gate16_json(value);
-        assert_golden("preflight", "gate16_preflight_run.json", &normalized)
+            &value["data"]["followUpBead"],
+            &serde_json::json!("eidetic_engine_cli-bijm"),
+            "preflight run follow-up bead",
+        )
     }
 
     #[test]
     fn gate16_preflight_show_json_matches_golden() -> TestResult {
-        let value = run_json_stdout(&["--json", "preflight", "show", "pf_gate16_contract"], true)?;
+        let value = run_json_stdout(
+            &["--json", "preflight", "show", "pf_gate16_contract"],
+            false,
+        )?;
         ensure_equal(
             &value["schema"],
             &serde_json::json!("ee.response.v1"),
             "preflight show response schema",
         )?;
         ensure_equal(
-            &value["data"]["run"]["id"],
-            &serde_json::json!("pf_gate16_contract"),
-            "preflight show run id",
+            &value["success"],
+            &serde_json::json!(false),
+            "preflight show success flag",
         )?;
         ensure_equal(
-            &value["data"]["run"]["block_reason"],
-            &serde_json::json!("Storage not yet wired"),
-            "preflight show degraded storage reason",
+            &value["data"]["code"],
+            &serde_json::json!("preflight_evidence_unavailable"),
+            "preflight show degraded code",
         )?;
         ensure_equal(
-            &value["data"]["brief"],
-            &serde_json::json!(null),
-            "preflight show keeps brief absent when storage fallback is active",
-        )?;
-        ensure_equal(
-            &value["data"]["tripwires"],
+            &value["data"]["evidenceIds"],
             &serde_json::json!([]),
-            "preflight show keeps tripwire list explicit in degraded fallback",
-        )?;
-
-        let normalized = normalize_gate16_json(value);
-        assert_golden("preflight", "gate16_preflight_show.json", &normalized)
+            "preflight show does not claim evidence",
+        )
     }
 
     #[test]
@@ -579,7 +507,7 @@ mod tests {
                 "helped",
                 "--dry-run",
             ],
-            true,
+            false,
         )?;
         ensure_equal(
             &value["schema"],
@@ -587,33 +515,15 @@ mod tests {
             "preflight close response schema",
         )?;
         ensure_equal(
-            &value["data"]["dry_run"],
-            &serde_json::json!(true),
-            "preflight close dry-run",
-        )?;
-        ensure_equal(
-            &value["data"]["new_status"],
-            &serde_json::json!("completed"),
-            "preflight close status",
-        )?;
-        ensure_equal(
-            &value["data"]["feedback"]["signal"],
-            &serde_json::json!("helpful"),
-            "preflight close feedback signal",
-        )?;
-        ensure_equal(
-            &value["data"]["feedback"]["durable_mutation"],
+            &value["success"],
             &serde_json::json!(false),
-            "preflight close dry-run must not mutate durable state",
+            "preflight close success flag",
         )?;
         ensure_equal(
-            &value["data"]["feedback"]["evidence_preserved"],
-            &serde_json::json!(true),
-            "preflight close preserves evidence in dry-run path",
-        )?;
-
-        let normalized = normalize_gate16_json(value);
-        assert_golden("preflight", "gate16_preflight_close.json", &normalized)
+            &value["data"]["code"],
+            &serde_json::json!("preflight_evidence_unavailable"),
+            "preflight close degraded code",
+        )
     }
 
     #[test]
@@ -627,36 +537,23 @@ mod tests {
                 "triggered",
                 "--include-disarmed",
             ],
-            true,
+            false,
         )?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.tripwire.list.v1"),
+            &serde_json::json!("ee.response.v1"),
             "tripwire list schema",
         )?;
         ensure_equal(
-            &value["triggered_count"],
-            &serde_json::json!(1),
-            "tripwire list triggered count",
+            &value["success"],
+            &serde_json::json!(false),
+            "tripwire list success flag",
         )?;
         ensure_equal(
-            &value["filters_applied"],
-            &serde_json::json!(["state=triggered"]),
-            "tripwire list filters",
-        )?;
-        ensure_equal(
-            &value["tripwires"][0]["action"],
-            &serde_json::json!("halt"),
-            "tripwire list preserves high-severity halt action",
-        )?;
-        ensure_equal(
-            &value["tripwires"][0]["state"],
-            &serde_json::json!("triggered"),
-            "tripwire list retains triggered state under projection",
-        )?;
-
-        let normalized = normalize_gate16_json(value);
-        assert_golden("preflight", "gate16_tripwire_list.json", &normalized)
+            &value["data"]["code"],
+            &serde_json::json!("tripwire_store_unavailable"),
+            "tripwire list degraded code",
+        )
     }
 
     #[test]
@@ -671,41 +568,23 @@ mod tests {
                 "success",
                 "--dry-run",
             ],
-            true,
+            false,
         )?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.tripwire.check.v1"),
+            &serde_json::json!("ee.response.v1"),
             "tripwire check schema",
         )?;
         ensure_equal(
-            &value["result"],
-            &serde_json::json!("triggered"),
-            "tripwire check result",
-        )?;
-        ensure_equal(
-            &value["should_halt"],
-            &serde_json::json!(true),
-            "tripwire check halt decision",
-        )?;
-        ensure_equal(
-            &value["feedback"]["evaluation"],
-            &serde_json::json!("false_alarm"),
-            "tripwire check false alarm feedback",
-        )?;
-        ensure_equal(
-            &value["feedback"]["durable_mutation"],
+            &value["success"],
             &serde_json::json!(false),
-            "tripwire check dry-run keeps storage read-only",
+            "tripwire check success flag",
         )?;
         ensure_equal(
-            &value["feedback"]["counterfactual_effect"]["intervention"],
-            &serde_json::json!("demote_repeated_false_alarm"),
-            "tripwire check emits deterministic false-alarm remediation",
-        )?;
-
-        let normalized = normalize_gate16_json(value);
-        assert_golden("preflight", "gate16_tripwire_check.json", &normalized)
+            &value["data"]["code"],
+            &serde_json::json!("tripwire_store_unavailable"),
+            "tripwire check degraded code",
+        )
     }
 
     #[test]

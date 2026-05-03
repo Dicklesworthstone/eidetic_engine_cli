@@ -574,8 +574,8 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
         repair_actions.push(command);
     }
 
-    // 09. tripwire list (--include-disarmed) - identify risky armed/triggered states
-    //     without mutating any tripwire.
+    // 09. tripwire list (--include-disarmed) - remains conservative until
+    //     persisted tripwire rules replace generated fixtures.
     let tripwire_list = run_logged_json_step(
         &scenario_dir,
         "09_tripwire_list",
@@ -588,34 +588,26 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             "list",
             "--include-disarmed",
         ],
-        "fx.tripwire_samples.v1",
-        "ee.tripwire.list.v1",
-        Some("tests/fixtures/golden/preflight/gate16_tripwire_list.json.golden"),
+        "fx.tripwire_unavailable.v1",
+        "ee.response.v1",
+        None,
     )?;
     command_dossiers.push(tripwire_list.dossier_dir.clone());
     ensure(
-        tripwire_list.output.status.success(),
-        "tripwire list should succeed",
+        !tripwire_list.output.status.success(),
+        "tripwire list should degrade until persisted tripwire rules are available",
     )?;
     assert_json_machine_stdout(&tripwire_list.output, "tripwire list")?;
     let tripwire_list_json = parse_json_stdout(&tripwire_list.output, "tripwire list")?;
     ensure(
-        tripwire_list_json["schema"] == json!("ee.tripwire.list.v1"),
-        "tripwire list schema",
+        tripwire_list_json["schema"] == json!("ee.response.v1")
+            && tripwire_list_json["data"]["code"] == json!("tripwire_store_unavailable"),
+        "tripwire list degraded schema/code",
     )?;
-    let tripwire_ids = tripwire_list_json["tripwires"]
-        .as_array()
-        .ok_or_else(|| "tripwire list missing tripwires array".to_string())?
-        .iter()
-        .filter_map(|tw| tw["id"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    ensure(
-        tripwire_ids.contains(&"tw_004".to_string()),
-        "tripwire list must surface the previously-triggered tw_004",
-    )?;
+    let tripwire_ids = Vec::<String>::new();
 
-    // 10. tripwire check tw_004 --dry-run - identifies risky action *without*
-    //     mutating memory state.
+    // 10. tripwire check tw_004 --dry-run - also degrades rather than
+    //     evaluating generated sample tripwires as if they were persisted.
     let tripwire_check = run_logged_json_step(
         &scenario_dir,
         "10_tripwire_check",
@@ -631,44 +623,26 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             "success",
             "--dry-run",
         ],
-        "fx.tripwire_samples.v1",
-        "ee.tripwire.check.v1",
-        Some("tests/fixtures/golden/preflight/gate16_tripwire_check.json.golden"),
+        "fx.tripwire_unavailable.v1",
+        "ee.response.v1",
+        None,
     )?;
     command_dossiers.push(tripwire_check.dossier_dir.clone());
     ensure(
-        tripwire_check.output.status.success(),
-        "tripwire check should succeed",
+        !tripwire_check.output.status.success(),
+        "tripwire check should degrade until explicit event payloads are available",
     )?;
     assert_json_machine_stdout(&tripwire_check.output, "tripwire check")?;
     let tripwire_check_json = parse_json_stdout(&tripwire_check.output, "tripwire check")?;
     ensure(
-        tripwire_check_json["schema"] == json!("ee.tripwire.check.v1"),
-        "tripwire check schema",
-    )?;
-    ensure(
-        tripwire_check_json["result"] == json!("triggered"),
-        "tripwire check result must be triggered for tw_004",
-    )?;
-    ensure(
-        tripwire_check_json["should_halt"] == json!(true),
-        "tripwire check must signal halt for forbidden-dep tripwire",
-    )?;
-    ensure(
-        tripwire_check_json["dry_run"] == json!(true),
-        "tripwire check must respect --dry-run",
-    )?;
-    let feedback = tripwire_check_json
-        .get("feedback")
-        .ok_or_else(|| "tripwire check missing feedback".to_string())?;
-    ensure(
-        feedback["dry_run"] == json!(true)
-            && feedback["durable_mutation"] == json!(false)
-            && feedback["evidence_preserved"] == json!(true),
-        "tripwire check must not mutate durable state in dry-run",
+        tripwire_check_json["schema"] == json!("ee.response.v1")
+            && tripwire_check_json["data"]["code"] == json!("tripwire_store_unavailable")
+            && tripwire_check_json["data"]["evidenceIds"] == json!([]),
+        "tripwire check degraded schema/code/evidence",
     )?;
 
-    // Re-check tw_004 to assert evidence was preserved (no mutation across runs).
+    // Re-check tw_004 to assert unavailable output is deterministic and still
+    // does not claim a persisted rule evaluation.
     let tripwire_check_replay = run_logged_json_step(
         &scenario_dir,
         "11_tripwire_check_replay",
@@ -684,21 +658,20 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             "success",
             "--dry-run",
         ],
-        "fx.tripwire_samples.v1",
-        "ee.tripwire.check.v1",
-        Some("tests/fixtures/golden/preflight/gate16_tripwire_check.json.golden"),
+        "fx.tripwire_unavailable.v1",
+        "ee.response.v1",
+        None,
     )?;
     command_dossiers.push(tripwire_check_replay.dossier_dir.clone());
     ensure(
-        tripwire_check_replay.output.status.success(),
-        "tripwire check replay should succeed",
+        !tripwire_check_replay.output.status.success(),
+        "tripwire check replay should degrade",
     )?;
     let replay_json = parse_json_stdout(&tripwire_check_replay.output, "tripwire check replay")?;
     ensure(
-        replay_json["result"] == tripwire_check_json["result"]
-            && replay_json["should_halt"] == tripwire_check_json["should_halt"]
-            && replay_json["state"] == tripwire_check_json["state"],
-        "tripwire check must be deterministic across dry-run replays",
+        replay_json["data"]["code"] == tripwire_check_json["data"]["code"]
+            && replay_json["data"]["followUpBead"] == tripwire_check_json["data"]["followUpBead"],
+        "tripwire check degradation must be deterministic across dry-run replays",
     )?;
 
     // Scenario summary - records selected memory IDs, alternatives, degradation
@@ -756,11 +729,11 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             "tripwireEvidence": {
                 "listedIds": tripwire_ids,
                 "checkedTripwireId": "tw_004",
-                "result": tripwire_check_json["result"],
-                "shouldHalt": tripwire_check_json["should_halt"],
-                "feedbackEvaluation": feedback["evaluation"],
+                "degradedCode": tripwire_check_json["data"]["code"],
+                "shouldHalt": JsonValue::Null,
+                "feedbackEvaluation": JsonValue::Null,
                 "durableMutation": false,
-                "evidencePreserved": true,
+                "evidencePreserved": false,
             },
             "degradationCodes": degradation_codes,
             "stdoutIsolation": "stdout-only machine data; stderr empty for every JSON command",
