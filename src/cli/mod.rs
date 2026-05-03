@@ -70,7 +70,6 @@ use crate::core::preflight::{
     CloseOptions as PreflightCloseOptions, RunOptions as PreflightRunOptions,
     ShowOptions as PreflightShowOptions, close_preflight, run_preflight, show_preflight,
 };
-use crate::core::quarantine::QuarantineReport;
 use crate::core::rule::{
     RuleAddOptions, RuleAddReport, RuleListOptions, RuleListReport, RuleProtectOptions,
     RuleProtectReport, RuleShowOptions, RuleShowReport, add_rule, list_rules, protect_rule,
@@ -3911,25 +3910,7 @@ where
             }
             DiagCommand::Graph => handle_diag_graph(&cli, stdout),
             DiagCommand::Integrity(args) => handle_diag_integrity(&cli, args, stdout),
-            DiagCommand::Quarantine => {
-                let report = QuarantineReport::gather();
-                let profile = cli.fields_level().to_field_profile();
-                match cli.renderer() {
-                    output::Renderer::Human | output::Renderer::Markdown => {
-                        write_stdout(stdout, &output::render_quarantine_human(&report))
-                    }
-                    output::Renderer::Toon => {
-                        write_stdout(stdout, &(output::render_quarantine_toon(&report) + "\n"))
-                    }
-                    output::Renderer::Json
-                    | output::Renderer::Jsonl
-                    | output::Renderer::Compact
-                    | output::Renderer::Hook => write_stdout(
-                        stdout,
-                        &(output::render_quarantine_json_filtered(&report, profile) + "\n"),
-                    ),
-                }
-            }
+            DiagCommand::Quarantine => handle_diag_quarantine(&cli, stdout, stderr),
             DiagCommand::Streams => {
                 let report = crate::core::streams::StreamsReport::gather(stderr);
                 match cli.renderer() {
@@ -7874,6 +7855,52 @@ where
             write_stdout(stdout, &(output::render_diag_claims_json(&report) + "\n"))
         }
     }
+}
+
+const DIAG_QUARANTINE_UNAVAILABLE_CODE: &str = "quarantine_trust_state_unavailable";
+const DIAG_QUARANTINE_UNAVAILABLE_MESSAGE: &str = "Quarantine diagnostics are unavailable until persistent source trust state is wired instead of reporting an empty placeholder posture.";
+const DIAG_QUARANTINE_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const DIAG_QUARANTINE_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-5g6d";
+const DIAG_QUARANTINE_UNAVAILABLE_SIDE_EFFECT: &str =
+    "read-only, conservative abstention; no source trust state read";
+
+fn handle_diag_quarantine<W, E>(cli: &Cli, stdout: &mut W, stderr: &mut E) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": "diag quarantine",
+                "code": DIAG_QUARANTINE_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": DIAG_QUARANTINE_UNAVAILABLE_MESSAGE,
+                "repair": DIAG_QUARANTINE_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": DIAG_QUARANTINE_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": DIAG_QUARANTINE_UNAVAILABLE_MESSAGE,
+                        "repair": DIAG_QUARANTINE_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": DIAG_QUARANTINE_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": DIAG_QUARANTINE_UNAVAILABLE_SIDE_EFFECT
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
+    }
+
+    let _ = writeln!(stderr, "error: {DIAG_QUARANTINE_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {DIAG_QUARANTINE_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
 }
 
 fn handle_graph_centrality_refresh<W, E>(

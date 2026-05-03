@@ -109,6 +109,10 @@ fn first_repair_command(value: &Value) -> Option<String> {
 fn command_boundary_matrix_row(args: &[String]) -> &'static str {
     if args.iter().any(|arg| arg == "context") {
         "context, pack, search, why"
+    } else if args.windows(2).any(
+        |window| matches!(window, [first, second] if first == "diag" && second == "quarantine"),
+    ) {
+        "diag quarantine"
     } else if args.iter().any(|arg| arg == "capabilities") {
         "capabilities, check, health, status"
     } else if args.iter().any(|arg| arg == "certificate") {
@@ -141,6 +145,10 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
 fn side_effect_class(args: &[String]) -> &'static str {
     if args.iter().any(|arg| arg == "context") {
         "audited pack write when storage is available; storage error before mutation here"
+    } else if args.windows(2).any(
+        |window| matches!(window, [first, second] if first == "diag" && second == "quarantine"),
+    ) {
+        "read-only, conservative abstention; no source trust state read"
     } else if args
         .iter()
         .any(|arg| arg == "capabilities" || arg == "certificate")
@@ -657,6 +665,124 @@ fn claim_commands_degrade_instead_of_reporting_empty_placeholder_results() -> Te
     }
 
     Ok(())
+}
+
+#[test]
+fn diag_quarantine_degrades_instead_of_reporting_placeholder_health() -> TestResult {
+    let result = run_ee_logged(
+        "diag-quarantine-unavailable",
+        None,
+        vec![
+            "--json".to_owned(),
+            "diag".to_owned(),
+            "quarantine".to_owned(),
+        ],
+    )?;
+
+    ensure_equal(
+        &result.exit_code,
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "diag quarantine unavailable exit code",
+    )?;
+    ensure(
+        result.stderr.is_empty(),
+        "diag quarantine JSON degraded response must keep stderr empty",
+    )?;
+    ensure_no_ansi(&result.stdout, "diag quarantine degraded stdout")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/schema",
+        json!("ee.response.v1"),
+        "diag quarantine degraded response schema",
+    )?;
+    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/command",
+        json!("diag quarantine"),
+        "diag quarantine command label",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/code",
+        json!("quarantine_trust_state_unavailable"),
+        "diag quarantine degraded code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/degraded/0/code",
+        json!("quarantine_trust_state_unavailable"),
+        "diag quarantine degraded array code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/followUpBead",
+        json!("eidetic_engine_cli-5g6d"),
+        "diag quarantine follow-up bead",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sideEffectClass",
+        json!("read-only, conservative abstention; no source trust state read"),
+        "diag quarantine side-effect class",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/evidenceIds",
+        json!([]),
+        "diag quarantine evidence ids",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sourceIds",
+        json!([]),
+        "diag quarantine source ids",
+    )?;
+
+    let fake_success =
+        validate_no_fake_success_output("diag quarantine", false, false, &result.stdout);
+    ensure(
+        fake_success.passed,
+        format!("degraded diag quarantine output should not be fake success: {fake_success:?}"),
+    )?;
+
+    let unsupported_claims =
+        validate_no_unsupported_evidence_claims("diag quarantine", false, false, &result.stdout);
+    ensure(
+        unsupported_claims.passed,
+        format!(
+            "degraded diag quarantine output should not count as unsupported success: {unsupported_claims:?}"
+        ),
+    )?;
+
+    let log_text = fs::read_to_string(&result.log_path)
+        .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+    let log_json: Value = serde_json::from_str(&log_text)
+        .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+    ensure_json_pointer(
+        &log_json,
+        "/degradationCodes",
+        json!(["quarantine_trust_state_unavailable"]),
+        "logged diag quarantine degradation code",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/repairCommand",
+        json!("ee status --json"),
+        "logged diag quarantine repair command",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/commandBoundaryMatrixRow",
+        json!("diag quarantine"),
+        "logged diag quarantine boundary matrix row",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/sideEffectClass",
+        json!("read-only, conservative abstention; no source trust state read"),
+        "logged diag quarantine side-effect class",
+    )
 }
 
 #[test]
