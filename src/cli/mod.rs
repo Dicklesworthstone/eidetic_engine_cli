@@ -8035,6 +8035,55 @@ where
 // EE-REHEARSE-001: Rehearsal Handlers
 // ============================================================================
 
+const REHEARSAL_UNAVAILABLE_CODE: &str = "rehearsal_unavailable";
+const REHEARSAL_UNAVAILABLE_MESSAGE: &str = "Rehearsal sandbox execution and artifact inspection are unavailable until real isolated dry-run artifacts are implemented.";
+const REHEARSAL_UNAVAILABLE_REPAIR: &str = "ee rehearse plan --json";
+const REHEARSAL_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-nd65";
+
+fn write_rehearsal_unavailable<W, E>(
+    cli: &Cli,
+    command: &'static str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": REHEARSAL_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": REHEARSAL_UNAVAILABLE_MESSAGE,
+                "repair": REHEARSAL_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": REHEARSAL_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": REHEARSAL_UNAVAILABLE_MESSAGE,
+                        "repair": REHEARSAL_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": REHEARSAL_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": "unavailable before sandbox mutation"
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
+    }
+
+    let _ = writeln!(stderr, "error: {REHEARSAL_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {REHEARSAL_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
+}
+
 fn handle_rehearse_plan<W, E>(
     cli: &Cli,
     args: &RehearsePlanArgs,
@@ -8087,135 +8136,42 @@ fn handle_rehearse_run<W, E>(
     cli: &Cli,
     args: &RehearseRunArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let profile =
-        crate::core::rehearse::RehearsalProfile::from_str(&args.profile).unwrap_or_default();
-
-    let commands = parse_command_specs(args.commands.as_ref(), args.commands_json.as_ref());
-
-    let options = crate::core::rehearse::RehearseRunOptions {
-        workspace: workspace_path,
-        commands,
-        output_dir: args.out.clone(),
-        profile,
-    };
-
-    match crate::core::rehearse::run_rehearsal(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &report.human_summary())
-            }
-            output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(stdout, &(report.to_json() + "\n")),
-        },
-        Err(error) => {
-            let json = serde_json::json!({
-                "schema": crate::models::ERROR_SCHEMA_V1,
-                "success": false,
-                "error": {
-                    "code": error.code(),
-                    "message": error.message(),
-                    "repair": error.repair(),
-                }
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
-    }
+    let _ = args;
+    write_rehearsal_unavailable(cli, "rehearse run", stdout, stderr)
 }
 
 fn handle_rehearse_inspect<W, E>(
     cli: &Cli,
     args: &RehearseInspectArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-
-    let options = crate::core::rehearse::RehearseInspectOptions {
-        artifact_id: args.artifact.clone(),
-        workspace: workspace_path,
-    };
-
-    match crate::core::rehearse::inspect_rehearsal(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &report.human_summary())
-            }
-            output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(stdout, &(report.to_json() + "\n")),
-        },
-        Err(error) => {
-            let json = serde_json::json!({
-                "schema": crate::models::ERROR_SCHEMA_V1,
-                "success": false,
-                "error": {
-                    "code": error.code(),
-                    "message": error.message(),
-                    "repair": error.repair(),
-                }
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
-    }
+    let _ = args;
+    write_rehearsal_unavailable(cli, "rehearse inspect", stdout, stderr)
 }
 
 fn handle_rehearse_promote_plan<W, E>(
     cli: &Cli,
     args: &RehearsePromotePlanArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-
-    let options = crate::core::rehearse::RehearsePromotePlanOptions {
-        artifact_id: args.artifact.clone(),
-        workspace: workspace_path,
-    };
-
-    match crate::core::rehearse::promote_plan_rehearsal(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &report.human_summary())
-            }
-            output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(stdout, &(report.to_json() + "\n")),
-        },
-        Err(error) => {
-            let json = serde_json::json!({
-                "schema": crate::models::ERROR_SCHEMA_V1,
-                "success": false,
-                "error": {
-                    "code": error.code(),
-                    "message": error.message(),
-                    "repair": error.repair(),
-                }
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
-    }
+    let _ = args;
+    write_rehearsal_unavailable(cli, "rehearse promote-plan", stdout, stderr)
 }
 
 fn parse_command_specs(

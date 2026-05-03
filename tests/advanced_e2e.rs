@@ -9,6 +9,8 @@ use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
 
+const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 7;
+
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
@@ -2401,7 +2403,7 @@ fn rehearse_plan_reports_non_rehearsable_command() -> TestResult {
 }
 
 #[test]
-fn rehearse_run_returns_manifest_json() -> TestResult {
+fn rehearse_run_degrades_until_real_sandbox_exists() -> TestResult {
     let command_spec = r#"[{
       "id":"cmd_status",
       "command":"status",
@@ -2419,26 +2421,35 @@ fn rehearse_run_returns_manifest_json() -> TestResult {
         "quick",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
+        "exit code",
+    )?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     let value = stdout_json(&output)?;
     ensure_equal(
         &value["schema"],
-        &serde_json::json!("ee.rehearse.run.v1"),
+        &serde_json::json!("ee.response.v1"),
         "schema",
     )?;
-    ensure(value.get("run_id").is_some(), "must contain run_id")?;
-    ensure(
-        value.get("command_results").is_some(),
-        "must contain command_results",
+    ensure_equal(&value["success"], &serde_json::json!(false), "success")?;
+    ensure_equal(
+        &value["data"]["code"],
+        &serde_json::json!("rehearsal_unavailable"),
+        "degraded code",
     )?;
     ensure(stdout_is_clean(&output), "stdout must be clean")
 }
 
 #[test]
-fn rehearse_inspect_and_promote_plan_return_valid_json() -> TestResult {
+fn rehearse_inspect_and_promote_plan_degrade_until_artifacts_exist() -> TestResult {
     let inspect_output = run_ee(&["rehearse", "inspect", "rrun_fixture_001", "--json"])?;
-    ensure_equal(&inspect_output.status.code(), &Some(0), "inspect exit code")?;
+    ensure_equal(
+        &inspect_output.status.code(),
+        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
+        "inspect exit code",
+    )?;
     ensure(
         stdout_is_json(&inspect_output),
         "inspect stdout must be valid JSON",
@@ -2446,18 +2457,19 @@ fn rehearse_inspect_and_promote_plan_return_valid_json() -> TestResult {
     let inspect_json = stdout_json(&inspect_output)?;
     ensure_equal(
         &inspect_json["schema"],
-        &serde_json::json!("ee.rehearse.inspect.v1"),
+        &serde_json::json!("ee.response.v1"),
         "inspect schema",
     )?;
-    ensure(
-        inspect_json.get("manifest_hash").is_some(),
-        "manifest hash must exist",
+    ensure_equal(
+        &inspect_json["data"]["code"],
+        &serde_json::json!("rehearsal_unavailable"),
+        "inspect degraded code",
     )?;
 
     let promote_output = run_ee(&["rehearse", "promote-plan", "rrun_fixture_001", "--json"])?;
     ensure_equal(
         &promote_output.status.code(),
-        &Some(0),
+        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
         "promote-plan exit code",
     )?;
     ensure(
@@ -2467,14 +2479,13 @@ fn rehearse_inspect_and_promote_plan_return_valid_json() -> TestResult {
     let promote_json = stdout_json(&promote_output)?;
     ensure_equal(
         &promote_json["schema"],
-        &serde_json::json!("ee.rehearse.promote_plan.v1"),
+        &serde_json::json!("ee.response.v1"),
         "promote schema",
     )?;
-    ensure(
-        promote_json["plan_steps"]
-            .as_array()
-            .is_some_and(|steps| !steps.is_empty()),
-        "plan_steps must be present",
+    ensure_equal(
+        &promote_json["data"]["code"],
+        &serde_json::json!("rehearsal_unavailable"),
+        "promote degraded code",
     )?;
     ensure(
         stdout_is_clean(&promote_output),
@@ -2493,7 +2504,10 @@ fn all_rehearse_commands_produce_stdout_only_data() -> TestResult {
 
     for args in &commands {
         let output = run_ee(args)?;
-        if output.status.code() == Some(0) {
+        if matches!(
+            output.status.code(),
+            Some(0) | Some(UNSATISFIED_DEGRADED_MODE_EXIT)
+        ) {
             ensure(
                 stdout_is_clean(&output),
                 format!("ee {} must have clean stdout", args.join(" ")),

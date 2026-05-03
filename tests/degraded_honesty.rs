@@ -113,6 +113,8 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "capabilities, check, health, status"
     } else if args.iter().any(|arg| arg == "certificate") {
         "certificate"
+    } else if args.iter().any(|arg| arg == "rehearse") {
+        "rehearse"
     } else {
         "unknown"
     }
@@ -126,6 +128,8 @@ fn side_effect_class(args: &[String]) -> &'static str {
         .any(|arg| arg == "capabilities" || arg == "certificate")
     {
         "read-only, idempotent"
+    } else if args.iter().any(|arg| arg == "rehearse") {
+        "unavailable before sandbox mutation"
     } else {
         "unknown"
     }
@@ -449,6 +453,102 @@ fn certificate_verify_degrades_instead_of_reporting_mock_success() -> TestResult
         "/sideEffectClass",
         json!("read-only, idempotent"),
         "logged certificate side-effect class",
+    )
+}
+
+#[test]
+fn rehearse_run_degrades_instead_of_reporting_simulated_success() -> TestResult {
+    let result = run_ee_logged(
+        "rehearse-run-unavailable",
+        None,
+        vec![
+            "--json".to_owned(),
+            "rehearse".to_owned(),
+            "run".to_owned(),
+            "--profile".to_owned(),
+            "quick".to_owned(),
+        ],
+    )?;
+
+    ensure_equal(
+        &result.exit_code,
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "rehearse unavailable exit code",
+    )?;
+    ensure(
+        result.stderr.is_empty(),
+        "rehearse JSON degraded response must keep stderr empty",
+    )?;
+    ensure_no_ansi(&result.stdout, "rehearse degraded stdout")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/schema",
+        json!("ee.response.v1"),
+        "rehearse degraded response schema",
+    )?;
+    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/code",
+        json!("rehearsal_unavailable"),
+        "rehearse degraded code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/degraded/0/code",
+        json!("rehearsal_unavailable"),
+        "rehearse degraded array code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/followUpBead",
+        json!("eidetic_engine_cli-nd65"),
+        "rehearse follow-up bead",
+    )?;
+
+    let fake_success =
+        validate_no_fake_success_output("rehearse run", false, false, &result.stdout);
+    ensure(
+        fake_success.passed,
+        format!("degraded rehearse output should not be fake success: {fake_success:?}"),
+    )?;
+
+    let unsupported_claims =
+        validate_no_unsupported_evidence_claims("rehearse run", false, false, &result.stdout);
+    ensure(
+        unsupported_claims.passed,
+        format!(
+            "degraded rehearse output should not count as unsupported success: {unsupported_claims:?}"
+        ),
+    )?;
+
+    let log_text = fs::read_to_string(&result.log_path)
+        .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+    let log_json: Value = serde_json::from_str(&log_text)
+        .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+    ensure_json_pointer(
+        &log_json,
+        "/degradationCodes",
+        json!(["rehearsal_unavailable"]),
+        "logged rehearse degradation code",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/repairCommand",
+        json!("ee rehearse plan --json"),
+        "logged rehearse repair command",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/commandBoundaryMatrixRow",
+        json!("rehearse"),
+        "logged rehearse boundary matrix row",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/sideEffectClass",
+        json!("unavailable before sandbox mutation"),
+        "logged rehearse side-effect class",
     )
 }
 
