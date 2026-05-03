@@ -2991,7 +2991,7 @@ pub fn render_quarantine_human(report: &QuarantineReport) -> String {
         output.push('\n');
     }
 
-    output.push_str("Next:\n  ee diag quarantine --json\n  ee import --validate-sources\n");
+    output.push_str("Next:\n  ee diag quarantine --json\n  ee import cass --dry-run --json\n");
     output
 }
 
@@ -9765,7 +9765,7 @@ mod tests {
     fn error_schema_configuration_has_stable_structure() -> TestResult {
         let error = DomainError::Configuration {
             message: "Invalid config file format.".to_string(),
-            repair: Some("ee config validate".to_string()),
+            repair: Some("ee doctor --fix-plan --json".to_string()),
         };
         let json = error_response_json(&error);
         ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
@@ -9775,20 +9775,28 @@ mod tests {
             "\"message\":\"Invalid config file format.\"",
             "message",
         )?;
-        ensure_contains(&json, "\"repair\":\"ee config validate\"", "repair")
+        ensure_contains(
+            &json,
+            "\"repair\":\"ee doctor --fix-plan --json\"",
+            "repair",
+        )
     }
 
     #[test]
     fn error_schema_storage_has_stable_structure() -> TestResult {
         let error = DomainError::Storage {
             message: "Database file corrupted.".to_string(),
-            repair: Some("ee db repair".to_string()),
+            repair: Some("ee doctor --fix-plan --json".to_string()),
         };
         let json = error_response_json(&error);
         ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
         ensure_contains(&json, "\"code\":\"storage\"", "code")?;
         ensure_contains(&json, "\"message\":\"Database file corrupted.\"", "message")?;
-        ensure_contains(&json, "\"repair\":\"ee db repair\"", "repair")
+        ensure_contains(
+            &json,
+            "\"repair\":\"ee doctor --fix-plan --json\"",
+            "repair",
+        )
     }
 
     #[test]
@@ -9808,7 +9816,7 @@ mod tests {
     fn error_schema_import_has_stable_structure() -> TestResult {
         let error = DomainError::Import {
             message: "CASS session file not found.".to_string(),
-            repair: Some("ee import --dry-run".to_string()),
+            repair: Some("ee import cass --dry-run".to_string()),
         };
         let json = error_response_json(&error);
         ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
@@ -9818,27 +9826,27 @@ mod tests {
             "\"message\":\"CASS session file not found.\"",
             "message",
         )?;
-        ensure_contains(&json, "\"repair\":\"ee import --dry-run\"", "repair")
+        ensure_contains(&json, "\"repair\":\"ee import cass --dry-run\"", "repair")
     }
 
     #[test]
     fn error_schema_unsatisfied_degraded_mode_has_stable_structure() -> TestResult {
         let error = DomainError::UnsatisfiedDegradedMode {
             message: "Semantic search unimplemented and --require-semantic was set.".to_string(),
-            repair: Some("ee search --lexical-only".to_string()),
+            repair: Some("ee index reembed --dry-run".to_string()),
         };
         let json = error_response_json(&error);
         ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
         ensure_contains(&json, "\"code\":\"unsatisfied_degraded_mode\"", "code")?;
         ensure_contains(&json, "--require-semantic", "message contains flag")?;
-        ensure_contains(&json, "\"repair\":\"ee search --lexical-only\"", "repair")
+        ensure_contains(&json, "\"repair\":\"ee index reembed --dry-run\"", "repair")
     }
 
     #[test]
     fn error_schema_policy_denied_has_stable_structure() -> TestResult {
         let error = DomainError::PolicyDenied {
             message: "Redaction policy prevents this operation.".to_string(),
-            repair: Some("ee policy review".to_string()),
+            repair: Some("ee doctor --fix-plan --json".to_string()),
         };
         let json = error_response_json(&error);
         ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
@@ -9848,20 +9856,24 @@ mod tests {
             "\"message\":\"Redaction policy prevents this operation.\"",
             "message",
         )?;
-        ensure_contains(&json, "\"repair\":\"ee policy review\"", "repair")
+        ensure_contains(
+            &json,
+            "\"repair\":\"ee doctor --fix-plan --json\"",
+            "repair",
+        )
     }
 
     #[test]
     fn error_schema_migration_required_has_stable_structure() -> TestResult {
         let error = DomainError::MigrationRequired {
             message: "Database schema version 3 requires migration to version 5.".to_string(),
-            repair: Some("ee db migrate".to_string()),
+            repair: Some("ee init --workspace .".to_string()),
         };
         let json = error_response_json(&error);
         ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
         ensure_contains(&json, "\"code\":\"migration_required\"", "code")?;
         ensure_contains(&json, "version 3", "message contains version")?;
-        ensure_contains(&json, "\"repair\":\"ee db migrate\"", "repair")
+        ensure_contains(&json, "\"repair\":\"ee init --workspace .\"", "repair")
     }
 
     #[test]

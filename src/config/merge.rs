@@ -148,7 +148,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             graph_weight: Some(0.10),
         },
         pack: PackConfig {
-            default_profile: Some("default".to_string()),
+            default_profile: Some("balanced".to_string()),
             default_format: Some("markdown".to_string()),
             default_max_tokens: Some(4000),
             mmr_lambda: Some(0.7),
@@ -673,6 +673,11 @@ mod tests {
             &Some(SearchSpeed::Balanced),
             "search speed",
         )?;
+        ensure_equal(
+            &defaults.pack.default_profile.as_deref(),
+            &Some("balanced"),
+            "default profile",
+        )?;
         ensure_equal(&defaults.pack.default_max_tokens, &Some(4000), "max tokens")?;
         ensure_equal(
             &defaults.curation.specificity_min,
@@ -694,7 +699,7 @@ mod tests {
             OsString::from("~/custom/ee.db"),
         );
         env.insert("EE_INDEX_DIR".to_string(), OsString::from("/tmp/index"));
-        env.insert("EE_PROFILE".to_string(), OsString::from("release"));
+        env.insert("EE_PROFILE".to_string(), OsString::from("thorough"));
         env.insert("EE_MAX_TOKENS".to_string(), OsString::from("8192"));
 
         let parsed =
@@ -712,7 +717,7 @@ mod tests {
         )?;
         ensure_equal(
             &parsed.pack.default_profile.as_deref(),
-            &Some("release"),
+            &Some("thorough"),
             "env profile",
         )?;
         ensure_equal(

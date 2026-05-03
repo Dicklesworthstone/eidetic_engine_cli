@@ -118,14 +118,14 @@ pub const CONFIG_PARSE_ERROR: ErrorCode = ErrorCode {
     id: "EE-E101",
     category: ErrorCategory::Configuration,
     description: "Failed to parse configuration file",
-    default_repair: Some("ee config validate"),
+    default_repair: Some("ee doctor --fix-plan --json"),
 };
 
 pub const CONFIG_INVALID_VALUE: ErrorCode = ErrorCode {
     id: "EE-E102",
     category: ErrorCategory::Configuration,
     description: "Invalid configuration value",
-    default_repair: Some("ee config validate"),
+    default_repair: Some("ee doctor --fix-plan --json"),
 };
 
 // Storage errors (EE-E200 - EE-E299)
@@ -147,7 +147,7 @@ pub const DATABASE_CORRUPTED: ErrorCode = ErrorCode {
     id: "EE-E202",
     category: ErrorCategory::Storage,
     description: "Database file is corrupted",
-    default_repair: Some("ee db repair"),
+    default_repair: Some("ee doctor --fix-plan --json"),
 };
 
 pub const WRITE_FAILED: ErrorCode = ErrorCode {
@@ -176,14 +176,14 @@ pub const INDEX_CORRUPTED: ErrorCode = ErrorCode {
     id: "EE-E302",
     category: ErrorCategory::SearchIndex,
     description: "Search index is corrupted",
-    default_repair: Some("ee index rebuild --force"),
+    default_repair: Some("ee index rebuild"),
 };
 
 pub const EMBEDDING_UNAVAILABLE: ErrorCode = ErrorCode {
     id: "EE-E303",
     category: ErrorCategory::SearchIndex,
     description: "Embedding model not available",
-    default_repair: Some("ee search --lexical-only"),
+    default_repair: Some("ee index reembed --dry-run"),
 };
 
 // Import errors (EE-E400 - EE-E499)
@@ -198,14 +198,14 @@ pub const IMPORT_FORMAT_ERROR: ErrorCode = ErrorCode {
     id: "EE-E401",
     category: ErrorCategory::Import,
     description: "Unrecognized import format",
-    default_repair: Some("ee import --dry-run"),
+    default_repair: Some("ee import jsonl --source <file> --dry-run"),
 };
 
 pub const IMPORT_DUPLICATE: ErrorCode = ErrorCode {
     id: "EE-E402",
     category: ErrorCategory::Import,
     description: "Import would create duplicate entries",
-    default_repair: Some("ee import --skip-duplicates"),
+    default_repair: Some("ee import jsonl --source <file> --dry-run"),
 };
 
 // Degraded mode errors (EE-E500 - EE-E599)
@@ -220,7 +220,7 @@ pub const SEMANTIC_SEARCH_REQUIRED: ErrorCode = ErrorCode {
     id: "EE-E501",
     category: ErrorCategory::UnsatisfiedDegradedMode,
     description: "Semantic search required but unavailable",
-    default_repair: Some("ee search --lexical-only"),
+    default_repair: Some("ee index reembed --dry-run"),
 };
 
 pub const UNKNOWN_AGENT_CONNECTOR: ErrorCode = ErrorCode {
@@ -241,7 +241,7 @@ pub const AGENT_SOURCE_NOT_IMPORTED: ErrorCode = ErrorCode {
     id: "EE-E504",
     category: ErrorCategory::UnsatisfiedDegradedMode,
     description: "Agent source detected but not yet imported",
-    default_repair: Some("ee import cass --source <path>"),
+    default_repair: Some("ee import cass --dry-run --json"),
 };
 
 // Policy errors (EE-E600 - EE-E699)
@@ -249,14 +249,14 @@ pub const REDACTION_BLOCKED: ErrorCode = ErrorCode {
     id: "EE-E600",
     category: ErrorCategory::PolicyDenied,
     description: "Operation blocked by redaction policy",
-    default_repair: Some("ee policy review"),
+    default_repair: Some("ee doctor --fix-plan --json"),
 };
 
 pub const RETENTION_BLOCKED: ErrorCode = ErrorCode {
     id: "EE-E601",
     category: ErrorCategory::PolicyDenied,
     description: "Operation blocked by retention policy",
-    default_repair: Some("ee policy review"),
+    default_repair: Some("ee doctor --fix-plan --json"),
 };
 
 pub const SCOPE_VIOLATION: ErrorCode = ErrorCode {
@@ -271,14 +271,14 @@ pub const MIGRATION_REQUIRED: ErrorCode = ErrorCode {
     id: "EE-E700",
     category: ErrorCategory::MigrationRequired,
     description: "Database schema requires migration",
-    default_repair: Some("ee db migrate"),
+    default_repair: Some("ee init --workspace ."),
 };
 
 pub const MIGRATION_FAILED: ErrorCode = ErrorCode {
     id: "EE-E701",
     category: ErrorCategory::MigrationRequired,
     description: "Database migration failed",
-    default_repair: Some("ee db migrate --dry-run"),
+    default_repair: Some("ee init --workspace . --repair-plan --json"),
 };
 
 /// All registered error codes for enumeration.

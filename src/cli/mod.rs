@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -50,7 +51,8 @@ use crate::core::init::{InitOptions, init_workspace};
 use crate::core::install::{InstallCheckOptions, InstallPlanOptions, check_install, plan_install};
 use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use crate::core::learn::{
-    LearnCloseOptions, LearnObserveOptions, close_experiment, observe_experiment,
+    LearnCloseOptions, LearnExperimentRunOptions, LearnObserveOptions, close_experiment,
+    observe_experiment, run_experiment,
 };
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
@@ -73,8 +75,10 @@ use crate::core::status::StatusReport;
 use crate::core::why::{WhyOptions, explain_memory};
 use crate::core::workspace as workspace_core;
 use crate::models::{
-    DomainError, ExperimentOutcomeStatus, ExperimentSafetyBoundary, InstallOperation,
-    LearningObservationSignal, ProcessExitCode, QUERY_SCHEMA_V1, RedactionLevel,
+    DEMO_FILE_SCHEMA_V1, DemoEntry, DemoFile, DemoId, DemoStatus, DomainError,
+    ExperimentOutcomeStatus, ExperimentSafetyBoundary, InstallOperation, LearningObservationSignal,
+    OutputVerification, ProcessExitCode, QUERY_SCHEMA_V1, RedactionLevel,
+    is_valid_demo_artifact_path, parse_demo_file_yaml,
 };
 use crate::output;
 use crate::pack::{
@@ -6164,7 +6168,33 @@ where
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
 
-    write_learn_unavailable(cli, "learn experiment run", stdout, stderr)
+    let options = LearnExperimentRunOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        experiment_id: args.experiment_id.clone(),
+        max_attention_tokens: args.max_attention_tokens,
+        max_runtime_seconds: args.max_runtime_seconds,
+        dry_run: args.dry_run,
+    };
+
+    match run_experiment(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_learn_experiment_run_human(&report))
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_learn_experiment_run_toon(&report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_learn_experiment_run_json(&report) + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_learn_observe<W, E>(
@@ -9604,7 +9634,7 @@ where
     if let Some(ref error) = report.error {
         let domain_error = DomainError::Storage {
             message: error.clone(),
-            repair: Some("ee db migrate".to_string()),
+            repair: Some("ee init --workspace . --repair-plan".to_string()),
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
@@ -11336,19 +11366,203 @@ where
 // EE-371: Demo list/run/verify handlers
 // ============================================================================
 
-const DEMO_UNAVAILABLE_CODE: &str = "demo_execution_unavailable";
-const DEMO_UNAVAILABLE_MESSAGE: &str = "Demo listing, execution, and verification are unavailable until demo.yaml manifests and artifact checks are parsed and executed from real evidence instead of empty timestamped placeholders.";
-const DEMO_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const DEMO_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-jp06.1";
-const DEMO_UNAVAILABLE_SIDE_EFFECT: &str =
-    "conservative abstention; no demo execution, verification, or artifact write";
+const DEMO_LIST_SCHEMA_V1: &str = "ee.demo.list.v1";
+const DEMO_RUN_PLAN_SCHEMA_V1: &str = "ee.demo.run_plan.v1";
+const DEMO_VERIFY_SCHEMA_V1: &str = "ee.demo.verify.v1";
+const DEMO_EXECUTION_UNAVAILABLE_CODE: &str = "demo_command_execution_unavailable";
+const DEMO_EXECUTION_UNAVAILABLE_MESSAGE: &str = "Demo manifests are parsed, but non-dry-run command execution is unavailable until demo runs persist an audit ledger and evidence artifacts.";
+const DEMO_EXECUTION_UNAVAILABLE_REPAIR: &str = "ee demo run <demo-id> --dry-run --json";
+const DEMO_FOLLOW_UP_BEAD: &str = "eidetic_engine_cli-jp06.1";
+const DEMO_LIST_SIDE_EFFECT: &str =
+    "read-only manifest parse; no command execution or artifact write";
+const DEMO_EXECUTION_UNAVAILABLE_SIDE_EFFECT: &str =
+    "conservative abstention; no demo execution, audit ledger, or artifact write";
+const DEMO_RUN_DRY_RUN_SIDE_EFFECT: &str =
+    "dry-run plan; no command execution, audit ledger, or artifact write";
+const DEMO_VERIFY_SIDE_EFFECT: &str =
+    "read-only artifact verification; no command execution or artifact write";
 
-fn write_demo_unavailable<W, E>(
+fn demo_workspace_path(cli: &Cli) -> PathBuf {
+    cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn demo_manifest_path(cli: &Cli, explicit: Option<&PathBuf>) -> PathBuf {
+    explicit
+        .cloned()
+        .unwrap_or_else(|| demo_workspace_path(cli).join("demo.yaml"))
+}
+
+fn load_demo_manifest(
     cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
+    explicit: Option<&PathBuf>,
+    repair: &str,
+) -> Result<(PathBuf, DemoFile), DomainError> {
+    let path = demo_manifest_path(cli, explicit);
+    let contents = fs::read_to_string(&path).map_err(|error| DomainError::Configuration {
+        message: format!("failed to read demo manifest {}: {error}", path.display()),
+        repair: Some(repair.to_owned()),
+    })?;
+    let manifest = parse_demo_file_yaml(&contents).map_err(|error| DomainError::Usage {
+        message: error.to_string(),
+        repair: Some(repair.to_owned()),
+    })?;
+    Ok((path, manifest))
+}
+
+fn parse_demo_status_filter(raw: Option<&str>) -> Result<Option<DemoStatus>, DomainError> {
+    raw.map(str::parse::<DemoStatus>)
+        .transpose()
+        .map_err(|error| DomainError::Usage {
+            message: error.to_string(),
+            repair: Some("ee demo list --status pending --json".to_owned()),
+        })
+}
+
+fn select_demo_refs<'a>(
+    manifest: &'a DemoFile,
+    raw_demo_id: &str,
+) -> Result<Vec<&'a DemoEntry>, DomainError> {
+    if raw_demo_id == "all" {
+        return Ok(manifest.demos.iter().collect());
+    }
+
+    let demo_id = raw_demo_id
+        .parse::<DemoId>()
+        .map_err(|error| DomainError::Usage {
+            message: format!("invalid demo id `{raw_demo_id}`: {error}"),
+            repair: Some("ee demo list --json".to_owned()),
+        })?;
+    let demo = manifest
+        .demos
+        .iter()
+        .find(|demo| demo.id == demo_id)
+        .ok_or_else(|| DomainError::NotFound {
+            resource: "demo".to_owned(),
+            id: raw_demo_id.to_owned(),
+            repair: Some("ee demo list --json".to_owned()),
+        })?;
+    Ok(vec![demo])
+}
+
+fn sorted_env_overrides(entry: &DemoEntry) -> BTreeMap<String, String> {
+    entry
+        .env_overrides
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+fn demo_artifact_output_json(artifact: &crate::models::DemoArtifactOutput) -> serde_json::Value {
+    serde_json::json!({
+        "path": artifact.path,
+        "blake3Hash": artifact.blake3_hash,
+        "sizeBytes": artifact.size_bytes,
+        "optional": artifact.optional,
+    })
+}
+
+fn output_verification_json(verification: OutputVerification) -> &'static str {
+    verification.as_str()
+}
+
+fn demo_command_json(
+    command_index: usize,
+    command: &crate::models::DemoCommand,
+) -> serde_json::Value {
+    serde_json::json!({
+        "index": command_index,
+        "command": command.command,
+        "cwd": command.cwd,
+        "timeoutMs": command.timeout_ms,
+        "expectedExitCode": command.expected_exit_code,
+        "expectedStdoutSchema": command.expected_stdout_schema,
+        "expectedStdoutContains": command.expected_stdout_contains,
+        "expectedStdoutExcludes": command.expected_stdout_excludes,
+        "expectedStderrContains": command.expected_stderr_contains,
+        "expectedStderrExcludes": command.expected_stderr_excludes,
+        "stdoutVerification": output_verification_json(command.stdout_verification),
+        "stderrVerification": output_verification_json(command.stderr_verification),
+        "artifactOutputs": command
+            .artifact_outputs
+            .iter()
+            .map(demo_artifact_output_json)
+            .collect::<Vec<_>>(),
+        "description": command.description,
+    })
+}
+
+fn demo_entry_json(entry: &DemoEntry, include_commands: bool) -> serde_json::Value {
+    let commands = if include_commands {
+        entry
+            .commands
+            .iter()
+            .enumerate()
+            .map(|(index, command)| demo_command_json(index, command))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    serde_json::json!({
+        "id": entry.id.to_string(),
+        "claimId": entry.claim_id.as_ref().map(ToString::to_string),
+        "title": entry.title,
+        "description": entry.description,
+        "status": DemoStatus::Pending.as_str(),
+        "commandCount": entry.commands.len(),
+        "commands": commands,
+        "envOverrides": sorted_env_overrides(entry),
+        "tags": entry.tags,
+        "platforms": entry.platforms,
+        "minEeVersion": entry.min_ee_version,
+        "ciEnabled": entry.ci_enabled,
+        "totalTimeoutMs": entry.total_timeout_ms,
+    })
+}
+
+fn demo_run_plan_command_json(
+    command_index: usize,
+    command: &crate::models::DemoCommand,
+    cwd_override: Option<&PathBuf>,
+) -> serde_json::Value {
+    let effective_cwd = cwd_override
+        .map(|path| path.display().to_string())
+        .or_else(|| command.cwd.clone())
+        .unwrap_or_else(|| ".".to_owned());
+    serde_json::json!({
+        "index": command_index,
+        "command": command.command,
+        "effectiveCwd": effective_cwd,
+        "timeoutMs": command.timeout_ms,
+        "expectedExitCode": command.expected_exit_code,
+        "artifactOutputs": command
+            .artifact_outputs
+            .iter()
+            .map(demo_artifact_output_json)
+            .collect::<Vec<_>>(),
+        "wouldExecute": true,
+        "executed": false,
+        "sideEffectClass": "not executed in dry-run",
+    })
+}
+
+fn demo_run_plan_json(entry: &DemoEntry, cwd_override: Option<&PathBuf>) -> serde_json::Value {
+    serde_json::json!({
+        "id": entry.id.to_string(),
+        "title": entry.title,
+        "commandCount": entry.commands.len(),
+        "totalTimeoutMs": entry.total_timeout_ms,
+        "envOverrides": sorted_env_overrides(entry),
+        "commands": entry
+            .commands
+            .iter()
+            .enumerate()
+            .map(|(index, command)| demo_run_plan_command_json(index, command, cwd_override))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn write_demo_unavailable<W, E>(cli: &Cli, stdout: &mut W, stderr: &mut E) -> ProcessExitCode
 where
     W: Write,
     E: Write,
@@ -11358,23 +11572,24 @@ where
             "schema": crate::models::RESPONSE_SCHEMA_V1,
             "success": false,
             "data": {
-                "command": command,
-                "code": DEMO_UNAVAILABLE_CODE,
+                "schema": DEMO_RUN_PLAN_SCHEMA_V1,
+                "command": "demo run",
+                "code": DEMO_EXECUTION_UNAVAILABLE_CODE,
                 "severity": "warning",
-                "message": DEMO_UNAVAILABLE_MESSAGE,
-                "repair": DEMO_UNAVAILABLE_REPAIR,
+                "message": DEMO_EXECUTION_UNAVAILABLE_MESSAGE,
+                "repair": DEMO_EXECUTION_UNAVAILABLE_REPAIR,
                 "degraded": [
                     {
-                        "code": DEMO_UNAVAILABLE_CODE,
+                        "code": DEMO_EXECUTION_UNAVAILABLE_CODE,
                         "severity": "warning",
-                        "message": DEMO_UNAVAILABLE_MESSAGE,
-                        "repair": DEMO_UNAVAILABLE_REPAIR
+                        "message": DEMO_EXECUTION_UNAVAILABLE_MESSAGE,
+                        "repair": DEMO_EXECUTION_UNAVAILABLE_REPAIR
                     }
                 ],
                 "evidenceIds": [],
                 "sourceIds": [],
-                "followUpBead": DEMO_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": DEMO_UNAVAILABLE_SIDE_EFFECT
+                "followUpBead": DEMO_FOLLOW_UP_BEAD,
+                "sideEffectClass": DEMO_EXECUTION_UNAVAILABLE_SIDE_EFFECT
             }
         });
         let _ = stdout.write_all(json.to_string().as_bytes());
@@ -11382,14 +11597,14 @@ where
         return ProcessExitCode::UnsatisfiedDegradedMode;
     }
 
-    let _ = writeln!(stderr, "error: {DEMO_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {DEMO_UNAVAILABLE_REPAIR}");
+    let _ = writeln!(stderr, "error: {DEMO_EXECUTION_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {DEMO_EXECUTION_UNAVAILABLE_REPAIR}");
     ProcessExitCode::UnsatisfiedDegradedMode
 }
 
 fn handle_demo_list<W, E>(
     cli: &Cli,
-    _args: &DemoListArgs,
+    args: &DemoListArgs,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -11397,12 +11612,68 @@ where
     W: Write,
     E: Write,
 {
-    write_demo_unavailable(cli, "demo list", stdout, stderr)
+    let status_filter = match parse_demo_status_filter(args.status.as_deref()) {
+        Ok(filter) => filter,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let (manifest_path, manifest) = match load_demo_manifest(
+        cli,
+        args.demo_file.as_ref(),
+        "ee demo list --demo-file <path> --json",
+    ) {
+        Ok(loaded) => loaded,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    let demos = manifest
+        .demos
+        .iter()
+        .filter(|demo| {
+            status_filter.is_none_or(|status| status == DemoStatus::Pending)
+                && args
+                    .tag
+                    .as_ref()
+                    .is_none_or(|tag| demo.tags.iter().any(|demo_tag| demo_tag == tag))
+        })
+        .map(|demo| demo_entry_json(demo, cli.fields_level() != FieldsLevel::Minimal))
+        .collect::<Vec<_>>();
+
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": true,
+            "data": {
+                "schema": DEMO_LIST_SCHEMA_V1,
+                "command": "demo list",
+                "manifestSchema": DEMO_FILE_SCHEMA_V1,
+                "manifestPath": manifest_path.display().to_string(),
+                "demoCount": manifest.demo_count(),
+                "filteredCount": demos.len(),
+                "demos": demos,
+                "sideEffectClass": DEMO_LIST_SIDE_EFFECT,
+                "auditSemantics": "read-only; no audit record persisted"
+            }
+        });
+        return write_stdout(stdout, &(json.to_string() + "\n"));
+    }
+
+    let mut text = String::new();
+    for demo in &manifest.demos {
+        if status_filter.is_none_or(|status| status == DemoStatus::Pending)
+            && args
+                .tag
+                .as_ref()
+                .is_none_or(|tag| demo.tags.iter().any(|demo_tag| demo_tag == tag))
+        {
+            text.push_str(&format!("{}\tpending\t{}\n", demo.id, demo.title));
+        }
+    }
+    write_stdout(stdout, &text)
 }
 
 fn handle_demo_run<W, E>(
     cli: &Cli,
-    _args: &DemoRunArgs,
+    args: &DemoRunArgs,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -11410,12 +11681,60 @@ where
     W: Write,
     E: Write,
 {
-    write_demo_unavailable(cli, "demo run", stdout, stderr)
+    let (manifest_path, manifest) = match load_demo_manifest(
+        cli,
+        args.demo_file.as_ref(),
+        "ee demo run <demo-id> --dry-run --json",
+    ) {
+        Ok(loaded) => loaded,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let demos = match select_demo_refs(&manifest, &args.demo_id) {
+        Ok(demos) => demos,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    if !args.dry_run {
+        return write_demo_unavailable(cli, stdout, stderr);
+    }
+
+    let planned = demos
+        .iter()
+        .map(|demo| demo_run_plan_json(demo, args.cwd.as_ref()))
+        .collect::<Vec<_>>();
+
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": true,
+            "data": {
+                "schema": DEMO_RUN_PLAN_SCHEMA_V1,
+                "command": "demo run",
+                "dryRun": true,
+                "manifestPath": manifest_path.display().to_string(),
+                "selectedCount": planned.len(),
+                "continueOnError": args.continue_on_error,
+                "demos": planned,
+                "sideEffectClass": DEMO_RUN_DRY_RUN_SIDE_EFFECT,
+                "auditSemantics": "dry-run report only; no audit record persisted"
+            }
+        });
+        return write_stdout(stdout, &(json.to_string() + "\n"));
+    }
+
+    let mut text = String::new();
+    for demo in demos {
+        text.push_str(&format!("DRY RUN {}\t{}\n", demo.id, demo.title));
+        for command in &demo.commands {
+            text.push_str(&format!("  {}\n", command.command));
+        }
+    }
+    write_stdout(stdout, &text)
 }
 
 fn handle_demo_verify<W, E>(
     cli: &Cli,
-    _args: &DemoVerifyArgs,
+    args: &DemoVerifyArgs,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -11423,7 +11742,271 @@ where
     W: Write,
     E: Write,
 {
-    write_demo_unavailable(cli, "demo verify", stdout, stderr)
+    let (manifest_path, manifest) = match load_demo_manifest(
+        cli,
+        args.demo_file.as_ref(),
+        "ee demo verify <demo-id> --json",
+    ) {
+        Ok(loaded) => loaded,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let demos = match select_demo_refs(&manifest, &args.demo_id) {
+        Ok(demos) => demos,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let artifacts_dir = args
+        .artifacts_dir
+        .clone()
+        .unwrap_or_else(|| demo_workspace_path(cli).join("artifacts"));
+    let mut checked_artifacts = 0usize;
+    let mut passed_artifacts = 0usize;
+    let mut failed_artifacts = 0usize;
+    let mut optional_missing_artifacts = 0usize;
+    let mut failed_demos = 0usize;
+    let mut demo_results = Vec::new();
+
+    for demo in demos {
+        let mut artifact_results = Vec::new();
+        for (command_index, command) in demo.commands.iter().enumerate() {
+            for artifact in &command.artifact_outputs {
+                let result = verify_demo_artifact(&artifacts_dir, command_index, artifact);
+                checked_artifacts += 1;
+                if result.optional_missing {
+                    optional_missing_artifacts += 1;
+                }
+                if result.verified {
+                    passed_artifacts += 1;
+                } else {
+                    failed_artifacts += 1;
+                }
+                artifact_results.push(result.json);
+            }
+        }
+
+        let all_artifacts_verified = artifact_results.iter().all(|result| {
+            result.get("verified").and_then(serde_json::Value::as_bool) == Some(true)
+        });
+        let has_existing_artifact = artifact_results
+            .iter()
+            .any(|result| result.get("exists").and_then(serde_json::Value::as_bool) == Some(true));
+        let has_verified_existing_artifact = artifact_results.iter().any(|result| {
+            result.get("exists").and_then(serde_json::Value::as_bool) == Some(true)
+                && result.get("verified").and_then(serde_json::Value::as_bool) == Some(true)
+        });
+        let demo_passed = has_verified_existing_artifact && all_artifacts_verified;
+        if !demo_passed {
+            failed_demos += 1;
+        }
+        let verification_error = if artifact_results.is_empty() {
+            Some("no artifact outputs declared for selected demo")
+        } else if !has_existing_artifact {
+            Some("no artifact evidence files found for selected demo")
+        } else if !all_artifacts_verified {
+            Some("one or more artifact checks failed")
+        } else if !has_verified_existing_artifact {
+            Some("no verified artifact files found for selected demo")
+        } else {
+            None
+        };
+        let status = if demo_passed {
+            DemoStatus::Passed
+        } else {
+            DemoStatus::Failed
+        };
+        demo_results.push(serde_json::json!({
+            "id": demo.id.to_string(),
+            "title": demo.title,
+            "status": status.as_str(),
+            "verificationError": verification_error,
+            "artifactResults": artifact_results,
+        }));
+    }
+
+    let success = !demo_results.is_empty() && failed_artifacts == 0 && failed_demos == 0;
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": success,
+            "data": {
+                "schema": DEMO_VERIFY_SCHEMA_V1,
+                "command": "demo verify",
+                "manifestPath": manifest_path.display().to_string(),
+                "artifactsDir": artifacts_dir.display().to_string(),
+                "selectedCount": demo_results.len(),
+                "checkedArtifacts": checked_artifacts,
+                "passedArtifacts": passed_artifacts,
+                "failedArtifacts": failed_artifacts,
+                "optionalMissingArtifacts": optional_missing_artifacts,
+                "failedDemos": failed_demos,
+                "demos": demo_results,
+                "sideEffectClass": DEMO_VERIFY_SIDE_EFFECT,
+                "auditSemantics": "read-only verification report; no audit record persisted"
+            }
+        });
+        let exit = write_stdout(stdout, &(json.to_string() + "\n"));
+        return if success {
+            exit
+        } else {
+            ProcessExitCode::UnsatisfiedDegradedMode
+        };
+    }
+
+    let mut text = String::new();
+    for demo in &demo_results {
+        let id = demo
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let status = demo
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("failed");
+        text.push_str(&format!("{id}\t{status}\n"));
+    }
+    let exit = write_stdout(stdout, &text);
+    if success {
+        exit
+    } else {
+        ProcessExitCode::UnsatisfiedDegradedMode
+    }
+}
+
+struct DemoArtifactCheck {
+    json: serde_json::Value,
+    verified: bool,
+    optional_missing: bool,
+}
+
+fn verify_demo_artifact(
+    artifacts_dir: &Path,
+    command_index: usize,
+    artifact: &crate::models::DemoArtifactOutput,
+) -> DemoArtifactCheck {
+    let Some(target_path) = demo_artifact_target_path(artifacts_dir, &artifact.path) else {
+        return DemoArtifactCheck {
+            json: serde_json::json!({
+                "commandIndex": command_index,
+                "path": artifact.path,
+                "optional": artifact.optional,
+                "exists": false,
+                "verified": false,
+                "error": "invalid artifact path",
+            }),
+            verified: false,
+            optional_missing: false,
+        };
+    };
+
+    let metadata = match fs::metadata(&target_path) {
+        Ok(metadata) => metadata,
+        Err(error) if artifact.optional && error.kind() == io::ErrorKind::NotFound => {
+            return DemoArtifactCheck {
+                json: serde_json::json!({
+                    "commandIndex": command_index,
+                    "path": artifact.path,
+                    "optional": true,
+                    "exists": false,
+                    "verified": true,
+                    "error": null,
+                }),
+                verified: true,
+                optional_missing: true,
+            };
+        }
+        Err(error) => {
+            return DemoArtifactCheck {
+                json: serde_json::json!({
+                    "commandIndex": command_index,
+                    "path": artifact.path,
+                    "optional": artifact.optional,
+                    "exists": false,
+                    "verified": false,
+                    "error": format!("failed to stat artifact: {error}"),
+                }),
+                verified: false,
+                optional_missing: false,
+            };
+        }
+    };
+
+    if !metadata.is_file() {
+        return DemoArtifactCheck {
+            json: serde_json::json!({
+                "commandIndex": command_index,
+                "path": artifact.path,
+                "optional": artifact.optional,
+                "exists": true,
+                "verified": false,
+                "error": "artifact path is not a file",
+            }),
+            verified: false,
+            optional_missing: false,
+        };
+    }
+
+    let actual_size_bytes = metadata.len();
+    let size_matched = artifact
+        .size_bytes
+        .is_none_or(|expected| expected == actual_size_bytes);
+    let (actual_blake3, hash_matched, hash_error) = match artifact.blake3_hash.as_deref() {
+        Some(expected_hash) => match fs::read(&target_path) {
+            Ok(bytes) => {
+                let actual = blake3::hash(&bytes).to_hex().to_string();
+                let matched = actual.eq_ignore_ascii_case(expected_hash);
+                (Some(actual), matched, None)
+            }
+            Err(error) => (
+                None,
+                false,
+                Some(format!("failed to read artifact for hashing: {error}")),
+            ),
+        },
+        None => (None, true, None),
+    };
+    let verified = size_matched && hash_matched;
+    let error = hash_error.or_else(|| {
+        if !size_matched {
+            Some("artifact size mismatch".to_owned())
+        } else if !hash_matched {
+            Some("artifact blake3 hash mismatch".to_owned())
+        } else {
+            None
+        }
+    });
+
+    DemoArtifactCheck {
+        json: serde_json::json!({
+            "commandIndex": command_index,
+            "path": artifact.path,
+            "optional": artifact.optional,
+            "exists": true,
+            "expectedSizeBytes": artifact.size_bytes,
+            "actualSizeBytes": actual_size_bytes,
+            "sizeMatched": size_matched,
+            "expectedBlake3": artifact.blake3_hash,
+            "actualBlake3": actual_blake3,
+            "hashMatched": hash_matched,
+            "verified": verified,
+            "error": error,
+        }),
+        verified,
+        optional_missing: false,
+    }
+}
+
+fn demo_artifact_target_path(artifacts_dir: &Path, relative: &str) -> Option<PathBuf> {
+    if !is_valid_demo_artifact_path(relative) {
+        return None;
+    }
+    let mut target = artifacts_dir.to_path_buf();
+    for component in Path::new(relative).components() {
+        match component {
+            Component::Normal(segment) => target.push(segment),
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir => return None,
+        }
+    }
+    Some(target)
 }
 
 // ============================================================================
@@ -11858,6 +12441,8 @@ const COMMAND_NAMES: &[&str] = &[
     "audit",
     "backup",
     "capabilities",
+    "causal",
+    "certificate",
     "check",
     "claim",
     "context",
@@ -11865,8 +12450,11 @@ const COMMAND_NAMES: &[&str] = &[
     "daemon",
     "diag",
     "doctor",
+    "demo",
     "economy",
     "eval",
+    "graph",
+    "handoff",
     "health",
     "help",
     "init",
@@ -11874,19 +12462,31 @@ const COMMAND_NAMES: &[&str] = &[
     "index",
     "install",
     "introspect",
+    "lab",
+    "learn",
     "memory",
     "mcp",
     "model",
     "outcome",
+    "outcome-quarantine",
+    "pack",
+    "plan",
+    "preflight",
+    "procedure",
+    "recorder",
     "remember",
+    "rehearse",
     "review",
+    "rule",
     "schema",
     "search",
     "situation",
     "status",
     "support",
+    "tripwire",
     "update",
     "version",
+    "workspace",
     "why",
 ];
 
@@ -11894,26 +12494,71 @@ const COMMAND_NAMES: &[&str] = &[
 const AGENT_SUBCOMMANDS: &[&str] = &["detect", "status", "sources", "scan"];
 const ANALYZE_SUBCOMMANDS: &[&str] = &["science-status"];
 const ARTIFACT_SUBCOMMANDS: &[&str] = &["register", "inspect", "list"];
-const BACKUP_SUBCOMMANDS: &[&str] = &["create"];
+const AUDIT_SUBCOMMANDS: &[&str] = &["timeline", "show", "diff", "verify"];
+const BACKUP_SUBCOMMANDS: &[&str] = &["create", "list", "inspect", "restore", "verify"];
+const CAUSAL_SUBCOMMANDS: &[&str] = &["trace", "compare", "estimate", "promote-plan"];
+const CERTIFICATE_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
 const CLAIM_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
-const CURATE_SUBCOMMANDS: &[&str] = &["apply", "candidates", "validate"];
+const CURATE_SUBCOMMANDS: &[&str] = &[
+    "candidates",
+    "validate",
+    "apply",
+    "accept",
+    "reject",
+    "snooze",
+    "merge",
+    "disposition",
+];
+const DEMO_SUBCOMMANDS: &[&str] = &["list", "run", "verify"];
 const DIAG_SUBCOMMANDS: &[&str] = &[
+    "claims",
     "dependencies",
     "graph",
     "integrity",
     "quarantine",
     "streams",
 ];
+const ECONOMY_SUBCOMMANDS: &[&str] = &["report", "score", "simulate", "prune-plan"];
 const EVAL_SUBCOMMANDS: &[&str] = &["run", "list"];
+const GRAPH_SUBCOMMANDS: &[&str] = &[
+    "export",
+    "centrality-refresh",
+    "feature-enrichment",
+    "neighborhood",
+];
+const HANDOFF_SUBCOMMANDS: &[&str] = &["preview", "create", "inspect", "resume"];
 const IMPORT_SUBCOMMANDS: &[&str] = &["cass", "jsonl", "eidetic-legacy"];
-const INDEX_SUBCOMMANDS: &[&str] = &["rebuild", "status"];
+const INDEX_SUBCOMMANDS: &[&str] = &["rebuild", "reembed", "status"];
 const INSTALL_SUBCOMMANDS: &[&str] = &["check", "plan"];
+const LAB_SUBCOMMANDS: &[&str] = &["capture", "replay", "counterfactual"];
+const LEARN_SUBCOMMANDS: &[&str] = &[
+    "agenda",
+    "uncertainty",
+    "experiment",
+    "observe",
+    "close",
+    "summary",
+];
+const LEARN_EXPERIMENT_SUBCOMMANDS: &[&str] = &["propose", "run"];
 const MEMORY_SUBCOMMANDS: &[&str] = &["list", "show", "history"];
 const MCP_SUBCOMMANDS: &[&str] = &["manifest"];
 const MODEL_SUBCOMMANDS: &[&str] = &["status", "list"];
+const OUTCOME_QUARANTINE_SUBCOMMANDS: &[&str] = &["list", "release"];
+const PLAN_SUBCOMMANDS: &[&str] = &["goal", "recipe", "explain"];
+const PLAN_RECIPE_SUBCOMMANDS: &[&str] = &["list", "show"];
+const PREFLIGHT_SUBCOMMANDS: &[&str] = &["run", "show", "close"];
+const PROCEDURE_SUBCOMMANDS: &[&str] = &[
+    "propose", "show", "list", "export", "promote", "verify", "drift",
+];
+const RECORDER_SUBCOMMANDS: &[&str] = &["start", "event", "finish", "tail", "import"];
+const REHEARSE_SUBCOMMANDS: &[&str] = &["plan", "run", "inspect", "promote-plan"];
 const REVIEW_SUBCOMMANDS: &[&str] = &["session"];
+const RULE_SUBCOMMANDS: &[&str] = &["add", "list", "show", "protect"];
 const SCHEMA_SUBCOMMANDS: &[&str] = &["list", "export"];
 const SITUATION_SUBCOMMANDS: &[&str] = &["classify", "compare", "link", "show", "explain"];
+const SUPPORT_SUBCOMMANDS: &[&str] = &["bundle", "inspect"];
+const TRIPWIRE_SUBCOMMANDS: &[&str] = &["list", "check"];
+const WORKSPACE_SUBCOMMANDS: &[&str] = &["resolve", "list", "alias"];
 
 /// Read-only normalized representation of a CLI invocation.
 #[derive(Clone, Debug, PartialEq)]
@@ -12229,26 +12874,9 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
 /// Suggest similar commands for a typo.
 #[must_use]
 pub fn did_you_mean(input: &str, parent_command: Option<&str>) -> Option<String> {
-    let candidates: &[&str] = match parent_command {
-        Some("agent") => AGENT_SUBCOMMANDS,
-        Some("analyze") => ANALYZE_SUBCOMMANDS,
-        Some("artifact") => ARTIFACT_SUBCOMMANDS,
-        Some("backup") => BACKUP_SUBCOMMANDS,
-        Some("claim") => CLAIM_SUBCOMMANDS,
-        Some("curate") => CURATE_SUBCOMMANDS,
-        Some("diag") => DIAG_SUBCOMMANDS,
-        Some("eval") => EVAL_SUBCOMMANDS,
-        Some("import") => IMPORT_SUBCOMMANDS,
-        Some("index") => INDEX_SUBCOMMANDS,
-        Some("install") => INSTALL_SUBCOMMANDS,
-        Some("memory") => MEMORY_SUBCOMMANDS,
-        Some("mcp") => MCP_SUBCOMMANDS,
-        Some("model") => MODEL_SUBCOMMANDS,
-        Some("review") => REVIEW_SUBCOMMANDS,
-        Some("schema") => SCHEMA_SUBCOMMANDS,
-        Some("situation") => SITUATION_SUBCOMMANDS,
-        _ => COMMAND_NAMES,
-    };
+    let candidates = parent_command
+        .and_then(subcommands_for_path)
+        .unwrap_or(COMMAND_NAMES);
 
     let input_lower = input.to_lowercase();
     let threshold = (input.len() / 2).clamp(2, 3);
@@ -12270,46 +12898,81 @@ pub fn did_you_mean(input: &str, parent_command: Option<&str>) -> Option<String>
     best.map(|(name, _)| name.to_string())
 }
 
+fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
+    match command_path {
+        "agent" => Some(AGENT_SUBCOMMANDS),
+        "analyze" => Some(ANALYZE_SUBCOMMANDS),
+        "artifact" => Some(ARTIFACT_SUBCOMMANDS),
+        "audit" => Some(AUDIT_SUBCOMMANDS),
+        "backup" => Some(BACKUP_SUBCOMMANDS),
+        "causal" => Some(CAUSAL_SUBCOMMANDS),
+        "certificate" => Some(CERTIFICATE_SUBCOMMANDS),
+        "claim" => Some(CLAIM_SUBCOMMANDS),
+        "curate" => Some(CURATE_SUBCOMMANDS),
+        "demo" => Some(DEMO_SUBCOMMANDS),
+        "diag" => Some(DIAG_SUBCOMMANDS),
+        "economy" => Some(ECONOMY_SUBCOMMANDS),
+        "eval" => Some(EVAL_SUBCOMMANDS),
+        "graph" => Some(GRAPH_SUBCOMMANDS),
+        "handoff" => Some(HANDOFF_SUBCOMMANDS),
+        "import" => Some(IMPORT_SUBCOMMANDS),
+        "index" => Some(INDEX_SUBCOMMANDS),
+        "install" => Some(INSTALL_SUBCOMMANDS),
+        "lab" => Some(LAB_SUBCOMMANDS),
+        "learn" => Some(LEARN_SUBCOMMANDS),
+        "learn experiment" => Some(LEARN_EXPERIMENT_SUBCOMMANDS),
+        "memory" => Some(MEMORY_SUBCOMMANDS),
+        "mcp" => Some(MCP_SUBCOMMANDS),
+        "model" => Some(MODEL_SUBCOMMANDS),
+        "outcome-quarantine" => Some(OUTCOME_QUARANTINE_SUBCOMMANDS),
+        "plan" => Some(PLAN_SUBCOMMANDS),
+        "plan recipe" => Some(PLAN_RECIPE_SUBCOMMANDS),
+        "preflight" => Some(PREFLIGHT_SUBCOMMANDS),
+        "procedure" => Some(PROCEDURE_SUBCOMMANDS),
+        "recorder" => Some(RECORDER_SUBCOMMANDS),
+        "rehearse" => Some(REHEARSE_SUBCOMMANDS),
+        "review" => Some(REVIEW_SUBCOMMANDS),
+        "rule" => Some(RULE_SUBCOMMANDS),
+        "schema" => Some(SCHEMA_SUBCOMMANDS),
+        "situation" => Some(SITUATION_SUBCOMMANDS),
+        "support" => Some(SUPPORT_SUBCOMMANDS),
+        "tripwire" => Some(TRIPWIRE_SUBCOMMANDS),
+        "workspace" => Some(WORKSPACE_SUBCOMMANDS),
+        _ => None,
+    }
+}
+
 /// Extract a likely invalid subcommand from args for suggestion lookup.
 fn extract_invalid_subcommand(args: &[OsString]) -> Option<(String, Option<String>)> {
     let args_str: Vec<&str> = args.iter().filter_map(|s| s.to_str()).collect();
+    let mut parent_path: Option<String> = None;
 
-    for (i, arg) in args_str.iter().enumerate() {
-        if *arg == "ee" || arg.starts_with('-') {
+    for arg in args_str {
+        if arg == "ee" || arg.starts_with('-') {
             continue;
         }
-        if COMMAND_NAMES.contains(arg) {
-            if let Some(next) = args_str.get(i + 1) {
-                if !next.starts_with('-') {
-                    let subcommands = match *arg {
-                        "agent" => Some(AGENT_SUBCOMMANDS),
-                        "analyze" => Some(ANALYZE_SUBCOMMANDS),
-                        "artifact" => Some(ARTIFACT_SUBCOMMANDS),
-                        "backup" => Some(BACKUP_SUBCOMMANDS),
-                        "claim" => Some(CLAIM_SUBCOMMANDS),
-                        "curate" => Some(CURATE_SUBCOMMANDS),
-                        "diag" => Some(DIAG_SUBCOMMANDS),
-                        "eval" => Some(EVAL_SUBCOMMANDS),
-                        "import" => Some(IMPORT_SUBCOMMANDS),
-                        "index" => Some(INDEX_SUBCOMMANDS),
-                        "install" => Some(INSTALL_SUBCOMMANDS),
-                        "memory" => Some(MEMORY_SUBCOMMANDS),
-                        "mcp" => Some(MCP_SUBCOMMANDS),
-                        "model" => Some(MODEL_SUBCOMMANDS),
-                        "review" => Some(REVIEW_SUBCOMMANDS),
-                        "schema" => Some(SCHEMA_SUBCOMMANDS),
-                        "situation" => Some(SITUATION_SUBCOMMANDS),
-                        _ => None,
-                    };
-                    if let Some(subs) = subcommands {
-                        if !subs.contains(next) {
-                            return Some(((*next).to_string(), Some((*arg).to_string())));
-                        }
-                    }
+
+        if let Some(parent) = parent_path.as_deref() {
+            if let Some(subcommands) = subcommands_for_path(parent) {
+                if !subcommands.contains(&arg) {
+                    return Some((arg.to_string(), Some(parent.to_string())));
                 }
+
+                let nested_path = format!("{parent} {arg}");
+                if subcommands_for_path(&nested_path).is_some() {
+                    parent_path = Some(nested_path);
+                    continue;
+                }
+                break;
             }
+        } else if COMMAND_NAMES.contains(&arg) {
+            if subcommands_for_path(arg).is_some() {
+                parent_path = Some(arg.to_string());
+                continue;
+            }
+            break;
         } else {
-            return Some(((*arg).to_string(), None));
+            return Some((arg.to_string(), None));
         }
     }
     None
@@ -12400,37 +13063,28 @@ fn detect_case_mistyped_flag(args: &[OsString]) -> Option<String> {
     None
 }
 
-/// Detect flag used as subcommand like `ee --json status` and suggest correct order.
+/// Detect a global flag typed as a bare positional like `ee json status`.
 fn detect_flag_as_subcommand(args: &[OsString]) -> Option<String> {
     let args_str: Vec<&str> = args.iter().filter_map(|s| s.to_str()).collect();
-
-    let mut flag_before_command: Option<&str> = None;
-    let mut command_found: Option<&str> = None;
 
     for arg in &args_str {
         if *arg == "ee" {
             continue;
         }
-        if arg.starts_with("--") {
-            let flag_part = arg.trim_start_matches("--");
-            let (flag_name, _) = flag_part.split_once('=').unwrap_or((flag_part, ""));
-            if GLOBAL_FLAGS.contains(&flag_name) && command_found.is_none() {
-                flag_before_command = Some(*arg);
-            }
-        } else if !arg.starts_with('-') && COMMAND_NAMES.contains(arg) {
-            command_found = Some(*arg);
-            if flag_before_command.is_some() {
-                break;
-            }
+        if arg.starts_with('-') {
+            return None;
         }
+
+        let lower = arg.to_lowercase();
+        if GLOBAL_FLAGS.contains(&lower.as_str()) {
+            return Some(format!(
+                "did you mean `--{lower}`? (global flags need a double dash)"
+            ));
+        }
+        return None;
     }
 
-    match (flag_before_command, command_found) {
-        (Some(flag), Some(cmd)) => Some(format!(
-            "try `ee {cmd} {flag}` (global flags work after the subcommand)"
-        )),
-        _ => None,
-    }
+    None
 }
 
 /// Analyze args and return normalization hints for the invocation.
@@ -12602,7 +13256,8 @@ mod tests {
         ImportCommand, LearnCommand, LearnExperimentCommand, MemoryCommand,
         OutcomeQuarantineCommand, OutputFormat, RuleCommand, ShadowMode, SituationCommand, run,
     };
-    use crate::models::ProcessExitCode;
+    use crate::models::error_codes::ALL_ERROR_CODES;
+    use crate::models::{ALL_DEGRADATION_CODES, ProcessExitCode};
     use crate::output;
 
     type TestResult = Result<(), String>;
@@ -12654,6 +13309,44 @@ mod tests {
         let stdout = String::from_utf8_lossy(&stdout).into_owned();
         let stderr = String::from_utf8_lossy(&stderr).into_owned();
         (exit, stdout, stderr)
+    }
+
+    fn ensure_repair_command_parses(repair: &str, context: &str) -> TestResult {
+        if !repair.starts_with("ee ") || repair.contains('<') || repair.contains('>') {
+            return Ok(());
+        }
+
+        let args = repair.split_whitespace().collect::<Vec<_>>();
+        match Cli::try_parse_from(args) {
+            Ok(_) => Ok(()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(format!(
+                "{context}: repair hint {repair:?} must parse, got {:?}",
+                error.kind()
+            )),
+        }
+    }
+
+    #[test]
+    fn registry_repair_hints_reference_current_cli_surface() -> TestResult {
+        for code in ALL_ERROR_CODES {
+            if let Some(repair) = code.default_repair {
+                ensure_repair_command_parses(repair, code.id)?;
+            }
+        }
+        for code in ALL_DEGRADATION_CODES {
+            if let Some(repair) = code.repair {
+                ensure_repair_command_parses(repair, code.id)?;
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -13935,7 +14628,7 @@ mod tests {
 
         ensure_equal(
             &exit,
-            &ProcessExitCode::UnsatisfiedDegradedMode,
+            &ProcessExitCode::Success,
             "learn experiment run JSON exit",
         )?;
         ensure(stderr.is_empty(), "learn experiment run stderr clean")?;
@@ -13944,26 +14637,15 @@ mod tests {
             .map_err(|error| format!("learn experiment run stdout must be JSON: {error}"))?;
         ensure_equal(
             &json["schema"],
-            &serde_json::json!("ee.response.v1"),
-            "response schema",
+            &serde_json::json!("ee.learn.experiment_run.v1"),
+            "run schema",
         )?;
-        ensure_equal(&json["success"], &serde_json::json!(false), "success flag")?;
+        ensure_equal(&json["dryRun"], &serde_json::json!(true), "dry-run flag")?;
+        ensure_equal(&json["status"], &serde_json::json!("dry_run"), "run status")?;
         ensure_equal(
-            &json["data"]["command"],
-            &serde_json::json!("learn experiment run"),
-            "command",
-        )?;
-        ensure_equal(
-            &json["data"]["code"],
-            &serde_json::json!("learning_records_unavailable"),
-            "degraded code",
-        )?;
-        ensure_equal(
-            &json["data"]["sideEffectClass"],
-            &serde_json::json!(
-                "conservative abstention; no learning agenda, uncertainty, summary, proposal, or experiment template emitted"
-            ),
-            "side effect class",
+            &json["experimentKind"],
+            &serde_json::json!("procedure_revalidation"),
+            "experiment kind",
         )
     }
 
@@ -14130,6 +14812,23 @@ mod tests {
         )?;
         ensure_contains(&stdout, "\"code\":\"usage\"", "format json error code")?;
         ensure(stderr.is_empty(), "format json error stderr must be empty")
+    }
+
+    #[test]
+    fn unknown_argument_after_global_flag_reports_actual_argument() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--json", "status", "--definitely-bad"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "unknown argument exit")?;
+        ensure_contains(&stdout, "ee.error.v1", "error schema")?;
+        ensure_contains(
+            &stdout,
+            "--definitely-bad",
+            "unknown argument remains visible",
+        )?;
+        ensure(
+            !stdout.contains("try `ee status --json`"),
+            "valid global flag order must not shadow the real parse error",
+        )?;
+        ensure(stderr.is_empty(), "json parse error stderr must be empty")
     }
 
     #[test]
@@ -16277,6 +16976,25 @@ mod tests {
     }
 
     #[test]
+    fn did_you_mean_includes_later_top_level_commands() -> TestResult {
+        ensure_equal(
+            &super::did_you_mean("wrkspace", None),
+            &Some("workspace".to_string()),
+            "wrkspace -> workspace",
+        )?;
+        ensure_equal(
+            &super::did_you_mean("preflght", None),
+            &Some("preflight".to_string()),
+            "preflght -> preflight",
+        )?;
+        ensure_equal(
+            &super::did_you_mean("recoder", None),
+            &Some("recorder".to_string()),
+            "recoder -> recorder",
+        )
+    }
+
+    #[test]
     fn did_you_mean_returns_none_for_unrelated() -> TestResult {
         let suggestion = super::did_you_mean("xyzabc", None);
         ensure_equal(&suggestion, &None, "unrelated returns None")
@@ -16311,6 +17029,68 @@ mod tests {
             &suggestion,
             &Some("science-status".to_string()),
             "science-stats -> science-status",
+        )
+    }
+
+    #[test]
+    fn did_you_mean_covers_expanded_nested_subcommands() -> TestResult {
+        ensure_equal(
+            &super::did_you_mean("restor", Some("backup")),
+            &Some("restore".to_string()),
+            "backup restor -> restore",
+        )?;
+        ensure_equal(
+            &super::did_you_mean("reembd", Some("index")),
+            &Some("reembed".to_string()),
+            "index reembd -> reembed",
+        )?;
+        ensure_equal(
+            &super::did_you_mean("claimz", Some("diag")),
+            &Some("claims".to_string()),
+            "diag claimz -> claims",
+        )?;
+        ensure_equal(
+            &super::did_you_mean("bundel", Some("support")),
+            &Some("bundle".to_string()),
+            "support bundel -> bundle",
+        )?;
+        ensure_equal(
+            &super::did_you_mean("alais", Some("workspace")),
+            &Some("alias".to_string()),
+            "workspace alais -> alias",
+        )
+    }
+
+    #[test]
+    fn extract_invalid_subcommand_handles_second_level_groups() -> TestResult {
+        let args: Vec<OsString> = ["ee", "learn", "experiment", "rn"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        ensure_equal(
+            &super::extract_invalid_subcommand(&args),
+            &Some(("rn".to_string(), Some("learn experiment".to_string()))),
+            "learn experiment rn parent",
+        )?;
+        ensure_equal(
+            &super::did_you_mean("rn", Some("learn experiment")),
+            &Some("run".to_string()),
+            "learn experiment rn -> run",
+        )?;
+
+        let args: Vec<OsString> = ["ee", "plan", "recipe", "shw"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        ensure_equal(
+            &super::extract_invalid_subcommand(&args),
+            &Some(("shw".to_string(), Some("plan recipe".to_string()))),
+            "plan recipe shw parent",
+        )?;
+        ensure_equal(
+            &super::did_you_mean("shw", Some("plan recipe")),
+            &Some("show".to_string()),
+            "plan recipe shw -> show",
         )
     }
 
@@ -16372,6 +17152,24 @@ mod tests {
     }
 
     #[test]
+    fn unknown_expanded_nested_subcommand_json_includes_did_you_mean() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "backup", "restor", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "backup typo exit")?;
+        ensure_contains(&stdout, "ee.error.v1", "error schema")?;
+        ensure_contains(&stdout, "did you mean `restore`", "backup restore hint")?;
+        ensure(stderr.is_empty(), "json error stderr must be empty")
+    }
+
+    #[test]
+    fn unknown_second_level_subcommand_json_includes_did_you_mean() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "learn", "experiment", "rn", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "learn experiment typo exit")?;
+        ensure_contains(&stdout, "ee.error.v1", "error schema")?;
+        ensure_contains(&stdout, "did you mean `run`", "learn experiment run hint")?;
+        ensure(stderr.is_empty(), "json error stderr must be empty")
+    }
+
+    #[test]
     fn unknown_command_human_shows_suggestion() -> TestResult {
         let (exit, _stdout, stderr) = invoke(&["ee", "serch"]);
         ensure_equal(&exit, &ProcessExitCode::Usage, "unknown command exit")?;
@@ -16424,29 +17222,35 @@ mod tests {
     }
 
     #[test]
-    fn detect_flag_as_subcommand_suggests_reorder() -> TestResult {
+    fn detect_flag_as_subcommand_suggests_double_dash_for_bare_flag() -> TestResult {
+        let args: Vec<OsString> = ["ee", "json", "status"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let hint = super::detect_flag_as_subcommand(&args)
+            .ok_or_else(|| "missing flag-as-subcommand hint".to_string())?;
+        ensure_contains(
+            &hint,
+            "did you mean `--json`",
+            "should suggest double-dash global flag",
+        )
+    }
+
+    #[test]
+    fn detect_flag_as_subcommand_no_hint_for_valid_global_flag_order() -> TestResult {
         let args: Vec<OsString> = ["ee", "--json", "status"]
             .iter()
             .map(OsString::from)
             .collect();
         let hint = super::detect_flag_as_subcommand(&args);
-        ensure(hint.is_some(), "should detect flag before command")?;
-        let hint_str = hint.ok_or_else(|| "missing flag-as-subcommand hint".to_string())?;
-        ensure_contains(
-            &hint_str,
-            "ee status --json",
-            "should suggest correct order",
-        )
-    }
+        ensure(hint.is_none(), "global flag before command is valid")?;
 
-    #[test]
-    fn detect_flag_as_subcommand_no_hint_when_flag_after_command() -> TestResult {
         let args: Vec<OsString> = ["ee", "status", "--json"]
             .iter()
             .map(OsString::from)
             .collect();
         let hint = super::detect_flag_as_subcommand(&args);
-        ensure(hint.is_none(), "flag after command needs no hint")
+        ensure(hint.is_none(), "flag after command is also valid")
     }
 
     #[test]

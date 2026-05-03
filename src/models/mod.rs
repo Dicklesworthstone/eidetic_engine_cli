@@ -78,9 +78,10 @@ pub use degradation::{
 pub use demo::{
     DEMO_ARTIFACT_OUTPUT_SCHEMA_V1, DEMO_COMMAND_SCHEMA_V1, DEMO_ENTRY_SCHEMA_V1,
     DEMO_FILE_SCHEMA_V1, DEMO_RUN_RESULT_SCHEMA_V1, DemoArtifactOutput, DemoCommand,
-    DemoCommandResult, DemoEntry, DemoFile, DemoRunResult, DemoStatus, DemoValidationError,
-    DemoValidationErrorKind, OutputVerification, ParseDemoStatusError,
-    ParseOutputVerificationError, validate_demo_file,
+    DemoCommandResult, DemoEntry, DemoFile, DemoParseError, DemoRunResult, DemoStatus,
+    DemoValidationError, DemoValidationErrorKind, OutputVerification, ParseDemoStatusError,
+    ParseOutputVerificationError, is_valid_demo_artifact_path, parse_demo_file_yaml,
+    validate_demo_file,
 };
 pub use economy::{
     ATTENTION_BUDGET_SCHEMA_V1, ATTENTION_COST_SCHEMA_V1, AggregateUtility,
@@ -563,10 +564,14 @@ mod tests {
     fn domain_error_message_and_repair_accessors() -> TestResult {
         let err = DomainError::Storage {
             message: "Database locked".to_string(),
-            repair: Some("ee db unlock".to_string()),
+            repair: Some("ee doctor --fix-plan --json".to_string()),
         };
         ensure_equal(&err.message(), &"Database locked".to_string(), "message")?;
-        ensure_equal(&err.repair(), &Some("ee db unlock"), "repair")
+        ensure_equal(
+            &err.repair(),
+            &Some("ee doctor --fix-plan --json"),
+            "repair",
+        )
     }
 
     #[test]

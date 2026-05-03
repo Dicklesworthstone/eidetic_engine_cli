@@ -573,7 +573,7 @@ impl JobLedger {
             }
         }
 
-        out.push_str("\nNext:\n  ee steward jobs --json\n");
+        out.push_str("\nNext:\n  ee status --json\n");
         out
     }
 }
@@ -1700,7 +1700,7 @@ impl RunnerReport {
             }
         }
 
-        out.push_str("\nNext:\n  ee steward jobs --json\n");
+        out.push_str("\nNext:\n  ee status --json\n");
         out
     }
 
@@ -2413,7 +2413,7 @@ impl JobDiagnosticReport {
             }
         }
 
-        out.push_str("\nNext:\n  ee steward diag --json\n");
+        out.push_str("\nNext:\n  ee doctor --fix-plan --json\n");
         out
     }
 }
@@ -2446,7 +2446,7 @@ pub fn diagnose_ledger(ledger: &JobLedger) -> JobDiagnosticReport {
                 DiagnosticSeverity::Error,
                 format!("Job {} failed: {}", job.id, msg),
             )
-            .with_suggestion("Review error and retry with `ee steward run`")
+            .with_suggestion("Review error, then inspect the next daemon tick with `ee daemon --once --dry-run --json`")
             .for_job(&job.id),
         );
     }
@@ -2462,7 +2462,7 @@ pub fn diagnose_ledger(ledger: &JobLedger) -> JobDiagnosticReport {
                     stats.pending
                 ),
             )
-            .with_suggestion("Run `ee steward run --all` to process pending jobs"),
+            .with_suggestion("Run `ee daemon --once --dry-run --json` to inspect pending jobs"),
         );
     }
 

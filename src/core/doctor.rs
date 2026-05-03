@@ -1388,7 +1388,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         minimum_smoke_test: "migration_sequence_is_contiguous and repository tests",
         degradation_code: "storage_unavailable",
         status_fields: &["capabilities.storage", "database.schema_version"],
-        diagnostic_command: "ee db status --json",
+        diagnostic_command: "ee status --json",
         release_pin_decision: "Local path dependencies are accepted only for development; release must record a registry pin or ADR-backed local source policy.",
     },
     DependencyContractEntry {
@@ -1459,7 +1459,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         minimum_smoke_test: "graph projection and centrality tests",
         degradation_code: "graph_unavailable",
         status_fields: &["capabilities.graph", "graph.snapshot_generation"],
-        diagnostic_command: "ee graph status --json",
+        diagnostic_command: "ee diag graph --json",
         release_pin_decision: "Local path dependencies are accepted only for development; release must record a registry pin or ADR-backed local source policy.",
     },
     DependencyContractEntry {

@@ -37,7 +37,10 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::path::{Component, Path};
 use std::str::FromStr;
+
+use serde::Deserialize;
 
 use super::{ClaimId, DemoId};
 
@@ -211,6 +214,303 @@ impl FromStr for OutputVerification {
             other => Err(ParseOutputVerificationError(other.to_owned())),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDemoFile {
+    schema: Option<String>,
+    version: Option<u32>,
+    #[serde(default)]
+    demos: Vec<RawDemoEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDemoEntry {
+    id: Option<String>,
+    #[serde(default, alias = "claimId")]
+    claim_id: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+    #[serde(default)]
+    commands: Vec<RawDemoCommand>,
+    #[serde(default, alias = "envOverrides")]
+    env_overrides: HashMap<String, String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    platforms: Vec<String>,
+    #[serde(default, alias = "minEeVersion")]
+    min_ee_version: Option<String>,
+    #[serde(default = "default_true", alias = "ciEnabled")]
+    ci_enabled: bool,
+    #[serde(default = "default_demo_timeout_ms", alias = "totalTimeoutMs")]
+    total_timeout_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDemoCommand {
+    command: Option<String>,
+    cwd: Option<String>,
+    #[serde(default = "default_command_timeout_ms", alias = "timeoutMs")]
+    timeout_ms: u64,
+    #[serde(default, alias = "expectedExitCode")]
+    expected_exit_code: i32,
+    #[serde(default, alias = "expectedStdoutSchema")]
+    expected_stdout_schema: Option<String>,
+    #[serde(default, alias = "expectedStderrContains")]
+    expected_stderr_contains: Vec<String>,
+    #[serde(default, alias = "expectedStderrExcludes")]
+    expected_stderr_excludes: Vec<String>,
+    #[serde(default, alias = "expectedStdoutContains")]
+    expected_stdout_contains: Vec<String>,
+    #[serde(default, alias = "expectedStdoutExcludes")]
+    expected_stdout_excludes: Vec<String>,
+    #[serde(default, alias = "stdoutVerification")]
+    stdout_verification: Option<String>,
+    #[serde(default, alias = "stderrVerification")]
+    stderr_verification: Option<String>,
+    #[serde(default, alias = "artifactOutputs")]
+    artifact_outputs: Vec<RawDemoArtifactOutput>,
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDemoArtifactOutput {
+    path: Option<String>,
+    #[serde(default, alias = "blake3Hash")]
+    blake3_hash: Option<String>,
+    #[serde(default, alias = "sizeBytes")]
+    size_bytes: Option<u64>,
+    #[serde(default)]
+    optional: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+const fn default_command_timeout_ms() -> u64 {
+    30_000
+}
+
+const fn default_demo_timeout_ms() -> u64 {
+    300_000
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DemoParseError {
+    pub message: String,
+}
+
+impl DemoParseError {
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for DemoParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DemoParseError {}
+
+/// Parse a `demo.yaml` manifest into typed demo records.
+///
+/// The parser accepts the documented snake_case YAML fields and the camelCase
+/// wire names used by JSON/golden fixtures, then validation enforces the stable
+/// typed ID, timeout, hash, and artifact-path contracts.
+pub fn parse_demo_file_yaml(input: &str) -> Result<DemoFile, DemoParseError> {
+    let raw: RawDemoFile = serde_yaml::from_str(input)
+        .map_err(|error| DemoParseError::new(format!("failed to parse demo.yaml: {error}")))?;
+
+    if let Some(schema) = raw.schema.as_deref() {
+        if schema != DEMO_FILE_SCHEMA_V1 {
+            return Err(DemoParseError::new(format!(
+                "unsupported demo schema `{schema}`; expected `{DEMO_FILE_SCHEMA_V1}`"
+            )));
+        }
+    }
+
+    if let Some(version) = raw.version {
+        if version != 1 {
+            return Err(DemoParseError::new(format!(
+                "unsupported demo manifest version `{version}`; expected `1`"
+            )));
+        }
+    }
+
+    let mut file = DemoFile {
+        schema: DEMO_FILE_SCHEMA_V1,
+        version: 1,
+        demos: Vec::new(),
+    };
+
+    for (demo_index, raw_demo) in raw.demos.into_iter().enumerate() {
+        file.demos.push(convert_raw_demo(demo_index, raw_demo)?);
+    }
+
+    let validation_errors = validate_demo_file(&file);
+    if !validation_errors.is_empty() {
+        let messages = validation_errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(DemoParseError::new(format!(
+            "demo.yaml validation failed: {messages}"
+        )));
+    }
+
+    Ok(file)
+}
+
+fn convert_raw_demo(
+    demo_index: usize,
+    raw_demo: RawDemoEntry,
+) -> Result<DemoEntry, DemoParseError> {
+    let raw_id = required_field(raw_demo.id, "demo id", demo_index, None)?;
+    let id = raw_id.parse::<DemoId>().map_err(|error| {
+        DemoParseError::new(format!(
+            "invalid demo id `{raw_id}` at demos[{demo_index}]: {error}"
+        ))
+    })?;
+    let title = required_field(raw_demo.title, "demo title", demo_index, None)?;
+    let description = raw_demo.description.unwrap_or_default();
+    let mut entry = DemoEntry::new(id, title, description);
+
+    if let Some(raw_claim_id) = raw_demo.claim_id {
+        let claim_id = raw_claim_id.parse::<ClaimId>().map_err(|error| {
+            DemoParseError::new(format!(
+                "invalid claim id `{raw_claim_id}` at demos[{demo_index}]: {error}"
+            ))
+        })?;
+        entry.claim_id = Some(claim_id);
+    }
+
+    entry.env_overrides = raw_demo.env_overrides;
+    entry.tags = raw_demo.tags;
+    entry.platforms = raw_demo.platforms;
+    entry.min_ee_version = raw_demo.min_ee_version;
+    entry.ci_enabled = raw_demo.ci_enabled;
+    entry.total_timeout_ms = raw_demo.total_timeout_ms;
+
+    for (command_index, raw_command) in raw_demo.commands.into_iter().enumerate() {
+        entry
+            .commands
+            .push(convert_raw_command(demo_index, command_index, raw_command)?);
+    }
+
+    Ok(entry)
+}
+
+fn convert_raw_command(
+    demo_index: usize,
+    command_index: usize,
+    raw_command: RawDemoCommand,
+) -> Result<DemoCommand, DemoParseError> {
+    let command = required_field(
+        raw_command.command,
+        "demo command",
+        demo_index,
+        Some(command_index),
+    )?;
+    let stdout_verification = parse_optional_verification(
+        raw_command.stdout_verification,
+        "stdoutVerification",
+        demo_index,
+        command_index,
+    )?;
+    let stderr_verification = parse_optional_verification(
+        raw_command.stderr_verification,
+        "stderrVerification",
+        demo_index,
+        command_index,
+    )?;
+
+    let mut converted = DemoCommand::new(command)
+        .with_timeout_ms(raw_command.timeout_ms)
+        .with_expected_exit_code(raw_command.expected_exit_code);
+    converted.cwd = raw_command.cwd;
+    converted.expected_stdout_schema = raw_command.expected_stdout_schema;
+    converted.expected_stderr_contains = raw_command.expected_stderr_contains;
+    converted.expected_stderr_excludes = raw_command.expected_stderr_excludes;
+    converted.expected_stdout_contains = raw_command.expected_stdout_contains;
+    converted.expected_stdout_excludes = raw_command.expected_stdout_excludes;
+    converted.stdout_verification = stdout_verification;
+    converted.stderr_verification = stderr_verification;
+    converted.description = raw_command.description;
+
+    if converted.expected_stdout_schema.is_some() {
+        converted.stdout_verification = OutputVerification::Schema;
+    }
+
+    for raw_artifact in raw_command.artifact_outputs {
+        converted.artifact_outputs.push(convert_raw_artifact(
+            demo_index,
+            command_index,
+            raw_artifact,
+        )?);
+    }
+
+    Ok(converted)
+}
+
+fn convert_raw_artifact(
+    demo_index: usize,
+    command_index: usize,
+    raw_artifact: RawDemoArtifactOutput,
+) -> Result<DemoArtifactOutput, DemoParseError> {
+    let path = required_field(
+        raw_artifact.path,
+        "artifact output path",
+        demo_index,
+        Some(command_index),
+    )?;
+    let mut artifact = DemoArtifactOutput::new(path);
+    artifact.blake3_hash = raw_artifact.blake3_hash;
+    artifact.size_bytes = raw_artifact.size_bytes;
+    artifact.optional = raw_artifact.optional;
+    Ok(artifact)
+}
+
+fn required_field(
+    value: Option<String>,
+    field_name: &str,
+    demo_index: usize,
+    command_index: Option<usize>,
+) -> Result<String, DemoParseError> {
+    let value = value.unwrap_or_default();
+    if value.trim().is_empty() {
+        let location = match command_index {
+            Some(index) => format!("demos[{demo_index}].commands[{index}]"),
+            None => format!("demos[{demo_index}]"),
+        };
+        return Err(DemoParseError::new(format!(
+            "missing {field_name} at {location}"
+        )));
+    }
+    Ok(value)
+}
+
+fn parse_optional_verification(
+    value: Option<String>,
+    field_name: &str,
+    demo_index: usize,
+    command_index: usize,
+) -> Result<OutputVerification, DemoParseError> {
+    let Some(value) = value else {
+        return Ok(OutputVerification::None);
+    };
+    value.parse::<OutputVerification>().map_err(|error| {
+        DemoParseError::new(format!(
+            "invalid {field_name} `{value}` at demos[{demo_index}].commands[{command_index}]: {error}"
+        ))
+    })
 }
 
 /// An artifact output produced by a demo command.
@@ -609,7 +909,8 @@ impl DemoRunResult {
         self.completed_at = Some(completed_at.into());
         self.total_elapsed_ms = total_elapsed_ms;
 
-        let all_passed = self.command_results.iter().all(|r| r.all_passed());
+        let all_passed =
+            !self.command_results.is_empty() && self.command_results.iter().all(|r| r.all_passed());
         self.status = if all_passed {
             DemoStatus::Passed
         } else {
@@ -617,12 +918,12 @@ impl DemoRunResult {
         };
 
         if !all_passed {
-            let first_failure = self
+            self.error_summary = self
                 .command_results
                 .iter()
                 .find(|r| !r.all_passed())
-                .and_then(|r| r.error.clone());
-            self.error_summary = first_failure;
+                .and_then(|r| r.error.clone())
+                .or_else(|| Some("Demo completed without command results".to_string()));
         }
     }
 
@@ -672,6 +973,10 @@ pub enum DemoValidationErrorKind {
     DuplicateDemoId,
     /// Invalid blake3 hash format.
     InvalidBlake3Hash,
+    /// Artifact path is absolute or escapes the artifact root.
+    InvalidArtifactPath,
+    /// Artifact output has no expected hash or size predicate.
+    MissingArtifactVerification,
     /// Invalid schema reference.
     InvalidSchemaReference,
 }
@@ -687,6 +992,8 @@ impl DemoValidationErrorKind {
             Self::InvalidTimeout => "invalid_timeout",
             Self::DuplicateDemoId => "duplicate_demo_id",
             Self::InvalidBlake3Hash => "invalid_blake3_hash",
+            Self::InvalidArtifactPath => "invalid_artifact_path",
+            Self::MissingArtifactVerification => "missing_artifact_verification",
             Self::InvalidSchemaReference => "invalid_schema_reference",
         }
     }
@@ -797,6 +1104,31 @@ pub fn validate_demo_file(file: &DemoFile) -> Vec<DemoValidationError> {
             }
 
             for artifact in &cmd.artifact_outputs {
+                if !is_valid_demo_artifact_path(&artifact.path) {
+                    errors.push(
+                        DemoValidationError::new(
+                            DemoValidationErrorKind::InvalidArtifactPath,
+                            format!("Invalid artifact path: {}", artifact.path),
+                        )
+                        .with_demo_id(&demo_id_str)
+                        .with_command_index(i),
+                    );
+                }
+
+                if artifact.blake3_hash.is_none() && artifact.size_bytes.is_none() {
+                    errors.push(
+                        DemoValidationError::new(
+                            DemoValidationErrorKind::MissingArtifactVerification,
+                            format!(
+                                "Artifact output must declare blake3 hash or size: {}",
+                                artifact.path
+                            ),
+                        )
+                        .with_demo_id(&demo_id_str)
+                        .with_command_index(i),
+                    );
+                }
+
                 if let Some(ref hash) = artifact.blake3_hash {
                     if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
                         errors.push(
@@ -826,39 +1158,54 @@ pub fn validate_demo_file(file: &DemoFile) -> Vec<DemoValidationError> {
     errors
 }
 
+#[must_use]
+pub fn is_valid_demo_artifact_path(path: &str) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed != path {
+        return false;
+    }
+    if path
+        .chars()
+        .any(|ch| ch == '\\' || ch == ':' || ch.is_control())
+    {
+        return false;
+    }
+    let mut has_normal_component = false;
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(_) => has_normal_component = true,
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir => return false,
+        }
+    }
+    has_normal_component
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn test_demo_id() -> DemoId {
-        DemoId::from_str("demo_00000000000000000000000001")
-            .unwrap_or_else(|error| panic!("valid demo id fixture: {error}"))
+        DemoId::from_uuid(uuid::Uuid::nil())
     }
 
     fn test_claim_id() -> ClaimId {
-        ClaimId::from_str("claim_00000000000000000000000001")
-            .unwrap_or_else(|error| panic!("valid claim id fixture: {error}"))
+        ClaimId::from_uuid(uuid::Uuid::nil())
     }
 
     #[test]
     fn demo_status_roundtrip() {
         for status in DemoStatus::all() {
-            let parsed: DemoStatus = status
-                .as_str()
-                .parse()
-                .unwrap_or_else(|error| panic!("status roundtrip fixture parses: {error}"));
-            assert_eq!(status, parsed);
+            let parsed = status.as_str().parse::<DemoStatus>();
+            assert_eq!(parsed, Ok(status));
         }
     }
 
     #[test]
     fn output_verification_roundtrip() {
         for verification in OutputVerification::all() {
-            let parsed: OutputVerification =
-                verification.as_str().parse().unwrap_or_else(|error| {
-                    panic!("output verification roundtrip fixture parses: {error}")
-                });
-            assert_eq!(verification, parsed);
+            let parsed = verification.as_str().parse::<OutputVerification>();
+            assert_eq!(parsed, Ok(verification));
         }
     }
 
@@ -976,6 +1323,20 @@ mod tests {
     }
 
     #[test]
+    fn demo_run_result_empty_completion_fails() {
+        let mut result = DemoRunResult::new(test_demo_id(), "2026-05-01T00:00:00Z");
+        result.complete("2026-05-01T00:00:01Z", 1000);
+
+        assert_eq!(result.status, DemoStatus::Failed);
+        assert_eq!(result.passed_count(), 0);
+        assert_eq!(result.failed_count(), 0);
+        assert_eq!(
+            result.error_summary,
+            Some("Demo completed without command results".to_string())
+        );
+    }
+
+    #[test]
     fn demo_run_result_timeout() {
         let mut result = DemoRunResult::new(test_demo_id(), "2026-05-01T00:00:00Z");
         result.timeout("2026-05-01T00:05:00Z", 300_000);
@@ -1053,6 +1414,61 @@ mod tests {
         let errors = validate_demo_file(&file);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].kind, DemoValidationErrorKind::InvalidBlake3Hash);
+    }
+
+    #[test]
+    fn validate_demo_file_rejects_unsafe_artifact_paths() {
+        for path in [
+            "",
+            ".",
+            "/tmp/out.txt",
+            "../out.txt",
+            "nested/../out.txt",
+            r"..\out.txt",
+            r"C:\tmp\out.txt",
+            r"nested\out.txt",
+            "out.txt:ads",
+            " out.txt",
+            "out.txt ",
+        ] {
+            let file = DemoFile::new().with_demo(
+                DemoEntry::new(test_demo_id(), "Test", "Description").with_command(
+                    DemoCommand::new("echo hello")
+                        .with_artifact_output(DemoArtifactOutput::new(path).with_size_bytes(1)),
+                ),
+            );
+
+            let errors = validate_demo_file(&file);
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].kind, DemoValidationErrorKind::InvalidArtifactPath);
+        }
+
+        let file = DemoFile::new().with_demo(
+            DemoEntry::new(test_demo_id(), "Test", "Description").with_command(
+                DemoCommand::new("echo hello").with_artifact_output(
+                    DemoArtifactOutput::new("./nested/out.txt").with_size_bytes(1),
+                ),
+            ),
+        );
+
+        assert!(validate_demo_file(&file).is_empty());
+    }
+
+    #[test]
+    fn validate_demo_file_rejects_artifacts_without_verification_predicate() {
+        let file = DemoFile::new().with_demo(
+            DemoEntry::new(test_demo_id(), "Test", "Description").with_command(
+                DemoCommand::new("echo hello")
+                    .with_artifact_output(DemoArtifactOutput::new("out.txt")),
+            ),
+        );
+
+        let errors = validate_demo_file(&file);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].kind,
+            DemoValidationErrorKind::MissingArtifactVerification
+        );
     }
 
     #[test]

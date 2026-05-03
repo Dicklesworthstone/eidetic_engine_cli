@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
+use clap::Parser;
+use ee::cli::Cli;
 use serde_json::{Map, Value};
 
 type TestResult = Result<(), String>;
@@ -286,6 +288,28 @@ fn accepted_default_rows_do_not_admit_forbidden_transitives() -> TestResult {
         }
     }
 
+    Ok(())
+}
+
+#[test]
+fn dependency_diagnostic_commands_parse_on_current_cli_surface() -> TestResult {
+    let matrix = load_matrix()?;
+    let root = object(&matrix, "matrix root")?;
+    for (index, entry) in array(root, "entries")?.iter().enumerate() {
+        let entry = object(entry, &format!("entries[{index}]"))?;
+        let name = string(entry, "name")?;
+        let diagnostic_command = string(entry, "diagnostic_command")?;
+        let args: Vec<&str> = diagnostic_command.split_whitespace().collect();
+        ensure(
+            args.first() == Some(&"ee"),
+            format!("dependency `{name}` diagnostic command must start with `ee`"),
+        )?;
+        Cli::try_parse_from(args).map_err(|error| {
+            format!(
+                "dependency `{name}` diagnostic command `{diagnostic_command}` no longer parses: {error}"
+            )
+        })?;
+    }
     Ok(())
 }
 

@@ -425,9 +425,9 @@ fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
         "--dry-run",
     ])?;
     ensure(
-        run.status.code() == Some(7),
+        run.status.success(),
         format!(
-            "learn experiment run dry-run should report degraded unavailable exit 7, got {:?}",
+            "learn experiment run dry-run should succeed, got {:?}",
             run.status.code()
         ),
     )?;
@@ -442,18 +442,14 @@ fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
         .map_err(|error| format!("learn experiment run stdout must be JSON: {error}"))?;
     ensure_json_equal(
         run_value.get("schema"),
-        JsonValue::String("ee.response.v1".to_string()),
+        JsonValue::String("ee.learn.experiment_run.v1".to_string()),
         "run schema",
     )?;
+    ensure_json_equal(run_value.get("dryRun"), JsonValue::Bool(true), "run dryRun")?;
     ensure_json_equal(
-        run_value.get("success"),
-        JsonValue::Bool(false),
-        "run success",
-    )?;
-    ensure_json_equal(
-        run_value.pointer("/data/code"),
-        JsonValue::String("learning_records_unavailable".to_string()),
-        "run degraded code",
+        run_value.get("status"),
+        JsonValue::String("dry_run".to_string()),
+        "run status",
     )?;
 
     let observe = run_ee(&[

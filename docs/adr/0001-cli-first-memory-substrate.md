@@ -32,7 +32,7 @@ out of scope.
 - FastAPI or web service as the primary product.
 - MCP as the only or central interface.
 - Always-on memory steward required for core commands.
-- Agent master loop that directs tool use or task planning.
+- Agent control loop that directs tool use or task planning.
 
 ## Verification
 
@@ -41,4 +41,3 @@ out of scope.
 - Machine-facing commands assert stdout-only data and stderr-only diagnostics.
 - MCP and future server tests prove adapter parity with CLI schemas instead of
   defining independent behavior.
-

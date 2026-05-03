@@ -179,7 +179,7 @@ impl CassImportError {
             Self::CassCommand { .. } => Some("run cass health --json"),
             Self::InvalidJson { .. } => Some("run cass api-version --json and cass doctor --json"),
             Self::Io { .. } => Some("check workspace and database path permissions"),
-            Self::Storage(_) => Some("ee db migrate --workspace ."),
+            Self::Storage(_) => Some("ee init --workspace . --repair-plan"),
         }
     }
 }

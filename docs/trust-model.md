@@ -138,7 +138,7 @@ trust; it only reports whether local signing is required for authoritative use.
   degraded capabilities, stable ordering, and a reproducible pack hash.
 - `ee why <memory-id> --json` must explain storage source, retrieval score,
   trust class, confidence, utility, pack selection, and audit history.
-- `ee outcome --memory <id> --helpful|--harmful --json` changes evidence and
+- `ee outcome <id> --signal helpful|harmful --json` changes evidence and
   utility, not trust class by itself.
 - `ee curate candidates --json` is where promotion, demotion, quarantine,
   supersession, and consolidation become explicit review items.

@@ -9,7 +9,7 @@
       "description": "Semantic search unavailable",
       "behavior_change": "Falling back to lexical (BM25) search only",
       "auto_recoverable": true,
-      "repair": "ee search --lexical-only"
+      "repair": "ee index reembed --dry-run"
     },
     {
       "id": "D002",
@@ -45,7 +45,7 @@
       "description": "Database is in read-only mode",
       "behavior_change": "Write operations will fail; reads work normally",
       "auto_recoverable": false,
-      "repair": "ee db unlock"
+      "repair": "ee doctor --fix-plan --json"
     },
     {
       "id": "D101",
@@ -54,7 +54,7 @@
       "description": "WAL mode not enabled",
       "behavior_change": "Reduced concurrent read performance",
       "auto_recoverable": false,
-      "repair": "ee db optimize"
+      "repair": "ee init --workspace . --repair-plan --json"
     },
     {
       "id": "D102",
@@ -63,7 +63,7 @@
       "description": "Database size exceeds recommended threshold",
       "behavior_change": "Some operations may be slower",
       "auto_recoverable": false,
-      "repair": "ee steward compact"
+      "repair": "ee doctor --fix-plan --json"
     },
     {
       "id": "D200",
@@ -99,7 +99,7 @@
       "description": "Graph snapshot is stale",
       "behavior_change": "Graph metrics may not reflect recent changes",
       "auto_recoverable": true,
-      "repair": "ee graph rebuild"
+      "repair": "ee graph centrality-refresh"
     },
     {
       "id": "D301",
@@ -108,7 +108,7 @@
       "description": "Graph metrics not computed",
       "behavior_change": "Related memories and why explanations limited",
       "auto_recoverable": true,
-      "repair": "ee graph rebuild"
+      "repair": "ee graph centrality-refresh"
     },
     {
       "id": "D400",
@@ -135,7 +135,7 @@
       "description": "Curation candidate queue is full",
       "behavior_change": "New candidates will be dropped until reviewed",
       "auto_recoverable": false,
-      "repair": "ee curate review"
+      "repair": "ee curate candidates --all --json"
     },
     {
       "id": "D501",
@@ -144,7 +144,7 @@
       "description": "Automatic curation disabled",
       "behavior_change": "Rules will not auto-promote; manual review required",
       "auto_recoverable": false,
-      "repair": "ee config set curate.auto_promote true"
+      "repair": "ee curate candidates --json"
     },
     {
       "id": "D600",
@@ -153,7 +153,7 @@
       "description": "Policy file not loaded",
       "behavior_change": "Default policies in effect; custom rules ignored",
       "auto_recoverable": false,
-      "repair": "ee policy validate"
+      "repair": "ee doctor --fix-plan --json"
     },
     {
       "id": "D601",
@@ -162,7 +162,7 @@
       "description": "Redaction patterns may be outdated",
       "behavior_change": "Some sensitive data may not be caught",
       "auto_recoverable": false,
-      "repair": "ee policy update"
+      "repair": "ee doctor --fix-plan --json"
     },
     {
       "id": "D700",

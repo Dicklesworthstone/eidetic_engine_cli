@@ -24,7 +24,7 @@ use std::io::{BufRead, BufReader, Write};
 use serde_json::{Value, json};
 
 use crate::core::agent_docs::AgentDocsTopic;
-use crate::models::ProcessExitCode;
+use crate::models::{ContextProfileName, ProcessExitCode};
 pub use crate::output::MCP_PROTOCOL_VERSION;
 use crate::output::public_schemas;
 
@@ -307,10 +307,23 @@ fn prompt_optional_bool(arguments: &Value, names: &[&str]) -> Result<bool, Strin
     optional_bool(arguments, names)
 }
 
+fn parse_mcp_context_profile(value: &str) -> Result<&'static str, String> {
+    ContextProfileName::parse(value)
+        .map(ContextProfileName::as_str)
+        .ok_or_else(|| {
+            format!(
+                "Invalid context profile '{value}'. Expected compact, balanced, thorough, or submodular."
+            )
+        })
+}
+
 fn render_pre_task_context_prompt(arguments: &Value) -> Result<String, String> {
     let task = prompt_required_string(arguments, &["task"])?;
     let workspace = prompt_optional_string(arguments, &["workspace"])?.unwrap_or(".");
-    let profile = prompt_optional_string(arguments, &["profile"])?.unwrap_or("balanced");
+    let profile = prompt_optional_string(arguments, &["profile"])?
+        .map(parse_mcp_context_profile)
+        .transpose()?
+        .unwrap_or("balanced");
     let max_tokens = optional_u32(arguments, &["maxTokens", "max_tokens"])?
         .map_or_else(|| "4000".to_string(), |value| value.to_string());
 
@@ -606,7 +619,8 @@ fn handle_tools_list(id: Value) -> Value {
                             },
                             "profile": {
                                 "type": "string",
-                                "description": "Context profile"
+                                "description": "Context profile",
+                                "enum": ["compact", "balanced", "thorough", "submodular"]
                             },
                             "database": {
                                 "type": "string",
@@ -1034,7 +1048,7 @@ fn build_cli_args_for_tool(tool: McpTool, arguments: &Value) -> Result<Vec<OsStr
             }
             if let Some(profile) = optional_string(arguments, &["profile"])? {
                 push_arg(&mut args, "--profile");
-                push_arg(&mut args, profile);
+                push_arg(&mut args, parse_mcp_context_profile(profile)?);
             }
             append_optional_path_flag(&mut args, arguments, &["database"], "--database")?;
             append_optional_path_flag(
@@ -1872,6 +1886,29 @@ mod tests {
     }
 
     #[test]
+    fn handle_prompts_get_pre_task_context_rejects_invalid_profile() -> Result<(), String> {
+        let response = handle_prompts_get(
+            json!(1),
+            Some(&json!({
+                "name": "pre-task-context",
+                "arguments": {
+                    "task": "prepare release",
+                    "profile": "release"
+                }
+            })),
+        );
+        let Some(error) = response.get("error") else {
+            return Err("pre-task-context invalid profile response missing error".to_string());
+        };
+        assert_eq!(error.get("code").and_then(Value::as_i64), Some(-32602));
+        let Some(message) = error.get("message").and_then(Value::as_str) else {
+            return Err("pre-task-context invalid profile response missing message".to_string());
+        };
+        assert!(message.contains("Invalid context profile 'release'"));
+        Ok(())
+    }
+
+    #[test]
     fn handle_prompts_get_record_lesson_requires_lesson() -> Result<(), String> {
         let response = handle_prompts_get(
             json!(1),
@@ -2241,7 +2278,7 @@ mod tests {
                 "query": "prepare release",
                 "maxTokens": u32::MAX,
                 "candidatePool": 250,
-                "profile": "release"
+                "profile": "thorough"
             }),
         )?)?;
 
@@ -2259,7 +2296,30 @@ mod tests {
             .ok_or_else(|| "context args missing --candidate-pool".to_string())?;
         assert_eq!(args.get(candidate_pool_index + 1), Some(&candidate_pool));
         assert!(args.contains(&"--profile".to_string()));
-        assert!(args.contains(&"release".to_string()));
+        assert!(args.contains(&"thorough".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn handle_tools_call_context_rejects_invalid_profile_before_cli() -> Result<(), String> {
+        let response = handle_tools_call(
+            json!(1),
+            Some(&json!({
+                "name": "ee_context",
+                "arguments": {
+                    "query": "prepare release",
+                    "profile": "release"
+                }
+            })),
+        );
+        let Some(error) = response.get("error") else {
+            return Err("context invalid profile response missing error".to_string());
+        };
+        assert_eq!(error.get("code").and_then(Value::as_i64), Some(-32602));
+        let Some(message) = error.get("message").and_then(Value::as_str) else {
+            return Err("context invalid profile response missing message".to_string());
+        };
+        assert!(message.contains("Invalid context profile 'release'"));
         Ok(())
     }
 

@@ -284,7 +284,7 @@ fn json_handles_very_long_error_message() -> TestResult {
 fn unavailable_feature_produces_degradation_code() -> TestResult {
     let error = DomainError::UnsatisfiedDegradedMode {
         message: "Semantic search requires embedding model".to_string(),
-        repair: Some("ee search --lexical-only".to_string()),
+        repair: Some("ee index reembed --dry-run".to_string()),
     };
     let json = error_response_json(&error);
 
@@ -295,7 +295,7 @@ fn unavailable_feature_produces_degradation_code() -> TestResult {
     )?;
     ensure_contains(
         &json,
-        "\"repair\":\"ee search --lexical-only\"",
+        "\"repair\":\"ee index reembed --dry-run\"",
         "repair hint",
     )
 }
@@ -304,24 +304,28 @@ fn unavailable_feature_produces_degradation_code() -> TestResult {
 fn policy_denied_produces_stable_error() -> TestResult {
     let error = DomainError::PolicyDenied {
         message: "Operation blocked by retention policy".to_string(),
-        repair: Some("ee policy review".to_string()),
+        repair: Some("ee doctor --fix-plan --json".to_string()),
     };
     let json = error_response_json(&error);
 
     ensure_contains(&json, "\"code\":\"policy_denied\"", "error code")?;
-    ensure_contains(&json, "\"repair\":\"ee policy review\"", "repair hint")
+    ensure_contains(
+        &json,
+        "\"repair\":\"ee doctor --fix-plan --json\"",
+        "repair hint",
+    )
 }
 
 #[test]
 fn migration_required_produces_stable_error() -> TestResult {
     let error = DomainError::MigrationRequired {
         message: "Database schema version 3 requires migration".to_string(),
-        repair: Some("ee db migrate".to_string()),
+        repair: Some("ee init --workspace .".to_string()),
     };
     let json = error_response_json(&error);
 
     ensure_contains(&json, "\"code\":\"migration_required\"", "error code")?;
-    ensure_contains(&json, "\"repair\":\"ee db migrate\"", "repair hint")
+    ensure_contains(&json, "\"repair\":\"ee init --workspace .\"", "repair hint")
 }
 
 #[test]
@@ -449,7 +453,7 @@ fn all_domain_error_variants_produce_valid_toon() -> TestResult {
         },
         DomainError::Configuration {
             message: "test".to_string(),
-            repair: Some("ee config validate".to_string()),
+            repair: Some("ee doctor --fix-plan".to_string()),
         },
         DomainError::Storage {
             message: "test".to_string(),
@@ -461,16 +465,16 @@ fn all_domain_error_variants_produce_valid_toon() -> TestResult {
         },
         DomainError::Graph {
             message: "test".to_string(),
-            repair: Some("ee graph rebuild".to_string()),
+            repair: Some("ee graph centrality-refresh --dry-run".to_string()),
         },
         DomainError::Import {
             message: "test".to_string(),
-            repair: Some("ee import --dry-run".to_string()),
+            repair: Some("ee import cass --dry-run".to_string()),
         },
         DomainError::NotFound {
             resource: "item".to_string(),
             id: "123".to_string(),
-            repair: Some("ee list".to_string()),
+            repair: Some("ee memory list".to_string()),
         },
         DomainError::UnsatisfiedDegradedMode {
             message: "test".to_string(),
@@ -478,11 +482,11 @@ fn all_domain_error_variants_produce_valid_toon() -> TestResult {
         },
         DomainError::PolicyDenied {
             message: "test".to_string(),
-            repair: Some("ee policy review".to_string()),
+            repair: Some("ee doctor --fix-plan".to_string()),
         },
         DomainError::MigrationRequired {
             message: "test".to_string(),
-            repair: Some("ee db migrate".to_string()),
+            repair: Some("ee init --workspace .".to_string()),
         },
     ];
 

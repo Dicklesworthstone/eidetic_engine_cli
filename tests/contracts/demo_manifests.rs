@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use ee::models::{
     ClaimId, DEMO_FILE_SCHEMA_V1, DemoArtifactOutput, DemoCommand, DemoEntry, DemoFile, DemoId,
-    validate_demo_file,
+    parse_demo_file_yaml, validate_demo_file,
 };
 
 type TestResult = Result<(), String>;
@@ -87,6 +87,124 @@ fn gate14_demo_manifest_links_each_demo_to_claim_id() -> TestResult {
         .ok_or_else(|| "one demo fixture is present".to_string())?;
     ensure(file.demo_count() == 1, "one demo fixture")?;
     ensure(demo.claim_id.is_some(), "demo links to a claim")
+}
+
+#[test]
+fn gate14_demo_yaml_parses_to_typed_manifest() -> TestResult {
+    let stdout_hash = "a".repeat(64);
+    let yaml = format!(
+        "\
+schema: ee.demo_file.v1
+version: 1
+demos:
+  - id: demo_00000000000000000000000001
+    claim_id: claim_00000000000000000000000001
+    title: Release context demo
+    description: Verifies release context output against the executable claim.
+    tags:
+      - release
+      - gate14
+    commands:
+      - command: 'ee context \"prepare release\" --workspace . --json'
+        expected_stdout_schema: ee.response.v1
+        expected_stdout_contains:
+          - '\"command\":\"context\"'
+        artifact_outputs:
+          - path: stdout.json
+            blake3_hash: {stdout_hash}
+"
+    );
+
+    let file = parse_demo_file_yaml(&yaml).map_err(|error| error.to_string())?;
+    let demo = file
+        .demos
+        .first()
+        .ok_or_else(|| "parsed demo is present".to_string())?;
+    ensure(file.schema == DEMO_FILE_SCHEMA_V1, "schema is stable")?;
+    ensure(demo.claim_id.is_some(), "parsed demo links to a claim")?;
+    ensure(demo.commands.len() == 1, "parsed demo has one command")?;
+    let command = demo
+        .commands
+        .first()
+        .ok_or_else(|| "parsed command is present".to_string())?;
+    ensure(
+        command.artifact_outputs.len() == 1,
+        "parsed command has one artifact output",
+    )
+}
+
+#[test]
+fn gate14_demo_yaml_rejects_unsupported_manifest_version() -> TestResult {
+    let yaml = "\
+schema: ee.demo_file.v1
+version: 2
+demos:
+  - id: demo_00000000000000000000000001
+    title: Unsupported version
+    commands:
+      - command: \"ee status --json\"
+";
+
+    let error = parse_demo_file_yaml(yaml)
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+    ensure(
+        error == Err("unsupported demo manifest version `2`; expected `1`".to_string()),
+        "unsupported demo manifest versions must fail explicitly",
+    )
+}
+
+#[test]
+fn gate14_demo_yaml_rejects_nonportable_artifact_paths() -> TestResult {
+    let yaml = r#"
+schema: ee.demo_file.v1
+version: 1
+demos:
+  - id: demo_00000000000000000000000001
+    title: Nonportable artifact path
+    commands:
+      - command: "ee status --json"
+        artifact_outputs:
+          - path: '..\out.txt'
+"#;
+
+    let error = parse_demo_file_yaml(yaml)
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+    ensure(
+        error.is_err_and(|message| {
+            message.contains("demo.yaml validation failed")
+                && message.contains("invalid_artifact_path")
+                && message.contains(r"..\out.txt")
+        }),
+        "nonportable artifact paths must fail manifest parsing",
+    )
+}
+
+#[test]
+fn gate14_demo_yaml_requires_artifact_verification_predicate() -> TestResult {
+    let yaml = "\
+schema: ee.demo_file.v1
+version: 1
+demos:
+  - id: demo_00000000000000000000000001
+    title: Missing artifact predicate
+    commands:
+      - command: \"ee status --json\"
+        artifact_outputs:
+          - path: stdout.json
+";
+
+    let error = parse_demo_file_yaml(yaml)
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+    ensure(
+        error.is_err_and(|message| {
+            message.contains("demo.yaml validation failed")
+                && message.contains("missing_artifact_verification")
+        }),
+        "artifact outputs must declare hash or size evidence",
+    )
 }
 
 #[test]

@@ -577,7 +577,7 @@ semantic_weight = 0.45
 graph_weight = 0.10
 
 [pack]
-default_profile = "default"
+default_profile = "balanced"
 default_format = "markdown"
 default_max_tokens = 4000
 mmr_lambda = 0.7
@@ -626,6 +626,11 @@ prompt_injection_guard = true
             "search speed",
         )?;
         ensure_equal(&config.search.lexical_weight, &Some(0.45), "lexical weight")?;
+        ensure_equal(
+            &config.pack.default_profile.as_deref(),
+            &Some("balanced"),
+            "pack default profile",
+        )?;
         ensure_equal(
             &config.pack.default_format.as_deref(),
             &Some("markdown"),

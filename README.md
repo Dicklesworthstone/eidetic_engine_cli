@@ -48,7 +48,7 @@ It returns a Markdown pack of project release rules, prior release incidents fro
 | **Anti-patterns first-class** | Trauma-guard surfaces high-severity risk memories before destructive actions |
 | **Graph-aware** | PageRank, communities, shortest paths, and link prediction over memory/session/decision graphs |
 | **CASS session import** | Mines your existing `cass` corpus (Claude Code, Codex, Cursor, Gemini, ChatGPT) for evidence |
-| **Context profiles** | `release`, `debug`, `onboarding`, `refactor`, `security`, and more, each with its own quota mix |
+| **Context profiles** | `compact`, `balanced`, `thorough`, and `submodular` quota/objective mixes |
 | **Local-first** | No cloud. No paid LLM APIs required. Embeddings run locally through Frankensearch |
 | **Stable JSON contract** | Every machine-facing command emits versioned JSON with `schema` field and `data_hash` |
 | **Deterministic** | Same DB + indexes + config + query → identical pack hash |
@@ -72,13 +72,13 @@ $ ee init --workspace .
 
 # 2. Capture a durable rule you just learned
 $ ee remember --workspace . --level procedural --kind rule \
-    --tag rust --tag ci \
+    --tags rust,ci \
     "This project treats clippy warnings as errors with pedantic and nursery enabled."
 ✓ memory mem_01HQ3K5Z stored (procedural · rule · confidence 0.55)
 ✓ indexed in 14ms
 
 # 3. Pull session evidence from your cass history
-$ ee import cass --workspace . --since 30d --json | jq '.summary'
+$ ee import cass --workspace . --limit 50 --json | jq '.summary'
 {
   "sessions_imported": 47,
   "evidence_spans": 312,
@@ -87,7 +87,7 @@ $ ee import cass --workspace . --since 30d --json | jq '.summary'
 }
 
 # 4. Ask for context before working
-$ ee context "fix the failing release workflow" --workspace . --profile release
+$ ee context "fix the failing release workflow" --workspace . --profile thorough
 ## Project Rules
 - Run `cargo fmt --check` before tagging  (mem_01HQ3K5Z · confidence 0.71)
 - Push release changes to main after verification  (mem_01HPCC3T · confidence 0.92)
@@ -117,7 +117,7 @@ $ ee why mem_01HPCC3T --json | jq '.score_components'
 }
 
 # 6. Record that the rule helped
-$ ee outcome --memory mem_01HQ3K5Z --helpful --note "Caught a clippy regression"
+$ ee outcome mem_01HQ3K5Z --signal helpful --reason "Caught a clippy regression"
 ✓ utility +0.08 → confidence 0.63
 ```
 
@@ -275,19 +275,19 @@ ee doctor --json
 ee init --workspace .
 
 # 2. Optionally seed from your cass history (recommended once)
-ee import cass --workspace . --since 90d
+ee import cass --workspace . --limit 50
 
 # 3. Get context for a task
 ee context "what should I know before refactoring the storage layer?" \
-  --workspace . --profile refactor --max-tokens 4000 --format markdown
+  --workspace . --profile thorough --max-tokens 4000 --format markdown
 
 # 4. When you learn something durable, capture it
 ee remember --workspace . --level procedural --kind rule \
-  --tag rust --tag testing \
+  --tags rust,testing \
   "Integration tests must hit a real Postgres instance, never a mock. See incident 2025-Q3."
 
 # 5. After a session, distill it
-ee review session --cass-session <session-id> --propose
+ee review session <session-id> --propose
 ee curate candidates --workspace .
 ee curate apply <candidate-id>
 
@@ -301,7 +301,7 @@ That's the core loop.
 
 ## Command Reference
 
-`ee` is organized into nine command groups. Run `ee <group> --help` for full details.
+`ee` is organized into core commands and command groups. Run `ee <command> --help` or `ee <group> --help` for full details.
 
 ### Core workflow
 
@@ -312,8 +312,8 @@ That's the core loop.
 | `ee doctor [--json]` | Health checks with repair commands for every failure |
 | `ee context "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the headline command) |
 | `ee search "<query>" [--limit N] [--explain] [--json]` | Hybrid retrieval over memories, sessions, rules, evidence |
-| `ee remember "<text>" --level <l> [--kind <k>] [--tag <t>]` | Capture a durable memory |
-| `ee outcome --memory <id> --helpful\|--harmful [--note "<note>"]` | Record feedback, updating utility/confidence |
+| `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b]` | Capture a durable memory |
+| `ee outcome <id> --signal helpful\|harmful [--reason "<reason>"]` | Record feedback, updating utility/confidence |
 | `ee why <memory-id> [--json]` | Explain why a memory was selected, scored, or curated the way it was |
 | `ee pack --query-file task.eeq.json --max-tokens N --format toon` | Build a pack from an explicit EQL query document |
 
@@ -321,74 +321,68 @@ That's the core loop.
 
 | Command | Purpose |
 |---|---|
-| `ee import cass --workspace . [--since 30d]` | Pull session evidence from `coding_agent_session_search` |
-| `ee import jsonl <file>` | Restore from a `ee export jsonl` archive |
+| `ee import cass --workspace . [--limit N] [--dry-run]` | Pull session evidence from `coding_agent_session_search` |
+| `ee import jsonl --source <file>` | Restore from a JSONL records file, including backup record exports |
 | `ee import eidetic-legacy --source <path> --dry-run` | One-time migration of legacy Eidetic Engine artifacts (read-only) |
 
 ### Curation & rules
 
 | Command | Purpose |
 |---|---|
-| `ee review session --cass-session <id> --propose` | Distill a session into proposed memories/rules |
+| `ee review session <id> --propose` | Distill a session into proposed memories/rules |
 | `ee curate candidates [--workspace .]` | List pending curation candidates |
 | `ee curate validate <id>` | Run validation (specificity, duplication, scope, evidence) |
 | `ee curate apply <id>` / `accept <id>` / `reject <id>` / `snooze <id>` / `merge <a> <b>` | Lifecycle transitions |
-| `ee curate retire <rule-id> --reason "..."` / `tombstone <id>` | Non-destructive removal |
-| `ee rule list` / `show <id>` / `add` / `update` / `mark <id> --as <state>` | Direct rule management |
+| `ee curate disposition --dry-run` | Evaluate TTL disposition policy without silent mutation |
+| `ee rule add` / `list` / `show <id>` / `protect <id>` | Direct rule management |
 
 ### Memory inspection
 
 | Command | Purpose |
 |---|---|
 | `ee memory show <id> [--json]` | Full record with provenance, links, audit trail |
-| `ee memory list [--workspace .] [--level <l>] [--kind <k>]` | Filtered listing |
-| `ee memory link <a> <b> --relation <r>` | Add a typed link between memories |
-| `ee memory tags <id> --add foo --remove bar` | Tag management |
-| `ee memory expire <id> [--reason "..."]` | Mark stale without deleting |
+| `ee memory list [--workspace .] [--level <l>] [--tag <t>]` | Filtered listing |
+| `ee memory history <id>` | Audit trail for a memory |
 
 ### Graph
 
 | Command | Purpose |
 |---|---|
-| `ee graph refresh [--workspace .]` | Rebuild graph snapshot from current DB |
-| `ee graph neighborhood <id> --hops N` | Expand around a memory/session/rule |
-| `ee graph centrality --kind memory` | PageRank / betweenness / eigenvector |
-| `ee graph communities` | Community detection with deterministic seeds |
-| `ee graph path <src> <dst>` | Shortest evidence path between two nodes |
-| `ee graph explain-link <src> <dst>` | Why these are connected, with witness |
+| `ee graph export [--workspace .]` | Export a deterministic graph snapshot artifact |
+| `ee graph neighborhood <id> [--direction both] [--limit N]` | Expand around a memory/session/rule |
+| `ee graph centrality-refresh [--dry-run]` | Refresh PageRank / betweenness metrics |
+| `ee graph feature-enrichment [--dry-run]` | Compute bounded graph-derived retrieval features |
 
 ### Index
 
 | Command | Purpose |
 |---|---|
-| `ee index status` / `rebuild` / `reembed` / `vacuum` | Manage derived search indexes (Frankensearch owns model selection) |
+| `ee index status` / `rebuild` / `reembed` | Manage derived search indexes (Frankensearch owns model selection) |
 
-### Workspace, profile, db
+### Workspace, models, schemas
 
 | Command | Purpose |
 |---|---|
-| `ee workspace resolve` / `list` / `alias <name>` | Identity, monorepo subscopes, forks, worktrees |
-| `ee profile list` / `show <name>` | Inspect built-in or user-defined context profiles |
-| `ee db status` / `migrate` / `check` / `backup` | Database lifecycle |
+| `ee workspace resolve` / `list` / `alias <name>` | Identity, monorepo subscopes, and aliases |
+| `ee model status` / `list` | Inspect embedding model registry posture |
+| `ee schema list` / `export <schema-id>` | Inspect stable machine-output schemas |
 
-### Backup, restore, export
+### Backup & restore
 
 | Command | Purpose |
 |---|---|
 | `ee backup create [--label <name>]` | Create a verified backup with manifest |
 | `ee backup list` / `verify <id>` / `inspect <id>` | Audit existing backups |
-| `ee restore <backup-id> --to <path>` | Side-path restore (never overwrites without explicit confirmation) |
-| `ee export jsonl > snapshot.jsonl` | Stream durable records to a portable JSONL file |
+| `ee backup restore <backup-id> --side-path <path>` | Restore into an isolated side path |
 
 ### Diagnostics, eval, ops
 
 | Command | Purpose |
 |---|---|
-| `ee eval run` / `report` | Run retrieval-quality evaluation on shipped fixtures |
+| `ee eval run` / `list` | Run or list retrieval-quality evaluation fixtures |
 | `ee analyze science-status --json` | Report optional science analytics feature posture and degradations |
-| `ee job list` / `show <id>` | Inspect indexing/import/steward jobs |
-| `ee daemon` | Optional supervised maintenance daemon |
-| `ee completion <shell>` | Generate shell completions |
+| `ee capabilities` / `check` / `health` | Inspect feature availability and readiness |
+| `ee daemon --foreground` | Optional supervised maintenance daemon |
 
 ---
 
@@ -420,7 +414,7 @@ import_batch_size = 200
 [cass]
 enabled = true
 binary  = "cass"                    # path or PATH lookup
-since   = "90d"                     # default --since for `ee import cass`
+since   = "90d"                     # CASS lookback for import planning and policies
 
 [search]
 default_speed   = "balanced"         # fast | balanced | thorough
@@ -429,7 +423,7 @@ semantic_weight = 0.45
 graph_weight    = 0.10
 
 [pack]
-default_profile  = "default"
+default_profile  = "balanced"
 default_format   = "markdown"
 default_max_tokens = 4000
 mmr_lambda       = 0.7
@@ -551,28 +545,14 @@ Every memory carries: `id`, `level`, `kind`, `content`, `content_hash`, `tags[]`
 
 ## Context Profiles
 
-Different tasks need different memory mixes. `--profile` shifts quotas and pinned sections without bypassing trust or privacy:
+Different tasks need different memory mixes. `--profile` currently selects one of the shipped context-packing profiles without bypassing trust or privacy:
 
 | Profile | Bias |
 |---|---|
-| `default` | Balanced rules, sessions, decisions, warnings |
-| `onboarding` | Project conventions, architecture, common commands, recent successful sessions |
-| `debug` | Similar failures, fixes, logs, test commands, error patterns |
-| `release` | Release rules, prior release incidents, verification checklists, branch/package warnings |
-| `review` | Coding standards, known bug classes, risky files, testing expectations |
-| `refactor` | Architecture decisions, invariants, coupling, previous refactor failures |
-| `security` | Secrets, auth, destructive actions, policy memories, high-severity warnings |
-| `performance` | Benchmarks, hot paths, previous optimization sessions, measurement rules |
-| `migration` | Dependency decisions, migration playbooks, compatibility traps |
-
-Define your own:
-
-```toml
-# ~/.config/ee/profiles/release-strict.toml
-extends = "release"
-quotas = { rules = 0.4, failures = 0.3, verification = 0.3 }
-pinned_sections = ["release", "branch_safety"]
-```
+| `compact` | Prioritizes procedural rules and known failure modes in a tight budget |
+| `balanced` | Default mix across rules, decisions, failures, evidence, and artifacts |
+| `thorough` | Expands evidence and artifact coverage for higher-recall work |
+| `submodular` | Uses the facility-location objective with thorough section quotas for deterministic diversity |
 
 ---
 
@@ -582,13 +562,13 @@ pinned_sections = ["release", "branch_safety"]
 
 ```bash
 # Discover what cass has
-ee import cass --workspace . --since 30d --dry-run --json
+ee import cass --workspace . --limit 50 --dry-run --json
 
 # Real import (idempotent, resumable, ledger-tracked)
-ee import cass --workspace . --since 30d
+ee import cass --workspace . --limit 50
 
 # Distill a single session into proposed memories
-ee review session --cass-session 7f4e --propose
+ee review session 7f4e --propose
 ```
 
 Required `cass` commands consumed (all with stable contracts):
@@ -617,8 +597,8 @@ When you discover a durable project convention:
   ee remember --workspace . --level procedural --kind rule "<rule>"
 
 After a remembered rule helps or harms:
-  ee outcome --memory <id> --helpful
-  ee outcome --memory <id> --harmful
+  ee outcome <id> --signal helpful
+  ee outcome <id> --signal harmful
 ```
 
 Or wire it into a PreToolUse hook that injects context before risky commands. The `ee context` JSON is stable and parseable.
@@ -633,10 +613,10 @@ Optional MCP adapter (feature-gated, off by default):
 
 ```bash
 cargo install ee --features mcp
-ee daemon --mcp-stdio
+ee mcp manifest --json
 ```
 
-Tools mirror the CLI: `ee_context`, `ee_search`, `ee_remember`, `ee_outcome`, `ee_curate_candidates`, `ee_memory_show`. Schemas match CLI JSON exactly; the CLI is the compatibility contract.
+The manifest mirrors the CLI contracts for tools such as `ee_context`, `ee_search`, `ee_remember`, `ee_outcome`, `ee_curate_candidates`, and `ee_memory_show`. Schemas match CLI JSON exactly; the CLI is the compatibility contract.
 
 ### Plain humans
 
@@ -690,8 +670,8 @@ ee backup list
 # Inspect contents without restoring
 ee backup inspect bk_01HQ4… --json
 
-# Restore to a side path (never overwrites without explicit --in-place)
-ee restore bk_01HQ4… --to ~/ee-restored/
+# Restore to an isolated side path
+ee backup restore bk_01HQ4… --side-path ~/ee-restored/
 ```
 
 Backups include the DB, the index manifest, the graph snapshot, the curation audit log, and a `manifest.json` with content hashes. Verification re-hashes everything on disk.
@@ -708,8 +688,8 @@ Measured on a 2024 MacBook Pro M3 against a workspace with 25 projects, 14k memo
 | `ee search "<q>"` (hybrid) | 38 ms | 110 ms |
 | `ee context "<task>"` (markdown, 4k tokens) | 95 ms | 240 ms |
 | `ee why <id>` | 6 ms | 14 ms |
-| `ee import cass --since 30d` (cold) | 4.1 s | 11 s |
-| `ee graph refresh` (full rebuild) | 2.3 s | 5.8 s |
+| `ee import cass --limit 50` (cold) | 4.1 s | 11 s |
+| `ee graph centrality-refresh` (full refresh) | 2.3 s | 5.8 s |
 | `ee index rebuild` (full) | 18 s | 41 s |
 
 Performance budgets are enforced in CI. Regressions panic the bench job.
@@ -734,8 +714,9 @@ Either install `cass` or disable CASS import:
 # Install
 cargo install --path /dp/coding_agent_session_search
 
-# Or disable
-ee config set cass.enabled false
+# Or disable in your config file
+# [cass]
+# enabled = false
 ```
 
 `ee` continues to work without `cass`; explicit `ee remember` is unaffected.
@@ -745,7 +726,7 @@ ee config set cass.enabled false
 The schema version on disk is older than the binary expects. This is safe and reversible:
 
 ```bash
-ee db migrate --json
+ee init --workspace . --json
 ```
 
 Failed migrations leave clear recovery instructions in stderr and never partially apply.
@@ -778,7 +759,7 @@ You can also keep running lexical-only; `ee status` shows the degraded capabilit
 
 - **Not a multi-process write fortress.** FrankenSQLite is single-process MVCC WAL. Multiple agents on one machine can read freely, but heavy concurrent writes are coordinated via job locks or the optional daemon's write owner. Don't run a swarm of writers without `ee daemon`.
 - **Not an agent harness.** `ee` does not run tools, manage approvals, or own the prompt loop. Use Claude Code or Codex for that.
-- **Not a chat UI.** No web frontend, no inline visualizer beyond `ee graph --export-graph file.html` (which produces a static page).
+- **Not a chat UI.** No web frontend, and graph exports are CLI artifacts rather than an interactive web surface.
 - **Not a permanent archive.** Forgetting and decay are features. If you need a sealed audit log, export to JSONL and version it in git.
 - **No paid LLM APIs out of the box.** Embedding is delegated to Frankensearch, which is local by default. No OpenAI/Anthropic/Google API calls in `ee` itself.
 - **Semantic quality is bounded by the model Frankensearch loads.** `ee` does not pick embedding models; configure them through Frankensearch.
@@ -804,7 +785,7 @@ The storage layer is FrankenSQLite via SQLModel. `rusqlite` is forbidden in the 
 Yes. `cass` is an evidence source, not a hard dependency. Without it, `ee remember`, `ee context`, `ee search`, curation, graph, and packing all work normally.
 
 **How big does the database get?**
-On a typical multi-project developer machine, expect 50–500 MB after a year. Cold/warm/hot tiering keeps the hot path small. `ee db backup` and `ee export jsonl` produce portable archives.
+On a typical multi-project developer machine, expect 50-500 MB after a year. Cold/warm/hot tiering keeps the hot path small. `ee backup create` produces portable, verified record archives.
 
 **What happens if my index gets corrupted?**
 `ee index rebuild` reproduces it from the DB. Indexes are derived assets, so losing them is annoying but never catastrophic.
@@ -819,7 +800,7 @@ Yes, that's the default. Reads are concurrent. Writes serialize through a job lo
 Run `ee context "<the task this CI run is doing>" --json` and pipe relevant rules into your agent's system prompt. JSON output is stable across patch versions.
 
 **Does `ee` ever rewrite my memories silently?**
-No. The steward proposes; you approve. Every promotion, consolidation, replacement, and tombstone produces an audit entry visible via `ee why <id>` and `ee curate review`.
+No. The steward proposes; you approve. Every promotion, consolidation, replacement, and tombstone produces an audit entry visible via `ee why <id>` and the curation queue commands.
 
 **Where do I see the architectural decisions?**
 [`docs/adr/`](docs/adr/). Every major subsystem has an ADR with rejected alternatives and verification hooks.

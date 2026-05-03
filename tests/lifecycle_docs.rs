@@ -1,7 +1,7 @@
 use ee::models::trust::{LOCAL_SIGNING_KEY_POLICY_SCHEMA_V1, LocalSigningKeyPosture};
 use ee::models::{
-    ERROR_SCHEMA_V1, LifecycleEvent, RESPONSE_SCHEMA_V1, RuleLifecycleAction, RuleLifecycleTrigger,
-    RuleMaturity, TrustClass,
+    ContextProfileName, ERROR_SCHEMA_V1, LifecycleEvent, RESPONSE_SCHEMA_V1, RuleLifecycleAction,
+    RuleLifecycleTrigger, RuleMaturity, TrustClass,
 };
 
 type TestResult = Result<(), String>;
@@ -38,6 +38,45 @@ fn readme_links_trust_model_guide() -> TestResult {
         README,
         "Lifecycle rules, advisory priority, and prompt-injection handling",
         "README trust section",
+    )
+}
+
+#[test]
+fn readme_context_profiles_match_shipped_cli_profiles() -> TestResult {
+    let expected_profiles = [
+        (ContextProfileName::Compact, "`compact`"),
+        (ContextProfileName::Balanced, "`balanced`"),
+        (ContextProfileName::Thorough, "`thorough`"),
+        (ContextProfileName::Submodular, "`submodular`"),
+    ];
+    if expected_profiles.map(|(profile, _documented_name)| profile) != ContextProfileName::all() {
+        return Err("README context profile test must enumerate every shipped profile".to_string());
+    }
+    for (_profile, documented_name) in expected_profiles {
+        ensure_contains(README, documented_name, "README context profile coverage")?;
+    }
+    let stale_examples = [
+        "--profile release",
+        "--profile refactor",
+        "--profile debug",
+        "--profile security",
+        "--profile performance",
+        "default_profile  = \"default\"",
+        "~/.config/ee/profiles/",
+        "extends = \"release\"",
+    ];
+    if let Some(stale_example) = stale_examples
+        .iter()
+        .find(|stale_example| README.contains(**stale_example))
+    {
+        return Err(format!(
+            "README context profile examples mention unsupported profile `{stale_example}`"
+        ));
+    }
+    ensure_contains(
+        README,
+        "default_profile  = \"balanced\"",
+        "README config default profile",
     )
 }
 

@@ -166,7 +166,7 @@ pub const SEMANTIC_SEARCH_UNAVAILABLE: DegradationCode = DegradationCode {
     description: "Semantic search unavailable",
     behavior_change: "Falling back to lexical (BM25) search only",
     auto_recoverable: true,
-    repair: Some("ee search --lexical-only"),
+    repair: Some("ee index reembed --dry-run"),
 };
 
 pub const EMBEDDING_MODEL_MISSING: DegradationCode = DegradationCode {
@@ -207,7 +207,7 @@ pub const DATABASE_READ_ONLY: DegradationCode = DegradationCode {
     description: "Database is in read-only mode",
     behavior_change: "Write operations will fail; reads work normally",
     auto_recoverable: false,
-    repair: Some("ee db unlock"),
+    repair: Some("ee doctor --fix-plan --json"),
 };
 
 pub const WAL_MODE_DISABLED: DegradationCode = DegradationCode {
@@ -217,7 +217,7 @@ pub const WAL_MODE_DISABLED: DegradationCode = DegradationCode {
     description: "WAL mode not enabled",
     behavior_change: "Reduced concurrent read performance",
     auto_recoverable: false,
-    repair: Some("ee db optimize"),
+    repair: Some("ee init --workspace . --repair-plan --json"),
 };
 
 pub const LARGE_DATABASE: DegradationCode = DegradationCode {
@@ -227,7 +227,7 @@ pub const LARGE_DATABASE: DegradationCode = DegradationCode {
     description: "Database size exceeds recommended threshold",
     behavior_change: "Some operations may be slower",
     auto_recoverable: false,
-    repair: Some("ee steward compact"),
+    repair: Some("ee doctor --fix-plan --json"),
 };
 
 // CASS degradations (D200 - D299)
@@ -269,7 +269,7 @@ pub const GRAPH_SNAPSHOT_STALE: DegradationCode = DegradationCode {
     description: "Graph snapshot is stale",
     behavior_change: "Graph metrics may not reflect recent changes",
     auto_recoverable: true,
-    repair: Some("ee graph rebuild"),
+    repair: Some("ee graph centrality-refresh"),
 };
 
 pub const GRAPH_METRICS_UNAVAILABLE: DegradationCode = DegradationCode {
@@ -279,7 +279,7 @@ pub const GRAPH_METRICS_UNAVAILABLE: DegradationCode = DegradationCode {
     description: "Graph metrics not computed",
     behavior_change: "Related memories and why explanations limited",
     auto_recoverable: true,
-    repair: Some("ee graph rebuild"),
+    repair: Some("ee graph centrality-refresh"),
 };
 
 // Pack degradations (D400 - D499)
@@ -311,7 +311,7 @@ pub const CURATION_QUEUE_FULL: DegradationCode = DegradationCode {
     description: "Curation candidate queue is full",
     behavior_change: "New candidates will be dropped until reviewed",
     auto_recoverable: false,
-    repair: Some("ee curate review"),
+    repair: Some("ee curate candidates --all --json"),
 };
 
 pub const AUTO_CURATION_DISABLED: DegradationCode = DegradationCode {
@@ -321,7 +321,7 @@ pub const AUTO_CURATION_DISABLED: DegradationCode = DegradationCode {
     description: "Automatic curation disabled",
     behavior_change: "Rules will not auto-promote; manual review required",
     auto_recoverable: false,
-    repair: Some("ee config set curate.auto_promote true"),
+    repair: Some("ee curate candidates --json"),
 };
 
 // Policy degradations (D600 - D699)
@@ -332,7 +332,7 @@ pub const POLICY_NOT_LOADED: DegradationCode = DegradationCode {
     description: "Policy file not loaded",
     behavior_change: "Default policies in effect; custom rules ignored",
     auto_recoverable: false,
-    repair: Some("ee policy validate"),
+    repair: Some("ee doctor --fix-plan --json"),
 };
 
 pub const REDACTION_PATTERNS_STALE: DegradationCode = DegradationCode {
@@ -342,7 +342,7 @@ pub const REDACTION_PATTERNS_STALE: DegradationCode = DegradationCode {
     description: "Redaction patterns may be outdated",
     behavior_change: "Some sensitive data may not be caught",
     auto_recoverable: false,
-    repair: Some("ee policy update"),
+    repair: Some("ee doctor --fix-plan --json"),
 };
 
 // Network degradations (D700 - D799)

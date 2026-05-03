@@ -142,7 +142,7 @@
         "capabilities.storage",
         "database.schema_version"
       ],
-      "diagnostic_command": "ee db status --json",
+      "diagnostic_command": "ee status --json",
       "release_pin_decision": "Local path dependencies are accepted only for development; release must record a registry pin or ADR-backed local source policy."
     },
     {
@@ -238,7 +238,7 @@
         "capabilities.graph",
         "graph.snapshot_generation"
       ],
-      "diagnostic_command": "ee graph status --json",
+      "diagnostic_command": "ee diag graph --json",
       "release_pin_decision": "Local path dependencies are accepted only for development; release must record a registry pin or ADR-backed local source policy."
     },
     {
