@@ -392,6 +392,9 @@ pub struct RuleLifecycleEvidence {
     pub helpful_outcomes: u32,
     pub harmful_outcomes: u32,
     pub distinct_harmful_sources: u32,
+    pub protected_rule: bool,
+    pub manual_curation_approved: bool,
+    pub intervening_helpful_from_harmful_sources: bool,
     pub validation_passes: u32,
     pub validation_contradictions: u32,
     pub review_approved: bool,
@@ -405,6 +408,9 @@ impl RuleLifecycleEvidence {
             helpful_outcomes: 0,
             harmful_outcomes: 0,
             distinct_harmful_sources: 0,
+            protected_rule: false,
+            manual_curation_approved: false,
+            intervening_helpful_from_harmful_sources: false,
             validation_passes: 0,
             validation_contradictions: 0,
             review_approved: false,
@@ -422,6 +428,24 @@ impl RuleLifecycleEvidence {
     pub fn with_harmful_outcomes(mut self, count: u32, distinct_sources: u32) -> Self {
         self.harmful_outcomes = count;
         self.distinct_harmful_sources = distinct_sources;
+        self
+    }
+
+    #[must_use]
+    pub fn with_protected_rule(mut self, protected: bool) -> Self {
+        self.protected_rule = protected;
+        self
+    }
+
+    #[must_use]
+    pub fn with_manual_curation_approved(mut self, approved: bool) -> Self {
+        self.manual_curation_approved = approved;
+        self
+    }
+
+    #[must_use]
+    pub fn with_intervening_helpful_from_harmful_sources(mut self, helpful: bool) -> Self {
+        self.intervening_helpful_from_harmful_sources = helpful;
         self
     }
 
@@ -455,8 +479,25 @@ impl RuleLifecycleEvidence {
     }
 
     #[must_use]
+    pub const fn protected_harmful_threshold(&self) -> u32 {
+        let helpful_threshold = self.helpful_outcomes.saturating_mul(2).saturating_add(1);
+        if helpful_threshold > 2 {
+            helpful_threshold
+        } else {
+            2
+        }
+    }
+
+    #[must_use]
     pub const fn has_harmful_quorum(&self) -> bool {
-        self.harmful_outcomes >= 2 && self.distinct_harmful_sources >= 2
+        if self.intervening_helpful_from_harmful_sources || self.distinct_harmful_sources < 2 {
+            return false;
+        }
+        if self.protected_rule {
+            return self.manual_curation_approved
+                && self.harmful_outcomes >= self.protected_harmful_threshold();
+        }
+        self.harmful_outcomes >= 2
     }
 
     #[must_use]
@@ -954,6 +995,71 @@ mod tests {
         assert_eq!(transition.action, RuleLifecycleAction::Retain);
         assert!(transition.confidence_delta < 0.0);
         assert!(transition.utility_delta < 0.0);
+    }
+
+    #[test]
+    fn harmful_quorum_requires_distinct_sources() {
+        let evidence = RuleLifecycleEvidence::new().with_harmful_outcomes(4, 1);
+        let transition = RuleLifecycleTransition::evaluate(
+            RuleMaturity::Validated,
+            RuleLifecycleTrigger::OutcomeHarmful,
+            &evidence,
+        );
+
+        assert!(transition.allowed);
+        assert!(!transition.requires_curation);
+        assert_eq!(transition.next_maturity, RuleMaturity::Validated);
+        assert_eq!(transition.action, RuleLifecycleAction::Retain);
+    }
+
+    #[test]
+    fn harmful_quorum_is_blocked_by_intervening_helpful_from_same_sources() {
+        let evidence = RuleLifecycleEvidence::new()
+            .with_harmful_outcomes(2, 2)
+            .with_intervening_helpful_from_harmful_sources(true);
+        let transition = RuleLifecycleTransition::evaluate(
+            RuleMaturity::Validated,
+            RuleLifecycleTrigger::OutcomeHarmful,
+            &evidence,
+        );
+
+        assert!(transition.allowed);
+        assert!(!transition.requires_curation);
+        assert_eq!(transition.next_maturity, RuleMaturity::Validated);
+        assert_eq!(transition.action, RuleLifecycleAction::Retain);
+    }
+
+    #[test]
+    fn protected_rule_requires_manual_curation_and_asymmetric_threshold() {
+        let below_threshold = RuleLifecycleEvidence::new()
+            .with_helpful_outcomes(2)
+            .with_harmful_outcomes(4, 2)
+            .with_protected_rule(true)
+            .with_manual_curation_approved(true);
+        assert_eq!(below_threshold.protected_harmful_threshold(), 5);
+        assert!(!below_threshold.has_harmful_quorum());
+
+        let without_manual_curation = RuleLifecycleEvidence::new()
+            .with_helpful_outcomes(2)
+            .with_harmful_outcomes(5, 2)
+            .with_protected_rule(true);
+        assert!(!without_manual_curation.has_harmful_quorum());
+
+        let eligible = RuleLifecycleEvidence::new()
+            .with_helpful_outcomes(2)
+            .with_harmful_outcomes(5, 2)
+            .with_protected_rule(true)
+            .with_manual_curation_approved(true);
+        let transition = RuleLifecycleTransition::evaluate(
+            RuleMaturity::Validated,
+            RuleLifecycleTrigger::OutcomeHarmful,
+            &eligible,
+        );
+
+        assert!(transition.allowed);
+        assert!(transition.requires_curation);
+        assert_eq!(transition.next_maturity, RuleMaturity::Deprecated);
+        assert_eq!(transition.action, RuleLifecycleAction::Deprecate);
     }
 
     #[test]

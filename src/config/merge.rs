@@ -12,8 +12,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 use super::file::{
-    CassConfig, ConfigFile, CurationConfig, PackConfig, PrivacyConfig, RuntimeConfig, SearchConfig,
-    SearchSpeed, StorageConfig, TrustConfig,
+    CassConfig, ConfigFile, CurationConfig, FeedbackConfig, PackConfig, PrivacyConfig,
+    RuntimeConfig, SearchConfig, SearchSpeed, StorageConfig, TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -39,6 +39,8 @@ pub const CURATION_DUPLICATE_SIMILARITY_KEY: &str = "curation.duplicate_similari
 pub const CURATION_HARMFUL_WEIGHT_KEY: &str = "curation.harmful_weight";
 pub const CURATION_DECAY_HALF_LIFE_DAYS_KEY: &str = "curation.decay_half_life_days";
 pub const CURATION_SPECIFICITY_MIN_KEY: &str = "curation.specificity_min";
+pub const FEEDBACK_HARMFUL_PER_SOURCE_PER_HOUR_KEY: &str = "feedback.harmful_per_source_per_hour";
+pub const FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY: &str = "feedback.harmful_burst_window_seconds";
 pub const PRIVACY_REDACT_SECRETS_KEY: &str = "privacy.redact_secrets";
 pub const PRIVACY_REDACTION_CLASSES_KEY: &str = "privacy.redaction_classes";
 pub const TRUST_DEFAULT_CLASS_KEY: &str = "trust.default_class";
@@ -158,6 +160,10 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             decay_half_life_days: Some(60),
             specificity_min: Some(0.45),
         },
+        feedback: FeedbackConfig {
+            harmful_per_source_per_hour: Some(5),
+            harmful_burst_window_seconds: Some(3600),
+        },
         privacy: PrivacyConfig {
             redact_secrets: Some(true),
             redaction_classes: Some(vec![
@@ -202,6 +208,10 @@ pub fn config_from_env(
             candidate_pool: None,
         },
         curation: CurationConfig::default(),
+        feedback: FeedbackConfig {
+            harmful_per_source_per_hour: optional_env_u64(env, "EE_HARMFUL_PER_SOURCE_PER_HOUR")?,
+            harmful_burst_window_seconds: optional_env_u64(env, "EE_HARMFUL_BURST_WINDOW_SECONDS")?,
+        },
         privacy: PrivacyConfig::default(),
         trust: TrustConfig::default(),
     })
@@ -463,6 +473,26 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.curation.specificity_min,
                 &layers.user.curation.specificity_min,
                 &layers.defaults.curation.specificity_min,
+            ),
+        },
+        feedback: FeedbackConfig {
+            harmful_per_source_per_hour: pick_field(
+                &mut sources,
+                FEEDBACK_HARMFUL_PER_SOURCE_PER_HOUR_KEY,
+                &layers.cli.feedback.harmful_per_source_per_hour,
+                &layers.environment.feedback.harmful_per_source_per_hour,
+                &layers.project.feedback.harmful_per_source_per_hour,
+                &layers.user.feedback.harmful_per_source_per_hour,
+                &layers.defaults.feedback.harmful_per_source_per_hour,
+            ),
+            harmful_burst_window_seconds: pick_field(
+                &mut sources,
+                FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY,
+                &layers.cli.feedback.harmful_burst_window_seconds,
+                &layers.environment.feedback.harmful_burst_window_seconds,
+                &layers.project.feedback.harmful_burst_window_seconds,
+                &layers.user.feedback.harmful_burst_window_seconds,
+                &layers.defaults.feedback.harmful_burst_window_seconds,
             ),
         },
         privacy: PrivacyConfig {

@@ -4,13 +4,14 @@ pub mod path;
 pub mod workspace;
 
 pub use file::{
-    CassConfig, ConfigFile, ConfigParseError, CurationConfig, PackConfig, PrivacyConfig,
-    RuntimeConfig, SearchConfig, SearchSpeed, StorageConfig, TrustConfig,
+    CassConfig, ConfigFile, ConfigParseError, CurationConfig, FeedbackConfig, PackConfig,
+    PrivacyConfig, RuntimeConfig, SearchConfig, SearchSpeed, StorageConfig, TrustConfig,
 };
 pub use merge::{
     CASS_BINARY_KEY, CASS_ENABLED_KEY, CASS_SINCE_KEY, CURATION_DECAY_HALF_LIFE_DAYS_KEY,
     CURATION_DUPLICATE_SIMILARITY_KEY, CURATION_HARMFUL_WEIGHT_KEY, ConfigLayers,
-    ConfigValueSource, EnvironmentConfigError, MergedConfig, PACK_CANDIDATE_POOL_KEY,
+    ConfigValueSource, EnvironmentConfigError, FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY,
+    FEEDBACK_HARMFUL_PER_SOURCE_PER_HOUR_KEY, MergedConfig, PACK_CANDIDATE_POOL_KEY,
     PACK_DEFAULT_FORMAT_KEY, PACK_DEFAULT_MAX_TOKENS_KEY, PACK_DEFAULT_PROFILE_KEY,
     PACK_MMR_LAMBDA_KEY, PRIVACY_REDACT_SECRETS_KEY, PRIVACY_REDACTION_CLASSES_KEY,
     RUNTIME_DAEMON_KEY, RUNTIME_IMPORT_BATCH_SIZE_KEY, RUNTIME_JOB_BUDGET_MS_KEY,

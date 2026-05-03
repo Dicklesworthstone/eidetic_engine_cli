@@ -23,6 +23,7 @@
       "evidenceJsonPresent": true,
       "sessionId": null
     },
+    "quarantine": null,
     "feedback": {
       "positiveWeight": 2.0,
       "positiveCount": 1,

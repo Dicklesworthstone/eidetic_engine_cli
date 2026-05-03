@@ -18,8 +18,9 @@ use crate::core::health::HealthReport;
 use crate::core::memory::{
     MemoryDetails, MemoryHistoryReport, MemoryListReport, MemoryShowReport, memory_validity,
 };
+use crate::core::outcome::{OutcomeQuarantineListReport, OutcomeQuarantineReviewReport};
 use crate::core::quarantine::{QuarantineEntry, QuarantineReport};
-use crate::core::rule::{RuleAddReport, RuleListReport, RuleShowReport};
+use crate::core::rule::{RuleAddReport, RuleListReport, RuleProtectReport, RuleShowReport};
 use crate::core::status::StatusReport;
 use crate::core::why::WhyReport;
 use crate::core::{VERSION_PROVENANCE_SCHEMA_V1, VersionReport};
@@ -1824,6 +1825,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
         });
         render_memory_health_json(d, &report.memory_health);
         render_curation_health_json(d, &report.curation_health);
+        render_feedback_health_json(d, &report.feedback_health);
         render_derived_assets_json(d, &report.derived_assets, true);
         render_agent_inventory_json(d, "agentInventory", &report.agent_inventory, false);
         d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
@@ -1965,6 +1967,38 @@ fn render_curation_health_json(
             Some(next) => h.field_str("nextScheduledAt", next),
             None => h.field_raw("nextScheduledAt", "null"),
         };
+    });
+}
+
+fn render_feedback_health_json(
+    parent: &mut JsonBuilder,
+    health: &crate::core::status::FeedbackHealthReport,
+) {
+    parent.field_object("feedbackHealth", |h| {
+        h.field_str("status", health.status.as_str());
+        h.field_u32(
+            "harmfulPerSourcePerHour",
+            health.harmful_per_source_per_hour,
+        );
+        h.field_u32(
+            "harmfulBurstWindowSeconds",
+            health.harmful_burst_window_seconds,
+        );
+        h.field_array_of_objects(
+            "perSourceHarmfulCounts",
+            &health.per_source_harmful_counts,
+            |obj, source| {
+                obj.field_str("sourceId", &source.source_id);
+                obj.field_u32("harmfulCount", source.harmful_count);
+            },
+        );
+        h.field_u32("quarantineQueueDepth", health.quarantine_queue_depth);
+        h.field_u32("protectedRuleCount", health.protected_rule_count);
+        match health.last_inversion_event.as_deref() {
+            Some(event) => h.field_str("lastInversionEvent", event),
+            None => h.field_raw("lastInversionEvent", "null"),
+        };
+        h.field_str("nextDeterministicAction", &health.next_deterministic_action);
     });
 }
 
@@ -3604,6 +3638,66 @@ pub fn render_rule_show_human(report: &RuleShowReport) -> String {
 #[must_use]
 pub fn render_rule_show_toon(report: &RuleShowReport) -> String {
     render_toon_from_json(&render_rule_show_json(report))
+}
+
+/// Render a procedural rule protection report as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_rule_protect_json(report: &RuleProtectReport) -> String {
+    ResponseEnvelope::success()
+        .data_raw(&report.data_json())
+        .finish()
+}
+
+/// Render a procedural rule protection report as human-readable text.
+#[must_use]
+pub fn render_rule_protect_human(report: &RuleProtectReport) -> String {
+    report.human_summary()
+}
+
+/// Render a procedural rule protection report as TOON.
+#[must_use]
+pub fn render_rule_protect_toon(report: &RuleProtectReport) -> String {
+    render_toon_from_json(&render_rule_protect_json(report))
+}
+
+/// Render a feedback quarantine list report as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_outcome_quarantine_list_json(report: &OutcomeQuarantineListReport) -> String {
+    ResponseEnvelope::success()
+        .data_raw(&report.data_json())
+        .finish()
+}
+
+/// Render a feedback quarantine list report as human-readable text.
+#[must_use]
+pub fn render_outcome_quarantine_list_human(report: &OutcomeQuarantineListReport) -> String {
+    report.human_summary()
+}
+
+/// Render a feedback quarantine list report as TOON.
+#[must_use]
+pub fn render_outcome_quarantine_list_toon(report: &OutcomeQuarantineListReport) -> String {
+    render_toon_from_json(&render_outcome_quarantine_list_json(report))
+}
+
+/// Render a feedback quarantine review report as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_outcome_quarantine_review_json(report: &OutcomeQuarantineReviewReport) -> String {
+    ResponseEnvelope::success()
+        .data_raw(&report.data_json())
+        .finish()
+}
+
+/// Render a feedback quarantine review report as human-readable text.
+#[must_use]
+pub fn render_outcome_quarantine_review_human(report: &OutcomeQuarantineReviewReport) -> String {
+    report.human_summary()
+}
+
+/// Render a feedback quarantine review report as TOON.
+#[must_use]
+pub fn render_outcome_quarantine_review_toon(report: &OutcomeQuarantineReviewReport) -> String {
+    render_toon_from_json(&render_outcome_quarantine_review_json(report))
 }
 
 /// Render a curation candidate list report as JSON (`ee.response.v1` envelope).
@@ -5796,6 +5890,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
             });
             render_memory_health_json(d, &report.memory_health);
             render_curation_health_json(d, &report.curation_health);
+            render_feedback_health_json(d, &report.feedback_health);
             render_derived_assets_json(
                 d,
                 &report.derived_assets,

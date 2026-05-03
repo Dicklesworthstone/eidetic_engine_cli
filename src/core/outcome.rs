@@ -27,10 +27,13 @@ use std::path::Path;
 
 use asupersync::Outcome;
 use asupersync::types::{CancelKind, CancelReason, PanicPayload};
+use chrono::{Duration, Utc};
+use serde::Serialize;
 
 use crate::db::{
-    AuditedFeedbackEventInput, CreateFeedbackEventInput, DbConnection, FeedbackCounts,
-    StoredFeedbackEvent, feedback_scoring,
+    AuditedFeedbackEventInput, CreateAuditInput, CreateFeedbackEventInput,
+    CreateFeedbackQuarantineInput, DbConnection, FeedbackCounts, StoredFeedbackEvent,
+    StoredFeedbackQuarantine, audit_actions, feedback_scoring, generate_audit_id,
 };
 use crate::models::{DomainError, ProcessExitCode};
 
@@ -247,6 +250,17 @@ const ALLOWED_SOURCE_TYPES: &[&str] = &[
     "usage_pattern",
     "decay_trigger",
 ];
+const HARMFUL_SIGNALS: &[&str] = &["negative", "contradiction", "harmful", "inaccurate"];
+
+/// Default harmful-feedback burst ceiling per source.
+pub const DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR: u32 = 5;
+/// Default harmful-feedback burst window in seconds.
+pub const DEFAULT_HARMFUL_BURST_WINDOW_SECONDS: u32 = 3600;
+
+/// Stable schema for `ee outcome quarantine list` response data.
+pub const OUTCOME_QUARANTINE_LIST_SCHEMA_V1: &str = "ee.outcome.quarantine.list.v1";
+/// Stable schema for `ee outcome quarantine release/reject` response data.
+pub const OUTCOME_QUARANTINE_REVIEW_SCHEMA_V1: &str = "ee.outcome.quarantine.review.v1";
 
 /// Status returned by the `ee outcome` feedback recording use case.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -257,6 +271,8 @@ pub enum OutcomeRecordStatus {
     DryRun,
     /// A caller-supplied event ID already existed with matching content.
     AlreadyRecorded,
+    /// The event was preserved in quarantine and did not affect live scoring.
+    Quarantined,
 }
 
 impl OutcomeRecordStatus {
@@ -266,6 +282,7 @@ impl OutcomeRecordStatus {
             Self::Recorded => "recorded",
             Self::DryRun => "dry_run",
             Self::AlreadyRecorded => "already_recorded",
+            Self::Quarantined => "feedback_quarantined",
         }
     }
 }
@@ -287,6 +304,27 @@ pub struct OutcomeRecordOptions<'a> {
     pub event_id: Option<String>,
     pub actor: Option<String>,
     pub dry_run: bool,
+    pub harmful_per_source_per_hour: u32,
+    pub harmful_burst_window_seconds: u32,
+}
+
+/// Options for listing quarantined feedback events.
+#[derive(Clone, Debug)]
+pub struct OutcomeQuarantineListOptions<'a> {
+    pub workspace_path: &'a Path,
+    pub database_path: Option<&'a Path>,
+    pub status: Option<&'a str>,
+}
+
+/// Options for releasing or rejecting one quarantined feedback event.
+#[derive(Clone, Debug)]
+pub struct OutcomeQuarantineReviewOptions<'a> {
+    pub workspace_path: &'a Path,
+    pub database_path: Option<&'a Path>,
+    pub quarantine_id: &'a str,
+    pub reject: bool,
+    pub actor: Option<&'a str>,
+    pub dry_run: bool,
 }
 
 /// Aggregated feedback summary exposed by `ee outcome`.
@@ -303,6 +341,35 @@ pub struct OutcomeFeedbackSummary {
     pub total_count: u32,
     pub net_score: f32,
     pub trust_score: f32,
+}
+
+/// Quarantine metadata exposed by outcome commands.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutcomeQuarantineSummary {
+    pub id: Option<String>,
+    pub status: String,
+    pub source_id: Option<String>,
+    pub limit: u32,
+    pub window_seconds: u32,
+    pub observed_count: u32,
+    pub reason: String,
+    pub raw_event_hash: Option<String>,
+}
+
+impl OutcomeQuarantineSummary {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": &self.id,
+            "status": &self.status,
+            "sourceId": &self.source_id,
+            "limit": self.limit,
+            "windowSeconds": self.window_seconds,
+            "observedCount": self.observed_count,
+            "reason": &self.reason,
+            "rawEventHash": &self.raw_event_hash,
+        })
+    }
 }
 
 impl OutcomeFeedbackSummary {
@@ -341,6 +408,107 @@ impl OutcomeFeedbackSummary {
     }
 }
 
+/// Stable quarantine row exposed by `ee outcome quarantine list`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutcomeQuarantineRecord {
+    pub id: String,
+    pub workspace_id: String,
+    pub source_id: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub signal: String,
+    pub proposed_event_id: Option<String>,
+    pub recorded_at: String,
+    pub reason: String,
+    pub raw_event_hash: String,
+    pub status: String,
+    pub reviewed_at: Option<String>,
+    pub reviewed_by: Option<String>,
+    pub released_feedback_event_id: Option<String>,
+}
+
+/// Result of listing quarantined feedback.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutcomeQuarantineListReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub status_filter: Option<String>,
+    pub queue_depth: usize,
+    pub records: Vec<OutcomeQuarantineRecord>,
+}
+
+impl OutcomeQuarantineListReport {
+    #[must_use]
+    pub fn data_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                r#"{{"schema":"{}","command":"outcome quarantine list","status":"serialization_failed"}}"#,
+                OUTCOME_QUARANTINE_LIST_SCHEMA_V1
+            )
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut output = format!("Feedback quarantine ({} records)\n", self.queue_depth);
+        for record in &self.records {
+            output.push_str(&format!(
+                "  {} [{}] {} {} from {}\n",
+                record.id, record.status, record.target_type, record.target_id, record.source_id
+            ));
+        }
+        output
+    }
+}
+
+/// Result of releasing or rejecting quarantined feedback.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutcomeQuarantineReviewReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub status: String,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub quarantine_id: String,
+    pub action: String,
+    pub changed: bool,
+    pub dry_run: bool,
+    pub feedback_event_id: Option<String>,
+    pub audit_id: Option<String>,
+}
+
+impl OutcomeQuarantineReviewReport {
+    #[must_use]
+    pub fn data_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                r#"{{"schema":"{}","command":"outcome quarantine review","status":"serialization_failed"}}"#,
+                OUTCOME_QUARANTINE_REVIEW_SCHEMA_V1
+            )
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        format!(
+            "Feedback quarantine {}\n  ID: {}\n  Changed: {}\n  Audit: {}\n",
+            self.action,
+            self.quarantine_id,
+            self.changed,
+            self.audit_id.as_deref().unwrap_or("none")
+        )
+    }
+}
+
 /// Result of recording outcome feedback.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutcomeRecordReport {
@@ -360,6 +528,7 @@ pub struct OutcomeRecordReport {
     pub reason_present: bool,
     pub evidence_json_present: bool,
     pub session_id: Option<String>,
+    pub quarantine: Option<OutcomeQuarantineSummary>,
     pub feedback: OutcomeFeedbackSummary,
 }
 
@@ -370,6 +539,9 @@ impl OutcomeRecordReport {
             OutcomeRecordStatus::Recorded => "Recorded outcome feedback",
             OutcomeRecordStatus::DryRun => "DRY RUN: Would record outcome feedback",
             OutcomeRecordStatus::AlreadyRecorded => "Outcome feedback already recorded",
+            OutcomeRecordStatus::Quarantined => {
+                "Outcome feedback quarantined; live scoring was not changed"
+            }
         };
 
         let mut output = String::new();
@@ -387,6 +559,11 @@ impl OutcomeRecordReport {
         }
         if let Some(ref audit_id) = self.audit_id {
             output.push_str(&format!("  Audit: {audit_id}\n"));
+        }
+        if let Some(ref quarantine) = self.quarantine
+            && let Some(ref quarantine_id) = quarantine.id
+        {
+            output.push_str(&format!("  Quarantine: {quarantine_id}\n"));
         }
         output.push_str(&format!(
             "  Feedback total: {}\n",
@@ -419,6 +596,7 @@ impl OutcomeRecordReport {
                 "evidenceJsonPresent": self.evidence_json_present,
                 "sessionId": &self.session_id,
             },
+            "quarantine": self.quarantine.as_ref().map(OutcomeQuarantineSummary::data_json),
             "feedback": self.feedback.data_json(),
         })
     }
@@ -450,10 +628,21 @@ pub fn record_outcome(
         ALLOWED_SOURCE_TYPES,
         "ee outcome <target-id> --source-type outcome_observed",
     )?;
-    let source_id = normalize_optional_text("source id", options.source_id.as_deref())?;
+    let mut source_id = normalize_optional_text("source id", options.source_id.as_deref())?;
     let reason = normalize_optional_text("reason", options.reason.as_deref())?;
     let evidence_json = normalize_evidence_json(options.evidence_json.as_deref())?;
     let session_id = normalize_optional_text("session id", options.session_id.as_deref())?;
+    validate_harmful_feedback_policy(
+        options.harmful_per_source_per_hour,
+        options.harmful_burst_window_seconds,
+    )?;
+    if source_id.is_none() && is_harmful_signal(&signal) {
+        source_id = Some(fallback_source_id(
+            &source_type,
+            session_id.as_deref(),
+            options.actor.as_deref(),
+        ));
+    }
     let event_id = match options.event_id.as_deref() {
         Some(raw) => Some(validate_feedback_event_id(raw)?),
         None if options.dry_run => None,
@@ -499,6 +688,14 @@ pub fn record_outcome(
 
     if options.dry_run {
         let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+        let quarantine = harmful_quarantine_preview(
+            &connection,
+            &target.workspace_id,
+            &signal,
+            source_id.as_deref(),
+            options.harmful_per_source_per_hour,
+            options.harmful_burst_window_seconds,
+        )?;
         return Ok(OutcomeRecordReport {
             version: env!("CARGO_PKG_VERSION"),
             status: OutcomeRecordStatus::DryRun,
@@ -516,6 +713,7 @@ pub fn record_outcome(
             reason_present: feedback_input.reason.is_some(),
             evidence_json_present: evidence_json.is_some(),
             session_id,
+            quarantine,
             feedback,
         });
     }
@@ -546,6 +744,7 @@ pub fn record_outcome(
                 reason_present: feedback_input.reason.is_some(),
                 evidence_json_present: evidence_json.is_some(),
                 session_id,
+                quarantine: None,
                 feedback,
             });
         }
@@ -553,6 +752,60 @@ pub fn record_outcome(
         return Err(DomainError::Usage {
             message: format!("feedback event id already exists with different content: {event_id}"),
             repair: Some("ee outcome --event-id <new-feedback-id>".to_string()),
+        });
+    }
+
+    if let Some(quarantine) = harmful_quarantine_preview(
+        &connection,
+        &target.workspace_id,
+        &signal,
+        source_id.as_deref(),
+        options.harmful_per_source_per_hour,
+        options.harmful_burst_window_seconds,
+    )? {
+        let quarantine_id = generate_feedback_quarantine_id();
+        let raw_event_hash = raw_feedback_event_hash(&event_id, &feedback_input)?;
+        let reason = quarantine.reason.clone();
+        let audit_id = insert_feedback_quarantine_audited(
+            &connection,
+            &quarantine_id,
+            &CreateFeedbackQuarantineInput {
+                workspace_id: target.workspace_id.clone(),
+                source_id: source_id.clone().unwrap_or_else(|| "unknown".to_owned()),
+                target_type: target_type.clone(),
+                target_id: target_id.clone(),
+                signal: signal.clone(),
+                proposed_event_id: Some(event_id.clone()),
+                recorded_at: Utc::now().to_rfc3339(),
+                reason,
+                raw_event_hash: raw_event_hash.clone(),
+            },
+            options.actor.as_deref(),
+        )?;
+        let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+        return Ok(OutcomeRecordReport {
+            version: env!("CARGO_PKG_VERSION"),
+            status: OutcomeRecordStatus::Quarantined,
+            dry_run: false,
+            event_id: Some(event_id),
+            audit_id: Some(audit_id),
+            target_type,
+            target_id,
+            workspace_id: target.workspace_id,
+            target_verified: target.verified,
+            signal,
+            weight,
+            source_type,
+            source_id,
+            reason_present: feedback_input.reason.is_some(),
+            evidence_json_present: evidence_json.is_some(),
+            session_id,
+            quarantine: Some(OutcomeQuarantineSummary {
+                id: Some(quarantine_id),
+                raw_event_hash: Some(raw_event_hash),
+                ..quarantine
+            }),
+            feedback,
         });
     }
 
@@ -589,14 +842,407 @@ pub fn record_outcome(
         reason_present: feedback_input.reason.is_some(),
         evidence_json_present: evidence_json.is_some(),
         session_id,
+        quarantine: None,
         feedback,
     })
+}
+
+/// List quarantined feedback events for a workspace.
+pub fn list_feedback_quarantine(
+    options: &OutcomeQuarantineListOptions<'_>,
+) -> Result<OutcomeQuarantineListReport, DomainError> {
+    let prepared = prepare_quarantine_workspace(options.workspace_path, options.database_path)?;
+    let status = normalize_quarantine_status(options.status)?;
+    let connection = open_existing_database(&prepared.database_path)?;
+    let rows = connection
+        .list_feedback_quarantine(&prepared.workspace_id, status.as_deref())
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list feedback quarantine: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    let records = rows
+        .into_iter()
+        .map(outcome_quarantine_record_from_row)
+        .collect::<Vec<_>>();
+    Ok(OutcomeQuarantineListReport {
+        schema: OUTCOME_QUARANTINE_LIST_SCHEMA_V1,
+        command: "outcome quarantine list",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        status_filter: status,
+        queue_depth: records.len(),
+        records,
+    })
+}
+
+/// Release or reject one quarantined feedback event without deleting evidence.
+pub fn review_feedback_quarantine(
+    options: &OutcomeQuarantineReviewOptions<'_>,
+) -> Result<OutcomeQuarantineReviewReport, DomainError> {
+    let prepared = prepare_quarantine_workspace(options.workspace_path, options.database_path)?;
+    let quarantine_id = validate_feedback_quarantine_id(options.quarantine_id)?;
+    let connection = open_existing_database(&prepared.database_path)?;
+    let Some(row) = connection
+        .get_feedback_quarantine(&quarantine_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query feedback quarantine: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?
+    else {
+        return Err(feedback_quarantine_not_found(&quarantine_id));
+    };
+    if row.workspace_id != prepared.workspace_id {
+        return Err(feedback_quarantine_not_found(&quarantine_id));
+    }
+
+    let action = if options.reject { "reject" } else { "release" };
+    if row.status != "pending" {
+        return Ok(outcome_quarantine_review_report(
+            &prepared,
+            &quarantine_id,
+            QuarantineReviewSummary {
+                action,
+                status: "already_reviewed",
+                changed: false,
+                dry_run: options.dry_run,
+                feedback_event_id: row.released_feedback_event_id,
+                audit_id: None,
+            },
+        ));
+    }
+    if options.dry_run {
+        return Ok(outcome_quarantine_review_report(
+            &prepared,
+            &quarantine_id,
+            QuarantineReviewSummary {
+                action,
+                status: "dry_run",
+                changed: true,
+                dry_run: true,
+                feedback_event_id: row.proposed_event_id,
+                audit_id: None,
+            },
+        ));
+    }
+
+    if options.reject {
+        let audit_id = update_feedback_quarantine_review_audited(
+            &connection,
+            &row,
+            "rejected",
+            options.actor,
+            None,
+        )?;
+        return Ok(outcome_quarantine_review_report(
+            &prepared,
+            &quarantine_id,
+            QuarantineReviewSummary {
+                action,
+                status: "rejected",
+                changed: true,
+                dry_run: false,
+                feedback_event_id: None,
+                audit_id: Some(audit_id),
+            },
+        ));
+    }
+
+    let event_id = row
+        .proposed_event_id
+        .clone()
+        .unwrap_or_else(generate_feedback_event_id);
+    let feedback_input = CreateFeedbackEventInput {
+        workspace_id: row.workspace_id.clone(),
+        target_type: row.target_type.clone(),
+        target_id: row.target_id.clone(),
+        signal: row.signal.clone(),
+        weight: default_feedback_weight("outcome_observed", &row.signal),
+        source_type: "outcome_observed".to_owned(),
+        source_id: Some(row.source_id.clone()),
+        reason: Some(row.reason.clone()),
+        evidence_json: None,
+        session_id: None,
+    };
+    let audit_id = release_feedback_quarantine_audited(
+        &connection,
+        &row,
+        &event_id,
+        &feedback_input,
+        options.actor,
+    )?;
+    Ok(outcome_quarantine_review_report(
+        &prepared,
+        &quarantine_id,
+        QuarantineReviewSummary {
+            action,
+            status: "released",
+            changed: true,
+            dry_run: false,
+            feedback_event_id: Some(event_id),
+            audit_id: Some(audit_id),
+        },
+    ))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TargetResolution {
     workspace_id: String,
     verified: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PreparedQuarantineWorkspace {
+    workspace_id: String,
+    workspace_path: std::path::PathBuf,
+    database_path: std::path::PathBuf,
+}
+
+fn prepare_quarantine_workspace(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+) -> Result<PreparedQuarantineWorkspace, DomainError> {
+    let workspace_path = resolve_workspace_path(workspace_path)?;
+    let database_path = database_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    Ok(PreparedQuarantineWorkspace {
+        workspace_id: super::curate::stable_workspace_id(&workspace_path),
+        workspace_path,
+        database_path,
+    })
+}
+
+fn resolve_workspace_path(path: &Path) -> Result<std::path::PathBuf, DomainError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(path)
+    };
+    absolute
+        .canonicalize()
+        .map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Failed to resolve workspace {}: {error}",
+                absolute.display()
+            ),
+            repair: Some("ee init --workspace .".to_owned()),
+        })
+}
+
+fn open_existing_database(database_path: &Path) -> Result<DbConnection, DomainError> {
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_owned()),
+        });
+    }
+    DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
+        message: format!("Failed to open database: {error}"),
+        repair: Some("ee doctor".to_owned()),
+    })
+}
+
+fn normalize_quarantine_status(raw: Option<&str>) -> Result<Option<String>, DomainError> {
+    let Some(raw) = raw else {
+        return Ok(Some("pending".to_owned()));
+    };
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(Some("pending".to_owned()));
+    }
+    if matches!(value, "pending" | "released" | "rejected" | "all") {
+        Ok((value != "all").then(|| value.to_owned()))
+    } else {
+        Err(DomainError::Usage {
+            message: format!("invalid quarantine status '{value}'"),
+            repair: Some("ee outcome quarantine list --status pending".to_owned()),
+        })
+    }
+}
+
+fn outcome_quarantine_record_from_row(row: StoredFeedbackQuarantine) -> OutcomeQuarantineRecord {
+    OutcomeQuarantineRecord {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        source_id: row.source_id,
+        target_type: row.target_type,
+        target_id: row.target_id,
+        signal: row.signal,
+        proposed_event_id: row.proposed_event_id,
+        recorded_at: row.recorded_at,
+        reason: row.reason,
+        raw_event_hash: row.raw_event_hash,
+        status: row.status,
+        reviewed_at: row.reviewed_at,
+        reviewed_by: row.reviewed_by,
+        released_feedback_event_id: row.released_feedback_event_id,
+    }
+}
+
+#[derive(Clone, Debug)]
+struct QuarantineReviewSummary<'a> {
+    action: &'a str,
+    status: &'a str,
+    changed: bool,
+    dry_run: bool,
+    feedback_event_id: Option<String>,
+    audit_id: Option<String>,
+}
+
+fn outcome_quarantine_review_report(
+    prepared: &PreparedQuarantineWorkspace,
+    quarantine_id: &str,
+    summary: QuarantineReviewSummary<'_>,
+) -> OutcomeQuarantineReviewReport {
+    OutcomeQuarantineReviewReport {
+        schema: OUTCOME_QUARANTINE_REVIEW_SCHEMA_V1,
+        command: "outcome quarantine review",
+        version: env!("CARGO_PKG_VERSION"),
+        status: summary.status.to_owned(),
+        workspace_id: prepared.workspace_id.clone(),
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        quarantine_id: quarantine_id.to_owned(),
+        action: summary.action.to_owned(),
+        changed: summary.changed,
+        dry_run: summary.dry_run,
+        feedback_event_id: summary.feedback_event_id,
+        audit_id: summary.audit_id,
+    }
+}
+
+fn validate_feedback_quarantine_id(raw: &str) -> Result<String, DomainError> {
+    let value = require_nonempty(
+        "feedback quarantine id",
+        raw,
+        "ee outcome quarantine release fq_...",
+    )?;
+    let payload = value
+        .strip_prefix("fq_")
+        .ok_or_else(|| DomainError::Usage {
+            message: "feedback quarantine id must start with 'fq_'".to_owned(),
+            repair: Some("ee outcome quarantine list --json".to_owned()),
+        })?;
+    if value.len() == 29 && payload.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        Ok(value)
+    } else {
+        Err(DomainError::Usage {
+            message:
+                "feedback quarantine id must be 'fq_' followed by 26 ASCII alphanumeric characters"
+                    .to_owned(),
+            repair: Some("ee outcome quarantine list --json".to_owned()),
+        })
+    }
+}
+
+fn feedback_quarantine_not_found(quarantine_id: &str) -> DomainError {
+    DomainError::NotFound {
+        resource: "feedback quarantine".to_owned(),
+        id: quarantine_id.to_owned(),
+        repair: Some("ee outcome quarantine list --json".to_owned()),
+    }
+}
+
+fn update_feedback_quarantine_review_audited(
+    connection: &DbConnection,
+    row: &StoredFeedbackQuarantine,
+    status: &str,
+    actor: Option<&str>,
+    released_feedback_event_id: Option<&str>,
+) -> Result<String, DomainError> {
+    let audit_id = generate_audit_id();
+    let details = feedback_quarantine_review_audit_details(row, status, released_feedback_event_id);
+    connection
+        .with_transaction(|| {
+            connection.update_feedback_quarantine_status(
+                &row.id,
+                status,
+                actor,
+                released_feedback_event_id,
+            )?;
+            connection.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(row.workspace_id.clone()),
+                    actor: actor
+                        .map(str::to_owned)
+                        .or_else(|| Some("ee outcome quarantine".to_owned())),
+                    action: if status == "released" {
+                        audit_actions::FEEDBACK_QUARANTINE_RELEASE.to_owned()
+                    } else {
+                        audit_actions::FEEDBACK_QUARANTINE_REJECT.to_owned()
+                    },
+                    target_type: Some("feedback_quarantine".to_owned()),
+                    target_id: Some(row.id.clone()),
+                    details: Some(details.clone()),
+                },
+            )
+        })
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to review feedback quarantine: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    Ok(audit_id)
+}
+
+fn release_feedback_quarantine_audited(
+    connection: &DbConnection,
+    row: &StoredFeedbackQuarantine,
+    event_id: &str,
+    feedback_input: &CreateFeedbackEventInput,
+    actor: Option<&str>,
+) -> Result<String, DomainError> {
+    let audit_id = generate_audit_id();
+    let details = feedback_quarantine_review_audit_details(row, "released", Some(event_id));
+    connection
+        .with_transaction(|| {
+            connection.insert_feedback_event(event_id, feedback_input)?;
+            connection.update_feedback_quarantine_status(
+                &row.id,
+                "released",
+                actor,
+                Some(event_id),
+            )?;
+            connection.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(row.workspace_id.clone()),
+                    actor: actor
+                        .map(str::to_owned)
+                        .or_else(|| Some("ee outcome quarantine".to_owned())),
+                    action: audit_actions::FEEDBACK_QUARANTINE_RELEASE.to_owned(),
+                    target_type: Some("feedback_quarantine".to_owned()),
+                    target_id: Some(row.id.clone()),
+                    details: Some(details.clone()),
+                },
+            )
+        })
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to release feedback quarantine: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    Ok(audit_id)
+}
+
+fn feedback_quarantine_review_audit_details(
+    row: &StoredFeedbackQuarantine,
+    status: &str,
+    released_feedback_event_id: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "feedbackQuarantineId": &row.id,
+        "status": status,
+        "targetType": &row.target_type,
+        "targetId": &row.target_id,
+        "sourceId": &row.source_id,
+        "rawEventHash": &row.raw_event_hash,
+        "releasedFeedbackEventId": released_feedback_event_id,
+    })
+    .to_string()
 }
 
 fn resolve_target_workspace(
@@ -675,6 +1321,103 @@ fn get_existing_event(
         })
 }
 
+fn harmful_quarantine_preview(
+    connection: &DbConnection,
+    workspace_id: &str,
+    signal: &str,
+    source_id: Option<&str>,
+    limit: u32,
+    window_seconds: u32,
+) -> Result<Option<OutcomeQuarantineSummary>, DomainError> {
+    if !is_harmful_signal(signal) {
+        return Ok(None);
+    }
+    let Some(source_id) = source_id else {
+        return Ok(None);
+    };
+    let since = Utc::now()
+        .checked_sub_signed(Duration::seconds(i64::from(window_seconds)))
+        .unwrap_or_else(Utc::now)
+        .to_rfc3339();
+    let live_count = connection
+        .count_harmful_feedback_for_source_since(workspace_id, source_id, &since)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to inspect harmful feedback rate state: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    let pending_count = connection
+        .count_pending_quarantine_for_source_since(workspace_id, source_id, &since)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to inspect feedback quarantine queue: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    let existing_count = live_count.saturating_add(pending_count);
+    if existing_count < limit {
+        return Ok(None);
+    }
+    let observed_count = existing_count.saturating_add(1);
+    Ok(Some(OutcomeQuarantineSummary {
+        id: None,
+        status: "pending".to_owned(),
+        source_id: Some(source_id.to_owned()),
+        limit,
+        window_seconds,
+        observed_count,
+        reason: format!(
+            "harmful feedback rate limit exceeded: source {source_id} observed {observed_count} harmful events in {window_seconds}s (limit {limit})"
+        ),
+        raw_event_hash: None,
+    }))
+}
+
+fn insert_feedback_quarantine_audited(
+    connection: &DbConnection,
+    quarantine_id: &str,
+    input: &CreateFeedbackQuarantineInput,
+    actor: Option<&str>,
+) -> Result<String, DomainError> {
+    let audit_id = generate_audit_id();
+    let details = feedback_quarantine_audit_details(quarantine_id, input);
+    connection
+        .with_transaction(|| {
+            connection.insert_feedback_quarantine(quarantine_id, input)?;
+            connection.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(input.workspace_id.clone()),
+                    actor: actor
+                        .map(str::to_owned)
+                        .or_else(|| Some("ee outcome".to_owned())),
+                    action: audit_actions::FEEDBACK_QUARANTINE.to_owned(),
+                    target_type: Some(input.target_type.clone()),
+                    target_id: Some(input.target_id.clone()),
+                    details: Some(details.clone()),
+                },
+            )
+        })
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to quarantine feedback event: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    Ok(audit_id)
+}
+
+fn validate_harmful_feedback_policy(limit: u32, window_seconds: u32) -> Result<(), DomainError> {
+    if limit == 0 {
+        return Err(DomainError::Usage {
+            message: "harmful feedback rate limit must be greater than zero".to_owned(),
+            repair: Some("ee outcome <target-id> --harmful-per-source-per-hour 5".to_owned()),
+        });
+    }
+    if window_seconds == 0 {
+        return Err(DomainError::Usage {
+            message: "harmful feedback burst window must be greater than zero seconds".to_owned(),
+            repair: Some("ee outcome <target-id> --harmful-burst-window-seconds 3600".to_owned()),
+        });
+    }
+    Ok(())
+}
+
 fn require_allowed(
     field: &str,
     raw: &str,
@@ -750,10 +1493,31 @@ fn validate_weight(weight: f32) -> Result<f32, DomainError> {
     }
 }
 
+fn is_harmful_signal(signal: &str) -> bool {
+    HARMFUL_SIGNALS.contains(&signal)
+}
+
+fn fallback_source_id(source_type: &str, session_id: Option<&str>, actor: Option<&str>) -> String {
+    if let Some(session_id) = session_id {
+        return format!("session:{session_id}");
+    }
+    let actor = actor.map(str::trim).filter(|value| !value.is_empty());
+    if let Some(actor) = actor {
+        return format!("actor:{}", stable_short_hash(actor));
+    }
+    format!("source-type:{source_type}")
+}
+
 fn generate_feedback_event_id() -> String {
     let mut payload = uuid::Uuid::now_v7().simple().to_string();
     payload.truncate(26);
     format!("fb_{payload}")
+}
+
+fn generate_feedback_quarantine_id() -> String {
+    let mut payload = uuid::Uuid::now_v7().simple().to_string();
+    payload.truncate(26);
+    format!("fq_{payload}")
 }
 
 fn validate_feedback_event_id(raw: &str) -> Result<String, DomainError> {
@@ -807,6 +1571,55 @@ fn outcome_audit_details(event_id: &str, input: &CreateFeedbackEventInput) -> St
     .to_string()
 }
 
+fn feedback_quarantine_audit_details(
+    quarantine_id: &str,
+    input: &CreateFeedbackQuarantineInput,
+) -> String {
+    serde_json::json!({
+        "feedbackQuarantineId": quarantine_id,
+        "proposedFeedbackEventId": &input.proposed_event_id,
+        "targetType": &input.target_type,
+        "targetId": &input.target_id,
+        "signal": &input.signal,
+        "sourceId": &input.source_id,
+        "recordedAt": &input.recorded_at,
+        "reason": &input.reason,
+        "rawEventHash": &input.raw_event_hash,
+    })
+    .to_string()
+}
+
+fn raw_feedback_event_hash(
+    event_id: &str,
+    input: &CreateFeedbackEventInput,
+) -> Result<String, DomainError> {
+    let payload = serde_json::json!({
+        "eventId": event_id,
+        "workspaceId": &input.workspace_id,
+        "targetType": &input.target_type,
+        "targetId": &input.target_id,
+        "signal": &input.signal,
+        "weight": score_json_value(input.weight),
+        "sourceType": &input.source_type,
+        "sourceId": &input.source_id,
+        "reason": &input.reason,
+        "evidenceJson": &input.evidence_json,
+        "sessionId": &input.session_id,
+    });
+    serde_json::to_string(&payload)
+        .map(|canonical| format!("blake3:{}", blake3::hash(canonical.as_bytes()).to_hex()))
+        .map_err(|error| DomainError::Usage {
+            message: format!(
+                "failed to canonicalize feedback event for quarantine hashing: {error}"
+            ),
+            repair: Some("ee outcome <target-id> --signal harmful".to_owned()),
+        })
+}
+
+fn stable_short_hash(value: &str) -> String {
+    blake3::hash(value.as_bytes()).to_hex()[..16].to_owned()
+}
+
 fn score_json_value(value: f32) -> serde_json::Value {
     let rounded = (f64::from(value) * 10_000.0).round() / 10_000.0;
     serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
@@ -822,10 +1635,10 @@ mod tests {
     use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection, feedback_scoring};
 
     use super::{
-        CliCancelReason, CliOutcomeClass, CliOutcomeSummary, EXIT_CANCELLED, EXIT_PANICKED,
-        OutcomeRecordOptions, OutcomeRecordStatus, default_feedback_weight,
-        generate_feedback_event_id, outcome_class, outcome_exit_code, record_outcome,
-        validate_feedback_event_id,
+        CliCancelReason, CliOutcomeClass, CliOutcomeSummary, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+        DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR, EXIT_CANCELLED, EXIT_PANICKED, OutcomeRecordOptions,
+        OutcomeRecordStatus, default_feedback_weight, generate_feedback_event_id, outcome_class,
+        outcome_exit_code, record_outcome, validate_feedback_event_id,
     };
     use crate::models::{DomainError, ProcessExitCode};
 
@@ -1125,6 +1938,8 @@ mod tests {
             event_id: Some("fb_01234567890123456789012345".to_string()),
             actor: Some("test".to_string()),
             dry_run: true,
+            harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
         })
         .map_err(|error| error.message())?;
 
@@ -1160,6 +1975,8 @@ mod tests {
             event_id: Some("fb_11234567890123456789012345".to_string()),
             actor: Some("test".to_string()),
             dry_run: false,
+            harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
         })
         .map_err(|error| error.message())?;
 
@@ -1206,6 +2023,8 @@ mod tests {
             event_id: Some("fb_21234567890123456789012345".to_string()),
             actor: Some("test".to_string()),
             dry_run: false,
+            harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
         };
 
         let first = record_outcome(&options).map_err(|error| error.message())?;
@@ -1222,6 +2041,92 @@ mod tests {
             "second status",
         )?;
         ensure_equal(&second.feedback.total_count, &1, "deduped count")
+    }
+
+    #[test]
+    fn harmful_feedback_over_source_rate_limit_is_quarantined() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-rate-limit")?;
+        for index in 0..DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR {
+            let report = record_outcome(&OutcomeRecordOptions {
+                database_path: &database,
+                target_type: "memory".to_string(),
+                target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+                workspace_id: None,
+                signal: "harmful".to_string(),
+                weight: None,
+                source_type: "outcome_observed".to_string(),
+                source_id: Some("spam-source".to_string()),
+                reason: Some("Observed a harmful outcome.".to_string()),
+                evidence_json: None,
+                session_id: None,
+                event_id: Some(format!("fb_{:026}", 300 + index)),
+                actor: Some("test".to_string()),
+                dry_run: false,
+                harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+                harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            })
+            .map_err(|error| error.message())?;
+            ensure_equal(
+                &report.status,
+                &OutcomeRecordStatus::Recorded,
+                "within limit records",
+            )?;
+        }
+
+        let over_limit = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "harmful".to_string(),
+            weight: None,
+            source_type: "outcome_observed".to_string(),
+            source_id: Some("spam-source".to_string()),
+            reason: Some("Burst event should be reviewed.".to_string()),
+            evidence_json: None,
+            session_id: None,
+            event_id: Some("fb_00000000000000000000000999".to_string()),
+            actor: Some("test".to_string()),
+            dry_run: false,
+            harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure_equal(
+            &over_limit.status,
+            &OutcomeRecordStatus::Quarantined,
+            "sixth harmful event quarantined",
+        )?;
+        ensure_equal(
+            &over_limit.feedback.total_count,
+            &DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            "quarantined event does not affect feedback count",
+        )?;
+        ensure_equal(
+            &over_limit.quarantine.is_some(),
+            &true,
+            "quarantine summary present",
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let events = connection
+            .list_feedback_events_for_target("memory", OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &events.len(),
+            &(DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR as usize),
+            "only live events are counted",
+        )?;
+        let quarantined = connection
+            .list_feedback_quarantine(OUTCOME_TEST_WORKSPACE_ID, Some("pending"))
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&quarantined.len(), &1_usize, "one quarantine row")?;
+        ensure_equal(
+            &quarantined[0].raw_event_hash.starts_with("blake3:"),
+            &true,
+            "raw event hash is stored",
+        )
     }
 
     #[test]
@@ -1242,6 +2147,8 @@ mod tests {
             event_id: None,
             actor: None,
             dry_run: false,
+            harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
         });
 
         match result {

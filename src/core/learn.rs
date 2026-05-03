@@ -803,6 +803,8 @@ pub fn observe_experiment(
         event_id: options.event_id.clone(),
         actor: options.actor.clone(),
         dry_run: false,
+        harmful_per_source_per_hour: crate::core::outcome::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+        harmful_burst_window_seconds: crate::core::outcome::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
     })?;
     let status = if feedback.status.as_str() == "already_recorded" {
         "already_recorded"
@@ -928,6 +930,8 @@ pub fn close_experiment(options: &LearnCloseOptions) -> Result<LearnCloseReport,
         event_id: options.event_id.clone(),
         actor: options.actor.clone(),
         dry_run: false,
+        harmful_per_source_per_hour: crate::core::outcome::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+        harmful_burst_window_seconds: crate::core::outcome::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
     })?;
     let status = if feedback.status.as_str() == "already_recorded" {
         "already_recorded"

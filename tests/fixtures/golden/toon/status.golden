@@ -45,6 +45,15 @@ data:
     oldestPendingAgeDays: null
     meanReviewLatencyDays: null
     nextScheduledAt: null
+  feedbackHealth:
+    status: not_inspected
+    harmfulPerSourcePerHour: 5
+    harmfulBurstWindowSeconds: 3600
+    perSourceHarmfulCounts[0]:
+    quarantineQueueDepth: 0
+    protectedRuleCount: 0
+    lastInversionEvent: null
+    nextDeterministicAction: provide --workspace to inspect feedback health
   derivedAssets[2]{name,status,sourceHighWatermark,assetHighWatermark,highWatermarkLag,path}:
     search_index,not_inspected,null,null,null,.ee/index
     graph_snapshot,unimplemented,null,null,null,.ee/graph

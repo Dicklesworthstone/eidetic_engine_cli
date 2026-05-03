@@ -440,6 +440,10 @@ duplicate_similarity = 0.92
 harmful_weight       = 2.5            # harmful feedback hits harder than helpful
 decay_half_life_days = 60
 
+[feedback]
+harmful_per_source_per_hour = 5        # excess harmful events are quarantined
+harmful_burst_window_seconds = 3600
+
 [privacy]
 redact_secrets   = true
 redaction_classes = ["api_key", "jwt", "password", "private_key", "ssh_key"]
@@ -457,6 +461,8 @@ Environment variable overrides:
 | `EE_INDEX_DIR`     | `[storage].index_dir` |
 | `EE_PROFILE`       | `[pack].default_profile` |
 | `EE_MAX_TOKENS`    | `[pack].default_max_tokens` |
+| `EE_HARMFUL_PER_SOURCE_PER_HOUR` | `[feedback].harmful_per_source_per_hour` |
+| `EE_HARMFUL_BURST_WINDOW_SECONDS` | `[feedback].harmful_burst_window_seconds` |
 | `EE_NO_COLOR`      | disables ANSI styling on stderr |
 | `EE_TRACE`         | enables structured tracing to stderr |
 

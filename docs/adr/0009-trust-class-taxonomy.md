@@ -68,7 +68,7 @@ deterministic delta against the memory's `confidence`, `utility`, and
 | Trigger                  | Confidence delta | Utility delta | Class effect                                                                                          |
 | ------------------------ | ---------------- | ------------- | ----------------------------------------------------------------------------------------------------- |
 | `outcome_helpful`        | +0.04            | +0.08         | None directly. Counts toward `agent_assertion` → `agent_validated` promotion when validation also fires. |
-| `outcome_harmful`        | −0.10            | −0.12         | After two harmful events from distinct sessions or sources within the decay window (and no intervening helpful from those same sources), the rule inverts to an anti-pattern via the curation review queue (never silently). |
+| `outcome_harmful`        | −0.10            | −0.12         | After two harmful events from distinct sessions or sources within the decay window (and no intervening helpful from those same sources), the rule enters the curation review queue for anti-pattern inversion or deprecation (never silently). |
 | `validation_passed`      | +0.06            | +0.04         | `agent_assertion` → `agent_validated` when paired with at least one prior `outcome_helpful` and no outstanding `outcome_harmful` within the decay window. |
 | `validation_contradicted`| −0.08            | −0.05         | If the memory is `agent_validated`, demote back to `agent_assertion`. If `human_explicit`, leave class unchanged but emit a `degraded` advisory.    |
 
@@ -79,6 +79,24 @@ applied at scoring time, not at storage time). The numeric deltas
 above are storage-time mutations to the per-memory record; the runtime
 scoring formula in `docs/scoring.md` (when written) applies further
 weighting.
+
+The deterministic inversion gate is:
+
+- Non-protected rules require at least two harmful events from at least
+  two distinct sources or sessions within the active decay window.
+- The same source set must have no intervening helpful event in that
+  window.
+- Protected rules require
+  `harmful_count >= max(2, helpful_count * 2 + 1)`, the same
+  distinct-source and no-intervening-helpful gates, plus an explicit
+  manual curation approval with a non-empty audit comment. Auto paths
+  cannot invert protected rules.
+
+Harmful feedback is rate-limited before it reaches this gate. The
+default policy is `[feedback].harmful_per_source_per_hour = 5` and
+`[feedback].harmful_burst_window_seconds = 3600`; excess events are
+preserved in `feedback_quarantine` with a raw event hash and do not
+affect scoring until released.
 
 ### Promotion is never silent
 
@@ -141,8 +159,9 @@ the same class.
   specificity above threshold plus no harmful within decay window."
 - EE-FEEDBACK-RATE-001 (harmful-feedback rate-limit and protected
   rules) gains a stable contract for the inversion threshold: "two
-  distinct sources, decay window, no intervening helpful." The
-  protected-rule guard layers on top of these rules.
+  distinct sources, decay window, no intervening helpful." Protected
+  rules add the asymmetric `max(2, helpful_count * 2 + 1)` threshold
+  and manual curation approval requirement.
 - The README and OPUS plan §22 cross-link to this ADR. Future drift
   between either document and this ADR is a doc bug, not a design
   question; this ADR wins.

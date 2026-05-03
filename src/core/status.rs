@@ -9,7 +9,7 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::config::{
     WorkspaceDiagnostic, WorkspaceDiagnosticSeverity, WorkspaceResolution, WorkspaceResolutionMode,
@@ -17,14 +17,16 @@ use crate::config::{
     resolve_workspace,
 };
 use crate::db::{
-    CreateMemoryInput, CreateWorkspaceInput, DbConnection, StoredCurationCandidate,
-    StoredCurationTtlPolicy, default_curation_ttl_policy_id_for_review_state,
+    CreateMemoryInput, CreateWorkspaceInput, DbConnection, FeedbackSourceHarmfulCount,
+    StoredCurationCandidate, StoredCurationTtlPolicy,
+    default_curation_ttl_policy_id_for_review_state,
 };
 use crate::models::{CapabilityStatus, MemoryId};
 
 use super::agent_detect::AgentInventoryReport;
 use super::curate::stable_workspace_id;
 use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
+use super::outcome::{DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR};
 use super::{build_info, runtime_status};
 
 /// Memory subsystem health status.
@@ -521,6 +523,85 @@ impl RuntimeReport {
     }
 }
 
+/// Feedback-loop health status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FeedbackHealthStatus {
+    /// Feedback storage is readable and no quarantine review is pending.
+    Healthy,
+    /// Quarantined feedback is awaiting review.
+    ReviewQueued,
+    /// No workspace was provided for inspection.
+    NotInspected,
+    /// Feedback storage could not be inspected.
+    Unavailable,
+}
+
+impl FeedbackHealthStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::ReviewQueued => "review_queued",
+            Self::NotInspected => "not_inspected",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Harmful feedback count for one source in the active burst window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeedbackSourceHealth {
+    pub source_id: String,
+    pub harmful_count: u32,
+}
+
+impl From<FeedbackSourceHarmfulCount> for FeedbackSourceHealth {
+    fn from(value: FeedbackSourceHarmfulCount) -> Self {
+        Self {
+            source_id: value.source_id,
+            harmful_count: value.harmful_count,
+        }
+    }
+}
+
+/// Read-only feedback health snapshot for `ee status --json`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeedbackHealthReport {
+    pub status: FeedbackHealthStatus,
+    pub harmful_per_source_per_hour: u32,
+    pub harmful_burst_window_seconds: u32,
+    pub per_source_harmful_counts: Vec<FeedbackSourceHealth>,
+    pub quarantine_queue_depth: u32,
+    pub protected_rule_count: u32,
+    pub last_inversion_event: Option<String>,
+    pub next_deterministic_action: String,
+}
+
+impl FeedbackHealthReport {
+    #[must_use]
+    pub fn not_inspected() -> Self {
+        Self {
+            status: FeedbackHealthStatus::NotInspected,
+            harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            per_source_harmful_counts: Vec::new(),
+            quarantine_queue_depth: 0,
+            protected_rule_count: 0,
+            last_inversion_event: None,
+            next_deterministic_action: "provide --workspace to inspect feedback health".to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn unavailable() -> Self {
+        Self {
+            status: FeedbackHealthStatus::Unavailable,
+            next_deterministic_action: "run ee init --workspace .".to_owned(),
+            ..Self::not_inspected()
+        }
+    }
+}
+
 /// A single degradation notice.
 #[derive(Clone, Debug)]
 pub struct DegradationReport {
@@ -539,6 +620,7 @@ pub struct StatusReport {
     pub runtime: RuntimeReport,
     pub memory_health: MemoryHealthReport,
     pub curation_health: CurationHealthReport,
+    pub feedback_health: FeedbackHealthReport,
     pub derived_assets: Vec<DerivedAssetReport>,
     pub agent_inventory: AgentInventoryReport,
     pub degradations: Vec<DegradationReport>,
@@ -570,6 +652,8 @@ impl StatusReport {
         let derived_assets = gather_derived_assets(options.workspace_path.as_deref());
         let (curation_health, curation_degradations) =
             gather_curation_health(options.workspace_path.as_deref());
+        let (feedback_health, feedback_degradations) =
+            gather_feedback_health(options.workspace_path.as_deref());
         let agent_inventory = AgentInventoryReport::not_inspected();
 
         let mut degradations = Vec::new();
@@ -602,6 +686,7 @@ impl StatusReport {
         }
 
         degradations.extend(curation_degradations);
+        degradations.extend(feedback_degradations);
 
         Self {
             version: build_info().version,
@@ -610,6 +695,7 @@ impl StatusReport {
             runtime,
             memory_health,
             curation_health,
+            feedback_health,
             derived_assets,
             agent_inventory,
             degradations,
@@ -728,6 +814,120 @@ fn gather_curation_health(
     let health = curation_health_from_rows(&candidates, &policies, Utc::now());
     let degradations = curation_health_degradations(&health);
     (health, degradations)
+}
+
+fn gather_feedback_health(
+    workspace_path: Option<&Path>,
+) -> (FeedbackHealthReport, Vec<DegradationReport>) {
+    let Some(workspace_path) = workspace_path else {
+        return (FeedbackHealthReport::not_inspected(), Vec::new());
+    };
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return (
+            FeedbackHealthReport::unavailable(),
+            vec![DegradationReport {
+                code: "feedback_health_unavailable",
+                severity: "low",
+                message: "Feedback health is unavailable because the workspace database is missing.",
+                repair: "Run `ee init --workspace .` before inspecting feedback health.",
+            }],
+        );
+    }
+
+    let canonical_workspace = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let workspace_id = stable_workspace_id(&canonical_workspace);
+    let connection = match DbConnection::open_file(&database_path) {
+        Ok(connection) => connection,
+        Err(_) => {
+            return (
+                FeedbackHealthReport::unavailable(),
+                vec![DegradationReport {
+                    code: "feedback_health_unavailable",
+                    severity: "medium",
+                    message: "Feedback health is unavailable because the database could not be opened.",
+                    repair: "Run `ee doctor --json`.",
+                }],
+            );
+        }
+    };
+    let since = Utc::now()
+        .checked_sub_signed(ChronoDuration::seconds(i64::from(
+            DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+        )))
+        .unwrap_or_else(Utc::now)
+        .to_rfc3339();
+    let per_source_harmful_counts = match connection
+        .list_harmful_feedback_source_counts_since(&workspace_id, &since)
+    {
+        Ok(counts) => counts.into_iter().map(FeedbackSourceHealth::from).collect(),
+        Err(_) => {
+            return (
+                FeedbackHealthReport::unavailable(),
+                vec![DegradationReport {
+                    code: "feedback_health_unavailable",
+                    severity: "medium",
+                    message: "Feedback health is unavailable because feedback rows could not be read.",
+                    repair: "Run `ee db migrate --workspace .` and `ee doctor --json`.",
+                }],
+            );
+        }
+    };
+    let quarantine_queue_depth =
+        match connection.list_feedback_quarantine(&workspace_id, Some("pending")) {
+            Ok(rows) => u32::try_from(rows.len()).unwrap_or(u32::MAX),
+            Err(_) => {
+                return (
+                    FeedbackHealthReport::unavailable(),
+                    vec![DegradationReport {
+                        code: "feedback_quarantine_unavailable",
+                        severity: "medium",
+                        message: "Feedback quarantine rows could not be read.",
+                        repair: "Run `ee db migrate --workspace .`.",
+                    }],
+                );
+            }
+        };
+    let protected_rule_count = match connection.count_protected_procedural_rules(&workspace_id) {
+        Ok(count) => count,
+        Err(_) => {
+            return (
+                FeedbackHealthReport::unavailable(),
+                vec![DegradationReport {
+                    code: "feedback_protected_rules_unavailable",
+                    severity: "medium",
+                    message: "Protected procedural rule rows could not be read.",
+                    repair: "Run `ee db migrate --workspace .`.",
+                }],
+            );
+        }
+    };
+    let status = if quarantine_queue_depth > 0 {
+        FeedbackHealthStatus::ReviewQueued
+    } else {
+        FeedbackHealthStatus::Healthy
+    };
+    let next_deterministic_action = if quarantine_queue_depth > 0 {
+        "review quarantined feedback with ee outcome quarantine list --json".to_owned()
+    } else {
+        "monitor harmful feedback rates".to_owned()
+    };
+
+    (
+        FeedbackHealthReport {
+            status,
+            harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            per_source_harmful_counts,
+            quarantine_queue_depth,
+            protected_rule_count,
+            last_inversion_event: None,
+            next_deterministic_action,
+        },
+        Vec::new(),
+    )
 }
 
 fn curation_health_from_rows(

@@ -21,6 +21,7 @@ pub struct ConfigFile {
     pub search: SearchConfig,
     pub pack: PackConfig,
     pub curation: CurationConfig,
+    pub feedback: FeedbackConfig,
     pub privacy: PrivacyConfig,
     pub trust: TrustConfig,
 }
@@ -67,6 +68,7 @@ impl ConfigFile {
             search: SearchConfig::parse(&document)?,
             pack: PackConfig::parse(&document)?,
             curation: CurationConfig::parse(&document)?,
+            feedback: FeedbackConfig::parse(&document)?,
             privacy: PrivacyConfig::parse(&document)?,
             trust: TrustConfig::parse(&document)?,
         })
@@ -221,6 +223,29 @@ impl CurationConfig {
             harmful_weight: optional_nonnegative_float(document, "curation", "harmful_weight")?,
             decay_half_life_days: optional_u64(document, "curation", "decay_half_life_days")?,
             specificity_min: optional_unit_float(document, "curation", "specificity_min")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FeedbackConfig {
+    pub harmful_per_source_per_hour: Option<u64>,
+    pub harmful_burst_window_seconds: Option<u64>,
+}
+
+impl FeedbackConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            harmful_per_source_per_hour: optional_u64(
+                document,
+                "feedback",
+                "harmful_per_source_per_hour",
+            )?,
+            harmful_burst_window_seconds: optional_u64(
+                document,
+                "feedback",
+                "harmful_burst_window_seconds",
+            )?,
         })
     }
 }
