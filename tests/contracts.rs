@@ -67,6 +67,12 @@ mod counterfactual_gate15;
 #[path = "contracts/recorder_gate17.rs"]
 mod recorder_gate17;
 
+#[path = "contracts/recorder_event_spine.rs"]
+mod recorder_event_spine;
+
+#[path = "contracts/preflight_tripwires.rs"]
+mod preflight_tripwires;
+
 #[path = "contracts/procedure_gate18.rs"]
 mod procedure_gate18;
 
