@@ -1,0 +1,11 @@
+{
+  "schema": "ee.response.v1",
+  "api_version": "0.1.0",
+  "command": "agent-docs",
+  "success": true,
+  "data": {
+    "section": "guide",
+    "content": "GUIDE_CONTENT_PLACEHOLDER"
+  },
+  "error": null
+}

@@ -1,0 +1,16 @@
+{
+  "schema": "ee.response.v1",
+  "api_version": "0.1.0",
+  "command": "status",
+  "success": true,
+  "data": {
+    "workspace_id": "WORKSPACE_ID_PLACEHOLDER",
+    "workspace_path": "WORKSPACE_PATH_PLACEHOLDER",
+    "database_status": "ready",
+    "index_status": "ready",
+    "memory_count": 0,
+    "rule_count": 0,
+    "posture": "healthy"
+  },
+  "error": null
+}

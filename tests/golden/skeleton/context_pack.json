@@ -1,0 +1,14 @@
+{
+  "schema": "ee.response.v1",
+  "api_version": "0.1.0",
+  "command": "context",
+  "success": true,
+  "data": {
+    "pack_id": "PACK_ID_PLACEHOLDER",
+    "task": "TASK_PLACEHOLDER",
+    "memories": [],
+    "token_count": 0,
+    "token_budget": 4000
+  },
+  "error": null
+}

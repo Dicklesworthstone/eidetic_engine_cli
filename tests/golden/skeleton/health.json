@@ -1,0 +1,15 @@
+{
+  "schema": "ee.response.v1",
+  "api_version": "0.1.0",
+  "command": "health",
+  "success": true,
+  "data": {
+    "verdict": "healthy",
+    "checks": {
+      "database": "ok",
+      "index": "ok",
+      "config": "ok"
+    }
+  },
+  "error": null
+}

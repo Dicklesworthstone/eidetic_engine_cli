@@ -1,0 +1,13 @@
+{
+  "schema": "ee.response.v1",
+  "api_version": "0.1.0",
+  "command": "remember",
+  "success": true,
+  "data": {
+    "memory_id": "MEMORY_ID_PLACEHOLDER",
+    "workspace_id": "WORKSPACE_ID_PLACEHOLDER",
+    "content_hash": "CONTENT_HASH_PLACEHOLDER",
+    "created_at": "TIMESTAMP_PLACEHOLDER"
+  },
+  "error": null
+}

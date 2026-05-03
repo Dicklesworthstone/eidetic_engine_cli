@@ -1,0 +1,16 @@
+{
+  "schema": "ee.response.v1",
+  "api_version": "0.1.0",
+  "command": "introspect",
+  "success": true,
+  "data": {
+    "commands": {},
+    "schemas": {},
+    "errors": {},
+    "normalization": {
+      "case_sensitivity": "insensitive",
+      "alias_support": true
+    }
+  },
+  "error": null
+}

@@ -1,0 +1,15 @@
+{
+  "schema": "ee.response.v1",
+  "api_version": "0.1.0",
+  "command": "why",
+  "success": true,
+  "data": {
+    "memory_id": "MEMORY_ID_PLACEHOLDER",
+    "explanation": {
+      "storage_reason": "explicit_remember",
+      "retrieval_factors": [],
+      "pack_selection_factors": []
+    }
+  },
+  "error": null
+}

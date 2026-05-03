@@ -1,0 +1,12 @@
+{
+  "schema": "ee.response.v1",
+  "api_version": "0.1.0",
+  "command": "version",
+  "success": true,
+  "data": {
+    "version": "0.1.0",
+    "git_hash": "GIT_HASH_PLACEHOLDER",
+    "build_date": "BUILD_DATE_PLACEHOLDER"
+  },
+  "error": null
+}
