@@ -380,11 +380,17 @@ fn gate21_close_inconclusive_json_matches_golden() -> TestResult {
 #[test]
 fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
     let output = run_ee(&["--json", "learn", "agenda", "--limit", "2"])?;
-    ensure(output.status.success(), "learn agenda CLI should succeed")?;
+    ensure(
+        output.status.code() == Some(7),
+        format!(
+            "learn agenda CLI should report degraded unavailable exit 7, got {:?}",
+            output.status.code()
+        ),
+    )?;
     ensure(
         output.stderr.is_empty(),
         format!(
-            "learn agenda --json must keep diagnostics off stderr for clean fixture, got: {}",
+            "learn agenda --json must keep diagnostics off stderr for degraded output, got: {}",
             String::from_utf8_lossy(&output.stderr)
         ),
     )?;
@@ -394,10 +400,15 @@ fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
         serde_json::from_str(&stdout).map_err(|error| format!("stdout must be JSON: {error}"))?;
     ensure_json_equal(
         value.get("schema"),
-        JsonValue::String(LEARN_AGENDA_SCHEMA_V1.to_string()),
+        JsonValue::String("ee.response.v1".to_string()),
         "cli schema",
     )?;
-    ensure_json_equal(value.get("success"), JsonValue::Bool(true), "cli success")?;
+    ensure_json_equal(value.get("success"), JsonValue::Bool(false), "cli success")?;
+    ensure_json_equal(
+        value.pointer("/data/code"),
+        JsonValue::String("learning_records_unavailable".to_string()),
+        "agenda degraded code",
+    )?;
 
     let workspace = unique_workspace_dir("gate21-cli-dry-run")?;
     let workspace_arg = workspace.to_string_lossy().into_owned();
@@ -414,8 +425,11 @@ fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
         "--dry-run",
     ])?;
     ensure(
-        run.status.success(),
-        "learn experiment run dry-run should succeed",
+        run.status.code() == Some(7),
+        format!(
+            "learn experiment run dry-run should report degraded unavailable exit 7, got {:?}",
+            run.status.code()
+        ),
     )?;
     ensure(
         run.stderr.is_empty(),
@@ -428,10 +442,19 @@ fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
         .map_err(|error| format!("learn experiment run stdout must be JSON: {error}"))?;
     ensure_json_equal(
         run_value.get("schema"),
-        JsonValue::String(LEARN_EXPERIMENT_RUN_SCHEMA_V1.to_string()),
+        JsonValue::String("ee.response.v1".to_string()),
         "run schema",
     )?;
-    ensure_json_equal(run_value.get("dryRun"), JsonValue::Bool(true), "run dryRun")?;
+    ensure_json_equal(
+        run_value.get("success"),
+        JsonValue::Bool(false),
+        "run success",
+    )?;
+    ensure_json_equal(
+        run_value.pointer("/data/code"),
+        JsonValue::String("learning_records_unavailable".to_string()),
+        "run degraded code",
+    )?;
 
     let observe = run_ee(&[
         "--workspace",

@@ -50,10 +50,7 @@ use crate::core::init::{InitOptions, init_workspace};
 use crate::core::install::{InstallCheckOptions, InstallPlanOptions, check_install, plan_install};
 use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use crate::core::learn::{
-    LearnAgendaOptions, LearnCloseOptions, LearnExperimentProposeOptions,
-    LearnExperimentRunOptions, LearnObserveOptions, LearnSummaryOptions, LearnUncertaintyOptions,
-    close_experiment, observe_experiment, propose_experiments, run_experiment, show_agenda,
-    show_summary, show_uncertainty,
+    LearnCloseOptions, LearnObserveOptions, close_experiment, observe_experiment,
 };
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
@@ -6005,6 +6002,56 @@ where
 // EE-441: Learn Command Handlers
 // ============================================================================
 
+const LEARN_UNAVAILABLE_CODE: &str = "learning_records_unavailable";
+const LEARN_UNAVAILABLE_MESSAGE: &str = "Learning agenda, uncertainty, summary, and experiment proposal reports are unavailable until they read persisted observation ledgers and evaluation registries instead of hard-coded learning templates.";
+const LEARN_UNAVAILABLE_REPAIR: &str = "ee learn observe <experiment-id> --dry-run --json";
+const LEARN_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-evah";
+const LEARN_UNAVAILABLE_SIDE_EFFECT: &str = "conservative abstention; no learning agenda, uncertainty, summary, proposal, or experiment template emitted";
+
+fn write_learn_unavailable<W, E>(
+    cli: &Cli,
+    command: &'static str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": LEARN_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": LEARN_UNAVAILABLE_MESSAGE,
+                "repair": LEARN_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": LEARN_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": LEARN_UNAVAILABLE_MESSAGE,
+                        "repair": LEARN_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": LEARN_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": LEARN_UNAVAILABLE_SIDE_EFFECT
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
+    }
+
+    let _ = writeln!(stderr, "error: {LEARN_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {LEARN_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
+}
+
 fn handle_learn_agenda<W, E>(
     cli: &Cli,
     args: &LearnAgendaArgs,
@@ -6015,31 +6062,8 @@ where
     W: Write,
     E: Write,
 {
-    let options = LearnAgendaOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
-        limit: args.limit,
-        topic: args.topic.clone(),
-        include_resolved: args.include_resolved,
-        sort: args.sort.clone(),
-    };
-
-    match show_agenda(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_learn_agenda_human(&report))
-            }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_learn_agenda_toon(&report) + "\n"))
-            }
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_learn_agenda_json(&report) + "\n"))
-            }
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    }
+    let _ = args;
+    write_learn_unavailable(cli, "learn agenda", stdout, stderr)
 }
 
 fn handle_learn_uncertainty<W, E>(
@@ -6052,7 +6076,7 @@ where
     W: Write,
     E: Write,
 {
-    let min_uncertainty = match args.min_uncertainty.parse::<f64>() {
+    match args.min_uncertainty.parse::<f64>() {
         Ok(value) if (0.0..=1.0).contains(&value) => value,
         _ => {
             let error = DomainError::Usage {
@@ -6066,33 +6090,7 @@ where
         }
     };
 
-    let options = LearnUncertaintyOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
-        limit: args.limit,
-        min_uncertainty,
-        kind: args.kind.clone(),
-        low_confidence: args.low_confidence,
-    };
-
-    match show_uncertainty(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_learn_uncertainty_human(&report))
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_learn_uncertainty_toon(&report) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(output::render_learn_uncertainty_json(&report) + "\n"),
-            ),
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    }
+    write_learn_unavailable(cli, "learn uncertainty", stdout, stderr)
 }
 
 fn handle_learn_experiment_propose<W, E>(
@@ -6105,7 +6103,7 @@ where
     W: Write,
     E: Write,
 {
-    let min_expected_value = match args.min_expected_value.parse::<f64>() {
+    match args.min_expected_value.parse::<f64>() {
         Ok(value) if (0.0..=1.0).contains(&value) => value,
         _ => {
             let error = DomainError::Usage {
@@ -6119,7 +6117,7 @@ where
         }
     };
 
-    let safety_boundary = match args.safety_boundary.parse::<ExperimentSafetyBoundary>() {
+    match args.safety_boundary.parse::<ExperimentSafetyBoundary>() {
         Ok(boundary) => boundary,
         Err(error) => {
             let domain_error = DomainError::Usage {
@@ -6134,36 +6132,7 @@ where
         }
     };
 
-    let options = LearnExperimentProposeOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
-        limit: args.limit,
-        topic: args.topic.clone(),
-        min_expected_value,
-        max_attention_tokens: args.max_attention_tokens,
-        max_runtime_seconds: args.max_runtime_seconds,
-        safety_boundary,
-    };
-
-    match propose_experiments(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => write_stdout(
-                stdout,
-                &output::render_learn_experiment_proposal_human(&report),
-            ),
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_learn_experiment_proposal_toon(&report) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(output::render_learn_experiment_proposal_json(&report) + "\n"),
-            ),
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    }
+    write_learn_unavailable(cli, "learn experiment propose", stdout, stderr)
 }
 
 fn handle_learn_experiment_run<W, E>(
@@ -6176,33 +6145,17 @@ where
     W: Write,
     E: Write,
 {
-    let options = LearnExperimentRunOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
-        experiment_id: args.experiment_id.clone(),
-        max_attention_tokens: args.max_attention_tokens,
-        max_runtime_seconds: args.max_runtime_seconds,
-        dry_run: args.dry_run,
-    };
-
-    match run_experiment(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_learn_experiment_run_human(&report))
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_learn_experiment_run_toon(&report) + "\n"),
+    if !args.dry_run {
+        let error = DomainError::PolicyDenied {
+            message: "Learning experiment execution requires --dry-run until experiment execution is backed by persisted ledgers.".to_string(),
+            repair: Some(
+                "Use ee learn experiment run --id <experiment-id> --dry-run --json".to_string(),
             ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(output::render_learn_experiment_run_json(&report) + "\n"),
-            ),
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
+
+    write_learn_unavailable(cli, "learn experiment run", stdout, stderr)
 }
 
 fn handle_learn_observe<W, E>(
@@ -6382,29 +6335,8 @@ where
     W: Write,
     E: Write,
 {
-    let options = LearnSummaryOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
-        period: args.period.clone(),
-        detailed: args.detailed,
-    };
-
-    match show_summary(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_learn_summary_human(&report))
-            }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_learn_summary_toon(&report) + "\n"))
-            }
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_learn_summary_json(&report) + "\n"))
-            }
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    }
+    let _ = args;
+    write_learn_unavailable(cli, "learn summary", stdout, stderr)
 }
 
 // ============================================================================

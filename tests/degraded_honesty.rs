@@ -121,6 +121,8 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "claim"
     } else if args.iter().any(|arg| arg == "rehearse") {
         "rehearse"
+    } else if args.iter().any(|arg| arg == "learn") {
+        "learn"
     } else if args.iter().any(|arg| arg == "lab") {
         "lab"
     } else if args.iter().any(|arg| arg == "economy") {
@@ -160,6 +162,8 @@ fn side_effect_class(args: &[String]) -> &'static str {
         "read-only, conservative abstention; no claim manifest parse or verification result"
     } else if args.iter().any(|arg| arg == "rehearse") {
         "unavailable before sandbox mutation"
+    } else if args.iter().any(|arg| arg == "learn") {
+        "conservative abstention; no learning agenda, uncertainty, summary, proposal, or experiment template emitted"
     } else if args.iter().any(|arg| arg == "lab") {
         "unavailable before lab episode capture, replay, or counterfactual mutation"
     } else if args.iter().any(|arg| arg == "economy" || arg == "causal") {
@@ -883,6 +887,185 @@ fn rehearse_run_degrades_instead_of_reporting_simulated_success() -> TestResult 
         json!("unavailable before sandbox mutation"),
         "logged rehearse side-effect class",
     )
+}
+
+#[test]
+fn learn_read_and_proposal_commands_degrade_instead_of_reporting_seed_templates() -> TestResult {
+    let commands = [
+        (
+            "learn-agenda-unavailable",
+            "learn agenda",
+            vec![
+                "--json".to_owned(),
+                "learn".to_owned(),
+                "agenda".to_owned(),
+                "--limit".to_owned(),
+                "2".to_owned(),
+            ],
+        ),
+        (
+            "learn-uncertainty-unavailable",
+            "learn uncertainty",
+            vec![
+                "--json".to_owned(),
+                "learn".to_owned(),
+                "uncertainty".to_owned(),
+                "--min-uncertainty".to_owned(),
+                "0.3".to_owned(),
+            ],
+        ),
+        (
+            "learn-experiment-propose-unavailable",
+            "learn experiment propose",
+            vec![
+                "--json".to_owned(),
+                "learn".to_owned(),
+                "experiment".to_owned(),
+                "propose".to_owned(),
+            ],
+        ),
+        (
+            "learn-experiment-run-unavailable",
+            "learn experiment run",
+            vec![
+                "--json".to_owned(),
+                "learn".to_owned(),
+                "experiment".to_owned(),
+                "run".to_owned(),
+                "--id".to_owned(),
+                "exp_database_contract_fixture".to_owned(),
+                "--dry-run".to_owned(),
+            ],
+        ),
+        (
+            "learn-summary-unavailable",
+            "learn summary",
+            vec![
+                "--json".to_owned(),
+                "learn".to_owned(),
+                "summary".to_owned(),
+            ],
+        ),
+    ];
+
+    for (artifact_name, command, args) in commands {
+        let result = run_ee_logged(artifact_name, None, args)?;
+
+        ensure_equal(
+            &result.exit_code,
+            &UNSATISFIED_DEGRADED_MODE_EXIT,
+            &format!("{command} unavailable exit code"),
+        )?;
+        ensure(
+            result.stderr.is_empty(),
+            format!("{command} JSON degraded response must keep stderr empty"),
+        )?;
+        ensure_no_ansi(&result.stdout, &format!("{command} degraded stdout"))?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/schema",
+            json!("ee.response.v1"),
+            &format!("{command} degraded response schema"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/success",
+            json!(false),
+            &format!("{command} success flag"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/code",
+            json!("learning_records_unavailable"),
+            &format!("{command} degraded code"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/degraded/0/code",
+            json!("learning_records_unavailable"),
+            &format!("{command} degraded array code"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/repair",
+            json!("ee learn observe <experiment-id> --dry-run --json"),
+            &format!("{command} repair command"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/followUpBead",
+            json!("eidetic_engine_cli-evah"),
+            &format!("{command} follow-up bead"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/sideEffectClass",
+            json!(
+                "conservative abstention; no learning agenda, uncertainty, summary, proposal, or experiment template emitted"
+            ),
+            &format!("{command} side-effect class"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/evidenceIds",
+            json!([]),
+            &format!("{command} evidence ids"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/sourceIds",
+            json!([]),
+            &format!("{command} source ids"),
+        )?;
+
+        let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
+        ensure(
+            fake_success.passed,
+            format!("degraded {command} output should not be fake success: {fake_success:?}"),
+        )?;
+
+        let unsupported_claims =
+            validate_no_unsupported_evidence_claims(command, false, false, &result.stdout);
+        ensure(
+            unsupported_claims.passed,
+            format!(
+                "degraded {command} output should not count as unsupported success: {unsupported_claims:?}"
+            ),
+        )?;
+
+        let log_text = fs::read_to_string(&result.log_path)
+            .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+        let log_json: Value = serde_json::from_str(&log_text)
+            .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+        ensure_json_pointer(
+            &log_json,
+            "/degradationCodes",
+            json!(["learning_records_unavailable"]),
+            &format!("logged {command} degradation code"),
+        )?;
+        ensure_json_pointer(
+            &log_json,
+            "/repairCommand",
+            json!("ee learn observe <experiment-id> --dry-run --json"),
+            &format!("logged {command} repair command"),
+        )?;
+        ensure_json_pointer(
+            &log_json,
+            "/commandBoundaryMatrixRow",
+            json!("learn"),
+            &format!("logged {command} boundary matrix row"),
+        )?;
+        ensure_json_pointer(
+            &log_json,
+            "/sideEffectClass",
+            json!(
+                "conservative abstention; no learning agenda, uncertainty, summary, proposal, or experiment template emitted"
+            ),
+            &format!("logged {command} side-effect class"),
+        )?;
+    }
+
+    Ok(())
 }
 
 #[test]
