@@ -2512,7 +2512,7 @@ fn robot_global_selects_machine_output() -> TestResult {
 }
 
 #[test]
-fn procedure_export_skill_capsule_json_exposes_render_only_artifact() -> TestResult {
+fn procedure_export_skill_capsule_json_degrades_until_store_exists() -> TestResult {
     let output = run_ee(&[
         "--json",
         "procedure",
@@ -2526,8 +2526,8 @@ fn procedure_export_skill_capsule_json_exposes_render_only_artifact() -> TestRes
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     ensure(
-        output.status.success(),
-        format!("procedure export should succeed; stderr: {stderr}"),
+        output.status.code() == Some(7),
+        format!("procedure export should degrade until stored procedures exist; stderr: {stderr}"),
     )?;
     ensure(
         stderr.is_empty(),
@@ -2540,30 +2540,33 @@ fn procedure_export_skill_capsule_json_exposes_render_only_artifact() -> TestRes
     )?;
     let value: serde_json::Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("procedure export stdout must be JSON: {error}"))?;
+    ensure_equal(&value["success"], &serde_json::json!(false), "success flag")?;
     ensure_equal(
-        &value["data"]["format"],
-        &serde_json::json!("skill_capsule"),
-        "skill capsule format",
+        &value["data"]["command"],
+        &serde_json::json!("procedure export"),
+        "procedure command",
     )?;
     ensure_equal(
-        &value["data"]["installMode"],
-        &serde_json::json!("render_only"),
-        "render-only install mode",
+        &value["data"]["code"],
+        &serde_json::json!("procedure_store_unavailable"),
+        "procedure degraded code",
     )?;
-    ensure_contains(
-        value["data"]["content"].as_str().unwrap_or_default(),
-        "This capsule is render-only",
-        "skill capsule safety text",
+    ensure_equal(
+        &value["data"]["repair"],
+        &serde_json::json!("ee status --json"),
+        "procedure repair",
     )?;
-    ensure_contains(
-        value["data"]["contentHash"].as_str().unwrap_or_default(),
-        "blake3:",
-        "content hash",
+    ensure(
+        value["data"].get("format").is_none()
+            && value["data"].get("installMode").is_none()
+            && value["data"].get("content").is_none()
+            && value["data"].get("contentHash").is_none(),
+        "procedure export degraded response must not emit render-only capsule artifact fields",
     )
 }
 
 #[test]
-fn procedure_promote_dry_run_json_reports_planned_curation_and_audit() -> TestResult {
+fn procedure_promote_dry_run_json_degrades_until_audited_promotion_exists() -> TestResult {
     let output = run_ee(&[
         "--json",
         "procedure",
@@ -2578,8 +2581,8 @@ fn procedure_promote_dry_run_json_reports_planned_curation_and_audit() -> TestRe
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     ensure(
-        output.status.success(),
-        format!("procedure promote should succeed; stderr: {stderr}"),
+        output.status.code() == Some(7),
+        format!("procedure promote should degrade until stored procedures exist; stderr: {stderr}"),
     )?;
     ensure(
         stderr.is_empty(),
@@ -2592,30 +2595,28 @@ fn procedure_promote_dry_run_json_reports_planned_curation_and_audit() -> TestRe
     )?;
     let value: serde_json::Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("procedure promote stdout must be JSON: {error}"))?;
+    ensure_equal(&value["success"], &serde_json::json!(false), "success flag")?;
     ensure_equal(
-        &value["data"]["schema"],
-        &serde_json::json!("ee.procedure.promote_report.v1"),
-        "procedure promote data schema",
+        &value["data"]["command"],
+        &serde_json::json!("procedure promote"),
+        "procedure command",
     )?;
     ensure_equal(
-        &value["data"]["dryRun"],
-        &serde_json::json!(true),
-        "dry-run flag",
+        &value["data"]["code"],
+        &serde_json::json!("procedure_store_unavailable"),
+        "procedure degraded code",
     )?;
     ensure_equal(
-        &value["data"]["curation"]["candidateType"],
-        &serde_json::json!("promote"),
-        "curation candidate type",
+        &value["data"]["repair"],
+        &serde_json::json!("ee status --json"),
+        "procedure repair",
     )?;
-    ensure_equal(
-        &value["data"]["audit"]["recorded"],
-        &serde_json::json!(false),
-        "audit remains unrecorded",
-    )?;
-    ensure_equal(
-        &value["data"]["plannedEffects"][0]["applied"],
-        &serde_json::json!(false),
-        "planned effects are not applied",
+    ensure(
+        value["data"].get("dryRun").is_none()
+            && value["data"].get("curation").is_none()
+            && value["data"].get("audit").is_none()
+            && value["data"].get("plannedEffects").is_none(),
+        "procedure promote degraded response must not emit planned curation or audit claims",
     )
 }
 
@@ -3607,32 +3608,44 @@ fn artifact_registry_registers_indexes_exports_and_supports_context() -> TestRes
     ])?;
     let support_stderr = String::from_utf8_lossy(&support.stderr);
     ensure(
-        support.status.success(),
-        format!("support bundle should succeed; stderr: {support_stderr}"),
+        support.status.code() == Some(7),
+        format!(
+            "support bundle should degrade until redacted archive materialization exists; stderr: {support_stderr}"
+        ),
     )?;
     ensure(support.stderr.is_empty(), "support bundle stderr clean")?;
     let support_json: serde_json::Value = serde_json::from_slice(&support.stdout)
         .map_err(|error| format!("support stdout must be JSON: {error}"))?;
     ensure_equal(
-        &support_json["data"]["artifact_registry_count"],
-        &serde_json::json!(2),
-        "support artifact registry count",
+        &support_json["success"],
+        &serde_json::json!(false),
+        "support success flag",
     )?;
     ensure_equal(
-        &support_json["data"]["artifact_registry_included"],
-        &serde_json::json!(true),
-        "support artifact registry included",
+        &support_json["data"]["command"],
+        &serde_json::json!("support bundle"),
+        "support command",
+    )?;
+    ensure_equal(
+        &support_json["data"]["code"],
+        &serde_json::json!("support_bundle_unavailable"),
+        "support degraded code",
+    )?;
+    ensure_equal(
+        &support_json["data"]["repair"],
+        &serde_json::json!("ee diag integrity --json"),
+        "support repair",
     )?;
     ensure(
-        support_json["data"]["files_collected"]
-            .as_array()
-            .is_some_and(|files| {
-                files
-                    .iter()
-                    .any(|file| file == ".ee/artifacts.redacted.jsonl")
-                    && files.iter().all(|file| file != ".ee/db.sqlite")
-            }),
-        "support bundle references redacted artifact export and omits raw DB",
+        support_json["data"]
+            .get("artifact_registry_count")
+            .is_none()
+            && support_json["data"]
+                .get("artifact_registry_included")
+                .is_none()
+            && support_json["data"].get("files_collected").is_none()
+            && support_json["data"].get("bundle_path").is_none(),
+        "support bundle degraded response must not emit archive collection fields",
     )?;
     ensure(
         !String::from_utf8_lossy(&support.stdout).contains("redaction-fixture"),
@@ -5169,7 +5182,7 @@ fn pack_query_file_rejects_oversized_document_before_parse() -> TestResult {
 }
 
 #[test]
-fn learn_experiment_propose_json_exposes_decision_ready_fields() -> TestResult {
+fn learn_experiment_propose_json_degrades_until_records_exist() -> TestResult {
     let output = run_ee(&[
         "--json",
         "learn",
@@ -5190,8 +5203,10 @@ fn learn_experiment_propose_json_exposes_decision_ready_fields() -> TestResult {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     ensure(
-        output.status.success(),
-        format!("learn experiment propose should succeed; stderr: {stderr}"),
+        output.status.code() == Some(7),
+        format!(
+            "learn experiment propose should degrade until learning records exist; stderr: {stderr}"
+        ),
     )?;
     ensure(
         output.stderr.is_empty(),
@@ -5202,45 +5217,30 @@ fn learn_experiment_propose_json_exposes_decision_ready_fields() -> TestResult {
         .map_err(|error| format!("learn experiment propose stdout must be JSON: {error}"))?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.learn.experiment_proposal.v1"),
-        "learn experiment proposal schema",
+        &serde_json::json!("ee.response.v1"),
+        "response schema",
     )?;
-    ensure_equal(&json["success"], &serde_json::json!(true), "success flag")?;
-    ensure_equal(&json["returned"], &serde_json::json!(1), "returned count")?;
-    ensure(
-        json["proposals"]
-            .as_array()
-            .is_some_and(|proposals| proposals.len() == 1),
-        "learn experiment propose should return one proposal",
-    )?;
-    let proposal = &json["proposals"][0];
-    ensure(
-        proposal["expectedValue"].is_number(),
-        "proposal expectedValue must be numeric",
+    ensure_equal(&json["success"], &serde_json::json!(false), "success flag")?;
+    ensure_equal(
+        &json["data"]["command"],
+        &serde_json::json!("learn experiment propose"),
+        "learn command",
     )?;
     ensure_equal(
-        &proposal["budget"]["attentionTokens"],
-        &serde_json::json!(650),
-        "proposal attention budget",
+        &json["data"]["code"],
+        &serde_json::json!("learning_records_unavailable"),
+        "learn degraded code",
     )?;
     ensure_equal(
-        &proposal["budget"]["maxRuntimeSeconds"],
-        &serde_json::json!(180),
-        "proposal runtime budget",
-    )?;
-    ensure_equal(
-        &proposal["safety"]["boundary"],
-        &serde_json::json!("human_review"),
-        "proposal safety boundary",
-    )?;
-    ensure_equal(
-        &proposal["safety"]["mutationAllowed"],
-        &serde_json::json!(false),
-        "proposal must not allow mutation",
+        &json["data"]["repair"],
+        &serde_json::json!("ee learn observe <experiment-id> --dry-run --json"),
+        "learn repair",
     )?;
     ensure(
-        proposal["decisionImpact"]["decisionId"].is_string(),
-        "proposal decision impact must identify the affected decision",
+        json.get("returned").is_none()
+            && json.get("proposals").is_none()
+            && json["data"].get("proposal").is_none(),
+        "learn experiment propose degraded response must not emit proposal template fields",
     )
 }
 
