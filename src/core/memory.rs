@@ -1415,6 +1415,30 @@ impl MemoryReviseReport {
         }
     }
 
+    /// Create an unavailable write report while preserving the computed preview.
+    #[must_use]
+    pub fn write_unavailable(
+        original_id: String,
+        reason: ReviseReason,
+        changed_fields: Vec<String>,
+    ) -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            dry_run: false,
+            success: false,
+            original_id,
+            new_id: None,
+            revision_group_id: None,
+            revision_number: None,
+            reason: reason.as_str().to_owned(),
+            changed_fields,
+            error: Some(
+                "Memory revision writes are unavailable until immutable revision storage and supersession links are implemented; rerun with --dry-run to preview changes."
+                    .to_owned(),
+            ),
+        }
+    }
+
     /// Create a not-found error report.
     #[must_use]
     pub fn not_found(original_id: String) -> Self {
@@ -1569,22 +1593,10 @@ pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
         );
     }
 
-    // Create the new memory (stub - actual DB write would happen here)
-    // For now, return a stub success since DB write methods may not exist yet
-    // Note: In full implementation, revision_group_id would come from a separate
-    // revision tracking table, and revision_number would be computed from the chain.
-    let new_id = format!("mem_{}", uuid::Uuid::now_v7().simple());
-    let revision_group_id = format!("rev_{}", uuid::Uuid::now_v7().simple());
-    let revision_number = 2; // Stub: first revision is always #2 (original is #1)
-
-    MemoryReviseReport::success(
+    MemoryReviseReport::write_unavailable(
         options.original_memory_id.to_owned(),
-        new_id,
-        revision_group_id,
-        revision_number,
         options.reason.clone(),
         changed_fields,
-        false,
     )
 }
 
@@ -2653,6 +2665,116 @@ mod tests {
         )?;
         ensure(report.changed_fields.len(), 1, "changed_fields count")?;
         ensure(report.error.is_none(), true, "no error")
+    }
+
+    #[test]
+    fn memory_revise_report_write_unavailable_preserves_preview_fields() -> TestResult {
+        let report = MemoryReviseReport::write_unavailable(
+            "mem_old".to_string(),
+            ReviseReason::Correction,
+            vec!["content".to_string(), "confidence".to_string()],
+        );
+
+        ensure(report.success, false, "success")?;
+        ensure(report.dry_run, false, "dry_run")?;
+        ensure(report.original_id, "mem_old".to_string(), "original_id")?;
+        ensure(report.new_id.is_none(), true, "new_id absent")?;
+        ensure(
+            report.revision_group_id.is_none(),
+            true,
+            "revision group absent",
+        )?;
+        ensure(report.revision_number.is_none(), true, "revision absent")?;
+        ensure(report.reason, "correction".to_string(), "reason")?;
+        ensure(
+            report.changed_fields,
+            vec!["content".to_string(), "confidence".to_string()],
+            "changed fields",
+        )?;
+        ensure(
+            report
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("unavailable")),
+            true,
+            "unavailable error",
+        )
+    }
+
+    #[test]
+    fn revise_memory_non_dry_run_reports_unavailable_instead_of_stub_success() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let created = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Store release checks as durable memory.",
+            level: "procedural",
+            kind: "rule",
+            tags: Some("release,checks"),
+            confidence: 0.9,
+            source: Some("file://README.md#L74-77"),
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let memory_id = created.memory_id.to_string();
+
+        let report = revise_memory(&ReviseMemoryOptions {
+            database_path: &created.database_path,
+            original_memory_id: &memory_id,
+            content: Some("Store release checks and clippy gates as durable memory."),
+            level: None,
+            kind: None,
+            confidence: None,
+            tags: None,
+            provenance_uri: None,
+            reason: ReviseReason::Correction,
+            actor: Some("SapphireBeacon"),
+            dry_run: false,
+        });
+
+        ensure(report.success, false, "success")?;
+        ensure(report.dry_run, false, "dry_run")?;
+        ensure(report.original_id, memory_id.clone(), "original id")?;
+        ensure(report.new_id.is_none(), true, "no generated new memory id")?;
+        ensure(
+            report.revision_group_id.is_none(),
+            true,
+            "no generated revision group",
+        )?;
+        ensure(
+            report.revision_number.is_none(),
+            true,
+            "no stub revision number",
+        )?;
+        ensure(
+            report.changed_fields,
+            vec!["content".to_string()],
+            "changed fields",
+        )?;
+        ensure(
+            report
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("--dry-run")),
+            true,
+            "repair hint mentions dry-run",
+        )?;
+
+        let connection = crate::db::DbConnection::open_file(&created.database_path)
+            .map_err(|error| error.to_string())?;
+        let original = connection
+            .get_memory(&memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "created memory should still exist".to_string())?;
+        ensure(
+            original.content,
+            "Store release checks as durable memory.".to_string(),
+            "original content unchanged",
+        )
     }
 
     #[test]
