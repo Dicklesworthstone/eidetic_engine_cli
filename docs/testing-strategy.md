@@ -157,6 +157,54 @@ progress bars, tracing, warnings, or debug text appear there. stderr assertions
 should allow diagnostics but require stable structure for JSONL progress events
 once those events exist.
 
+### Boundary-Migration Log Schema
+
+Mechanical-boundary migration tests must use `ee.e2e.boundary_log.v1` as the
+logical schema for each logged command step, even when a test stores the fields
+in several small artifact files instead of one JSON object. The schema is a
+cross-cutting contract for beads that split Rust CLI mechanics from agent-skill
+workflows.
+
+Required command-step fields:
+
+- `command` and `argv`: the exact binary and arguments executed.
+- `cwd` and `workspace`: the process directory and resolved workspace root.
+- `env_sanitized`: environment override names and redacted values only.
+- `started_at_unix_ms`, `ended_at_unix_ms`, and `elapsed_ms`.
+- `exit_code`.
+- `stdout_artifact_path` and `stderr_artifact_path`.
+- `stdout_json_valid` and `schema_validation`.
+- `golden_validation`.
+- `redaction_status`.
+- `evidence_ids`.
+- `degradation_codes`.
+- `mutation_summary`: `read_only`, `dry_run_no_mutation_expected`,
+  `durable_write_expected`, or a more specific conservative summary.
+- `command_boundary_matrix_row`: reference to the command-boundary matrix row
+  in `docs/mechanical-boundary-command-inventory.md`, or null if not applicable.
+- `fixture_hashes`: map of fixture IDs to content hashes, or empty when no
+  fixtures are required.
+- `db_generation_before` and `db_generation_after`: DB generation numbers
+  before/after command execution, or null when not applicable.
+- `runtime_budget`: runtime budget in milliseconds if configured, or null when
+  unbounded.
+- `cancellation_status`: `not_applicable`, `not_requested`, `requested`,
+  `completed`, or `timeout`.
+- `reproduction_command`: stable shell command for re-running the exact step
+  from `cwd` with sanitized overrides.
+- `first_failure`: null on a clean step; otherwise the shortest actionable
+  diagnosis, such as `stdout_pollution`, `schema_mismatch:<schema>`,
+  `missing_matrix_row:<surface>`, `unexpected_mutation`,
+  `missing_fixture_hash:<fixture_id>`, `error.code=<code>`, or the first stable
+  stderr line.
+
+Boundary-migration e2e tests must fail if a successful JSON-mode command writes
+human diagnostics to stdout, if stdout cannot be parsed as the requested machine
+format, or if the parsed schema does not match the expected command contract.
+Later mechanical-boundary command-family beads should cite this section in their
+acceptance criteria and store CI artifacts under `target/ee-e2e/` or a
+documented compatible subdirectory.
+
 ## Degradation Matrix
 
 Graceful degradation is part of the product contract, not a best-effort message.

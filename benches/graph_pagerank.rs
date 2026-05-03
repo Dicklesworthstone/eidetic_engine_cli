@@ -239,6 +239,12 @@ fn compare_only_mode_enabled() -> bool {
 
 fn assert_regression_window(scale: &str, stats: &QuickStats) {
     let baseline = load_baseline(scale).unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        stats.p50_ms <= BUDGET_P50_MS,
+        "p50 budget exceeded for scale '{scale}': current {:.3}ms > {:.3}ms",
+        stats.p50_ms,
+        BUDGET_P50_MS
+    );
     let max_p50 = baseline.p50_ms * (1.0 + REGRESSION_THRESHOLD);
     assert!(
         stats.p50_ms <= max_p50,
@@ -247,6 +253,12 @@ fn assert_regression_window(scale: &str, stats: &QuickStats) {
         max_p50,
         baseline.p50_ms,
         REGRESSION_THRESHOLD * 100.0
+    );
+    assert!(
+        stats.p99_ms <= BUDGET_P99_MS,
+        "p99 budget exceeded for scale '{scale}': current {:.3}ms > {:.3}ms",
+        stats.p99_ms,
+        BUDGET_P99_MS
     );
     let max_p99 = baseline.p99_ms * (1.0 + REGRESSION_THRESHOLD);
     assert!(
@@ -303,12 +315,11 @@ criterion_main!(benches);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn benchmark_group_name_is_canonical() {
         assert_eq!(
-            BENCH_GROUP_NAME, "ee_graph_pagerank",
+            super::BENCH_GROUP_NAME,
+            "ee_graph_pagerank",
             "canonical group name"
         );
     }
@@ -316,11 +327,11 @@ mod tests {
     #[test]
     fn budget_constants_match_plan() {
         assert!(
-            (BUDGET_P50_MS - 350.0).abs() < f64::EPSILON,
+            (super::BUDGET_P50_MS - 350.0).abs() < f64::EPSILON,
             "p50 budget matches plan §28/README"
         );
         assert!(
-            (BUDGET_P99_MS - 2000.0).abs() < f64::EPSILON,
+            (super::BUDGET_P99_MS - 2000.0).abs() < f64::EPSILON,
             "p99 hard ceiling matches plan §28/README"
         );
     }
@@ -328,14 +339,14 @@ mod tests {
     #[test]
     fn regression_threshold_is_30_percent() {
         assert!(
-            (REGRESSION_THRESHOLD - 0.30).abs() < f64::EPSILON,
+            (super::REGRESSION_THRESHOLD - 0.30).abs() < f64::EPSILON,
             "regression threshold is 30%"
         );
     }
 
     #[test]
     fn seeded_link_ids_match_database_constraint_shape() {
-        let sample = seed_link_id(42);
+        let sample = super::seed_link_id(42);
         assert!(
             sample.starts_with("link_"),
             "seed link id must use link_ prefix"

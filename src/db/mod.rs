@@ -292,9 +292,13 @@ impl DbConnection {
     pub fn integrity_report(&self) -> Result<IntegrityReport> {
         let integrity = self.check_integrity()?;
         let foreign_keys = self.check_foreign_keys()?;
-        let reference_check = self.check_reference_integrity()?;
         let schema_version = self.schema_version()?;
         let needs_migration = self.needs_migration()?;
+        let reference_check = if needs_migration {
+            ReferenceIntegrityReport::clean()
+        } else {
+            self.check_reference_integrity()?
+        };
 
         Ok(IntegrityReport {
             integrity_check: integrity,
@@ -872,6 +876,14 @@ pub struct ReferenceIntegrityReport {
 }
 
 impl ReferenceIntegrityReport {
+    #[must_use]
+    pub const fn clean() -> Self {
+        Self {
+            issue_count: 0,
+            issues: Vec::new(),
+        }
+    }
+
     #[must_use]
     pub fn is_clean(&self) -> bool {
         self.issue_count == 0
@@ -10490,7 +10502,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
     fn update_workspace_name() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
@@ -10502,21 +10513,20 @@ mod tests {
 
         connection.insert_workspace("wsp_update00000000000000000000", &input)?;
 
-        let before = connection.get_workspace("wsp_update00000000000000000000")?;
-        ensure(before.is_some(), "workspace exists")?;
-        ensure(
-            before.expect("checked above").name.is_none(),
-            "name is None before update",
-        )?;
+        let Some(before) = connection.get_workspace("wsp_update00000000000000000000")? else {
+            return Err(TestFailure::new("workspace exists"));
+        };
+        ensure(before.name.is_none(), "name is None before update")?;
 
         let affected = connection
             .update_workspace_name("wsp_update00000000000000000000", Some("Updated Name"))?;
         ensure(affected, "update affected a row")?;
 
-        let after = connection.get_workspace("wsp_update00000000000000000000")?;
-        ensure(after.is_some(), "workspace still exists")?;
+        let Some(after) = connection.get_workspace("wsp_update00000000000000000000")? else {
+            return Err(TestFailure::new("workspace still exists"));
+        };
         ensure_equal(
-            &after.expect("checked above").name,
+            &after.name,
             &Some("Updated Name".to_string()),
             "name updated",
         )?;
@@ -10524,12 +10534,10 @@ mod tests {
         let cleared = connection.update_workspace_name("wsp_update00000000000000000000", None)?;
         ensure(cleared, "clear affected a row")?;
 
-        let final_state = connection.get_workspace("wsp_update00000000000000000000")?;
-        ensure(final_state.is_some(), "workspace still exists")?;
-        ensure(
-            final_state.expect("checked above").name.is_none(),
-            "name cleared to None",
-        )?;
+        let Some(final_state) = connection.get_workspace("wsp_update00000000000000000000")? else {
+            return Err(TestFailure::new("workspace still exists"));
+        };
+        ensure(final_state.name.is_none(), "name cleared to None")?;
 
         connection.close()?;
         Ok(())

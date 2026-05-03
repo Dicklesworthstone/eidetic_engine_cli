@@ -95,6 +95,11 @@ fn write_json(path: &Path, value: &JsonValue) -> TestResult {
 }
 
 #[cfg(unix)]
+fn path_arg(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(unix)]
 struct LoggedStep {
     output: Output,
     dossier_dir: PathBuf,
@@ -175,6 +180,10 @@ fn run_logged_json_step(
             "stdoutPath": dossier_dir.join("stdout").display().to_string(),
         }),
     )?;
+
+    if output.status.success() {
+        assert_stdout_only_machine_data(&output, step_slug)?;
+    }
 
     Ok(LoggedStep {
         output,
@@ -518,21 +527,21 @@ fn backup_workflow_creates_verifiable_artifact() -> TestResult {
 
     let workspace = scenario_dir.join("workspace");
     fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
+    let database_path = path_arg(&workspace.join("ee.db"));
 
     let step = run_logged_json_step(
         &scenario_dir,
         "01-init",
         &workspace,
-        &[
-            "init",
-            "--database",
-            workspace.join("ee.db").to_str().unwrap(),
-            "--json",
-        ],
+        &["init", "--database", database_path.as_str(), "--json"],
         "USR006-INIT-001",
         "ee.response.v1",
     )?;
     ensure(step.output.status.success(), "init should succeed")?;
+    ensure(
+        step.dossier_dir.join("stdout.schema.json").exists(),
+        "init dossier should include stdout schema metadata",
+    )?;
 
     let step = run_logged_json_step(
         &scenario_dir,
@@ -541,7 +550,7 @@ fn backup_workflow_creates_verifiable_artifact() -> TestResult {
         &[
             "remember",
             "--database",
-            workspace.join("ee.db").to_str().unwrap(),
+            database_path.as_str(),
             "--level",
             "episodic",
             "--kind",
@@ -556,6 +565,7 @@ fn backup_workflow_creates_verifiable_artifact() -> TestResult {
 
     let backup_dir = workspace.join("backups");
     fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
+    let backup_dir_arg = path_arg(&backup_dir);
 
     let step = run_logged_json_step(
         &scenario_dir,
@@ -565,9 +575,9 @@ fn backup_workflow_creates_verifiable_artifact() -> TestResult {
             "backup",
             "create",
             "--database",
-            workspace.join("ee.db").to_str().unwrap(),
+            database_path.as_str(),
             "--output-dir",
-            backup_dir.to_str().unwrap(),
+            backup_dir_arg.as_str(),
             "--label",
             "test-backup",
             "--redaction",
@@ -606,7 +616,7 @@ fn backup_workflow_creates_verifiable_artifact() -> TestResult {
                 "backup",
                 "list",
                 "--output-dir",
-                backup_dir.to_str().unwrap(),
+                backup_dir_arg.as_str(),
                 "--json",
             ],
             "USR006-BACKUP-LIST-001",
@@ -632,7 +642,7 @@ fn backup_workflow_creates_verifiable_artifact() -> TestResult {
                 "verify",
                 backup_id,
                 "--output-dir",
-                backup_dir.to_str().unwrap(),
+                backup_dir_arg.as_str(),
                 "--json",
             ],
             "USR006-BACKUP-VERIFY-001",
@@ -650,6 +660,7 @@ fn backup_workflow_creates_verifiable_artifact() -> TestResult {
         }
 
         let restore_path = scenario_dir.join("restored");
+        let restore_path_arg = path_arg(&restore_path);
         let restore_step = run_logged_json_step(
             &scenario_dir,
             "06-backup-restore",
@@ -659,9 +670,9 @@ fn backup_workflow_creates_verifiable_artifact() -> TestResult {
                 "restore",
                 backup_id,
                 "--output-dir",
-                backup_dir.to_str().unwrap(),
+                backup_dir_arg.as_str(),
                 "--side-path",
-                restore_path.to_str().unwrap(),
+                restore_path_arg.as_str(),
                 "--dry-run",
                 "--json",
             ],
@@ -707,17 +718,13 @@ fn export_with_redaction_prevents_secret_leakage() -> TestResult {
 
     let workspace = scenario_dir.join("workspace");
     fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
+    let database_path = path_arg(&workspace.join("ee.db"));
 
     let step = run_logged_json_step(
         &scenario_dir,
         "01-init",
         &workspace,
-        &[
-            "init",
-            "--database",
-            workspace.join("ee.db").to_str().unwrap(),
-            "--json",
-        ],
+        &["init", "--database", database_path.as_str(), "--json"],
         "USR006-EXPORT-INIT",
         "ee.response.v1",
     )?;
@@ -739,7 +746,7 @@ fn export_with_redaction_prevents_secret_leakage() -> TestResult {
             &[
                 "remember",
                 "--database",
-                workspace.join("ee.db").to_str().unwrap(),
+                database_path.as_str(),
                 "--level",
                 "episodic",
                 "--kind",
@@ -757,6 +764,7 @@ fn export_with_redaction_prevents_secret_leakage() -> TestResult {
     }
 
     let export_path = scenario_dir.join("export.jsonl");
+    let export_path_arg = path_arg(&export_path);
     let step = run_logged_json_step(
         &scenario_dir,
         "03-export-redacted",
@@ -764,9 +772,9 @@ fn export_with_redaction_prevents_secret_leakage() -> TestResult {
         &[
             "export",
             "--database",
-            workspace.join("ee.db").to_str().unwrap(),
+            database_path.as_str(),
             "--output",
-            export_path.to_str().unwrap(),
+            export_path_arg.as_str(),
             "--redaction",
             "standard",
             "--json",

@@ -89,6 +89,9 @@ pub const DEGRADATION_CODE_BUDGET_EXCEEDED: &str = "science_budget_exceeded";
 /// Stable schema for `ee analyze science-status --json` payloads.
 pub const SCIENCE_STATUS_SCHEMA_V1: &str = "ee.science.status.v1";
 
+/// Stable schema for clustering diagnostics over consolidation candidates.
+pub const CLUSTERING_DIAGNOSTICS_SCHEMA_V1: &str = "ee.science.clustering_diagnostics.v1";
+
 /// Canonical command path for science status diagnostics.
 pub const SCIENCE_STATUS_COMMAND: &str = "analyze science-status";
 
@@ -486,6 +489,18 @@ mod enabled {
                 silhouette_score,
             }
         }
+
+        #[must_use]
+        pub fn data_json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "schema": super::CLUSTERING_DIAGNOSTICS_SCHEMA_V1,
+                "status": if self.cluster_count == 0 { "empty" } else { "computed" },
+                "available": true,
+                "degradationCode": null,
+                "clusterCount": self.cluster_count,
+                "silhouetteScore": self.silhouette_score,
+            })
+        }
     }
 
     fn valid_embeddings(embeddings: &[Vec<f32>]) -> bool {
@@ -680,6 +695,18 @@ mod disabled {
         #[must_use]
         pub fn compute(_embeddings: &[Vec<f32>]) -> Self {
             Self::default()
+        }
+
+        #[must_use]
+        pub fn data_json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "schema": super::CLUSTERING_DIAGNOSTICS_SCHEMA_V1,
+                "status": "not_compiled",
+                "available": false,
+                "degradationCode": super::DEGRADATION_CODE_NOT_COMPILED,
+                "clusterCount": self.cluster_count,
+                "silhouetteScore": self.silhouette_score,
+            })
         }
     }
 }
@@ -1119,6 +1146,18 @@ mod tests {
             diag.silhouette_score,
             None,
             "silhouette remains unavailable",
+        )?;
+        let json = diag.data_json();
+        ensure_json_str(
+            json.get("schema").and_then(serde_json::Value::as_str),
+            CLUSTERING_DIAGNOSTICS_SCHEMA_V1,
+            "clustering diagnostics schema",
+        )?;
+        ensure_json_str(
+            json.get("degradationCode")
+                .and_then(serde_json::Value::as_str),
+            DEGRADATION_CODE_NOT_COMPILED,
+            "clustering diagnostics degradation code",
         )
     }
 
@@ -1133,6 +1172,17 @@ mod tests {
         ]);
 
         ensure(diag.cluster_count, 2, "cluster count")?;
+        let json = diag.data_json();
+        ensure_json_str(
+            json.get("schema").and_then(serde_json::Value::as_str),
+            CLUSTERING_DIAGNOSTICS_SCHEMA_V1,
+            "clustering diagnostics schema",
+        )?;
+        ensure_json_str(
+            json.get("status").and_then(serde_json::Value::as_str),
+            "computed",
+            "clustering diagnostics status",
+        )?;
         match diag.silhouette_score {
             Some(score) if score > 0.9 && score <= 1.0 => Ok(()),
             other => Err(format!("expected high silhouette score, got {other:?}")),

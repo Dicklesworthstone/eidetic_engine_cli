@@ -1,13 +1,1 @@
-{
-  "schema": "ee.release_manifest.v1",
-  "version": "0.1.0",
-  "artifacts": [
-    {
-      "artifactId": "ee-0.1.0-x86_64-unknown-linux-gnu",
-      "target": "x86_64-unknown-linux-gnu",
-      "url": "file:///dev/null",
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-      "bytes": 1000
-    }
-  ]
-}
+{"schema":"ee.release_manifest.v1","version":"0.1.0","artifacts":[{"artifactId":"ee-current-x86_64-unknown-linux-gnu","target":"x86_64-unknown-linux-gnu","url":"file:///dev/null","sha256":"0000000000000000000000000000000000000000000000000000000000000000","bytes":1000}]}

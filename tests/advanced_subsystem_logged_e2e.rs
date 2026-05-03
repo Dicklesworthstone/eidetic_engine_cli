@@ -38,7 +38,14 @@ struct GoldenValidation {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct SanitizedEnvOverride {
+    name: String,
+    value: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct CommandLog {
+    schema: String,
     subsystem: String,
     step_name: String,
     command: String,
@@ -46,6 +53,9 @@ struct CommandLog {
     cwd: String,
     workspace: String,
     env_override_names: Vec<String>,
+    env_sanitized: Vec<SanitizedEnvOverride>,
+    started_at_unix_ms: u128,
+    ended_at_unix_ms: u128,
     elapsed_ms: u128,
     exit_code: i32,
     stdout_artifact_path: String,
@@ -55,6 +65,9 @@ struct CommandLog {
     schema_validation: SchemaValidation,
     golden_validation: GoldenValidation,
     redaction_status: String,
+    evidence_ids: Vec<String>,
+    degradation_codes: Vec<String>,
+    mutation_summary: String,
     first_failure: Option<String>,
 }
 
@@ -110,6 +123,13 @@ fn unique_scenario_dir(scenario_id: &str) -> Result<PathBuf, String> {
     Ok(root)
 }
 
+fn unix_ms_now() -> Result<u128, String> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("clock moved backwards: {error}"))?
+        .as_millis())
+}
+
 fn write_text(path: &Path, content: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -137,6 +157,58 @@ fn schema_from_json(value: &JsonValue) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn collect_string_fields(value: &JsonValue, key_suffix: &str, out: &mut Vec<String>) {
+    match value {
+        JsonValue::Object(map) => {
+            for (key, child) in map {
+                if key.ends_with(key_suffix) {
+                    match child {
+                        JsonValue::String(text) => out.push(text.clone()),
+                        JsonValue::Array(items) => {
+                            for item in items {
+                                if let Some(text) = item.as_str() {
+                                    out.push(text.to_owned());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                collect_string_fields(child, key_suffix, out);
+            }
+        }
+        JsonValue::Array(items) => {
+            for child in items {
+                collect_string_fields(child, key_suffix, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_evidence_ids(value: Option<&JsonValue>) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(value) = value {
+        collect_string_fields(value, "Id", &mut ids);
+        collect_string_fields(value, "Ids", &mut ids);
+        collect_string_fields(value, "_id", &mut ids);
+        collect_string_fields(value, "_ids", &mut ids);
+        ids.sort();
+        ids.dedup();
+    }
+    ids
+}
+
+fn extract_degradation_codes(value: Option<&JsonValue>) -> Vec<String> {
+    let mut codes = Vec::new();
+    if let Some(value) = value {
+        collect_string_fields(value, "code", &mut codes);
+        codes.sort();
+        codes.dedup();
+    }
+    codes
+}
+
 fn extract_redaction_status(value: Option<&JsonValue>) -> String {
     let candidates = [
         "/redactionStatus",
@@ -155,11 +227,42 @@ fn extract_redaction_status(value: Option<&JsonValue>) -> String {
     "not_reported".to_owned()
 }
 
+fn mutation_summary(spec: &StepSpec) -> String {
+    if spec.args.iter().any(|arg| arg == "--dry-run") {
+        "dry_run_no_mutation_expected".to_owned()
+    } else if spec.name == "init_workspace" {
+        "durable_write_expected".to_owned()
+    } else {
+        "read_only".to_owned()
+    }
+}
+
 fn first_failure_diagnosis(
     exit_code: i32,
     parsed_stdout: Option<&JsonValue>,
+    stdout: &str,
     stderr: &str,
+    expected_schema_contains: &str,
 ) -> Option<String> {
+    if parsed_stdout.is_none() {
+        let trimmed = stdout.trim_start();
+        if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            return Some("stdout_json_parse_failed".to_owned());
+        }
+        return Some("stdout_pollution".to_owned());
+    }
+
+    let actual_schema = parsed_stdout.and_then(schema_from_json);
+    if !actual_schema
+        .as_deref()
+        .is_some_and(|schema| schema.contains(expected_schema_contains))
+    {
+        return Some(format!(
+            "schema_mismatch:{}",
+            actual_schema.unwrap_or_else(|| "missing".to_owned())
+        ));
+    }
+
     if exit_code == 0 {
         return None;
     }
@@ -198,11 +301,13 @@ fn run_logged_step(
         command.env(key, value);
     }
 
+    let started_at_unix_ms = unix_ms_now()?;
     let start = Instant::now();
     let output = command
         .output()
         .map_err(|error| format!("failed to execute step {}: {error}", spec.name))?;
     let elapsed_ms = start.elapsed().as_millis();
+    let ended_at_unix_ms = unix_ms_now()?;
 
     let stdout = String::from_utf8(output.stdout.clone())
         .map_err(|error| format!("stdout UTF-8 decode failed for {}: {error}", spec.name))?;
@@ -221,9 +326,16 @@ fn run_logged_step(
         .is_some_and(|schema| schema.contains(spec.expected_schema_contains));
     let stderr_is_empty = stderr.is_empty();
     let exit_code = output.status.code().unwrap_or(-1);
-    let first_failure = first_failure_diagnosis(exit_code, parsed_stdout.as_ref(), &stderr);
+    let first_failure = first_failure_diagnosis(
+        exit_code,
+        parsed_stdout.as_ref(),
+        &stdout,
+        &stderr,
+        spec.expected_schema_contains,
+    );
 
     Ok(CommandLog {
+        schema: "ee.e2e.boundary_log.v1".to_owned(),
         subsystem: spec.subsystem.to_owned(),
         step_name: spec.name.to_owned(),
         command: "ee".to_owned(),
@@ -236,6 +348,15 @@ fn run_logged_step(
             .iter()
             .map(|(key, _)| (*key).to_owned())
             .collect(),
+        env_sanitized: env_overrides
+            .iter()
+            .map(|(key, _)| SanitizedEnvOverride {
+                name: (*key).to_owned(),
+                value: "<redacted>".to_owned(),
+            })
+            .collect(),
+        started_at_unix_ms,
+        ended_at_unix_ms,
         elapsed_ms,
         exit_code,
         stdout_artifact_path: stdout_path.display().to_string(),
@@ -256,6 +377,9 @@ fn run_logged_step(
             reason: "runtime scenario contains non-deterministic IDs/timestamps".to_owned(),
         },
         redaction_status: extract_redaction_status(parsed_stdout.as_ref()),
+        evidence_ids: extract_evidence_ids(parsed_stdout.as_ref()),
+        degradation_codes: extract_degradation_codes(parsed_stdout.as_ref()),
+        mutation_summary: mutation_summary(spec),
         first_failure,
     })
 }
@@ -519,6 +643,22 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                     .all(|entry| entry["first_failure"].is_null())
             }),
         "successful scenario commands must not report first-failure diagnoses",
+    )?;
+    ensure(
+        parsed_summary["commands"]
+            .as_array()
+            .is_some_and(|commands| {
+                commands.iter().all(|entry| {
+                    entry["schema"] == serde_json::json!("ee.e2e.boundary_log.v1")
+                        && entry["started_at_unix_ms"].is_number()
+                        && entry["ended_at_unix_ms"].is_number()
+                        && entry["env_sanitized"].is_array()
+                        && entry["evidence_ids"].is_array()
+                        && entry["degradation_codes"].is_array()
+                        && entry["mutation_summary"].is_string()
+                })
+            }),
+        "logged commands must include boundary migration contract fields",
     )
 }
 
@@ -568,5 +708,66 @@ fn advanced_subsystem_failure_log_captures_first_failure_diagnosis() -> TestResu
             "first failure diagnosis must include policy_denied, got {:?}",
             log.first_failure
         ),
+    )
+}
+
+#[test]
+fn boundary_logger_detects_schema_mismatch_on_real_command() -> TestResult {
+    let scenario_dir = unique_scenario_dir("ee_boundary_schema_mismatch")?;
+    let workspace = scenario_dir.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+
+    let mismatch_step = StepSpec {
+        subsystem: "boundary",
+        name: "status_schema_mismatch_probe",
+        args: vec![
+            "--workspace".to_owned(),
+            workspace.display().to_string(),
+            "--json".to_owned(),
+            "status".to_owned(),
+        ],
+        expected_schema_contains: "ee.not_the_status_schema.v1",
+        expected_exit_code: 0,
+        expect_clean_stderr: true,
+    };
+
+    let log = run_logged_step(&scenario_dir, &workspace, &[], &mismatch_step)?;
+    ensure_equal(&log.exit_code, &0, "schema mismatch probe exit code")?;
+    ensure(log.stdout_json_valid, "schema mismatch probe stdout JSON")?;
+    ensure_equal(
+        &log.schema_validation.status,
+        &"failed".to_owned(),
+        "schema mismatch validation status",
+    )?;
+    ensure(
+        log.first_failure
+            .as_ref()
+            .is_some_and(|diagnosis| diagnosis.starts_with("schema_mismatch:")),
+        format!(
+            "schema mismatch must be first failure, got {:?}",
+            log.first_failure
+        ),
+    )
+}
+
+#[test]
+fn boundary_logger_detects_stdout_pollution() -> TestResult {
+    let diagnosis = first_failure_diagnosis(
+        0,
+        None,
+        "progress: loading index\n{\"schema\":\"ee.response.v1\"}\n",
+        "",
+        "ee.response.v1",
+    );
+
+    ensure_equal(
+        &diagnosis,
+        &Some("stdout_pollution".to_owned()),
+        "stdout pollution diagnosis",
     )
 }

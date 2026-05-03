@@ -11,14 +11,15 @@ use std::path::Path;
 #[derive(Debug, Deserialize)]
 struct RedactionFixture {
     id: String,
-    description: String,
+    #[serde(rename = "description")]
+    _description: String,
     input: String,
     expected_class: Option<String>,
     encoding: String,
     context: String,
     expected_detected: bool,
-    #[serde(default)]
-    notes: Option<String>,
+    #[serde(default, rename = "notes")]
+    _notes: Option<String>,
 }
 
 fn load_fixtures(dir: &Path) -> Vec<RedactionFixture> {
@@ -216,6 +217,7 @@ fn generate_coverage_report() {
 
     eprintln!(
         "Coverage Report:\n{}",
-        serde_json::to_string_pretty(&report).unwrap()
+        serde_json::to_string_pretty(&report)
+            .unwrap_or_else(|error| format!("failed to serialize coverage report: {error}"))
     );
 }

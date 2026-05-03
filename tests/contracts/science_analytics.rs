@@ -3,7 +3,10 @@
 //! This suite pins the public CLI payloads for science status/eval surfaces and
 //! enforces dependency-tree constraints for the `science-analytics` feature.
 
-use ee::science::ScienceDegradation;
+use ee::science::{
+    CLUSTERING_DIAGNOSTICS_SCHEMA_V1, ClusteringDiagnostics, DEGRADATION_CODE_NOT_COMPILED,
+    ScienceDegradation,
+};
 use serde_json::{Value as JsonValue, json};
 use std::collections::BTreeSet;
 use std::env;
@@ -275,6 +278,69 @@ fn science_input_too_large_contract_matches_fixture() -> TestResult {
         "repair": degradation.repair,
     });
     assert_fixture_json("input_too_large", &payload)
+}
+
+#[test]
+fn clustering_diagnostics_json_contract_matches_feature_state() -> TestResult {
+    let payload = ClusteringDiagnostics::compute(&[
+        vec![1.0, 0.0],
+        vec![0.99, 0.1],
+        vec![-1.0, 0.0],
+        vec![-0.99, -0.1],
+    ])
+    .data_json();
+
+    ensure_json_equal(
+        payload
+            .get("schema")
+            .ok_or("missing clustering diagnostics schema")?,
+        &json!(CLUSTERING_DIAGNOSTICS_SCHEMA_V1),
+        "clustering diagnostics schema",
+    )?;
+
+    if cfg!(feature = "science-analytics") {
+        ensure_json_equal(
+            payload
+                .get("status")
+                .ok_or("missing clustering diagnostics status")?,
+            &json!("computed"),
+            "clustering diagnostics computed status",
+        )?;
+        ensure_json_equal(
+            payload
+                .get("available")
+                .ok_or("missing clustering diagnostics availability")?,
+            &json!(true),
+            "clustering diagnostics availability",
+        )?;
+        ensure_json_equal(
+            payload
+                .get("clusterCount")
+                .ok_or("missing clustering diagnostics cluster count")?,
+            &json!(2),
+            "clustering diagnostics cluster count",
+        )?;
+        ensure(
+            payload
+                .get("silhouetteScore")
+                .and_then(JsonValue::as_f64)
+                .is_some_and(|score| score > 0.9 && score <= 1.0),
+            format!("expected high silhouette score, got {payload}"),
+        )
+    } else {
+        ensure_json_equal(
+            &payload,
+            &json!({
+                "schema": CLUSTERING_DIAGNOSTICS_SCHEMA_V1,
+                "status": "not_compiled",
+                "available": false,
+                "degradationCode": DEGRADATION_CODE_NOT_COMPILED,
+                "clusterCount": 0,
+                "silhouetteScore": null,
+            }),
+            "clustering diagnostics default degradation",
+        )
+    }
 }
 
 #[test]
