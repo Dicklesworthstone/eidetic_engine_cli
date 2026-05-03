@@ -18,7 +18,10 @@ use serde_json::{Value as JsonValue, json};
 use tempfile::TempDir;
 
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
-use ee::core::outcome::{OutcomeRecordOptions, record_outcome};
+use ee::core::outcome::{
+    DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+    OutcomeRecordOptions, record_outcome,
+};
 use ee::db::DbConnection;
 
 const BENCH_GROUP_NAME: &str = "ee_outcome";
@@ -155,6 +158,8 @@ fn record_once(fixture: &OutcomeFixture, counter: usize, dry_run: bool) -> Resul
         event_id: None,
         actor: Some("benchmark".to_string()),
         dry_run,
+        harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+        harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
     })
     .map_err(|error| format!("record_outcome failed: {error:?}"))?;
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -468,6 +473,8 @@ mod tests {
             event_id: None,
             actor: Some("unit-test".to_string()),
             dry_run: false,
+            harmful_per_source_per_hour: super::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: super::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
         })
         .expect("record outcome");
 
