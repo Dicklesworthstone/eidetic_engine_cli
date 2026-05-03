@@ -1,11 +1,9 @@
-//! Contract coverage for `ee eval run --science`.
+//! Contract coverage for public `ee eval` degraded honesty.
 //!
-//! Ensures the CLI exposes deterministic science metrics through the stable
-//! response envelope while keeping diagnostics off stdout.
+//! Eval renderers still have lower-level fixture contracts, but the public CLI
+//! must not report no-scenario stub success before fixture discovery and
+//! execution are actually wired.
 
-use ee::science::{
-    DEGRADATION_CODE_BACKEND_UNAVAILABLE, DEGRADATION_CODE_NOT_COMPILED, ScienceStatus, status,
-};
 use serde_json::{Value as JsonValue, json};
 use std::process::{Command, Output};
 
@@ -34,16 +32,8 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
-fn expected_degradation(status: ScienceStatus) -> JsonValue {
-    match status {
-        ScienceStatus::Available => JsonValue::Null,
-        ScienceStatus::NotCompiled => json!(DEGRADATION_CODE_NOT_COMPILED),
-        ScienceStatus::BackendUnavailable => json!(DEGRADATION_CODE_BACKEND_UNAVAILABLE),
-    }
-}
-
 #[test]
-fn eval_run_science_json_has_stable_metrics_contract() -> TestResult {
+fn eval_run_science_json_degrades_until_fixture_runner_exists() -> TestResult {
     let output = run_ee(&["--json", "eval", "run", "--science"])?;
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("eval run --science stdout was not UTF-8: {error}"))?;
@@ -51,8 +41,11 @@ fn eval_run_science_json_has_stable_metrics_contract() -> TestResult {
         .map_err(|error| format!("eval run --science stderr was not UTF-8: {error}"))?;
 
     ensure(
-        output.status.success(),
-        format!("eval run --science must succeed; stderr: {stderr}"),
+        output.status.code() == Some(7),
+        format!(
+            "eval run --science must fail closed with degraded exit; got {:?}; stderr: {stderr}",
+            output.status.code()
+        ),
     )?;
     ensure(
         stderr.is_empty(),
@@ -65,77 +58,53 @@ fn eval_run_science_json_has_stable_metrics_contract() -> TestResult {
 
     let value: JsonValue = serde_json::from_str(&stdout)
         .map_err(|error| format!("stdout JSON parse failed: {error}"))?;
-    let science_status = status();
 
     ensure_json_equal(
         value.get("schema"),
         json!("ee.response.v1"),
         "response schema",
     )?;
-    ensure_json_equal(value.get("success"), JsonValue::Bool(true), "success")?;
+    ensure_json_equal(value.get("success"), JsonValue::Bool(false), "success")?;
     ensure_json_equal(value.pointer("/data/command"), json!("eval run"), "command")?;
     ensure_json_equal(
-        value.pointer("/data/status"),
-        json!("no_scenarios"),
-        "status",
+        value.pointer("/data/code"),
+        json!("eval_fixtures_unavailable"),
+        "degraded code",
     )?;
     ensure_json_equal(
-        value.pointer("/data/scienceMetrics/schema"),
-        json!("ee.eval.science_metrics.v1"),
-        "science schema",
+        value.pointer("/data/degraded/0/code"),
+        json!("eval_fixtures_unavailable"),
+        "degraded array code",
     )?;
     ensure_json_equal(
-        value.pointer("/data/scienceMetrics/status"),
-        json!(science_status.as_str()),
-        "science status",
+        value.pointer("/data/repair"),
+        json!("ee status --json"),
+        "repair command",
     )?;
     ensure_json_equal(
-        value.pointer("/data/scienceMetrics/available"),
-        JsonValue::Bool(science_status.is_available()),
-        "science availability",
+        value.pointer("/data/followUpBead"),
+        json!("eidetic_engine_cli-uiy3"),
+        "follow-up bead",
     )?;
-    ensure_json_equal(
-        value.pointer("/data/scienceMetrics/degradationCode"),
-        expected_degradation(science_status),
-        "science degradation code",
-    )?;
-    ensure_json_equal(
-        value.pointer("/data/scienceMetrics/scenariosEvaluated"),
-        json!(0),
-        "scenarios evaluated",
-    )?;
-    ensure_json_equal(
-        value.pointer("/data/scienceMetrics/positiveLabel"),
-        json!("scenario_passed"),
-        "positive label",
-    )?;
-    ensure_json_equal(
-        value.pointer("/data/scienceMetrics/precision"),
-        JsonValue::Null,
-        "precision",
-    )?;
-    ensure_json_equal(
-        value.pointer("/data/scienceMetrics/recall"),
-        JsonValue::Null,
-        "recall",
-    )?;
-    ensure_json_equal(
-        value.pointer("/data/scienceMetrics/f1Score"),
-        JsonValue::Null,
-        "f1 score",
+    ensure(
+        value.pointer("/data/scienceMetrics").is_none(),
+        "scienceMetrics must not be emitted without a real eval report",
     )
 }
 
 #[test]
-fn eval_run_without_science_omits_science_metrics() -> TestResult {
+fn eval_run_without_science_degrades_before_metrics_contract() -> TestResult {
     let output = run_ee(&["--json", "eval", "run"])?;
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("eval run stdout was not UTF-8: {error}"))?;
     let stderr = String::from_utf8(output.stderr)
         .map_err(|error| format!("eval run stderr was not UTF-8: {error}"))?;
     ensure(
-        output.status.success(),
-        format!("eval run must succeed; stderr: {stderr}"),
+        output.status.code() == Some(7),
+        format!(
+            "eval run must fail closed with degraded exit; got {:?}; stderr: {stderr}",
+            output.status.code()
+        ),
     )?;
     ensure(
         stderr.is_empty(),
@@ -144,8 +113,13 @@ fn eval_run_without_science_omits_science_metrics() -> TestResult {
 
     let value: JsonValue = serde_json::from_str(&stdout)
         .map_err(|error| format!("stdout JSON parse failed: {error}"))?;
+    ensure_json_equal(
+        value.pointer("/data/code"),
+        json!("eval_fixtures_unavailable"),
+        "degraded code",
+    )?;
     ensure(
         value.pointer("/data/scienceMetrics").is_none(),
-        "scienceMetrics should be omitted unless --science is set",
+        "scienceMetrics should be omitted while eval is unavailable",
     )
 }

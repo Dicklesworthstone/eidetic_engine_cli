@@ -4114,41 +4114,8 @@ where
             handle_economy_prune_plan(&cli, args, stdout, stderr)
         }
         Some(Command::Eval(ref eval_cmd)) => match eval_cmd {
-            EvalCommand::Run {
-                scenario_id,
-                science,
-                ..
-            } => match cli.renderer() {
-                output::Renderer::Human | output::Renderer::Markdown => write_stdout(
-                    stdout,
-                    &output::render_eval_run_human(scenario_id.as_deref(), *science),
-                ),
-                output::Renderer::Toon => write_stdout(
-                    stdout,
-                    &(output::render_eval_run_toon(scenario_id.as_deref(), *science) + "\n"),
-                ),
-                output::Renderer::Json
-                | output::Renderer::Jsonl
-                | output::Renderer::Compact
-                | output::Renderer::Hook => write_stdout(
-                    stdout,
-                    &(output::render_eval_run_json(scenario_id.as_deref(), *science) + "\n"),
-                ),
-            },
-            EvalCommand::List => match cli.renderer() {
-                output::Renderer::Human | output::Renderer::Markdown => {
-                    write_stdout(stdout, &output::render_eval_list_human())
-                }
-                output::Renderer::Toon => {
-                    write_stdout(stdout, &(output::render_eval_list_toon() + "\n"))
-                }
-                output::Renderer::Json
-                | output::Renderer::Jsonl
-                | output::Renderer::Compact
-                | output::Renderer::Hook => {
-                    write_stdout(stdout, &(output::render_eval_list_json() + "\n"))
-                }
-            },
+            EvalCommand::Run { .. } => write_eval_unavailable(&cli, "eval run", stdout, stderr),
+            EvalCommand::List => write_eval_unavailable(&cli, "eval list", stdout, stderr),
         },
         Some(Command::Import(ImportCommand::Cass(ref args))) => {
             handle_import_cass(&cli, args, stdout, stderr)
@@ -4532,6 +4499,56 @@ where
         Some(Command::Update(ref args)) => handle_update(&cli, args, stdout, stderr),
         Some(Command::Why(ref args)) => handle_why(&cli, args, stdout, stderr),
     }
+}
+
+const EVAL_UNAVAILABLE_CODE: &str = "eval_fixtures_unavailable";
+const EVAL_UNAVAILABLE_MESSAGE: &str = "Evaluation run and scenario listing are unavailable until eval commands discover and execute deterministic fixture registries instead of rendering a no-scenarios stub report.";
+const EVAL_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const EVAL_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-uiy3";
+const EVAL_UNAVAILABLE_SIDE_EFFECT: &str = "read-only, conservative abstention; no fixture discovery, evaluation report, or science metrics emitted";
+
+fn write_eval_unavailable<W, E>(
+    cli: &Cli,
+    command: &'static str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": EVAL_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": EVAL_UNAVAILABLE_MESSAGE,
+                "repair": EVAL_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": EVAL_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": EVAL_UNAVAILABLE_MESSAGE,
+                        "repair": EVAL_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": EVAL_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": EVAL_UNAVAILABLE_SIDE_EFFECT
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
+    }
+
+    let _ = writeln!(stderr, "error: {EVAL_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {EVAL_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
 }
 
 const HANDOFF_UNAVAILABLE_CODE: &str = "handoff_unavailable";

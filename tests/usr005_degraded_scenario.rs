@@ -104,12 +104,22 @@ fn dependency_surface_reports_unavailable_dependency_codes() -> TestResult {
 #[test]
 fn eval_and_science_status_return_useful_partial_output_under_degradation() -> TestResult {
     let eval_output = run_ee(&["eval", "run", "--science", "--json"])?;
-    ensure(eval_output.status.success(), "eval run should succeed")?;
+    ensure(
+        eval_output.status.code() == Some(7),
+        format!(
+            "eval run should fail closed with degraded exit code, got {:?}",
+            eval_output.status.code()
+        ),
+    )?;
     assert_stdout_only_machine_data(&eval_output, "eval run")?;
     let eval = stdout_json(&eval_output, "eval run")?;
     ensure(
-        eval.pointer("/data/scienceMetrics").is_some(),
-        "eval run --science should include science metrics",
+        eval.pointer("/data/code").and_then(JsonValue::as_str) == Some("eval_fixtures_unavailable"),
+        "eval run should report eval_fixtures_unavailable",
+    )?;
+    ensure(
+        eval.pointer("/data/scienceMetrics").is_none(),
+        "eval run --science must not emit science metrics without real eval results",
     )?;
 
     let science_output = run_ee(&["analyze", "science-status", "--json"])?;
