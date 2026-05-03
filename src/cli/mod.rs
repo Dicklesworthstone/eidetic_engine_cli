@@ -7428,6 +7428,57 @@ where
     }
 }
 
+const RECORDER_TAIL_UNAVAILABLE_CODE: &str = "recorder_tail_unavailable";
+const RECORDER_TAIL_UNAVAILABLE_MESSAGE: &str = "Recorder tail and follow are unavailable until they read persisted recorder events instead of stubbed empty or prefix-simulated run state.";
+const RECORDER_TAIL_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const RECORDER_TAIL_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-6xzc";
+const RECORDER_TAIL_UNAVAILABLE_SIDE_EFFECT: &str =
+    "read-only, conservative abstention; no recorder tail or follow snapshot";
+
+fn write_recorder_tail_unavailable<W, E>(
+    cli: &Cli,
+    command: &'static str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": RECORDER_TAIL_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": RECORDER_TAIL_UNAVAILABLE_MESSAGE,
+                "repair": RECORDER_TAIL_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": RECORDER_TAIL_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": RECORDER_TAIL_UNAVAILABLE_MESSAGE,
+                        "repair": RECORDER_TAIL_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": RECORDER_TAIL_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": RECORDER_TAIL_UNAVAILABLE_SIDE_EFFECT
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
+    }
+
+    let _ = writeln!(stderr, "error: {RECORDER_TAIL_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {RECORDER_TAIL_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
+}
+
 fn handle_recorder_tail<W, E>(
     cli: &Cli,
     args: &RecorderTailArgs,
@@ -7438,37 +7489,12 @@ where
     W: Write,
     E: Write,
 {
-    let options = crate::core::recorder::RecorderTailOptions {
-        run_id: args.run_id.clone(),
-        limit: args.limit,
-        from_sequence: args.from_sequence,
-        follow: args.follow,
+    let command = if args.follow {
+        "recorder tail --follow"
+    } else {
+        "recorder tail"
     };
-
-    // Check if follow mode with JSONL format.
-    let use_jsonl_follow = args.follow
-        && args
-            .tail_format
-            .as_ref()
-            .is_some_and(|f| f.eq_ignore_ascii_case("jsonl"));
-
-    if use_jsonl_follow {
-        return handle_recorder_tail_follow_jsonl(&options, stdout, stderr);
-    }
-
-    // Non-follow mode: single snapshot.
-    let report = crate::core::recorder::tail_recording(&options);
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &report.human_summary())
-        }
-        output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(stdout, &(report.data_json().to_string() + "\n")),
-    }
+    write_recorder_tail_unavailable(cli, command, stdout, stderr)
 }
 
 fn handle_recorder_import<W, E>(
@@ -7591,70 +7617,6 @@ where
         let _ = writeln!(stderr, "\nNext:\n  {}", error.repair);
     }
     ProcessExitCode::Usage
-}
-
-fn handle_recorder_tail_follow_jsonl<W, E>(
-    options: &crate::core::recorder::RecorderTailOptions,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    use crate::core::recorder::{
-        FollowConfig, TailFollowResult, follow_diagnostic, poll_follow_events,
-    };
-
-    let config = FollowConfig::default();
-    let mut current_sequence = options.from_sequence.unwrap_or(0);
-    let mut consecutive_empty = 0u32;
-    let max_consecutive_empty = 100; // Safety limit for tests.
-
-    loop {
-        let result = poll_follow_events(&options.run_id, current_sequence, options.limit);
-
-        // Emit diagnostic to stderr.
-        if let Some(diag) = follow_diagnostic(&result) {
-            let _ = writeln!(stderr, "[tail-follow] {diag}");
-        }
-
-        match result {
-            TailFollowResult::Events(events) => {
-                consecutive_empty = 0;
-                for event in &events {
-                    let line = event.to_jsonl();
-                    if writeln!(stdout, "{line}").is_err() {
-                        // Broken pipe: graceful exit.
-                        return ProcessExitCode::Success;
-                    }
-                    current_sequence = event.sequence + 1;
-                }
-            }
-            TailFollowResult::RunCompleted { final_sequence: _ } => {
-                return ProcessExitCode::Success;
-            }
-            TailFollowResult::RunNotFound => {
-                let err_json = serde_json::json!({
-                    "schema": crate::models::ERROR_SCHEMA_V1,
-                    "error": {
-                        "code": "run_not_found",
-                        "message": format!("Recorder run '{}' not found", options.run_id),
-                    }
-                });
-                let _ = writeln!(stdout, "{}", err_json);
-                return ProcessExitCode::Storage;
-            }
-            TailFollowResult::Waiting { last_sequence: _ } => {
-                consecutive_empty += 1;
-                if consecutive_empty >= max_consecutive_empty {
-                    // Safety exit for tests; real impl would continue.
-                    return ProcessExitCode::Success;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(config.poll_interval_ms));
-            }
-        }
-    }
 }
 
 // ============================================================================

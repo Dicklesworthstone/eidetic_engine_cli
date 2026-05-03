@@ -404,7 +404,7 @@ fn recorder_finish_validates_status() -> TestResult {
 }
 
 #[test]
-fn recorder_tail_returns_valid_json() -> TestResult {
+fn recorder_tail_degrades_until_persisted_events_exist() -> TestResult {
     let output = run_ee(&[
         "recorder",
         "tail",
@@ -413,13 +413,33 @@ fn recorder_tail_returns_valid_json() -> TestResult {
         "10",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(7), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(
-        stdout_has_schema(&output, "ee.recorder.tail.v1"),
-        "must have recorder tail schema",
+        output.stderr.is_empty(),
+        "json command must keep diagnostics off stderr",
     )?;
-    ensure(stdout_contains(&output, "events"), "must contain events")
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "recorder tail response schema",
+    )?;
+    ensure_equal(
+        &json["success"],
+        &serde_json::json!(false),
+        "recorder tail success flag",
+    )?;
+    ensure_equal(
+        &json["data"]["code"],
+        &serde_json::json!("recorder_tail_unavailable"),
+        "recorder tail degraded code",
+    )?;
+    ensure_equal(
+        &json["data"]["followUpBead"],
+        &serde_json::json!("eidetic_engine_cli-6xzc"),
+        "recorder tail follow-up bead",
+    )
 }
 
 // ============================================================================

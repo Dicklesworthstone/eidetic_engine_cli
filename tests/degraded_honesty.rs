@@ -127,6 +127,8 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "situation"
     } else if args.iter().any(|arg| arg == "handoff") {
         "handoff"
+    } else if args.iter().any(|arg| arg == "recorder") {
+        "recorder"
     } else {
         "unknown"
     }
@@ -152,6 +154,8 @@ fn side_effect_class(args: &[String]) -> &'static str {
         "conservative abstention; no situation routing, link, or recommendation mutation"
     } else if args.iter().any(|arg| arg == "handoff") {
         "conservative abstention; no continuity capsule write"
+    } else if args.iter().any(|arg| arg == "recorder") {
+        "read-only, conservative abstention; no recorder tail or follow snapshot"
     } else {
         "unknown"
     }
@@ -1243,6 +1247,119 @@ fn handoff_create_degrades_instead_of_writing_placeholder_capsule() -> TestResul
         "/sideEffectClass",
         json!("conservative abstention; no continuity capsule write"),
         "logged handoff side-effect class",
+    )
+}
+
+#[test]
+fn recorder_tail_degrades_instead_of_reporting_stubbed_empty_events() -> TestResult {
+    let result = run_ee_logged(
+        "recorder-tail-unavailable",
+        None,
+        vec![
+            "--json".to_owned(),
+            "recorder".to_owned(),
+            "tail".to_owned(),
+            "run_fixture_001".to_owned(),
+        ],
+    )?;
+
+    ensure_equal(
+        &result.exit_code,
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "recorder tail unavailable exit code",
+    )?;
+    ensure(
+        result.stderr.is_empty(),
+        "recorder tail JSON degraded response must keep stderr empty",
+    )?;
+    ensure_no_ansi(&result.stdout, "recorder tail degraded stdout")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/schema",
+        json!("ee.response.v1"),
+        "recorder tail degraded response schema",
+    )?;
+    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/code",
+        json!("recorder_tail_unavailable"),
+        "recorder tail degraded code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/degraded/0/code",
+        json!("recorder_tail_unavailable"),
+        "recorder tail degraded array code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/followUpBead",
+        json!("eidetic_engine_cli-6xzc"),
+        "recorder tail follow-up bead",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sideEffectClass",
+        json!("read-only, conservative abstention; no recorder tail or follow snapshot"),
+        "recorder tail side-effect class",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/evidenceIds",
+        json!([]),
+        "recorder tail evidence ids",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sourceIds",
+        json!([]),
+        "recorder tail source ids",
+    )?;
+
+    let fake_success =
+        validate_no_fake_success_output("recorder tail", false, false, &result.stdout);
+    ensure(
+        fake_success.passed,
+        format!("degraded recorder tail output should not be fake success: {fake_success:?}"),
+    )?;
+
+    let unsupported_claims =
+        validate_no_unsupported_evidence_claims("recorder tail", false, false, &result.stdout);
+    ensure(
+        unsupported_claims.passed,
+        format!(
+            "degraded recorder tail output should not count as unsupported success: {unsupported_claims:?}"
+        ),
+    )?;
+
+    let log_text = fs::read_to_string(&result.log_path)
+        .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+    let log_json: Value = serde_json::from_str(&log_text)
+        .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+    ensure_json_pointer(
+        &log_json,
+        "/degradationCodes",
+        json!(["recorder_tail_unavailable"]),
+        "logged recorder tail degradation code",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/repairCommand",
+        json!("ee status --json"),
+        "logged recorder tail repair command",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/commandBoundaryMatrixRow",
+        json!("recorder"),
+        "logged recorder tail boundary matrix row",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/sideEffectClass",
+        json!("read-only, conservative abstention; no recorder tail or follow snapshot"),
+        "logged recorder tail side-effect class",
     )
 }
 
