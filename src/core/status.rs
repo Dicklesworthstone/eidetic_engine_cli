@@ -18,7 +18,7 @@ use crate::config::{
 };
 use crate::db::{
     CreateWorkspaceInput, DbConnection, FeedbackSourceHarmfulCount, PROVENANCE_CHAIN_HASH_VERSION,
-    PROVENANCE_STATUS_UNVERIFIED, StoredCurationCandidate, StoredCurationTtlPolicy,
+    PROVENANCE_STATUS_UNVERIFIED, StoredCurationCandidate, StoredCurationTtlPolicy, StoredMemory,
     default_curation_ttl_policy_id_for_review_state,
 };
 use crate::models::{CapabilityStatus, MemoryId};
@@ -28,6 +28,8 @@ use super::curate::stable_workspace_id;
 use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
 use super::outcome::{DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR};
 use super::{build_info, runtime_status};
+
+const MEMORY_STALE_AFTER_DAYS: i64 = 30;
 
 /// Memory subsystem health status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,7 +95,7 @@ pub struct MemoryHealthScoreComponents {
 }
 
 impl MemoryHealthReport {
-    /// Gather memory health (stub until storage is wired).
+    /// Gather memory health without a workspace-bound store.
     #[must_use]
     pub fn gather() -> Self {
         Self {
@@ -647,7 +649,8 @@ impl StatusReport {
     pub fn gather_with_options(options: &StatusOptions) -> Self {
         let capabilities = CapabilityReport::gather();
         let runtime = RuntimeReport::gather();
-        let memory_health = MemoryHealthReport::gather();
+        let (memory_health, memory_health_degradations) =
+            gather_memory_health(options.workspace_path.as_deref());
         let workspace = gather_workspace_status(options.workspace_path.as_deref());
         let derived_assets = gather_derived_assets(options.workspace_path.as_deref());
         let (curation_health, curation_degradations) =
@@ -676,15 +679,7 @@ impl StatusReport {
             });
         }
 
-        if memory_health.status == MemoryHealthStatus::Unavailable {
-            degradations.push(DegradationReport {
-                code: "memory_health_unavailable",
-                severity: "low",
-                message: "Memory health metrics unavailable until storage is wired.",
-                repair: "Implement storage subsystem.",
-            });
-        }
-
+        degradations.extend(memory_health_degradations);
         degradations.extend(curation_degradations);
         degradations.extend(feedback_degradations);
 
@@ -743,6 +738,161 @@ fn gather_derived_assets(workspace_path: Option<&Path>) -> Vec<DerivedAssetRepor
     let graph_snapshot = DerivedAssetReport::unimplemented("graph_snapshot", ".ee/graph");
 
     vec![search_index, graph_snapshot]
+}
+
+fn gather_memory_health(
+    workspace_path: Option<&Path>,
+) -> (MemoryHealthReport, Vec<DegradationReport>) {
+    let Some(workspace_path) = workspace_path else {
+        return (
+            MemoryHealthReport::gather(),
+            vec![DegradationReport {
+                code: "memory_health_unavailable",
+                severity: "low",
+                message: "Memory health is unavailable without an explicit workspace.",
+                repair: "Run `ee status --workspace . --json`.",
+            }],
+        );
+    };
+
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return (
+            MemoryHealthReport::gather(),
+            vec![DegradationReport {
+                code: "memory_health_unavailable",
+                severity: "low",
+                message: "Memory health is unavailable because the workspace database is missing.",
+                repair: "Run `ee init --workspace .` before inspecting memory health.",
+            }],
+        );
+    }
+
+    let canonical_workspace = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let workspace_id = stable_workspace_id(&canonical_workspace);
+    let connection = match DbConnection::open_file(&database_path) {
+        Ok(connection) => connection,
+        Err(_) => {
+            return (
+                MemoryHealthReport::gather(),
+                vec![DegradationReport {
+                    code: "memory_health_unavailable",
+                    severity: "medium",
+                    message: "Memory health is unavailable because the database could not be opened.",
+                    repair: "Run `ee doctor --json`.",
+                }],
+            );
+        }
+    };
+
+    let memories = match connection.list_memories(&workspace_id, None, true) {
+        Ok(memories) => memories,
+        Err(_) => {
+            return (
+                MemoryHealthReport::gather(),
+                vec![DegradationReport {
+                    code: "memory_health_unavailable",
+                    severity: "medium",
+                    message: "Memory health is unavailable because memory rows could not be read.",
+                    repair: "Run `ee db migrate --workspace .` and `ee doctor --json`.",
+                }],
+            );
+        }
+    };
+
+    (memory_health_from_rows(&memories, Utc::now()), Vec::new())
+}
+
+fn memory_health_from_rows(memories: &[StoredMemory], now: DateTime<Utc>) -> MemoryHealthReport {
+    if memories.is_empty() {
+        return MemoryHealthReport {
+            status: MemoryHealthStatus::Empty,
+            total_count: 0,
+            active_count: 0,
+            tombstoned_count: 0,
+            stale_count: 0,
+            average_confidence: None,
+            provenance_coverage: None,
+            health_score: None,
+            score_components: None,
+        };
+    }
+
+    let total_count = capped_u32(memories.len());
+    let mut active_count = 0_u32;
+    let mut tombstoned_count = 0_u32;
+    let mut stale_count = 0_u32;
+    let mut confidence_sum = 0.0_f32;
+    let mut provenance_count = 0_u32;
+
+    for memory in memories {
+        if memory.tombstoned_at.is_some() {
+            tombstoned_count = tombstoned_count.saturating_add(1);
+            continue;
+        }
+
+        active_count = active_count.saturating_add(1);
+        confidence_sum += memory.confidence;
+        if memory
+            .provenance_uri
+            .as_deref()
+            .is_some_and(|uri| !uri.trim().is_empty())
+        {
+            provenance_count = provenance_count.saturating_add(1);
+        }
+        if memory_row_is_stale(memory, now) {
+            stale_count = stale_count.saturating_add(1);
+        }
+    }
+
+    let average_confidence = if active_count == 0 {
+        None
+    } else {
+        Some((confidence_sum / active_count as f32).clamp(0.0, 1.0))
+    };
+    let provenance_coverage = if active_count == 0 {
+        None
+    } else {
+        Some(bounded_ratio(provenance_count, active_count))
+    };
+
+    let mut report = MemoryHealthReport {
+        status: MemoryHealthStatus::Healthy,
+        total_count,
+        active_count,
+        tombstoned_count,
+        stale_count,
+        average_confidence,
+        provenance_coverage,
+        health_score: None,
+        score_components: None,
+    }
+    .with_conservative_score();
+
+    report.status = match report.health_score {
+        _ if active_count == 0 => MemoryHealthStatus::Degraded,
+        Some(score) if score >= 0.5 => MemoryHealthStatus::Healthy,
+        _ => MemoryHealthStatus::Degraded,
+    };
+
+    report
+}
+
+fn memory_row_is_stale(memory: &StoredMemory, now: DateTime<Utc>) -> bool {
+    let Some(reference) = parse_memory_timestamp(&memory.updated_at)
+        .or_else(|| parse_memory_timestamp(&memory.created_at))
+    else {
+        return true;
+    };
+    now.signed_duration_since(reference).num_days() >= MEMORY_STALE_AFTER_DAYS
+}
+
+fn parse_memory_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc))
 }
 
 fn gather_curation_health(
@@ -1466,6 +1616,38 @@ mod tests {
             .map_err(|e| format!("invalid timestamp '{s}': {e}"))
     }
 
+    fn stored_memory_fixture(
+        id: &str,
+        confidence: f32,
+        provenance_uri: Option<&str>,
+        updated_at: &str,
+        tombstoned_at: Option<&str>,
+    ) -> StoredMemory {
+        StoredMemory {
+            id: id.to_owned(),
+            workspace_id: "ws_test".to_owned(),
+            level: "semantic".to_owned(),
+            kind: "fact".to_owned(),
+            content: format!("test memory {id}"),
+            confidence,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: provenance_uri.map(str::to_owned),
+            trust_class: "agent_assertion".to_owned(),
+            trust_subclass: None,
+            provenance_chain_hash: Some(format!("blake3:{id}")),
+            provenance_chain_hash_version: PROVENANCE_CHAIN_HASH_VERSION.to_owned(),
+            provenance_verification_status: PROVENANCE_STATUS_UNVERIFIED.to_owned(),
+            provenance_verified_at: None,
+            provenance_verification_note: None,
+            created_at: updated_at.to_owned(),
+            updated_at: updated_at.to_owned(),
+            tombstoned_at: tombstoned_at.map(str::to_owned),
+            valid_from: None,
+            valid_to: None,
+        }
+    }
+
     #[test]
     fn status_report_gather_returns_valid_report() -> TestResult {
         let report = StatusReport::gather();
@@ -1617,6 +1799,78 @@ mod tests {
         ensure(components.confidence_score, 0.0, "invalid confidence")?;
         ensure(components.provenance_score, 0.0, "invalid provenance")?;
         ensure(report.health_score, Some(0.0), "invalid evidence score")
+    }
+
+    #[test]
+    fn memory_health_from_rows_counts_persisted_memory_metrics() -> TestResult {
+        let now = parse_ts("2026-05-03T00:00:00Z")?;
+        let rows = vec![
+            stored_memory_fixture(
+                "mem_fresh",
+                0.8,
+                Some("cass://session/1"),
+                "2026-04-30T00:00:00Z",
+                None,
+            ),
+            stored_memory_fixture("mem_stale", 0.4, None, "2026-03-01T00:00:00Z", None),
+            stored_memory_fixture(
+                "mem_tombstoned",
+                0.9,
+                Some("cass://session/2"),
+                "2026-04-28T00:00:00Z",
+                Some("2026-05-01T00:00:00Z"),
+            ),
+        ];
+
+        let report = memory_health_from_rows(&rows, now);
+
+        ensure(
+            report.status,
+            MemoryHealthStatus::Degraded,
+            "mixed memory health status",
+        )?;
+        ensure(report.total_count, 3, "total count")?;
+        ensure(report.active_count, 2, "active count")?;
+        ensure(report.tombstoned_count, 1, "tombstoned count")?;
+        ensure(report.stale_count, 1, "stale count")?;
+        ensure(
+            report.average_confidence,
+            Some(0.6),
+            "average active confidence",
+        )?;
+        ensure(
+            report.provenance_coverage,
+            Some(0.5),
+            "active provenance coverage",
+        )?;
+
+        let components = report
+            .score_components
+            .ok_or_else(|| "non-empty memory health should include components".to_owned())?;
+        ensure(components.active_ratio, 2.0 / 3.0, "active ratio")?;
+        ensure(components.freshness_score, 0.5, "freshness")?;
+        ensure(components.confidence_score, 0.6, "confidence score")?;
+        ensure(components.provenance_score, 0.5, "provenance score")?;
+        ensure(components.tombstone_penalty, 1.0 / 3.0, "tombstone penalty")
+    }
+
+    #[test]
+    fn gather_memory_health_reads_workspace_database_rows() -> TestResult {
+        let fixture = StatusBenchFixture::prepare(StatusBenchScale {
+            name: "memory_health_test",
+            memory_count: 3,
+        })?;
+
+        let (report, degradations) = gather_memory_health(Some(fixture.workspace_path()));
+
+        ensure(degradations.is_empty(), true, "no unavailable degradation")?;
+        ensure(report.status, MemoryHealthStatus::Healthy, "status")?;
+        ensure(report.total_count, 3, "total count")?;
+        ensure(report.active_count, 3, "active count")?;
+        ensure(report.tombstoned_count, 0, "tombstoned count")?;
+        ensure(report.average_confidence, Some(0.6), "average confidence")?;
+        ensure(report.provenance_coverage, Some(1.0), "provenance coverage")?;
+        ensure(report.health_score, Some(0.6), "conservative score")
     }
 
     #[test]
