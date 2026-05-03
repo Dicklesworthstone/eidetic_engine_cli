@@ -346,8 +346,8 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "procedure".to_owned(),
                 "list".to_owned(),
             ],
-            expected_schema_contains: "ee.procedure.list_report.v1",
-            expected_exit_code: 0,
+            expected_schema_contains: "ee.response.v1",
+            expected_exit_code: 7,
             expect_clean_stderr: true,
         },
         StepSpec {

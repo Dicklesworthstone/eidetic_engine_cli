@@ -7163,156 +7163,95 @@ where
 // EE-411: Procedure Command Handlers
 // ============================================================================
 
-fn handle_procedure_propose<W, E>(
+const PROCEDURE_UNAVAILABLE_CODE: &str = "procedure_store_unavailable";
+const PROCEDURE_UNAVAILABLE_MESSAGE: &str = "Procedure lifecycle data is unavailable until procedure commands are backed by persisted evidence, verification, and curation records instead of generated fixture data.";
+const PROCEDURE_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const PROCEDURE_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-q5vf";
+
+fn write_procedure_unavailable<W, E>(
     cli: &Cli,
-    args: &ProcedureProposeArgs,
+    command: &'static str,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let options = crate::core::procedure::ProcedureProposeOptions {
-        workspace: workspace_path,
-        title: args.title.clone(),
-        summary: args.summary.clone(),
-        source_run_ids: args.source_runs.clone(),
-        evidence_ids: args.evidence_ids.clone(),
-        dry_run: args.dry_run,
-    };
-
-    match crate::core::procedure::propose_procedure(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_procedure_propose_human(&report))
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": PROCEDURE_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": PROCEDURE_UNAVAILABLE_MESSAGE,
+                "repair": PROCEDURE_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": PROCEDURE_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": PROCEDURE_UNAVAILABLE_MESSAGE,
+                        "repair": PROCEDURE_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": PROCEDURE_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": "conservative abstention; no procedure mutation or artifact write"
             }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_procedure_propose_toon(&report) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(output::render_procedure_propose_json(&report) + "\n"),
-            ),
-        },
-        Err(error) => {
-            let json = serde_json::json!({
-                "schema": crate::models::ERROR_SCHEMA_V1,
-                "success": false,
-                "error": {
-                    "code": error.code(),
-                    "message": error.message(),
-                    "repair": error.repair(),
-                }
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
     }
+
+    let _ = writeln!(stderr, "error: {PROCEDURE_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {PROCEDURE_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
+}
+
+fn handle_procedure_propose<W, E>(
+    cli: &Cli,
+    args: &ProcedureProposeArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let _ = args;
+    write_procedure_unavailable(cli, "procedure propose", stdout, stderr)
 }
 
 fn handle_procedure_show<W, E>(
     cli: &Cli,
     args: &ProcedureShowArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let options = crate::core::procedure::ProcedureShowOptions {
-        workspace: workspace_path,
-        procedure_id: args.procedure_id.clone(),
-        include_steps: args.include_steps,
-        include_verification: args.include_verification,
-    };
-
-    match crate::core::procedure::show_procedure(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_procedure_show_human(&report))
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_procedure_show_toon(&report) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(output::render_procedure_show_json(&report) + "\n"),
-            ),
-        },
-        Err(error) => {
-            let json = serde_json::json!({
-                "schema": crate::models::ERROR_SCHEMA_V1,
-                "success": false,
-                "error": {
-                    "code": error.code(),
-                    "message": error.message(),
-                    "repair": error.repair(),
-                }
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
-    }
+    let _ = args;
+    write_procedure_unavailable(cli, "procedure show", stdout, stderr)
 }
 
 fn handle_procedure_list<W, E>(
     cli: &Cli,
     args: &ProcedureListArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let options = crate::core::procedure::ProcedureListOptions {
-        workspace: workspace_path,
-        status_filter: args.status.clone(),
-        limit: args.limit,
-        include_steps: args.include_steps,
-    };
-
-    match crate::core::procedure::list_procedures(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_procedure_list_human(&report))
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_procedure_list_toon(&report) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(output::render_procedure_list_json(&report) + "\n"),
-            ),
-        },
-        Err(error) => {
-            let json = serde_json::json!({
-                "schema": crate::models::ERROR_SCHEMA_V1,
-                "success": false,
-                "error": {
-                    "code": error.code(),
-                    "message": error.message(),
-                    "repair": error.repair(),
-                }
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
-    }
+    let _ = args;
+    write_procedure_unavailable(cli, "procedure list", stdout, stderr)
 }
 
 fn handle_procedure_export<W, E>(
@@ -7325,33 +7264,8 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let options = crate::core::procedure::ProcedureExportOptions {
-        workspace: workspace_path,
-        procedure_id: args.procedure_id.clone(),
-        format: args.export_format.clone(),
-        output_path: args.output.clone(),
-    };
-
-    match crate::core::procedure::export_procedure(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_procedure_export_human(&report))
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_procedure_export_toon(&report) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(output::render_procedure_export_json(&report) + "\n"),
-            ),
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    }
+    let _ = args;
+    write_procedure_unavailable(cli, "procedure export", stdout, stderr)
 }
 
 fn handle_procedure_promote<W, E>(
@@ -7364,43 +7278,14 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let options = crate::core::procedure::ProcedurePromoteOptions {
-        workspace: workspace_path,
-        procedure_id: args.procedure_id.clone(),
-        dry_run: args.dry_run,
-        actor: args.actor.clone(),
-        reason: args.reason.clone(),
-    };
-
-    match crate::core::procedure::promote_procedure(&options) {
-        Ok(report) => {
-            if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
-                write_stdout(
-                    stdout,
-                    &(output::render_procedure_promote_mermaid(&report) + "\n"),
-                )
-            } else {
-                match cli.renderer() {
-                    output::Renderer::Human | output::Renderer::Markdown => {
-                        write_stdout(stdout, &output::render_procedure_promote_human(&report))
-                    }
-                    output::Renderer::Toon => write_stdout(
-                        stdout,
-                        &(output::render_procedure_promote_toon(&report) + "\n"),
-                    ),
-                    output::Renderer::Json
-                    | output::Renderer::Jsonl
-                    | output::Renderer::Compact
-                    | output::Renderer::Hook => write_stdout(
-                        stdout,
-                        &(output::render_procedure_promote_json(&report) + "\n"),
-                    ),
-                }
-            }
-        }
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    if !args.dry_run {
+        let error = DomainError::PolicyDenied {
+            message: "procedure promote requires --dry-run until audited durable promotion is implemented".to_owned(),
+            repair: Some("ee procedure promote <procedure-id> --dry-run --json".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
+    write_procedure_unavailable(cli, "procedure promote", stdout, stderr)
 }
 
 // ============================================================================
@@ -7411,59 +7296,14 @@ fn handle_procedure_verify<W, E>(
     cli: &Cli,
     args: &ProcedureVerifyArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let options = crate::core::procedure::ProcedureVerifyOptions {
-        workspace: workspace_path,
-        procedure_id: args.procedure_id.clone(),
-        source_kind: Some(args.source_kind.clone()),
-        source_ids: args.source_ids.clone(),
-        dry_run: args.dry_run,
-        allow_failure: args.allow_failure,
-    };
-
-    match crate::core::procedure::verify_procedure(&options) {
-        Ok(report) => {
-            let exit_code = if report.fail_count > 0 && !args.allow_failure {
-                ProcessExitCode::Usage
-            } else {
-                ProcessExitCode::Success
-            };
-
-            match cli.renderer() {
-                output::Renderer::Human | output::Renderer::Markdown => {
-                    write_stdout(stdout, &report.human_summary());
-                }
-                output::Renderer::Toon => {
-                    write_stdout(stdout, &(report.human_summary() + "\n"));
-                }
-                output::Renderer::Json
-                | output::Renderer::Jsonl
-                | output::Renderer::Compact
-                | output::Renderer::Hook => {
-                    write_stdout(stdout, &(report.to_json() + "\n"));
-                }
-            }
-            exit_code
-        }
-        Err(error) => {
-            let json = serde_json::json!({
-                "schema": crate::models::ERROR_SCHEMA_V1,
-                "success": false,
-                "error": {
-                    "code": error.code(),
-                    "message": error.message(),
-                    "repair": error.repair(),
-                }
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
-    }
+    let _ = args;
+    write_procedure_unavailable(cli, "procedure verify", stdout, stderr)
 }
 
 fn handle_procedure_drift<W, E>(
@@ -7476,153 +7316,8 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let evidence = match parse_procedure_drift_evidence_inputs(&args.evidence) {
-        Ok(evidence) => evidence,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    };
-    let dependency_contracts =
-        match parse_procedure_dependency_contract_inputs(&args.dependency_contracts) {
-            Ok(dependency_contracts) => dependency_contracts,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        };
-    let verification = args
-        .failed_verification
-        .as_ref()
-        .map(|verification_id| build_failed_verification_fixture(args, verification_id));
-
-    let options = crate::core::procedure::ProcedureDriftOptions {
-        workspace: workspace_path,
-        procedure_id: args.procedure_id.clone(),
-        checked_at: args.checked_at.clone(),
-        staleness_threshold_days: args.staleness_threshold_days,
-        verification,
-        evidence,
-        dependency_contracts,
-        dry_run: true,
-    };
-
-    match crate::core::procedure::detect_procedure_drift(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_procedure_drift_human(&report))
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_procedure_drift_toon(&report) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(output::render_procedure_drift_json(&report) + "\n"),
-            ),
-        },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    }
-}
-
-fn parse_procedure_drift_evidence_inputs(
-    raw_values: &[String],
-) -> Result<Vec<crate::core::procedure::ProcedureDriftEvidenceInput>, crate::models::DomainError> {
-    raw_values
-        .iter()
-        .map(|raw| {
-            let fields = parse_pipe_fields(raw, 3, "evidence")?;
-            Ok(crate::core::procedure::ProcedureDriftEvidenceInput {
-                evidence_id: fields[0].to_owned(),
-                last_seen_at: fields[1].to_owned(),
-                source_kind: fields[2].to_owned(),
-            })
-        })
-        .collect()
-}
-
-fn parse_procedure_dependency_contract_inputs(
-    raw_values: &[String],
-) -> Result<Vec<crate::core::procedure::ProcedureDependencyContractInput>, crate::models::DomainError>
-{
-    raw_values
-        .iter()
-        .map(|raw| {
-            let fields = parse_pipe_fields(raw, 5, "dependency-contract")?;
-            Ok(crate::core::procedure::ProcedureDependencyContractInput {
-                dependency_name: fields[0].to_owned(),
-                owning_surface: fields[1].to_owned(),
-                expected_contract: fields[2].to_owned(),
-                actual_contract: fields[3].to_owned(),
-                compatibility: fields[4].to_owned(),
-            })
-        })
-        .collect()
-}
-
-fn parse_pipe_fields<'a>(
-    raw: &'a str,
-    expected_count: usize,
-    flag_name: &str,
-) -> Result<Vec<&'a str>, crate::models::DomainError> {
-    let fields = raw
-        .split('|')
-        .map(str::trim)
-        .filter(|field| !field.is_empty())
-        .collect::<Vec<_>>();
-    if fields.len() == expected_count {
-        Ok(fields)
-    } else {
-        Err(crate::models::DomainError::Usage {
-            message: format!(
-                "--{flag_name} expects {expected_count} pipe-separated non-empty fields"
-            ),
-            repair: Some("Quote the value so the shell preserves `|` separators.".to_owned()),
-        })
-    }
-}
-
-fn build_failed_verification_fixture(
-    args: &ProcedureDriftArgs,
-    verification_id: &str,
-) -> crate::core::procedure::ProcedureVerifyReport {
-    let source_ids = if args.failed_sources.is_empty() {
-        vec![format!("{verification_id}_source")]
-    } else {
-        args.failed_sources.clone()
-    };
-    let fail_count = u32::try_from(source_ids.len()).unwrap_or(u32::MAX);
-    let verified_at = args
-        .checked_at
-        .clone()
-        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-    let sources_checked = source_ids
-        .into_iter()
-        .map(
-            |source_id| crate::core::procedure::VerificationSourceResult {
-                source_id,
-                source_kind: "eval_fixture".to_owned(),
-                result: "failed".to_owned(),
-                step_results: Vec::new(),
-                message: Some("verification failure supplied to procedure drift".to_owned()),
-            },
-        )
-        .collect();
-
-    crate::core::procedure::ProcedureVerifyReport {
-        schema: crate::core::procedure::PROCEDURE_VERIFY_REPORT_SCHEMA_V1.to_owned(),
-        procedure_id: args.procedure_id.clone(),
-        verification_id: verification_id.to_owned(),
-        status: "failed".to_owned(),
-        source_kind: "eval_fixture".to_owned(),
-        sources_checked,
-        pass_count: 0,
-        fail_count,
-        skip_count: 0,
-        overall_result: "failed".to_owned(),
-        verified_at,
-        dry_run: true,
-        confidence: 0.0,
-        next_actions: Vec::new(),
-    }
+    let _ = args;
+    write_procedure_unavailable(cli, "procedure drift", stdout, stderr)
 }
 
 // ============================================================================
@@ -14307,7 +14002,11 @@ mod tests {
             "skill-capsule",
         ]);
 
-        ensure_equal(&exit, &ProcessExitCode::Success, "procedure export exit")?;
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::UnsatisfiedDegradedMode,
+            "procedure export exit",
+        )?;
         ensure(stderr.is_empty(), "procedure export JSON stderr clean")?;
 
         let value: serde_json::Value =
@@ -14317,25 +14016,21 @@ mod tests {
             &serde_json::json!("ee.response.v1"),
             "response schema",
         )?;
+        ensure_equal(&value["success"], &serde_json::json!(false), "success flag")?;
         ensure_equal(
-            &value["data"]["schema"],
-            &serde_json::json!("ee.procedure.export_report.v1"),
-            "data schema",
+            &value["data"]["command"],
+            &serde_json::json!("procedure export"),
+            "command",
         )?;
         ensure_equal(
-            &value["data"]["format"],
-            &serde_json::json!("skill_capsule"),
-            "export format",
-        )?;
-        ensure_equal(
-            &value["data"]["installMode"],
-            &serde_json::json!("render_only"),
-            "install mode",
+            &value["data"]["code"],
+            &serde_json::json!("procedure_store_unavailable"),
+            "degraded code",
         )?;
         ensure_contains(
-            value["data"]["content"].as_str().unwrap_or_default(),
-            "This capsule is render-only",
-            "skill capsule safety text",
+            value["data"]["message"].as_str().unwrap_or_default(),
+            "persisted evidence",
+            "degraded message",
         )
     }
 
@@ -14352,12 +14047,16 @@ mod tests {
 
         ensure_equal(
             &exit,
-            &ProcessExitCode::Success,
+            &ProcessExitCode::UnsatisfiedDegradedMode,
             "procedure export markdown exit",
         )?;
-        ensure(stderr.is_empty(), "procedure export markdown stderr clean")?;
-        ensure_starts_with(&stdout, "# Procedure proc_export", "markdown header")?;
-        ensure_contains(&stdout, "## Provenance", "markdown provenance")
+        ensure(stdout.is_empty(), "procedure export markdown stdout empty")?;
+        ensure_contains(
+            &stderr,
+            "Procedure lifecycle data is unavailable",
+            "procedure export markdown stderr",
+        )?;
+        ensure_contains(&stderr, "ee status --json", "procedure repair command")
     }
 
     #[test]
@@ -14373,7 +14072,11 @@ mod tests {
             "MistySalmon",
         ]);
 
-        ensure_equal(&exit, &ProcessExitCode::Success, "procedure promote exit")?;
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::UnsatisfiedDegradedMode,
+            "procedure promote exit",
+        )?;
         ensure(stderr.is_empty(), "procedure promote JSON stderr clean")?;
         let value: serde_json::Value =
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
@@ -14382,30 +14085,26 @@ mod tests {
             &serde_json::json!("ee.response.v1"),
             "response schema",
         )?;
+        ensure_equal(&value["success"], &serde_json::json!(false), "success flag")?;
         ensure_equal(
-            &value["data"]["schema"],
-            &serde_json::json!("ee.procedure.promote_report.v1"),
-            "promote data schema",
+            &value["data"]["command"],
+            &serde_json::json!("procedure promote"),
+            "command",
         )?;
         ensure_equal(
-            &value["data"]["dryRun"],
-            &serde_json::json!(true),
-            "dry run flag",
+            &value["data"]["code"],
+            &serde_json::json!("procedure_store_unavailable"),
+            "degraded code",
         )?;
         ensure_equal(
-            &value["data"]["status"],
-            &serde_json::json!("dry_run"),
-            "promotion status",
+            &value["data"]["followUpBead"],
+            &serde_json::json!("eidetic_engine_cli-q5vf"),
+            "follow-up bead",
         )?;
         ensure_equal(
-            &value["data"]["curation"]["candidateType"],
-            &serde_json::json!("promote"),
-            "curation candidate type",
-        )?;
-        ensure_equal(
-            &value["data"]["audit"]["recorded"],
-            &serde_json::json!(false),
-            "audit not recorded",
+            &value["data"]["sideEffectClass"],
+            &serde_json::json!("conservative abstention; no procedure mutation or artifact write"),
+            "side effect class",
         )
     }
 

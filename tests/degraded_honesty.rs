@@ -119,6 +119,8 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "economy"
     } else if args.iter().any(|arg| arg == "causal") {
         "causal"
+    } else if args.iter().any(|arg| arg == "procedure") {
+        "procedure"
     } else {
         "unknown"
     }
@@ -136,6 +138,8 @@ fn side_effect_class(args: &[String]) -> &'static str {
         "unavailable before sandbox mutation"
     } else if args.iter().any(|arg| arg == "economy" || arg == "causal") {
         "read-only, conservative abstention"
+    } else if args.iter().any(|arg| arg == "procedure") {
+        "conservative abstention; no procedure mutation or artifact write"
     } else {
         "unknown"
     }
@@ -769,6 +773,118 @@ fn causal_trace_degrades_instead_of_reporting_generated_chains() -> TestResult {
         "/sideEffectClass",
         json!("read-only, conservative abstention"),
         "logged causal side-effect class",
+    )
+}
+
+#[test]
+fn procedure_list_degrades_instead_of_reporting_generated_records() -> TestResult {
+    let result = run_ee_logged(
+        "procedure-list-unavailable",
+        None,
+        vec![
+            "--json".to_owned(),
+            "procedure".to_owned(),
+            "list".to_owned(),
+        ],
+    )?;
+
+    ensure_equal(
+        &result.exit_code,
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "procedure unavailable exit code",
+    )?;
+    ensure(
+        result.stderr.is_empty(),
+        "procedure JSON degraded response must keep stderr empty",
+    )?;
+    ensure_no_ansi(&result.stdout, "procedure degraded stdout")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/schema",
+        json!("ee.response.v1"),
+        "procedure degraded response schema",
+    )?;
+    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/code",
+        json!("procedure_store_unavailable"),
+        "procedure degraded code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/degraded/0/code",
+        json!("procedure_store_unavailable"),
+        "procedure degraded array code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/followUpBead",
+        json!("eidetic_engine_cli-q5vf"),
+        "procedure follow-up bead",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sideEffectClass",
+        json!("conservative abstention; no procedure mutation or artifact write"),
+        "procedure side-effect class",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/evidenceIds",
+        json!([]),
+        "procedure evidence ids",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sourceIds",
+        json!([]),
+        "procedure source ids",
+    )?;
+
+    let fake_success =
+        validate_no_fake_success_output("procedure list", false, false, &result.stdout);
+    ensure(
+        fake_success.passed,
+        format!("degraded procedure output should not be fake success: {fake_success:?}"),
+    )?;
+
+    let unsupported_claims =
+        validate_no_unsupported_evidence_claims("procedure list", false, false, &result.stdout);
+    ensure(
+        unsupported_claims.passed,
+        format!(
+            "degraded procedure output should not count as unsupported success: {unsupported_claims:?}"
+        ),
+    )?;
+
+    let log_text = fs::read_to_string(&result.log_path)
+        .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+    let log_json: Value = serde_json::from_str(&log_text)
+        .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+    ensure_json_pointer(
+        &log_json,
+        "/degradationCodes",
+        json!(["procedure_store_unavailable"]),
+        "logged procedure degradation code",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/repairCommand",
+        json!("ee status --json"),
+        "logged procedure repair command",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/commandBoundaryMatrixRow",
+        json!("procedure"),
+        "logged procedure boundary matrix row",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/sideEffectClass",
+        json!("conservative abstention; no procedure mutation or artifact write"),
+        "logged procedure side-effect class",
     )
 }
 

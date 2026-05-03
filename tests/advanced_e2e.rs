@@ -423,30 +423,114 @@ fn recorder_tail_returns_valid_json() -> TestResult {
 }
 
 // ============================================================================
-// Procedure Tests (EE-411 - Stub tests for when implemented)
+// Procedure Tests (EE-411 - Degraded until persisted lifecycle records exist)
 // ============================================================================
 
-#[test]
-fn procedure_list_returns_valid_json() -> TestResult {
-    let output = run_ee(&["procedure", "list", "--json"])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
-    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
-    ensure(stdout_is_clean(&output), "stdout must be clean")
+fn assert_procedure_unavailable(output: &std::process::Output, command: &str) -> TestResult {
+    ensure_equal(
+        &output.status.code(),
+        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
+        "exit code",
+    )?;
+    ensure(stdout_is_json(output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(output), "stdout must be clean")?;
+    ensure(
+        output.stderr.is_empty(),
+        "json degraded response must keep stderr empty",
+    )?;
+    let json = stdout_json(output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "response schema",
+    )?;
+    ensure_equal(&json["success"], &serde_json::json!(false), "success")?;
+    ensure_equal(
+        &json["data"]["command"],
+        &serde_json::json!(command),
+        "command",
+    )?;
+    ensure_equal(
+        &json["data"]["code"],
+        &serde_json::json!("procedure_store_unavailable"),
+        "degraded code",
+    )?;
+    ensure_equal(
+        &json["data"]["repair"],
+        &serde_json::json!("ee status --json"),
+        "repair",
+    )?;
+    ensure_equal(
+        &json["data"]["followUpBead"],
+        &serde_json::json!("eidetic_engine_cli-q5vf"),
+        "follow-up bead",
+    )?;
+    ensure_equal(
+        &json["data"]["sideEffectClass"],
+        &serde_json::json!("conservative abstention; no procedure mutation or artifact write"),
+        "side-effect class",
+    )
 }
 
 #[test]
-fn procedure_show_handles_not_found() -> TestResult {
+fn procedure_list_degrades_until_persisted_records_exist() -> TestResult {
+    let output = run_ee(&["procedure", "list", "--json"])?;
+    assert_procedure_unavailable(&output, "procedure list")
+}
+
+#[test]
+fn procedure_show_degrades_instead_of_rendering_generated_detail() -> TestResult {
     let output = run_ee(&["procedure", "show", "proc_nonexistent", "--json"])?;
-    // May return NotFound (10) or Success with empty result
+    assert_procedure_unavailable(&output, "procedure show")
+}
+
+#[test]
+fn procedure_export_degrades_instead_of_rendering_skill_capsule() -> TestResult {
+    let output = run_ee(&[
+        "procedure",
+        "export",
+        "proc_export",
+        "--export-format",
+        "skill-capsule",
+        "--json",
+    ])?;
+    assert_procedure_unavailable(&output, "procedure export")
+}
+
+#[test]
+fn procedure_promote_dry_run_degrades_until_audited_promotion_exists() -> TestResult {
+    let output = run_ee(&[
+        "procedure",
+        "promote",
+        "proc_promote",
+        "--dry-run",
+        "--actor",
+        "MistySalmon",
+        "--json",
+    ])?;
+    assert_procedure_unavailable(&output, "procedure promote")
+}
+
+#[test]
+fn procedure_promote_without_dry_run_is_policy_denied() -> TestResult {
+    let output = run_ee(&["procedure", "promote", "proc_promote", "--json"])?;
+    ensure_equal(&output.status.code(), &Some(8), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(
-        output.status.code() == Some(0) || output.status.code() == Some(10),
-        "exit code must be 0 or 10 (not found)",
+        output.stderr.is_empty(),
+        "json policy response must keep stderr empty",
     )?;
-    if output.status.code() == Some(0) {
-        ensure(stdout_is_json(&output), "stdout must be valid JSON")
-    } else {
-        Ok(())
-    }
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.error.v1"),
+        "error schema",
+    )?;
+    ensure_equal(
+        &json["error"]["code"],
+        &serde_json::json!("policy_denied"),
+        "error code",
+    )
 }
 
 // ============================================================================
