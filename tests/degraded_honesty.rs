@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use ee::core::degraded_honesty::validate_no_fake_success_output;
+use ee::core::degraded_honesty::{
+    validate_no_fake_success_output, validate_no_unsupported_evidence_claims,
+};
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -89,6 +91,39 @@ fn collect_degradation_codes(value: &Value) -> Vec<String> {
     codes
 }
 
+fn first_repair_command(value: &Value) -> Option<String> {
+    value
+        .pointer("/error/repair")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .pointer("/data/degraded/0/repair")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| value.pointer("/degraded/0/repair").and_then(Value::as_str))
+        .map(str::to_owned)
+}
+
+fn command_boundary_matrix_row(args: &[String]) -> &'static str {
+    if args.iter().any(|arg| arg == "context") {
+        "context, pack, search, why"
+    } else if args.iter().any(|arg| arg == "capabilities") {
+        "capabilities, check, health, status"
+    } else {
+        "unknown"
+    }
+}
+
+fn side_effect_class(args: &[String]) -> &'static str {
+    if args.iter().any(|arg| arg == "context") {
+        "audited pack write when storage is available; storage error before mutation here"
+    } else if args.iter().any(|arg| arg == "capabilities") {
+        "read-only, idempotent"
+    } else {
+        "unknown"
+    }
+}
+
 fn run_ee_logged(
     name: &str,
     workspace: Option<&Path>,
@@ -138,6 +173,7 @@ fn run_ee_logged(
             Some(format!("stdout_json_parse_failed: {error}")),
         ),
     };
+    let repair_command = parsed_result.as_ref().ok().and_then(first_repair_command);
 
     let exit_code = output.status.code().unwrap_or(-1);
     let log = json!({
@@ -159,6 +195,9 @@ fn run_ee_logged(
         "redactionStatus": "not_applicable",
         "evidenceIds": [],
         "degradationCodes": degradation_codes,
+        "repairCommand": repair_command,
+        "commandBoundaryMatrixRow": command_boundary_matrix_row(&args),
+        "sideEffectClass": side_effect_class(&args),
         "firstFailureDiagnosis": first_failure_diagnosis
     });
     let mut log_text = serde_json::to_string_pretty(&log)
@@ -254,6 +293,24 @@ fn context_without_database_uses_honest_error_envelope_and_e2e_log() -> TestResu
         "/degradationCodes",
         json!(["storage"]),
         "logged degradation/error code",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/repairCommand",
+        json!("ee init --workspace ."),
+        "logged repair command",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/commandBoundaryMatrixRow",
+        json!("context, pack, search, why"),
+        "logged command-boundary matrix row",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/sideEffectClass",
+        json!("audited pack write when storage is available; storage error before mutation here"),
+        "logged side-effect class",
     )
 }
 
@@ -283,5 +340,55 @@ fn successful_capabilities_output_has_no_fake_success_markers() -> TestResult {
     ensure(
         fake_success.passed,
         format!("capabilities output contains fake success marker: {fake_success:?}"),
+    )?;
+
+    let unsupported_claims =
+        validate_no_unsupported_evidence_claims("capabilities", true, false, &result.stdout);
+    ensure(
+        unsupported_claims.passed,
+        format!("capabilities output contains unsupported evidence claim: {unsupported_claims:?}"),
+    )
+}
+
+#[test]
+fn successful_validity_claims_need_concrete_evidence_sources() -> TestResult {
+    let outputs = [
+        (
+            "certificate verify",
+            r#"{"schema":"ee.certificate.verify.v1","success":true,"data":{"result":"valid","hashVerified":true,"message":"Certificate verification passed"}}"#,
+        ),
+        (
+            "causal estimate",
+            r#"{"schema":"ee.response.v1","success":true,"data":{"uplift":0.12,"confidenceState":"medium"}}"#,
+        ),
+        (
+            "lab replay",
+            r#"{"schema":"ee.response.v1","success":true,"data":{"replayOutcome":"success","episodeHashVerified":true}}"#,
+        ),
+    ];
+
+    for (command, output) in outputs {
+        let report = validate_no_unsupported_evidence_claims(command, true, false, output);
+        ensure(
+            !report.passed,
+            format!("{command} should reject unsupported successful evidence claims"),
+        )?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn successful_validity_claims_pass_with_concrete_evidence_sources() -> TestResult {
+    let report = validate_no_unsupported_evidence_claims(
+        "certificate verify",
+        true,
+        false,
+        r#"{"schema":"ee.certificate.verify.v1","success":true,"data":{"result":"valid","hashVerified":true,"manifestHash":"blake3:manifest","payloadHash":"blake3:payload"}}"#,
+    );
+
+    ensure(
+        report.passed,
+        format!("manifest-backed validity claim should pass: {report:?}"),
     )
 }

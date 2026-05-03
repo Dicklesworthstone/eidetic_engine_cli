@@ -301,6 +301,58 @@ pub const FORBIDDEN_SUCCESS_MARKERS: &[&str] = &[
     "tests/fixtures/",
 ];
 
+/// Successful outputs must not claim evidence-backed validity without evidence.
+///
+/// The markers are matched against compact lower-case JSON/text so spacing and
+/// renderer formatting do not change the result.
+pub const UNSUPPORTED_EVIDENCE_CLAIM_MARKERS: &[(&str, &str)] = &[
+    ("persisted records", r#""persisted":true"#),
+    ("certificate validity", r#""result":"valid""#),
+    ("certificate hash verification", r#""hashverified":true"#),
+    (
+        "certificate verification message",
+        "certificateverificationpassed",
+    ),
+    ("replay success", r#""replayoutcome":"success""#),
+    ("verified replay hash", r#""episodehashverified":true"#),
+    ("procedure validation", r#""overallresult":"passed""#),
+    ("procedure verified status", r#""status":"verified""#),
+    ("causal uplift", r#""uplift""#),
+    ("causal confidence", r#""confidencestate":"#),
+];
+
+/// Evidence-source markers that make a validity claim supportable.
+pub const CONCRETE_EVIDENCE_SOURCE_MARKERS: &[&str] = &[
+    r#""evidenceids":["#,
+    r#""sourceids":["#,
+    r#""sourceschecked":[{"#,
+    r#""manifestpath":""#,
+    r#""manifesthash":""#,
+    r#""artifacthash":""#,
+    r#""payloadhash":""#,
+    r#""databasepath":""#,
+    r#""auditid":""#,
+    r#""recorderrunids":["#,
+    r#""contextpackids":["#,
+    r#""preflightids":["#,
+    r#""tripwireids":["#,
+    r#""procedureids":["#,
+];
+
+fn compact_ascii_lowercase(input: &str) -> String {
+    input
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .map(|character| character.to_ascii_lowercase())
+        .collect()
+}
+
+fn has_concrete_evidence_source(compact_output: &str) -> bool {
+    CONCRETE_EVIDENCE_SOURCE_MARKERS
+        .iter()
+        .any(|marker| compact_output.contains(marker))
+}
+
 /// Validate that a successful production command did not return fake data.
 ///
 /// Failed/degraded commands are allowed to explain that behavior is unavailable.
@@ -339,6 +391,52 @@ pub fn validate_no_fake_success_output(
                 )
             } else {
                 HonestyCheckResult::pass_for("no_fake_success_output", command_path)
+            }
+        })
+        .collect();
+
+    HonestyReport::from_checks(checks)
+}
+
+/// Validate that successful output does not overclaim unsupported evidence.
+///
+/// This complements fake-data marker checks. A command can avoid words like
+/// "mock" and still claim that a certificate is valid, a replay succeeded, or a
+/// record was persisted without naming any concrete evidence source.
+#[must_use]
+pub fn validate_no_unsupported_evidence_claims(
+    command_path: &str,
+    success: bool,
+    fixture_mode: bool,
+    output: &str,
+) -> HonestyReport {
+    if !success {
+        return HonestyReport::from_checks(vec![HonestyCheckResult::pass_for(
+            "evidence_claim_not_applicable_for_failure",
+            command_path,
+        )]);
+    }
+
+    if fixture_mode {
+        return HonestyReport::from_checks(vec![HonestyCheckResult::pass_for(
+            "evidence_claim_allowed_in_fixture_mode",
+            command_path,
+        )]);
+    }
+
+    let compact_output = compact_ascii_lowercase(output);
+    let has_evidence = has_concrete_evidence_source(&compact_output);
+    let checks = UNSUPPORTED_EVIDENCE_CLAIM_MARKERS
+        .iter()
+        .map(|(claim, marker)| {
+            if compact_output.contains(marker) && !has_evidence {
+                HonestyCheckResult::fail_for(
+                    "no_unsupported_evidence_claim",
+                    command_path,
+                    format!("Successful production output claims {claim} without concrete evidence source"),
+                )
+            } else {
+                HonestyCheckResult::pass_for("no_unsupported_evidence_claim", command_path)
             }
         })
         .collect();
@@ -546,5 +644,49 @@ mod tests {
         );
 
         assert!(report.passed);
+    }
+
+    #[test]
+    fn unsupported_evidence_claim_rejects_valid_certificate_without_sources() {
+        let report = validate_no_unsupported_evidence_claims(
+            "certificate verify",
+            true,
+            false,
+            r#"{"schema":"ee.certificate.verify.v1","success":true,"data":{"result":"valid","hashVerified":true,"message":"Certificate verification passed"}}"#,
+        );
+
+        assert!(!report.passed);
+        assert!(report.issue_count >= 1);
+    }
+
+    #[test]
+    fn unsupported_evidence_claim_accepts_manifest_backed_certificate() {
+        let report = validate_no_unsupported_evidence_claims(
+            "certificate verify",
+            true,
+            false,
+            r#"{"schema":"ee.certificate.verify.v1","success":true,"data":{"result":"valid","hashVerified":true,"manifestHash":"blake3:abc123","payloadHash":"blake3:def456"}}"#,
+        );
+
+        assert!(report.passed);
+    }
+
+    #[test]
+    fn unsupported_evidence_claim_ignores_failures_and_fixture_mode() {
+        let failure = validate_no_unsupported_evidence_claims(
+            "certificate verify",
+            false,
+            false,
+            r#"{"schema":"ee.error.v1","error":{"message":"certificate validity unavailable"}}"#,
+        );
+        let fixture = validate_no_unsupported_evidence_claims(
+            "procedure verify",
+            true,
+            true,
+            r#"{"schema":"ee.response.v1","success":true,"data":{"overallResult":"passed","sourcesChecked":[{"sourceId":"fixture_001"}]}}"#,
+        );
+
+        assert!(failure.passed);
+        assert!(fixture.passed);
     }
 }
