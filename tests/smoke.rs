@@ -6097,7 +6097,7 @@ fn mcp_manifest_json_real_binary_smoke() -> TestResult {
 }
 
 #[test]
-fn daemon_foreground_once_json_real_binary_smoke() -> TestResult {
+fn daemon_foreground_once_json_degrades_before_simulated_jobs_run() -> TestResult {
     let output = run_ee(&[
         "--json",
         "daemon",
@@ -6112,8 +6112,10 @@ fn daemon_foreground_once_json_real_binary_smoke() -> TestResult {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     ensure(
-        output.status.success(),
-        format!("daemon foreground should succeed; stderr: {stderr}"),
+        output.status.code() == Some(7),
+        format!(
+            "daemon foreground should report degraded mode before simulated jobs run; stderr: {stderr}"
+        ),
     )?;
     ensure(output.stderr.is_empty(), "daemon stderr must be empty")?;
     ensure_no_ansi(&stdout, "daemon stdout")?;
@@ -6125,30 +6127,36 @@ fn daemon_foreground_once_json_real_binary_smoke() -> TestResult {
         &serde_json::json!("ee.response.v1"),
         "response schema",
     )?;
-    ensure_equal(&parsed["success"], &serde_json::json!(true), "success")?;
+    ensure_equal(&parsed["success"], &serde_json::json!(false), "success")?;
     ensure_equal(
-        &parsed["data"]["schema"],
-        &serde_json::json!("ee.steward.daemon_foreground.v1"),
-        "daemon schema",
+        &parsed["data"]["command"],
+        &serde_json::json!("daemon foreground"),
+        "daemon command",
     )?;
     ensure_equal(
-        &parsed["data"]["mode"],
-        &serde_json::json!("foreground"),
-        "daemon mode",
+        &parsed["data"]["code"],
+        &serde_json::json!("daemon_jobs_unavailable"),
+        "daemon degraded code",
     )?;
     ensure_equal(
-        &parsed["data"]["daemonized"],
-        &serde_json::json!(false),
-        "daemonized flag",
+        &parsed["data"]["repair"],
+        &serde_json::json!("ee status --json"),
+        "daemon repair",
     )?;
     ensure_equal(
-        &parsed["data"]["summary"]["tickCount"],
-        &serde_json::json!(1),
-        "tick count",
+        &parsed["data"]["followUpBead"],
+        &serde_json::json!("eidetic_engine_cli-5g6d"),
+        "daemon follow-up bead",
     )?;
-    ensure_equal(
-        &parsed["data"]["jobTypes"][0],
-        &serde_json::json!("health_check"),
-        "job type",
+    ensure(
+        parsed["data"].get("schema").is_none()
+            && parsed["data"].get("summary").is_none()
+            && parsed["data"].get("jobTypes").is_none()
+            && parsed["data"].get("ticks").is_none(),
+        "daemon degraded response must not emit scheduler schema, ticks, or job types",
+    )?;
+    ensure(
+        !stdout.contains("health_check") && !stdout.contains("itemsProcessed"),
+        "daemon degraded stdout must not claim simulated work",
     )
 }

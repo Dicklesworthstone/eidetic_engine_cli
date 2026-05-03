@@ -149,6 +149,8 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "review"
     } else if args.iter().any(|arg| arg == "handoff") {
         "handoff"
+    } else if args.iter().any(|arg| arg == "daemon") {
+        "daemon"
     } else if args.iter().any(|arg| arg == "recorder") {
         "recorder"
     } else if args.iter().any(|arg| arg == "demo") {
@@ -200,6 +202,8 @@ fn side_effect_class(args: &[String]) -> &'static str {
         "read-only, conservative abstention; no session review or curation candidate proposal emitted"
     } else if args.iter().any(|arg| arg == "handoff") {
         "conservative abstention; no continuity capsule write"
+    } else if args.iter().any(|arg| arg == "daemon") {
+        "conservative abstention; no daemon tick, scheduler ledger, or maintenance job mutation"
     } else if args.iter().any(|arg| arg == "recorder") {
         if args.iter().any(|arg| arg == "tail") {
             "read-only, conservative abstention; no recorder tail or follow snapshot"
@@ -2876,6 +2880,151 @@ fn handoff_create_degrades_instead_of_writing_placeholder_capsule() -> TestResul
         "/sideEffectClass",
         json!("conservative abstention; no continuity capsule write"),
         "logged handoff side-effect class",
+    )
+}
+
+#[test]
+fn daemon_foreground_degrades_instead_of_reporting_simulated_job_success() -> TestResult {
+    let result = run_ee_logged(
+        "daemon-foreground-unavailable",
+        None,
+        vec![
+            "--json".to_owned(),
+            "daemon".to_owned(),
+            "--foreground".to_owned(),
+            "--once".to_owned(),
+            "--interval-ms".to_owned(),
+            "0".to_owned(),
+            "--job".to_owned(),
+            "health_check".to_owned(),
+        ],
+    )?;
+
+    ensure_equal(
+        &result.exit_code,
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "daemon unavailable exit code",
+    )?;
+    ensure(
+        result.stderr.is_empty(),
+        "daemon JSON degraded response must keep stderr empty",
+    )?;
+    ensure_no_ansi(&result.stdout, "daemon degraded stdout")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/schema",
+        json!("ee.response.v1"),
+        "daemon degraded response schema",
+    )?;
+    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/command",
+        json!("daemon foreground"),
+        "daemon command label",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/code",
+        json!("daemon_jobs_unavailable"),
+        "daemon degraded code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/degraded/0/code",
+        json!("daemon_jobs_unavailable"),
+        "daemon degraded array code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/repair",
+        json!("ee status --json"),
+        "daemon repair command",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/followUpBead",
+        json!("eidetic_engine_cli-5g6d"),
+        "daemon follow-up bead",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sideEffectClass",
+        json!(
+            "conservative abstention; no daemon tick, scheduler ledger, or maintenance job mutation"
+        ),
+        "daemon side-effect class",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/evidenceIds",
+        json!([]),
+        "daemon evidence ids",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/sourceIds",
+        json!([]),
+        "daemon source ids",
+    )?;
+    ensure(
+        result.parsed.pointer("/data/schema").is_none()
+            && result.parsed.pointer("/data/summary").is_none()
+            && result.parsed.pointer("/data/jobTypes").is_none()
+            && result.parsed.pointer("/data/ticks").is_none()
+            && result.parsed.pointer("/data/runs").is_none(),
+        "daemon degraded output must not emit scheduler schema, ticks, jobs, or run results",
+    )?;
+    ensure(
+        !result.stdout.contains("health_check") && !result.stdout.contains("itemsProcessed"),
+        "daemon degraded stdout must not claim simulated job work",
+    )?;
+
+    let fake_success =
+        validate_no_fake_success_output("daemon foreground", false, false, &result.stdout);
+    ensure(
+        fake_success.passed,
+        format!("degraded daemon output should not be fake success: {fake_success:?}"),
+    )?;
+
+    let unsupported_claims =
+        validate_no_unsupported_evidence_claims("daemon foreground", false, false, &result.stdout);
+    ensure(
+        unsupported_claims.passed,
+        format!(
+            "degraded daemon output should not count as unsupported success: {unsupported_claims:?}"
+        ),
+    )?;
+
+    let log_text = fs::read_to_string(&result.log_path)
+        .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+    let log_json: Value = serde_json::from_str(&log_text)
+        .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+    ensure_json_pointer(
+        &log_json,
+        "/degradationCodes",
+        json!(["daemon_jobs_unavailable"]),
+        "logged daemon degradation code",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/repairCommand",
+        json!("ee status --json"),
+        "logged daemon repair command",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/commandBoundaryMatrixRow",
+        json!("daemon"),
+        "logged daemon boundary matrix row",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/sideEffectClass",
+        json!(
+            "conservative abstention; no daemon tick, scheduler ledger, or maintenance job mutation"
+        ),
+        "logged daemon side-effect class",
     )
 }
 

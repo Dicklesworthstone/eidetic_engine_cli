@@ -80,7 +80,7 @@ use crate::output;
 use crate::pack::{
     ContextPackProfile, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
 };
-use crate::steward::{DaemonForegroundOptions, JobType, RunnerOptions, run_daemon_foreground};
+use crate::steward::JobType;
 
 #[derive(Clone, Debug, Parser, PartialEq)]
 #[command(
@@ -11430,6 +11430,57 @@ where
 // EE-207: Foreground Daemon Mode
 // ============================================================================
 
+const DAEMON_UNAVAILABLE_CODE: &str = "daemon_jobs_unavailable";
+const DAEMON_UNAVAILABLE_MESSAGE: &str = "Daemon scheduling is unavailable until steward jobs run real maintenance handlers instead of simulated item counts.";
+const DAEMON_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const DAEMON_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-5g6d";
+const DAEMON_UNAVAILABLE_SIDE_EFFECT: &str =
+    "conservative abstention; no daemon tick, scheduler ledger, or maintenance job mutation";
+
+fn write_daemon_unavailable<W, E>(
+    cli: &Cli,
+    command: &'static str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": DAEMON_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": DAEMON_UNAVAILABLE_MESSAGE,
+                "repair": DAEMON_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": DAEMON_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": DAEMON_UNAVAILABLE_MESSAGE,
+                        "repair": DAEMON_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": DAEMON_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": DAEMON_UNAVAILABLE_SIDE_EFFECT
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
+    }
+
+    let _ = writeln!(stderr, "error: {DAEMON_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {DAEMON_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
+}
+
 fn handle_daemon<W, E>(
     cli: &Cli,
     args: &DaemonArgs,
@@ -11440,67 +11491,12 @@ where
     W: Write,
     E: Write,
 {
-    if !args.foreground {
-        let error = DomainError::UnsatisfiedDegradedMode {
-            message: "Background daemon mode is not implemented; run the bounded foreground daemon explicitly.".to_owned(),
-            repair: Some("ee daemon --foreground --once --json".to_owned()),
-        };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-    }
-
-    let mut runner_options = RunnerOptions::new();
-    if let Some(time_limit_ms) = args.time_limit_ms {
-        runner_options = runner_options.with_time_limit(time_limit_ms);
-    }
-    if let Some(item_limit) = args.item_limit {
-        runner_options = runner_options.with_item_limit(item_limit);
-    }
-    runner_options = runner_options.with_dry_run(args.dry_run);
-
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .display()
-        .to_string();
-    let mut options = DaemonForegroundOptions::new(workspace);
-    options.tick_limit = if args.once { 1 } else { args.max_ticks };
-    options.interval_ms = args.interval_ms;
-    options.dry_run = args.dry_run;
-    options.runner_options = runner_options;
-    if !args.jobs.is_empty() {
-        options.job_types = args.jobs.clone();
-    }
-
-    match run_daemon_foreground(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &report.human_summary())
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_toon_from_json(&report.data_json().to_string()) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                let response = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
-                    "success": true,
-                    "data": report.data_json(),
-                });
-                write_stdout(stdout, &(response.to_string() + "\n"))
-            }
-        },
-        Err(message) => {
-            let error = DomainError::Usage {
-                message,
-                repair: Some("ee daemon --foreground --once --json".to_owned()),
-            };
-            write_domain_error(&error, cli.wants_json(), stdout, stderr)
-        }
-    }
+    let command = if args.foreground {
+        "daemon foreground"
+    } else {
+        "daemon"
+    };
+    write_daemon_unavailable(cli, command, stdout, stderr)
 }
 
 // ============================================================================
@@ -14650,7 +14646,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_foreground_json_output_is_response_enveloped() -> TestResult {
+    fn daemon_foreground_json_degrades_before_simulated_jobs_run() -> TestResult {
         let (exit, stdout, stderr) = invoke(&[
             "ee",
             "daemon",
@@ -14663,23 +14659,40 @@ mod tests {
             "--json",
         ]);
 
-        ensure_equal(&exit, &ProcessExitCode::Success, "daemon exit")?;
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::UnsatisfiedDegradedMode,
+            "daemon exit",
+        )?;
         ensure_contains(&stdout, "\"schema\":\"ee.response.v1\"", "response schema")?;
         ensure_contains(
             &stdout,
-            "\"schema\":\"ee.steward.daemon_foreground.v1\"",
-            "daemon schema",
+            "\"success\":false",
+            "daemon unavailable success flag",
         )?;
-        ensure_contains(&stdout, "\"command\":\"daemon\"", "daemon command")?;
-        ensure_contains(&stdout, "\"mode\":\"foreground\"", "foreground mode")?;
-        ensure_contains(&stdout, "\"daemonized\":false", "not daemonized")?;
-        ensure_contains(&stdout, "\"tickCount\":1", "tick count")?;
-        ensure_contains(&stdout, "\"health_check\"", "health check job")?;
+        ensure_contains(
+            &stdout,
+            "\"code\":\"daemon_jobs_unavailable\"",
+            "daemon unavailable code",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"command\":\"daemon foreground\"",
+            "daemon command",
+        )?;
+        ensure_contains(&stdout, "\"repair\":\"ee status --json\"", "repair")?;
+        ensure(
+            !stdout.contains("ee.steward.daemon_foreground.v1")
+                && !stdout.contains("\"tickCount\"")
+                && !stdout.contains("\"jobTypes\"")
+                && !stdout.contains("\"health_check\""),
+            "daemon degraded output must not emit simulated scheduler schema, ticks, or jobs",
+        )?;
         ensure(stderr.is_empty(), "daemon json stderr empty")
     }
 
     #[test]
-    fn daemon_background_mode_reports_stable_json_error() -> TestResult {
+    fn daemon_background_mode_reports_jobs_unavailable() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "daemon", "--json"]);
 
         ensure_equal(
@@ -14687,13 +14700,14 @@ mod tests {
             &ProcessExitCode::UnsatisfiedDegradedMode,
             "daemon background exit",
         )?;
-        ensure_contains(&stdout, "\"schema\":\"ee.error.v1\"", "error schema")?;
+        ensure_contains(&stdout, "\"schema\":\"ee.response.v1\"", "response schema")?;
+        ensure_contains(&stdout, "\"success\":false", "success flag")?;
         ensure_contains(
             &stdout,
-            "\"code\":\"unsatisfied_degraded_mode\"",
-            "error code",
+            "\"code\":\"daemon_jobs_unavailable\"",
+            "daemon unavailable code",
         )?;
-        ensure_contains(&stdout, "ee daemon --foreground --once --json", "repair")?;
+        ensure_contains(&stdout, "\"repair\":\"ee status --json\"", "repair")?;
         ensure(stderr.is_empty(), "daemon json error stderr empty")
     }
 
