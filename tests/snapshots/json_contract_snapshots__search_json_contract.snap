@@ -1,0 +1,51 @@
+---
+source: tests/json_contract_snapshots.rs
+expression: search
+---
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "search",
+    "status": "success",
+    "query": "format before release",
+    "results": [
+      {
+        "docId": "mem_00000000000000000000000001",
+        "score": 0.40820467472076416,
+        "source": "semantic_fast",
+        "fastScore": 0.40820467472076416
+      }
+    ],
+    "resultCount": 1,
+    "elapsedMs": 0,
+    "metrics": {
+      "requestedLimit": 10,
+      "returnedCount": 1,
+      "errorCount": 0,
+      "elapsedMs": 0,
+      "sourceCounts": {
+        "lexical": 0,
+        "semanticFast": 1,
+        "semanticQuality": 0,
+        "hybrid": 0,
+        "reranked": 0
+      },
+      "scoreDistribution": {
+        "top": 0.4082050025463104,
+        "min": 0.4082050025463104,
+        "max": 0.4082050025463104,
+        "mean": 0.4082050025463104
+      },
+      "fieldCoverage": {
+        "fastScoreCount": 1,
+        "qualityScoreCount": 0,
+        "lexicalScoreCount": 0,
+        "rerankScoreCount": 0,
+        "metadataCount": 0,
+        "explanationCount": 0
+      }
+    },
+    "errors": []
+  }
+}

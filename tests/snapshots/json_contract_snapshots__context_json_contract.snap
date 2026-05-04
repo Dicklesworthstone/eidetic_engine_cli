@@ -1,0 +1,181 @@
+---
+source: tests/json_contract_snapshots.rs
+expression: context
+---
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "context",
+    "request": {
+      "query": "format before release",
+      "profile": "compact",
+      "maxTokens": 4000,
+      "candidatePool": 10,
+      "sections": [
+        "procedural_rules",
+        "decisions",
+        "failures",
+        "evidence",
+        "artifacts"
+      ]
+    },
+    "pack": {
+      "query": "format before release",
+      "hash": "[HASH]",
+      "budget": {
+        "maxTokens": 4000,
+        "usedTokens": 11
+      },
+      "advisoryBanner": {
+        "status": "clear",
+        "summary": "Packed memories are from high-trust classes; still verify provenance before acting.",
+        "authoritativeCount": 1,
+        "advisoryCount": 0,
+        "legacyCount": 0,
+        "degradationCount": 0,
+        "notes": []
+      },
+      "quality": {
+        "itemCount": 1,
+        "omittedCount": 0,
+        "usedTokens": 11,
+        "maxTokens": 4000,
+        "budgetUtilization": 0.00275,
+        "averageRelevance": 0.408205,
+        "averageUtility": 0.8,
+        "provenanceSourceCount": 1,
+        "provenanceSourcesPerItem": 1.0,
+        "provenanceComplete": true,
+        "sections": [
+          {
+            "section": "procedural_rules",
+            "itemCount": 1,
+            "usedTokens": 11
+          },
+          {
+            "section": "decisions",
+            "itemCount": 0,
+            "usedTokens": 0
+          },
+          {
+            "section": "failures",
+            "itemCount": 0,
+            "usedTokens": 0
+          },
+          {
+            "section": "evidence",
+            "itemCount": 0,
+            "usedTokens": 0
+          },
+          {
+            "section": "artifacts",
+            "itemCount": 0,
+            "usedTokens": 0
+          }
+        ],
+        "omissions": {
+          "tokenBudgetExceeded": 0,
+          "redundantCandidates": 0
+        }
+      },
+      "selectionCertificate": {
+        "profile": "compact",
+        "objective": "mmr_redundancy",
+        "algorithm": "deterministic_greedy_mmr",
+        "guarantee": "deterministic redundancy-controlled greedy ranking; no submodular guarantee claimed",
+        "guaranteeStatus": "conditional",
+        "guaranteeEvidence": {
+          "status": "conditional",
+          "certificateId": null,
+          "identityValid": true,
+          "summary": "deterministic redundancy-controlled greedy ranking; no submodular guarantee claimed"
+        },
+        "candidateCount": 1,
+        "selectedCount": 1,
+        "omittedCount": 0,
+        "budgetLimit": 4000,
+        "budgetUsed": 11,
+        "totalObjectiveValue": 0.306154,
+        "monotone": false,
+        "submodular": false,
+        "selectedItems": [
+          {
+            "rank": 1,
+            "memoryId": "mem_00000000000000000000000001",
+            "tokenCost": 11,
+            "feasible": true
+          }
+        ],
+        "rejectedFrontier": [],
+        "steps": [
+          {
+            "rank": 1,
+            "memoryId": "mem_00000000000000000000000001",
+            "marginalGain": 0.306154,
+            "objectiveValue": 0.306154,
+            "tokenCost": 11,
+            "feasible": true,
+            "coveredFeatures": [
+              "section:procedural_rules",
+              "diversity:procedural:rule:cargo",
+              "memory:mem_00000000000000000000000001"
+            ]
+          }
+        ]
+      },
+      "items": [
+        {
+          "rank": 1,
+          "memoryId": "mem_00000000000000000000000001",
+          "section": "procedural_rules",
+          "content": "Run cargo fmt --check before release.",
+          "estimatedTokens": 11,
+          "scores": {
+            "relevance": 0.408205,
+            "utility": 0.8
+          },
+          "trust": {
+            "class": "human_explicit",
+            "subclass": "project-rule",
+            "posture": "authoritative"
+          },
+          "provenance": [
+            {
+              "uri": "file://AGENTS.md#L164-173",
+              "scheme": "file",
+              "label": "AGENTS.md:L164-173",
+              "locator": "L164-173",
+              "note": "Memory mem_00000000000000000000000001 selected for context pack"
+            }
+          ],
+          "why": "Deterministic retrieval explanation for query `format before release`: source=memory search_source=semantic_fast; score_components=[relevance=unit_score(search_hit.score) with search_hit.score=0.4082, utility=unit_score(memory.utility) with memory.utility=0.8000]; formula=unit_score(field)=clamp(field, 0.0, 1.0) for finite fields, otherwise 0.0; inputs are stored memory/link fields and the explicit search hit, not agent reasoning.",
+          "diversityKey": "procedural:rule:cargo"
+        }
+      ],
+      "omitted": [],
+      "provenanceFooter": {
+        "memoryCount": 1,
+        "sourceCount": 1,
+        "schemes": [
+          "file"
+        ],
+        "entries": [
+          {
+            "rank": 1,
+            "memoryId": "mem_00000000000000000000000001",
+            "sourceIndex": 1,
+            "source": {
+              "uri": "file://AGENTS.md#L164-173",
+              "scheme": "file",
+              "label": "AGENTS.md:L164-173",
+              "locator": "L164-173",
+              "note": "Memory mem_00000000000000000000000001 selected for context pack"
+            }
+          }
+        ]
+      }
+    },
+    "degraded": []
+  }
+}

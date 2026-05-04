@@ -1,0 +1,41 @@
+---
+source: tests/json_contract_snapshots.rs
+expression: doctor
+---
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "fields": "standard",
+  "data": {
+    "command": "doctor",
+    "version": "0.1.0",
+    "healthy": true,
+    "checks": [
+      {
+        "name": "runtime",
+        "severity": "ok",
+        "message": "Asupersync runtime initialized successfully."
+      },
+      {
+        "name": "workspace",
+        "severity": "ok",
+        "message": "Workspace inspected at [WORKSPACE]."
+      },
+      {
+        "name": "database",
+        "severity": "ok",
+        "message": "Database opened and schema is current at [DATABASE]."
+      },
+      {
+        "name": "search_index",
+        "severity": "ok",
+        "message": "Search index is ready at [INDEX]."
+      },
+      {
+        "name": "cass",
+        "severity": "ok",
+        "message": "CASS binary discovered and accessible."
+      }
+    ]
+  }
+}

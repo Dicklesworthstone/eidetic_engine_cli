@@ -1,0 +1,58 @@
+---
+source: tests/json_contract_snapshots.rs
+expression: why
+---
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "why",
+    "version": "0.1.0",
+    "memoryId": "mem_00000000000000000000000001",
+    "found": true,
+    "storage": {
+      "origin": "Explicitly remembered via `ee remember`",
+      "trustClass": "human_explicit",
+      "trustSubclass": "project-rule",
+      "provenanceUri": "file://AGENTS.md#L164-173",
+      "createdAt": "[TIMESTAMP]",
+      "validFrom": null,
+      "validTo": null,
+      "validityStatus": "unknown",
+      "validityWindowKind": "unbounded"
+    },
+    "retrieval": {
+      "confidence": 0.92,
+      "utility": 0.8,
+      "importance": 0.7,
+      "tags": [
+        "cargo",
+        "formatting"
+      ],
+      "level": "procedural",
+      "kind": "rule"
+    },
+    "selection": {
+      "selectionScore": 0.84,
+      "aboveConfidenceThreshold": true,
+      "isActive": true,
+      "scoreBreakdown": "selection_score = 0.5 * confidence(0.92) + 0.3 * utility(0.80) + 0.2 * importance(0.70) = 0.84",
+      "latestPackSelection": {
+        "packId": "[PACK_ID]",
+        "query": "format before release",
+        "profile": "compact",
+        "rank": 1,
+        "section": "procedural_rules",
+        "estimatedTokens": 8,
+        "relevance": 0.91,
+        "utility": 0.8,
+        "why": "Selected because the memory matches release-formatting work.",
+        "packHash": "[HASH]",
+        "selectedAt": "[TIMESTAMP]"
+      }
+    },
+    "contradictions": [],
+    "links": [],
+    "degraded": []
+  }
+}
