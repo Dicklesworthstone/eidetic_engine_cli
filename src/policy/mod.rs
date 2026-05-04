@@ -19,7 +19,98 @@ use crate::models::TrustClass;
 
 pub const SUBSYSTEM: &str = "policy";
 pub const INSTRUCTION_LIKE_SCORE_THRESHOLD: f32 = 0.45;
+pub const SECRET_REDACTION_PLACEHOLDER: &str = "***REDACTED***";
 pub const TRUST_PROMOTION_EVIDENCE_REJECTED_CODE: &str = "trust_promotion_evidence_rejected";
+
+const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
+    SecretKeyPattern {
+        code: "api_key",
+        key: "api_key",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "api_key",
+        key: "apikey",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "api_key",
+        key: "api-key",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "auth_token",
+        key: "auth_token",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "bearer_token",
+        key: "bearer_token",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "bearer_token",
+        key: "bearer",
+        whitespace_value: true,
+    },
+    SecretKeyPattern {
+        code: "client_secret",
+        key: "client_secret",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "connection_string",
+        key: "connection_string",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "database_url",
+        key: "database_url",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "password",
+        key: "password",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "password",
+        key: "passwd",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "private_key",
+        key: "private_key",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "secret",
+        key: "secret",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "secret_key",
+        key: "secret_key",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "ssh_key",
+        key: "ssh_key",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "token",
+        key: "token",
+        whitespace_value: false,
+    },
+];
+
+#[derive(Clone, Copy, Debug)]
+struct SecretKeyPattern {
+    code: &'static str,
+    key: &'static str,
+    whitespace_value: bool,
+}
 
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
@@ -103,6 +194,14 @@ pub struct InstructionLikeReport {
     pub threshold: f32,
     pub signals: Vec<InstructionSignalMatch>,
     pub rejected_reasons: Vec<&'static str>,
+}
+
+/// Deterministic report for secret-like content redaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SecretRedactionReport {
+    pub content: String,
+    pub redacted: bool,
+    pub redacted_reasons: Vec<&'static str>,
 }
 
 /// Stable rejection returned when privileged trust promotion evidence is not
@@ -349,6 +448,203 @@ pub fn detect_instruction_like_content(content: &str) -> InstructionLikeReport {
     }
 }
 
+/// Redact secret-like values while preserving enough surrounding context for
+/// diagnostics, curation review, and non-secret memory content.
+#[must_use]
+pub fn redact_secret_like_content(content: &str) -> SecretRedactionReport {
+    let mut reasons = Vec::new();
+    let (without_key_values, key_value_redacted) = redact_secret_key_values(content, &mut reasons);
+    let (without_url_passwords, url_password_redacted) =
+        redact_url_passwords(&without_key_values, &mut reasons);
+    let (without_pem_blocks, pem_block_redacted) =
+        redact_pem_blocks(&without_url_passwords, &mut reasons);
+
+    reasons.sort_unstable();
+    reasons.dedup();
+
+    SecretRedactionReport {
+        content: without_pem_blocks,
+        redacted: key_value_redacted || url_password_redacted || pem_block_redacted,
+        redacted_reasons: reasons,
+    }
+}
+
+fn redact_secret_key_values(input: &str, reasons: &mut Vec<&'static str>) -> (String, bool) {
+    let mut output = input.to_owned();
+    let mut changed = false;
+
+    for pattern in SECRET_KEY_PATTERNS {
+        let mut search_start = 0;
+        loop {
+            let lower = output.to_ascii_lowercase();
+            if search_start >= lower.len() {
+                break;
+            }
+            let Some(relative) = lower[search_start..].find(pattern.key) else {
+                break;
+            };
+            let key_start = search_start + relative;
+            let key_end = key_start + pattern.key.len();
+            if !is_key_boundary(lower.as_bytes(), key_start, key_end) {
+                search_start = key_end;
+                continue;
+            }
+
+            let Some((value_start, value_end)) =
+                secret_value_range(&output, key_end, pattern.whitespace_value)
+            else {
+                search_start = key_end;
+                continue;
+            };
+            if value_start == value_end {
+                search_start = key_end;
+                continue;
+            }
+            output.replace_range(value_start..value_end, SECRET_REDACTION_PLACEHOLDER);
+            reasons.push(pattern.code);
+            changed = true;
+            search_start = value_start + SECRET_REDACTION_PLACEHOLDER.len();
+        }
+    }
+
+    (output, changed)
+}
+
+fn is_key_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
+    let before_ok = start == 0
+        || bytes
+            .get(start.saturating_sub(1))
+            .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
+    let after_ok = bytes
+        .get(end)
+        .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
+    before_ok && after_ok
+}
+
+fn secret_value_range(
+    input: &str,
+    key_end: usize,
+    whitespace_value: bool,
+) -> Option<(usize, usize)> {
+    let separator_cursor = key_end;
+    let mut cursor = skip_ascii_spaces(input, key_end);
+    let separator = input.as_bytes().get(cursor).copied()?;
+    if matches!(separator, b'=' | b':') {
+        cursor += 1;
+    } else if whitespace_value && cursor > separator_cursor {
+    } else {
+        return None;
+    }
+    cursor = skip_ascii_spaces(input, cursor);
+    if cursor >= input.len() {
+        return None;
+    }
+
+    let quote = input.as_bytes().get(cursor).copied();
+    if matches!(quote, Some(b'"' | b'\'')) {
+        let quote = quote?;
+        let value_start = cursor + 1;
+        let value_end = input[value_start..]
+            .bytes()
+            .position(|byte| byte == quote)
+            .map_or(input.len(), |relative| value_start + relative);
+        return Some((value_start, value_end));
+    }
+
+    let value_end = input[cursor..]
+        .char_indices()
+        .find_map(|(offset, ch)| {
+            if ch.is_whitespace() || matches!(ch, ',' | ';' | '&') {
+                Some(cursor + offset)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(input.len());
+    Some((cursor, value_end))
+}
+
+fn skip_ascii_spaces(input: &str, mut cursor: usize) -> usize {
+    while matches!(input.as_bytes().get(cursor), Some(b' ' | b'\t')) {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn redact_url_passwords(input: &str, reasons: &mut Vec<&'static str>) -> (String, bool) {
+    let mut output = input.to_owned();
+    let mut changed = false;
+    let mut search_start = 0;
+
+    loop {
+        if search_start >= output.len() {
+            break;
+        }
+        let lower = output.to_ascii_lowercase();
+        let Some(relative_scheme) = lower[search_start..].find("://") else {
+            break;
+        };
+        let scheme_marker = search_start + relative_scheme + 3;
+        let segment_end = output[scheme_marker..]
+            .char_indices()
+            .find_map(|(offset, ch)| ch.is_whitespace().then_some(scheme_marker + offset))
+            .unwrap_or(output.len());
+        let Some(at_relative) = output[scheme_marker..segment_end].find('@') else {
+            search_start = segment_end;
+            continue;
+        };
+        let at_index = scheme_marker + at_relative;
+        let Some(colon_relative) = output[scheme_marker..at_index].rfind(':') else {
+            search_start = at_index + 1;
+            continue;
+        };
+        let value_start = scheme_marker + colon_relative + 1;
+        if value_start < at_index {
+            output.replace_range(value_start..at_index, SECRET_REDACTION_PLACEHOLDER);
+            reasons.push("url_password");
+            changed = true;
+            search_start = value_start + SECRET_REDACTION_PLACEHOLDER.len();
+        } else {
+            search_start = at_index + 1;
+        }
+    }
+
+    (output, changed)
+}
+
+fn redact_pem_blocks(input: &str, reasons: &mut Vec<&'static str>) -> (String, bool) {
+    let mut output = input.to_owned();
+    let mut changed = false;
+    let mut search_start = 0;
+
+    loop {
+        let lower = output.to_ascii_lowercase();
+        if search_start >= lower.len() {
+            break;
+        }
+        let Some(relative_begin) = lower[search_start..].find("-----begin") else {
+            break;
+        };
+        let begin = search_start + relative_begin;
+        let end = lower[begin..]
+            .find("-----end")
+            .map_or(output.len(), |relative_end| {
+                let marker_start = begin + relative_end;
+                output[marker_start..]
+                    .find('\n')
+                    .map_or(output.len(), |relative_line_end| {
+                        marker_start + relative_line_end
+                    })
+            });
+        output.replace_range(begin..end, SECRET_REDACTION_PLACEHOLDER);
+        reasons.push("pem_block");
+        changed = true;
+        search_start = begin + SECRET_REDACTION_PLACEHOLDER.len();
+    }
+
+    (output, changed)
+}
+
 fn normalize_for_instruction_detection(content: &str) -> String {
     content
         .to_ascii_lowercase()
@@ -386,7 +682,8 @@ fn round_score(score: f32) -> f32 {
 mod tests {
     use super::{
         INSTRUCTION_LIKE_SCORE_THRESHOLD, InstructionRisk, InstructionSignalKind,
-        TRUST_PROMOTION_EVIDENCE_REJECTED_CODE, detect_instruction_like_content, subsystem_name,
+        SECRET_REDACTION_PLACEHOLDER, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE,
+        detect_instruction_like_content, redact_secret_like_content, subsystem_name,
         validate_trust_promotion_evidence,
     };
 
@@ -578,5 +875,46 @@ mod tests {
             validate_trust_promotion_evidence("agent_assertion", "agent_inference", "reviewer");
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn secret_redactor_masks_key_value_patterns() {
+        let key_name = concat!("api", "_", "key");
+        let raw_value = concat!("sk", "_", "test", "_", "123");
+        let report =
+            redact_secret_like_content(&format!("Use {key_name}={raw_value} only locally."));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"api_key"));
+        assert!(report.content.contains(SECRET_REDACTION_PLACEHOLDER));
+        assert!(!report.content.contains(raw_value));
+    }
+
+    #[test]
+    fn secret_redactor_masks_url_passwords_and_bearer_values() {
+        let url_password = concat!("pw", "_", "from", "_", "dsn");
+        let bearer_value = concat!("ghp", "_", "redact", "_", "me");
+        let report = redact_secret_like_content(&format!(
+            "Fetch postgres://user:{url_password}@localhost/db with bearer {bearer_value}."
+        ));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"url_password"));
+        assert!(report.redacted_reasons.contains(&"bearer_token"));
+        assert!(!report.content.contains(url_password));
+        assert!(!report.content.contains(bearer_value));
+    }
+
+    #[test]
+    fn secret_redactor_masks_pem_blocks() {
+        let raw_body = concat!("abc", "123");
+        let report = redact_secret_like_content(&format!(
+            "Do not store -----BEGIN PRIVATE KEY-----\n{raw_body}\n-----END PRIVATE KEY----- in memory."
+        ));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"pem_block"));
+        assert!(report.content.contains(SECRET_REDACTION_PLACEHOLDER));
+        assert!(!report.content.contains(raw_body));
     }
 }

@@ -1824,13 +1824,23 @@ fn evaluate_candidate_for_apply(
             let proposed_content = stored.proposed_content.as_deref().map(str::trim);
             match proposed_content.filter(|value| !value.is_empty()) {
                 Some(content) => {
+                    let redaction = crate::policy::redact_secret_like_content(content);
+                    if redaction.redacted {
+                        warnings.push(validation_issue(
+                            "proposed_content_redacted",
+                            format!(
+                                "Proposed content for {candidate_type} contained secret-like values and was redacted before memory update."
+                            ),
+                            "Review the curation candidate and keep only durable, non-secret evidence.",
+                        ));
+                    }
                     push_apply_change(
                         &mut changes,
                         "content",
                         Some(target_memory.content.clone()),
-                        Some(content.to_owned()),
+                        Some(redaction.content.clone()),
                     );
-                    target_after.content = content.to_owned();
+                    target_after.content = redaction.content;
                 }
                 None => errors.push(validation_issue(
                     CandidateValidationError::ContentRequiredForType { candidate_type }.code(),
@@ -4183,6 +4193,70 @@ mod tests {
     }
 
     #[test]
+    fn apply_curation_candidate_redacts_secret_like_content_before_memory_persist() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(31)).to_string();
+        let candidate_id = curate_id(32);
+        let raw_value = concat!("ghp", "_", "curate", "_", "apply");
+        let proposed_content =
+            format!("Run `cargo test` before editing src/core/curate.rs with token: {raw_value}.");
+        let connection = seed_candidate_database(
+            &database_path,
+            &workspace_id,
+            &memory_id,
+            &candidate_id,
+            "consolidate",
+            Some("approved"),
+            Some(&proposed_content),
+        )?;
+
+        let report = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.application.status, "applied");
+        assert!(
+            report
+                .application
+                .warnings
+                .iter()
+                .any(|issue| issue.code == "proposed_content_redacted")
+        );
+        let content_change = report
+            .application
+            .changes
+            .iter()
+            .find(|change| change.field == "content")
+            .ok_or_else(|| "content change missing".to_owned())?;
+        let after = content_change
+            .after
+            .as_ref()
+            .ok_or_else(|| "content change after missing".to_owned())?;
+        assert!(after.contains(crate::policy::SECRET_REDACTION_PLACEHOLDER));
+        assert!(!after.contains(raw_value));
+
+        let memory = connection
+            .get_memory(&memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory missing after redacted apply".to_owned())?;
+        assert!(
+            memory
+                .content
+                .contains(crate::policy::SECRET_REDACTION_PLACEHOLDER)
+        );
+        assert!(!memory.content.contains(raw_value));
+        Ok(())
+    }
+
+    #[test]
     fn apply_curation_candidate_dry_run_leaves_memory_and_candidate_unchanged() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
@@ -4540,7 +4614,7 @@ mod tests {
                     proposed_confidence: Some(0.82),
                     proposed_trust_class: Some("agent_validated".to_owned()),
                     source_type: "feedback_event".to_owned(),
-                    source_id: Some("outcome_helpful".to_owned()),
+                    source_id: Some("fb_01234567890123456789012345".to_owned()),
                     reason: "Useful during release verification.".to_owned(),
                     confidence: 0.76,
                     status: status.map(str::to_owned),

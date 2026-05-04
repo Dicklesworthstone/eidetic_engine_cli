@@ -1337,10 +1337,15 @@ fn push_reason(reasons: &mut Vec<&'static str>, reason: &'static str) {
 }
 
 fn collect_specificity_tokens(input: &str) -> Vec<SpecificityToken> {
-    let lexical_tokens = lexical_tokens(input);
+    let redaction = crate::policy::redact_secret_like_content(input);
+    let token_input = redaction.content.as_str();
+    let lexical_tokens = lexical_tokens(token_input);
     let mut tokens = Vec::new();
-    collect_inline_code_tokens(input, &mut tokens);
-    collect_fenced_command_tokens(input, &mut tokens);
+    for class in redaction.redacted_reasons {
+        push_redacted_specificity_token(&mut tokens, class);
+    }
+    collect_inline_code_tokens(token_input, &mut tokens);
+    collect_fenced_command_tokens(token_input, &mut tokens);
     collect_lexical_concrete_tokens(&lexical_tokens, &mut tokens);
     tokens
 }
@@ -1350,7 +1355,7 @@ fn collect_inline_code_tokens(input: &str, tokens: &mut Vec<SpecificityToken>) {
         if index % 2 == 1 && !segment.trim().is_empty() {
             let trimmed = segment.trim();
             if looks_like_command(trimmed) {
-                push_specificity_token(tokens, SpecificityTokenKind::Command, trimmed);
+                push_command_specificity_token(tokens, trimmed);
             }
         }
     }
@@ -1365,7 +1370,7 @@ fn collect_fenced_command_tokens(input: &str, tokens: &mut Vec<SpecificityToken>
             continue;
         }
         if in_fence && looks_like_command(trimmed) {
-            push_specificity_token(tokens, SpecificityTokenKind::Command, trimmed);
+            push_command_specificity_token(tokens, trimmed);
         }
     }
 }
@@ -1377,11 +1382,7 @@ fn collect_lexical_concrete_tokens(lexical_tokens: &[String], tokens: &mut Vec<S
             push_redacted_specificity_token(tokens, class);
         }
         if KNOWN_COMMANDS.contains(&lower.as_str()) {
-            push_specificity_token(
-                tokens,
-                SpecificityTokenKind::Command,
-                &command_phrase(lexical_tokens, index),
-            );
+            push_command_specificity_token(tokens, &command_phrase(lexical_tokens, index));
         }
         if looks_like_file_path(token) {
             push_specificity_token(tokens, SpecificityTokenKind::FilePath, token);
@@ -1494,6 +1495,14 @@ fn push_specificity_token(
         value: trimmed.to_string(),
         redacted: false,
     });
+}
+
+fn push_command_specificity_token(tokens: &mut Vec<SpecificityToken>, value: &str) {
+    let redaction = crate::policy::redact_secret_like_content(value);
+    for class in redaction.redacted_reasons {
+        push_redacted_specificity_token(tokens, class);
+    }
+    push_specificity_token(tokens, SpecificityTokenKind::Command, &redaction.content);
 }
 
 fn push_redacted_specificity_token(tokens: &mut Vec<SpecificityToken>, class: &'static str) {
@@ -1807,7 +1816,10 @@ pub fn validate_candidate(
         .filter(|source_id| !source_id.is_empty())
         .map(str::to_string)
         .ok_or(CandidateValidationError::MissingSourceEvidence)?;
-    let reason_instruction_report = crate::policy::detect_instruction_like_content(&input.reason);
+    let reason = input.reason.trim().to_string();
+    let reason_redaction = crate::policy::redact_secret_like_content(&reason);
+    let reason_instruction_report =
+        crate::policy::detect_instruction_like_content(&reason_redaction.content);
     if reason_instruction_report.is_instruction_like {
         return Err(CandidateValidationError::PromptInjectionFlagged {
             field: "reason",
@@ -1869,6 +1881,8 @@ pub fn validate_candidate(
     let proposed_content = input
         .proposed_content
         .map(|content| content.trim().to_string())
+        .filter(|content| !content.is_empty())
+        .map(|content| crate::policy::redact_secret_like_content(&content).content)
         .filter(|content| !content.is_empty());
     if let Some(content) = &proposed_content {
         let content_instruction_report = crate::policy::detect_instruction_like_content(content);
@@ -1909,7 +1923,7 @@ pub fn validate_candidate(
         proposed_trust_class: input.proposed_trust_class,
         source_type: input.source_type,
         source_id: Some(source_id),
-        reason: input.reason.trim().to_string(),
+        reason: reason_redaction.content,
         confidence: input.confidence,
         ttl_expires_at,
     })
@@ -2711,7 +2725,7 @@ impl FeedbackRateState {
 
     #[must_use]
     pub fn exceeds_limit(&self, config: &FeedbackRateConfig) -> bool {
-        self.harmful_count >= config.harmful_per_source_per_hour
+        self.harmful_count > config.harmful_per_source_per_hour
     }
 }
 
@@ -3282,9 +3296,9 @@ mod tests {
         DuplicateRuleMatchKind, DuplicateRuleRecord, ParseCandidateSourceError,
         ParseCandidateStatusError, ParseCandidateTypeError, ParseReviewQueueStateError,
         REVIEW_QUEUE_INVALID_TRANSITION_CODE, REVIEW_QUEUE_STATE_SCHEMA_V1, ReviewQueueState,
-        SpecificityPlatform, check_duplicate_rule, check_duplicate_rule_with_config,
-        specificity_score, subsystem_name, validate_candidate, validate_review_queue_transition,
-        validate_status_transition,
+        SpecificityPlatform, SpecificityReport, SpecificityTokenKind, check_duplicate_rule,
+        check_duplicate_rule_with_config, specificity_score, subsystem_name, validate_candidate,
+        validate_review_queue_transition, validate_status_transition,
     };
 
     #[test]
@@ -3377,6 +3391,84 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
                 .iter()
                 .all(|token| !token.value.contains(key_value))
         );
+    }
+
+    #[test]
+    fn specificity_score_redacts_inline_command_api_key() {
+        let raw_value = concat!("sk", "-", "inline", "-", "123456789");
+        let secret_label = concat!("api", "_", "key");
+        let text = format!(
+            "Run `cargo test -- {secret_label}={raw_value}` before editing src/policy/mod.rs."
+        );
+
+        let report = specificity_score(&text);
+
+        assert!(report.structural_signals.has_inline_command);
+        assert_specificity_report_omits_raw(&report, raw_value);
+        assert!(
+            report
+                .concrete_tokens
+                .iter()
+                .any(|token| token.kind == SpecificityTokenKind::Command
+                    && token
+                        .value
+                        .contains(crate::policy::SECRET_REDACTION_PLACEHOLDER)),
+            "{report:?}"
+        );
+        assert!(
+            report
+                .redacted_concrete_tokens
+                .iter()
+                .any(|token| token.value == concat!("REDACTED:", "api", "_", "key")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn specificity_score_redacts_fenced_command_pem_block() {
+        let raw_body = concat!("MII", "Inline", "Pem", "Body", "123456789");
+        let text = format!(
+            "\
+```bash
+cargo test -----BEGIN PRIVATE KEY-----{raw_body}-----END PRIVATE KEY-----
+```
+Then update src/policy/mod.rs on main."
+        );
+
+        let report = specificity_score(&text);
+
+        assert!(report.structural_signals.has_command_block);
+        assert_specificity_report_omits_raw(&report, raw_body);
+        assert!(
+            report
+                .concrete_tokens
+                .iter()
+                .any(|token| token.kind == SpecificityTokenKind::Command
+                    && token
+                        .value
+                        .contains(crate::policy::SECRET_REDACTION_PLACEHOLDER)),
+            "{report:?}"
+        );
+        assert!(
+            report
+                .redacted_concrete_tokens
+                .iter()
+                .any(|token| token.value == "REDACTED:pem_block"),
+            "{report:?}"
+        );
+    }
+
+    fn assert_specificity_report_omits_raw(report: &SpecificityReport, raw: &str) {
+        for token in report
+            .concrete_tokens
+            .iter()
+            .chain(report.redacted_concrete_tokens.iter())
+        {
+            assert!(
+                !token.value.contains(raw),
+                "specificity token leaked raw secret {raw:?}: {token:?}"
+            );
+        }
     }
 
     #[test]
@@ -4099,6 +4191,44 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
+    fn validate_candidate_redacts_secret_like_proposed_content() {
+        let mut input = valid_input();
+        input.candidate_type = CandidateType::Consolidate;
+        let raw_value = concat!("sk", "_", "curate", "_", "123");
+        let secret_label = concat!("api", "_", "key");
+        input.proposed_content = Some(format!(
+            "Run `cargo test` before updating src/curate/mod.rs with {secret_label}={raw_value}."
+        ));
+
+        let candidate = validate_candidate(input, "2026-04-29T12:00:00Z").unwrap();
+        let content = candidate.proposed_content.unwrap();
+
+        assert!(content.contains(crate::policy::SECRET_REDACTION_PLACEHOLDER));
+        assert!(!content.contains(raw_value));
+        let report = candidate.specificity_report.unwrap();
+        assert!(report.passes_threshold, "{report:?}");
+        assert!(!report.redacted_concrete_tokens.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn validate_candidate_redacts_secret_like_reason() {
+        let mut input = valid_input();
+        let raw_value = concat!("ghp", "_", "curate", "_", "456");
+        input.reason = format!("Captured during review with token: {raw_value}.");
+
+        let candidate = validate_candidate(input, "2026-04-29T12:00:00Z").unwrap();
+
+        assert!(
+            candidate
+                .reason
+                .contains(crate::policy::SECRET_REDACTION_PLACEHOLDER)
+        );
+        assert!(!candidate.reason.contains(raw_value));
+    }
+
+    #[test]
     fn candidate_too_generic_error_exposes_stable_code() {
         let error = CandidateValidationError::CandidateTooGeneric {
             score: "0.0000".to_string(),
@@ -4477,6 +4607,10 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
         }
 
         assert_eq!(state.harmful_count, 5);
+        assert!(!state.exceeds_limit(&config));
+
+        state.record_harmful_event("2026-04-30T12:06:00Z");
+        assert_eq!(state.harmful_count, 6);
         assert!(state.exceeds_limit(&config));
     }
 
