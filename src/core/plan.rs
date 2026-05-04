@@ -9,6 +9,8 @@ use std::cmp::Reverse;
 
 use serde_json::{Value as JsonValue, json};
 
+use crate::core::task_frame::{TaskFrameRecord, TaskFrameShowOptions, show_task_frame};
+
 pub const GOAL_PLAN_SCHEMA_V1: &str = "ee.plan.goal.v1";
 pub const RECIPE_LIST_SCHEMA_V1: &str = "ee.plan.recipe_list.v1";
 pub const RECIPE_SHOW_SCHEMA_V1: &str = "ee.plan.recipe.v1";
@@ -918,6 +920,7 @@ pub struct GoalPlan {
     pub dry_run_recommended: bool,
     pub next_inspection_commands: Vec<String>,
     pub rejected_alternatives: Vec<RejectedAlternative>,
+    pub task_frame_posture: Option<TaskFramePlanPosture>,
 }
 
 impl GoalPlan {
@@ -941,6 +944,10 @@ impl GoalPlan {
             "dryRunRecommended": self.dry_run_recommended,
             "nextInspectionCommands": self.next_inspection_commands,
         });
+
+        if let Some(posture) = &self.task_frame_posture {
+            obj["taskFramePosture"] = posture.data_json();
+        }
 
         if include_alternatives && !self.rejected_alternatives.is_empty() {
             obj["rejectedAlternatives"] = json!(
@@ -988,6 +995,38 @@ pub struct PlanGoalOptions {
     pub goal: String,
     pub workspace: Option<String>,
     pub profile: PlanProfile,
+    pub task_frame_id: Option<String>,
+}
+
+/// Passive task-frame state used as plan posture input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskFramePlanPosture {
+    pub frame_id: String,
+    pub status: String,
+    pub root_goal: String,
+    pub current_focus: Option<String>,
+    pub blocker_count: usize,
+    pub active_subgoal_count: usize,
+    pub redaction_status: String,
+    pub non_executing: bool,
+    pub source_id: String,
+}
+
+impl TaskFramePlanPosture {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "frameId": self.frame_id,
+            "status": self.status,
+            "rootGoal": self.root_goal,
+            "currentFocus": self.current_focus,
+            "blockerCount": self.blocker_count,
+            "activeSubgoalCount": self.active_subgoal_count,
+            "redactionStatus": self.redaction_status,
+            "nonExecuting": self.non_executing,
+            "sourceId": self.source_id,
+        })
+    }
 }
 
 /// Generate a plan for a goal.
@@ -995,6 +1034,9 @@ pub struct PlanGoalOptions {
 pub fn generate_plan(options: &PlanGoalOptions) -> GoalPlan {
     let classification = classify_goal(&options.goal);
     let plan_id = format!("plan-{:08x}", rand_id());
+    let task_frame_posture = options.workspace.as_ref().and_then(|workspace| {
+        task_frame_plan_posture(workspace, options.task_frame_id.as_deref()).ok()
+    });
 
     let recipe = if classification.primary == GoalCategory::Unknown {
         None
@@ -1024,10 +1066,13 @@ pub fn generate_plan(options: &PlanGoalOptions) -> GoalPlan {
 
     let dry_run_recommended = options.profile == PlanProfile::Safe;
 
-    let next_inspection_commands = vec![
+    let mut next_inspection_commands = vec![
         "ee status --json".to_string(),
         format!("ee plan explain {} --json", plan_id),
     ];
+    if let Some(posture) = &task_frame_posture {
+        next_inspection_commands.push(format!("ee task-frame show {} --json", posture.frame_id));
+    }
 
     let rejected_alternatives: Vec<RejectedAlternative> = classification
         .alternatives
@@ -1051,13 +1096,61 @@ pub fn generate_plan(options: &PlanGoalOptions) -> GoalPlan {
         recipe_version,
         profile: options.profile,
         steps,
-        preconditions: vec!["workspace_initialized".to_string()],
+        preconditions: plan_preconditions(task_frame_posture.as_ref()),
         stop_conditions: vec!["any_step_fails".to_string()],
         degraded_branches,
         dry_run_recommended,
         next_inspection_commands,
         rejected_alternatives,
+        task_frame_posture,
     }
+}
+
+/// Return passive task-frame posture for commands that may inspect it without execution.
+pub fn task_frame_plan_posture(
+    workspace: &str,
+    task_frame_id: Option<&str>,
+) -> Result<TaskFramePlanPosture, String> {
+    let report = show_task_frame(&TaskFrameShowOptions {
+        workspace_path: std::path::PathBuf::from(workspace),
+        frame_id: task_frame_id.map(ToOwned::to_owned),
+        active: task_frame_id.is_none(),
+    })
+    .map_err(|error| error.message())?;
+    let frame = report
+        .frame
+        .ok_or_else(|| "task-frame posture unavailable".to_owned())?;
+    Ok(posture_from_frame(&frame))
+}
+
+fn posture_from_frame(frame: &TaskFrameRecord) -> TaskFramePlanPosture {
+    TaskFramePlanPosture {
+        frame_id: frame.id.clone(),
+        status: frame.status.as_str().to_owned(),
+        root_goal: frame.root_goal.clone(),
+        current_focus: frame.current_focus.clone(),
+        blocker_count: frame.blockers.len()
+            + frame
+                .subgoals
+                .iter()
+                .filter(|subgoal| subgoal.status.as_str() == "blocked")
+                .count(),
+        active_subgoal_count: frame.active_subgoal_count(),
+        redaction_status: frame.redaction_status.clone(),
+        non_executing: true,
+        source_id: format!("ee.task_frame.store.v1#{}", frame.id),
+    }
+}
+
+fn plan_preconditions(task_frame_posture: Option<&TaskFramePlanPosture>) -> Vec<String> {
+    let mut preconditions = vec!["workspace_initialized".to_owned()];
+    if let Some(posture) = task_frame_posture {
+        preconditions.push(format!("task_frame_status:{}", posture.status));
+        if posture.blocker_count > 0 {
+            preconditions.push("task_frame_has_blockers".to_owned());
+        }
+    }
+    preconditions
 }
 
 /// Generate a pseudo-random ID (deterministic for testing when seeded).
@@ -1228,6 +1321,7 @@ mod tests {
             goal: "initialize new workspace".to_string(),
             workspace: None,
             profile: PlanProfile::Full,
+            task_frame_id: None,
         };
         let plan = generate_plan(&options);
         assert_eq!(plan.recipe_id, "init-workspace");
@@ -1240,6 +1334,7 @@ mod tests {
             goal: "xyzzy".to_string(),
             workspace: None,
             profile: PlanProfile::Full,
+            task_frame_id: None,
         };
         let plan = generate_plan(&options);
         assert_eq!(plan.recipe_id, "unknown");
@@ -1252,6 +1347,52 @@ mod tests {
         assert!(explanation.is_some());
         let exp = explanation.ok_or_else(|| "init-workspace explanation missing".to_string())?;
         assert_eq!(exp.recipe_id, "init-workspace");
+        Ok(())
+    }
+
+    #[test]
+    fn generate_plan_can_reference_task_frame_posture_without_execution() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let created = crate::core::task_frame::create_task_frame(
+            &crate::core::task_frame::TaskFrameCreateOptions {
+                workspace_path: workspace.path().to_path_buf(),
+                goal: "Ship task frame support".to_owned(),
+                actor: "cod-pane6".to_owned(),
+                status: crate::core::task_frame::TaskFrameStatus::Active,
+                current_focus: Some("handoff posture".to_owned()),
+                blockers: vec!["blocked on review".to_owned()],
+                evidence_links: Vec::new(),
+                created_at: Some("2026-05-04T00:00:00Z".to_owned()),
+                dry_run: false,
+            },
+        )
+        .map_err(|error| error.message())?;
+        let frame_id = created.frame.ok_or_else(|| "missing frame".to_owned())?.id;
+        let options = PlanGoalOptions {
+            goal: "continue task frame work".to_owned(),
+            workspace: Some(workspace.path().display().to_string()),
+            profile: PlanProfile::Safe,
+            task_frame_id: Some(frame_id.clone()),
+        };
+        let plan = generate_plan(&options);
+        let posture = plan
+            .task_frame_posture
+            .ok_or_else(|| "missing task-frame posture".to_owned())?;
+
+        assert_eq!(posture.frame_id, frame_id);
+        assert_eq!(posture.status, "active");
+        assert!(posture.non_executing);
+        assert_eq!(posture.blocker_count, 1);
+        assert!(
+            plan.preconditions
+                .iter()
+                .any(|precondition| precondition == "task_frame_status:active")
+        );
+        assert!(
+            plan.next_inspection_commands
+                .iter()
+                .any(|command| command.starts_with("ee task-frame show "))
+        );
         Ok(())
     }
 

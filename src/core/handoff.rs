@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::focus::{focus_state_hash, read_active_focus_state};
 use crate::core::task_frame::{
-    TaskFrameRecord, TaskFrameShowOptions, NON_EXECUTING_CONTRACT, show_task_frame,
+    NON_EXECUTING_CONTRACT, TaskFrameRecord, TaskFrameShowOptions, show_task_frame,
 };
 use crate::models::DomainError;
 
@@ -869,7 +869,10 @@ fn add_task_frame_to_resume(report: &mut ResumeReport, task_frame: serde_json::V
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
 
-    if let Some(goal) = task_frame.get("rootGoal").and_then(serde_json::Value::as_str) {
+    if let Some(goal) = task_frame
+        .get("rootGoal")
+        .and_then(serde_json::Value::as_str)
+    {
         report.current_objective = Some(goal.to_owned());
     }
     report.status_summary = Some(format!(
@@ -878,7 +881,9 @@ fn add_task_frame_to_resume(report: &mut ResumeReport, task_frame: serde_json::V
     report.next_actions.push(
         NextAction::new(1, "Review passive task-frame state.")
             .with_command(format!("ee task-frame show {frame_id} --json"))
-            .with_reason("Task frame was included as durable resume context, not as an execution plan."),
+            .with_reason(
+                "Task frame was included as durable resume context, not as an execution plan.",
+            ),
     );
 
     if let Some(blockers) = task_frame
@@ -1322,21 +1327,22 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
     }
 
     let task_frame = match options.task_frame_id.as_deref() {
-        Some(_) => match read_handoff_task_frame(&options.workspace, options.task_frame_id.as_deref())
-        {
-            Ok(Some(frame)) => task_frame_json(&frame),
-            Ok(None) => None,
-            Err(error) => {
-                report.degradations.push(
-                    DegradationInfo::new(
-                        "handoff_task_frame_unavailable",
-                        format!("Task-frame state could not be read: {}", error.message()),
-                    )
-                    .with_next_action("ee task-frame show --active --json"),
-                );
-                None
+        Some(_) => {
+            match read_handoff_task_frame(&options.workspace, options.task_frame_id.as_deref()) {
+                Ok(Some(frame)) => task_frame_json(&frame),
+                Ok(None) => None,
+                Err(error) => {
+                    report.degradations.push(
+                        DegradationInfo::new(
+                            "handoff_task_frame_unavailable",
+                            format!("Task-frame state could not be read: {}", error.message()),
+                        )
+                        .with_next_action("ee task-frame show --active --json"),
+                    );
+                    None
+                }
             }
-        },
+        }
         None => capsule
             .get("task_frame")
             .cloned()
@@ -1679,8 +1685,8 @@ mod tests {
     #[test]
     fn handoff_preview_create_and_resume_include_redacted_task_frame() -> TestResult {
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let created =
-            crate::core::task_frame::create_task_frame(&crate::core::task_frame::TaskFrameCreateOptions {
+        let created = crate::core::task_frame::create_task_frame(
+            &crate::core::task_frame::TaskFrameCreateOptions {
                 workspace_path: dir.path().to_path_buf(),
                 goal: "Continue release with api_key=sk-live-123".to_owned(),
                 actor: "cod-pane6".to_owned(),
@@ -1699,8 +1705,9 @@ mod tests {
                 ],
                 created_at: Some("2026-05-04T00:00:00Z".to_owned()),
                 dry_run: false,
-            })
-            .map_err(|error| error.message())?;
+            },
+        )
+        .map_err(|error| error.message())?;
         let frame_id = created.frame.ok_or_else(|| "missing frame".to_owned())?.id;
 
         let preview = preview_handoff(&PreviewOptions {

@@ -758,15 +758,35 @@ impl SearchScoreExplanation {
     #[must_use]
     pub fn from_scored_result(result: &ScoredResult) -> Self {
         let mut components = Vec::with_capacity(5);
-        components.push(SearchScoreComponent::new("primary_score", result.score));
-        push_optional_score_component(&mut components, "lexical_score", result.lexical_score);
-        push_optional_score_component(&mut components, "semantic_fast_score", result.fast_score);
+        components.push(SearchScoreComponent::new(
+            "primary_score",
+            result.score,
+            ScoreComponentSource::Structural,
+        ));
+        push_optional_score_component(
+            &mut components,
+            "lexical_score",
+            result.lexical_score,
+            ScoreComponentSource::Lexical,
+        );
+        push_optional_score_component(
+            &mut components,
+            "semantic_fast_score",
+            result.fast_score,
+            ScoreComponentSource::Semantic,
+        );
         push_optional_score_component(
             &mut components,
             "semantic_quality_score",
             result.quality_score,
+            ScoreComponentSource::Semantic,
         );
-        push_optional_score_component(&mut components, "rerank_score", result.rerank_score);
+        push_optional_score_component(
+            &mut components,
+            "rerank_score",
+            result.rerank_score,
+            ScoreComponentSource::Structural,
+        );
 
         Self {
             doc_id: result.doc_id.clone(),
@@ -782,13 +802,39 @@ impl SearchScoreExplanation {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SearchScoreComponent {
     pub name: &'static str,
+    pub source: &'static str,
     pub value: f32,
 }
 
 impl SearchScoreComponent {
     #[must_use]
-    pub const fn new(name: &'static str, value: f32) -> Self {
-        Self { name, value }
+    pub const fn new(name: &'static str, value: f32, source: ScoreComponentSource) -> Self {
+        Self {
+            name,
+            source: source.as_str(),
+            value,
+        }
+    }
+}
+
+/// Stable source tags for individual score components.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScoreComponentSource {
+    Lexical,
+    Semantic,
+    Freshness,
+    Structural,
+}
+
+impl ScoreComponentSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lexical => "lexical",
+            Self::Semantic => "semantic",
+            Self::Freshness => "freshness",
+            Self::Structural => "structural",
+        }
     }
 }
 
@@ -801,9 +847,10 @@ fn push_optional_score_component(
     components: &mut Vec<SearchScoreComponent>,
     name: &'static str,
     value: Option<f32>,
+    source: ScoreComponentSource,
 ) {
     if let Some(value) = value {
-        components.push(SearchScoreComponent::new(name, value));
+        components.push(SearchScoreComponent::new(name, value, source));
     }
 }
 
@@ -927,10 +974,7 @@ pub enum IndexManifestError {
         actual_dimension: usize,
     },
     /// Embedding deterministic flag mismatch (rebuild required).
-    EmbeddingDeterministicMismatch {
-        expected: bool,
-        actual: bool,
-    },
+    EmbeddingDeterministicMismatch { expected: bool, actual: bool },
     /// Document schema mismatch (rebuild required).
     DocumentSchemaMismatch {
         expected_schema: String,
@@ -1245,8 +1289,8 @@ impl Default for IndexManifest {
 mod tests {
     use super::{
         CanonicalSearchDocument, DocumentSource, Embedder, HashEmbedder, REQUIRED_RETRIEVAL_ENGINE,
-        ScoreSource, ScoredResult, SearchCapabilityName, SearchSurface, explain_scored_result,
-        module_readiness, score_source_name, subsystem_name,
+        ScoreComponentSource, ScoreSource, ScoredResult, SearchCapabilityName, SearchSurface,
+        explain_scored_result, module_readiness, score_source_name, subsystem_name,
     };
     use crate::models::CapabilityStatus;
     use serde_json::json;
@@ -1366,6 +1410,14 @@ mod tests {
     }
 
     #[test]
+    fn score_component_source_tags_are_stable() {
+        assert_eq!(ScoreComponentSource::Lexical.as_str(), "lexical");
+        assert_eq!(ScoreComponentSource::Semantic.as_str(), "semantic");
+        assert_eq!(ScoreComponentSource::Freshness.as_str(), "freshness");
+        assert_eq!(ScoreComponentSource::Structural.as_str(), "structural");
+    }
+
+    #[test]
     fn scored_result_explanation_preserves_components_in_stable_order() {
         let result = ScoredResult {
             doc_id: "mem-release-rule".to_owned(),
@@ -1384,10 +1436,16 @@ mod tests {
         };
 
         let explanation = explain_scored_result(&result);
-        let components: Vec<(&str, String)> = explanation
+        let components: Vec<(&str, &str, String)> = explanation
             .components
             .iter()
-            .map(|component| (component.name, format!("{:.3}", component.value)))
+            .map(|component| {
+                (
+                    component.name,
+                    component.source,
+                    format!("{:.3}", component.value),
+                )
+            })
             .collect();
 
         assert_eq!(explanation.doc_id, "mem-release-rule");
@@ -1396,14 +1454,41 @@ mod tests {
         assert_eq!(
             components,
             vec![
-                ("primary_score", "0.875".to_owned()),
-                ("lexical_score", "3.500".to_owned()),
-                ("semantic_fast_score", "0.820".to_owned()),
-                ("rerank_score", "0.910".to_owned()),
+                ("primary_score", "structural", "0.875".to_owned()),
+                ("lexical_score", "lexical", "3.500".to_owned()),
+                ("semantic_fast_score", "semantic", "0.820".to_owned()),
+                ("rerank_score", "structural", "0.910".to_owned()),
             ]
         );
         assert!(!explanation.frankensearch_explanation_available);
         assert!(explanation.metadata_available);
+    }
+
+    #[test]
+    fn scored_result_explanation_tags_semantic_quality_component_source() {
+        let result = ScoredResult {
+            doc_id: "mem-quality-rule".to_owned(),
+            score: 0.93,
+            source: ScoreSource::SemanticQuality,
+            index: Some(3),
+            fast_score: None,
+            quality_score: Some(0.93),
+            lexical_score: None,
+            rerank_score: None,
+            explanation: None,
+            metadata: None,
+        };
+
+        let explanation = explain_scored_result(&result);
+        let Some(quality_component) = explanation
+            .components
+            .iter()
+            .find(|component| component.name == "semantic_quality_score")
+        else {
+            panic!("semantic quality component must be present");
+        };
+
+        assert_eq!(quality_component.source, "semantic");
     }
 
     #[test]
@@ -1427,9 +1512,15 @@ mod tests {
             .iter()
             .map(|component| component.name)
             .collect();
+        let component_sources: Vec<&str> = explanation
+            .components
+            .iter()
+            .map(|component| component.source)
+            .collect();
 
         assert_eq!(explanation.source, "lexical");
         assert_eq!(component_names, vec!["primary_score"]);
+        assert_eq!(component_sources, vec!["structural"]);
         assert!(!explanation.frankensearch_explanation_available);
         assert!(!explanation.metadata_available);
     }
@@ -2112,7 +2203,7 @@ mod tests {
             1,
             "2026-04-30T12:00:00Z",
             100,
-            5, // Same db_generation as we'll check
+            5,                                           // Same db_generation as we'll check
             EmbeddingConfig::new("hash-256", 512, true), // Wrong dimension
         );
         let expected = EmbeddingConfig::default();

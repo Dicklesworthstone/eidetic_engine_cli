@@ -383,7 +383,8 @@ pub fn update_task_frame(options: &TaskFrameUpdateOptions) -> Result<TaskFrameRe
     }
     let mut redacted = frame.redaction_status == "redacted";
     if options.current_focus.is_some() {
-        let (current_focus, focus_redacted) = redact_optional_task_text(options.current_focus.clone());
+        let (current_focus, focus_redacted) =
+            redact_optional_task_text(options.current_focus.clone());
         frame.current_focus = current_focus;
         redacted |= focus_redacted;
     }
@@ -434,7 +435,8 @@ pub fn close_task_frame(options: &TaskFrameCloseOptions) -> Result<TaskFrameRepo
     frame.closed_at = Some(now);
     let (close_reason, reason_redacted) = redact_task_text(options.reason.trim());
     frame.close_reason = Some(close_reason);
-    frame.redaction_status = redaction_status(frame.redaction_status == "redacted" || reason_redacted);
+    frame.redaction_status =
+        redaction_status(frame.redaction_status == "redacted" || reason_redacted);
     frame.suggested_commands = suggested_commands(Some(&frame.id));
 
     if !options.dry_run {
@@ -702,7 +704,10 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
     })
 }
 
-#[expect(dead_code, reason = "utility prepared for future subgoal bulk operations")]
+#[expect(
+    dead_code,
+    reason = "utility prepared for future subgoal bulk operations"
+)]
 fn normalized_strings(values: &[String]) -> Vec<String> {
     let mut normalized = values
         .iter()
@@ -720,7 +725,10 @@ fn normalized_strings(values: &[String]) -> Vec<String> {
     normalized
 }
 
-#[expect(dead_code, reason = "utility prepared for future subgoal bulk operations")]
+#[expect(
+    dead_code,
+    reason = "utility prepared for future subgoal bulk operations"
+)]
 fn append_unique_strings(target: &mut Vec<String>, values: &[String]) {
     target.extend(normalized_strings(values));
     target.sort();
@@ -1119,9 +1127,8 @@ mod tests {
         let workspace = temp_workspace("redaction")?;
         let mut options = create_options(workspace.clone());
         options.goal = "Rotate api_key=sk-live-123 before release".to_owned();
-        options.current_focus = Some(
-            "Check DATABASE_URL=postgres://user:hunter2@example.test/db".to_owned(),
-        );
+        options.current_focus =
+            Some("Check DATABASE_URL=postgres://user:hunter2@example.test/db".to_owned());
         options.blockers = vec![
             "needs password='open-sesame' from operator".to_owned(),
             "token: ghp_secret_token".to_owned(),

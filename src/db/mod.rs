@@ -13333,6 +13333,10 @@ mod tests {
             utility: 0.7,
             why: "cross workspace item".to_string(),
             diversity_key: None,
+            provenance_json: r#"{"schema":"ee.pack_item.provenance.v1","entries":[]}"#
+                .to_string(),
+            trust_class: "agent_assertion".to_string(),
+            trust_subclass: None,
         }];
         let pack_omissions = vec![super::CreatePackOmissionInput {
             pack_id: pack_id.to_string(),
@@ -14232,6 +14236,9 @@ mod tests {
             utility: 0.8,
             why: "High relevance to cargo formatting query".to_string(),
             diversity_key: None,
+            provenance_json: r#"{"schema":"ee.pack_item.provenance.v1","entries":[{"uri":"file://AGENTS.md#L42","note":"project release rule"}]}"#.to_string(),
+            trust_class: "human_explicit".to_string(),
+            trust_subclass: Some("project-rule".to_string()),
         }];
 
         connection.insert_pack_record("pack_000000000000000000000pack1", &input, &items, &[])?;
@@ -14257,6 +14264,21 @@ mod tests {
             &pack_items[0].why,
             &"High relevance to cargo formatting query".to_string(),
             "pack item why",
+        )?;
+        ensure_equal(
+            &pack_items[0].provenance_json,
+            &items[0].provenance_json,
+            "pack item provenance json",
+        )?;
+        ensure_equal(
+            &pack_items[0].trust_class,
+            &"human_explicit".to_string(),
+            "pack item trust class",
+        )?;
+        ensure_equal(
+            &pack_items[0].trust_subclass,
+            &Some("project-rule".to_string()),
+            "pack item trust subclass",
         )?;
 
         connection.close()?;
@@ -14292,6 +14314,9 @@ mod tests {
             utility: 0.75,
             why: "Selected for release preparation".to_string(),
             diversity_key: Some("cargo".to_string()),
+            provenance_json: r#"{"schema":"ee.pack_item.provenance.v1","entries":[{"uri":"cass-session://release-a#L10-12","note":"session evidence"}]}"#.to_string(),
+            trust_class: "cass_evidence".to_string(),
+            trust_subclass: Some("session-span".to_string()),
         }];
 
         connection.insert_pack_record("pack_000000000000000000000pack2", &input, &items, &[])?;
@@ -14303,6 +14328,21 @@ mod tests {
             &history[0].1.why,
             &"Selected for release preparation".to_string(),
             "selection reason",
+        )?;
+        ensure_equal(
+            &history[0].1.provenance_json,
+            &items[0].provenance_json,
+            "history item provenance json",
+        )?;
+        ensure_equal(
+            &history[0].1.trust_class,
+            &"cass_evidence".to_string(),
+            "history item trust class",
+        )?;
+        ensure_equal(
+            &history[0].1.trust_subclass,
+            &Some("session-span".to_string()),
+            "history item trust subclass",
         )?;
 
         connection.close()?;

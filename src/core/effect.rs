@@ -778,6 +778,7 @@ impl EffectManifest {
             CommandEffect::read_only("schema list", "List response schemas"),
             CommandEffect::read_only("search", "Search memories"),
             CommandEffect::read_only("status", "Report workspace status"),
+            CommandEffect::read_only("task-frame show", "Show passive task-frame state"),
             CommandEffect::read_only("update", "Plan update without mutation"),
             CommandEffect::read_only("version", "Print version"),
             CommandEffect::read_only("workspace list", "List workspace aliases"),
@@ -1301,6 +1302,26 @@ impl EffectManifest {
                 "focus set",
                 vec![".ee/focus/state.json"],
                 "Replace passive focus state from explicit command arguments",
+            ),
+            CommandEffect::workspace_file_write(
+                "task-frame create",
+                vec![".ee/task_frames.json"],
+                "Create a passive task frame without executing commands",
+            ),
+            CommandEffect::workspace_file_write(
+                "task-frame update",
+                vec![".ee/task_frames.json"],
+                "Update passive task-frame state without executing commands",
+            ),
+            CommandEffect::workspace_file_write(
+                "task-frame close",
+                vec![".ee/task_frames.json"],
+                "Close a passive task frame without executing commands",
+            ),
+            CommandEffect::workspace_file_write(
+                "task-frame subgoal add",
+                vec![".ee/task_frames.json"],
+                "Add a passive task-frame subgoal without executing commands",
             ),
         ]
     }
