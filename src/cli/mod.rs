@@ -8623,11 +8623,20 @@ where
         }
     };
 
-    let valid_target_types = ["memory", "context_pack", "recorder_run", "recorder_event", "causal_trace"];
+    let valid_target_types = [
+        "memory",
+        "context_pack",
+        "recorder_run",
+        "recorder_event",
+        "causal_trace",
+    ];
     if !valid_target_types.contains(&args.target_type.as_str()) {
         let domain_error = DomainError::Usage {
             message: format!("Invalid target type '{}'", args.target_type),
-            repair: Some("Use one of: memory, context_pack, recorder_run, recorder_event, causal_trace".to_string()),
+            repair: Some(
+                "Use one of: memory, context_pack, recorder_run, recorder_event, causal_trace"
+                    .to_string(),
+            ),
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
@@ -8635,18 +8644,15 @@ where
     let now = chrono::Utc::now().to_rfc3339();
     let trace_id = format!("rat_{}", uuid::Uuid::now_v7());
 
-    let mut trace = match RationaleTrace::new(
-        &trace_id,
-        kind,
-        &args.author,
-        &args.summary,
-        &now,
-    ) {
+    let mut trace = match RationaleTrace::new(&trace_id, kind, &args.author, &args.summary, &now) {
         Ok(t) => t,
         Err(e) => {
             let domain_error = DomainError::Usage {
                 message: format!("Invalid rationale trace: {e}"),
-                repair: Some("Ensure summary does not contain private chain-of-thought markers or secrets".to_string()),
+                repair: Some(
+                    "Ensure summary does not contain private chain-of-thought markers or secrets"
+                        .to_string(),
+                ),
             };
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
@@ -11357,6 +11363,71 @@ fn format_why_human(report: &crate::core::why::WhyReport) -> String {
                 "    source: {}, created: {}\n",
                 link.source, link.created_at
             ));
+        }
+    }
+
+    if !report.rationale_traces.is_empty() {
+        output.push_str("\nRationale traces:\n");
+        for trace in &report.rationale_traces {
+            output.push_str(&format!(
+                "  {} [{} / {} / {}]\n",
+                trace.trace_id, trace.kind, trace.posture, trace.visibility
+            ));
+            output.push_str(&format!("    summary: {}\n", trace.summary));
+            output.push_str(&format!(
+                "    confidence: {:.2}, author: {}, created: {}\n",
+                f32::from(trace.confidence_basis_points) / 10_000.0,
+                trace.author,
+                trace.created_at
+            ));
+            if !trace.evidence_uris.is_empty() {
+                output.push_str(&format!(
+                    "    evidence: {}\n",
+                    trace.evidence_uris.join(", ")
+                ));
+            }
+            if !trace.linked_memory_ids.is_empty() {
+                output.push_str(&format!(
+                    "    memories: {}\n",
+                    trace.linked_memory_ids.join(", ")
+                ));
+            }
+            if !trace.linked_context_pack_ids.is_empty() {
+                output.push_str(&format!(
+                    "    context packs: {}\n",
+                    trace.linked_context_pack_ids.join(", ")
+                ));
+            }
+            if !trace.linked_recorder_run_ids.is_empty() {
+                output.push_str(&format!(
+                    "    recorder runs: {}\n",
+                    trace.linked_recorder_run_ids.join(", ")
+                ));
+            }
+            if !trace.linked_recorder_event_ids.is_empty() {
+                output.push_str(&format!(
+                    "    recorder events: {}\n",
+                    trace.linked_recorder_event_ids.join(", ")
+                ));
+            }
+            if !trace.linked_causal_trace_ids.is_empty() {
+                output.push_str(&format!(
+                    "    causal traces: {}\n",
+                    trace.linked_causal_trace_ids.join(", ")
+                ));
+            }
+            if !trace.supersedes_trace_ids.is_empty() {
+                output.push_str(&format!(
+                    "    supersedes: {}\n",
+                    trace.supersedes_trace_ids.join(", ")
+                ));
+            }
+            if !trace.contradicted_by_trace_ids.is_empty() {
+                output.push_str(&format!(
+                    "    contradicted by: {}\n",
+                    trace.contradicted_by_trace_ids.join(", ")
+                ));
+            }
         }
     }
 
@@ -15604,6 +15675,7 @@ mod tests {
         OutcomeQuarantineCommand, OutputFormat, RuleCommand, ShadowMode, SituationCommand,
         TaskFrameCommand, TaskFrameSubgoalCommand, run,
     };
+    use crate::core::why::{RationaleTraceSummary, WhyReport};
     use crate::models::error_codes::ALL_ERROR_CODES;
     use crate::models::{ALL_DEGRADATION_CODES, MemoryId, ProcessExitCode};
     use crate::output;
@@ -15715,6 +15787,64 @@ mod tests {
             &after,
             &(true, Some(Command::Status)),
             "--json after status parse",
+        )
+    }
+
+    fn why_rationale_trace_fixture() -> WhyReport {
+        WhyReport::not_found("mem_release_rule".to_string()).with_rationale_traces(vec![
+            RationaleTraceSummary {
+                schema: crate::models::RATIONALE_TRACE_SCHEMA_V1,
+                trace_id: "rat_release_decision".to_string(),
+                kind: "decision".to_string(),
+                posture: "supported".to_string(),
+                visibility: "public".to_string(),
+                author: "agent:test".to_string(),
+                summary: "Visible rationale explains why release evidence supports the memory."
+                    .to_string(),
+                confidence_basis_points: 8750,
+                evidence_uris: vec!["cass://session#L10-L14".to_string()],
+                linked_memory_ids: vec!["mem_release_rule".to_string()],
+                linked_context_pack_ids: vec!["pack_release".to_string()],
+                linked_recorder_run_ids: vec!["run_release".to_string()],
+                linked_recorder_event_ids: vec!["event_release".to_string()],
+                linked_causal_trace_ids: vec!["causal_release".to_string()],
+                supersedes_trace_ids: vec!["rat_old".to_string()],
+                contradicted_by_trace_ids: vec!["rat_conflict".to_string()],
+                created_at: "2026-05-04T09:55:00Z".to_string(),
+            },
+        ])
+    }
+
+    #[test]
+    fn why_human_includes_rationale_traces() -> TestResult {
+        let output = super::format_why_human(&why_rationale_trace_fixture());
+
+        ensure_contains(&output, "Rationale traces:", "human rationale heading")?;
+        ensure_contains(&output, "rat_release_decision", "human trace id")?;
+        ensure_contains(
+            &output,
+            "Visible rationale explains why release evidence supports the memory.",
+            "human trace summary",
+        )?;
+        ensure_contains(&output, "confidence: 0.88", "human trace confidence")?;
+        ensure_contains(&output, "memories: mem_release_rule", "human memory link")?;
+        ensure_contains(&output, "context packs: pack_release", "human pack link")?;
+        ensure_contains(&output, "recorder runs: run_release", "human run link")?;
+        ensure_contains(
+            &output,
+            "recorder events: event_release",
+            "human event link",
+        )?;
+        ensure_contains(
+            &output,
+            "causal traces: causal_release",
+            "human causal link",
+        )?;
+        ensure_contains(&output, "supersedes: rat_old", "human supersedes link")?;
+        ensure_contains(
+            &output,
+            "contradicted by: rat_conflict",
+            "human contradicted-by link",
         )
     }
 
@@ -17568,7 +17698,11 @@ mod tests {
         ensure_contains(&stdout, "command: status", "status TOON command")?;
         // After fix: gather() inspects current workspace, degradation count varies
         ensure_contains(&stdout, "degraded[", "status TOON degradation section")?;
-        ensure_contains(&stdout, "{code,severity,message}:", "status TOON degradation columns")?;
+        ensure_contains(
+            &stdout,
+            "{code,severity,message}:",
+            "status TOON degradation columns",
+        )?;
         ensure_ends_with(&stdout, '\n', "status TOON trailing newline")?;
         ensure(stderr.is_empty(), "status format TOON stderr must be empty")
     }
