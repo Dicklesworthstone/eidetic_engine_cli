@@ -1,0 +1,186 @@
+{
+  "schema": "ee.skill.rehearsal_promotion_review.fixtures.v1",
+  "skillPath": "skills/rehearsal-promotion-review/SKILL.md",
+  "fixtures": [
+    {
+      "id": "rpr_successful_dry_run",
+      "description": "Rehearsal plan with all preconditions passing and no destructive mutations.",
+      "taskClass": "successful-dry-run",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/rehearsal-success --json",
+        "ee rehearse plan --workspace /tmp/ee-fixtures/rehearsal-success --json",
+        "ee rehearse inspect --plan-id reh.plan.001 --workspace /tmp/ee-fixtures/rehearsal-success --json"
+      ],
+      "evidenceIds": ["ev.rehearsal.success.001", "ev.precondition.all_pass"],
+      "rehearsalArtifactIds": ["reh.plan.001", "reh.artifact.config.json"],
+      "rehearsalArtifactPaths": ["/tmp/ee-fixtures/rehearsal-success/.ee/rehearsals/reh.plan.001"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "mutationPosture": "dry-run",
+      "expectedPreconditionStatus": "all_pass",
+      "expectedMutationRiskLevel": "low",
+      "expectedGoNoGoClass": "go",
+      "expectedEscalationRequired": false,
+      "firstFailureDiagnosis": null
+    },
+    {
+      "id": "rpr_partial_failure",
+      "description": "Rehearsal run with some preconditions failing and partial artifacts.",
+      "taskClass": "partial-failure",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/rehearsal-partial --json",
+        "ee rehearse run --workspace /tmp/ee-fixtures/rehearsal-partial --json",
+        "ee rehearse inspect --plan-id reh.plan.002 --workspace /tmp/ee-fixtures/rehearsal-partial --json"
+      ],
+      "evidenceIds": ["ev.rehearsal.partial.001", "ev.precondition.partial_fail"],
+      "rehearsalArtifactIds": ["reh.plan.002", "reh.artifact.incomplete"],
+      "rehearsalArtifactPaths": ["/tmp/ee-fixtures/rehearsal-partial/.ee/rehearsals/reh.plan.002"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "mutationPosture": "dry-run",
+      "expectedPreconditionStatus": "partial_fail",
+      "expectedMutationRiskLevel": "medium",
+      "expectedGoNoGoClass": "needs-escalation",
+      "expectedEscalationRequired": true,
+      "firstFailureDiagnosis": "precondition check failed: missing dependency"
+    },
+    {
+      "id": "rpr_unavailable_rehearsal",
+      "description": "Rehearsal command is unavailable or not yet wired.",
+      "taskClass": "unavailable-rehearsal",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/rehearsal-unavailable --json",
+        "ee rehearse plan --workspace /tmp/ee-fixtures/rehearsal-unavailable --json"
+      ],
+      "evidenceIds": [],
+      "rehearsalArtifactIds": [],
+      "rehearsalArtifactPaths": [],
+      "redactionStatus": "unknown",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": ["rehearsal_unavailable"],
+      "mutationPosture": "read-only",
+      "expectedPreconditionStatus": "not_checked",
+      "expectedMutationRiskLevel": "unknown",
+      "expectedGoNoGoClass": "unavailable",
+      "expectedEscalationRequired": false,
+      "firstFailureDiagnosis": "rehearsal commands not yet wired to dry-run isolation"
+    },
+    {
+      "id": "rpr_unsupported_command",
+      "description": "Skill invoked with unsupported command type or schema version.",
+      "taskClass": "unsupported-command",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/rehearsal-unsupported --json",
+        "ee rehearse unknown-subcommand --workspace /tmp/ee-fixtures/rehearsal-unsupported --json"
+      ],
+      "evidenceIds": [],
+      "rehearsalArtifactIds": [],
+      "rehearsalArtifactPaths": [],
+      "redactionStatus": "unknown",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": ["unsupported_command"],
+      "mutationPosture": "read-only",
+      "expectedPreconditionStatus": "not_checked",
+      "expectedMutationRiskLevel": "unknown",
+      "expectedGoNoGoClass": "unavailable",
+      "expectedEscalationRequired": false,
+      "firstFailureDiagnosis": "unsupported rehearsal command or schema version"
+    },
+    {
+      "id": "rpr_redacted_artifact",
+      "description": "Rehearsal artifacts contain redacted evidence that must be preserved.",
+      "taskClass": "redacted-artifact",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/rehearsal-redacted --json",
+        "ee rehearse plan --workspace /tmp/ee-fixtures/rehearsal-redacted --json",
+        "ee rehearse inspect --plan-id reh.plan.003 --workspace /tmp/ee-fixtures/rehearsal-redacted --json"
+      ],
+      "evidenceIds": ["ev.rehearsal.redacted.001", "ev.precondition.all_pass"],
+      "rehearsalArtifactIds": ["reh.plan.003", "reh.artifact.redacted_config"],
+      "rehearsalArtifactPaths": ["/tmp/ee-fixtures/rehearsal-redacted/.ee/rehearsals/reh.plan.003"],
+      "redactionStatus": "redacted",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "mutationPosture": "dry-run",
+      "expectedPreconditionStatus": "all_pass",
+      "expectedMutationRiskLevel": "medium",
+      "expectedGoNoGoClass": "go",
+      "expectedEscalationRequired": false,
+      "firstFailureDiagnosis": null
+    },
+    {
+      "id": "rpr_malformed_artifact",
+      "description": "Rehearsal artifact JSON is malformed or unparseable.",
+      "taskClass": "malformed-artifact",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/rehearsal-malformed --json",
+        "ee rehearse inspect --plan-id reh.plan.invalid --workspace /tmp/ee-fixtures/rehearsal-malformed --json"
+      ],
+      "evidenceIds": [],
+      "rehearsalArtifactIds": ["reh.plan.invalid"],
+      "rehearsalArtifactPaths": ["/tmp/ee-fixtures/rehearsal-malformed/.ee/rehearsals/reh.plan.invalid"],
+      "redactionStatus": "unknown",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": ["rehearsal_parse_error"],
+      "mutationPosture": "read-only",
+      "expectedPreconditionStatus": "not_checked",
+      "expectedMutationRiskLevel": "unknown",
+      "expectedGoNoGoClass": "unavailable",
+      "expectedEscalationRequired": false,
+      "firstFailureDiagnosis": "malformed rehearsal artifact JSON"
+    },
+    {
+      "id": "rpr_degraded_cli",
+      "description": "CLI returns degraded output requiring repair before promotion review.",
+      "taskClass": "degraded-cli",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/rehearsal-degraded --json",
+        "ee rehearse plan --workspace /tmp/ee-fixtures/rehearsal-degraded --json"
+      ],
+      "evidenceIds": ["ev.rehearsal.degraded.001"],
+      "rehearsalArtifactIds": ["reh.plan.004"],
+      "rehearsalArtifactPaths": ["/tmp/ee-fixtures/rehearsal-degraded/.ee/rehearsals/reh.plan.004"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": ["index_stale", "graph_projection_unavailable"],
+      "mutationPosture": "dry-run",
+      "expectedPreconditionStatus": "partial_fail",
+      "expectedMutationRiskLevel": "unknown",
+      "expectedGoNoGoClass": "needs-escalation",
+      "expectedEscalationRequired": true,
+      "firstFailureDiagnosis": "degraded CLI output; repair commands required before promotion review"
+    },
+    {
+      "id": "rpr_destructive_promotion",
+      "description": "Promotion would involve destructive operations requiring explicit user approval.",
+      "taskClass": "destructive-promotion",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/rehearsal-destructive --json",
+        "ee rehearse plan --workspace /tmp/ee-fixtures/rehearsal-destructive --json",
+        "ee rehearse promote-plan --plan-id reh.plan.005 --workspace /tmp/ee-fixtures/rehearsal-destructive --dry-run --json"
+      ],
+      "evidenceIds": ["ev.rehearsal.destructive.001", "ev.precondition.all_pass"],
+      "rehearsalArtifactIds": ["reh.plan.005", "reh.artifact.delete_records"],
+      "rehearsalArtifactPaths": ["/tmp/ee-fixtures/rehearsal-destructive/.ee/rehearsals/reh.plan.005"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "mutationPosture": "dry-run",
+      "expectedPreconditionStatus": "all_pass",
+      "expectedMutationRiskLevel": "high",
+      "expectedGoNoGoClass": "needs-escalation",
+      "expectedEscalationRequired": true,
+      "firstFailureDiagnosis": "promotion involves destructive operations; user approval required"
+    }
+  ]
+}
