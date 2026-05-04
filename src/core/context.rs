@@ -268,7 +268,6 @@ pub struct ContextPackOptions {
     pub profile: Option<ContextPackProfile>,
     pub max_tokens: Option<u32>,
     pub candidate_pool: Option<u32>,
-    pub filters: crate::models::QueryFilters,
 }
 
 #[derive(Debug)]
@@ -345,9 +344,9 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
     // Apply query filters to search results
     if !options.filters.is_empty() {
         let pre_filter_count = search_report.results.len();
-        search_report.results.retain(|hit| {
-            options.filters.matches(hit.metadata.as_ref())
-        });
+        search_report
+            .results
+            .retain(|hit| options.filters.matches(hit.metadata.as_ref()));
         let filtered_count = pre_filter_count - search_report.results.len();
         if filtered_count > 0 {
             push_degradation(
