@@ -590,6 +590,15 @@ mod tests {
                 "migration_required",
                 ProcessExitCode::MigrationRequired,
             ),
+            // Bug: eidetic_engine_cli-wfgr - MigrationDrift must expose its own code
+            (
+                DomainError::MigrationDrift {
+                    message: String::new(),
+                    repair: None,
+                },
+                "migration_drift",
+                ProcessExitCode::MigrationRequired,
+            ),
         ];
         for (error, expected_code, expected_exit) in cases {
             ensure_equal(&error.code(), &expected_code, "code")?;

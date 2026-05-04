@@ -8,10 +8,36 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::db::{DbConnection, StoredModelRegistryEntry};
+use crate::db::{DbConnection, DbError, StoredModelRegistryEntry};
 use crate::models::DomainError;
 use crate::search::HashEmbedder;
 use frankensearch::Embedder;
+
+/// Convert a DbError to DomainError, preserving MigrationDrift as a distinct error code.
+///
+/// Bug: eidetic_engine_cli-wfgr
+fn db_error_to_domain(error: DbError, context: &str, repair: Option<String>) -> DomainError {
+    match error {
+        DbError::MigrationDrift {
+            version,
+            expected_name,
+            actual_name,
+            expected_checksum,
+            actual_checksum,
+        } => DomainError::MigrationDrift {
+            message: format!(
+                "{context}: migration {version} drifted; expected {} ({}), found {actual_name} ({actual_checksum})",
+                expected_name.as_deref().unwrap_or("<missing>"),
+                expected_checksum.as_deref().unwrap_or("<missing>"),
+            ),
+            repair: Some("Reinstall ee or restore database from backup".to_string()),
+        },
+        other => DomainError::Storage {
+            message: format!("{context}: {other}"),
+            repair,
+        },
+    }
+}
 
 /// Schema identifier for `ee model status` JSON output.
 pub const MODEL_STATUS_SCHEMA_V1: &str = "ee.model.status.v1";
@@ -340,10 +366,7 @@ fn resolve_workspace_id(
     let path_str = workspace_path.to_string_lossy().into_owned();
     let workspace = connection
         .get_workspace_by_path(&path_str)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to resolve workspace: {error}"),
-            repair: Some("ee init --workspace .".to_string()),
-        })?;
+        .map_err(|error| db_error_to_domain(error, "Failed to resolve workspace", Some("ee init --workspace .".to_string())))?;
     workspace
         .map(|workspace| workspace.id)
         .ok_or_else(|| DomainError::Configuration {
@@ -358,19 +381,13 @@ pub fn build_model_status_report(
 ) -> Result<ModelStatusReport, DomainError> {
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
     let database_path = resolved_database_path(&workspace_path, options.database_path)?;
-    let connection =
-        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to open database: {error}"),
-            repair: Some("ee init --workspace .".to_string()),
-        })?;
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| db_error_to_domain(error, "Failed to open database", Some("ee init --workspace .".to_string())))?;
     let workspace_id = resolve_workspace_id(&connection, &workspace_path)?;
 
     let entries = connection
         .list_model_registry_entries(&workspace_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to list model registry entries: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
+        .map_err(|error| db_error_to_domain(error, "Failed to list model registry entries", Some("ee doctor".to_string())))?;
 
     let registered_count = entries.len();
     let available_count = entries
@@ -426,19 +443,13 @@ pub fn build_model_list_report(
 ) -> Result<ModelListReport, DomainError> {
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
     let database_path = resolved_database_path(&workspace_path, options.database_path)?;
-    let connection =
-        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to open database: {error}"),
-            repair: Some("ee init --workspace .".to_string()),
-        })?;
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| db_error_to_domain(error, "Failed to open database", Some("ee init --workspace .".to_string())))?;
     let workspace_id = resolve_workspace_id(&connection, &workspace_path)?;
 
     let entries = connection
         .list_model_registry_entries(&workspace_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to list model registry entries: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
+        .map_err(|error| db_error_to_domain(error, "Failed to list model registry entries", Some("ee doctor".to_string())))?;
 
     let mut degradations = Vec::new();
     if entries.is_empty() {
