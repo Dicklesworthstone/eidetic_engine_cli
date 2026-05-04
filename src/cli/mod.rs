@@ -10382,6 +10382,7 @@ where
         database_path: args.database.clone(),
         index_dir: args.index_dir.clone(),
         query: request.query,
+        filters: request.filters,
         profile,
         max_tokens: args.max_tokens.or(request.max_tokens),
         candidate_pool: args.candidate_pool.or(request.candidate_pool),
@@ -10502,6 +10503,7 @@ fn parse_query_document(content: &str) -> Result<QueryFileRequest, QueryFileErro
     let (max_tokens, candidate_pool) = budget_from_document(object)?;
     let (profile, renderer, mut output_degraded) = output_from_document(object)?;
     degraded.append(&mut output_degraded);
+    let filters = extract_query_filters(object);
 
     Ok(QueryFileRequest {
         workspace_path,
@@ -10511,6 +10513,7 @@ fn parse_query_document(content: &str) -> Result<QueryFileRequest, QueryFileErro
         candidate_pool,
         renderer,
         degraded,
+        filters,
     })
 }
 

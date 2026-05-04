@@ -264,6 +264,7 @@ pub struct ContextPackOptions {
     pub database_path: Option<PathBuf>,
     pub index_dir: Option<PathBuf>,
     pub query: String,
+    pub filters: crate::models::QueryFilters,
     pub profile: Option<ContextPackProfile>,
     pub max_tokens: Option<u32>,
     pub candidate_pool: Option<u32>,

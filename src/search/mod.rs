@@ -2192,7 +2192,7 @@ mod tests {
             first
                 .embedding
                 .iter()
-                .any(|value| value.is_finite() && *value != 0.0)
+                .any(|value| value.is_finite() && value.abs() > f32::EPSILON)
         );
     }
 
