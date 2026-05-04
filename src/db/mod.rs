@@ -23,6 +23,8 @@ pub const PROVENANCE_STATUS_VERIFIED: &str = "verified";
 pub const PROVENANCE_STATUS_MISSING: &str = "missing";
 pub const PROVENANCE_STATUS_MISMATCH: &str = "mismatch";
 pub const PROVENANCE_STATUS_SKIPPED: &str = "skipped";
+pub const MIGRATION_DRIFT_ERROR_ID: &str = "EE-E040";
+pub const MIGRATION_DRIFT_ERROR_CODE: &str = "migration_drift";
 
 /// Standard audit action types for memory operations (EE-070).
 pub mod audit_actions {
@@ -144,6 +146,7 @@ impl DbConnection {
                     .map_err(|source| DbError::sqlmodel(DbOperation::OpenSchemaOnly, source))?
             }
         };
+        enable_foreign_key_enforcement(&inner)?;
 
         Ok(Self {
             inner,
@@ -534,6 +537,10 @@ impl DbConnection {
         rows.iter().map(MigrationRecord::from_row).collect()
     }
 
+    pub fn validate_applied_migrations(&self) -> Result<()> {
+        validate_applied_migration_records(&self.applied_migrations()?)
+    }
+
     pub fn has_migration(&self, version: u32) -> Result<bool> {
         validate_migration_version(version)?;
 
@@ -567,6 +574,12 @@ impl DbConnection {
             .query_sync(sql, params)
             .map_err(|source| DbError::sqlmodel(operation, source))
     }
+}
+
+fn enable_foreign_key_enforcement(inner: &FrankenConnection) -> Result<()> {
+    inner
+        .execute_raw("PRAGMA foreign_keys = ON")
+        .map_err(|source| DbError::sqlmodel(DbOperation::EnableForeignKeys, source))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -696,6 +709,13 @@ pub enum DbError {
         field: MigrationField,
         message: String,
     },
+    MigrationDrift {
+        version: u32,
+        expected_name: Option<String>,
+        actual_name: String,
+        expected_checksum: Option<String>,
+        actual_checksum: String,
+    },
     MalformedRow {
         operation: DbOperation,
         message: String,
@@ -716,7 +736,31 @@ impl DbError {
                 Some(*operation)
             }
             Self::MalformedRow { operation, .. } => Some(*operation),
-            Self::InvalidMode { .. } | Self::InvalidMigration { .. } => None,
+            Self::InvalidMode { .. }
+            | Self::InvalidMigration { .. }
+            | Self::MigrationDrift { .. } => None,
+        }
+    }
+
+    pub const fn error_id(&self) -> Option<&'static str> {
+        match self {
+            Self::MigrationDrift { .. } => Some(MIGRATION_DRIFT_ERROR_ID),
+            Self::SqlModel { .. }
+            | Self::InvalidPath { .. }
+            | Self::InvalidMode { .. }
+            | Self::InvalidMigration { .. }
+            | Self::MalformedRow { .. } => None,
+        }
+    }
+
+    pub const fn error_code(&self) -> Option<&'static str> {
+        match self {
+            Self::MigrationDrift { .. } => Some(MIGRATION_DRIFT_ERROR_CODE),
+            Self::SqlModel { .. }
+            | Self::InvalidPath { .. }
+            | Self::InvalidMode { .. }
+            | Self::InvalidMigration { .. }
+            | Self::MalformedRow { .. } => None,
         }
     }
 }
@@ -750,6 +794,20 @@ impl fmt::Display for DbError {
             Self::InvalidMigration { field, message } => {
                 write!(f, "invalid migration {}: {}", field, message)
             }
+            Self::MigrationDrift {
+                version,
+                expected_name,
+                actual_name,
+                expected_checksum,
+                actual_checksum,
+            } => {
+                let expected_name = expected_name.as_deref().unwrap_or("<unknown>");
+                let expected_checksum = expected_checksum.as_deref().unwrap_or("<unknown>");
+                write!(
+                    f,
+                    "{MIGRATION_DRIFT_ERROR_ID} {MIGRATION_DRIFT_ERROR_CODE}: applied migration {version} drifted; expected {expected_name} ({expected_checksum}), found {actual_name} ({actual_checksum})"
+                )
+            }
             Self::MalformedRow { operation, message } => {
                 write!(
                     f,
@@ -768,6 +826,7 @@ impl Error for DbError {
             Self::InvalidPath { .. }
             | Self::InvalidMode { .. }
             | Self::InvalidMigration { .. }
+            | Self::MigrationDrift { .. }
             | Self::MalformedRow { .. } => None,
         }
     }
@@ -900,6 +959,7 @@ pub enum DbOperation {
     OpenMemory,
     OpenReadWrite,
     OpenSchemaOnly,
+    EnableForeignKeys,
     Query,
     Execute,
     Close,
@@ -921,6 +981,7 @@ impl fmt::Display for DbOperation {
             Self::OpenMemory => f.write_str("memory open"),
             Self::OpenReadWrite => f.write_str("read-write open"),
             Self::OpenSchemaOnly => f.write_str("schema-only open"),
+            Self::EnableForeignKeys => f.write_str("foreign key enforcement enable"),
             Self::Query => f.write_str("query"),
             Self::Execute => f.write_str("execute"),
             Self::Close => f.write_str("close"),
@@ -2208,6 +2269,35 @@ CREATE INDEX idx_rationale_trace_links_trace
     "blake3:v025_rationale_traces_2026_05_04",
 );
 
+/// V026: Preserve context-pack item provenance and trust signals.
+pub const V026_PACK_ITEM_CONTEXT_SIGNALS: Migration = Migration::new(
+    26,
+    "pack_item_context_signals",
+    r#"
+-- Persist item-level context signals needed to audit and replay context packs.
+ALTER TABLE pack_items ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{"schema":"ee.pack_item.provenance.v1","entries":[]}'
+    CHECK (json_valid(provenance_json));
+
+ALTER TABLE pack_items ADD COLUMN trust_class TEXT NOT NULL DEFAULT 'agent_assertion'
+    CHECK (trust_class IN ('human_explicit', 'agent_validated', 'agent_assertion', 'cass_evidence', 'legacy_import'));
+
+ALTER TABLE pack_items ADD COLUMN trust_subclass TEXT
+    CHECK (trust_subclass IS NULL OR length(trim(trust_subclass)) > 0);
+
+UPDATE pack_items
+SET trust_class = COALESCE(
+        (SELECT memories.trust_class FROM memories WHERE memories.id = pack_items.memory_id),
+        trust_class
+    ),
+    trust_subclass = (
+        SELECT memories.trust_subclass FROM memories WHERE memories.id = pack_items.memory_id
+    );
+
+CREATE INDEX idx_pack_items_trust_class ON pack_items(trust_class);
+"#,
+    "blake3:v026_pack_item_context_signals_2026_05_04",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -2235,7 +2325,40 @@ pub const MIGRATIONS: &[Migration] = &[
     V023_FEEDBACK_QUARANTINE_PAYLOAD,
     V024_TRIPWIRE_STORE,
     V025_RATIONALE_TRACES,
+    V026_PACK_ITEM_CONTEXT_SIGNALS,
 ];
+
+fn compiled_migration(version: u32) -> Option<&'static Migration> {
+    MIGRATIONS
+        .iter()
+        .find(|migration| migration.version == version)
+}
+
+fn validate_applied_migration_records(records: &[MigrationRecord]) -> Result<()> {
+    for record in records {
+        let Some(expected) = compiled_migration(record.version()) else {
+            return Err(DbError::MigrationDrift {
+                version: record.version(),
+                expected_name: None,
+                actual_name: record.name().to_string(),
+                expected_checksum: None,
+                actual_checksum: record.checksum().to_string(),
+            });
+        };
+
+        if record.name() != expected.name() || record.checksum() != expected.checksum() {
+            return Err(DbError::MigrationDrift {
+                version: record.version(),
+                expected_name: Some(expected.name().to_string()),
+                actual_name: record.name().to_string(),
+                expected_checksum: Some(expected.checksum().to_string()),
+                actual_checksum: record.checksum().to_string(),
+            });
+        }
+    }
+
+    Ok(())
+}
 
 /// Result of applying migrations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2262,6 +2385,7 @@ impl DbConnection {
     /// Apply all pending migrations in version order.
     pub fn migrate(&self) -> Result<MigrationResult> {
         self.ensure_migration_table()?;
+        self.validate_applied_migrations()?;
 
         let mut applied = Vec::new();
         let mut skipped = Vec::new();
@@ -2314,6 +2438,7 @@ impl DbConnection {
         if !self.migration_table_exists()? {
             return Ok(true);
         }
+        self.validate_applied_migrations()?;
 
         for migration in MIGRATIONS {
             if !self.has_migration(migration.version)? {
@@ -2329,6 +2454,7 @@ impl DbConnection {
         if !self.migration_table_exists()? {
             return Ok(None);
         }
+        self.validate_applied_migrations()?;
 
         let migrations = self.applied_migrations()?;
         Ok(migrations.last().map(|m| m.version()))
@@ -7187,6 +7313,9 @@ pub struct CreatePackItemInput {
     pub utility: f32,
     pub why: String,
     pub diversity_key: Option<String>,
+    pub provenance_json: String,
+    pub trust_class: String,
+    pub trust_subclass: Option<String>,
 }
 
 /// A stored pack_items row.
@@ -7201,6 +7330,9 @@ pub struct StoredPackItem {
     pub utility: f32,
     pub why: String,
     pub diversity_key: Option<String>,
+    pub provenance_json: String,
+    pub trust_class: String,
+    pub trust_subclass: Option<String>,
 }
 
 /// Input for creating a pack omission.
@@ -7254,7 +7386,7 @@ impl DbConnection {
         for item in items {
             self.execute_for(
                 DbOperation::Execute,
-                "INSERT INTO pack_items (pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO pack_items (pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key, provenance_json, trust_class, trust_subclass) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 &[
                     Value::Text(item.pack_id.clone()),
                     Value::Text(item.memory_id.clone()),
@@ -7265,6 +7397,11 @@ impl DbConnection {
                     Value::Float(item.utility),
                     Value::Text(item.why.clone()),
                     item.diversity_key.as_ref().map_or(Value::Null, |key| Value::Text(key.clone())),
+                    Value::Text(item.provenance_json.clone()),
+                    Value::Text(item.trust_class.clone()),
+                    item.trust_subclass
+                        .as_ref()
+                        .map_or(Value::Null, |subclass| Value::Text(subclass.clone())),
                 ],
             )?;
         }
@@ -7300,7 +7437,7 @@ impl DbConnection {
     pub fn get_pack_items(&self, pack_id: &str) -> Result<Vec<StoredPackItem>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key FROM pack_items WHERE pack_id = ?1 ORDER BY rank ASC",
+            "SELECT pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key, provenance_json, trust_class, trust_subclass FROM pack_items WHERE pack_id = ?1 ORDER BY rank ASC",
             &[Value::Text(pack_id.to_string())],
         )?;
 
@@ -7315,7 +7452,7 @@ impl DbConnection {
     ) -> Result<Vec<(StoredPackRecord, StoredPackItem)>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT pr.id, pr.workspace_id, pr.query, pr.profile, pr.max_tokens, pr.used_tokens, pr.item_count, pr.omitted_count, pr.pack_hash, pr.degraded_json, pr.created_at, pr.created_by, pi.pack_id, pi.memory_id, pi.rank, pi.section, pi.estimated_tokens, pi.relevance, pi.utility, pi.why, pi.diversity_key FROM pack_items pi JOIN pack_records pr ON pi.pack_id = pr.id WHERE pi.memory_id = ?1 ORDER BY pr.created_at DESC LIMIT ?2",
+            "SELECT pr.id, pr.workspace_id, pr.query, pr.profile, pr.max_tokens, pr.used_tokens, pr.item_count, pr.omitted_count, pr.pack_hash, pr.degraded_json, pr.created_at, pr.created_by, pi.pack_id, pi.memory_id, pi.rank, pi.section, pi.estimated_tokens, pi.relevance, pi.utility, pi.why, pi.diversity_key, pi.provenance_json, pi.trust_class, pi.trust_subclass FROM pack_items pi JOIN pack_records pr ON pi.pack_id = pr.id WHERE pi.memory_id = ?1 ORDER BY pr.created_at DESC LIMIT ?2",
             &[Value::Text(memory_id.to_string()), Value::BigInt(i64::from(limit))],
         )?;
 
@@ -7372,6 +7509,11 @@ fn stored_pack_item_from_joined_row(row: &Row, offset: usize) -> Result<StoredPa
         utility: required_f64(row, offset + 6, DbOperation::Query, "utility")? as f32,
         why: required_text(row, offset + 7, DbOperation::Query, "why")?.to_string(),
         diversity_key: optional_text(row, offset + 8)?.map(str::to_string),
+        provenance_json: required_text(row, offset + 9, DbOperation::Query, "provenance_json")?
+            .to_string(),
+        trust_class: required_text(row, offset + 10, DbOperation::Query, "trust_class")?
+            .to_string(),
+        trust_subclass: optional_text(row, offset + 11)?.map(str::to_string),
     })
 }
 
@@ -7931,20 +8073,55 @@ impl DbConnection {
         ttl_secs: Option<u64>,
         reason: Option<&str>,
     ) -> Result<AcquireLockResult> {
-        let now = Utc::now().to_rfc3339();
+        let now_instant = Utc::now();
+        let now = now_instant.to_rfc3339();
         let ttl = ttl_secs.unwrap_or(concurrent_writer_contract::DEFAULT_LOCK_TTL_SECS);
         let expires_at = if ttl > 0 {
-            Some((Utc::now() + chrono::Duration::seconds(ttl as i64)).to_rfc3339())
+            Some((now_instant + chrono::Duration::seconds(ttl as i64)).to_rfc3339())
         } else {
             None
         };
 
         let resource_key = lock_id.canonical_key();
 
+        self.begin_transaction(IsolationLevel::RepeatableRead)?;
+        let result = self.acquire_advisory_lock_in_transaction(
+            lock_id,
+            holder_id,
+            reason,
+            &now,
+            expires_at.as_deref(),
+            &resource_key,
+        );
+
+        match result {
+            Ok(result) => match self.commit() {
+                Ok(()) => Ok(result),
+                Err(error) => {
+                    let _ = self.rollback();
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.rollback();
+                Err(error)
+            }
+        }
+    }
+
+    fn acquire_advisory_lock_in_transaction(
+        &self,
+        lock_id: &AdvisoryLockId,
+        holder_id: &str,
+        reason: Option<&str>,
+        now: &str,
+        expires_at: Option<&str>,
+        resource_key: &str,
+    ) -> Result<AcquireLockResult> {
         let existing = self.query_for(
             DbOperation::Query,
             "SELECT holder_id, acquired_at, expires_at FROM ee_advisory_locks WHERE resource_key = ?1",
-            &[Value::Text(resource_key.clone())],
+            &[Value::Text(resource_key.to_string())],
         )?;
 
         if let Some(row) = existing.first() {
@@ -7952,7 +8129,7 @@ impl DbConnection {
             let existing_acquired = required_text(row, 1, DbOperation::Query, "acquired_at")?;
             let existing_expiry = optional_text(row, 2)?;
 
-            let is_expired = existing_expiry.is_some_and(|exp| exp < now.as_str());
+            let is_expired = existing_expiry.is_some_and(|exp| exp < now);
 
             if !is_expired {
                 return Ok(AcquireLockResult::AlreadyHeld {
@@ -7964,49 +8141,57 @@ impl DbConnection {
             self.execute_for(
                 DbOperation::Execute,
                 "DELETE FROM ee_advisory_locks WHERE resource_key = ?1",
-                &[Value::Text(resource_key.clone())],
+                &[Value::Text(resource_key.to_string())],
             )?;
 
             let previous_holder = existing_holder.to_string();
 
-            self.execute_for(
-                DbOperation::Execute,
-                "INSERT INTO ee_advisory_locks (resource_key, resource_type, resource_id, holder_id, acquired_at, expires_at, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                &[
-                    Value::Text(resource_key),
-                    Value::Text(lock_id.resource_type().to_string()),
-                    Value::Text(lock_id.resource_id().to_string()),
-                    Value::Text(holder_id.to_string()),
-                    Value::Text(now.clone()),
-                    expires_at.clone().map_or(Value::Null, Value::Text),
-                    reason.map_or(Value::Null, |r| Value::Text(r.to_string())),
-                ],
+            self.insert_advisory_lock_row(
+                lock_id,
+                resource_key,
+                holder_id,
+                now,
+                expires_at,
+                reason,
             )?;
 
             return Ok(AcquireLockResult::Expired { previous_holder });
         }
 
-        self.execute_for(
-            DbOperation::Execute,
-            "INSERT INTO ee_advisory_locks (resource_key, resource_type, resource_id, holder_id, acquired_at, expires_at, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            &[
-                Value::Text(resource_key),
-                Value::Text(lock_id.resource_type().to_string()),
-                Value::Text(lock_id.resource_id().to_string()),
-                Value::Text(holder_id.to_string()),
-                Value::Text(now.clone()),
-                expires_at.clone().map_or(Value::Null, Value::Text),
-                reason.map_or(Value::Null, |r| Value::Text(r.to_string())),
-            ],
-        )?;
+        self.insert_advisory_lock_row(lock_id, resource_key, holder_id, now, expires_at, reason)?;
 
         Ok(AcquireLockResult::Acquired(AdvisoryLock {
             id: lock_id.clone(),
             holder_id: holder_id.to_string(),
-            acquired_at: now,
-            expires_at,
+            acquired_at: now.to_string(),
+            expires_at: expires_at.map(str::to_string),
             reason: reason.map(str::to_string),
         }))
+    }
+
+    fn insert_advisory_lock_row(
+        &self,
+        lock_id: &AdvisoryLockId,
+        resource_key: &str,
+        holder_id: &str,
+        acquired_at: &str,
+        expires_at: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO ee_advisory_locks (resource_key, resource_type, resource_id, holder_id, acquired_at, expires_at, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            &[
+                Value::Text(resource_key.to_string()),
+                Value::Text(lock_id.resource_type().to_string()),
+                Value::Text(lock_id.resource_id().to_string()),
+                Value::Text(holder_id.to_string()),
+                Value::Text(acquired_at.to_string()),
+                expires_at.map_or(Value::Null, |value| Value::Text(value.to_string())),
+                reason.map_or(Value::Null, |value| Value::Text(value.to_string())),
+            ],
+        )?;
+        Ok(())
     }
 
     /// Release an advisory lock held by the specified holder.
@@ -8585,6 +8770,8 @@ mod tests {
     use std::error::Error as StdError;
     use std::fmt;
     use std::path::PathBuf;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     use sqlmodel_core::{Row, Value};
 
@@ -8662,6 +8849,63 @@ mod tests {
         migrations
             .first()
             .ok_or_else(|| TestFailure::new(format!("{context}: missing first migration")))
+    }
+
+    fn ensure_migration_drift<T>(result: super::Result<T>, context: &str) -> TestResult {
+        let error = match result {
+            Ok(_) => {
+                return Err(TestFailure::new(format!(
+                    "{context}: expected migration drift error"
+                )));
+            }
+            Err(error) => error,
+        };
+
+        ensure_equal(
+            &error.error_id(),
+            &Some(super::MIGRATION_DRIFT_ERROR_ID),
+            context,
+        )?;
+        ensure_equal(
+            &error.error_code(),
+            &Some(super::MIGRATION_DRIFT_ERROR_CODE),
+            context,
+        )?;
+
+        match error {
+            DbError::MigrationDrift {
+                version,
+                expected_name,
+                actual_name,
+                expected_checksum,
+                actual_checksum,
+            } => {
+                ensure_equal(&version, &1, "drift version")?;
+                ensure_equal(
+                    &expected_name,
+                    &Some(super::V001_INIT_SCHEMA.name().to_string()),
+                    "drift expected name",
+                )?;
+                ensure_equal(
+                    &actual_name,
+                    &super::V001_INIT_SCHEMA.name().to_string(),
+                    "drift actual name",
+                )?;
+                ensure_equal(
+                    &expected_checksum,
+                    &Some(super::V001_INIT_SCHEMA.checksum().to_string()),
+                    "drift expected checksum",
+                )?;
+                ensure_equal(
+                    &actual_checksum,
+                    &"blake3:drifted_checksum".to_string(),
+                    "drift actual checksum",
+                )
+            }
+            other => Err(TestFailure::new(format!(
+                "{context}: expected MigrationDrift, got {other:?}"
+            ))),
+        }
     }
 
     fn table_exists(
@@ -8953,6 +9197,54 @@ mod tests {
             &1,
             "duplicate insert must preserve one migration row",
         )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn applied_migration_validation_accepts_clean_checksums() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+
+        let first = connection.migrate()?;
+        ensure_equal(
+            &first.applied().to_vec(),
+            &migration_versions(),
+            "first migration run applies all compiled migrations",
+        )?;
+
+        connection.validate_applied_migrations()?;
+        ensure(
+            !connection.needs_migration()?,
+            "clean applied migrations should be current",
+        )?;
+
+        let second = connection.migrate()?;
+        ensure_equal(
+            &second.skipped().to_vec(),
+            &migration_versions(),
+            "clean applied migrations should be skipped",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn applied_migration_validation_rejects_checksum_drift() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_migration_table()?;
+        let drifted = MigrationRecord::new(
+            super::V001_INIT_SCHEMA.version(),
+            super::V001_INIT_SCHEMA.name(),
+            "blake3:drifted_checksum",
+            "2026-04-29T19:59:00Z",
+        )?;
+        connection.record_migration(&drifted)?;
+
+        ensure_migration_drift(connection.validate_applied_migrations(), "validate drift")?;
+        ensure_migration_drift(connection.needs_migration(), "needs_migration drift")?;
+        ensure_migration_drift(connection.migrate(), "migrate drift")?;
 
         connection.close()?;
         Ok(())
@@ -9284,6 +9576,36 @@ mod tests {
         ensure(
             bad_workspace.is_err(),
             "workspace with invalid id format must be rejected",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn opens_memory_connection_with_foreign_key_enforcement() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+
+        let rows = connection.query("PRAGMA foreign_keys", &[])?;
+        ensure_equal(
+            &first_value(&rows, 0, "foreign_keys pragma")?.as_i64(),
+            &Some(1),
+            "foreign key enforcement is enabled on open",
+        )?;
+
+        connection.execute_raw("CREATE TABLE parent (id TEXT PRIMARY KEY)")?;
+        connection.execute_raw("CREATE TABLE child (parent_id TEXT REFERENCES parent(id))")?;
+
+        let missing_parent = connection.execute_raw("INSERT INTO child (parent_id) VALUES ('p1')");
+        ensure(
+            matches!(
+                missing_parent,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "child row with a missing parent must be rejected",
         )?;
 
         connection.close()?;
@@ -14251,5 +14573,176 @@ mod tests {
 
         conn1.close()?;
         Ok(())
+    }
+
+    #[test]
+    fn advisory_lock_acquire_is_atomic_across_file_connections() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database_path = tempdir.path().join("locks.db");
+        let setup = DbConnection::open_file(&database_path)?;
+        setup.ensure_advisory_locks_table()?;
+        setup.close()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("shared_file_workspace");
+        let results = acquire_lock_from_parallel_file_connections(&database_path, &lock_id, 8)?;
+
+        let mut acquired_count = 0;
+        let mut already_held_count = 0;
+        for result in results {
+            match result {
+                super::AcquireLockResult::Acquired(_) => acquired_count += 1,
+                super::AcquireLockResult::AlreadyHeld { .. } => already_held_count += 1,
+                super::AcquireLockResult::Expired { previous_holder } => {
+                    return Err(TestFailure::new(format!(
+                        "fresh lock should not report expired holder {previous_holder}"
+                    )));
+                }
+            }
+        }
+
+        ensure_equal(
+            &acquired_count,
+            &1_usize,
+            "exactly one file-backed connection acquires the fresh lock",
+        )?;
+        ensure_equal(
+            &already_held_count,
+            &7_usize,
+            "remaining file-backed connections observe AlreadyHeld",
+        )?;
+
+        let check = DbConnection::open_file(&database_path)?;
+        let held = check
+            .is_lock_held(&lock_id)?
+            .ok_or_else(|| TestFailure::new("lock should be held after contention"))?;
+        ensure(
+            held.holder_id.starts_with("agent_parallel_"),
+            "winner holder should be one of the parallel agents",
+        )?;
+        check.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn advisory_lock_expired_replacement_is_atomic_across_file_connections() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database_path = tempdir.path().join("expired-locks.db");
+        let setup = DbConnection::open_file(&database_path)?;
+        setup.ensure_advisory_locks_table()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("expired_file_workspace");
+        let resource_key = lock_id.canonical_key();
+        setup.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO ee_advisory_locks (resource_key, resource_type, resource_id, holder_id, acquired_at, expires_at, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            &[
+                Value::Text(resource_key),
+                Value::Text(lock_id.resource_type().to_string()),
+                Value::Text(lock_id.resource_id().to_string()),
+                Value::Text("agent_expired".to_string()),
+                Value::Text("2026-01-01T00:00:00+00:00".to_string()),
+                Value::Text("2026-01-01T00:01:00+00:00".to_string()),
+                Value::Text("expired fixture".to_string()),
+            ],
+        )?;
+        setup.close()?;
+
+        let results = acquire_lock_from_parallel_file_connections(&database_path, &lock_id, 8)?;
+
+        let mut expired_count = 0;
+        let mut already_held_count = 0;
+        for result in results {
+            match result {
+                super::AcquireLockResult::Expired { previous_holder } => {
+                    expired_count += 1;
+                    ensure_equal(
+                        &previous_holder,
+                        &"agent_expired".to_string(),
+                        "expired replacement reports previous holder",
+                    )?;
+                }
+                super::AcquireLockResult::AlreadyHeld { holder_id, .. } => {
+                    already_held_count += 1;
+                    ensure(
+                        holder_id.starts_with("agent_parallel_"),
+                        "AlreadyHeld should point at the replacement holder",
+                    )?;
+                }
+                super::AcquireLockResult::Acquired(lock) => {
+                    return Err(TestFailure::new(format!(
+                        "expired fixture should be replaced, not freshly acquired by {}",
+                        lock.holder_id
+                    )));
+                }
+            }
+        }
+
+        ensure_equal(
+            &expired_count,
+            &1_usize,
+            "exactly one file-backed connection replaces the expired lock",
+        )?;
+        ensure_equal(
+            &already_held_count,
+            &7_usize,
+            "remaining file-backed connections observe the replacement lock",
+        )?;
+
+        let check = DbConnection::open_file(&database_path)?;
+        let held = check
+            .is_lock_held(&lock_id)?
+            .ok_or_else(|| TestFailure::new("replacement lock should be held"))?;
+        ensure(
+            held.holder_id.starts_with("agent_parallel_"),
+            "expired holder should be replaced by a parallel agent",
+        )?;
+        ensure(
+            held.holder_id != "agent_expired",
+            "expired holder must not remain active",
+        )?;
+        check.close()?;
+        Ok(())
+    }
+
+    fn acquire_lock_from_parallel_file_connections(
+        database_path: &std::path::Path,
+        lock_id: &super::AdvisoryLockId,
+        contender_count: usize,
+    ) -> std::result::Result<Vec<super::AcquireLockResult>, TestFailure> {
+        let barrier = Arc::new(Barrier::new(contender_count));
+        let mut handles = Vec::with_capacity(contender_count);
+
+        for index in 0..contender_count {
+            let database_path = database_path.to_path_buf();
+            let lock_id = lock_id.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(
+                move || -> std::result::Result<super::AcquireLockResult, String> {
+                    barrier.wait();
+                    let connection = DbConnection::open_file(&database_path)
+                        .map_err(|error| error.to_string())?;
+                    let holder_id = format!("agent_parallel_{index}");
+                    let result = connection
+                        .acquire_advisory_lock(&lock_id, &holder_id, Some(60), Some("race test"))
+                        .map_err(|error| error.to_string());
+                    let close_result = connection.close().map_err(|error| error.to_string());
+
+                    match (result, close_result) {
+                        (Ok(result), Ok(())) => Ok(result),
+                        (Err(error), _) | (_, Err(error)) => Err(error),
+                    }
+                },
+            ));
+        }
+
+        let mut results = Vec::with_capacity(contender_count);
+        for handle in handles {
+            let result = handle
+                .join()
+                .map_err(|_| TestFailure::new("advisory lock contender thread panicked"))?
+                .map_err(TestFailure::new)?;
+            results.push(result);
+        }
+        Ok(results)
     }
 }
