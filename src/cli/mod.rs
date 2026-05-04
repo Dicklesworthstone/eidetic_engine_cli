@@ -10387,7 +10387,6 @@ where
         profile,
         max_tokens: args.max_tokens.or(request.max_tokens),
         candidate_pool: args.candidate_pool.or(request.candidate_pool),
-        filters: request.filters,
     };
     let renderer = effective_pack_renderer(cli, request.renderer);
 

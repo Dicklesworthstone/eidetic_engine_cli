@@ -17,6 +17,9 @@ use crate::models::{
     is_safe_install_path, is_safe_release_artifact_path, is_supported_release_target,
 };
 
+const TRUSTED_TAR_PATHS: &[&str] = &["/usr/bin/tar", "/bin/tar"];
+const TRUSTED_INSTALL_TOOL_PATH: &str = "/usr/bin:/bin";
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct InstallCheckOptions {
     pub install_dir: Option<PathBuf>,
@@ -926,42 +929,160 @@ fn extract_binary_from_archive(
 }
 
 fn extract_tar_xz(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
-    use std::process::Command;
-
-    let status = Command::new("tar")
-        .args([
-            "-xJf",
-            &archive_path.to_string_lossy(),
-            "-C",
-            &dest_dir.to_string_lossy(),
-        ])
-        .status()
-        .map_err(|e| format!("failed to run tar: {e}"))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("tar extraction failed with status {status}"))
-    }
+    extract_with_trusted_tar(archive_path, dest_dir, "-xJf")
 }
 
 fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
+    extract_with_trusted_tar(archive_path, dest_dir, "-xzf")
+}
+
+fn extract_with_trusted_tar(
+    archive_path: &Path,
+    dest_dir: &Path,
+    extract_flag: &str,
+) -> Result<(), String> {
     use std::process::Command;
 
-    let status = Command::new("tar")
-        .args([
-            "-xzf",
-            &archive_path.to_string_lossy(),
-            "-C",
-            &dest_dir.to_string_lossy(),
-        ])
+    let tar_path = resolve_trusted_tar_binary()?;
+    let status = Command::new(&tar_path)
+        .arg(extract_flag)
+        .arg(archive_path)
+        .arg("-C")
+        .arg(dest_dir)
+        .env_clear()
+        .env("PATH", TRUSTED_INSTALL_TOOL_PATH)
+        .env("LANG", "C")
         .status()
-        .map_err(|e| format!("failed to run tar: {e}"))?;
+        .map_err(|e| format!("failed to run trusted tar '{}': {e}", tar_path.display()))?;
 
     if status.success() {
         Ok(())
     } else {
-        Err(format!("tar extraction failed with status {status}"))
+        Err(format!(
+            "trusted tar '{}' extraction failed with status {status}",
+            tar_path.display()
+        ))
+    }
+}
+
+fn resolve_trusted_tar_binary() -> Result<PathBuf, String> {
+    resolve_trusted_tar_binary_from_candidates(
+        TRUSTED_TAR_PATHS.iter().map(|path| Path::new(*path)),
+    )
+}
+
+fn resolve_trusted_tar_binary_from_candidates<'a>(
+    candidates: impl IntoIterator<Item = &'a Path>,
+) -> Result<PathBuf, String> {
+    let mut errors = Vec::new();
+    for candidate in candidates {
+        match validate_trusted_tar_binary(candidate) {
+            Ok(()) => return Ok(candidate.to_path_buf()),
+            Err(error) => errors.push(format!("{}: {error}", candidate.display())),
+        }
+    }
+
+    if errors.is_empty() {
+        Err("no trusted tar binary candidates configured".to_owned())
+    } else {
+        Err(format!(
+            "no trusted tar binary available; refused candidates: {}",
+            errors.join("; ")
+        ))
+    }
+}
+
+fn validate_trusted_tar_binary(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err("tar binary path must be absolute; refusing PATH lookup".to_owned());
+    }
+    if !TRUSTED_TAR_PATHS
+        .iter()
+        .any(|trusted_path| path == Path::new(trusted_path))
+    {
+        return Err(format!(
+            "tar binary '{}' is not a trusted system path",
+            path.display()
+        ));
+    }
+
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("failed to stat tar binary '{}': {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "tar binary '{}' is not a regular file",
+            path.display()
+        ));
+    }
+
+    validate_trusted_executable_metadata(path, &metadata)
+}
+
+#[cfg(unix)]
+fn validate_trusted_executable_metadata(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if metadata.uid() != 0 {
+        return Err(format!("tar binary '{}' is not root-owned", path.display()));
+    }
+
+    let mode = metadata.permissions().mode();
+    if mode & 0o111 == 0 {
+        return Err(format!("tar binary '{}' is not executable", path.display()));
+    }
+    if mode & 0o022 != 0 {
+        return Err(format!(
+            "tar binary '{}' is writable by group or other users",
+            path.display()
+        ));
+    }
+
+    if let Some(parent) = path.parent() {
+        validate_trusted_executable_parent(parent)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_trusted_executable_parent(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("failed to stat tar parent '{}': {error}", path.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "tar parent '{}' is not a directory",
+            path.display()
+        ));
+    }
+    if metadata.uid() != 0 {
+        return Err(format!("tar parent '{}' is not root-owned", path.display()));
+    }
+    if metadata.permissions().mode() & 0o022 != 0 {
+        return Err(format!(
+            "tar parent '{}' is writable by group or other users",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_trusted_executable_metadata(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), String> {
+    if metadata.permissions().readonly() {
+        Ok(())
+    } else {
+        Err(format!(
+            "tar binary '{}' integrity cannot be validated on this platform",
+            path.display()
+        ))
     }
 }
 
@@ -1150,6 +1271,18 @@ mod tests {
         ensure(
             !selected_target_triple(Some("")).is_empty(),
             "empty override falls back to inferred target",
+        )
+    }
+
+    #[test]
+    fn trusted_tar_resolver_rejects_path_based_invocation() -> TestResult {
+        let candidates = [Path::new("tar")];
+        let error = resolve_trusted_tar_binary_from_candidates(candidates)
+            .expect_err("relative tar candidate must be rejected");
+
+        ensure(
+            error.contains("refusing PATH lookup"),
+            "relative tar candidate should be rejected before process invocation",
         )
     }
 
