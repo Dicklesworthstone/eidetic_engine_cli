@@ -372,9 +372,22 @@ impl Job {
     }
 
     fn calculate_duration(&mut self) {
-        // In a real implementation, parse timestamps and calculate
-        // For now, this is a placeholder
-        self.duration_ms = Some(0);
+        let (Some(started), Some(completed)) = (&self.started_at, &self.completed_at) else {
+            return;
+        };
+
+        let Ok(start_dt) = DateTime::parse_from_rfc3339(started) else {
+            return;
+        };
+        let Ok(end_dt) = DateTime::parse_from_rfc3339(completed) else {
+            return;
+        };
+
+        let duration = end_dt.signed_duration_since(start_dt);
+        let millis = duration.num_milliseconds();
+        if millis >= 0 {
+            self.duration_ms = Some(millis as u64);
+        }
     }
 
     /// Render job as JSON.
@@ -3583,5 +3596,48 @@ mod tests {
         assert!(human.contains("Job Diagnostics"));
         assert!(human.contains("Health:"));
         assert!(human.contains("Summary:"));
+    }
+
+    #[test]
+    fn job_duration_calculated_from_timestamps() -> TestResult {
+        // Bug: eidetic_engine_cli-s048 - was returning hardcoded zero
+        let mut job = Job::new("job-dur-001", JobType::HealthCheck, "2026-04-30T12:00:00Z");
+        job.start("2026-04-30T12:00:01.000Z");
+        job.complete("2026-04-30T12:00:03.500Z", Some(10));
+
+        ensure(job.duration_ms, Some(2500), "duration should be 2500ms")?;
+
+        let json = job.data_json();
+        ensure(
+            json["durationMs"].as_u64(),
+            Some(2500),
+            "JSON durationMs should be 2500",
+        )
+    }
+
+    #[test]
+    fn job_duration_handles_failed_job() -> TestResult {
+        let mut job = Job::new("job-dur-002", JobType::IndexRebuild, "2026-04-30T10:00:00Z");
+        job.start("2026-04-30T10:00:00.100Z");
+        job.fail("2026-04-30T10:00:05.600Z", "index corruption");
+
+        ensure(
+            job.duration_ms,
+            Some(5500),
+            "failed job duration should be 5500ms",
+        )
+    }
+
+    #[test]
+    fn job_duration_none_without_start() {
+        let mut job = Job::new("job-dur-003", JobType::DecaySweep, "2026-04-30T08:00:00Z");
+        // Complete without starting (edge case)
+        job.completed_at = Some("2026-04-30T08:00:10Z".to_string());
+        job.calculate_duration();
+
+        assert!(
+            job.duration_ms.is_none(),
+            "duration should be None without started_at"
+        );
     }
 }
