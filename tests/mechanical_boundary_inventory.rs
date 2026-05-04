@@ -1,6 +1,10 @@
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
 const INVENTORY: &str = include_str!("../docs/mechanical-boundary-command-inventory.md");
 const README_SOURCE: &str = include_str!("../README.md");
+const SKILL_STANDARDS: &str = include_str!("../skills/ee-skill-standards/SKILL.md");
+
+const KNOWN_PROJECT_LOCAL_SKILL_PATHS: &[(&str, &str)] =
+    &[("skills/ee-skill-standards/SKILL.md", SKILL_STANDARDS)];
 
 const REQUIRED_MATRIX_HEADERS: &[&str] = &[
     "Surface",
@@ -893,10 +897,31 @@ fn readme_workflow_parity_matrix_covers_advertised_surfaces() -> Result<(), Stri
             required_commands.contains('`'),
             "workflow row must name backticked ee command paths: {row:?}"
         );
-        assert!(
-            skill == "none" || skill.contains("skill"),
-            "workflow row must explicitly say no skill or name a project-local skill: {row:?}"
-        );
+        if skill == "none" {
+            assert_eq!(
+                skill, "none",
+                "workflow row without a skill must use the exact `none` marker: {row:?}"
+            );
+        } else {
+            assert!(
+                skill.contains("skill"),
+                "workflow row must explicitly name a project-local skill: {row:?}"
+            );
+            let skill_paths = backticked_tokens_with_prefix(skill, "skills/");
+            assert!(
+                !skill_paths.is_empty(),
+                "workflow row with a skill handoff must cite a backticked skill path: {row:?}"
+            );
+            for path in skill_paths {
+                let source = known_project_local_skill(path).ok_or_else(|| {
+                    format!("workflow row references unknown project-local skill path `{path}`")
+                })?;
+                assert!(
+                    !source.trim().is_empty(),
+                    "known project-local skill path `{path}` must load non-empty content"
+                );
+            }
+        }
         assert!(
             degraded.contains('`') || degraded.contains("intentionally deferred"),
             "workflow row must name degraded/unavailable behavior: {row:?}"
@@ -1159,6 +1184,29 @@ fn row_cell<'a>(row: &'a [String], index: usize, context: &str) -> Result<&'a st
     row.get(index)
         .map(String::as_str)
         .ok_or_else(|| format!("matrix row missing {context} cell at index {index}: {row:?}"))
+}
+
+fn backticked_tokens_with_prefix<'a>(cell: &'a str, prefix: &str) -> Vec<&'a str> {
+    let mut tokens = Vec::new();
+    let mut rest = cell;
+
+    while let Some((_, after_open)) = rest.split_once('`') {
+        let Some((token, after_close)) = after_open.split_once('`') else {
+            break;
+        };
+        if token.starts_with(prefix) {
+            tokens.push(token);
+        }
+        rest = after_close;
+    }
+
+    tokens
+}
+
+fn known_project_local_skill(path: &str) -> Option<&'static str> {
+    KNOWN_PROJECT_LOCAL_SKILL_PATHS
+        .iter()
+        .find_map(|(known_path, source)| (*known_path == path).then_some(*source))
 }
 
 fn side_effect_class(side_effect: &str) -> Result<&str, String> {
