@@ -1,0 +1,170 @@
+{
+  "schema": "ee.skill.preflight_risk_review.fixtures.v1",
+  "skillPath": "skills/preflight-risk-review/SKILL.md",
+  "fixtures": [
+    {
+      "id": "pfr_low_risk",
+      "description": "Read-only documentation task with clean preflight and clear tripwires.",
+      "taskClass": "low-risk",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/low-risk --json",
+        "ee preflight run --workspace /tmp/ee-fixtures/low-risk --task \"update README wording\" --json",
+        "ee tripwire list --workspace /tmp/ee-fixtures/low-risk --json"
+      ],
+      "evidenceIds": ["ev.preflight.low.001", "tw.docs.clear"],
+      "tripwireIds": ["tw.docs.clear"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "expectedRiskLevel": "low",
+      "generatedQuestionCount": 0,
+      "stopConditionCount": 0,
+      "expectedDisposition": "go",
+      "firstFailureDiagnosis": null
+    },
+    {
+      "id": "pfr_destructive_command",
+      "description": "A destructive shell command needs explicit user confirmation and no-worktree/no-delete escalation.",
+      "taskClass": "destructive-command",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/destructive --json",
+        "ee preflight run --workspace /tmp/ee-fixtures/destructive --task \"delete generated files\" --json",
+        "ee tripwire check tw.destructive.delete --workspace /tmp/ee-fixtures/destructive --json"
+      ],
+      "evidenceIds": ["ev.preflight.destructive.001", "tw.destructive.delete"],
+      "tripwireIds": ["tw.destructive.delete"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "expectedRiskLevel": "blocked",
+      "generatedQuestionCount": 2,
+      "stopConditionCount": 2,
+      "expectedDisposition": "ask_user",
+      "firstFailureDiagnosis": "destructive command requires explicit confirmation"
+    },
+    {
+      "id": "pfr_migration",
+      "description": "Schema or data migration requires rollback, backup, and post-check questions.",
+      "taskClass": "migration",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/migration --json",
+        "ee preflight run --workspace /tmp/ee-fixtures/migration --task \"migrate memory rows\" --json",
+        "ee tripwire check tw.migration.rollback --workspace /tmp/ee-fixtures/migration --json"
+      ],
+      "evidenceIds": ["ev.preflight.migration.001", "tw.migration.rollback"],
+      "tripwireIds": ["tw.migration.rollback"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "expectedRiskLevel": "high",
+      "generatedQuestionCount": 3,
+      "stopConditionCount": 1,
+      "expectedDisposition": "ask_user",
+      "firstFailureDiagnosis": "migration requires rollback and backup confirmation"
+    },
+    {
+      "id": "pfr_production_deploy",
+      "description": "Production deploy requires release checks and explicit follow-up ee commands.",
+      "taskClass": "production-deploy",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/deploy --json",
+        "ee preflight run --workspace /tmp/ee-fixtures/deploy --task \"deploy release\" --json",
+        "ee tripwire check tw.deploy.release --workspace /tmp/ee-fixtures/deploy --json"
+      ],
+      "evidenceIds": ["ev.preflight.deploy.001", "tw.deploy.release"],
+      "tripwireIds": ["tw.deploy.release"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "expectedRiskLevel": "high",
+      "generatedQuestionCount": 4,
+      "stopConditionCount": 1,
+      "expectedDisposition": "ask_user",
+      "firstFailureDiagnosis": "production deploy requires release verification confirmation"
+    },
+    {
+      "id": "pfr_no_evidence",
+      "description": "No preflight or tripwire evidence is available.",
+      "taskClass": "no-evidence",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/no-evidence --json",
+        "ee preflight run --workspace /tmp/ee-fixtures/no-evidence --task \"change release workflow\" --json"
+      ],
+      "evidenceIds": [],
+      "tripwireIds": [],
+      "redactionStatus": "unknown",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": ["preflight_evidence_unavailable"],
+      "expectedRiskLevel": "unknown",
+      "generatedQuestionCount": 1,
+      "stopConditionCount": 1,
+      "expectedDisposition": "ask_user",
+      "firstFailureDiagnosis": "no evidence matches; user confirmation required"
+    },
+    {
+      "id": "pfr_redacted_evidence",
+      "description": "Evidence exists but redaction failed.",
+      "taskClass": "redacted-evidence",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/redacted --json",
+        "ee preflight run --workspace /tmp/ee-fixtures/redacted --task \"review secrets\" --json"
+      ],
+      "evidenceIds": ["ev.preflight.redaction_failed"],
+      "tripwireIds": ["tw.privacy.secret"],
+      "redactionStatus": "failed",
+      "rawSecretsIncluded": true,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": ["redaction_failed"],
+      "expectedRiskLevel": "blocked",
+      "generatedQuestionCount": 1,
+      "stopConditionCount": 1,
+      "expectedDisposition": "refuse",
+      "firstFailureDiagnosis": "redaction failed or raw secrets are present"
+    },
+    {
+      "id": "pfr_degraded_tripwire",
+      "description": "Tripwire store is unavailable, so tripwires cannot be claimed clear.",
+      "taskClass": "degraded-tripwire",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/degraded-tripwire --json",
+        "ee preflight run --workspace /tmp/ee-fixtures/degraded-tripwire --task \"run cleanup\" --json",
+        "ee tripwire list --workspace /tmp/ee-fixtures/degraded-tripwire --json"
+      ],
+      "evidenceIds": ["ev.preflight.cleanup.001"],
+      "tripwireIds": [],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": true,
+      "degradedCodes": ["tripwire_store_unavailable"],
+      "expectedRiskLevel": "unknown",
+      "generatedQuestionCount": 2,
+      "stopConditionCount": 1,
+      "expectedDisposition": "ask_user",
+      "firstFailureDiagnosis": "tripwire evidence unavailable; cannot claim clear"
+    },
+    {
+      "id": "pfr_malformed_evidence",
+      "description": "Malformed JSON or malformed evidence bundle must refuse.",
+      "taskClass": "malformed-evidence",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/malformed --json"
+      ],
+      "evidenceIds": [],
+      "tripwireIds": [],
+      "redactionStatus": "unknown",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": ["evidence_parse_error"],
+      "expectedRiskLevel": "blocked",
+      "generatedQuestionCount": 0,
+      "stopConditionCount": 1,
+      "expectedDisposition": "refuse",
+      "firstFailureDiagnosis": "malformed evidence JSON"
+    }
+  ]
+}
