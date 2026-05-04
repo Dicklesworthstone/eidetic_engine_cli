@@ -3,7 +3,11 @@
 //! Provides a quick posture summary indicating whether the workspace
 //! is ready for normal operation or requires attention.
 
+use std::path::Path;
+
 use crate::models::CapabilityStatus;
+
+use super::status::{default_workspace_path, probe_search_capability, probe_storage_capability};
 
 /// Overall posture of the workspace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,10 +60,23 @@ impl CheckReport {
     /// Gather current posture.
     #[must_use]
     pub fn gather() -> Self {
+        let workspace_path = default_workspace_path();
+        Self::gather_with_workspace(workspace_path.as_deref())
+    }
+
+    #[must_use]
+    pub fn gather_for_workspace(workspace_path: &Path) -> Self {
+        Self::gather_with_workspace(Some(workspace_path))
+    }
+
+    #[must_use]
+    pub fn gather_with_workspace(workspace_path: Option<&Path>) -> Self {
         let runtime_ready = true;
-        let workspace_initialized = false;
-        let database_ready = false;
-        let search_ready = false;
+        let storage_status = probe_storage_capability(workspace_path);
+        let search_status = probe_search_capability(workspace_path);
+        let workspace_initialized = storage_status != CapabilityStatus::Pending;
+        let database_ready = storage_status == CapabilityStatus::Ready;
+        let search_ready = search_status == CapabilityStatus::Ready;
 
         let mut suggested_actions = Vec::new();
 
@@ -71,7 +88,7 @@ impl CheckReport {
             });
         }
 
-        if !database_ready {
+        if workspace_initialized && !database_ready {
             suggested_actions.push(SuggestedAction {
                 priority: 2,
                 command: "ee doctor --json",
@@ -79,11 +96,11 @@ impl CheckReport {
             });
         }
 
-        if !search_ready {
+        if database_ready && !search_ready {
             suggested_actions.push(SuggestedAction {
                 priority: 3,
-                command: "ee index rebuild",
-                reason: "Rebuild search index when available.",
+                command: "ee index status --workspace . --json",
+                reason: "Inspect search index readiness before rebuilding.",
             });
         }
 
@@ -125,7 +142,7 @@ impl CheckReport {
         } else if self.workspace_initialized {
             CapabilityStatus::Degraded
         } else {
-            CapabilityStatus::Unimplemented
+            CapabilityStatus::Pending
         }
     }
 
@@ -133,8 +150,10 @@ impl CheckReport {
     pub fn search_status(&self) -> CapabilityStatus {
         if self.search_ready {
             CapabilityStatus::Ready
+        } else if self.database_ready {
+            CapabilityStatus::Degraded
         } else {
-            CapabilityStatus::Unimplemented
+            CapabilityStatus::Pending
         }
     }
 }
@@ -155,7 +174,7 @@ mod tests {
 
     #[test]
     fn check_report_gather_returns_posture() -> TestResult {
-        let report = CheckReport::gather();
+        let report = CheckReport::gather_with_workspace(None);
 
         ensure(report.runtime_ready, true, "runtime should be ready")?;
         ensure(
@@ -167,7 +186,7 @@ mod tests {
 
     #[test]
     fn check_report_suggests_init_when_not_initialized() -> TestResult {
-        let report = CheckReport::gather();
+        let report = CheckReport::gather_with_workspace(None);
 
         let has_init = report
             .suggested_actions

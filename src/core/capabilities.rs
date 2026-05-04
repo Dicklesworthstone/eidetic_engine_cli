@@ -3,9 +3,15 @@
 //! Reports feature availability, command status, and subsystem readiness.
 //! Used by agents to discover what ee can do in its current configuration.
 
+use std::path::Path;
+
 use crate::models::CapabilityStatus;
 
-use super::{build_info, runtime_status};
+use super::build_info;
+use super::status::{
+    default_workspace_path, probe_cass_capability, probe_runtime_capability,
+    probe_search_capability, probe_storage_capability,
+};
 
 /// A single capability entry describing a feature or subsystem.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -159,35 +165,41 @@ impl CapabilitiesReport {
     /// Gather current capabilities from compile-time and runtime state.
     #[must_use]
     pub fn gather() -> Self {
+        let workspace_path = default_workspace_path();
+        Self::gather_with_workspace(workspace_path.as_deref())
+    }
+
+    #[must_use]
+    pub fn gather_for_workspace(workspace_path: &Path) -> Self {
+        Self::gather_with_workspace(Some(workspace_path))
+    }
+
+    #[must_use]
+    pub fn gather_with_workspace(workspace_path: Option<&Path>) -> Self {
         let info = build_info();
-        let _runtime = runtime_status();
+        let runtime_status = probe_runtime_capability();
+        let storage_status = probe_storage_capability(workspace_path);
+        let search_status = probe_search_capability(workspace_path);
+        let cass_status = probe_cass_capability();
 
         let subsystems = vec![
-            CapabilityEntry::new(
-                "runtime",
-                CapabilityStatus::Ready,
-                "Asupersync async runtime",
-            ),
+            CapabilityEntry::new("runtime", runtime_status, "Asupersync async runtime"),
             CapabilityEntry::new(
                 "storage",
-                CapabilityStatus::Unimplemented,
+                storage_status,
                 "FrankenSQLite/SQLModel persistence",
             ),
-            CapabilityEntry::new(
-                "search",
-                CapabilityStatus::Unimplemented,
-                "Frankensearch hybrid retrieval",
-            ),
+            CapabilityEntry::new("search", search_status, "Frankensearch hybrid retrieval"),
             CapabilityEntry::new(
                 "graph",
-                CapabilityStatus::Unimplemented,
+                if cfg!(feature = "graph") {
+                    CapabilityStatus::Ready
+                } else {
+                    CapabilityStatus::Pending
+                },
                 "FrankenNetworkX graph analytics",
             ),
-            CapabilityEntry::new(
-                "cass",
-                CapabilityStatus::Degraded,
-                "CASS session import adapter",
-            ),
+            CapabilityEntry::new("cass", cass_status, "CASS session import adapter"),
         ];
 
         let features = vec![
@@ -224,12 +236,12 @@ impl CapabilitiesReport {
             CommandEntry::new("schema", true, "Schema registry"),
             CommandEntry::new("status", true, "Subsystem readiness"),
             CommandEntry::new("version", true, "Version info"),
-            CommandEntry::new("context", false, "Context packing"),
-            CommandEntry::new("search", false, "Memory search"),
-            CommandEntry::new("why", false, "Explainability"),
-            CommandEntry::new("init", false, "Workspace initialization"),
-            CommandEntry::new("index", false, "Search index management"),
-            CommandEntry::new("curate", false, "Rule curation"),
+            CommandEntry::new("context", true, "Context packing"),
+            CommandEntry::new("search", true, "Memory search"),
+            CommandEntry::new("why", true, "Explainability"),
+            CommandEntry::new("init", true, "Workspace initialization"),
+            CommandEntry::new("index", true, "Search index management"),
+            CommandEntry::new("curate", true, "Rule curation"),
         ];
 
         let output_formats = vec![

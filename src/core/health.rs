@@ -4,7 +4,15 @@
 //! verdict and counts of issues by severity. Simpler than doctor (no fix plans),
 //! more binary than status (which reports detailed readiness states).
 
-use super::{build_info, runtime_status};
+use std::path::Path;
+
+use crate::models::CapabilityStatus;
+
+use super::build_info;
+use super::status::{
+    default_workspace_path, probe_runtime_capability, probe_search_capability,
+    probe_storage_capability,
+};
 
 /// Overall health verdict.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,30 +62,65 @@ impl HealthReport {
     /// Gather current health status.
     #[must_use]
     pub fn gather() -> Self {
-        let version = build_info().version;
-        let _runtime = runtime_status();
+        let workspace_path = default_workspace_path();
+        Self::gather_with_workspace(workspace_path.as_deref())
+    }
 
-        let runtime_ok = true;
-        let storage_ok = false;
-        let search_ok = false;
+    #[must_use]
+    pub fn gather_for_workspace(workspace_path: &Path) -> Self {
+        Self::gather_with_workspace(Some(workspace_path))
+    }
+
+    #[must_use]
+    pub fn gather_with_workspace(workspace_path: Option<&Path>) -> Self {
+        let version = build_info().version;
+        let runtime_status = probe_runtime_capability();
+        let runtime_ok = runtime_status == CapabilityStatus::Ready;
+        let storage_status = probe_storage_capability(workspace_path);
+        let search_status = probe_search_capability(workspace_path);
+        let storage_ok = storage_status == CapabilityStatus::Ready;
+        let search_ok = search_status == CapabilityStatus::Ready;
 
         let mut issues = Vec::new();
 
-        if !storage_ok {
+        if !runtime_ok {
             issues.push(HealthIssue {
-                subsystem: "storage",
-                code: "storage_not_implemented",
-                severity: "medium",
-                message: "Storage subsystem is not wired yet.",
+                subsystem: "runtime",
+                code: "runtime_unavailable",
+                severity: "high",
+                message: "Asupersync runtime failed to initialize.",
             });
         }
 
-        if !search_ok {
+        if storage_status == CapabilityStatus::Pending {
+            issues.push(HealthIssue {
+                subsystem: "storage",
+                code: "storage_not_ready",
+                severity: "medium",
+                message: "Workspace storage has not been initialized.",
+            });
+        } else if !storage_ok {
+            issues.push(HealthIssue {
+                subsystem: "storage",
+                code: "storage_degraded",
+                severity: "high",
+                message: "Workspace storage exists but failed readiness checks.",
+            });
+        }
+
+        if search_status == CapabilityStatus::Pending {
             issues.push(HealthIssue {
                 subsystem: "search",
-                code: "search_not_implemented",
+                code: "search_not_ready",
                 severity: "medium",
-                message: "Search subsystem is not wired yet.",
+                message: "Search is waiting for workspace storage before it can be inspected.",
+            });
+        } else if !search_ok {
+            issues.push(HealthIssue {
+                subsystem: "search",
+                code: "search_index_degraded",
+                severity: "medium",
+                message: "Search is compiled but the selected workspace index is not ready.",
             });
         }
 
@@ -137,7 +180,7 @@ mod tests {
 
     #[test]
     fn health_report_gather_returns_valid_report() -> TestResult {
-        let report = HealthReport::gather();
+        let report = HealthReport::gather_with_workspace(None);
 
         ensure(
             report.version,
@@ -151,7 +194,7 @@ mod tests {
 
     #[test]
     fn health_report_verdict_is_degraded_when_medium_issues() -> TestResult {
-        let report = HealthReport::gather();
+        let report = HealthReport::gather_with_workspace(None);
 
         ensure(
             report.verdict,
@@ -167,7 +210,7 @@ mod tests {
 
     #[test]
     fn health_report_issue_counts_are_correct() -> TestResult {
-        let report = HealthReport::gather();
+        let report = HealthReport::gather_with_workspace(None);
 
         ensure(report.issue_count(), 2, "two issues total")?;
         ensure(report.high_severity_count(), 0, "no high severity issues")?;

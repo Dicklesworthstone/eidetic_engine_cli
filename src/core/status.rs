@@ -713,10 +713,13 @@ pub struct StatusReport {
 }
 
 impl StatusReport {
-    /// Gather current subsystem status.
+    /// Gather current subsystem status, defaulting to current directory as
+    /// workspace when available.
     #[must_use]
     pub fn gather() -> Self {
-        Self::gather_with_options(&StatusOptions::default())
+        Self::gather_with_options(&StatusOptions {
+            workspace_path: default_workspace_path(),
+        })
     }
 
     /// Gather current subsystem status and inspect rebuildable assets when
@@ -2117,7 +2120,7 @@ mod tests {
     }
 
     #[test]
-    fn status_without_workspace_reports_not_inspected_asset() -> TestResult {
+    fn status_gather_inspects_current_workspace_by_default() -> TestResult {
         let report = StatusReport::gather();
         let search_index = report
             .derived_assets
@@ -2125,15 +2128,12 @@ mod tests {
             .find(|asset| asset.name == "search_index")
             .ok_or_else(|| "missing search_index asset".to_string())?;
 
+        // After fix: gather() uses current directory as workspace, so status
+        // should be something other than NotInspected (e.g., Missing, Ready, Degraded).
         ensure(
-            search_index.status,
-            DerivedAssetStatus::NotInspected,
-            "search index status",
-        )?;
-        ensure(
-            search_index.asset_high_watermark,
-            None,
-            "no asset watermark without workspace",
+            search_index.status != DerivedAssetStatus::NotInspected,
+            true,
+            "search index should be inspected when current dir is workspace",
         )
     }
 

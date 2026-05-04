@@ -6,8 +6,8 @@ data:
   version: 0.1.0
   capabilities:
     runtime: ready
-    storage: unimplemented
-    search: unimplemented
+    storage: pending
+    search: pending
     agentDetection: ready
   runtime:
     engine: asupersync
@@ -67,6 +67,6 @@ data:
     inspectionCommand: ee agent status --json
     degraded[0]:
   degraded[3]{code,severity,message}:
-    storage_not_implemented,medium,Storage subsystem is not wired yet.
-    search_not_implemented,medium,Search subsystem is not wired yet.
+    storage_not_inspected,low,Storage readiness was not inspected because no workspace was selected.
+    search_not_inspected,low,Search readiness was not inspected because no workspace was selected.
     memory_health_unavailable,low,Memory health is unavailable without an explicit workspace.
