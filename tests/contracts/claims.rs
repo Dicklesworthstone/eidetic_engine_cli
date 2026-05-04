@@ -5,6 +5,7 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 use ee::core::claims::{
     CLAIM_VERIFY_SCHEMA_V1, ClaimListOptions, ClaimShowOptions, ClaimVerifyOptions,
@@ -13,6 +14,7 @@ use ee::core::claims::{
 };
 use ee::models::{ClaimId, DemoId, EvidenceId, ManifestVerificationStatus, PolicyId};
 use ee::output::render_claim_verify_json;
+use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
 
@@ -67,6 +69,22 @@ fn unique_claim_workspace(label: &str) -> Result<PathBuf, String> {
     fs::create_dir_all(&path)
         .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
     Ok(path)
+}
+
+fn run_ee(args: &[String]) -> Result<std::process::Output, String> {
+    Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(args)
+        .output()
+        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn parse_stdout_json(output: &std::process::Output) -> Result<Value, String> {
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        format!(
+            "stdout should be parseable JSON: {error}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
 }
 
 #[derive(Debug)]
@@ -307,6 +325,76 @@ fn gate14_core_claim_reports_parse_and_verify_real_manifest_hashes() -> TestResu
     ensure(result.artifacts_passed == 1, "artifact passed count")?;
     ensure(result.artifacts_failed == 0, "artifact failed count")?;
     ensure(result.errors.is_empty(), "passing claim has no errors")
+}
+
+#[test]
+fn gate14_cli_claim_commands_parse_and_verify_real_files() -> TestResult {
+    let fixture = write_real_claim_fixture("cli_real_manifest", None, true)?;
+    let workspace = fixture.workspace.display().to_string();
+
+    let list = run_ee(&[
+        "--workspace".to_string(),
+        workspace.clone(),
+        "--json".to_string(),
+        "claim".to_string(),
+        "list".to_string(),
+        "--status".to_string(),
+        "active".to_string(),
+    ])?;
+    ensure(list.status.code() == Some(0), "claim list exit")?;
+    ensure(list.stderr.is_empty(), "claim list JSON stderr")?;
+    let list_json = parse_stdout_json(&list)?;
+    ensure(
+        list_json["schema"] == json!("ee.claim_list.v1"),
+        "claim list schema",
+    )?;
+    ensure(list_json["success"] == json!(true), "claim list success")?;
+    ensure(
+        list_json["data"]["claims"][0]["id"] == json!(fixture.claim_id.as_str()),
+        "claim list id",
+    )?;
+
+    let show = run_ee(&[
+        "--workspace".to_string(),
+        workspace.clone(),
+        "--json".to_string(),
+        "claim".to_string(),
+        "show".to_string(),
+        fixture.claim_id.clone(),
+        "--include-manifest".to_string(),
+    ])?;
+    ensure(show.status.code() == Some(0), "claim show exit")?;
+    ensure(show.stderr.is_empty(), "claim show JSON stderr")?;
+    let show_json = parse_stdout_json(&show)?;
+    ensure(show_json["success"] == json!(true), "claim show success")?;
+    ensure(
+        show_json["data"]["manifest"]["artifactCount"] == json!(1),
+        "claim show manifest artifact count",
+    )?;
+
+    let verify = run_ee(&[
+        "--workspace".to_string(),
+        workspace,
+        "--json".to_string(),
+        "claim".to_string(),
+        "verify".to_string(),
+        fixture.claim_id,
+    ])?;
+    ensure(verify.status.code() == Some(0), "claim verify exit")?;
+    ensure(verify.stderr.is_empty(), "claim verify JSON stderr")?;
+    let verify_json = parse_stdout_json(&verify)?;
+    ensure(
+        verify_json["schema"] == json!("ee.claim_verify.v1"),
+        "claim verify schema",
+    )?;
+    ensure(
+        verify_json["success"] == json!(true),
+        "claim verify success",
+    )?;
+    ensure(
+        verify_json["data"]["results"][0]["status"] == json!("passing"),
+        "claim verify manifest status",
+    )
 }
 
 #[test]

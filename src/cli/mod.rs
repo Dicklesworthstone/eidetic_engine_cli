@@ -91,10 +91,10 @@ use crate::core::why::{WhyOptions, explain_memory};
 use crate::core::workspace as workspace_core;
 use crate::models::preflight::{TripwireState, TripwireType};
 use crate::models::{
-    DEMO_FILE_SCHEMA_V1, DemoEntry, DemoFile, DemoId, DemoStatus, DomainError,
-    ExperimentOutcomeStatus, ExperimentSafetyBoundary, InstallOperation, LearningObservationSignal,
-    OutputVerification, ProcessExitCode, QUERY_SCHEMA_V1, RedactionLevel,
-    is_valid_demo_artifact_path, parse_demo_file_yaml,
+    CertificateKind, CertificateStatus, DEMO_FILE_SCHEMA_V1, DemoEntry, DemoFile, DemoId,
+    DemoStatus, DomainError, ExperimentOutcomeStatus, ExperimentSafetyBoundary, InstallOperation,
+    LearningObservationSignal, OutputVerification, ProcessExitCode, QUERY_SCHEMA_V1,
+    RedactionLevel, is_valid_demo_artifact_path, parse_demo_file_yaml,
 };
 use crate::output;
 use crate::pack::{
@@ -1775,6 +1775,10 @@ pub struct CertificateListArgs {
     /// Include expired certificates.
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_expired: bool,
+
+    /// Path to certificate manifest JSON.
+    #[arg(long, value_name = "PATH")]
+    pub manifest: Option<PathBuf>,
 }
 
 /// Arguments for `ee certificate show`.
@@ -1783,6 +1787,10 @@ pub struct CertificateShowArgs {
     /// Certificate ID to show.
     #[arg(value_name = "CERTIFICATE_ID")]
     pub certificate_id: String,
+
+    /// Path to certificate manifest JSON.
+    #[arg(long, value_name = "PATH")]
+    pub manifest: Option<PathBuf>,
 }
 
 /// Arguments for `ee certificate verify`.
@@ -1791,6 +1799,10 @@ pub struct CertificateVerifyArgs {
     /// Certificate ID to verify.
     #[arg(value_name = "CERTIFICATE_ID")]
     pub certificate_id: String,
+
+    /// Path to certificate manifest JSON.
+    #[arg(long, value_name = "PATH")]
+    pub manifest: Option<PathBuf>,
 }
 
 /// Subcommands for `ee causal`.
@@ -11512,8 +11524,58 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_certificate_store_unavailable(cli, "certificate list", stdout, stderr)
+    let Some(manifest_path) = args.manifest.as_ref() else {
+        return write_certificate_store_unavailable(cli, "certificate list", stdout, stderr);
+    };
+
+    let kind = match args
+        .kind
+        .as_deref()
+        .map(str::parse::<CertificateKind>)
+        .transpose()
+    {
+        Ok(kind) => kind,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error.to_string(),
+                repair: Some(
+                    "Use one of: pack, curation, tail_risk, privacy_budget, lifecycle.".to_string(),
+                ),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let status = match args
+        .status
+        .as_deref()
+        .map(str::parse::<CertificateStatus>)
+        .transpose()
+    {
+        Ok(status) => status,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error.to_string(),
+                repair: Some("Use one of: valid, pending, invalid, expired, revoked.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let mut options = crate::core::certificate::CertificateListOptions::new()
+        .with_manifest_path(manifest_path)
+        .with_limit(args.limit);
+    if let Some(kind) = kind {
+        options = options.with_kind(kind);
+    }
+    if let Some(status) = status {
+        options = options.with_status(status);
+    }
+    if args.include_expired {
+        options = options.include_expired();
+    }
+
+    let report = crate::core::certificate::list_certificates(&options);
+    write_certificate_list_report(cli, &report, stdout)
 }
 
 fn handle_certificate_show<W, E>(
@@ -11526,8 +11588,14 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_certificate_store_unavailable(cli, "certificate show", stdout, stderr)
+    let Some(manifest_path) = args.manifest.as_ref() else {
+        return write_certificate_store_unavailable(cli, "certificate show", stdout, stderr);
+    };
+
+    let options = crate::core::certificate::CertificateLookupOptions::new(&args.certificate_id)
+        .with_manifest_path(manifest_path);
+    let report = crate::core::certificate::show_certificate_with_options(&options);
+    write_certificate_show_report(cli, &report, stdout)
 }
 
 fn handle_certificate_verify<W, E>(
@@ -11540,8 +11608,92 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_certificate_store_unavailable(cli, "certificate verify", stdout, stderr)
+    let Some(manifest_path) = args.manifest.as_ref() else {
+        return write_certificate_store_unavailable(cli, "certificate verify", stdout, stderr);
+    };
+
+    let options = crate::core::certificate::CertificateLookupOptions::new(&args.certificate_id)
+        .with_manifest_path(manifest_path);
+    let report = crate::core::certificate::verify_certificate_with_options(&options);
+    write_certificate_verify_report(cli, &report, stdout)
+}
+
+fn write_certificate_list_report<W>(
+    cli: &Cli,
+    report: &crate::core::certificate::CertificateListReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_certificate_list_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_certificate_list_toon(report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_certificate_list_json(report) + "\n"),
+        ),
+    }
+}
+
+fn write_certificate_show_report<W>(
+    cli: &Cli,
+    report: &crate::core::certificate::CertificateShowReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_certificate_show_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_certificate_show_toon(report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_certificate_show_json(report) + "\n"),
+        ),
+    }
+}
+
+fn write_certificate_verify_report<W>(
+    cli: &Cli,
+    report: &crate::core::certificate::CertificateVerifyReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_certificate_verify_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_certificate_verify_toon(report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_certificate_verify_json(report) + "\n"),
+        ),
+    }
 }
 
 // ============================================================================
@@ -11726,7 +11878,7 @@ where
 
 fn handle_claim_list<W, E>(
     cli: &Cli,
-    _args: &ClaimListArgs,
+    args: &ClaimListArgs,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -11734,12 +11886,25 @@ where
     W: Write,
     E: Write,
 {
-    write_claim_unavailable(cli, "claim list", stdout, stderr)
+    let options = crate::core::claims::ClaimListOptions {
+        workspace_path: resolve_cli_workspace_path(
+            cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
+        ),
+        claims_file: args.claims_file.clone(),
+        status: args.status.clone(),
+        frequency: args.frequency.clone(),
+        tag: args.tag.clone(),
+    };
+
+    match crate::core::claims::build_claim_list_report(&options) {
+        Ok(report) => write_claim_list_report(cli, &report, stdout),
+        Err(_) => write_claim_unavailable(cli, "claim list", stdout, stderr),
+    }
 }
 
 fn handle_claim_show<W, E>(
     cli: &Cli,
-    _args: &ClaimShowArgs,
+    args: &ClaimShowArgs,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -11747,12 +11912,25 @@ where
     W: Write,
     E: Write,
 {
-    write_claim_unavailable(cli, "claim show", stdout, stderr)
+    let options = crate::core::claims::ClaimShowOptions {
+        workspace_path: resolve_cli_workspace_path(
+            cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
+        ),
+        claims_file: args.claims_file.clone(),
+        claim_id: args.claim_id.clone(),
+        include_manifest: args.include_manifest,
+        ..Default::default()
+    };
+
+    match crate::core::claims::build_claim_show_report(&options) {
+        Ok(report) => write_claim_show_report(cli, &report, stdout),
+        Err(_) => write_claim_unavailable(cli, "claim show", stdout, stderr),
+    }
 }
 
 fn handle_claim_verify<W, E>(
     cli: &Cli,
-    _args: &ClaimVerifyArgs,
+    args: &ClaimVerifyArgs,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -11760,7 +11938,92 @@ where
     W: Write,
     E: Write,
 {
-    write_claim_unavailable(cli, "claim verify", stdout, stderr)
+    let options = crate::core::claims::ClaimVerifyOptions {
+        workspace_path: resolve_cli_workspace_path(
+            cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
+        ),
+        claims_file: args.claims_file.clone(),
+        artifacts_dir: args.artifacts_dir.clone(),
+        claim_id: args.claim_id.clone(),
+        fail_fast: args.fail_fast,
+    };
+
+    match crate::core::claims::build_claim_verify_report(&options) {
+        Ok(report) => write_claim_verify_report(cli, &report, stdout),
+        Err(_) => write_claim_unavailable(cli, "claim verify", stdout, stderr),
+    }
+}
+
+fn write_claim_list_report<W>(
+    cli: &Cli,
+    report: &crate::core::claims::ClaimListReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_claim_list_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_claim_list_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_claim_list_json(report) + "\n"))
+        }
+    }
+}
+
+fn write_claim_show_report<W>(
+    cli: &Cli,
+    report: &crate::core::claims::ClaimShowReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_claim_show_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_claim_show_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_claim_show_json(report) + "\n"))
+        }
+    }
+}
+
+fn write_claim_verify_report<W>(
+    cli: &Cli,
+    report: &crate::core::claims::ClaimVerifyReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_claim_verify_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_claim_verify_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_claim_verify_json(report) + "\n"))
+        }
+    }
 }
 
 // ============================================================================

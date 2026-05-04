@@ -88,6 +88,15 @@ fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
+fn parse_stdout_json(output: &std::process::Output) -> Result<Value, String> {
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        format!(
+            "stdout should be parseable JSON: {error}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
 fn hash_payload(payload: &str) -> String {
     blake3::hash(payload.as_bytes()).to_hex().to_string()
 }
@@ -389,6 +398,88 @@ fn certificate_verify_json_degrades_until_manifest_store_exists() -> TestResult 
         &value["data"]["degraded"][0]["code"],
         &json!("certificate_store_unavailable"),
         "degraded array code",
+    )
+}
+
+#[test]
+fn certificate_cli_reads_explicit_manifest_records() -> TestResult {
+    let (_dir, manifest_path) = write_certificate_manifest_fixture()?;
+    let manifest = manifest_path.display().to_string();
+
+    let list = run_ee(&[
+        "--json",
+        "certificate",
+        "list",
+        "--manifest",
+        &manifest,
+        "--kind",
+        "pack",
+    ])?;
+    ensure_equal(&list.status.code(), &Some(0), "list exit")?;
+    ensure(list.stderr.is_empty(), "json certificate list stderr")?;
+    let list_json = parse_stdout_json(&list)?;
+    ensure_equal(
+        &list_json["schema"],
+        &json!("ee.certificate.list.v1"),
+        "list schema",
+    )?;
+    ensure_equal(&list_json["success"], &json!(true), "list success")?;
+    ensure_equal(
+        &list_json["data"]["totalCount"],
+        &json!(6),
+        "manifest certificate count",
+    )?;
+    ensure_equal(
+        &list_json["data"]["certificates"][0]["id"],
+        &json!("cert_pack_failed_assumptions"),
+        "deterministic list ordering",
+    )?;
+
+    let show = run_ee(&[
+        "--json",
+        "certificate",
+        "show",
+        "cert_pack_valid",
+        "--manifest",
+        &manifest,
+    ])?;
+    ensure_equal(&show.status.code(), &Some(0), "show exit")?;
+    ensure(show.stderr.is_empty(), "json certificate show stderr")?;
+    let show_json = parse_stdout_json(&show)?;
+    ensure_equal(
+        &show_json["data"]["certificate"]["payloadHash"],
+        &json!(hash_payload(
+            r#"{"packHash":"pack_valid","selected":["mem_01"]}"#
+        )),
+        "show payload hash",
+    )?;
+
+    let verify = run_ee(&[
+        "--json",
+        "certificate",
+        "verify",
+        "cert_pack_valid",
+        "--manifest",
+        &manifest,
+    ])?;
+    ensure_equal(&verify.status.code(), &Some(0), "verify exit")?;
+    ensure(verify.stderr.is_empty(), "json certificate verify stderr")?;
+    let verify_json = parse_stdout_json(&verify)?;
+    ensure_equal(
+        &verify_json["schema"],
+        &json!("ee.certificate.verify.v1"),
+        "verify schema",
+    )?;
+    ensure_equal(&verify_json["success"], &json!(true), "verify success")?;
+    ensure_equal(
+        &verify_json["data"]["result"],
+        &json!("valid"),
+        "manifest-backed verify result",
+    )?;
+    ensure_equal(
+        &verify_json["data"]["hashVerified"],
+        &json!(true),
+        "manifest-backed hash check",
     )
 }
 

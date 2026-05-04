@@ -1,5 +1,6 @@
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
 const INVENTORY: &str = include_str!("../docs/mechanical-boundary-command-inventory.md");
+const README_SOURCE: &str = include_str!("../README.md");
 
 const REQUIRED_MATRIX_HEADERS: &[&str] = &[
     "Surface",
@@ -24,6 +25,250 @@ const BASELINE_LEDGER_HEADERS: &[&str] = &[
     "Runtime contract",
     "Degraded / repair posture",
     "Evidence required",
+];
+
+const WORKFLOW_PARITY_HEADERS: &[&str] = &[
+    "Workflow ID",
+    "README surface",
+    "Post-migration user path",
+    "Required ee commands",
+    "Project-local skill",
+    "Degraded / unavailable behavior",
+    "Repair command",
+    "Owning bead IDs",
+    "Test / E2E coverage",
+    "No-feature-loss status",
+];
+
+const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
+    (
+        "install-verify",
+        "### Verify",
+        "Installation and Verify",
+        &[
+            "version",
+            "doctor",
+            "status",
+            "install check",
+            "install plan",
+            "update",
+        ],
+    ),
+    (
+        "quick-example-context-loop",
+        "## Quick Example",
+        "TLDR and Quick Example",
+        &[
+            "init",
+            "remember",
+            "import cass",
+            "context",
+            "why",
+            "outcome",
+            "search",
+        ],
+    ),
+    (
+        "quick-start-core-loop",
+        "## Quick Start",
+        "Quick Start",
+        &[
+            "init",
+            "import cass",
+            "context",
+            "remember",
+            "review session",
+            "curate candidates",
+            "curate apply",
+            "search",
+        ],
+    ),
+    (
+        "core-command-reference",
+        "### Core workflow",
+        "Command Reference core workflow",
+        &[
+            "init", "status", "doctor", "context", "search", "remember", "outcome", "why", "pack",
+        ],
+    ),
+    (
+        "import-ingestion",
+        "### Import & ingestion",
+        "Command Reference Import and ingestion",
+        &[
+            "import cass",
+            "import jsonl",
+            "import eidetic-legacy",
+            "review session",
+        ],
+    ),
+    (
+        "curation-rules",
+        "### Curation & rules",
+        "Curation and rules",
+        &[
+            "curate candidates",
+            "curate validate",
+            "curate apply",
+            "curate accept",
+            "curate reject",
+            "curate snooze",
+            "curate merge",
+            "curate disposition",
+            "rule add",
+            "rule list",
+            "rule show",
+            "rule protect",
+        ],
+    ),
+    (
+        "memory-inspection",
+        "### Memory inspection",
+        "Memory inspection",
+        &[
+            "memory show",
+            "memory list",
+            "memory history",
+            "memory revise",
+            "why",
+        ],
+    ),
+    (
+        "graph-index-derived-assets",
+        "### Graph",
+        "Graph and Index",
+        &[
+            "graph export",
+            "graph neighborhood",
+            "graph centrality-refresh",
+            "graph feature-enrichment",
+            "index status",
+            "index rebuild",
+            "index reembed",
+        ],
+    ),
+    (
+        "workspace-model-schema-adapters",
+        "### Workspace, models, schemas",
+        "Workspace, models, schemas, and MCP",
+        &[
+            "workspace resolve",
+            "workspace list",
+            "workspace alias",
+            "model status",
+            "model list",
+            "schema list",
+            "schema export",
+            "mcp manifest",
+            "agent-docs",
+            "help",
+            "introspect",
+        ],
+    ),
+    (
+        "backup-restore",
+        "### Backup & restore",
+        "Backup and Restore",
+        &[
+            "backup create",
+            "backup list",
+            "backup inspect",
+            "backup verify",
+            "backup restore",
+        ],
+    ),
+    (
+        "diagnostics-eval-ops",
+        "### Diagnostics, eval, ops",
+        "Diagnostics, eval, and ops",
+        &[
+            "capabilities",
+            "check",
+            "health",
+            "doctor",
+            "diag claims",
+            "diag dependencies",
+            "diag graph",
+            "diag integrity",
+            "diag quarantine",
+            "diag streams",
+            "eval run",
+            "eval list",
+            "daemon",
+            "analyze science-status",
+        ],
+    ),
+    (
+        "configuration-context-profiles",
+        "## Configuration",
+        "Configuration and Context Profiles",
+        &["context", "pack", "status", "workspace resolve"],
+    ),
+    (
+        "cass-integration",
+        "## CASS Integration",
+        "CASS Integration",
+        &["import cass", "review session", "status", "doctor"],
+    ),
+    (
+        "agent-harness-integration",
+        "## Agent Harness Integration",
+        "Agent Harness Integration",
+        &[
+            "context",
+            "remember",
+            "outcome",
+            "curate candidates",
+            "memory show",
+            "mcp manifest",
+            "handoff create",
+            "handoff inspect",
+            "handoff resume",
+        ],
+    ),
+    (
+        "privacy-trust",
+        "## Privacy & Trust",
+        "Privacy and Trust",
+        &[
+            "remember",
+            "outcome",
+            "curate candidates",
+            "rule protect",
+            "handoff create",
+            "handoff preview",
+            "why",
+        ],
+    ),
+    (
+        "troubleshooting",
+        "## Troubleshooting",
+        "Troubleshooting",
+        &[
+            "index rebuild",
+            "index reembed",
+            "import cass",
+            "init",
+            "workspace list",
+            "workspace alias",
+            "status",
+            "doctor",
+            "model status",
+        ],
+    ),
+    (
+        "limitations-faq-docs",
+        "## Limitations",
+        "Limitations, FAQ, and Documentation",
+        &[
+            "status",
+            "agent-docs",
+            "doctor",
+            "mcp manifest",
+            "backup create",
+            "index rebuild",
+        ],
+    ),
 ];
 
 const BASELINE_ACTUAL_COMMANDS: &[(&str, &[&str])] = &[
@@ -600,6 +845,139 @@ fn baseline_infrastructure_ledger_covers_actual_and_absent_command_paths() -> Re
 }
 
 #[test]
+fn readme_workflow_parity_matrix_covers_advertised_surfaces() -> Result<(), String> {
+    let commands = command_paths_from_extract_function(CLI_SOURCE)?;
+    let rows = workflow_parity_rows(INVENTORY)?;
+    let header = rows
+        .first()
+        .ok_or_else(|| "README workflow parity matrix must include a header row".to_owned())?;
+
+    assert_eq!(
+        header, WORKFLOW_PARITY_HEADERS,
+        "workflow parity headers changed; update the myk6 contract with the docs"
+    );
+    assert!(
+        README_SOURCE.contains("## TL;DR"),
+        "README TLDR workflow surface must remain discoverable"
+    );
+
+    let mut workflow_ids = std::collections::BTreeSet::new();
+    for row in rows.iter().skip(2) {
+        assert_eq!(
+            row.len(),
+            header.len(),
+            "workflow parity row has wrong cell count: {row:?}"
+        );
+        for index in 0..header.len() {
+            assert!(
+                !row_cell(row, index, "workflow parity cell")?.is_empty(),
+                "workflow parity row has an empty required cell: {row:?}"
+            );
+        }
+
+        let workflow_id = row_cell(row, 0, "workflow id")?;
+        assert!(
+            workflow_ids.insert(workflow_id),
+            "workflow parity matrix has duplicate workflow ID `{workflow_id}`"
+        );
+
+        let required_commands = row_cell(row, 3, "required commands")?;
+        let skill = row_cell(row, 4, "project-local skill")?;
+        let degraded = row_cell(row, 5, "degraded behavior")?;
+        let repair = row_cell(row, 6, "repair command")?;
+        let owners = row_cell(row, 7, "owning beads")?;
+        let coverage = row_cell(row, 8, "coverage")?;
+        let no_feature_loss = row_cell(row, 9, "no-feature-loss status")?;
+
+        assert!(
+            required_commands.contains('`'),
+            "workflow row must name backticked ee command paths: {row:?}"
+        );
+        assert!(
+            skill == "none" || skill.contains("skill"),
+            "workflow row must explicitly say no skill or name a project-local skill: {row:?}"
+        );
+        assert!(
+            degraded.contains('`') || degraded.contains("intentionally deferred"),
+            "workflow row must name degraded/unavailable behavior: {row:?}"
+        );
+        assert!(
+            repair.contains("ee "),
+            "workflow row must name a copy-pasteable repair command: {row:?}"
+        );
+        assert!(
+            owners.contains("eidetic_engine_cli-"),
+            "workflow row must name owning bead IDs: {row:?}"
+        );
+        assert!(
+            ["test", "e2e", "golden", "contract", "fixture", "docs"]
+                .iter()
+                .any(|needle| coverage.contains(needle)),
+            "workflow row must name concrete test/e2e/docs coverage: {row:?}"
+        );
+        assert!(
+            no_feature_loss.contains("no feature was dropped")
+                || no_feature_loss.contains("deferred with rationale"),
+            "workflow row must explicitly document no-feature-loss or deferred rationale: {row:?}"
+        );
+    }
+
+    let expected_ids = README_WORKFLOW_ROWS
+        .iter()
+        .map(|(workflow_id, _, _, _)| *workflow_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        workflow_ids, expected_ids,
+        "workflow parity matrix must cover every advertised README workflow row exactly"
+    );
+
+    for (workflow_id, readme_marker, surface_fragment, expected_commands) in README_WORKFLOW_ROWS {
+        assert!(
+            README_SOURCE.contains(readme_marker),
+            "README is missing advertised workflow marker `{readme_marker}`"
+        );
+        let row = workflow_parity_row_for(&rows, workflow_id)?;
+        let surface = row_cell(row, 1, "README surface")?;
+        let command_cell = row_cell(row, 3, "required commands")?;
+
+        assert!(
+            surface.contains(surface_fragment),
+            "workflow `{workflow_id}` must cite README surface `{surface_fragment}`"
+        );
+        for command in *expected_commands {
+            assert!(
+                commands.iter().any(|actual| actual == command),
+                "workflow `{workflow_id}` expects command `{command}` but it is not in the CLI extractor"
+            );
+            assert!(
+                command_cell.contains(&format!("`{command}`")),
+                "workflow `{workflow_id}` missing command `{command}` in required commands cell"
+            );
+        }
+    }
+
+    for required in [
+        "ee.workflow_parity.e2e_log.v1",
+        "workflow ID",
+        "generated command list",
+        "commands run",
+        "skill paths used",
+        "degraded states observed",
+        "artifact paths",
+        "stdout and stderr artifact paths",
+        "parsed JSON schema or golden status",
+        "first-failure diagnosis",
+    ] {
+        assert!(
+            INVENTORY.contains(required),
+            "workflow parity e2e log contract missing required field text: {required}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn skill_only_matrix_rows_have_skill_handoff_and_boundary_coverage() -> Result<(), String> {
     for row in matrix_rows(INVENTORY)?.iter().skip(2) {
         let classification = row_cell(row, 1, "classification")?;
@@ -722,12 +1100,52 @@ fn baseline_rows(inventory: &str) -> Result<Vec<Vec<String>>, String> {
     }
 }
 
+fn workflow_parity_section(inventory: &str) -> Result<&str, String> {
+    let (_, after_start) = inventory
+        .split_once("## README Workflow Parity Matrix")
+        .ok_or_else(|| "README Workflow Parity Matrix section must exist".to_owned())?;
+    let (section, _) = after_start
+        .split_once("## Baseline Infrastructure Coverage Ledger")
+        .ok_or_else(|| {
+            "Baseline Infrastructure Coverage Ledger section must follow parity matrix".to_owned()
+        })?;
+    Ok(section)
+}
+
+fn workflow_parity_rows(inventory: &str) -> Result<Vec<Vec<String>>, String> {
+    let rows = workflow_parity_section(inventory)?
+        .lines()
+        .filter(|line| line.starts_with('|'))
+        .map(markdown_row_cells)
+        .collect::<Vec<_>>();
+
+    if rows.len() < 3 {
+        Err(
+            "README workflow parity matrix must include header, delimiter, and data rows"
+                .to_owned(),
+        )
+    } else {
+        Ok(rows)
+    }
+}
+
 fn baseline_row_for<'a>(rows: &'a [Vec<String>], surface: &str) -> Result<&'a [String], String> {
     rows.iter()
         .skip(2)
         .find(|row| row.first().is_some_and(|cell| cell == surface))
         .map(Vec::as_slice)
         .ok_or_else(|| format!("baseline ledger missing row for `{surface}`"))
+}
+
+fn workflow_parity_row_for<'a>(
+    rows: &'a [Vec<String>],
+    workflow_id: &str,
+) -> Result<&'a [String], String> {
+    rows.iter()
+        .skip(2)
+        .find(|row| row.first().is_some_and(|cell| cell == workflow_id))
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("workflow parity matrix missing row for `{workflow_id}`"))
 }
 
 fn markdown_row_cells(line: &str) -> Vec<String> {
