@@ -921,6 +921,21 @@ pub enum IndexManifestError {
         expected_model: String,
         actual_model: String,
     },
+    /// Embedding dimension mismatch (rebuild required).
+    EmbeddingDimensionMismatch {
+        expected_dimension: usize,
+        actual_dimension: usize,
+    },
+    /// Embedding deterministic flag mismatch (rebuild required).
+    EmbeddingDeterministicMismatch {
+        expected: bool,
+        actual: bool,
+    },
+    /// Document schema mismatch (rebuild required).
+    DocumentSchemaMismatch {
+        expected_schema: String,
+        actual_schema: String,
+    },
 }
 
 impl std::fmt::Display for IndexManifestError {
@@ -959,6 +974,30 @@ impl std::fmt::Display for IndexManifestError {
                     "index embedding model '{actual_model}' does not match expected '{expected_model}'"
                 )
             }
+            Self::EmbeddingDimensionMismatch {
+                expected_dimension,
+                actual_dimension,
+            } => {
+                write!(
+                    f,
+                    "index embedding dimension {actual_dimension} does not match expected {expected_dimension}"
+                )
+            }
+            Self::EmbeddingDeterministicMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "index embedding deterministic flag {actual} does not match expected {expected}"
+                )
+            }
+            Self::DocumentSchemaMismatch {
+                expected_schema,
+                actual_schema,
+            } => {
+                write!(
+                    f,
+                    "index document schema '{actual_schema}' does not match expected '{expected_schema}'"
+                )
+            }
         }
     }
 }
@@ -980,6 +1019,15 @@ impl IndexManifestError {
             Self::EmbeddingMismatch { .. } => {
                 "Run `ee index rebuild` with the correct embedding model."
             }
+            Self::EmbeddingDimensionMismatch { .. } => {
+                "Run `ee index rebuild` to regenerate with correct embedding dimensions."
+            }
+            Self::EmbeddingDeterministicMismatch { .. } => {
+                "Run `ee index rebuild` to regenerate with correct embedding configuration."
+            }
+            Self::DocumentSchemaMismatch { .. } => {
+                "Run `ee index rebuild` to regenerate with current document schema."
+            }
         }
     }
 
@@ -993,6 +1041,9 @@ impl IndexManifestError {
             Self::MissingField { .. } => "index_manifest_missing_field",
             Self::GenerationMismatch { .. } => "index_generation_mismatch",
             Self::EmbeddingMismatch { .. } => "index_embedding_mismatch",
+            Self::EmbeddingDimensionMismatch { .. } => "index_embedding_dimension_mismatch",
+            Self::EmbeddingDeterministicMismatch { .. } => "index_embedding_deterministic_mismatch",
+            Self::DocumentSchemaMismatch { .. } => "index_document_schema_mismatch",
         }
     }
 }
@@ -1093,22 +1144,51 @@ impl IndexManifest {
 
     /// Validate the embedding configuration matches expected.
     ///
+    /// Checks model ID, dimension, and deterministic flag.
+    ///
     /// # Errors
     ///
-    /// Returns [`IndexManifestError::EmbeddingMismatch`] if the model IDs
-    /// don't match.
+    /// Returns an error if any embedding field mismatches.
     pub fn validate_embedding(&self, expected: &EmbeddingConfig) -> Result<(), IndexManifestError> {
-        if self.embedding.model_id == expected.model_id {
-            Ok(())
-        } else {
-            Err(IndexManifestError::EmbeddingMismatch {
+        if self.embedding.model_id != expected.model_id {
+            return Err(IndexManifestError::EmbeddingMismatch {
                 expected_model: expected.model_id.clone(),
                 actual_model: self.embedding.model_id.clone(),
+            });
+        }
+        if self.embedding.dimension != expected.dimension {
+            return Err(IndexManifestError::EmbeddingDimensionMismatch {
+                expected_dimension: expected.dimension,
+                actual_dimension: self.embedding.dimension,
+            });
+        }
+        if self.embedding.deterministic != expected.deterministic {
+            return Err(IndexManifestError::EmbeddingDeterministicMismatch {
+                expected: expected.deterministic,
+                actual: self.embedding.deterministic,
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate the document schema matches the current canonical schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexManifestError::DocumentSchemaMismatch`] if the schema
+    /// doesn't match the current canonical document schema.
+    pub fn validate_document_schema(&self) -> Result<(), IndexManifestError> {
+        if self.document_schema == CANONICAL_DOCUMENT_SCHEMA {
+            Ok(())
+        } else {
+            Err(IndexManifestError::DocumentSchemaMismatch {
+                expected_schema: CANONICAL_DOCUMENT_SCHEMA.to_owned(),
+                actual_schema: self.document_schema.clone(),
             })
         }
     }
 
-    /// Full validation including schema, embedding, and staleness check.
+    /// Full validation including schema, embedding, document schema, and staleness check.
     ///
     /// # Errors
     ///
@@ -1119,6 +1199,7 @@ impl IndexManifest {
         current_db_generation: u64,
     ) -> Result<IndexStaleness, IndexManifestError> {
         self.validate_schema()?;
+        self.validate_document_schema()?;
         self.validate_embedding(expected_embedding)?;
         Ok(self.check_staleness(current_db_generation))
     }
@@ -1946,6 +2027,139 @@ mod tests {
     }
 
     #[test]
+    fn index_manifest_validate_embedding_dimension_mismatch() {
+        let manifest = IndexManifest::new(
+            1,
+            "2026-04-30T12:00:00Z",
+            100,
+            5,
+            EmbeddingConfig::new("hash-256", 512, true), // Wrong dimension
+        );
+        let expected = EmbeddingConfig::default(); // dimension=256
+
+        let result = manifest.validate_embedding(&expected);
+        assert_eq!(
+            result,
+            Err(IndexManifestError::EmbeddingDimensionMismatch {
+                expected_dimension: 256,
+                actual_dimension: 512,
+            })
+        );
+    }
+
+    #[test]
+    fn index_manifest_validate_embedding_deterministic_mismatch() {
+        let manifest = IndexManifest::new(
+            1,
+            "2026-04-30T12:00:00Z",
+            100,
+            5,
+            EmbeddingConfig::new("hash-256", 256, false), // Wrong deterministic flag
+        );
+        let expected = EmbeddingConfig::default(); // deterministic=true
+
+        let result = manifest.validate_embedding(&expected);
+        assert_eq!(
+            result,
+            Err(IndexManifestError::EmbeddingDeterministicMismatch {
+                expected: true,
+                actual: false,
+            })
+        );
+    }
+
+    #[test]
+    fn index_manifest_validate_document_schema_success() {
+        let manifest = IndexManifest::new(
+            1,
+            "2026-04-30T12:00:00Z",
+            100,
+            5,
+            EmbeddingConfig::default(),
+        );
+        assert!(manifest.validate_document_schema().is_ok());
+    }
+
+    #[test]
+    fn index_manifest_validate_document_schema_mismatch() {
+        let mut manifest = IndexManifest::new(
+            1,
+            "2026-04-30T12:00:00Z",
+            100,
+            5,
+            EmbeddingConfig::default(),
+        );
+        manifest.document_schema = "ee.search.document.v0".to_owned();
+
+        let result = manifest.validate_document_schema();
+        assert_eq!(
+            result,
+            Err(IndexManifestError::DocumentSchemaMismatch {
+                expected_schema: CANONICAL_DOCUMENT_SCHEMA.to_owned(),
+                actual_schema: "ee.search.document.v0".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn index_manifest_stale_but_reachable_reports_stale_not_current() {
+        // Bug: eidetic_engine_cli-86mw
+        // A manifest with matching generation but incompatible artifacts should
+        // fail validation, not report Current.
+
+        // Case 1: Matching db_generation but wrong embedding dimension
+        let manifest = IndexManifest::new(
+            1,
+            "2026-04-30T12:00:00Z",
+            100,
+            5, // Same db_generation as we'll check
+            EmbeddingConfig::new("hash-256", 512, true), // Wrong dimension
+        );
+        let expected = EmbeddingConfig::default();
+
+        // check_staleness alone would say Current (same generation)
+        assert_eq!(manifest.check_staleness(5), IndexStaleness::Current);
+
+        // But full validate should catch the incompatibility
+        let result = manifest.validate(&expected, 5);
+        assert!(result.is_err());
+        assert_eq!(
+            result,
+            Err(IndexManifestError::EmbeddingDimensionMismatch {
+                expected_dimension: 256,
+                actual_dimension: 512,
+            })
+        );
+    }
+
+    #[test]
+    fn index_manifest_full_validate_checks_document_schema() {
+        let mut manifest = IndexManifest::new(
+            1,
+            "2026-04-30T12:00:00Z",
+            100,
+            5,
+            EmbeddingConfig::default(),
+        );
+        manifest.document_schema = "ee.search.document.v0".to_owned();
+        let expected = EmbeddingConfig::default();
+
+        // check_staleness alone would say Current
+        assert_eq!(manifest.check_staleness(5), IndexStaleness::Current);
+
+        // But full validate should catch document schema mismatch
+        let result = manifest.validate(&expected, 5);
+        assert!(result.is_err());
+        assert_eq!(
+            result,
+            Err(IndexManifestError::DocumentSchemaMismatch {
+                expected_schema: CANONICAL_DOCUMENT_SCHEMA.to_owned(),
+                actual_schema: "ee.search.document.v0".to_owned(),
+            })
+        );
+    }
+
+    #[test]
     fn index_manifest_error_codes_are_stable() {
         assert_eq!(
             IndexManifestError::NotFound {
@@ -1992,6 +2206,30 @@ mod tests {
             .code(),
             "index_embedding_mismatch"
         );
+        assert_eq!(
+            IndexManifestError::EmbeddingDimensionMismatch {
+                expected_dimension: 256,
+                actual_dimension: 512
+            }
+            .code(),
+            "index_embedding_dimension_mismatch"
+        );
+        assert_eq!(
+            IndexManifestError::EmbeddingDeterministicMismatch {
+                expected: true,
+                actual: false
+            }
+            .code(),
+            "index_embedding_deterministic_mismatch"
+        );
+        assert_eq!(
+            IndexManifestError::DocumentSchemaMismatch {
+                expected_schema: "a".to_owned(),
+                actual_schema: "b".to_owned()
+            }
+            .code(),
+            "index_document_schema_mismatch"
+        );
     }
 
     #[test]
@@ -2017,6 +2255,18 @@ mod tests {
             IndexManifestError::EmbeddingMismatch {
                 expected_model: "a".to_owned(),
                 actual_model: "b".to_owned(),
+            },
+            IndexManifestError::EmbeddingDimensionMismatch {
+                expected_dimension: 256,
+                actual_dimension: 512,
+            },
+            IndexManifestError::EmbeddingDeterministicMismatch {
+                expected: true,
+                actual: false,
+            },
+            IndexManifestError::DocumentSchemaMismatch {
+                expected_schema: "a".to_owned(),
+                actual_schema: "b".to_owned(),
             },
         ];
         for error in errors {
