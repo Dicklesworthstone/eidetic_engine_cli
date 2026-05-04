@@ -62,11 +62,11 @@ data:
         diagnostic:
           schema: ee.output_size_diagnostic.v1
           json:
-            bytes: 2348
-            estimatedTokens: 70
+            bytes: 2359
+            estimatedTokens: 74
           toon:
-            bytes: 2258
-            estimatedTokens: 234
+            bytes: 2269
+            estimatedTokens: 238
           savings:
             bytes: 90
             tokens: -164

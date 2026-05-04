@@ -38,6 +38,10 @@ use crate::core::doctor::{
     DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport, IntegrityDiagnosticsOptions,
     IntegrityDiagnosticsReport,
 };
+use crate::core::economy::{
+    EconomyPrunePlanOptions, EconomyReportOptions, EconomyScoreOptions, EconomySimulateOptions,
+    generate_economy_report, generate_prune_plan, score_artifact, simulate_budgets,
+};
 use crate::core::feedback::{PreflightFeedbackKind, TaskOutcome};
 use crate::core::handoff::{
     InspectOptions as HandoffInspectOptions, ResumeOptions as HandoffResumeOptions,
@@ -51,14 +55,20 @@ use crate::core::index::{
 use crate::core::init::{InitOptions, init_workspace};
 use crate::core::install::{InstallCheckOptions, InstallPlanOptions, check_install, plan_install};
 use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
+use crate::core::lab::{
+    CaptureOptions as LabCaptureOptions, CounterfactualOptions as LabCounterfactualOptions,
+    InterventionSpec, ReplayOptions as LabReplayOptions, capture_episode, replay_episode,
+    run_counterfactual,
+};
 use crate::core::learn::{
     LearnCloseOptions, LearnExperimentRunOptions, LearnObserveOptions, close_experiment,
     observe_experiment, run_experiment,
 };
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
-    GetMemoryOptions, ListMemoriesOptions, RememberMemoryOptions, RememberMemoryReport,
-    get_memory_details, list_memories, remember_memory,
+    GetMemoryOptions, ListMemoriesOptions, MemoryReviseReport, RememberMemoryOptions,
+    RememberMemoryReport, ReviseMemoryOptions, ReviseReason, get_memory_details, list_memories,
+    remember_memory, revise_memory,
 };
 use crate::core::outcome::{
     DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
@@ -3252,6 +3262,10 @@ pub enum EconomyCommand {
 /// Arguments for `ee economy report`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct EconomyReportArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
     /// Filter by artifact type: memory, procedure, tripwire, situation.
     #[arg(long, value_name = "TYPE")]
     pub artifact_type: Option<String>,
@@ -3276,6 +3290,10 @@ pub struct EconomyScoreArgs {
     #[arg(value_name = "ARTIFACT_ID")]
     pub artifact_id: String,
 
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
     /// Type of artifact: memory, procedure, tripwire, situation.
     #[arg(long, value_name = "TYPE", default_value = "memory")]
     pub artifact_type: String,
@@ -3288,6 +3306,10 @@ pub struct EconomyScoreArgs {
 /// Arguments for `ee economy simulate`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct EconomySimulateArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
     /// Baseline budget in tokens used for delta comparisons.
     #[arg(long, value_name = "TOKENS", default_value_t = 4000)]
     pub baseline_budget: u32,
@@ -3308,6 +3330,10 @@ pub struct EconomySimulateArgs {
 /// Arguments for `ee economy prune-plan`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct EconomyPrunePlanArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
     /// Confirm that the command must not mutate durable state.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
@@ -3394,6 +3420,8 @@ pub enum MemoryCommand {
     Show(MemoryShowArgs),
     /// Show the history of a memory (audit log entries).
     History(MemoryHistoryArgs),
+    /// Preview or request an immutable memory revision.
+    Revise(MemoryReviseArgs),
 }
 
 /// Arguments for `ee memory list`.
@@ -3446,6 +3474,54 @@ pub struct MemoryHistoryArgs {
     /// Maximum number of history entries to return.
     #[arg(long, short = 'n', default_value_t = 50)]
     pub limit: u32,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee memory revise`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MemoryReviseArgs {
+    /// Memory ID to revise (e.g., "mem_01JV...").
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Replacement memory content.
+    #[arg(long, value_name = "TEXT")]
+    pub content: Option<String>,
+
+    /// Replacement memory level (working, episodic, semantic, procedural).
+    #[arg(long, short = 'l', value_name = "LEVEL")]
+    pub level: Option<String>,
+
+    /// Replacement memory kind (rule, fact, decision, failure, etc.).
+    #[arg(long, short = 'k', value_name = "KIND")]
+    pub kind: Option<String>,
+
+    /// Replacement confidence score (0.0 to 1.0).
+    #[arg(long, value_name = "SCORE")]
+    pub confidence: Option<String>,
+
+    /// Replacement tags, comma-separated.
+    #[arg(long = "tag", alias = "tags", short = 't', value_name = "TAGS")]
+    pub tags: Option<String>,
+
+    /// Replacement provenance URI. `--source` is accepted as an alias.
+    #[arg(long, alias = "source", value_name = "URI")]
+    pub provenance_uri: Option<String>,
+
+    /// Revision reason: correction, update, refinement, consolidation, or custom text.
+    #[arg(long, default_value = "update", value_name = "REASON")]
+    pub reason: String,
+
+    /// Actor requesting the revision.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Preview the revision without writing. Required until revision storage is implemented.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -4180,6 +4256,9 @@ where
         }
         Some(Command::Memory(MemoryCommand::History(ref args))) => {
             handle_memory_history(&cli, args, stdout, stderr)
+        }
+        Some(Command::Memory(MemoryCommand::Revise(ref args))) => {
+            handle_memory_revise(&cli, args, stdout, stderr)
         }
         Some(Command::Index(IndexCommand::Rebuild(ref args))) => {
             handle_index_rebuild(&cli, args, stdout, stderr)
@@ -5942,53 +6021,85 @@ where
 // EE-382: Lab Command Handlers
 // ============================================================================
 
-const LAB_UNAVAILABLE_CODE: &str = "lab_replay_unavailable";
-const LAB_UNAVAILABLE_MESSAGE: &str = "Counterfactual lab capture, replay, and intervention analysis are unavailable until lab commands are backed by stored episodes and evidence-only replay artifacts instead of generated reports.";
-const LAB_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const LAB_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-db4z";
+fn lab_workspace(cli: &Cli) -> PathBuf {
+    cli.workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
 
-fn write_lab_unavailable<W, E>(
+fn write_lab_capture_report<W>(
     cli: &Cli,
-    command: &'static str,
+    report: &crate::core::lab::CaptureReport,
     stdout: &mut W,
-    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
-    E: Write,
 {
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": LAB_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": LAB_UNAVAILABLE_MESSAGE,
-                "repair": LAB_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": LAB_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": LAB_UNAVAILABLE_MESSAGE,
-                        "repair": LAB_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": LAB_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": "unavailable before lab episode capture, replay, or counterfactual mutation"
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &(output::render_lab_capture_human(report) + "\n"))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_lab_capture_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_lab_capture_json(report) + "\n"))
+        }
     }
+}
 
-    let _ = writeln!(stderr, "error: {LAB_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {LAB_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
+fn write_lab_replay_report<W>(
+    cli: &Cli,
+    report: &crate::core::lab::ReplayReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &(output::render_lab_replay_human(report) + "\n"))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_lab_replay_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_lab_replay_json(report) + "\n"))
+        }
+    }
+}
+
+fn write_lab_counterfactual_report<W>(
+    cli: &Cli,
+    report: &crate::core::lab::CounterfactualReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &(output::render_lab_counterfactual_human(report) + "\n"),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_lab_counterfactual_toon(report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_lab_counterfactual_json(report) + "\n"),
+        ),
+    }
 }
 
 fn handle_lab_capture<W, E>(
@@ -6001,8 +6112,19 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_lab_unavailable(cli, "lab capture", stdout, stderr)
+    let options = LabCaptureOptions {
+        workspace: lab_workspace(cli),
+        session_id: args.session_id.clone(),
+        task_input: args.task_input.clone(),
+        include_memories: args.include_memories,
+        include_actions: args.include_actions,
+        dry_run: args.dry_run,
+    };
+
+    match capture_episode(&options) {
+        Ok(report) => write_lab_capture_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_lab_replay<W, E>(
@@ -6015,8 +6137,18 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_lab_unavailable(cli, "lab replay", stdout, stderr)
+    let options = LabReplayOptions {
+        workspace: lab_workspace(cli),
+        episode_id: args.episode_id.clone(),
+        verify_hash: true,
+        record_trace: true,
+        dry_run: args.dry_run,
+    };
+
+    match replay_episode(&options) {
+        Ok(report) => write_lab_replay_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_lab_counterfactual<W, E>(
@@ -6029,8 +6161,44 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_lab_unavailable(cli, "lab counterfactual", stdout, stderr)
+    let mut interventions = Vec::new();
+    interventions.extend(
+        args.add_memory
+            .iter()
+            .cloned()
+            .map(InterventionSpec::add_memory),
+    );
+    interventions.extend(
+        args.remove_memory
+            .iter()
+            .cloned()
+            .map(InterventionSpec::remove_memory),
+    );
+    interventions.extend(
+        args.strengthen_memory
+            .iter()
+            .cloned()
+            .map(|memory_id| InterventionSpec::strengthen_memory(memory_id, 0.25)),
+    );
+    interventions.extend(
+        args.weaken_memory
+            .iter()
+            .cloned()
+            .map(|memory_id| InterventionSpec::weaken_memory(memory_id, 0.25)),
+    );
+
+    let options = LabCounterfactualOptions {
+        workspace: lab_workspace(cli),
+        episode_id: args.episode_id.clone(),
+        interventions,
+        generate_hypotheses: true,
+        dry_run: args.dry_run,
+    };
+
+    match run_counterfactual(&options) {
+        Ok(report) => write_lab_counterfactual_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 // ============================================================================
@@ -7639,7 +7807,7 @@ where
 }
 
 const DIAG_QUARANTINE_UNAVAILABLE_CODE: &str = "quarantine_trust_state_unavailable";
-const DIAG_QUARANTINE_UNAVAILABLE_MESSAGE: &str = "Quarantine diagnostics are unavailable until persistent source trust state is wired instead of reporting an empty placeholder posture.";
+const DIAG_QUARANTINE_UNAVAILABLE_MESSAGE: &str = "Quarantine diagnostics are unavailable until persistent source trust state is wired instead of reporting an empty derived health posture.";
 const DIAG_QUARANTINE_UNAVAILABLE_REPAIR: &str = "ee status --json";
 const DIAG_QUARANTINE_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-5g6d";
 const DIAG_QUARANTINE_UNAVAILABLE_SIDE_EFFECT: &str =
@@ -8432,6 +8600,131 @@ where
             stdout,
             &(output::render_memory_history_json(&report) + "\n"),
         ),
+    }
+}
+
+fn handle_memory_revise<W, E>(
+    cli: &Cli,
+    args: &MemoryReviseArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let confidence = match parse_memory_revise_confidence(args.confidence.as_deref()) {
+        Ok(value) => value,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let tags = args.tags.as_deref().map(parse_memory_revise_tags);
+    let reason = ReviseReason::parse(args.reason.trim());
+
+    let options = ReviseMemoryOptions {
+        database_path: &database_path,
+        original_memory_id: &args.memory_id,
+        content: args.content.as_deref(),
+        level: args.level.as_deref(),
+        kind: args.kind.as_deref(),
+        confidence,
+        tags,
+        provenance_uri: args.provenance_uri.as_deref(),
+        reason,
+        actor: args.actor.as_deref(),
+        dry_run: args.dry_run,
+    };
+
+    let report = revise_memory(&options);
+    if !report.success {
+        let domain_error = memory_revise_error_to_domain(&report, &args.memory_id);
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_output())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
+    }
+}
+
+fn parse_memory_revise_confidence(raw: Option<&str>) -> Result<Option<f32>, DomainError> {
+    match raw {
+        Some(value) => match value.parse::<f32>() {
+            Ok(parsed) if parsed.is_finite() && (0.0..=1.0).contains(&parsed) => Ok(Some(parsed)),
+            _ => Err(DomainError::Usage {
+                message: format!(
+                    "Invalid confidence `{value}`: expected a finite number from 0.0 to 1.0"
+                ),
+                repair: Some("Use --confidence 0.8".to_owned()),
+            }),
+        },
+        None => Ok(None),
+    }
+}
+
+fn parse_memory_revise_tags(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn memory_revise_error_to_domain(report: &MemoryReviseReport, memory_id: &str) -> DomainError {
+    match report.error.as_deref() {
+        Some("Memory not found") => DomainError::NotFound {
+            resource: "memory".to_string(),
+            id: memory_id.to_string(),
+            repair: Some("ee memory list".to_string()),
+        },
+        Some("No changes specified") => DomainError::Usage {
+            message: "No memory revision changes were specified.".to_string(),
+            repair: Some(
+                "Use at least one of --content, --level, --kind, --confidence, --tag, or --provenance-uri."
+                    .to_string(),
+            ),
+        },
+        Some("Cannot revise tombstoned memory") => DomainError::PolicyDenied {
+            message: "Cannot revise tombstoned memory.".to_string(),
+            repair: Some("Use ee memory show --include-tombstoned to inspect it.".to_string()),
+        },
+        Some(message) if message.starts_with("Memory revision writes are unavailable") => {
+            DomainError::PolicyDenied {
+                message: message.to_string(),
+                repair: Some("Rerun with --dry-run to preview the revision.".to_string()),
+            }
+        }
+        Some(message) => DomainError::Storage {
+            message: message.to_string(),
+            repair: Some("ee doctor".to_string()),
+        },
+        None => DomainError::PolicyDenied {
+            message: "Memory revision did not complete.".to_string(),
+            repair: Some("Rerun with --dry-run to preview the revision.".to_string()),
+        },
     }
 }
 
@@ -9939,6 +10232,92 @@ where
         }
     }
     error.exit_code()
+}
+
+impl MemoryReviseReport {
+    #[must_use]
+    pub fn human_output(&self) -> String {
+        let changed_fields = if self.changed_fields.is_empty() {
+            "none".to_string()
+        } else {
+            self.changed_fields.join(", ")
+        };
+
+        if self.dry_run {
+            format!(
+                "DRY RUN: Would revise memory {}\n  Reason: {}\n  Changed fields: {}\n",
+                self.original_id, self.reason, changed_fields
+            )
+        } else if self.success {
+            let new_id = self.new_id.as_deref().unwrap_or("unknown");
+            format!(
+                "Revised memory {}\n  New memory: {}\n  Reason: {}\n  Changed fields: {}\n",
+                self.original_id, new_id, self.reason, changed_fields
+            )
+        } else {
+            let error = self.error.as_deref().unwrap_or("Memory revision failed");
+            format!(
+                "Memory revision unavailable for {}\n  Reason: {}\n  Changed fields: {}\n  Error: {}\n",
+                self.original_id, self.reason, changed_fields, error
+            )
+        }
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        let status = if self.success {
+            if self.dry_run { "DRY_RUN" } else { "REVISED" }
+        } else {
+            "UNAVAILABLE"
+        };
+        format!(
+            "{}|{}|{}|{}",
+            status,
+            self.original_id,
+            self.reason,
+            self.changed_fields.join(",")
+        )
+    }
+
+    #[must_use]
+    pub fn json_output(&self) -> String {
+        let json = serde_json::json!({
+            "schema": "ee.response.v1",
+            "success": self.success,
+            "data": {
+                "command": "memory revise",
+                "version": self.version,
+                "dry_run": self.dry_run,
+                "persisted": self.success && !self.dry_run,
+                "original_id": self.original_id,
+                "new_id": self.new_id,
+                "revision_group_id": self.revision_group_id,
+                "revision_number": self.revision_number,
+                "reason": self.reason,
+                "changed_fields": self.changed_fields,
+                "audit_id": null,
+                "index_job_id": null,
+                "index_status": if self.success && !self.dry_run {
+                    "pending"
+                } else {
+                    "not_scheduled"
+                },
+                "policy": if self.success && !self.dry_run {
+                    "writes_enabled"
+                } else {
+                    "dry_run_only"
+                },
+                "degraded": if self.success && self.dry_run {
+                    vec!["revision_write_unavailable"]
+                } else {
+                    Vec::<&str>::new()
+                },
+                "error": self.error,
+            }
+        });
+
+        json.to_string()
+    }
 }
 
 impl RememberMemoryReport {
@@ -12331,55 +12710,6 @@ where
 // EE-431: Memory Economics and Attention Budgets
 // ============================================================================
 
-const ECONOMY_UNAVAILABLE_CODE: &str = "economy_metrics_unavailable";
-const ECONOMY_UNAVAILABLE_MESSAGE: &str = "Memory economy metrics are unavailable until economy scoring is backed by persisted workspace data instead of static seed fixtures.";
-const ECONOMY_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const ECONOMY_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-ve0w";
-
-fn write_economy_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": ECONOMY_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": ECONOMY_UNAVAILABLE_MESSAGE,
-                "repair": ECONOMY_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": ECONOMY_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": ECONOMY_UNAVAILABLE_MESSAGE,
-                        "repair": ECONOMY_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": ECONOMY_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": "read-only, conservative abstention"
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
-
-    let _ = writeln!(stderr, "error: {ECONOMY_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {ECONOMY_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
-}
-
 fn handle_economy_report<W, E>(
     cli: &Cli,
     args: &EconomyReportArgs,
@@ -12390,8 +12720,38 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_economy_unavailable(cli, "economy report", stdout, stderr)
+    let (workspace_path, database_path) = match economy_paths(cli, args.database.as_deref()) {
+        Ok(paths) => paths,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let options = EconomyReportOptions {
+        workspace_path,
+        database_path,
+        artifact_type: args.artifact_type.clone(),
+        min_utility: args.min_utility,
+        include_debt: args.include_debt,
+        include_reserves: args.include_reserves,
+    };
+
+    match generate_economy_report(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &render_economy_report_human(&report))
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(economy_response_json("economy report", "report", &report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(economy_response_json("economy report", "report", &report) + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_economy_score<W, E>(
@@ -12404,8 +12764,37 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_economy_unavailable(cli, "economy score", stdout, stderr)
+    let (workspace_path, database_path) = match economy_paths(cli, args.database.as_deref()) {
+        Ok(paths) => paths,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let options = EconomyScoreOptions {
+        workspace_path,
+        database_path,
+        artifact_id: args.artifact_id.clone(),
+        artifact_type: args.artifact_type.clone(),
+        breakdown: args.breakdown,
+    };
+
+    match score_artifact(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &render_economy_score_human(&report))
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(economy_response_json("economy score", "score", &report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(economy_response_json("economy score", "score", &report) + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_economy_simulate<W, E>(
@@ -12426,7 +12815,38 @@ where
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
 
-    write_economy_unavailable(cli, "economy simulate", stdout, stderr)
+    let (workspace_path, database_path) = match economy_paths(cli, args.database.as_deref()) {
+        Ok(paths) => paths,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let options = EconomySimulateOptions {
+        workspace_path,
+        database_path,
+        baseline_budget_tokens: args.baseline_budget,
+        budget_tokens: args.budgets.clone(),
+        context_profile: args.context_profile.clone(),
+        situation_profile: args.situation_profile.clone(),
+    };
+
+    match simulate_budgets(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &render_economy_simulation_human(&report))
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(economy_response_json("economy simulate", "simulation", &report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(economy_response_json("economy simulate", "simulation", &report) + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_economy_prune_plan<W, E>(
@@ -12447,7 +12867,122 @@ where
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
 
-    write_economy_unavailable(cli, "economy prune-plan", stdout, stderr)
+    let (workspace_path, database_path) = match economy_paths(cli, args.database.as_deref()) {
+        Ok(paths) => paths,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let options = EconomyPrunePlanOptions {
+        workspace_path,
+        database_path,
+        dry_run: args.dry_run,
+        max_recommendations: args.max_recommendations,
+    };
+
+    match generate_prune_plan(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &render_economy_prune_plan_human(&report))
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(economy_response_json("economy prune-plan", "prunePlan", &report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(economy_response_json("economy prune-plan", "prunePlan", &report) + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn economy_paths(cli: &Cli, database: Option<&Path>) -> Result<(PathBuf, PathBuf), DomainError> {
+    let workspace_path =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = database
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        return Err(DomainError::UnsatisfiedDegradedMode {
+            message: format!(
+                "Memory economy metrics are unavailable because no database exists at {}.",
+                database_path.display()
+            ),
+            repair: Some("ee init --workspace .".to_owned()),
+        });
+    }
+
+    Ok((workspace_path, database_path))
+}
+
+fn economy_response_json<T>(command: &'static str, payload_key: &'static str, payload: &T) -> String
+where
+    T: serde::Serialize,
+{
+    let mut data = serde_json::Map::new();
+    data.insert(
+        "command".to_owned(),
+        serde_json::Value::String(command.to_owned()),
+    );
+    data.insert(
+        "version".to_owned(),
+        serde_json::Value::String(env!("CARGO_PKG_VERSION").to_owned()),
+    );
+    data.insert(
+        payload_key.to_owned(),
+        serde_json::to_value(payload).unwrap_or_else(|error| {
+            serde_json::json!({
+                "serializationError": error.to_string(),
+            })
+        }),
+    );
+
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": data,
+    })
+    .to_string()
+}
+
+fn render_economy_report_human(report: &crate::core::economy::EconomyReport) -> String {
+    format!(
+        "Economy report: {}\n  Artifacts: {}\n  Scored: {}\n  Mutation: {}\n",
+        report.status,
+        report.total_artifacts,
+        report.scored_artifact_ids.len(),
+        report.mutation_status
+    )
+}
+
+fn render_economy_score_human(report: &crate::core::economy::EconomyScoreReport) -> String {
+    format!(
+        "Economy score: {}\n  Artifact: {}\n  Score: {:.4}\n  Mutation: {}\n",
+        report.status, report.artifact_id, report.overall_score, report.mutation_status
+    )
+}
+
+fn render_economy_simulation_human(
+    report: &crate::core::economy::EconomySimulationReport,
+) -> String {
+    format!(
+        "Economy simulation: {}\n  Baseline budget: {}\n  Scenarios: {}\n  Mutation: {}\n",
+        report.status,
+        report.baseline_budget_tokens,
+        report.scenarios.len(),
+        report.mutation_status
+    )
+}
+
+fn render_economy_prune_plan_human(report: &crate::core::economy::EconomyPrunePlan) -> String {
+    format!(
+        "Economy prune plan: {}\n  Recommendations: {}\n  Mutation: {}\n",
+        report.status, report.summary.recommendation_count, report.mutation_status
+    )
 }
 
 // ============================================================================
@@ -12755,6 +13290,7 @@ impl NormalizedInvocation {
                     MemoryCommand::List(_) => "memory list".to_string(),
                     MemoryCommand::Show(_) => "memory show".to_string(),
                     MemoryCommand::History(_) => "memory history".to_string(),
+                    MemoryCommand::Revise(_) => "memory revise".to_string(),
                 },
                 Command::Mcp(mcp) => match mcp {
                     McpCommand::Manifest => "mcp manifest".to_string(),
@@ -13182,6 +13718,57 @@ impl InvocationHints {
 // EE-393: Tripwire List and Check Commands
 // ============================================================================
 
+const TRIPWIRE_STORE_UNAVAILABLE_CODE: &str = "tripwire_store_unavailable";
+const TRIPWIRE_STORE_UNAVAILABLE_MESSAGE: &str = "Tripwire store access is unavailable until tripwire commands are backed by persisted preflight tripwire records.";
+const TRIPWIRE_STORE_UNAVAILABLE_REPAIR: &str = "ee status --json";
+const TRIPWIRE_STORE_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-qmu0";
+const TRIPWIRE_STORE_UNAVAILABLE_SIDE_EFFECT: &str =
+    "read-only, conservative abstention; no tripwire store read or event evaluation";
+
+fn write_tripwire_store_unavailable<W, E>(
+    cli: &Cli,
+    command: &'static str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": false,
+            "data": {
+                "command": command,
+                "code": TRIPWIRE_STORE_UNAVAILABLE_CODE,
+                "severity": "warning",
+                "message": TRIPWIRE_STORE_UNAVAILABLE_MESSAGE,
+                "repair": TRIPWIRE_STORE_UNAVAILABLE_REPAIR,
+                "degraded": [
+                    {
+                        "code": TRIPWIRE_STORE_UNAVAILABLE_CODE,
+                        "severity": "warning",
+                        "message": TRIPWIRE_STORE_UNAVAILABLE_MESSAGE,
+                        "repair": TRIPWIRE_STORE_UNAVAILABLE_REPAIR
+                    }
+                ],
+                "evidenceIds": [],
+                "sourceIds": [],
+                "followUpBead": TRIPWIRE_STORE_UNAVAILABLE_FOLLOW_UP,
+                "sideEffectClass": TRIPWIRE_STORE_UNAVAILABLE_SIDE_EFFECT
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::UnsatisfiedDegradedMode;
+    }
+
+    let _ = writeln!(stderr, "error: {TRIPWIRE_STORE_UNAVAILABLE_MESSAGE}");
+    let _ = writeln!(stderr, "\nNext:\n  {TRIPWIRE_STORE_UNAVAILABLE_REPAIR}");
+    ProcessExitCode::UnsatisfiedDegradedMode
+}
+
 fn handle_tripwire_list<W, E>(
     cli: &Cli,
     args: &TripwireListArgs,
@@ -13202,11 +13789,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_tripwire_store_unavailable(cli, "tripwire list", stdout, stderr);
     }
 
     let state = match parse_optional_tripwire_state(args.state.as_deref()) {
@@ -13228,8 +13811,14 @@ where
         include_disarmed: args.include_disarmed,
     }) {
         Ok(report) => report,
+        Err(DomainError::Storage { .. } | DomainError::MigrationRequired { .. }) => {
+            return write_tripwire_store_unavailable(cli, "tripwire list", stdout, stderr);
+        }
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
+    if args.database.is_none() && report.total_count == 0 {
+        return write_tripwire_store_unavailable(cli, "tripwire list", stdout, stderr);
+    }
 
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
@@ -13274,11 +13863,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_tripwire_store_unavailable(cli, "tripwire check", stdout, stderr);
     }
 
     let report = match check_tripwire(&TripwireCheckOptions {
@@ -13291,8 +13876,14 @@ where
         dry_run: args.dry_run,
     }) {
         Ok(report) => report,
+        Err(DomainError::Storage { .. } | DomainError::MigrationRequired { .. }) => {
+            return write_tripwire_store_unavailable(cli, "tripwire check", stdout, stderr);
+        }
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
+    if args.database.is_none() && report.result.as_str() == "not_found" {
+        return write_tripwire_store_unavailable(cli, "tripwire check", stdout, stderr);
+    }
 
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
@@ -15462,6 +16053,18 @@ mod tests {
     }
 
     #[test]
+    fn diag_quarantine_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "diag", "quarantine"])
+            .map_err(|e| format!("failed to parse diag quarantine: {:?}", e.kind()))?;
+
+        ensure_equal(
+            &parsed.command,
+            &Some(Command::Diag(DiagCommand::Quarantine)),
+            "diag quarantine command",
+        )
+    }
+
+    #[test]
     fn diag_integrity_command_parses() -> TestResult {
         let parsed = Cli::try_parse_from([
             "ee",
@@ -15635,6 +16238,37 @@ mod tests {
             "missing database degradation",
         )?;
         ensure(stderr.is_empty(), "diag integrity json stderr empty")
+    }
+
+    #[test]
+    fn diag_quarantine_json_degrades_without_placeholder_report() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "diag", "quarantine", "--json"]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::UnsatisfiedDegradedMode,
+            "diag quarantine exit",
+        )?;
+        ensure_contains(&stdout, "\"schema\":\"ee.response.v1\"", "response schema")?;
+        ensure_contains(&stdout, "\"success\":false", "success flag")?;
+        ensure_contains(
+            &stdout,
+            "\"command\":\"diag quarantine\"",
+            "diag quarantine command",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"code\":\"quarantine_trust_state_unavailable\"",
+            "quarantine unavailable code",
+        )?;
+        ensure_contains(&stdout, "\"repair\":\"ee status --json\"", "repair")?;
+        ensure(
+            !stdout.contains("ee.quarantine.v1")
+                && !stdout.contains("\"healthy_count\"")
+                && !stdout.contains("placeholder"),
+            "diag quarantine degraded output must not emit a placeholder report",
+        )?;
+        ensure(stderr.is_empty(), "diag quarantine json stderr empty")
     }
 
     // ========================================================================
@@ -16461,6 +17095,217 @@ mod tests {
             ),
             _ => Err("expected Memory Show command".to_string()),
         }
+    }
+
+    #[test]
+    fn memory_revise_command_parses_preview_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "memory",
+            "revise",
+            "mem_test123",
+            "--content",
+            "Updated memory",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--confidence",
+            "0.91",
+            "--tag",
+            "release,format",
+            "--source",
+            "file:///tmp/source.md#L1",
+            "--reason",
+            "correction",
+            "--actor",
+            "CopperDuck",
+            "--dry-run",
+            "--database",
+            "/tmp/ee.db",
+        ])
+        .map_err(|e| format!("failed to parse memory revise: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Memory(MemoryCommand::Revise(ref args))) => {
+                ensure_equal(&args.memory_id, &"mem_test123".to_string(), "memory id")?;
+                ensure_equal(
+                    &args.content,
+                    &Some("Updated memory".to_string()),
+                    "content",
+                )?;
+                ensure_equal(&args.level, &Some("procedural".to_string()), "level")?;
+                ensure_equal(&args.kind, &Some("rule".to_string()), "kind")?;
+                ensure_equal(&args.confidence, &Some("0.91".to_string()), "confidence")?;
+                ensure_equal(&args.tags, &Some("release,format".to_string()), "tags")?;
+                ensure_equal(
+                    &args.provenance_uri,
+                    &Some("file:///tmp/source.md#L1".to_string()),
+                    "provenance",
+                )?;
+                ensure_equal(&args.reason, &"correction".to_string(), "reason")?;
+                ensure_equal(&args.actor, &Some("CopperDuck".to_string()), "actor")?;
+                ensure_equal(&args.dry_run, &true, "dry_run")?;
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("/tmp/ee.db")),
+                    "database path",
+                )
+            }
+            _ => Err("expected Memory Revise command".to_string()),
+        }
+    }
+
+    #[test]
+    fn memory_revise_dry_run_json_reports_preview_without_persistence() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().to_string_lossy().into_owned();
+        let (init_exit, _init_stdout, init_stderr) =
+            invoke(&["ee", "--workspace", &workspace, "init", "--json"]);
+        ensure_equal(&init_exit, &ProcessExitCode::Success, "init exit")?;
+        ensure(init_stderr.is_empty(), "init json stderr clean")?;
+
+        let (remember_exit, remember_stdout, remember_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "remember",
+            "Run cargo fmt --check before release.",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--json",
+        ]);
+        ensure_equal(&remember_exit, &ProcessExitCode::Success, "remember exit")?;
+        ensure(remember_stderr.is_empty(), "remember json stderr clean")?;
+        let remembered: serde_json::Value =
+            serde_json::from_str(&remember_stdout).map_err(|error| error.to_string())?;
+        let memory_id = remembered["data"]["memory_id"]
+            .as_str()
+            .ok_or_else(|| "remember output missing memory_id".to_string())?;
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--json",
+            "memory",
+            "revise",
+            memory_id,
+            "--content",
+            "Run cargo fmt --check and clippy before release.",
+            "--reason",
+            "correction",
+            "--dry-run",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "revise dry-run exit")?;
+        ensure(stderr.is_empty(), "revise dry-run json stderr clean")?;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["command"],
+            &serde_json::json!("memory revise"),
+            "command",
+        )?;
+        ensure_equal(
+            &value["data"]["dry_run"],
+            &serde_json::json!(true),
+            "dry_run",
+        )?;
+        ensure_equal(
+            &value["data"]["persisted"],
+            &serde_json::json!(false),
+            "persisted",
+        )?;
+        ensure_equal(
+            &value["data"]["new_id"],
+            &serde_json::Value::Null,
+            "no stub new_id",
+        )?;
+        ensure_equal(
+            &value["data"]["revision_number"],
+            &serde_json::Value::Null,
+            "no stub revision number",
+        )?;
+        ensure_equal(
+            &value["data"]["changed_fields"],
+            &serde_json::json!(["content"]),
+            "changed fields",
+        )?;
+        ensure_equal(
+            &value["data"]["degraded"],
+            &serde_json::json!(["revision_write_unavailable"]),
+            "degraded code",
+        )
+    }
+
+    #[test]
+    fn memory_revise_non_dry_run_is_policy_denied() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().to_string_lossy().into_owned();
+        let (init_exit, _init_stdout, init_stderr) =
+            invoke(&["ee", "--workspace", &workspace, "init", "--json"]);
+        ensure_equal(&init_exit, &ProcessExitCode::Success, "init exit")?;
+        ensure(init_stderr.is_empty(), "init json stderr clean")?;
+
+        let (remember_exit, remember_stdout, remember_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "remember",
+            "Prefer deterministic context packs.",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--json",
+        ]);
+        ensure_equal(&remember_exit, &ProcessExitCode::Success, "remember exit")?;
+        ensure(remember_stderr.is_empty(), "remember json stderr clean")?;
+        let remembered: serde_json::Value =
+            serde_json::from_str(&remember_stdout).map_err(|error| error.to_string())?;
+        let memory_id = remembered["data"]["memory_id"]
+            .as_str()
+            .ok_or_else(|| "remember output missing memory_id".to_string())?;
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--json",
+            "memory",
+            "revise",
+            memory_id,
+            "--content",
+            "Prefer deterministic context packs with provenance.",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::PolicyDenied, "revise policy exit")?;
+        ensure(stderr.is_empty(), "revise policy json stderr clean")?;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.error.v1"),
+            "error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("policy_denied"),
+            "policy code",
+        )?;
+        ensure_contains(
+            value["error"]["message"].as_str().unwrap_or_default(),
+            "revision writes are unavailable",
+            "policy message",
+        )
     }
 
     // ========================================================================

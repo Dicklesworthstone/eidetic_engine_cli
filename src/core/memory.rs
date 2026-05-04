@@ -1918,6 +1918,30 @@ mod tests {
         }
     }
 
+    fn remember_revisable_memory(
+        content: &str,
+    ) -> Result<(tempfile::TempDir, RememberMemoryReport), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let created = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content,
+            level: "procedural",
+            kind: "rule",
+            tags: Some("release,checks"),
+            confidence: 0.9,
+            source: Some("file://README.md#L74-77"),
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        Ok((temp, created))
+    }
+
     #[test]
     fn memory_show_report_not_found_is_correct() -> TestResult {
         let report = MemoryShowReport::not_found();
@@ -2703,23 +2727,8 @@ mod tests {
 
     #[test]
     fn revise_memory_non_dry_run_reports_unavailable_instead_of_stub_success() -> TestResult {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
-
-        let created = remember_memory(&RememberMemoryOptions {
-            workspace_path: temp.path(),
-            database_path: None,
-            content: "Store release checks as durable memory.",
-            level: "procedural",
-            kind: "rule",
-            tags: Some("release,checks"),
-            confidence: 0.9,
-            source: Some("file://README.md#L74-77"),
-            valid_from: None,
-            valid_to: None,
-            dry_run: false,
-        })
-        .map_err(|error| error.message())?;
+        let (_temp, created) =
+            remember_revisable_memory("Store release checks as durable memory.")?;
         let memory_id = created.memory_id.to_string();
 
         let report = revise_memory(&ReviseMemoryOptions {
@@ -2774,6 +2783,154 @@ mod tests {
             original.content,
             "Store release checks as durable memory.".to_string(),
             "original content unchanged",
+        )
+    }
+
+    #[test]
+    fn revise_memory_dry_run_preview_preserves_database() -> TestResult {
+        let (_temp, created) =
+            remember_revisable_memory("Store release checks as durable memory.")?;
+        let memory_id = created.memory_id.to_string();
+
+        let report = revise_memory(&ReviseMemoryOptions {
+            database_path: &created.database_path,
+            original_memory_id: &memory_id,
+            content: Some("Store release checks and clippy gates as durable memory."),
+            level: None,
+            kind: None,
+            confidence: Some(0.91),
+            tags: None,
+            provenance_uri: Some("file://README.md#L267"),
+            reason: ReviseReason::Correction,
+            actor: Some("ProudBasin"),
+            dry_run: true,
+        });
+
+        ensure(report.success, true, "success")?;
+        ensure(report.dry_run, true, "dry_run")?;
+        ensure(report.original_id, memory_id.clone(), "original id")?;
+        ensure(report.new_id.is_none(), true, "no new id")?;
+        ensure(report.revision_number.is_none(), true, "no revision")?;
+        ensure(
+            report.changed_fields,
+            vec![
+                "content".to_string(),
+                "confidence".to_string(),
+                "provenance_uri".to_string(),
+            ],
+            "changed fields",
+        )?;
+
+        let connection = crate::db::DbConnection::open_file(&created.database_path)
+            .map_err(|error| error.to_string())?;
+        let original = connection
+            .get_memory(&memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "created memory should still exist".to_string())?;
+        ensure(
+            original.content,
+            "Store release checks as durable memory.".to_string(),
+            "original content unchanged",
+        )?;
+        ensure(original.confidence, 0.9, "original confidence unchanged")
+    }
+
+    #[test]
+    fn revise_memory_no_changes_reports_usage_error() -> TestResult {
+        let (_temp, created) = remember_revisable_memory("Keep memory revisions honest.")?;
+        let memory_id = created.memory_id.to_string();
+
+        let report = revise_memory(&ReviseMemoryOptions {
+            database_path: &created.database_path,
+            original_memory_id: &memory_id,
+            content: Some("Keep memory revisions honest."),
+            level: None,
+            kind: None,
+            confidence: None,
+            tags: None,
+            provenance_uri: None,
+            reason: ReviseReason::Update,
+            actor: Some("ProudBasin"),
+            dry_run: true,
+        });
+
+        ensure(report.success, false, "success")?;
+        ensure(report.original_id, memory_id, "original id")?;
+        ensure(
+            report.changed_fields,
+            Vec::<String>::new(),
+            "changed fields",
+        )?;
+        ensure(
+            report.error,
+            Some("No changes specified".to_string()),
+            "no changes error",
+        )
+    }
+
+    #[test]
+    fn revise_memory_tombstoned_original_is_denied() -> TestResult {
+        let (_temp, created) = remember_revisable_memory("Do not revise tombstoned memories.")?;
+        let memory_id = created.memory_id.to_string();
+        let connection = crate::db::DbConnection::open_file(&created.database_path)
+            .map_err(|error| error.to_string())?;
+        let tombstoned = connection
+            .tombstone_memory(&memory_id)
+            .map_err(|error| error.to_string())?;
+        ensure(tombstoned, true, "memory tombstoned")?;
+
+        let report = revise_memory(&ReviseMemoryOptions {
+            database_path: &created.database_path,
+            original_memory_id: &memory_id,
+            content: Some("This revision must not be accepted."),
+            level: None,
+            kind: None,
+            confidence: None,
+            tags: None,
+            provenance_uri: None,
+            reason: ReviseReason::Correction,
+            actor: Some("ProudBasin"),
+            dry_run: true,
+        });
+
+        ensure(report.success, false, "success")?;
+        ensure(report.original_id, memory_id, "original id")?;
+        ensure(
+            report.error,
+            Some("Cannot revise tombstoned memory".to_string()),
+            "tombstoned error",
+        )
+    }
+
+    #[test]
+    fn revise_memory_storage_error_is_reported_without_stub_success() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("missing-parent").join("ee.db");
+
+        let report = revise_memory(&ReviseMemoryOptions {
+            database_path: &database_path,
+            original_memory_id: "mem_missing_storage",
+            content: Some("No storage should mean no revision."),
+            level: None,
+            kind: None,
+            confidence: None,
+            tags: None,
+            provenance_uri: None,
+            reason: ReviseReason::Correction,
+            actor: Some("ProudBasin"),
+            dry_run: true,
+        });
+
+        ensure(report.success, false, "success")?;
+        ensure(report.new_id.is_none(), true, "no new id")?;
+        ensure(report.revision_number.is_none(), true, "no revision")?;
+        ensure(
+            report
+                .error
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Failed to open database")),
+            true,
+            "storage error message",
         )
     }
 

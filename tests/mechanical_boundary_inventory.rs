@@ -38,7 +38,13 @@ const BASELINE_ACTUAL_COMMANDS: &[(&str, &[&str])] = &[
     ),
     (
         "manual memory write/read",
-        &["remember", "memory list", "memory show", "memory history"],
+        &[
+            "remember",
+            "memory list",
+            "memory show",
+            "memory history",
+            "memory revise",
+        ],
     ),
     (
         "outcome feedback and quarantine",
@@ -153,7 +159,7 @@ fn mechanical_boundary_inventory_covers_all_cli_command_paths() -> Result<(), St
     let commands = command_paths_from_extract_function(CLI_SOURCE)?;
     assert_eq!(
         commands.len(),
-        144,
+        145,
         "unexpected CLI command count; update the mechanical boundary inventory"
     );
 

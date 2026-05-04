@@ -352,7 +352,7 @@ fn effect_manifest_covers_all_normalized_cli_command_paths() -> TestResult {
     use ee::core::effect::EffectManifest;
 
     let commands = command_paths_from_cli_extract_function()?;
-    ensure(commands.len(), 144, "normalized CLI command count")?;
+    ensure(commands.len(), 145, "normalized CLI command count")?;
 
     let manifest = EffectManifest::build();
     let missing = commands
@@ -437,6 +437,7 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
         ("demo run", "demo_command_execution_unavailable"),
         ("eval list", "eval_fixtures_unavailable"),
         ("handoff create", "handoff_unavailable"),
+        ("memory revise", "revision_write_unavailable"),
         ("procedure export", "procedure_store_unavailable"),
         ("rehearse run", "rehearsal_unavailable"),
         ("support bundle", "support_bundle_unavailable"),

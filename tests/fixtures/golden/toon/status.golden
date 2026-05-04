@@ -69,4 +69,4 @@ data:
   degraded[3]{code,severity,message}:
     storage_not_implemented,medium,Storage subsystem is not wired yet.
     search_not_implemented,medium,Search subsystem is not wired yet.
-    memory_health_unavailable,low,Memory health metrics unavailable until storage is wired.
+    memory_health_unavailable,low,Memory health is unavailable without an explicit workspace.

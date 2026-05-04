@@ -973,6 +973,11 @@ impl EffectManifest {
                 "Learning summary abstains until persisted observation ledgers exist",
             ),
             CommandEffect::degraded_unavailable(
+                "memory revise",
+                "revision_write_unavailable",
+                "Memory revision abstains until immutable revision writes are implemented",
+            ),
+            CommandEffect::degraded_unavailable(
                 "preflight run",
                 "preflight_evidence_unavailable",
                 "Preflight run abstains until persisted evidence matches exist",
