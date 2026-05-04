@@ -3259,6 +3259,159 @@ pub enum EvalCommand {
     List,
 }
 
+/// Subcommands for `ee focus`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum FocusCommand {
+    /// Show passive active-memory focus state.
+    Show(FocusShowArgs),
+    /// Replace passive focus state with an explicit memory set.
+    Set(FocusSetArgs),
+    /// Add memories to passive focus state without eviction.
+    Add(FocusAddArgs),
+    /// Remove memories from passive focus state.
+    Remove(FocusRemoveArgs),
+    /// Clear passive focus state by writing an empty state artifact.
+    Clear(FocusClearArgs),
+    /// Explain current focus state and memory validity.
+    Explain(FocusExplainArgs),
+}
+
+/// Arguments for `ee focus show`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct FocusShowArgs {}
+
+/// Arguments for `ee focus set`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct FocusSetArgs {
+    /// Memory IDs to make active.
+    #[arg(value_name = "MEMORY_ID", required = true)]
+    pub memory_ids: Vec<String>,
+
+    /// Focal memory ID. It must also appear in MEMORY_ID.
+    #[arg(long, value_name = "MEMORY_ID")]
+    pub focal: Option<String>,
+
+    /// Memory ID to mark pinned. Repeat for multiple pinned memories.
+    #[arg(long = "pin", value_name = "MEMORY_ID")]
+    pub pinned_memory_ids: Vec<String>,
+
+    /// Maximum active-memory capacity.
+    #[arg(long, default_value_t = DEFAULT_FOCUS_CAPACITY)]
+    pub capacity: usize,
+
+    /// Visible reason attached to each focused memory.
+    #[arg(long, default_value = "Explicit focus selection.")]
+    pub reason: String,
+
+    /// Provenance for the focus update. Repeat for multiple sources.
+    #[arg(long, value_name = "PROVENANCE")]
+    pub provenance: Vec<String>,
+
+    /// Optional task-frame scope identifier.
+    #[arg(long, value_name = "TASK_FRAME_ID")]
+    pub task_frame_id: Option<String>,
+
+    /// Optional recorder-run scope identifier.
+    #[arg(long, value_name = "RECORDER_RUN_ID")]
+    pub recorder_run_id: Option<String>,
+
+    /// Optional handoff capsule scope identifier.
+    #[arg(long, value_name = "HANDOFF_ID")]
+    pub handoff_id: Option<String>,
+
+    /// Optional profile label for parallel work in one workspace.
+    #[arg(long, value_name = "PROFILE")]
+    pub profile: Option<String>,
+}
+
+/// Arguments for `ee focus add`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct FocusAddArgs {
+    /// Memory IDs to add.
+    #[arg(value_name = "MEMORY_ID", required = true)]
+    pub memory_ids: Vec<String>,
+
+    /// New focal memory ID. It must be present after the add.
+    #[arg(long, value_name = "MEMORY_ID")]
+    pub focal: Option<String>,
+
+    /// Memory ID to mark pinned. Repeat for multiple pinned memories.
+    #[arg(long = "pin", value_name = "MEMORY_ID")]
+    pub pinned_memory_ids: Vec<String>,
+
+    /// Optional new capacity.
+    #[arg(long)]
+    pub capacity: Option<usize>,
+
+    /// Visible reason attached to newly focused memories.
+    #[arg(long, default_value = "Explicit focus addition.")]
+    pub reason: String,
+
+    /// Provenance for the focus update. Repeat for multiple sources.
+    #[arg(long, value_name = "PROVENANCE")]
+    pub provenance: Vec<String>,
+
+    /// Optional task-frame scope identifier.
+    #[arg(long, value_name = "TASK_FRAME_ID")]
+    pub task_frame_id: Option<String>,
+
+    /// Optional recorder-run scope identifier.
+    #[arg(long, value_name = "RECORDER_RUN_ID")]
+    pub recorder_run_id: Option<String>,
+
+    /// Optional handoff capsule scope identifier.
+    #[arg(long, value_name = "HANDOFF_ID")]
+    pub handoff_id: Option<String>,
+
+    /// Optional profile label for parallel work in one workspace.
+    #[arg(long, value_name = "PROFILE")]
+    pub profile: Option<String>,
+}
+
+/// Arguments for `ee focus remove`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct FocusRemoveArgs {
+    /// Memory IDs to remove.
+    #[arg(value_name = "MEMORY_ID", required = true)]
+    pub memory_ids: Vec<String>,
+
+    /// Provenance for the focus update. Repeat for multiple sources.
+    #[arg(long, value_name = "PROVENANCE")]
+    pub provenance: Vec<String>,
+}
+
+/// Arguments for `ee focus clear`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct FocusClearArgs {
+    /// Optional capacity for the empty replacement state.
+    #[arg(long)]
+    pub capacity: Option<usize>,
+
+    /// Provenance for the focus update. Repeat for multiple sources.
+    #[arg(long, value_name = "PROVENANCE")]
+    pub provenance: Vec<String>,
+
+    /// Optional task-frame scope identifier.
+    #[arg(long, value_name = "TASK_FRAME_ID")]
+    pub task_frame_id: Option<String>,
+
+    /// Optional recorder-run scope identifier.
+    #[arg(long, value_name = "RECORDER_RUN_ID")]
+    pub recorder_run_id: Option<String>,
+
+    /// Optional handoff capsule scope identifier.
+    #[arg(long, value_name = "HANDOFF_ID")]
+    pub handoff_id: Option<String>,
+
+    /// Optional profile label for parallel work in one workspace.
+    #[arg(long, value_name = "PROFILE")]
+    pub profile: Option<String>,
+}
+
+/// Arguments for `ee focus explain`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct FocusExplainArgs {}
+
 /// Subcommands for `ee analyze`.
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum AnalyzeCommand {
@@ -4762,6 +4915,132 @@ where
     let _ = writeln!(stderr, "error: {HANDOFF_UNAVAILABLE_MESSAGE}");
     let _ = writeln!(stderr, "\nNext:\n  {HANDOFF_UNAVAILABLE_REPAIR}");
     ProcessExitCode::UnsatisfiedDegradedMode
+}
+
+fn handle_focus<W, E>(
+    cli: &Cli,
+    command: &FocusCommand,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let result = match command {
+        FocusCommand::Show(_) => show_focus(&FocusShowOptions { workspace_path }),
+        FocusCommand::Set(args) => set_focus(&FocusSetOptions {
+            workspace_path,
+            memory_ids: args.memory_ids.clone(),
+            focal_memory_id: args.focal.clone(),
+            pinned_memory_ids: args.pinned_memory_ids.clone(),
+            capacity: args.capacity,
+            reason: args.reason.clone(),
+            provenance: args.provenance.clone(),
+            scope: focus_scope(
+                args.task_frame_id.clone(),
+                args.recorder_run_id.clone(),
+                args.handoff_id.clone(),
+                args.profile.clone(),
+            ),
+        }),
+        FocusCommand::Add(args) => add_focus(&FocusAddOptions {
+            workspace_path,
+            memory_ids: args.memory_ids.clone(),
+            focal_memory_id: args.focal.clone(),
+            pinned_memory_ids: args.pinned_memory_ids.clone(),
+            capacity: args.capacity,
+            reason: args.reason.clone(),
+            provenance: args.provenance.clone(),
+            scope: focus_scope(
+                args.task_frame_id.clone(),
+                args.recorder_run_id.clone(),
+                args.handoff_id.clone(),
+                args.profile.clone(),
+            ),
+        }),
+        FocusCommand::Remove(args) => remove_focus(&FocusRemoveOptions {
+            workspace_path,
+            memory_ids: args.memory_ids.clone(),
+            provenance: args.provenance.clone(),
+        }),
+        FocusCommand::Clear(args) => clear_focus(&FocusClearOptions {
+            workspace_path,
+            capacity: args.capacity,
+            provenance: args.provenance.clone(),
+            scope: focus_scope(
+                args.task_frame_id.clone(),
+                args.recorder_run_id.clone(),
+                args.handoff_id.clone(),
+                args.profile.clone(),
+            ),
+        }),
+        FocusCommand::Explain(_) => explain_focus(&FocusExplainOptions { workspace_path }),
+    };
+
+    match result {
+        Ok(report) => write_focus_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn focus_scope(
+    task_frame_id: Option<String>,
+    recorder_run_id: Option<String>,
+    handoff_id: Option<String>,
+    profile: Option<String>,
+) -> FocusScope {
+    FocusScope {
+        task_frame_id,
+        recorder_run_id,
+        handoff_id,
+        profile,
+    }
+}
+
+fn write_focus_report<W>(cli: &Cli, report: &FocusReport, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_focus_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&focus_response_json(report)) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(focus_response_json(report) + "\n")),
+    }
+}
+
+fn focus_response_json(report: &FocusReport) -> String {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": report.data_json(),
+    })
+    .to_string()
+}
+
+fn render_focus_human(report: &FocusReport) -> String {
+    let focal = report
+        .state
+        .focal_memory_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "-".to_owned());
+    format!(
+        "Focus: {} memories / capacity {}\n  Focal: {}\n  Mutated: {}\n  State hash: {}\n",
+        report.state.item_count(),
+        report.state.capacity,
+        focal,
+        report.mutated,
+        report.state_hash
+    )
 }
 
 fn normalize_outcome_quarantine_args(mut args: Vec<OsString>) -> Vec<OsString> {
@@ -14438,8 +14717,8 @@ mod tests {
 
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli,
-        Command, CurateCommand, DiagCommand, EconomyCommand, FieldsLevel, GraphCommand,
-        ImportCommand, LearnCommand, LearnExperimentCommand, MemoryCommand,
+        Command, CurateCommand, DiagCommand, EconomyCommand, FieldsLevel, FocusCommand,
+        GraphCommand, ImportCommand, LearnCommand, LearnExperimentCommand, MemoryCommand,
         OutcomeQuarantineCommand, OutputFormat, RuleCommand, ShadowMode, SituationCommand, run,
     };
     use crate::models::error_codes::ALL_ERROR_CODES;
@@ -14762,6 +15041,188 @@ mod tests {
                 .as_array()
                 .is_some_and(|entries| !entries.is_empty()),
             "science capabilities must be present",
+        )
+    }
+
+    #[test]
+    fn parser_accepts_focus_set_scope_options() -> TestResult {
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(1)).to_string();
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "focus",
+            "set",
+            &memory_id,
+            "--focal",
+            &memory_id,
+            "--pin",
+            &memory_id,
+            "--capacity",
+            "3",
+            "--task-frame-id",
+            "task-a",
+            "--recorder-run-id",
+            "run-a",
+            "--handoff-id",
+            "handoff-a",
+            "--profile",
+            "resume",
+            "--provenance",
+            "test",
+        ])
+        .map_err(|error| format!("failed to parse focus set: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Focus(FocusCommand::Set(args))) => {
+                ensure_equal(&args.memory_ids, &vec![memory_id.clone()], "memory ids")?;
+                ensure_equal(&args.focal, &Some(memory_id.clone()), "focal")?;
+                ensure_equal(&args.pinned_memory_ids, &vec![memory_id], "pinned ids")?;
+                ensure_equal(&args.capacity, &3, "capacity")?;
+                ensure_equal(
+                    &args.task_frame_id,
+                    &Some("task-a".to_owned()),
+                    "task frame",
+                )?;
+                ensure_equal(
+                    &args.recorder_run_id,
+                    &Some("run-a".to_owned()),
+                    "recorder run",
+                )?;
+                ensure_equal(&args.handoff_id, &Some("handoff-a".to_owned()), "handoff")?;
+                ensure_equal(&args.profile, &Some("resume".to_owned()), "profile")
+            }
+            other => Err(format!("expected focus set command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn focus_show_json_is_read_only_and_stderr_clean() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().to_string_lossy().into_owned();
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "--workspace", &workspace, "--json", "focus", "show"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "focus show exit")?;
+        ensure(stderr.is_empty(), "focus show JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["command"],
+            &serde_json::json!("focus show"),
+            "command path",
+        )?;
+        ensure_equal(
+            &value["data"]["mutated"],
+            &serde_json::json!(false),
+            "read-only mutation flag",
+        )?;
+        ensure_equal(
+            &dir.path().join(".ee/focus/state.json").exists(),
+            &false,
+            "show must not create focus state",
+        )
+    }
+
+    #[test]
+    fn focus_set_add_remove_clear_json_workflow_is_stable() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().to_string_lossy().into_owned();
+        let first = MemoryId::from_uuid(uuid::Uuid::from_u128(2)).to_string();
+        let second = MemoryId::from_uuid(uuid::Uuid::from_u128(3)).to_string();
+
+        let (set_exit, set_stdout, set_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--json",
+            "focus",
+            "set",
+            &first,
+            "--focal",
+            &first,
+            "--pin",
+            &first,
+            "--capacity",
+            "2",
+            "--reason",
+            "test set",
+        ]);
+        ensure_equal(&set_exit, &ProcessExitCode::Success, "focus set exit")?;
+        ensure(set_stderr.is_empty(), "focus set JSON stderr clean")?;
+        let set_json: serde_json::Value =
+            serde_json::from_str(&set_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &set_json["data"]["focusState"]["itemCount"],
+            &serde_json::json!(1),
+            "set item count",
+        )?;
+
+        let (add_exit, add_stdout, add_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--json",
+            "focus",
+            "add",
+            &second,
+            "--reason",
+            "test add",
+        ]);
+        ensure_equal(&add_exit, &ProcessExitCode::Success, "focus add exit")?;
+        ensure(add_stderr.is_empty(), "focus add JSON stderr clean")?;
+        let add_json: serde_json::Value =
+            serde_json::from_str(&add_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &add_json["data"]["focusState"]["itemCount"],
+            &serde_json::json!(2),
+            "add item count",
+        )?;
+
+        let (remove_exit, remove_stdout, remove_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--json",
+            "focus",
+            "remove",
+            &first,
+        ]);
+        ensure_equal(&remove_exit, &ProcessExitCode::Success, "focus remove exit")?;
+        ensure(remove_stderr.is_empty(), "focus remove JSON stderr clean")?;
+        let remove_json: serde_json::Value =
+            serde_json::from_str(&remove_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &remove_json["data"]["focusState"]["focalMemoryId"],
+            &serde_json::Value::Null,
+            "remove focal cleared",
+        )?;
+
+        let (clear_exit, clear_stdout, clear_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--json",
+            "focus",
+            "clear",
+            "--capacity",
+            "4",
+        ]);
+        ensure_equal(&clear_exit, &ProcessExitCode::Success, "focus clear exit")?;
+        ensure(clear_stderr.is_empty(), "focus clear JSON stderr clean")?;
+        let clear_json: serde_json::Value =
+            serde_json::from_str(&clear_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &clear_json["data"]["focusState"]["itemCount"],
+            &serde_json::json!(0),
+            "clear item count",
+        )?;
+        ensure_equal(
+            &clear_json["data"]["focusState"]["capacity"],
+            &serde_json::json!(4),
+            "clear capacity",
         )
     }
 
