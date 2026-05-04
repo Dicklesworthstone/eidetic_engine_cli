@@ -542,21 +542,21 @@ fn candidate_selection_why(
     memory_utility: f32,
     artifact_id: Option<&str>,
 ) -> String {
-    let (selection, utility_field) = match artifact_id {
+    let (source_reference, utility_field) = match artifact_id {
         Some(artifact_id) => (
             format!(
-                "Selected for query `{query}` through registered artifact {artifact_id} from {search_source} search result."
+                "source=registered_artifact artifact_id={artifact_id} search_source={search_source}"
             ),
             "linked_memory.utility",
         ),
         None => (
-            format!("Selected for query `{query}` from {search_source} search result."),
+            format!("source=memory search_source={search_source}"),
             "memory.utility",
         ),
     };
 
     format!(
-        "{selection} Deterministic pack scoring: relevance=unit_score(search_hit.score) with search_hit.score={search_score:.4}; utility=unit_score({utility_field}) with {utility_field}={memory_utility:.4}; unit_score(field)=clamp(field, 0.0, 1.0) for finite fields, otherwise 0.0."
+        "Deterministic retrieval explanation for query `{query}`: {source_reference}; score_components=[relevance=unit_score(search_hit.score) with search_hit.score={search_score:.4}, utility=unit_score({utility_field}) with {utility_field}={memory_utility:.4}]; formula=unit_score(field)=clamp(field, 0.0, 1.0) for finite fields, otherwise 0.0; inputs are stored memory/link fields and the explicit search hit, not agent reasoning."
     )
 }
 
@@ -753,7 +753,7 @@ fn push_degradation(
 mod tests {
     use std::path::PathBuf;
 
-    use super::{AccessLevel, CapabilitySet, CommandContext, candidate_selection_why};
+    use super::{AccessLevel, CapabilitySet, CommandContext, candidate_selection_why, unit_score};
     use crate::config::WorkspaceLocation;
     use crate::core::budget::RequestBudget;
 
@@ -970,7 +970,9 @@ mod tests {
     fn candidate_selection_why_names_direct_source_fields() {
         let why = candidate_selection_why("prepare release", "lexical", 0.812_34, 0.456_78, None);
 
-        assert!(why.contains("Selected for query `prepare release` from lexical search result."));
+        assert!(why.contains(
+            "Deterministic retrieval explanation for query `prepare release`: source=memory search_source=lexical"
+        ));
         assert!(why.contains("relevance=unit_score(search_hit.score)"));
         assert!(why.contains("search_hit.score=0.8123"));
         assert!(why.contains("utility=unit_score(memory.utility)"));
@@ -993,12 +995,56 @@ mod tests {
         );
 
         assert!(why.contains(
-            "through registered artifact art_0123456789abcdef01234567 from hybrid search result"
+            "source=registered_artifact artifact_id=art_0123456789abcdef01234567 search_source=hybrid"
         ));
         assert!(why.contains("relevance=unit_score(search_hit.score)"));
         assert!(why.contains("search_hit.score=0.9123"));
         assert!(why.contains("utility=unit_score(linked_memory.utility)"));
         assert!(why.contains("linked_memory.utility=0.5568"));
+    }
+
+    #[test]
+    fn candidate_selection_why_declares_deterministic_inputs() {
+        let why = candidate_selection_why("prepare release", "lexical", 0.812_34, 0.456_78, None);
+
+        assert!(
+            why.contains("inputs are stored memory/link fields and the explicit search hit"),
+            "{why}"
+        );
+        assert!(why.contains("not agent reasoning"), "{why}");
+
+        let lower = why.to_ascii_lowercase();
+        for forbidden in [
+            "believes",
+            "understands",
+            "intends",
+            "inferred intent",
+            "story",
+        ] {
+            assert!(
+                !lower.contains(forbidden),
+                "explanation used qualitative reasoning term `{forbidden}`: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn unit_score_clamps_non_finite_and_bounds() {
+        assert!(
+            matches!(unit_score(-0.25), Some(score) if (score.into_inner() - 0.0).abs() <= f32::EPSILON)
+        );
+        assert!(
+            matches!(unit_score(0.50), Some(score) if (score.into_inner() - 0.50).abs() <= f32::EPSILON)
+        );
+        assert!(
+            matches!(unit_score(1.25), Some(score) if (score.into_inner() - 1.0).abs() <= f32::EPSILON)
+        );
+        assert!(
+            matches!(unit_score(f32::NAN), Some(score) if (score.into_inner() - 0.0).abs() <= f32::EPSILON)
+        );
+        assert!(
+            matches!(unit_score(f32::INFINITY), Some(score) if (score.into_inner() - 0.0).abs() <= f32::EPSILON)
+        );
     }
 
     #[test]
