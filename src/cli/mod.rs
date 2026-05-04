@@ -3925,7 +3925,10 @@ where
             handle_backup_verify(&cli, args, stdout, stderr)
         }
         Some(Command::Capabilities) => {
-            let report = CapabilitiesReport::gather();
+            let report = cli.workspace.as_deref().map_or_else(
+                CapabilitiesReport::gather,
+                CapabilitiesReport::gather_for_workspace,
+            );
             let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
@@ -3944,7 +3947,10 @@ where
             }
         }
         Some(Command::Check) => {
-            let report = CheckReport::gather();
+            let report = cli
+                .workspace
+                .as_deref()
+                .map_or_else(CheckReport::gather, CheckReport::gather_for_workspace);
             let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
@@ -4033,7 +4039,10 @@ where
             }
         },
         Some(Command::Doctor(ref args)) => {
-            let report = DoctorReport::gather();
+            let report = cli
+                .workspace
+                .as_deref()
+                .map_or_else(DoctorReport::gather, DoctorReport::gather_for_workspace);
             let profile = cli.fields_level().to_field_profile();
             if args.franken_health {
                 let report = FrankenHealthReport::gather();
@@ -4169,7 +4178,10 @@ where
             }
         },
         Some(Command::Health) => {
-            let report = HealthReport::gather();
+            let report = cli
+                .workspace
+                .as_deref()
+                .map_or_else(HealthReport::gather, HealthReport::gather_for_workspace);
             let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
@@ -15807,8 +15819,8 @@ mod tests {
 
         ensure_equal(
             &exit,
-            &ProcessExitCode::Success,
-            "learn experiment run JSON exit",
+            &ProcessExitCode::UnsatisfiedDegradedMode,
+            "learn experiment run abstains until backed by registry",
         )?;
         ensure(stderr.is_empty(), "learn experiment run stderr clean")?;
         ensure_ends_with(&stdout, '\n', "learn experiment run newline")?;
@@ -15816,15 +15828,13 @@ mod tests {
             .map_err(|error| format!("learn experiment run stdout must be JSON: {error}"))?;
         ensure_equal(
             &json["schema"],
-            &serde_json::json!("ee.learn.experiment_run.v1"),
-            "run schema",
+            &serde_json::json!("ee.error.v1"),
+            "error schema",
         )?;
-        ensure_equal(&json["dryRun"], &serde_json::json!(true), "dry-run flag")?;
-        ensure_equal(&json["status"], &serde_json::json!("dry_run"), "run status")?;
         ensure_equal(
-            &json["experimentKind"],
-            &serde_json::json!("procedure_revalidation"),
-            "experiment kind",
+            &json["error"]["code"],
+            &serde_json::json!("unsatisfied_degraded_mode"),
+            "error code",
         )
     }
 
@@ -16415,6 +16425,38 @@ mod tests {
             "fix-plan suggested commands",
         )?;
         ensure(stderr.is_empty(), "fix-plan json stderr empty")
+    }
+
+    #[test]
+    fn doctor_json_uses_explicit_workspace_for_capability_probes() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::create_dir(dir.path().join(".ee"))
+            .map_err(|error| format!("failed to create .ee dir: {error}"))?;
+        let workspace = dir.path().to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&["ee", "--workspace", &workspace, "doctor", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "doctor json exit")?;
+        ensure(stderr.is_empty(), "doctor json stderr empty")?;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        let checks = value["data"]["checks"]
+            .as_array()
+            .ok_or_else(|| "doctor checks must be an array".to_string())?;
+        let workspace_check = checks
+            .iter()
+            .find(|check| check["name"] == serde_json::json!("workspace"))
+            .ok_or_else(|| "workspace check missing".to_string())?;
+        ensure_equal(
+            &workspace_check["severity"],
+            &serde_json::json!("ok"),
+            "workspace check uses selected path",
+        )?;
+        ensure_contains(
+            workspace_check["message"].as_str().unwrap_or_default(),
+            &workspace,
+            "workspace check message includes explicit workspace",
+        )
     }
 
     #[test]

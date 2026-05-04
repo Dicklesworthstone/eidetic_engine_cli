@@ -43,10 +43,21 @@ const LEARNING_RECORDS_UNAVAILABLE_MESSAGE: &str = "Learning agenda, uncertainty
 const LEARNING_RECORDS_UNAVAILABLE_REPAIR: &str =
     "ee learn observe <experiment-id> --dry-run --json";
 
+const EXPERIMENT_REGISTRY_UNAVAILABLE_MESSAGE: &str = "Experiment execution requires persisted experiment definitions from an evaluation registry. Hard-coded experiment templates have been removed to preserve deterministic explainable retrieval.";
+const EXPERIMENT_REGISTRY_UNAVAILABLE_REPAIR: &str =
+    "Provide explicit input datasets or use skill workflows for experiment orchestration.";
+
 fn learning_records_unavailable() -> DomainError {
     DomainError::UnsatisfiedDegradedMode {
         message: LEARNING_RECORDS_UNAVAILABLE_MESSAGE.to_string(),
         repair: Some(LEARNING_RECORDS_UNAVAILABLE_REPAIR.to_string()),
+    }
+}
+
+fn experiment_registry_unavailable() -> DomainError {
+    DomainError::UnsatisfiedDegradedMode {
+        message: EXPERIMENT_REGISTRY_UNAVAILABLE_MESSAGE.to_string(),
+        repair: Some(EXPERIMENT_REGISTRY_UNAVAILABLE_REPAIR.to_string()),
     }
 }
 
@@ -1498,376 +1509,13 @@ pub fn propose_experiments(
 }
 
 /// Run a deterministic dry-run-only active learning experiment rehearsal.
+///
+/// Abstains with `experiment_registry_unavailable` because experiment definitions
+/// must come from persisted evaluation registries, not hard-coded templates.
 pub fn run_experiment(
-    options: &LearnExperimentRunOptions,
+    _options: &LearnExperimentRunOptions,
 ) -> Result<LearnExperimentRunReport, DomainError> {
-    let generated_at = Utc::now().to_rfc3339();
-    if !options.dry_run {
-        return Err(DomainError::PolicyDenied {
-            message: "Learning experiment execution requires --dry-run in this slice.".to_string(),
-            repair: Some(
-                "Use ee learn experiment run --id <experiment-id> --dry-run --json".to_string(),
-            ),
-        });
-    }
-    let experiment_id = require_text(
-        "experiment id",
-        &options.experiment_id,
-        "ee learn experiment run --id exp_database_contract_fixture --dry-run --json",
-    )?;
-    let template =
-        experiment_run_template(&experiment_id).ok_or_else(|| DomainError::NotFound {
-            resource: "learning experiment".to_string(),
-            id: experiment_id.clone(),
-            repair: Some(
-                "Run ee learn experiment propose --json to list known experiments.".to_string(),
-            ),
-        })?;
-    let planned_attention_tokens = template
-        .requested_attention_tokens
-        .min(options.max_attention_tokens);
-    let planned_runtime_seconds = template
-        .requested_runtime_seconds
-        .min(options.max_runtime_seconds);
-    let safety = safety_plan(
-        ExperimentSafetyBoundary::DryRunOnly,
-        template.stop_condition,
-    );
-
-    Ok(LearnExperimentRunReport {
-        schema: LEARN_EXPERIMENT_RUN_SCHEMA_V1.to_owned(),
-        status: "dry_run".to_string(),
-        dry_run: true,
-        experiment_id,
-        experiment_kind: template.experiment_kind.to_string(),
-        title: template.title.to_string(),
-        hypothesis: template.hypothesis.to_string(),
-        budget: ExperimentRunBudget {
-            requested_attention_tokens: template.requested_attention_tokens,
-            requested_runtime_seconds: template.requested_runtime_seconds,
-            planned_attention_tokens,
-            planned_runtime_seconds,
-            shadow_budget_delta_tokens: template.shadow_budget_delta_tokens,
-            budget_class: budget_class(planned_attention_tokens, planned_runtime_seconds)
-                .to_string(),
-        },
-        safety,
-        steps: template.steps,
-        observations: template.observations,
-        outcome_preview: template.outcome_preview,
-        next_actions: template.next_actions,
-        generated_at,
-    })
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct ExperimentRunTemplate {
-    experiment_kind: &'static str,
-    title: &'static str,
-    hypothesis: &'static str,
-    stop_condition: &'static str,
-    requested_attention_tokens: u32,
-    requested_runtime_seconds: u32,
-    shadow_budget_delta_tokens: i32,
-    steps: Vec<ExperimentRunStep>,
-    observations: Vec<ExperimentRunObservationPreview>,
-    outcome_preview: ExperimentRunOutcomePreview,
-    next_actions: Vec<String>,
-}
-
-fn experiment_run_template(experiment_id: &str) -> Option<ExperimentRunTemplate> {
-    match experiment_id {
-        "exp_replay_error_boundary" => Some(ExperimentRunTemplate {
-            experiment_kind: "fixture_replay",
-            title: "Replay async error boundary failures",
-            hypothesis: "A dry-run replay can distinguish missing propagation evidence from a weak procedural rule.",
-            stop_condition: "Stop after the replay produces a pass/fail explanation or safety finding.",
-            requested_attention_tokens: 900,
-            requested_runtime_seconds: 240,
-            shadow_budget_delta_tokens: -120,
-            steps: vec![
-                run_step(
-                    1,
-                    "load_fixture",
-                    "Load replay fixture family for async error boundaries.",
-                    "neutral",
-                ),
-                run_step(
-                    2,
-                    "replay_failure",
-                    "Replay the fixture against the candidate procedural rule.",
-                    "negative",
-                ),
-                run_step(
-                    3,
-                    "summarize_evidence",
-                    "Produce observation and closure previews without writing storage.",
-                    "negative",
-                ),
-            ],
-            observations: vec![run_observation(
-                LearningObservationSignal::Negative,
-                "fixture_replay_pass",
-                Some(0.0),
-                &["gap_001", "mem_002", "fixture_async_error_boundary"],
-                "Dry-run replay would contradict the candidate rule until more propagation evidence exists.",
-            )],
-            outcome_preview: run_outcome(
-                ExperimentOutcomeStatus::Rejected,
-                "Keep async error propagation guidance low-confidence until replay evidence passes.",
-                -0.18,
-                8,
-                &[],
-                &["mem_002"],
-                &["No durable mutation performed; replay result is an observation preview."],
-            ),
-            next_actions: run_next_actions("exp_replay_error_boundary", "negative", "rejected"),
-        }),
-        "exp_database_contract_fixture" => Some(ExperimentRunTemplate {
-            experiment_kind: "procedure_revalidation",
-            title: "Run database-operation contract fixture",
-            hypothesis: "A fixture-only dry run can show whether database-operation memories need stronger integration-test evidence.",
-            stop_condition: "Stop after fixture output records stdout/stderr separation and mutation posture.",
-            requested_attention_tokens: 700,
-            requested_runtime_seconds: 180,
-            shadow_budget_delta_tokens: -80,
-            steps: vec![
-                run_step(
-                    1,
-                    "select_fixture",
-                    "Select deterministic database-operation contract fixture.",
-                    "neutral",
-                ),
-                run_step(
-                    2,
-                    "revalidate_procedure",
-                    "Revalidate the procedure against fixture stdout/stderr contracts.",
-                    "positive",
-                ),
-                run_step(
-                    3,
-                    "score_decision",
-                    "Estimate decision impact and confidence delta without storage writes.",
-                    "positive",
-                ),
-            ],
-            observations: vec![run_observation(
-                LearningObservationSignal::Positive,
-                "procedure_revalidation_pass",
-                Some(1.0),
-                &["gap_002", "mem_001", "fixture_database_contract"],
-                "Dry-run procedure revalidation would support stronger database-operation guidance.",
-            )],
-            outcome_preview: run_outcome(
-                ExperimentOutcomeStatus::Confirmed,
-                "Increase confidence for database-operation integration-test guidance.",
-                0.22,
-                -4,
-                &["mem_001"],
-                &[],
-                &["Dry-run only; promote through learn close after reviewing fixture evidence."],
-            ),
-            next_actions: run_next_actions(
-                "exp_database_contract_fixture",
-                "positive",
-                "confirmed",
-            ),
-        }),
-        "exp_cli_validation_shadow" => Some(ExperimentRunTemplate {
-            experiment_kind: "classifier_disambiguation",
-            title: "Shadow CLI validation examples",
-            hypothesis: "Shadowing invalid arguments can clarify whether CLI validation rules are resolved or still ambiguous.",
-            stop_condition: "Stop after two invalid argument examples produce stable repair text.",
-            requested_attention_tokens: 500,
-            requested_runtime_seconds: 120,
-            shadow_budget_delta_tokens: -40,
-            steps: vec![
-                run_step(
-                    1,
-                    "select_shadow_cases",
-                    "Select deterministic invalid-argument examples.",
-                    "neutral",
-                ),
-                run_step(
-                    2,
-                    "compare_repairs",
-                    "Compare repair text across classifier outputs.",
-                    "neutral",
-                ),
-                run_step(
-                    3,
-                    "classify_resolution",
-                    "Decide whether the learning gap stays resolved.",
-                    "neutral",
-                ),
-            ],
-            observations: vec![run_observation(
-                LearningObservationSignal::Neutral,
-                "classifier_disambiguation_stable",
-                Some(1.0),
-                &["gap_003", "mem_003", "fixture_cli_validation"],
-                "Dry-run classifier disambiguation would keep the validation convention resolved.",
-            )],
-            outcome_preview: run_outcome(
-                ExperimentOutcomeStatus::Inconclusive,
-                "Keep CLI validation convention resolved but do not promote new evidence yet.",
-                0.0,
-                0,
-                &[],
-                &[],
-                &["No unsafe mutation or ambiguous repair text observed in dry run."],
-            ),
-            next_actions: run_next_actions("exp_cli_validation_shadow", "neutral", "inconclusive"),
-        }),
-        "exp_shadow_budget_probe" => Some(ExperimentRunTemplate {
-            experiment_kind: "shadow_budget",
-            title: "Shadow attention budget against selected pack decisions",
-            hypothesis: "A budget shadow can show whether lower attention cost preserves the same learning decision.",
-            stop_condition: "Stop after the shadow budget either preserves or changes the selected decision.",
-            requested_attention_tokens: 600,
-            requested_runtime_seconds: 120,
-            shadow_budget_delta_tokens: -240,
-            steps: vec![
-                run_step(
-                    1,
-                    "load_budget_fixture",
-                    "Load deterministic attention-budget fixture.",
-                    "neutral",
-                ),
-                run_step(
-                    2,
-                    "simulate_shadow_budget",
-                    "Compare baseline and reduced token budgets.",
-                    "positive",
-                ),
-                run_step(
-                    3,
-                    "explain_delta",
-                    "Explain selected decision delta and risk reserve.",
-                    "positive",
-                ),
-            ],
-            observations: vec![run_observation(
-                LearningObservationSignal::Positive,
-                "shadow_budget_preserved_decision",
-                Some(1.0),
-                &["economy_budget_fixture", "decision_shadow_budget"],
-                "Dry-run shadow budget would preserve the decision while reducing token cost.",
-            )],
-            outcome_preview: run_outcome(
-                ExperimentOutcomeStatus::Confirmed,
-                "Prefer the lower-cost context budget for this fixture family.",
-                0.12,
-                -2,
-                &["decision_shadow_budget"],
-                &[],
-                &["Shadow budget is only a dry-run recommendation; no policy was changed."],
-            ),
-            next_actions: run_next_actions("exp_shadow_budget_probe", "positive", "confirmed"),
-        }),
-        _ => None,
-    }
-}
-
-fn run_step(
-    order: u32,
-    name: impl Into<String>,
-    action: impl Into<String>,
-    expected_signal: impl Into<String>,
-) -> ExperimentRunStep {
-    ExperimentRunStep {
-        order,
-        name: name.into(),
-        action: action.into(),
-        expected_signal: expected_signal.into(),
-        writes_storage: false,
-    }
-}
-
-fn run_observation(
-    signal: LearningObservationSignal,
-    measurement_name: impl Into<String>,
-    measurement_value: Option<f64>,
-    evidence_ids: &[&str],
-    note: impl Into<String>,
-) -> ExperimentRunObservationPreview {
-    ExperimentRunObservationPreview {
-        signal: signal.as_str().to_string(),
-        measurement_name: measurement_name.into(),
-        measurement_value: measurement_value.map(rounded_metric),
-        evidence_ids: evidence_ids.iter().map(|id| (*id).to_string()).collect(),
-        note: note.into(),
-    }
-}
-
-fn run_outcome(
-    status: ExperimentOutcomeStatus,
-    decision_impact: impl Into<String>,
-    confidence_delta: f64,
-    priority_delta: i32,
-    promoted_artifact_ids: &[&str],
-    demoted_artifact_ids: &[&str],
-    safety_notes: &[&str],
-) -> ExperimentRunOutcomePreview {
-    ExperimentRunOutcomePreview {
-        status: status.as_str().to_string(),
-        decision_impact: decision_impact.into(),
-        confidence_delta: rounded_metric(confidence_delta),
-        priority_delta,
-        promoted_artifact_ids: promoted_artifact_ids
-            .iter()
-            .map(|id| (*id).to_string())
-            .collect(),
-        demoted_artifact_ids: demoted_artifact_ids
-            .iter()
-            .map(|id| (*id).to_string())
-            .collect(),
-        safety_notes: safety_notes
-            .iter()
-            .map(|note| (*note).to_string())
-            .collect(),
-    }
-}
-
-fn run_next_actions(experiment_id: &str, signal: &str, outcome_status: &str) -> Vec<String> {
-    vec![
-        format!(
-            "ee learn observe {experiment_id} --signal {signal} --measurement-name <name> --dry-run --json"
-        ),
-        format!(
-            "ee learn close {experiment_id} --status {outcome_status} --decision-impact <impact> --dry-run --json"
-        ),
-    ]
-}
-
-fn safety_plan(
-    boundary: ExperimentSafetyBoundary,
-    stop_condition: &'static str,
-) -> ExperimentSafetyPlan {
-    let review_required = matches!(
-        boundary,
-        ExperimentSafetyBoundary::AskBeforeActing
-            | ExperimentSafetyBoundary::HumanReview
-            | ExperimentSafetyBoundary::Denied
-    );
-    let denied_reasons = if boundary == ExperimentSafetyBoundary::Denied {
-        vec!["configured safety boundary denies experiment execution".to_owned()]
-    } else {
-        Vec::new()
-    };
-
-    ExperimentSafetyPlan {
-        boundary: boundary.as_str().to_owned(),
-        dry_run_first: true,
-        mutation_allowed: false,
-        review_required,
-        stop_conditions: vec![
-            stop_condition.to_owned(),
-            "Stop before any durable memory mutation; close with observe/close evidence first."
-                .to_owned(),
-        ],
-        denied_reasons,
-    }
+    Err(experiment_registry_unavailable())
 }
 
 fn rounded_metric(value: f64) -> f64 {
@@ -1875,14 +1523,6 @@ fn rounded_metric(value: f64) -> f64 {
         (value * 1000.0).round() / 1000.0
     } else {
         0.0
-    }
-}
-
-fn budget_class(attention_tokens: u32, runtime_seconds: u32) -> &'static str {
-    match (attention_tokens, runtime_seconds) {
-        (0..=600, 0..=120) => "small",
-        (0..=1_000, 0..=240) => "medium",
-        _ => "large",
     }
 }
 
@@ -1920,6 +1560,27 @@ mod tests {
                 error.code()
             )),
             Ok(_) => Err("expected unsatisfied degraded mode, got success".to_string()),
+        }
+    }
+
+    fn assert_experiment_registry_unavailable<T>(result: Result<T, DomainError>) -> TestResult {
+        match result {
+            Err(DomainError::UnsatisfiedDegradedMode { message, repair }) => {
+                assert_eq!(message, EXPERIMENT_REGISTRY_UNAVAILABLE_MESSAGE);
+                assert_eq!(
+                    repair.as_deref(),
+                    Some(EXPERIMENT_REGISTRY_UNAVAILABLE_REPAIR)
+                );
+                Ok(())
+            }
+            Err(error) => Err(format!(
+                "expected unsatisfied degraded mode for experiment registry, got {}",
+                error.code()
+            )),
+            Ok(_) => Err(
+                "expected unsatisfied degraded mode for experiment registry, got success"
+                    .to_string(),
+            ),
         }
     }
 
@@ -2230,59 +1891,41 @@ mod tests {
     }
 
     #[test]
-    fn learn_experiment_run_dry_run_covers_procedure_revalidation() -> TestResult {
-        let report = run_experiment(&LearnExperimentRunOptions {
+    fn learn_experiment_run_abstains_until_backed_by_registry() -> TestResult {
+        assert_experiment_registry_unavailable(run_experiment(&LearnExperimentRunOptions {
             experiment_id: "exp_database_contract_fixture".to_string(),
             max_attention_tokens: 600,
             max_runtime_seconds: 90,
             dry_run: true,
             ..Default::default()
-        })
-        .map_err(|e| e.message())?;
-
-        assert_eq!(report.schema, LEARN_EXPERIMENT_RUN_SCHEMA_V1);
-        assert_eq!(report.status, "dry_run");
-        assert!(report.dry_run);
-        assert_eq!(report.experiment_kind, "procedure_revalidation");
-        assert_eq!(report.budget.planned_attention_tokens, 600);
-        assert_eq!(report.budget.planned_runtime_seconds, 90);
-        assert!(report.steps.iter().all(|step| !step.writes_storage));
-        assert_eq!(report.observations[0].signal, "positive");
-        assert_eq!(report.outcome_preview.status, "confirmed");
-        Ok(())
+        }))
     }
 
     #[test]
-    fn learn_experiment_run_rejects_non_dry_run() -> TestResult {
-        let result = run_experiment(&LearnExperimentRunOptions {
+    fn learn_experiment_run_abstains_for_non_dry_run() -> TestResult {
+        assert_experiment_registry_unavailable(run_experiment(&LearnExperimentRunOptions {
             experiment_id: "exp_database_contract_fixture".to_string(),
             dry_run: false,
             ..Default::default()
-        });
-
-        assert!(matches!(result, Err(DomainError::PolicyDenied { .. })));
-        Ok(())
+        }))
     }
 
     #[test]
-    fn learn_experiment_run_supports_seeded_kinds() -> TestResult {
-        let cases = [
-            ("exp_replay_error_boundary", "fixture_replay"),
-            ("exp_database_contract_fixture", "procedure_revalidation"),
-            ("exp_cli_validation_shadow", "classifier_disambiguation"),
-            ("exp_shadow_budget_probe", "shadow_budget"),
+    fn learn_experiment_run_abstains_for_all_experiment_ids() -> TestResult {
+        let experiment_ids = [
+            "exp_replay_error_boundary",
+            "exp_database_contract_fixture",
+            "exp_cli_validation_shadow",
+            "exp_shadow_budget_probe",
+            "exp_unknown_experiment",
         ];
 
-        for (experiment_id, expected_kind) in cases {
-            let report = run_experiment(&LearnExperimentRunOptions {
+        for experiment_id in experiment_ids {
+            assert_experiment_registry_unavailable(run_experiment(&LearnExperimentRunOptions {
                 experiment_id: experiment_id.to_string(),
                 dry_run: true,
                 ..Default::default()
-            })
-            .map_err(|e| e.message())?;
-            assert_eq!(report.experiment_kind, expected_kind);
-            assert!(!report.steps.is_empty());
-            assert!(!report.observations.is_empty());
+            }))?;
         }
         Ok(())
     }
