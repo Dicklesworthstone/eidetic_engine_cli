@@ -1,27 +1,23 @@
 {
   "schema": "ee.response.v1",
-  "success": true,
+  "success": false,
   "data": {
-    "run": {
-      "id": "pf_gate16_contract",
-      "task_input": "(run not found in storage)",
-      "status": "completed",
-      "risk_level": "unknown",
-      "cleared": false,
-      "block_reason": "Storage not yet wired",
-      "started_at": "TIMESTAMP",
-      "completed_at": "TIMESTAMP",
-      "duration_ms": null
-    },
-    "brief": null,
-    "tripwires": [],
+    "command": "preflight show",
+    "code": "preflight_evidence_unavailable",
+    "severity": "warning",
+    "message": "Preflight risk briefs are unavailable until preflight commands are backed by persisted evidence matches and stored run records instead of task-text heuristics.",
+    "repair": "ee status --json",
     "degraded": [
       {
-        "code": "preflight_evidence_stale",
+        "code": "preflight_evidence_unavailable",
         "severity": "warning",
-        "message": "Preflight persistence is not wired yet; stored risk brief evidence may be stale or unavailable.",
-        "repair": "ee preflight run <task> --json"
+        "message": "Preflight risk briefs are unavailable until preflight commands are backed by persisted evidence matches and stored run records instead of task-text heuristics.",
+        "repair": "ee status --json"
       }
-    ]
+    ],
+    "evidenceIds": [],
+    "sourceIds": [],
+    "followUpBead": "eidetic_engine_cli-bijm",
+    "sideEffectClass": "conservative abstention; no preflight run, risk brief, or feedback ledger mutation"
   }
 }

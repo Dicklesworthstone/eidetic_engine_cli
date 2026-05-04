@@ -237,15 +237,56 @@ fn release_task_preflight_matches_exact_gate_golden() -> TestResult {
     })
     .map_err(|error| error.message())?;
 
-    ensure_equal(&report.risk_level, &"high".to_owned(), "risk level")?;
+    ensure_equal(&report.risk_level, &"critical".to_owned(), "risk level")?;
     ensure_equal(&report.cleared, &false, "high-risk run is not auto-cleared")?;
     ensure_equal(&report.tripwires_set, &1, "generated tripwire count")?;
+    ensure_equal(
+        &report.tripwires[0].source_kind,
+        &Some("dependency_contract".to_owned()),
+        "generated tripwire source kind",
+    )?;
+    ensure_equal(
+        &report.tripwires[0].source_id,
+        &Some("dep_no_tokio".to_owned()),
+        "generated tripwire source id",
+    )?;
+    ensure_equal(
+        &report.tripwires[0].source_score,
+        &Some(1.0),
+        "generated tripwire source score",
+    )?;
+    ensure_equal(
+        &report.tripwires[0].trigger_terms,
+        &vec![
+            "deploy".to_owned(),
+            "migration".to_owned(),
+            "production".to_owned(),
+        ],
+        "generated tripwire trigger terms",
+    )?;
+    ensure(
+        report.tripwires[0]
+            .provenance
+            .contains(&"source_score=1.000".to_owned()),
+        "generated tripwire provenance must include source score",
+    )?;
     ensure(
         report.evidence_ids.contains(&"dep_no_tokio".to_owned()),
         "preflight report must include evidence ids",
     )?;
     ensure(
-        report.next_action == "verify_must_checks_before_proceeding",
+        report.ask_now_prompts.is_empty(),
+        "preflight core must not emit ask-now prompts",
+    )?;
+    ensure(
+        report
+            .must_verify_checks
+            .iter()
+            .any(|check| check.contains("dependency_contract:dep_no_tokio")),
+        "preflight checks must cite explicit evidence sources",
+    )?;
+    ensure(
+        report.next_action == "review_evidence_matches_before_proceeding",
         "preflight report must include next action",
     )?;
 
@@ -254,28 +295,20 @@ fn release_task_preflight_matches_exact_gate_golden() -> TestResult {
 }
 
 #[test]
-fn degraded_evidence_preflight_matches_exact_gate_golden() -> TestResult {
-    let report = show_preflight(&PreflightShowOptions {
+fn show_preflight_returns_not_found_without_persisted_run() -> TestResult {
+    let Err(error) = show_preflight(&PreflightShowOptions {
         run_id: "pf_gate16_contract".to_owned(),
         ..Default::default()
-    })
-    .map_err(|error| error.message())?;
+    }) else {
+        return Err("show must not fabricate a stored preflight run".to_owned());
+    };
 
-    ensure(
-        report
-            .degraded
-            .iter()
-            .any(|entry| entry.code == "preflight_evidence_stale"),
-        "show preflight must expose preflight_evidence_stale",
-    )?;
-
-    let actual = normalized(serde_json::to_value(report).map_err(|error| error.to_string())?)?;
-    assert_exact_golden("preflight/degraded_evidence.json", &actual)
+    ensure_equal(&error.code(), &"not_found", "show not found code")
 }
 
 #[test]
-fn false_alarm_close_matches_exact_gate_golden() -> TestResult {
-    let report = close_preflight(&PreflightCloseOptions {
+fn close_preflight_returns_not_found_without_feedback() -> TestResult {
+    let Err(error) = close_preflight(&PreflightCloseOptions {
         run_id: "pf_gate16_contract".to_owned(),
         cleared: true,
         reason: Some("task completed without needing the warning".to_owned()),
@@ -283,23 +316,11 @@ fn false_alarm_close_matches_exact_gate_golden() -> TestResult {
         feedback_kind: Some(PreflightFeedbackKind::FalseAlarm),
         dry_run: true,
         ..Default::default()
-    })
-    .map_err(|error| error.message())?;
+    }) else {
+        return Err("close must not record feedback for a missing preflight run".to_owned());
+    };
 
-    let feedback = report
-        .feedback
-        .as_ref()
-        .ok_or_else(|| "false-alarm close missing feedback".to_owned())?;
-    ensure_equal(
-        &feedback.feedback_kind,
-        &Some("false_alarm".to_owned()),
-        "feedback kind",
-    )?;
-    ensure_equal(&feedback.durable_mutation, &false, "dry-run mutation")?;
-    ensure_equal(&feedback.evidence_preserved, &true, "evidence preserved")?;
-
-    let actual = normalized(serde_json::to_value(report).map_err(|error| error.to_string())?)?;
-    assert_exact_golden("preflight/false_alarm_close.json", &actual)
+    ensure_equal(&error.code(), &"not_found", "close not found code")
 }
 
 #[test]

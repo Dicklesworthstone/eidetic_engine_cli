@@ -3,29 +3,22 @@
   "run_id": "pf_DYNAMIC",
   "task_input": "deploy production database migration",
   "status": "completed",
-  "risk_level": "high",
+  "risk_level": "critical",
   "cleared": false,
-  "block_reason": "Risk level high exceeds auto-clear threshold medium",
+  "block_reason": "Evidence-backed risk level critical exceeds auto-clear threshold medium",
   "risk_brief_id": "rb_DYNAMIC",
   "top_risks": [
-    "high-risk task language requires explicit preflight review.",
-    "Deployment or production wording can hide irreversible side effects.",
-    "Migration wording requires schema and data-safety checks."
+    "critical [dependency_contract:dep_no_tokio]: Forbidden async runtime dependency must not appear in release work"
   ],
-  "ask_now_prompts": [
-    "Confirm the exact target environment and rollback point before proceeding.",
-    "Ask whether this action touches production state or release artifacts."
-  ],
+  "ask_now_prompts": [],
   "must_verify_checks": [
-    "Verify current branch, workspace, and durable evidence scope.",
-    "Run the relevant release/deployment verification before execution.",
-    "Verify migration dry-run or rollback evidence before applying."
+    "Review evidence source dependency_contract:dep_no_tokio before proceeding."
   ],
   "evidence_ids": [
     "dep_no_tokio"
   ],
-  "next_action": "verify_must_checks_before_proceeding",
-  "risks_identified": 0,
+  "next_action": "review_evidence_matches_before_proceeding",
+  "risks_identified": 1,
   "tripwires_set": 1,
   "tripwires": [
     {
@@ -35,7 +28,20 @@
       "tripwire_type": "file_change",
       "action": "halt",
       "condition": "task_contains_any(\"deploy\", \"migration\", \"production\")",
-      "message": "critical [dependency_contract:dep_no_tokio]: Forbidden async runtime dependency must not appear in release work"
+      "message": "critical [dependency_contract:dep_no_tokio]: Forbidden async runtime dependency must not appear in release work",
+      "source_kind": "dependency_contract",
+      "source_id": "dep_no_tokio",
+      "source_score": 1.0,
+      "trigger_terms": [
+        "deploy",
+        "migration",
+        "production"
+      ],
+      "provenance": [
+        "source_kind=dependency_contract",
+        "source_id=dep_no_tokio",
+        "source_score=1.000"
+      ]
     }
   ],
   "degraded": [],

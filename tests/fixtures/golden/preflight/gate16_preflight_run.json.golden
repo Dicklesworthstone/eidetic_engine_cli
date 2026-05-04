@@ -1,43 +1,23 @@
 {
   "schema": "ee.response.v1",
-  "success": true,
+  "success": false,
   "data": {
-    "run_id": "pf_DYNAMIC",
-    "task_input": "deploy production database migration",
-    "status": "completed",
-    "risk_level": "high",
-    "cleared": false,
-    "block_reason": "Risk level high exceeds auto-clear threshold medium",
-    "risk_brief_id": "rb_DYNAMIC",
-    "top_risks": [
-      "high-risk task language requires explicit preflight review.",
-      "Deployment or production wording can hide irreversible side effects.",
-      "Migration wording requires schema and data-safety checks."
-    ],
-    "ask_now_prompts": [
-      "Confirm the exact target environment and rollback point before proceeding.",
-      "Ask whether this action touches production state or release artifacts."
-    ],
-    "must_verify_checks": [
-      "Verify current branch, workspace, and durable evidence scope.",
-      "Run the relevant release/deployment verification before execution.",
-      "Verify migration dry-run or rollback evidence before applying."
-    ],
-    "evidence_ids": [],
-    "next_action": "verify_must_checks_before_proceeding",
-    "risks_identified": 0,
-    "tripwires_set": 0,
-    "tripwires": [],
+    "command": "preflight run",
+    "code": "preflight_evidence_unavailable",
+    "severity": "warning",
+    "message": "Preflight risk briefs are unavailable until preflight commands are backed by persisted evidence matches and stored run records instead of task-text heuristics.",
+    "repair": "ee status --json",
     "degraded": [
       {
-        "code": "preflight_evidence_stale",
+        "code": "preflight_evidence_unavailable",
         "severity": "warning",
-        "message": "No persisted evidence sources were available, so the preflight brief relies on task text only.",
-        "repair": "ee preflight run <task> --json"
+        "message": "Preflight risk briefs are unavailable until preflight commands are backed by persisted evidence matches and stored run records instead of task-text heuristics.",
+        "repair": "ee status --json"
       }
     ],
-    "dry_run": false,
-    "started_at": "TIMESTAMP",
-    "completed_at": "TIMESTAMP"
+    "evidenceIds": [],
+    "sourceIds": [],
+    "followUpBead": "eidetic_engine_cli-bijm",
+    "sideEffectClass": "conservative abstention; no preflight run, risk brief, or feedback ledger mutation"
   }
 }

@@ -1,24 +1,10 @@
 {
-  "schema": "ee.preflight.report.v1",
-  "run": {
+  "schema": "ee.error.v1",
+  "error": {
+    "code": "not_found",
+    "message": "preflight run not found: pf_gate16_contract",
+    "resource": "preflight run",
     "id": "pf_gate16_contract",
-    "task_input": "(run not found in storage)",
-    "status": "completed",
-    "risk_level": "unknown",
-    "cleared": false,
-    "block_reason": "Storage not yet wired",
-    "started_at": "TIMESTAMP",
-    "completed_at": "TIMESTAMP",
-    "duration_ms": null
-  },
-  "brief": null,
-  "tripwires": [],
-  "degraded": [
-    {
-      "code": "preflight_evidence_stale",
-      "severity": "warning",
-      "message": "Preflight persistence is not wired yet; stored risk brief evidence may be stale or unavailable.",
-      "repair": "ee preflight run <task> --json"
-    }
-  ]
+    "repair": "Persisted preflight run storage is not wired; run preflight with explicit evidence before show/close."
+  }
 }

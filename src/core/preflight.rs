@@ -14,10 +14,7 @@ use std::path::PathBuf;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::core::feedback::{
-    PreflightFeedbackKind, RecordFeedbackReport, RecordOutcomeOptions, TaskOutcome,
-    infer_preflight_feedback_kind, record_preflight_outcome,
-};
+use crate::core::feedback::{PreflightFeedbackKind, RecordFeedbackReport, TaskOutcome};
 use crate::models::DomainError;
 use crate::models::claims::{ClaimEntry, ClaimStatus};
 use crate::models::episode::{RegretCategory, RegretEntry as LedgerRegretEntry};
@@ -265,6 +262,10 @@ pub struct GeneratedTripwire {
     pub source_id: String,
     /// Score used for ranking and thresholding.
     pub source_score: f64,
+    /// Trigger terms copied from the evidence source.
+    pub trigger_terms: Vec<String>,
+    /// Human-readable provenance facts for the generated tripwire.
+    pub provenance: Vec<String>,
     /// Risk level used for deterministic ordering.
     pub risk_level: RiskLevel,
 }
@@ -530,6 +531,16 @@ pub struct TripwireView {
     pub action: String,
     pub condition: String,
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_terms: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<String>,
 }
 
 impl From<&Tripwire> for TripwireView {
@@ -545,7 +556,24 @@ impl From<&Tripwire> for TripwireView {
             action: tripwire.action.as_str().to_owned(),
             condition: tripwire.condition.clone(),
             message: tripwire.message.clone(),
+            source_kind: None,
+            source_id: None,
+            source_score: None,
+            trigger_terms: Vec::new(),
+            provenance: Vec::new(),
         }
+    }
+}
+
+impl From<&GeneratedTripwire> for TripwireView {
+    fn from(generated: &GeneratedTripwire) -> Self {
+        let mut view = Self::from(&generated.tripwire);
+        view.source_kind = Some(generated.source_kind.as_str().to_owned());
+        view.source_id = Some(generated.source_id.clone());
+        view.source_score = Some(generated.source_score);
+        view.trigger_terms = generated.trigger_terms.clone();
+        view.provenance = generated.provenance.clone();
+        view
     }
 }
 
@@ -597,6 +625,16 @@ pub struct PreflightDegradation {
 }
 
 impl PreflightDegradation {
+    #[must_use]
+    pub fn evidence_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            code: "preflight_evidence_unavailable".to_owned(),
+            severity: "medium".to_owned(),
+            message: message.into(),
+            repair: Some("Provide explicit preflight evidence sources or run a project-local preflight risk-review skill.".to_owned()),
+        }
+    }
+
     #[must_use]
     pub fn evidence_stale(message: impl Into<String>) -> Self {
         Self {
@@ -673,6 +711,12 @@ fn build_generated_tripwire(
         source_kind: source.kind,
         source_id: source.source_id.clone(),
         source_score: source.score,
+        trigger_terms: source.trigger_terms.clone(),
+        provenance: vec![
+            format!("source_kind={}", source.kind.as_str()),
+            format!("source_id={}", source.source_id),
+            format!("source_score={:.3}", source.score),
+        ],
         risk_level: source.risk_level,
     }
 }
@@ -801,65 +845,61 @@ pub fn run_preflight(options: &RunOptions) -> Result<RunReport, DomainError> {
     let mut report = RunReport::new(run_id.clone(), options.task_input.clone());
     report.dry_run = options.dry_run;
 
-    if options.dry_run {
-        report.status = PreflightStatus::Completed.as_str().to_owned();
-        report.completed_at = Some(Utc::now().to_rfc3339());
-        return Ok(report);
-    }
-
-    // Assess risk level based on task input patterns
-    let risk_level = assess_task_risk(&options.task_input);
-    report.risk_level = risk_level.as_str().to_owned();
-
-    // Generate risk brief
-    let brief_id = format!("{}{}", RISK_BRIEF_ID_PREFIX, generate_id());
-    report.risk_brief_id = Some(brief_id);
-    let readiness = readiness_brief_fields(&options.task_input, risk_level);
-    report.top_risks = readiness.top_risks;
-    report.ask_now_prompts = readiness.ask_now_prompts;
-    report.must_verify_checks = readiness.must_verify_checks;
-
+    let mut generated_tripwires = Vec::new();
     if options.check_tripwires {
-        let tripwires = generate_tripwires_from_sources(
+        generated_tripwires = generate_tripwires_from_sources(
             &run_id,
             &options.task_input,
             &report.started_at,
             &options.tripwire_sources,
             &options.tripwire_generation,
         );
-        report.tripwires_set = tripwires.len();
-        report.tripwires = tripwires
-            .iter()
-            .map(|generated| TripwireView::from(&generated.tripwire))
-            .collect();
-        report.evidence_ids = tripwires
+        report.tripwires_set = generated_tripwires.len();
+        report.tripwires = generated_tripwires.iter().map(TripwireView::from).collect();
+        report.evidence_ids = generated_tripwires
             .iter()
             .map(|generated| generated.source_id.clone())
             .collect();
-        if options.tripwire_sources.is_empty() && risk_level.requires_confirmation() {
-            report.degraded.push(PreflightDegradation::evidence_stale(
-                "No persisted evidence sources were available, so the preflight brief relies on task text only.",
-            ));
-        }
     }
 
-    // Determine clearance
-    let auto_clear_threshold = options.auto_clear_threshold.unwrap_or(RiskLevel::Medium);
-    if risk_level <= auto_clear_threshold {
-        report.cleared = true;
-    } else {
+    if generated_tripwires.is_empty() {
+        report.risk_level = RiskLevel::Unknown.as_str().to_owned();
         report.cleared = false;
-        report.block_reason = Some(format!(
-            "Risk level {} exceeds auto-clear threshold {}",
-            risk_level.as_str(),
-            auto_clear_threshold.as_str()
+        report.block_reason = Some(
+            "No persisted preflight evidence matched the task; task-text heuristics are not enough to clear execution.".to_owned(),
+        );
+        report.next_action = "collect_preflight_evidence_or_use_risk_review_skill".to_owned();
+        report.degraded.push(preflight_unavailable_degradation(
+            &options.task_input,
+            options.tripwire_sources.len(),
         ));
-    }
-    report.next_action = if report.cleared {
-        "proceed_after_standard_checks".to_owned()
     } else {
-        "verify_must_checks_before_proceeding".to_owned()
-    };
+        let risk_level = evidence_risk_level(&generated_tripwires);
+        report.risk_level = risk_level.as_str().to_owned();
+        report.risk_brief_id = Some(format!("{}{}", RISK_BRIEF_ID_PREFIX, generate_id()));
+
+        let readiness = evidence_brief_fields(&generated_tripwires);
+        report.top_risks = readiness.top_risks;
+        report.must_verify_checks = readiness.must_verify_checks;
+        report.risks_identified = report.top_risks.len();
+
+        let auto_clear_threshold = options.auto_clear_threshold.unwrap_or(RiskLevel::Medium);
+        if risk_level <= auto_clear_threshold {
+            report.cleared = true;
+        } else {
+            report.cleared = false;
+            report.block_reason = Some(format!(
+                "Evidence-backed risk level {} exceeds auto-clear threshold {}",
+                risk_level.as_str(),
+                auto_clear_threshold.as_str()
+            ));
+        }
+        report.next_action = if report.cleared {
+            "proceed_after_evidence_review".to_owned()
+        } else {
+            "review_evidence_matches_before_proceeding".to_owned()
+        };
+    }
 
     report.status = PreflightStatus::Completed.as_str().to_owned();
     report.completed_at = Some(Utc::now().to_rfc3339());
@@ -869,86 +909,40 @@ pub fn run_preflight(options: &RunOptions) -> Result<RunReport, DomainError> {
 
 /// Show details of a preflight run.
 pub fn show_preflight(options: &ShowOptions) -> Result<ShowReport, DomainError> {
-    // For now, return a stub since we don't have persistence wired
-    // In a real implementation, this would query the database
-
-    if !options.run_id.starts_with(PREFLIGHT_RUN_ID_PREFIX) {
-        return Err(DomainError::Usage {
-            message: format!(
-                "Invalid preflight run ID: expected prefix '{}', got '{}'",
-                PREFLIGHT_RUN_ID_PREFIX,
-                &options.run_id[..options.run_id.len().min(3)]
-            ),
-            repair: Some("Provide a valid preflight run ID (format: pf_<uuid>)".to_owned()),
-        });
-    }
-
-    // Create a stub run view
-    let run = PreflightRunView {
-        id: options.run_id.clone(),
-        task_input: "(run not found in storage)".to_owned(),
-        status: PreflightStatus::Completed.as_str().to_owned(),
-        risk_level: RiskLevel::Unknown.as_str().to_owned(),
-        cleared: false,
-        block_reason: Some("Storage not yet wired".to_owned()),
-        started_at: Utc::now().to_rfc3339(),
-        completed_at: Some(Utc::now().to_rfc3339()),
-        duration_ms: None,
-    };
-
-    let mut report = ShowReport::new(run);
-    report.degraded.push(PreflightDegradation::evidence_stale(
-        "Preflight persistence is not wired yet; stored risk brief evidence may be stale or unavailable.",
-    ));
-    Ok(report)
+    validate_preflight_run_id(&options.run_id)?;
+    Err(preflight_run_not_found(&options.run_id))
 }
 
 /// Close a preflight run.
 pub fn close_preflight(options: &CloseOptions) -> Result<CloseReport, DomainError> {
-    if !options.run_id.starts_with(PREFLIGHT_RUN_ID_PREFIX) {
-        return Err(DomainError::Usage {
+    validate_preflight_run_id(&options.run_id)?;
+    Err(preflight_run_not_found(&options.run_id))
+}
+
+fn validate_preflight_run_id(run_id: &str) -> Result<(), DomainError> {
+    if run_id.starts_with(PREFLIGHT_RUN_ID_PREFIX) {
+        Ok(())
+    } else {
+        Err(DomainError::Usage {
             message: format!(
                 "Invalid preflight run ID: expected prefix '{}', got '{}'",
                 PREFLIGHT_RUN_ID_PREFIX,
-                &options.run_id[..options.run_id.len().min(3)]
+                &run_id[..run_id.len().min(3)]
             ),
             repair: Some("Provide a valid preflight run ID (format: pf_<uuid>)".to_owned()),
-        });
+        })
     }
+}
 
-    let mut report = CloseReport::new(options.run_id.clone(), PreflightStatus::Running);
-    report.cleared = options.cleared;
-    report.reason = options.reason.clone();
-    report.task_outcome = options
-        .task_outcome
-        .map(|outcome| outcome.as_str().to_owned());
-    report.dry_run = options.dry_run;
-
-    if options.cleared {
-        report.new_status = PreflightStatus::Completed.as_str().to_owned();
-    } else {
-        report.new_status = PreflightStatus::Cancelled.as_str().to_owned();
+fn preflight_run_not_found(run_id: &str) -> DomainError {
+    DomainError::NotFound {
+        resource: "preflight run".to_owned(),
+        id: run_id.to_owned(),
+        repair: Some(
+            "Persisted preflight run storage is not wired; run preflight with explicit evidence before show/close."
+                .to_owned(),
+        ),
     }
-
-    let feedback_kind = options.feedback_kind.or_else(|| {
-        options
-            .task_outcome
-            .map(|outcome| infer_preflight_feedback_kind(options.cleared, outcome))
-    });
-
-    if let Some(feedback_kind) = feedback_kind {
-        let task_outcome = options.task_outcome.unwrap_or(TaskOutcome::Unknown);
-        report.feedback = Some(record_preflight_outcome(&RecordOutcomeOptions {
-            workspace: options.workspace.clone(),
-            preflight_run_id: options.run_id.clone(),
-            task_outcome,
-            feedback_kind,
-            notes: options.reason.clone(),
-            dry_run: options.dry_run,
-        })?);
-    }
-
-    Ok(report)
 }
 
 /// Assess risk level from task input text.
@@ -996,55 +990,63 @@ fn assess_task_risk(task_input: &str) -> RiskLevel {
 
 struct ReadinessBriefFields {
     top_risks: Vec<String>,
-    ask_now_prompts: Vec<String>,
     must_verify_checks: Vec<String>,
 }
 
-fn readiness_brief_fields(task_input: &str, risk_level: RiskLevel) -> ReadinessBriefFields {
-    let lower = task_input.to_lowercase();
-    let mut top_risks = Vec::new();
-    let mut ask_now_prompts = Vec::new();
-    let mut must_verify_checks = Vec::new();
-
-    if risk_level.requires_confirmation() {
-        top_risks.push(format!(
-            "{}-risk task language requires explicit preflight review.",
-            risk_level.as_str()
-        ));
-        ask_now_prompts.push(
-            "Confirm the exact target environment and rollback point before proceeding.".to_owned(),
-        );
-        must_verify_checks
-            .push("Verify current branch, workspace, and durable evidence scope.".to_owned());
-    }
-
-    if lower.contains("production") || lower.contains("deploy") {
-        top_risks.push(
-            "Deployment or production wording can hide irreversible side effects.".to_owned(),
-        );
-        ask_now_prompts.push(
-            "Ask whether this action touches production state or release artifacts.".to_owned(),
-        );
-        must_verify_checks
-            .push("Run the relevant release/deployment verification before execution.".to_owned());
-    }
-
-    if lower.contains("migrate") || lower.contains("migration") {
-        top_risks.push("Migration wording requires schema and data-safety checks.".to_owned());
-        must_verify_checks
-            .push("Verify migration dry-run or rollback evidence before applying.".to_owned());
-    }
-
-    if top_risks.is_empty() {
-        top_risks.push("No high-severity task pattern matched.".to_owned());
-        must_verify_checks.push("Proceed with standard project verification.".to_owned());
-    }
-
+fn evidence_brief_fields(generated_tripwires: &[GeneratedTripwire]) -> ReadinessBriefFields {
+    let top_risks = generated_tripwires
+        .iter()
+        .map(|generated| {
+            generated.tripwire.message.clone().unwrap_or_else(|| {
+                format!(
+                    "{} [{}:{}]",
+                    generated.risk_level.as_str(),
+                    generated.source_kind.as_str(),
+                    generated.source_id
+                )
+            })
+        })
+        .collect();
+    let must_verify_checks = generated_tripwires
+        .iter()
+        .map(|generated| {
+            format!(
+                "Review evidence source {}:{} before proceeding.",
+                generated.source_kind.as_str(),
+                generated.source_id
+            )
+        })
+        .collect();
     ReadinessBriefFields {
         top_risks,
-        ask_now_prompts,
         must_verify_checks,
     }
+}
+
+fn evidence_risk_level(generated_tripwires: &[GeneratedTripwire]) -> RiskLevel {
+    generated_tripwires
+        .iter()
+        .map(|generated| generated.risk_level)
+        .max_by_key(|level| risk_rank(*level))
+        .unwrap_or(RiskLevel::Unknown)
+}
+
+fn preflight_unavailable_degradation(
+    task_input: &str,
+    source_count: usize,
+) -> PreflightDegradation {
+    let heuristic_level = assess_task_risk(task_input);
+    let source_message = if source_count == 0 {
+        "No persisted evidence sources were provided."
+    } else {
+        "Persisted evidence sources were provided, but none matched the task and threshold."
+    };
+    let heuristic_message = if matches!(heuristic_level, RiskLevel::None | RiskLevel::Unknown) {
+        "No task-text heuristic is treated as an evidence-backed risk."
+    } else {
+        "Task text matched heuristic risk language, but heuristics are not treated as evidence-backed risks."
+    };
+    PreflightDegradation::evidence_unavailable(format!("{source_message} {heuristic_message}"))
 }
 
 #[cfg(test)]
@@ -1085,7 +1087,7 @@ mod tests {
     }
 
     #[test]
-    fn run_assesses_critical_risk() -> TestResult {
+    fn run_without_evidence_does_not_promote_task_text_to_risk() -> TestResult {
         let options = RunOptions {
             task_input: "delete all production data".to_owned(),
             dry_run: false,
@@ -1095,14 +1097,29 @@ mod tests {
         let report = run_preflight(&options).map_err(|e| e.message())?;
         ensure(
             report.risk_level,
-            RiskLevel::Critical.as_str().to_owned(),
-            "risk_level",
+            RiskLevel::Unknown.as_str().to_owned(),
+            "task-text-only risk level",
         )?;
-        ensure(report.cleared, false, "should not be cleared")
+        ensure(report.cleared, false, "should not be cleared")?;
+        ensure(report.risk_brief_id.is_none(), true, "no fake risk brief")?;
+        ensure(report.top_risks.is_empty(), true, "no heuristic risks")?;
+        ensure(
+            report.ask_now_prompts.is_empty(),
+            true,
+            "no ask-now prompts",
+        )?;
+        ensure(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "preflight_evidence_unavailable"),
+            true,
+            "evidence unavailable degradation",
+        )
     }
 
     #[test]
-    fn run_assesses_low_risk() -> TestResult {
+    fn run_with_no_evidence_does_not_auto_clear_low_risk_text() -> TestResult {
         let options = RunOptions {
             task_input: "list all files".to_owned(),
             dry_run: false,
@@ -1112,10 +1129,10 @@ mod tests {
         let report = run_preflight(&options).map_err(|e| e.message())?;
         ensure(
             report.risk_level,
-            RiskLevel::Low.as_str().to_owned(),
+            RiskLevel::Unknown.as_str().to_owned(),
             "risk_level",
         )?;
-        ensure(report.cleared, true, "should be cleared")
+        ensure(report.cleared, false, "no evidence means not cleared")
     }
 
     #[test]
@@ -1130,33 +1147,17 @@ mod tests {
     }
 
     #[test]
-    fn close_sets_status_based_on_cleared() -> TestResult {
+    fn close_returns_not_found_without_persisted_run() -> TestResult {
         let options = CloseOptions {
             run_id: format!("{}test", PREFLIGHT_RUN_ID_PREFIX),
             cleared: true,
             ..Default::default()
         };
 
-        let report = close_preflight(&options).map_err(|e| e.message())?;
-        ensure(
-            report.new_status,
-            PreflightStatus::Completed.as_str().to_owned(),
-            "cleared status",
-        )?;
-
-        let options_blocked = CloseOptions {
-            run_id: format!("{}test", PREFLIGHT_RUN_ID_PREFIX),
-            cleared: false,
-            reason: Some("Task rejected".to_owned()),
-            ..Default::default()
+        let Err(error) = close_preflight(&options) else {
+            return Err("close should not invent a persisted preflight run".to_owned());
         };
-
-        let report_blocked = close_preflight(&options_blocked).map_err(|e| e.message())?;
-        ensure(
-            report_blocked.new_status,
-            PreflightStatus::Cancelled.as_str().to_owned(),
-            "blocked status",
-        )
+        ensure(error.code(), "not_found", "error code")
     }
 
     #[test]
@@ -1277,6 +1278,20 @@ mod tests {
             generated[0].tripwire.condition.clone(),
             "task_contains_any(\"release\")".to_string(),
             "condition",
+        )?;
+        ensure(
+            generated[0].trigger_terms.clone(),
+            vec!["release".to_string()],
+            "generated trigger terms",
+        )?;
+        ensure(
+            generated[0].provenance.clone(),
+            vec![
+                "source_kind=dependency_contract".to_string(),
+                "source_id=dep_no_tokio".to_string(),
+                "source_score=1.000".to_string(),
+            ],
+            "generated provenance",
         )
     }
 
@@ -1360,9 +1375,44 @@ mod tests {
         ensure(report.tripwires_set, 1, "tripwires_set")?;
         ensure(report.tripwires.len(), 1, "tripwire views")?;
         ensure(
+            report.ask_now_prompts.is_empty(),
+            true,
+            "no generated ask-now prompts",
+        )?;
+        ensure(report.risks_identified, 1, "risk count from evidence")?;
+        ensure(
             report.tripwires[0].tripwire_type.clone(),
             TripwireType::FileChange.as_str().to_string(),
             "tripwire type",
+        )?;
+        ensure(
+            report.tripwires[0].source_kind.clone(),
+            Some("dependency_contract".to_string()),
+            "tripwire source kind",
+        )?;
+        ensure(
+            report.tripwires[0].source_id.clone(),
+            Some("dep_forbidden_runtime".to_string()),
+            "tripwire source id",
+        )?;
+        ensure(
+            report.tripwires[0].source_score,
+            Some(1.0),
+            "tripwire source score",
+        )?;
+        ensure(
+            report.tripwires[0].trigger_terms.clone(),
+            vec!["release".to_string()],
+            "tripwire trigger terms",
+        )?;
+        ensure(
+            report.tripwires[0].provenance.clone(),
+            vec![
+                "source_kind=dependency_contract".to_string(),
+                "source_id=dep_forbidden_runtime".to_string(),
+                "source_score=1.000".to_string(),
+            ],
+            "tripwire provenance",
         )
     }
 
