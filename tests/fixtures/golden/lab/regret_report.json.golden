@@ -1,60 +1,55 @@
 {
-  "schema": "ee.lab.regret_report.v1",
+  "schema": "ee.lab.hypothesis_report.v1",
   "episode_id": "ep_golden_test",
-  "regret_entries": [
+  "hypothesis_records": [
     {
-      "id": "reg_NORMALIZED",
+      "id": "hyprec_NORMALIZED",
       "episode_id": "ep_golden_test",
       "intervention_type": "add",
-      "regret_kind": "hypothesis",
+      "hypothesis_kind": "pack_diff_hypothesis",
       "memory_id": null,
-      "would_have_surfaced": false,
-      "would_have_changed": false,
-      "confidence": 0.0,
+      "requires_replay_evidence": true,
+      "validation_status": "unvalidated",
       "explanation": "Unverified hypothesis for intervention 1"
     },
     {
-      "id": "reg_NORMALIZED",
+      "id": "hyprec_NORMALIZED",
       "episode_id": "ep_golden_test",
       "intervention_type": "strengthen",
-      "regret_kind": "hypothesis",
+      "hypothesis_kind": "pack_diff_hypothesis",
       "memory_id": "mem_stale",
-      "would_have_surfaced": false,
-      "would_have_changed": false,
-      "confidence": 0.0,
+      "requires_replay_evidence": true,
+      "validation_status": "unvalidated",
       "explanation": "Unverified hypothesis for intervention 2"
     },
     {
-      "id": "reg_NORMALIZED",
+      "id": "hyprec_NORMALIZED",
       "episode_id": "ep_golden_test",
       "intervention_type": "remove",
-      "regret_kind": "hypothesis",
+      "hypothesis_kind": "pack_diff_hypothesis",
       "memory_id": "mem_noisy",
-      "would_have_surfaced": false,
-      "would_have_changed": false,
-      "confidence": 0.0,
+      "requires_replay_evidence": true,
+      "validation_status": "unvalidated",
       "explanation": "Unverified hypothesis for intervention 3"
     },
     {
-      "id": "reg_NORMALIZED",
+      "id": "hyprec_NORMALIZED",
       "episode_id": "ep_golden_test",
       "intervention_type": "weaken",
-      "regret_kind": "hypothesis",
+      "hypothesis_kind": "pack_diff_hypothesis",
       "memory_id": "mem_harmful",
-      "would_have_surfaced": false,
-      "would_have_changed": false,
-      "confidence": 0.0,
+      "requires_replay_evidence": true,
+      "validation_status": "unvalidated",
       "explanation": "Unverified hypothesis for intervention 4"
     },
     {
-      "id": "reg_NORMALIZED",
+      "id": "hyprec_NORMALIZED",
       "episode_id": "ep_golden_test",
       "intervention_type": "add",
-      "regret_kind": "hypothesis",
+      "hypothesis_kind": "pack_diff_hypothesis",
       "memory_id": null,
-      "would_have_surfaced": false,
-      "would_have_changed": false,
-      "confidence": 0.0,
+      "requires_replay_evidence": true,
+      "validation_status": "unvalidated",
       "explanation": "Unverified hypothesis for intervention 5"
     }
   ]

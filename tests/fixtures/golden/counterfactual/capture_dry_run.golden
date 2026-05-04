@@ -11,7 +11,15 @@
   ],
   "outcome_ref": "cass:session_golden:outcome",
   "repository_fingerprint": "repo:NORMALIZED",
+  "evidence_ids": [
+    "cass:session_golden:outcome",
+    "cass:session_golden:session",
+    "pack:blake3:NORMALIZED",
+    "repo:NORMALIZED",
+    "task_input:NORMALIZED"
+  ],
   "redaction_status": "redacted",
+  "redaction_classes": [],
   "memories_captured": 0,
   "actions_captured": 0,
   "episode_hash": null,

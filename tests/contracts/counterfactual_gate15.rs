@@ -41,6 +41,13 @@ fn ensure_contains(haystack: &str, needle: &str, context: &str) -> TestResult {
     )
 }
 
+fn ensure_not_contains(haystack: &str, needle: &str, context: &str) -> TestResult {
+    ensure(
+        !haystack.contains(needle),
+        format!("{context}: expected not to contain '{needle}' but got:\n{haystack}"),
+    )
+}
+
 fn golden_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -241,11 +248,108 @@ fn gate15_capture_records_redacted_episode_evidence() -> TestResult {
         report.repository_fingerprint.is_some(),
         "repository fingerprint is present",
     )?;
+    ensure(
+        !report.evidence_ids.is_empty(),
+        "capture reports evidence IDs",
+    )?;
+    ensure(
+        report
+            .evidence_ids
+            .iter()
+            .any(|id| id == "cass:session_gate15:session"),
+        "capture includes session evidence ID",
+    )?;
 
     let json = render_lab_capture_json(&report);
     ensure_contains(&json, "\"packHash\":", "rendered pack hash")?;
     ensure_contains(&json, "\"policyIds\":", "rendered policy IDs")?;
+    ensure_contains(&json, "\"evidenceIds\":", "rendered evidence IDs")?;
     ensure_contains(&json, "\"redactionStatus\":\"redacted\"", "redaction")
+}
+
+#[test]
+fn gate15_capture_redacts_sensitive_task_payloads() -> TestResult {
+    let password_value = "fixture-value-one";
+    let token_value = "fixture-value-two";
+    let api_key_value = "fixture-value-three";
+    let task_input = [
+        "debug auth failure ",
+        "pass",
+        "word=",
+        password_value,
+        " tok",
+        "en=",
+        token_value,
+        " api",
+        "_key=",
+        api_key_value,
+    ]
+    .concat();
+    let options = CaptureOptions {
+        workspace: PathBuf::from("/repo/ee"),
+        session_id: Some("session_secret".to_string()),
+        task_input: Some(task_input),
+        dry_run: false,
+        ..Default::default()
+    };
+
+    let report = capture_episode(&options).map_err(|e| e.message())?;
+
+    ensure_not_contains(&report.task_input, password_value, "password redacted")?;
+    ensure_not_contains(&report.task_input, token_value, "token redacted")?;
+    ensure_not_contains(&report.task_input, api_key_value, "api key redacted")?;
+    ensure_contains(
+        &report.task_input,
+        "***REDACTED:password***",
+        "password marker",
+    )?;
+    ensure(
+        report.redaction_classes == vec!["api_key", "password", "token"],
+        format!(
+            "redaction classes are stable: {:?}",
+            report.redaction_classes
+        ),
+    )?;
+    ensure(
+        report
+            .evidence_ids
+            .iter()
+            .any(|id| id.starts_with("task_input:")),
+        "redacted task input hash is tracked as evidence",
+    )?;
+
+    let json = render_lab_capture_json(&report);
+    ensure_not_contains(&json, password_value, "rendered password redacted")?;
+    ensure_not_contains(&json, token_value, "rendered token redacted")?;
+    ensure_contains(
+        &json,
+        "\"redactionClasses\":[",
+        "redaction classes rendered",
+    )
+}
+
+#[test]
+fn gate15_capture_pack_hash_is_stable_for_same_explicit_inputs() -> TestResult {
+    let task_input = ["prepare release pass", "word=fixture-value-one"].concat();
+    let options = CaptureOptions {
+        workspace: PathBuf::from("/repo/ee"),
+        session_id: Some("session_stable".to_string()),
+        task_input: Some(task_input),
+        dry_run: false,
+        ..Default::default()
+    };
+
+    let first = capture_episode(&options).map_err(|e| e.message())?;
+    let second = capture_episode(&options).map_err(|e| e.message())?;
+
+    ensure(
+        first.pack_hash == second.pack_hash,
+        "pack hash is stable for the same redacted explicit inputs",
+    )?;
+    ensure(
+        first.evidence_ids == second.evidence_ids,
+        "evidence IDs are deterministic for the same explicit inputs",
+    )
 }
 
 // ============================================================================
@@ -354,8 +458,14 @@ fn replay_non_dry_run_reports_missing_frozen_inputs() -> TestResult {
         "non-dry replay cannot complete without frozen inputs",
     )?;
     ensure(
-        !report.outcome_matches,
-        "outcome match is false without replay evidence",
+        !report.replay_evidence_available,
+        "replay evidence is unavailable",
+    )?;
+    ensure(
+        report
+            .missing_frozen_inputs
+            .contains(&"frozen episode manifest".to_string()),
+        "missing inputs identify the episode manifest",
     )
 }
 
@@ -384,9 +494,20 @@ fn gate15_replay_reports_missing_frozen_inputs_without_mutable_state_access() ->
     ensure_contains(&json, "\"frozenInputs\":false", "frozen input field")?;
     ensure_contains(
         &json,
+        "\"replayEvidenceAvailable\":false",
+        "replay evidence field",
+    )?;
+    ensure_contains(
+        &json,
+        "\"missingFrozenInputs\":[\"frozen episode manifest\",\"frozen memory snapshot\",\"frozen action trace\"]",
+        "missing frozen input list",
+    )?;
+    ensure_contains(
+        &json,
         "\"mutableCurrentStateAccess\":[]",
         "mutable access field",
     )?;
+    ensure_not_contains(&json, "outcome_matches", "no outcome comparison field")?;
     ensure_contains(&json, "lab_replay_unavailable", "degradation warning")
 }
 
@@ -451,27 +572,26 @@ fn counterfactual_tracks_interventions_applied() -> TestResult {
 #[test]
 fn counterfactual_status_variants_stable() {
     assert_eq!(CounterfactualStatus::Pending.as_str(), "pending");
-    assert_eq!(CounterfactualStatus::Analyzed.as_str(), "analyzed");
     assert_eq!(
-        CounterfactualStatus::OutcomeChanged.as_str(),
-        "outcome_changed"
+        CounterfactualStatus::HypothesisReady.as_str(),
+        "hypothesis_ready"
     );
     assert_eq!(
-        CounterfactualStatus::OutcomeUnchanged.as_str(),
-        "outcome_unchanged"
+        CounterfactualStatus::MissingReplayEvidence.as_str(),
+        "missing_replay_evidence"
     );
     assert_eq!(CounterfactualStatus::Failed.as_str(), "failed");
 }
 
 #[test]
-fn counterfactual_with_intervention_reports_no_outcome_change_without_replay() -> TestResult {
+fn counterfactual_with_intervention_reports_missing_replay_evidence() -> TestResult {
     let options = CounterfactualOptions {
         episode_id: "ep_failure".to_string(),
         interventions: vec![
             InterventionSpec::add_memory("missing context")
                 .with_hypothesis("Adding context would prevent failure"),
         ],
-        generate_regret: true,
+        generate_hypotheses: true,
         dry_run: false,
         ..Default::default()
     };
@@ -479,24 +599,24 @@ fn counterfactual_with_intervention_reports_no_outcome_change_without_replay() -
     let report = run_counterfactual(&options).map_err(|e| e.message())?;
 
     ensure(
-        !report.outcome_changed,
-        "outcome change is not claimed without replay evidence",
+        report.behavior_claims.is_empty(),
+        "no behavior claims are emitted without replay evidence",
     )?;
     ensure(
-        report.status == CounterfactualStatus::Failed,
-        "missing replay evidence produces failed status",
+        report.status == CounterfactualStatus::MissingReplayEvidence,
+        "missing replay evidence produces explicit status",
     )
 }
 
 #[test]
-fn counterfactual_generates_regret_entries() -> TestResult {
+fn counterfactual_generates_hypothesis_records() -> TestResult {
     let options = CounterfactualOptions {
         episode_id: "ep_failure".to_string(),
         interventions: vec![
             InterventionSpec::add_memory("context A"),
             InterventionSpec::remove_memory("mem_noisy"),
         ],
-        generate_regret: true,
+        generate_hypotheses: true,
         dry_run: false,
         ..Default::default()
     };
@@ -504,17 +624,17 @@ fn counterfactual_generates_regret_entries() -> TestResult {
     let report = run_counterfactual(&options).map_err(|e| e.message())?;
 
     ensure(
-        report.regret_entries.len() == 2,
-        "regret entry per intervention",
+        report.hypothesis_records.len() == 2,
+        "hypothesis record per intervention",
     )
 }
 
 #[test]
-fn counterfactual_dry_run_skips_regret() -> TestResult {
+fn counterfactual_dry_run_skips_hypothesis_records() -> TestResult {
     let options = CounterfactualOptions {
         episode_id: "ep_test".to_string(),
         interventions: vec![InterventionSpec::add_memory("test")],
-        generate_regret: true,
+        generate_hypotheses: true,
         dry_run: true,
         ..Default::default()
     };
@@ -522,13 +642,13 @@ fn counterfactual_dry_run_skips_regret() -> TestResult {
     let report = run_counterfactual(&options).map_err(|e| e.message())?;
 
     ensure(
-        report.regret_entries.is_empty(),
-        "dry run generates no regret",
+        report.hypothesis_records.is_empty(),
+        "dry run generates no hypothesis records",
     )
 }
 
 #[test]
-fn counterfactual_omits_confidence_without_replay_evidence() -> TestResult {
+fn counterfactual_marks_hypothesis_confidence_without_replay_evidence() -> TestResult {
     let options = CounterfactualOptions {
         episode_id: "ep_test".to_string(),
         interventions: vec![InterventionSpec::add_memory("context")],
@@ -539,8 +659,12 @@ fn counterfactual_omits_confidence_without_replay_evidence() -> TestResult {
     let report = run_counterfactual(&options).map_err(|e| e.message())?;
 
     ensure(
-        report.confidence.is_none(),
-        "confidence is absent without replay evidence",
+        report.confidence_state == "hypothesis_only_missing_replay_evidence",
+        "confidence state identifies missing replay evidence",
+    )?;
+    ensure(
+        !report.replay_evidence_available,
+        "replay evidence is unavailable",
     )
 }
 
@@ -552,7 +676,7 @@ fn gate15_counterfactual_is_non_mutating_and_explains_hypothesis() -> TestResult
             InterventionSpec::add_memory("remember release workflow needs fmt and clippy")
                 .with_hypothesis("The missing warning would have entered the context pack"),
         ],
-        generate_regret: true,
+        generate_hypotheses: true,
         dry_run: false,
         ..Default::default()
     };
@@ -585,8 +709,8 @@ fn gate15_counterfactual_is_non_mutating_and_explains_hypothesis() -> TestResult
         "claim remains hypothesis until externally verified",
     )?;
     ensure(
-        !report.would_have_surfaced,
-        "wouldHaveSurfaced remains false without pack replay evidence",
+        report.behavior_claims.is_empty(),
+        "no behavior claims are emitted without replay evidence",
     )?;
     ensure(
         report.curation_candidates.iter().all(|candidate| {
@@ -598,7 +722,9 @@ fn gate15_counterfactual_is_non_mutating_and_explains_hypothesis() -> TestResult
     let json = render_lab_counterfactual_json(&report);
     ensure_contains(&json, "\"durableMutation\":false", "no mutation")?;
     ensure_contains(&json, "\"claimStatus\":\"hypothesis\"", "claim posture")?;
-    ensure_contains(&json, "\"wouldHaveSurfaced\":false", "surfaced semantics")?;
+    ensure_contains(&json, "\"behaviorClaims\":[]", "no behavior claims")?;
+    ensure_not_contains(&json, "wouldHave", "no would-have field")?;
+    ensure_not_contains(&json, "outcome_changed", "no outcome changed field")?;
     ensure_contains(
         &json,
         "\"degradationCodes\":[\"lab_replay_unavailable\"]",
@@ -607,9 +733,9 @@ fn gate15_counterfactual_is_non_mutating_and_explains_hypothesis() -> TestResult
 }
 
 #[test]
-fn gate15_regret_entries_remain_hypotheses_without_behavior_claims() -> TestResult {
+fn gate15_hypothesis_records_require_replay_evidence() -> TestResult {
     let options = CounterfactualOptions {
-        episode_id: "ep_gate15_regret_taxonomy".to_string(),
+        episode_id: "ep_gate15_hypothesis_taxonomy".to_string(),
         interventions: vec![
             InterventionSpec::add_memory("missed warning"),
             InterventionSpec::strengthen_memory("mem_stale", 0.4),
@@ -617,35 +743,42 @@ fn gate15_regret_entries_remain_hypotheses_without_behavior_claims() -> TestResu
             InterventionSpec::weaken_memory("mem_harmful", 0.3),
             InterventionSpec::add_memory("overfit policy correction"),
         ],
-        generate_regret: true,
+        generate_hypotheses: true,
         dry_run: false,
         ..Default::default()
     };
 
     let report = run_counterfactual(&options).map_err(|e| e.message())?;
     let kinds = report
-        .regret_entries
+        .hypothesis_records
         .iter()
-        .map(|entry| entry.regret_kind.as_str())
+        .map(|record| record.hypothesis_kind.as_str())
         .collect::<Vec<_>>();
 
     ensure(
         kinds
             == vec![
-                "hypothesis",
-                "hypothesis",
-                "hypothesis",
-                "hypothesis",
-                "hypothesis",
+                "pack_diff_hypothesis",
+                "pack_diff_hypothesis",
+                "pack_diff_hypothesis",
+                "pack_diff_hypothesis",
+                "pack_diff_hypothesis",
             ],
-        format!("regret entries remain hypotheses: {kinds:?}"),
+        format!("hypothesis records use mechanical taxonomy: {kinds:?}"),
     )?;
     ensure(
         report
-            .regret_entries
+            .hypothesis_records
             .iter()
-            .all(|entry| !entry.would_have_surfaced && !entry.would_have_changed),
-        "regret entries do not claim surfaced or changed behavior",
+            .all(|record| record.requires_replay_evidence),
+        "hypothesis records require replay evidence",
+    )?;
+    ensure(
+        report
+            .hypothesis_records
+            .iter()
+            .all(|record| record.validation_status == "unvalidated"),
+        "hypothesis records require validation",
     )
 }
 
@@ -712,79 +845,85 @@ fn intervention_with_hypothesis() {
 }
 
 // ============================================================================
-// Regret Entry Contract
+// Hypothesis Record Contract
 // ============================================================================
 
 #[test]
-fn regret_entry_includes_intervention_type() -> TestResult {
+fn hypothesis_record_includes_intervention_type() -> TestResult {
     let options = CounterfactualOptions {
         episode_id: "ep_test".to_string(),
         interventions: vec![InterventionSpec::add_memory("helpful")],
-        generate_regret: true,
+        generate_hypotheses: true,
         dry_run: false,
         ..Default::default()
     };
 
     let report = run_counterfactual(&options).map_err(|e| e.message())?;
 
-    ensure(!report.regret_entries.is_empty(), "has regret entries")?;
-    let entry = report
-        .regret_entries
-        .first()
-        .ok_or_else(|| "missing regret entry".to_string())?;
     ensure(
-        entry.intervention_type == InterventionType::Add,
-        "regret tracks intervention type",
+        !report.hypothesis_records.is_empty(),
+        "has hypothesis records",
+    )?;
+    let record = report
+        .hypothesis_records
+        .first()
+        .ok_or_else(|| "missing hypothesis record".to_string())?;
+    ensure(
+        record.intervention_type == InterventionType::Add,
+        "hypothesis record tracks intervention type",
     )
 }
 
 #[test]
-fn regret_entry_has_unique_id() -> TestResult {
+fn hypothesis_record_has_unique_id() -> TestResult {
     let options = CounterfactualOptions {
         episode_id: "ep_test".to_string(),
         interventions: vec![
             InterventionSpec::add_memory("a"),
             InterventionSpec::add_memory("b"),
         ],
-        generate_regret: true,
+        generate_hypotheses: true,
         dry_run: false,
         ..Default::default()
     };
 
     let report = run_counterfactual(&options).map_err(|e| e.message())?;
 
-    ensure(report.regret_entries.len() == 2, "has two entries")?;
+    ensure(report.hypothesis_records.len() == 2, "has two records")?;
     let first = report
-        .regret_entries
+        .hypothesis_records
         .first()
-        .ok_or_else(|| "missing first regret entry".to_string())?;
+        .ok_or_else(|| "missing first hypothesis record".to_string())?;
     let second = report
-        .regret_entries
+        .hypothesis_records
         .get(1)
-        .ok_or_else(|| "missing second regret entry".to_string())?;
-    ensure(first.id != second.id, "regret entries have unique IDs")
+        .ok_or_else(|| "missing second hypothesis record".to_string())?;
+    ensure(first.id != second.id, "hypothesis records have unique IDs")
 }
 
 #[test]
-fn regret_entry_links_to_episode() -> TestResult {
+fn hypothesis_record_links_to_episode() -> TestResult {
     let options = CounterfactualOptions {
         episode_id: "ep_specific_episode".to_string(),
         interventions: vec![InterventionSpec::add_memory("context")],
-        generate_regret: true,
+        generate_hypotheses: true,
         dry_run: false,
         ..Default::default()
     };
 
     let report = run_counterfactual(&options).map_err(|e| e.message())?;
 
-    ensure(!report.regret_entries.is_empty(), "has regret entries")?;
-    let entry = report
-        .regret_entries
-        .first()
-        .ok_or_else(|| "missing regret entry".to_string())?;
     ensure(
-        entry.episode_id == "ep_specific_episode",
-        "regret links to source episode",
+        !report.hypothesis_records.is_empty(),
+        "has hypothesis records",
+    )?;
+    let record = report
+        .hypothesis_records
+        .first()
+        .ok_or_else(|| "missing hypothesis record".to_string())?;
+    ensure(
+        record.episode_id == "ep_specific_episode",
+        "hypothesis record links to source episode",
     )
 }
 
@@ -971,15 +1110,21 @@ fn replay_report_json_includes_all_fields() -> TestResult {
     ensure_contains(&json, "episode_id", "has episode_id")?;
     ensure_contains(&json, "replay_id", "has replay_id")?;
     ensure_contains(&json, "status", "has status")?;
-    ensure_contains(&json, "outcome_matches", "has outcome_matches")
+    ensure_contains(
+        &json,
+        "replay_evidence_available",
+        "has replay_evidence_available",
+    )?;
+    ensure_contains(&json, "missing_frozen_inputs", "has missing_frozen_inputs")?;
+    ensure_not_contains(&json, "outcome_matches", "no outcome comparison field")
 }
 
 #[test]
-fn counterfactual_report_json_includes_regret() -> TestResult {
+fn counterfactual_report_json_includes_hypothesis_records() -> TestResult {
     let options = CounterfactualOptions {
         episode_id: "ep_test".to_string(),
         interventions: vec![InterventionSpec::add_memory("context")],
-        generate_regret: true,
+        generate_hypotheses: true,
         dry_run: false,
         ..Default::default()
     };
@@ -987,8 +1132,14 @@ fn counterfactual_report_json_includes_regret() -> TestResult {
     let report = run_counterfactual(&options).map_err(|e| e.message())?;
     let json = report.to_json();
 
-    ensure_contains(&json, "regret_entries", "has regret_entries array")?;
-    ensure_contains(&json, "intervention_type", "regret has intervention_type")
+    ensure_contains(&json, "hypothesis_records", "has hypothesis_records array")?;
+    ensure_contains(
+        &json,
+        "intervention_type",
+        "hypothesis record has intervention_type",
+    )?;
+    ensure_not_contains(&json, "would_have", "no would-have fields")?;
+    ensure_not_contains(&json, "outcome_changed", "no outcome change field")
 }
 
 // ============================================================================
@@ -1049,7 +1200,7 @@ fn counterfactual_with_interventions_matches_golden() -> TestResult {
                 .with_hypothesis("Adding context prevents failure"),
             InterventionSpec::remove_memory("mem_noisy"),
         ],
-        generate_regret: true,
+        generate_hypotheses: true,
         dry_run: false,
         ..Default::default()
     };
@@ -1068,7 +1219,7 @@ fn gate15_counterfactual_add_memory_lab_golden_matches() -> TestResult {
             InterventionSpec::add_memory("helpful context")
                 .with_hypothesis("Adding context prevents failure"),
         ],
-        generate_regret: true,
+        generate_hypotheses: true,
         dry_run: false,
         ..Default::default()
     };
@@ -1079,7 +1230,7 @@ fn gate15_counterfactual_add_memory_lab_golden_matches() -> TestResult {
 }
 
 #[test]
-fn gate15_regret_report_lab_golden_matches() -> TestResult {
+fn gate15_hypothesis_report_lab_golden_matches() -> TestResult {
     let options = CounterfactualOptions {
         episode_id: "ep_golden_test".to_string(),
         interventions: vec![
@@ -1089,16 +1240,16 @@ fn gate15_regret_report_lab_golden_matches() -> TestResult {
             InterventionSpec::weaken_memory("mem_harmful", 0.3),
             InterventionSpec::add_memory("overfit policy correction"),
         ],
-        generate_regret: true,
+        generate_hypotheses: true,
         dry_run: false,
         ..Default::default()
     };
 
     let report = run_counterfactual(&options).map_err(|e| e.message())?;
     let json = serde_json::json!({
-        "schema": "ee.lab.regret_report.v1",
+        "schema": "ee.lab.hypothesis_report.v1",
         "episode_id": report.episode_id,
-        "regret_entries": report.regret_entries,
+        "hypothesis_records": report.hypothesis_records,
     });
     let rendered = serde_json::to_string_pretty(&json).map_err(|error| error.to_string())?;
     let normalized = normalize_for_golden(&rendered);
@@ -1113,7 +1264,7 @@ fn gate15_promote_candidates_dry_run_lab_golden_matches() -> TestResult {
             InterventionSpec::add_memory("helpful context")
                 .with_hypothesis("Adding context prevents failure"),
         ],
-        generate_regret: true,
+        generate_hypotheses: true,
         dry_run: false,
         ..Default::default()
     };
@@ -1174,8 +1325,8 @@ fn normalize_for_golden(json: &str) -> String {
     );
     normalized = regex_replace(
         &normalized,
-        r#""id"\s*:\s*"reg_[a-f0-9_]+""#,
-        r#""id": "reg_NORMALIZED""#,
+        r#""id"\s*:\s*"hyprec_[a-f0-9_]+""#,
+        r#""id": "hyprec_NORMALIZED""#,
     );
     normalized = regex_replace(
         &normalized,
@@ -1257,6 +1408,17 @@ fn normalize_for_golden(json: &str) -> String {
         r#""repositoryFingerprint"\s*:\s*"repo:[a-f0-9]+""#,
         r#""repositoryFingerprint": "repo:NORMALIZED""#,
     );
+    normalized = regex_replace(
+        &normalized,
+        r#"task_input:[a-f0-9]+"#,
+        "task_input:NORMALIZED",
+    );
+    normalized = regex_replace(
+        &normalized,
+        r#"pack:blake3:[a-f0-9]+"#,
+        "pack:blake3:NORMALIZED",
+    );
+    normalized = regex_replace(&normalized, r#"repo:[a-f0-9]+"#, "repo:NORMALIZED");
 
     normalized
 }

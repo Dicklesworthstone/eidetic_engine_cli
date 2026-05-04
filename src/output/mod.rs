@@ -7095,7 +7095,9 @@ pub fn render_lab_capture_json(report: &CaptureReport) -> String {
             "policyIds": report.policy_ids,
             "outcomeRef": report.outcome_ref,
             "repositoryFingerprint": report.repository_fingerprint,
+            "evidenceIds": report.evidence_ids,
             "redactionStatus": report.redaction_status,
+            "redactionClasses": report.redaction_classes,
             "episodeHash": report.episode_hash,
             "stored": report.stored,
             "memories_captured": report.memories_captured,
@@ -7153,9 +7155,10 @@ pub fn render_lab_replay_json(report: &ReplayReport) -> String {
             "replay_id": report.replay_id,
             "status": report.status.as_str(),
             "frozenInputs": report.frozen_inputs,
+            "replayEvidenceAvailable": report.replay_evidence_available,
+            "missingFrozenInputs": report.missing_frozen_inputs,
             "mutableCurrentStateAccess": report.mutable_current_state_access,
             "episodeHashVerified": report.episode_hash_verified,
-            "outcome_matches": report.outcome_matches,
             "dry_run": report.dry_run,
             "warnings": report.warnings,
             "replayed_at": report.replayed_at,
@@ -7176,7 +7179,16 @@ pub fn render_lab_replay_human(report: &ReplayReport) -> String {
     lines.push(format!("  Episode ID: {}", report.episode_id));
     lines.push(format!("  Replay ID: {}", report.replay_id));
     lines.push(format!("  Status: {}", report.status.as_str()));
-    lines.push(format!("  Outcome matches: {}", report.outcome_matches));
+    lines.push(format!(
+        "  Replay evidence available: {}",
+        report.replay_evidence_available
+    ));
+    if !report.missing_frozen_inputs.is_empty() {
+        lines.push(format!(
+            "  Missing frozen inputs: {}",
+            report.missing_frozen_inputs.join(", ")
+        ));
+    }
     lines.push(format!("  Replayed at: {}", report.replayed_at));
     lines.join("\n")
 }
@@ -7216,13 +7228,11 @@ pub fn render_lab_counterfactual_json(report: &CounterfactualReport) -> String {
             "durableMutation": report.durable_mutation,
             "curationCandidates": report.curation_candidates,
             "claimStatus": report.claim_status,
-            "wouldHaveSurfaced": report.would_have_surfaced,
-            "surfacedItemIds": report.surfaced_item_ids,
+            "replayEvidenceAvailable": report.replay_evidence_available,
+            "behaviorClaims": report.behavior_claims,
             "interventions_applied": report.interventions_applied,
-            "regret_entries": report.regret_entries.len(),
-            "regretKinds": report.regret_entries.iter().map(|entry| &entry.regret_kind).collect::<Vec<_>>(),
-            "confidence": report.confidence,
-            "outcome_changed": report.outcome_changed,
+            "hypothesisRecords": report.hypothesis_records.len(),
+            "hypothesisKinds": report.hypothesis_records.iter().map(|record| &record.hypothesis_kind).collect::<Vec<_>>(),
             "dry_run": report.dry_run,
             "analyzed_at": report.analyzed_at,
         }
@@ -7243,11 +7253,17 @@ pub fn render_lab_counterfactual_human(report: &CounterfactualReport) -> String 
     lines.push(format!("  Episode ID: {}", report.episode_id));
     lines.push(format!("  Status: {}", report.status.as_str()));
     lines.push(format!("  Interventions: {}", report.interventions_applied));
-    lines.push(format!("  Outcome changed: {}", report.outcome_changed));
-    if !report.regret_entries.is_empty() {
-        lines.push(format!("  Regret entries: {}", report.regret_entries.len()));
-        for entry in &report.regret_entries {
-            lines.push(format!("    - {}: {}", entry.id, entry.explanation));
+    lines.push(format!(
+        "  Behavior claims: {}",
+        report.behavior_claims.len()
+    ));
+    if !report.hypothesis_records.is_empty() {
+        lines.push(format!(
+            "  Hypothesis records: {}",
+            report.hypothesis_records.len()
+        ));
+        for record in &report.hypothesis_records {
+            lines.push(format!("    - {}: {}", record.id, record.explanation));
         }
     }
     lines.push(format!("  Analyzed at: {}", report.analyzed_at));
@@ -8893,7 +8909,10 @@ mod tests {
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::doctor::DoctorReport;
     use crate::core::health::HealthReport;
-    use crate::core::learn::{LearnExperimentProposeOptions, propose_experiments};
+    use crate::core::learn::{
+        ExperimentBudget, ExperimentDecisionImpact, ExperimentProposal, ExperimentSafetyPlan,
+        LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1, LearnExperimentProposalReport,
+    };
     use crate::core::status::StatusReport;
     use crate::core::{
         BUILD_TIMESTAMP_POLICY, BuildFeature, BuildInfo, BuildProvenanceDegradation,
@@ -8980,10 +8999,60 @@ mod tests {
             .map_err(|error| format!("response rejected: {error:?}"))
     }
 
+    fn learn_experiment_proposal_fixture() -> LearnExperimentProposalReport {
+        LearnExperimentProposalReport {
+            schema: LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1.to_string(),
+            total_candidates: 3,
+            returned: 1,
+            min_expected_value: 0.3,
+            max_attention_tokens: 800,
+            max_runtime_seconds: 180,
+            generated_at: "2026-01-02T03:04:05Z".to_string(),
+            proposals: vec![ExperimentProposal {
+                experiment_id: "exp_renderer_fixture".to_string(),
+                question_id: "gap_renderer_fixture".to_string(),
+                title: "Render experiment proposal contract".to_string(),
+                hypothesis: "A fixed renderer fixture preserves proposal JSON, human, and TOON output without invoking unavailable learn records.".to_string(),
+                status: "proposed".to_string(),
+                topic: "renderer_contract".to_string(),
+                expected_value: 0.539,
+                uncertainty_reduction: 0.32,
+                confidence: 0.48,
+                budget: ExperimentBudget {
+                    attention_tokens: 800,
+                    max_runtime_seconds: 180,
+                    dry_run_required: true,
+                    budget_class: "medium".to_string(),
+                },
+                safety: ExperimentSafetyPlan {
+                    boundary: "human_review".to_string(),
+                    dry_run_first: true,
+                    mutation_allowed: false,
+                    review_required: true,
+                    stop_conditions: vec![
+                        "Stop after renderer output is validated.".to_string(),
+                        "Stop before any durable memory mutation.".to_string(),
+                    ],
+                    denied_reasons: Vec::new(),
+                },
+                decision_impact: ExperimentDecisionImpact {
+                    decision_id: "decision_renderer_fixture".to_string(),
+                    target_artifact_ids: vec!["mem_renderer_fixture".to_string()],
+                    current_decision: "Keep proposal renderer output stable.".to_string(),
+                    possible_change: "Update only renderer contracts when the public shape changes."
+                        .to_string(),
+                    impact_score: 0.85,
+                },
+                evidence_ids: vec!["gap_renderer_fixture".to_string()],
+                next_command: "ee learn experiment run --dry-run --id exp_renderer_fixture --json"
+                    .to_string(),
+            }],
+        }
+    }
+
     #[test]
     fn learn_experiment_proposal_json_exposes_ev_budget_safety_and_decision() -> TestResult {
-        let report = propose_experiments(&LearnExperimentProposeOptions::default())
-            .map_err(|error| error.message())?;
+        let report = learn_experiment_proposal_fixture();
         let json = render_learn_experiment_proposal_json(&report);
         let value: serde_json::Value =
             serde_json::from_str(&json).map_err(|error| error.to_string())?;
@@ -9007,11 +9076,7 @@ mod tests {
 
     #[test]
     fn learn_experiment_proposal_human_and_toon_are_stable() -> TestResult {
-        let report = propose_experiments(&LearnExperimentProposeOptions {
-            limit: 1,
-            ..Default::default()
-        })
-        .map_err(|error| error.message())?;
+        let report = learn_experiment_proposal_fixture();
 
         let human = render_learn_experiment_proposal_human(&report);
         ensure_contains(&human, "Learning Experiment Proposals", "human title")?;
