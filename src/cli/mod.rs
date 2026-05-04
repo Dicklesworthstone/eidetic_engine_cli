@@ -7658,7 +7658,21 @@ where
                 "evidenceIds": [],
                 "sourceIds": [],
                 "followUpBead": REHEARSAL_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": "unavailable before sandbox mutation"
+                "sideEffectClass": "unavailable before sandbox mutation",
+                "dryRunIsolation": {
+                    "status": "unavailable",
+                    "reason": "real isolated dry-run execution is not implemented",
+                    "commandSpecValidation": "unavailable before execution planning",
+                    "unsupportedCommandPolicy": "report unavailable instead of simulating success"
+                },
+                "mutationPosture": {
+                    "durableMutation": false,
+                    "sandboxCreated": false,
+                    "artifactsCreated": false,
+                    "worktreeCreated": false,
+                    "filesDeleted": false
+                },
+                "firstFailureDiagnosis": "real isolated dry-run artifacts are not implemented"
             }
         });
         let _ = stdout.write_all(json.to_string().as_bytes());
