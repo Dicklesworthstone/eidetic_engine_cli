@@ -92,6 +92,9 @@ pub const SCIENCE_STATUS_SCHEMA_V1: &str = "ee.science.status.v1";
 /// Stable schema for clustering diagnostics over consolidation candidates.
 pub const CLUSTERING_DIAGNOSTICS_SCHEMA_V1: &str = "ee.science.clustering_diagnostics.v1";
 
+/// Stable schema for clustering analysis reports.
+pub const CLUSTERING_ANALYSIS_SCHEMA_V1: &str = "ee.science.clustering_analysis.v1";
+
 /// Stable schema for drift analysis reports over frozen evaluation snapshots.
 pub const DRIFT_ANALYSIS_SCHEMA_V1: &str = "ee.science.drift_analysis.v1";
 
@@ -101,11 +104,20 @@ pub const DEGRADATION_CODE_DRIFT_UNAVAILABLE: &str = "drift_analysis_unavailable
 /// Degradation code for missing evaluation snapshots.
 pub const DEGRADATION_CODE_NO_SNAPSHOTS: &str = "drift_no_evaluation_snapshots";
 
+/// Degradation code for no candidates available for clustering.
+pub const DEGRADATION_CODE_NO_CANDIDATES: &str = "clustering_no_candidates";
+
+/// Degradation code for missing candidate embeddings.
+pub const DEGRADATION_CODE_NO_EMBEDDINGS: &str = "clustering_no_embeddings";
+
 /// Canonical command path for science status diagnostics.
 pub const SCIENCE_STATUS_COMMAND: &str = "analyze science-status";
 
 /// Canonical command path for drift analysis.
 pub const DRIFT_ANALYSIS_COMMAND: &str = "analyze drift";
+
+/// Canonical command path for clustering analysis.
+pub const CLUSTERING_ANALYSIS_COMMAND: &str = "analyze clustering";
 
 /// Feature flag that enables science analytics.
 pub const SCIENCE_ANALYTICS_FEATURE: &str = "science-analytics";
@@ -583,6 +595,200 @@ pub fn analyze_drift(options: &DriftAnalysisOptions) -> DriftAnalysisReport {
 
     // For now, return degraded until evaluation snapshots are implemented
     DriftAnalysisReport::unavailable(options)
+}
+
+// ============================================================================
+// Clustering Analysis for Consolidation Candidates (EE-174)
+// ============================================================================
+
+/// Options for clustering analysis over consolidation candidates.
+#[derive(Clone, Debug, Default)]
+pub struct ClusteringAnalysisOptions {
+    /// Workspace path for candidate discovery.
+    pub workspace: std::path::PathBuf,
+    /// Optional candidate type filter.
+    pub candidate_type: Option<String>,
+    /// Optional status filter.
+    pub status: Option<String>,
+    /// Maximum number of candidates to analyze.
+    pub limit: u32,
+    /// Include per-cluster detail in the report.
+    pub detailed: bool,
+}
+
+/// Report from clustering analysis over consolidation candidates.
+#[derive(Clone, Debug)]
+pub struct ClusteringAnalysisReport {
+    /// Versioned schema for the report.
+    pub schema: &'static str,
+    /// Canonical command path.
+    pub command: &'static str,
+    /// Whether science analytics is available.
+    pub available: bool,
+    /// Whether clustering was computed.
+    pub computed: bool,
+    /// Number of candidates analyzed.
+    pub candidate_count: usize,
+    /// Clustering diagnostics result.
+    pub diagnostics: ClusteringDiagnostics,
+    /// Degradations encountered during analysis.
+    pub degradations: Vec<ClusteringDegradation>,
+    /// Recommended next actions.
+    pub next_actions: Vec<String>,
+    /// Report generation timestamp.
+    pub generated_at: String,
+}
+
+impl ClusteringAnalysisReport {
+    /// Build a degraded report when science analytics is not compiled.
+    #[must_use]
+    pub fn not_compiled() -> Self {
+        Self {
+            schema: CLUSTERING_ANALYSIS_SCHEMA_V1,
+            command: CLUSTERING_ANALYSIS_COMMAND,
+            available: false,
+            computed: false,
+            candidate_count: 0,
+            diagnostics: ClusteringDiagnostics::default(),
+            degradations: vec![ClusteringDegradation {
+                code: DEGRADATION_CODE_NOT_COMPILED.to_string(),
+                message: "Science analytics not compiled into this binary.".to_string(),
+                severity: "high".to_string(),
+                repair: "Rebuild ee with --features science-analytics.".to_string(),
+            }],
+            next_actions: vec!["Rebuild ee with --features science-analytics.".to_string()],
+            generated_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// Build a degraded report when no candidates are available.
+    #[must_use]
+    pub fn no_candidates() -> Self {
+        Self {
+            schema: CLUSTERING_ANALYSIS_SCHEMA_V1,
+            command: CLUSTERING_ANALYSIS_COMMAND,
+            available: is_available(),
+            computed: false,
+            candidate_count: 0,
+            diagnostics: ClusteringDiagnostics::default(),
+            degradations: vec![ClusteringDegradation {
+                code: DEGRADATION_CODE_NO_CANDIDATES.to_string(),
+                message: "No curation candidates available for clustering analysis.".to_string(),
+                severity: "medium".to_string(),
+                repair: "ee curate candidates --workspace . --json".to_string(),
+            }],
+            next_actions: vec!["ee curate candidates --workspace . --json".to_string()],
+            generated_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// Build a degraded report when candidate embeddings are unavailable.
+    #[must_use]
+    pub fn no_embeddings(candidate_count: usize) -> Self {
+        Self {
+            schema: CLUSTERING_ANALYSIS_SCHEMA_V1,
+            command: CLUSTERING_ANALYSIS_COMMAND,
+            available: is_available(),
+            computed: false,
+            candidate_count,
+            diagnostics: ClusteringDiagnostics::default(),
+            degradations: vec![ClusteringDegradation {
+                code: DEGRADATION_CODE_NO_EMBEDDINGS.to_string(),
+                message: "Candidate embeddings not available for clustering.".to_string(),
+                severity: "medium".to_string(),
+                repair: "ee index rebuild --workspace . --json".to_string(),
+            }],
+            next_actions: vec![
+                "ee index rebuild --workspace . --json".to_string(),
+                "ee analyze science-status --json".to_string(),
+            ],
+            generated_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// Stable machine-readable payload.
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": self.schema,
+            "command": self.command,
+            "available": self.available,
+            "computed": self.computed,
+            "candidateCount": self.candidate_count,
+            "diagnostics": self.diagnostics.data_json(),
+            "degradations": self.degradations.iter().map(ClusteringDegradation::data_json).collect::<Vec<_>>(),
+            "nextActions": self.next_actions,
+            "generatedAt": self.generated_at,
+        })
+    }
+
+    /// Human-readable summary.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("ee {}\n\n", self.command));
+        out.push_str(&format!(
+            "Computed: {} (candidates: {}, clusters: {})\n",
+            self.computed, self.candidate_count, self.diagnostics.cluster_count
+        ));
+        if let Some(score) = self.diagnostics.silhouette_score {
+            out.push_str(&format!("Silhouette score: {score:.3}\n"));
+        }
+        if !self.degradations.is_empty() {
+            out.push_str("\nDegradations:\n");
+            for degradation in &self.degradations {
+                out.push_str(&format!(
+                    "  - [{}] {} -> {}\n",
+                    degradation.code, degradation.message, degradation.repair
+                ));
+            }
+        }
+        if !self.next_actions.is_empty() {
+            out.push_str("\nNext:\n");
+            for action in &self.next_actions {
+                out.push_str(&format!("  - {action}\n"));
+            }
+        }
+        out
+    }
+}
+
+/// Degradation entry for clustering analysis.
+#[derive(Clone, Debug)]
+pub struct ClusteringDegradation {
+    pub code: String,
+    pub message: String,
+    pub severity: String,
+    pub repair: String,
+}
+
+impl ClusteringDegradation {
+    #[must_use]
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "code": self.code,
+            "message": self.message,
+            "severity": self.severity,
+            "repair": self.repair,
+        })
+    }
+}
+
+/// Analyze clustering over consolidation candidates.
+///
+/// Returns a degraded report if science analytics is unavailable or if
+/// candidate embeddings cannot be retrieved.
+#[must_use]
+pub fn analyze_clustering(_options: &ClusteringAnalysisOptions) -> ClusteringAnalysisReport {
+    if !is_available() {
+        return ClusteringAnalysisReport::not_compiled();
+    }
+
+    // For now, return degraded until candidate embedding retrieval is implemented.
+    // The ClusteringDiagnostics::compute() logic is ready and tested; what's
+    // missing is the integration to pull embeddings from curation candidates
+    // via the search index.
+    ClusteringAnalysisReport::no_embeddings(0)
 }
 
 #[must_use]
