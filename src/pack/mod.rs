@@ -2215,8 +2215,8 @@ mod tests {
         DEFAULT_CHARS_PER_TOKEN, PackCandidate, PackCandidateInput, PackOmissionReason,
         PackProvenance, PackSection, PackSelectionObjective, PackTrustSignal, PackValidationError,
         SectionQuota, SectionQuotas, TokenBudget, TokenEstimationStrategy, assemble_draft,
-        assemble_draft_with_profile, candidate_similarity, estimate_tokens, estimate_tokens_default,
-        pack_item_provenance_json, subsystem_name,
+        assemble_draft_with_profile, candidate_similarity, estimate_tokens,
+        estimate_tokens_default, pack_item_provenance_json, subsystem_name,
     };
     use crate::models::{ContextProfile, MemoryId, ProvenanceUri, TrustClass, UnitScore};
     use crate::testing::ensure_contains;

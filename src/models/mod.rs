@@ -349,6 +349,10 @@ pub enum DomainError {
         message: String,
         repair: Option<String>,
     },
+    MigrationDrift {
+        message: String,
+        repair: Option<String>,
+    },
 }
 
 impl DomainError {
@@ -365,6 +369,7 @@ impl DomainError {
             Self::UnsatisfiedDegradedMode { .. } => "unsatisfied_degraded_mode",
             Self::PolicyDenied { .. } => "policy_denied",
             Self::MigrationRequired { .. } => "migration_required",
+            Self::MigrationDrift { .. } => "migration_drift",
         }
     }
 
@@ -379,7 +384,8 @@ impl DomainError {
             | Self::Import { message, .. }
             | Self::UnsatisfiedDegradedMode { message, .. }
             | Self::PolicyDenied { message, .. }
-            | Self::MigrationRequired { message, .. } => message.clone(),
+            | Self::MigrationRequired { message, .. }
+            | Self::MigrationDrift { message, .. } => message.clone(),
             Self::NotFound { resource, id, .. } => {
                 format!("{resource} not found: {id}")
             }
@@ -398,7 +404,8 @@ impl DomainError {
             | Self::NotFound { repair, .. }
             | Self::UnsatisfiedDegradedMode { repair, .. }
             | Self::PolicyDenied { repair, .. }
-            | Self::MigrationRequired { repair, .. } => repair.as_deref(),
+            | Self::MigrationRequired { repair, .. }
+            | Self::MigrationDrift { repair, .. } => repair.as_deref(),
         }
     }
 
@@ -415,6 +422,7 @@ impl DomainError {
             Self::UnsatisfiedDegradedMode { .. } => ProcessExitCode::UnsatisfiedDegradedMode,
             Self::PolicyDenied { .. } => ProcessExitCode::PolicyDenied,
             Self::MigrationRequired { .. } => ProcessExitCode::MigrationRequired,
+            Self::MigrationDrift { .. } => ProcessExitCode::MigrationRequired,
         }
     }
 }

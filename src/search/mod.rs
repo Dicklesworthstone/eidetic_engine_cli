@@ -1480,15 +1480,14 @@ mod tests {
         };
 
         let explanation = explain_scored_result(&result);
-        let Some(quality_component) = explanation
-            .components
-            .iter()
-            .find(|component| component.name == "semantic_quality_score")
-        else {
-            panic!("semantic quality component must be present");
-        };
-
-        assert_eq!(quality_component.source, "semantic");
+        assert_eq!(
+            explanation
+                .components
+                .iter()
+                .find(|component| component.name == "semantic_quality_score")
+                .map(|component| component.source),
+            Some("semantic")
+        );
     }
 
     #[test]

@@ -2245,8 +2245,8 @@ mod tests {
                     utility: 0.6,
                     why: "cross-workspace item".to_string(),
                     diversity_key: None,
-                    provenance_json:
-                        r#"{"schema":"ee.pack_item.provenance.v1","entries":[]}"#.to_string(),
+                    provenance_json: r#"{"schema":"ee.pack_item.provenance.v1","entries":[]}"#
+                        .to_string(),
                     trust_class: "agent_assertion".to_string(),
                     trust_subclass: None,
                 }],
