@@ -477,7 +477,6 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
         ("handoff create", "handoff_unavailable"),
         ("memory revise", "revision_write_unavailable"),
         ("procedure export", "procedure_store_unavailable"),
-        ("rehearse run", "rehearsal_unavailable"),
         ("support bundle", "support_bundle_unavailable"),
         ("tripwire check", "tripwire_store_unavailable"),
     ] {

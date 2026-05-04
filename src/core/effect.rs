@@ -1065,25 +1065,25 @@ impl EffectManifest {
                 "recorder_tail_unavailable",
                 "Recorder import planning abstains until persisted event tailing exists",
             ),
-            CommandEffect::degraded_unavailable(
+            CommandEffect::read_only(
                 "rehearse plan",
-                "rehearsal_unavailable",
-                "Rehearsal planning abstains until real isolated artifacts exist",
+                "Rehearsal planning validates command specs and estimates side-path artifacts",
             ),
-            CommandEffect::degraded_unavailable(
+            CommandEffect::workspace_file_write(
                 "rehearse run",
-                "rehearsal_unavailable",
-                "Rehearsal execution abstains until real isolated artifacts exist",
+                vec![
+                    "rehearsal artifact root",
+                    "tempfile-backed sandbox workspace",
+                ],
+                "Rehearsal execution writes side-path sandbox artifacts without mutating the source workspace",
             ),
-            CommandEffect::degraded_unavailable(
+            CommandEffect::read_only(
                 "rehearse inspect",
-                "rehearsal_unavailable",
-                "Rehearsal inspection abstains until real isolated artifacts exist",
+                "Rehearsal inspection reads a prior manifest and verifies hashes",
             ),
-            CommandEffect::degraded_unavailable(
+            CommandEffect::read_only(
                 "rehearse promote-plan",
-                "rehearsal_unavailable",
-                "Rehearsal promotion planning abstains until real isolated artifacts exist",
+                "Rehearsal promotion planning reads a manifest and emits a conservative checklist",
             ),
             CommandEffect::degraded_unavailable(
                 "review session",
@@ -1897,7 +1897,6 @@ mod tests {
             ("demo run", "demo_command_execution_unavailable"),
             ("handoff create", "handoff_unavailable"),
             ("procedure export", "procedure_store_unavailable"),
-            ("rehearse run", "rehearsal_unavailable"),
             ("support bundle", "support_bundle_unavailable"),
         ] {
             let effect = manifest
