@@ -142,3 +142,17 @@ lint log records:
 The project-local lint schema is `ee.skill_standards.lint_log.v1`. It exists to
 prove the skill folder contract and to give future skill beads a stable place to
 record missing requirements without claiming unsupported behavior.
+
+## Available Skills
+
+| Skill | Purpose | Consumes |
+|-------|---------|----------|
+| `causal-credit-review` | Interpret causal evidence and recommend promote/demote/reroute | `ee causal trace/estimate/compare/promote-plan --json` |
+| `counterfactual-failure-analysis` | Analyze failure episodes and counterfactual scenarios | `ee lab capture/replay/counterfactual --json` |
+| `preflight-risk-review` | Review preflight evidence and tripwire matches | `ee preflight run --json`, `ee tripwire check --json` |
+| `procedure-distillation` | Distill procedures from session patterns | `ee procedure propose --json`, `ee review --json` |
+| `situation-framing` | Frame task situations and classify contexts | `ee status --json`, `ee context --json` |
+| `ee-skill-standards` | Meta-skill for creating and validating other skills | N/A |
+
+Each skill folder contains `SKILL.md` with trigger conditions, evidence gathering
+steps, stop/go gates, output template, and testing requirements.
