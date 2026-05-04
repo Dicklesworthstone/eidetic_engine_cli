@@ -511,9 +511,14 @@ mod tests {
 
     #[test]
     fn trust_promotion_rejects_arbitrary_agent_validated_source_id() {
-        let rejection =
-            validate_trust_promotion_evidence("agent_validated", "feedback_event", "reviewer")
-                .expect_err("reviewer must not spoof feedback evidence");
+        let rejection = match validate_trust_promotion_evidence(
+            "agent_validated",
+            "feedback_event",
+            "reviewer",
+        ) {
+            Ok(()) => panic!("reviewer must not spoof feedback evidence"),
+            Err(rejection) => rejection,
+        };
 
         assert_eq!(rejection.code, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE);
         assert_eq!(
@@ -524,12 +529,16 @@ mod tests {
 
     #[test]
     fn trust_promotion_rejects_agent_validated_without_feedback_source() {
-        let rejection = validate_trust_promotion_evidence(
+        let rejection = match validate_trust_promotion_evidence(
             "agent_validated",
             "human_request",
             "fb_01234567890123456789012345",
-        )
-        .expect_err("human request source must not spoof validated agent outcome evidence");
+        ) {
+            Ok(()) => {
+                panic!("human request source must not spoof validated agent outcome evidence")
+            }
+            Err(rejection) => rejection,
+        };
 
         assert_eq!(
             rejection.reason,
@@ -550,9 +559,14 @@ mod tests {
 
     #[test]
     fn trust_promotion_rejects_arbitrary_human_explicit_source_id() {
-        let rejection =
-            validate_trust_promotion_evidence("human_explicit", "human_request", "reviewer")
-                .expect_err("reviewer must not spoof human-explicit audit evidence");
+        let rejection = match validate_trust_promotion_evidence(
+            "human_explicit",
+            "human_request",
+            "reviewer",
+        ) {
+            Ok(()) => panic!("reviewer must not spoof human-explicit audit evidence"),
+            Err(rejection) => rejection,
+        };
 
         assert_eq!(rejection.code, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE);
         assert_eq!(rejection.reason, "human_explicit_requires_audit_log_id");

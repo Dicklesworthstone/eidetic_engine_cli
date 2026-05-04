@@ -9,6 +9,12 @@
 
 use crate::models::TrustClass;
 
+/// Harmful event count where positive recovery must keep source risk visible.
+pub const SEVERE_HARMFUL_HISTORY_COUNT: u32 = 3;
+
+/// Recovery ceiling for sources with severe harmful history.
+pub const SEVERE_HARM_RECOVERY_CEILING: f32 = 0.49;
+
 /// Decay factor configuration per signal type.
 #[derive(Clone, Copy, Debug)]
 pub struct DecayConfig {
@@ -212,11 +218,12 @@ impl TrustDecayCalculator {
             factor *= self.config.inaccurate_decay;
         }
 
-        // Apply positive recovery (capped at ceiling)
+        // Apply positive recovery without allowing severe harm history to disappear.
+        let recovery_ceiling = self.positive_recovery_ceiling(state);
         for _ in 0..state.positive_count {
             factor *= self.config.positive_recovery;
-            if factor > self.config.trust_ceiling {
-                factor = self.config.trust_ceiling;
+            if factor > recovery_ceiling {
+                factor = recovery_ceiling;
             }
         }
 
@@ -241,6 +248,15 @@ impl TrustDecayCalculator {
     pub fn should_block(&self, state: &SourceTrustState) -> bool {
         let effective = self.effective_trust(state);
         effective <= self.config.trust_floor * 2.0
+    }
+
+    fn positive_recovery_ceiling(&self, state: &SourceTrustState) -> f32 {
+        let ceiling = if state.harmful_count >= SEVERE_HARMFUL_HISTORY_COUNT {
+            self.config.trust_ceiling.min(SEVERE_HARM_RECOVERY_CEILING)
+        } else {
+            self.config.trust_ceiling
+        };
+        ceiling.max(self.config.trust_floor)
     }
 
     /// Get a trust advisory for a source.
@@ -423,6 +439,33 @@ mod tests {
         let factor = calc.calculate_decay_factor(&state);
 
         ensure(factor > 0.85, true, "positive provides recovery")
+    }
+
+    #[test]
+    fn positive_recovery_does_not_erase_severe_harm_history() -> TestResult {
+        let mut state = SourceTrustState::new("harmful_source");
+        for _ in 0..SEVERE_HARMFUL_HISTORY_COUNT {
+            state.record_harmful();
+        }
+        for _ in 0..100 {
+            state.record_positive();
+        }
+
+        let calc = TrustDecayCalculator::new();
+        let factor = calc.calculate_decay_factor(&state);
+        let advisory = calc.advisory(&state);
+
+        ensure_approx(
+            factor,
+            SEVERE_HARM_RECOVERY_CEILING,
+            0.001,
+            "severe harm recovery ceiling",
+        )?;
+        ensure(
+            advisory.code(),
+            "quarantine",
+            "severe harm history remains visible after recovery",
+        )
     }
 
     #[test]
