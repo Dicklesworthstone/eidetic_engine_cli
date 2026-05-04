@@ -1776,7 +1776,7 @@ pub struct CertificateListArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_expired: bool,
 
-    /// Path to certificate manifest JSON.
+    /// Path to certificate manifest JSON. Defaults to <workspace>/certificates.json.
     #[arg(long, value_name = "PATH")]
     pub manifest: Option<PathBuf>,
 }
@@ -1788,7 +1788,7 @@ pub struct CertificateShowArgs {
     #[arg(value_name = "CERTIFICATE_ID")]
     pub certificate_id: String,
 
-    /// Path to certificate manifest JSON.
+    /// Path to certificate manifest JSON. Defaults to <workspace>/certificates.json.
     #[arg(long, value_name = "PATH")]
     pub manifest: Option<PathBuf>,
 }
@@ -1800,7 +1800,7 @@ pub struct CertificateVerifyArgs {
     #[arg(value_name = "CERTIFICATE_ID")]
     pub certificate_id: String,
 
-    /// Path to certificate manifest JSON.
+    /// Path to certificate manifest JSON. Defaults to <workspace>/certificates.json.
     #[arg(long, value_name = "PATH")]
     pub manifest: Option<PathBuf>,
 }
@@ -11469,6 +11469,7 @@ const CERTIFICATE_STORE_UNAVAILABLE_CODE: &str = "certificate_store_unavailable"
 const CERTIFICATE_STORE_UNAVAILABLE_MESSAGE: &str = "Certificate manifest storage is unavailable; certificate records cannot be listed, shown, or verified from production evidence.";
 const CERTIFICATE_STORE_UNAVAILABLE_REPAIR: &str = "ee doctor --json";
 const CERTIFICATE_STORE_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-v76q";
+const CERTIFICATE_DEFAULT_MANIFEST_FILE: &str = "certificates.json";
 
 fn write_certificate_store_unavailable<W, E>(
     cli: &Cli,
@@ -11524,9 +11525,10 @@ where
     W: Write,
     E: Write,
 {
-    let Some(manifest_path) = args.manifest.as_ref() else {
+    let manifest_path = resolve_certificate_manifest_path(cli, args.manifest.as_deref());
+    if !manifest_path.exists() {
         return write_certificate_store_unavailable(cli, "certificate list", stdout, stderr);
-    };
+    }
 
     let kind = match args
         .kind
@@ -11562,7 +11564,7 @@ where
     };
 
     let mut options = crate::core::certificate::CertificateListOptions::new()
-        .with_manifest_path(manifest_path)
+        .with_manifest_path(&manifest_path)
         .with_limit(args.limit);
     if let Some(kind) = kind {
         options = options.with_kind(kind);
@@ -11588,12 +11590,13 @@ where
     W: Write,
     E: Write,
 {
-    let Some(manifest_path) = args.manifest.as_ref() else {
+    let manifest_path = resolve_certificate_manifest_path(cli, args.manifest.as_deref());
+    if !manifest_path.exists() {
         return write_certificate_store_unavailable(cli, "certificate show", stdout, stderr);
-    };
+    }
 
     let options = crate::core::certificate::CertificateLookupOptions::new(&args.certificate_id)
-        .with_manifest_path(manifest_path);
+        .with_manifest_path(&manifest_path);
     let report = crate::core::certificate::show_certificate_with_options(&options);
     write_certificate_show_report(cli, &report, stdout)
 }
@@ -11608,14 +11611,25 @@ where
     W: Write,
     E: Write,
 {
-    let Some(manifest_path) = args.manifest.as_ref() else {
+    let manifest_path = resolve_certificate_manifest_path(cli, args.manifest.as_deref());
+    if !manifest_path.exists() {
         return write_certificate_store_unavailable(cli, "certificate verify", stdout, stderr);
-    };
+    }
 
     let options = crate::core::certificate::CertificateLookupOptions::new(&args.certificate_id)
-        .with_manifest_path(manifest_path);
+        .with_manifest_path(&manifest_path);
     let report = crate::core::certificate::verify_certificate_with_options(&options);
     write_certificate_verify_report(cli, &report, stdout)
+}
+
+fn resolve_certificate_manifest_path(cli: &Cli, explicit_manifest: Option<&Path>) -> PathBuf {
+    explicit_manifest.map_or_else(
+        || {
+            resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")))
+                .join(CERTIFICATE_DEFAULT_MANIFEST_FILE)
+        },
+        Path::to_path_buf,
+    )
 }
 
 fn write_certificate_list_report<W>(
@@ -14276,6 +14290,7 @@ fn render_tripwire_check_human(report: &crate::core::tripwire::CheckReport) -> S
 mod tests {
     use std::ffi::OsString;
     use std::fmt::Debug;
+    use std::fs;
 
     use clap::Parser;
 
@@ -14396,6 +14411,127 @@ mod tests {
             &after,
             &(true, Some(Command::Status)),
             "--json after status parse",
+        )
+    }
+
+    #[test]
+    fn certificate_commands_read_workspace_default_manifest() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().to_string_lossy().into_owned();
+        let payload_path = "default-payload.json";
+        let payload = r#"{"packHash":"pack_default","selected":["mem_01"]}"#;
+        let payload_hash = blake3::hash(payload.as_bytes()).to_hex().to_string();
+
+        fs::write(dir.path().join(payload_path), payload)
+            .map_err(|error| format!("failed to write certificate payload: {error}"))?;
+        let manifest = serde_json::json!({
+            "schema": "ee.certificate.manifest.v1",
+            "certificates": [
+                {
+                    "id": "cert_pack_default",
+                    "kind": "pack",
+                    "status": "valid",
+                    "workspaceId": "workspace_default",
+                    "issuedAt": "2026-05-04T00:00:00Z",
+                    "expiresAt": "2999-01-01T00:00:00Z",
+                    "payloadPath": payload_path,
+                    "payloadHash": payload_hash,
+                    "payloadSchema": "ee.certificate.payload.v1",
+                    "assumptions": [
+                        {
+                            "valid": true
+                        }
+                    ]
+                }
+            ]
+        });
+        let manifest_json =
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?;
+        fs::write(
+            dir.path().join(super::CERTIFICATE_DEFAULT_MANIFEST_FILE),
+            manifest_json,
+        )
+        .map_err(|error| format!("failed to write certificate manifest: {error}"))?;
+
+        let (list_exit, list_stdout, list_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--json",
+            "certificate",
+            "list",
+        ]);
+        ensure_equal(
+            &list_exit,
+            &ProcessExitCode::Success,
+            "certificate list exit",
+        )?;
+        ensure(list_stderr.is_empty(), "certificate list JSON stderr clean")?;
+        let list_json: serde_json::Value =
+            serde_json::from_str(&list_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &list_json["schema"],
+            &serde_json::json!("ee.certificate.list.v1"),
+            "certificate list schema",
+        )?;
+        ensure_equal(
+            &list_json["data"]["certificates"][0]["id"],
+            &serde_json::json!("cert_pack_default"),
+            "certificate list default manifest id",
+        )?;
+
+        let (show_exit, show_stdout, show_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--json",
+            "certificate",
+            "show",
+            "cert_pack_default",
+        ]);
+        ensure_equal(
+            &show_exit,
+            &ProcessExitCode::Success,
+            "certificate show exit",
+        )?;
+        ensure(show_stderr.is_empty(), "certificate show JSON stderr clean")?;
+        let show_json: serde_json::Value =
+            serde_json::from_str(&show_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &show_json["data"]["certificate"]["workspaceId"],
+            &serde_json::json!("workspace_default"),
+            "certificate show default manifest workspace id",
+        )?;
+
+        let (verify_exit, verify_stdout, verify_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--json",
+            "certificate",
+            "verify",
+            "cert_pack_default",
+        ]);
+        ensure_equal(
+            &verify_exit,
+            &ProcessExitCode::Success,
+            "certificate verify exit",
+        )?;
+        ensure(
+            verify_stderr.is_empty(),
+            "certificate verify JSON stderr clean",
+        )?;
+        let verify_json: serde_json::Value =
+            serde_json::from_str(&verify_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &verify_json["data"]["result"],
+            &serde_json::json!("valid"),
+            "certificate verify default manifest result",
+        )?;
+        ensure_equal(
+            &verify_json["data"]["hashVerified"],
+            &serde_json::json!(true),
+            "certificate verify default manifest hash",
         )
     }
 
