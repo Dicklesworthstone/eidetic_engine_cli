@@ -14,6 +14,9 @@ const DRIFT_REVIEW_TEMPLATE: &str =
     include_str!("../skills/procedure-distillation/references/drift-review-template.md");
 const E2E_FIXTURES: &str =
     include_str!("../skills/procedure-distillation/fixtures/e2e-fixtures.json");
+const VALIDATION_SCRIPT: &str = include_str!(
+    "../skills/procedure-distillation/scripts/validate_procedure_distillation_skill.py"
+);
 
 const REQUIRED_SECTIONS: &[&str] = &[
     "## Trigger Conditions",
@@ -388,6 +391,27 @@ fn procedure_distillation_fixture_matrix_covers_e2e_logs() -> TestResult {
     }
 
     Ok(())
+}
+
+#[test]
+fn procedure_distillation_has_e2e_validation_script() -> TestResult {
+    assert_contains_all(
+        "procedure validation script",
+        VALIDATION_SCRIPT,
+        &[
+            "ee.skill.procedure_distillation.e2e_log.v1",
+            "ee.skill.procedure_distillation.fixtures.v1",
+            "pd_insufficient_evidence",
+            "pd_render_only_export_logging",
+            "procedure_store_unavailable",
+            "renderOnlyExportCheck",
+        ],
+    )?;
+    assert_contains_all(
+        "procedure skill validation script reference",
+        SKILL,
+        &["scripts/validate_procedure_distillation_skill.py"],
+    )
 }
 
 fn validate_fixture_log_shape(fixture: &ProcedureSkillFixture) -> TestResult {

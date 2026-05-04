@@ -218,6 +218,9 @@ redacted source evidence, and degraded `ee procedure` output. Templates live in:
 - `references/skill-capsule-review-template.md`
 - `references/drift-review-template.md`
 
+Run `scripts/validate_procedure_distillation_skill.py` from the repository root
+to validate the skill, fixtures, templates, and E2E log contract together.
+
 ## E2E Logging
 
 E2E logs use schema `ee.skill.procedure_distillation.e2e_log.v1` and record
