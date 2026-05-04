@@ -33,7 +33,7 @@ FAILED=0
 PASSED=0
 RUN=0
 
-SCENARIOS=(baseline degraded skill-handoff)
+SCENARIOS=(baseline degraded redaction skill-handoff)
 
 log_info() {
     echo "[INFO] $*" >&2
@@ -191,6 +191,7 @@ write_boundary_log() {
     ARTIFACT_ROOT="${ARTIFACT_ROOT}" \
     WORKSPACE="${WORKSPACE}" \
     REPO_ROOT="${REPO_ROOT}" \
+    CORPUS_PATH="${CORPUS_PATH}" \
     STRICT_GOLDEN="${EE_BOUNDARY_STRICT_GOLDEN:-}" \
     FIXTURE_HASHES="${fixture_hashes}" \
     python3 - "$@" <<'PY'
@@ -277,8 +278,25 @@ if first_failure is None and not forbidden_checked:
     first_failure = "forbidden_filesystem_operation"
 
 fixture_hashes = json.loads(os.environ["FIXTURE_HASHES"])
+fixture_metadata = {}
+if os.environ["FIXTURE_ID"] not in ("", "none"):
+    with open(os.environ["CORPUS_PATH"], encoding="utf-8") as fh:
+        corpus = json.load(fh)
+    fixture_metadata = next(
+        (fixture for fixture in corpus["fixtures"] if fixture["id"] == os.environ["FIXTURE_ID"]),
+        {},
+    )
 if first_failure is None and os.environ["FIXTURE_ID"] not in ("", "none") and not fixture_hashes:
     first_failure = f"missing_fixture_hash:{os.environ['FIXTURE_ID']}"
+
+redaction_status = fixture_metadata.get("redactionState", {"status": "none", "classes": []})
+trust_classes = [fixture_metadata.get("trustClass", "synthetic_fixture")] if fixture_metadata else []
+if fixture_metadata:
+    prompt_injection_quarantine_status = (
+        "quarantined" if fixture_metadata.get("promptInjectionQuarantined") else "not_quarantined"
+    )
+else:
+    prompt_injection_quarantine_status = "not_applicable"
 
 command_name = os.environ["COMMAND_NAME"]
 reproduction_command = (
@@ -324,8 +342,8 @@ record = {
     "evidence_bundle_path": os.environ.get("EVIDENCE_BUNDLE_PATH") or None,
     "evidence_bundle_hash": os.environ.get("EVIDENCE_BUNDLE_HASH") or None,
     "provenance_ids": [],
-    "trust_classes": ["synthetic_fixture"] if os.environ["FIXTURE_ID"] != "none" else [],
-    "prompt_injection_quarantine_status": "not_applicable",
+    "trust_classes": trust_classes,
+    "prompt_injection_quarantine_status": prompt_injection_quarantine_status,
     "command_boundary_matrix_row": os.environ["MATRIX_ROW"],
     "readme_workflow_row": os.environ["WORKFLOW_ROW"] or None,
     "fixture_hashes": fixture_hashes,
@@ -549,6 +567,28 @@ scenario_degraded() {
         why mem_00000000000000000000000001 --workspace "${WORKSPACE}" --json
 }
 
+scenario_redaction() {
+    local had_openai_key=0
+    local previous_openai_key=""
+    if [[ -v OPENAI_API_KEY ]]; then
+        had_openai_key=1
+        previous_openai_key="${OPENAI_API_KEY}"
+    fi
+
+    export OPENAI_API_KEY="not-a-real-key"
+    run_ee_case redacted_status_env "privacy-trust" \
+        "privacy/trust/redacted support and handoff rows" \
+        "README privacy and trust workflow" "boundary.redacted_secret_placeholder.v1" \
+        "class=read_only" "read_only" "ee.response.v1" "0" "none" \
+        status --workspace "${WORKSPACE}" --json
+
+    if [[ "${had_openai_key}" -eq 1 ]]; then
+        export OPENAI_API_KEY="${previous_openai_key}"
+    else
+        unset OPENAI_API_KEY
+    fi
+}
+
 scenario_skill_handoff() {
     run_skill_handoff_case
 }
@@ -569,6 +609,7 @@ for path in sorted(root.glob("*/boundary-log.json")):
 by_family = defaultdict(lambda: {"passed": 0, "failed": 0})
 by_fixture = defaultdict(lambda: {"passed": 0, "failed": 0})
 by_side_effect = defaultdict(lambda: {"passed": 0, "failed": 0})
+by_workflow = defaultdict(lambda: {"passed": 0, "failed": 0})
 degraded = Counter()
 evidence_artifacts = []
 repro = []
@@ -581,6 +622,7 @@ for record in logs:
     for evidence_id in record["evidence_ids"] or ["none"]:
         by_fixture[evidence_id][bucket] += 1
     by_side_effect[record["side_effect_class"]][bucket] += 1
+    by_workflow[record["readme_workflow_row"] or "none"][bucket] += 1
     degraded.update(record["degradation_codes"])
     if record["evidence_bundle_path"]:
         evidence_artifacts.append(
@@ -606,6 +648,7 @@ summary = {
     "by_command_family": dict(sorted(by_family.items())),
     "by_fixture": dict(sorted(by_fixture.items())),
     "by_side_effect_class": dict(sorted(by_side_effect.items())),
+    "by_workflow": dict(sorted(by_workflow.items())),
     "degraded_states_observed": dict(sorted(degraded.items())),
     "evidence_artifacts": evidence_artifacts,
     "reproduction_commands": repro,
@@ -679,6 +722,7 @@ main() {
         case "${target}" in
             baseline) scenario_baseline ;;
             degraded) scenario_degraded ;;
+            redaction) scenario_redaction ;;
             skill-handoff) scenario_skill_handoff ;;
             *)
                 log_error "unknown scenario: ${target}"
