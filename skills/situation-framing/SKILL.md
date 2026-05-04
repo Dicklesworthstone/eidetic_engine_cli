@@ -119,7 +119,9 @@ When a claim is useful but unsupported, put it in `evidenceGaps` or `assumptions
 
 Static tests must validate frontmatter, required sections, referenced `ee ... --json` commands, output template fields, refusal gates, degraded behavior, ambiguous-task handling, no hidden chain-of-thought request, direct DB prohibition, trust class handling, prompt-injection handling, and redaction handling.
 
-Fixture coverage must include bug fix, feature, refactor, investigation, docs, deploy, ambiguous task, missing evidence, and degraded CLI evidence cases. See `references/e2e-fixtures.md` for the fixture matrix.
+Fixture coverage must include bug fix, feature, refactor, investigation, docs, deploy, ambiguous task, missing evidence, and degraded CLI evidence cases. See `references/e2e-fixtures.md` and `fixtures/e2e-fixtures.json` for the fixture matrix and executable corpus.
+
+Run `skills/situation-framing/scripts/validate_situation_framing_skill.py` after changing the skill, fixtures, or fixture matrix.
 
 ## E2E Logging
 

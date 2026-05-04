@@ -122,11 +122,7 @@ fn bare_status_inspects_current_workspace() -> TestResult {
 
     // Initialize the workspace first
     let init_output = run_ee(&["init", "--workspace", workspace_arg])?;
-    ensure(
-        init_output.status.success(),
-        true,
-        "init should succeed",
-    )?;
+    ensure(init_output.status.success(), true, "init should succeed")?;
 
     // Run bare status from the workspace directory (using --workspace to simulate cwd)
     // The fix ensures that when --workspace is omitted, it defaults to "."

@@ -27,6 +27,13 @@ const PREFLIGHT_FIXTURES: &str =
     include_str!("../skills/preflight-risk-review/fixtures/e2e-fixtures.json");
 
 const SITUATION_SKILL: &str = include_str!("../skills/situation-framing/SKILL.md");
+const SITUATION_FIXTURES: &str =
+    include_str!("../skills/situation-framing/fixtures/e2e-fixtures.json");
+
+const PROCEDURE_DISTILLATION_SKILL: &str =
+    include_str!("../skills/procedure-distillation/SKILL.md");
+const PROCEDURE_DISTILLATION_FIXTURES: &str =
+    include_str!("../skills/procedure-distillation/fixtures/e2e-fixtures.json");
 
 const CAUSAL_CREDIT_SKILL: &str = include_str!("../skills/causal-credit-review/SKILL.md");
 const CAUSAL_CREDIT_FIXTURES: &str =
@@ -64,7 +71,16 @@ const ALL_SKILLS: &[(&str, &str, Option<&str>)] = &[
         PREFLIGHT_SKILL,
         Some(PREFLIGHT_FIXTURES),
     ),
-    ("situation-framing", SITUATION_SKILL, None),
+    (
+        "situation-framing",
+        SITUATION_SKILL,
+        Some(SITUATION_FIXTURES),
+    ),
+    (
+        "procedure-distillation",
+        PROCEDURE_DISTILLATION_SKILL,
+        Some(PROCEDURE_DISTILLATION_FIXTURES),
+    ),
     (
         "causal-credit-review",
         CAUSAL_CREDIT_SKILL,
@@ -283,6 +299,34 @@ fn situation_skill_has_framing_and_planning_sections() -> TestResult {
         &parsed.body,
         &["situation", "task", "context", "ee status", "ee context"],
     )
+}
+
+#[test]
+fn situation_fixtures_cover_required_scenarios() -> TestResult {
+    let fixtures: GenericSkillFixtures = parse_fixtures(SITUATION_FIXTURES, "situation")?;
+    let fixture_ids: Vec<&str> = fixtures.fixtures.iter().map(|f| f.id.as_str()).collect();
+
+    let required_scenarios = [
+        "bug_fix",
+        "feature",
+        "refactor",
+        "investigate",
+        "docs",
+        "deploy",
+        "ambiguous",
+        "missing_evidence",
+        "degraded",
+    ];
+
+    for scenario in required_scenarios {
+        let found = fixture_ids.iter().any(|id| id.contains(scenario));
+        if !found {
+            return Err(format!(
+                "situation fixtures missing scenario covering `{scenario}`"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[test]

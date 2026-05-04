@@ -423,6 +423,8 @@ fn error_json_has_required_envelope_fields() -> TestResult {
     ensure_contains(&json, "\"error\":{", "error object")?;
     ensure_contains(&json, "\"code\":\"storage\"", "code field")?;
     ensure_contains(&json, "\"message\":\"Test error\"", "message field")?;
+    ensure_contains(&json, "\"severity\":\"high\"", "severity field")?;
+    ensure_contains(&json, "\"details\":{}", "details field")?;
     ensure_contains(&json, "\"repair\":\"ee doctor\"", "repair field")
 }
 

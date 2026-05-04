@@ -4,7 +4,6 @@
 //! validating SKILL.md structure, parsing fixtures, and logging e2e results.
 
 use serde::Deserialize;
-use std::collections::BTreeSet;
 
 pub type TestResult = Result<(), String>;
 
@@ -102,6 +101,7 @@ pub fn compute_fixture_hash(fixture_id: &str) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct GenericSkillFixture {
     pub id: String,
+    #[serde(default)]
     pub description: String,
     #[serde(default)]
     pub ee_commands: Vec<String>,
@@ -148,6 +148,24 @@ pub fn validate_fixture_dispositions(
         "needs-escalation",
         "unavailable",
         "refuse",
+        "draft_only",
+        "refuse_promotion",
+        "ready_for_manual_review",
+        "request_more_evidence",
+        "reject_non_durable",
+        "reject_duplicate",
+        "generate_candidate",
+        "request_repair",
+        "review_supported",
+        "refuse_strengthen",
+        "request_evidence",
+        "supported_hypothesis",
+        "refuse_strong_claim",
+        "hypothesis_only",
+        "request_data_collection",
+        "generate_plan",
+        "propose_replication",
+        "request_more_samples",
         "ask_user",
     ];
     for fixture in fixtures {
@@ -328,15 +346,21 @@ mod tests {
         let fixtures = vec![GenericSkillFixture {
             id: "test".to_string(),
             description: "test".to_string(),
-            ee_commands: vec![],
-            evidence_ids: vec![],
+            ee_commands: vec!["ee status --json".to_string()],
+            evidence_ids: vec!["ev-test".to_string()],
             redaction_status: "passed".to_string(),
             raw_secrets_included: false,
-            prompt_injection_quarantined: false,
-            degraded_codes: vec![],
+            prompt_injection_quarantined: true,
+            degraded_codes: vec!["degraded-test".to_string()],
             expected_disposition: "invalid_disposition".to_string(),
             first_failure_diagnosis: None,
         }];
+        assert_eq!(fixtures[0].description, "test");
+        assert_eq!(fixtures[0].ee_commands, ["ee status --json"]);
+        assert_eq!(fixtures[0].evidence_ids, ["ev-test"]);
+        assert!(!fixtures[0].raw_secrets_included);
+        assert!(fixtures[0].prompt_injection_quarantined);
+        assert_eq!(fixtures[0].degraded_codes, ["degraded-test"]);
         assert!(validate_fixture_dispositions(&fixtures, "test").is_err());
     }
 
@@ -346,5 +370,27 @@ mod tests {
         let json = log.to_json();
         assert!(json.contains("\"schema\":\"ee.skill_standards.lint_log.v1\""));
         assert!(json.contains("\"required_section_check\":\"pass\""));
+    }
+
+    #[test]
+    fn skill_lint_log_uses_declared_required_fields() {
+        let fixture = GenericSkillFixture {
+            id: "fixture-1".to_string(),
+            description: "fixture".to_string(),
+            ee_commands: Vec::new(),
+            evidence_ids: Vec::new(),
+            redaction_status: "passed".to_string(),
+            raw_secrets_included: false,
+            prompt_injection_quarantined: true,
+            degraded_codes: vec!["degraded-test".to_string()],
+            expected_disposition: "go".to_string(),
+            first_failure_diagnosis: None,
+        };
+        let json = SkillLintLog::new("skills/test/SKILL.md")
+            .with_fixture(&fixture)
+            .to_json();
+        for field in REQUIRED_LOG_FIELDS {
+            assert!(json.contains(&format!("\"{field}\":")));
+        }
     }
 }

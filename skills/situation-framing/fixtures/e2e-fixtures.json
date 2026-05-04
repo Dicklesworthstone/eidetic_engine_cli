@@ -1,0 +1,181 @@
+{
+  "schema": "ee.skill.situation_framing.fixtures.v1",
+  "skillPath": "skills/situation-framing/SKILL.md",
+  "fixtures": [
+    {
+      "id": "sf_bug_fix_release",
+      "description": "Bug fix frame for a failing release workflow with prior-failure evidence available.",
+      "taskInput": "Fix failing release workflow",
+      "expectedClassification": "bug_fix",
+      "requiredGate": "Prior failure provenance or evidence gap",
+      "eeCommands": [
+        "ee --workspace /tmp/ee-fixtures/release --json status",
+        "ee --workspace /tmp/ee-fixtures/release --json context \"Fix failing release workflow\"",
+        "ee --workspace /tmp/ee-fixtures/release --json search \"release workflow failure\" --explain"
+      ],
+      "evidenceIds": ["ev.sf.release.failure.001", "mem.release.rule.001"],
+      "provenanceIds": ["prov.release.ci.001"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "expectedDisposition": "go",
+      "firstFailureDiagnosis": null
+    },
+    {
+      "id": "sf_feature_memory_rule",
+      "description": "Feature frame for a new procedural memory feature that must keep mutation explicit.",
+      "taskInput": "Add a new procedural memory feature",
+      "expectedClassification": "feature",
+      "requiredGate": "Durable mutation must be explicit ee command",
+      "eeCommands": [
+        "ee --workspace /tmp/ee-fixtures/feature --json status",
+        "ee --workspace /tmp/ee-fixtures/feature --json context \"Add a new procedural memory feature\"",
+        "ee --workspace /tmp/ee-fixtures/feature --json capabilities"
+      ],
+      "evidenceIds": ["ev.sf.feature.context.001"],
+      "provenanceIds": ["prov.feature.plan.001"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "expectedDisposition": "go",
+      "firstFailureDiagnosis": null
+    },
+    {
+      "id": "sf_refactor_storage",
+      "description": "Refactor frame for storage path resolution that must not inspect direct database files.",
+      "taskInput": "Refactor storage path resolution",
+      "expectedClassification": "refactor",
+      "requiredGate": "No direct DB scraping",
+      "eeCommands": [
+        "ee --workspace /tmp/ee-fixtures/storage --json status",
+        "ee --workspace /tmp/ee-fixtures/storage --json search \"storage path resolution\" --explain"
+      ],
+      "evidenceIds": ["ev.sf.storage.path.001"],
+      "provenanceIds": ["prov.storage.adr.001"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "expectedDisposition": "go",
+      "firstFailureDiagnosis": null
+    },
+    {
+      "id": "sf_investigate_slow_search",
+      "description": "Investigation frame where degraded search output prevents ranking claims.",
+      "taskInput": "Investigate slow search",
+      "expectedClassification": "investigation",
+      "requiredGate": "Degraded search must stop ranking claims",
+      "eeCommands": [
+        "ee --workspace /tmp/ee-fixtures/slow-search --json status",
+        "ee --workspace /tmp/ee-fixtures/slow-search --json search \"slow search\" --explain",
+        "ee --workspace /tmp/ee-fixtures/slow-search --json doctor --fix-plan"
+      ],
+      "evidenceIds": ["ev.sf.search.status.001"],
+      "provenanceIds": [],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": ["search_unavailable"],
+      "expectedDisposition": "ask_user",
+      "firstFailureDiagnosis": "search evidence unavailable; ranking claims must be withheld"
+    },
+    {
+      "id": "sf_docs_update",
+      "description": "Docs frame with context evidence and no unsupported feature-loss claims.",
+      "taskInput": "Update docs for install flow",
+      "expectedClassification": "docs",
+      "requiredGate": "No unsupported feature-loss claims",
+      "eeCommands": [
+        "ee --workspace /tmp/ee-fixtures/docs --json status",
+        "ee --workspace /tmp/ee-fixtures/docs --json context \"Update docs for install flow\""
+      ],
+      "evidenceIds": ["ev.sf.docs.context.001"],
+      "provenanceIds": ["prov.docs.install.001"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "expectedDisposition": "go",
+      "firstFailureDiagnosis": null
+    },
+    {
+      "id": "sf_deploy_release",
+      "description": "Deploy frame requiring risk checks that cite provenance IDs.",
+      "taskInput": "Prepare deploy or release",
+      "expectedClassification": "deploy",
+      "requiredGate": "Risk checks cite provenance IDs",
+      "eeCommands": [
+        "ee --workspace /tmp/ee-fixtures/deploy --json status",
+        "ee --workspace /tmp/ee-fixtures/deploy --json context \"Prepare deploy or release\"",
+        "ee --workspace /tmp/ee-fixtures/deploy --json why mem.release.rule.001"
+      ],
+      "evidenceIds": ["ev.sf.deploy.context.001", "mem.release.rule.001"],
+      "provenanceIds": ["prov.release.checklist.001"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "expectedDisposition": "go",
+      "firstFailureDiagnosis": null
+    },
+    {
+      "id": "sf_ambiguous_request",
+      "description": "Ambiguous user request must gather minimal readiness evidence and ask for a decision point.",
+      "taskInput": "Make it better",
+      "expectedClassification": "ambiguous",
+      "requiredGate": "Output asks for evidence or decision point",
+      "eeCommands": [
+        "ee --workspace /tmp/ee-fixtures/ambiguous --json status"
+      ],
+      "evidenceIds": [],
+      "provenanceIds": [],
+      "redactionStatus": "unknown",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "expectedDisposition": "ask_user",
+      "firstFailureDiagnosis": "ambiguous task needs a concrete goal or evidence target"
+    },
+    {
+      "id": "sf_missing_evidence",
+      "description": "Prior incident explanation with no context/search evidence must report an evidence gap.",
+      "taskInput": "Explain prior incident with no context",
+      "expectedClassification": "investigation",
+      "requiredGate": "evidenceGaps names missing evidence",
+      "eeCommands": [
+        "ee --workspace /tmp/ee-fixtures/missing-evidence --json status",
+        "ee --workspace /tmp/ee-fixtures/missing-evidence --json search \"prior incident\" --explain"
+      ],
+      "evidenceIds": [],
+      "provenanceIds": [],
+      "redactionStatus": "unknown",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": ["context_unavailable"],
+      "expectedDisposition": "ask_user",
+      "firstFailureDiagnosis": "missing evidence prevents incident explanation"
+    },
+    {
+      "id": "sf_degraded_cli",
+      "description": "Degraded ee response must name the degraded codes, effect, and repair command.",
+      "taskInput": "Continue when CASS/search is unavailable",
+      "expectedClassification": "investigation",
+      "requiredGate": "Names degraded code, effect, and repair",
+      "eeCommands": [
+        "ee --workspace /tmp/ee-fixtures/degraded --json status",
+        "ee --workspace /tmp/ee-fixtures/degraded --json context \"Continue when CASS/search is unavailable\"",
+        "ee --workspace /tmp/ee-fixtures/degraded --json search \"fallback evidence\" --explain"
+      ],
+      "evidenceIds": ["ev.sf.status.degraded.001"],
+      "provenanceIds": [],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": true,
+      "degradedCodes": ["cass_unavailable", "search_unavailable"],
+      "expectedDisposition": "unavailable",
+      "firstFailureDiagnosis": "degraded context/search evidence cannot support the requested conclusion"
+    }
+  ]
+}

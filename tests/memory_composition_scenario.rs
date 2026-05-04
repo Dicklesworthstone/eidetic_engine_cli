@@ -202,10 +202,17 @@ fn recorder_focus_task_frame_rationale_handoff_resume_composition() -> TestResul
         workspace_path,
         "init",
         "init_workspace",
-        vec!["init".to_owned(), workspace_arg.clone(), "--json".to_owned()],
+        vec![
+            "init".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+        ],
         "response",
     )?;
-    ensure(log.first_failure.is_none(), format!("init failed: {:?}", log.first_failure))?;
+    ensure(
+        log.first_failure.is_none(),
+        format!("init failed: {:?}", log.first_failure),
+    )?;
     commands.push(log);
 
     // Step 2: Create task-frame with goal (proves non-executing passive state)
@@ -231,7 +238,9 @@ fn recorder_focus_task_frame_rationale_handoff_resume_composition() -> TestResul
     )?;
     proof.task_frame_id = extract_field_string(parsed.as_ref(), "/data/frame/id");
     proof.task_frame_status_history.push("active".to_owned());
-    if let Some(contract) = extract_field_string(parsed.as_ref(), "/data/frame/nonExecutingContract") {
+    if let Some(contract) =
+        extract_field_string(parsed.as_ref(), "/data/frame/nonExecutingContract")
+    {
         proof.non_executing_contract_verified = contract.contains("never executes");
     }
     commands.push(log);
