@@ -1184,6 +1184,264 @@ mod tests {
         assert_golden("agent", "outcome_recorded.json", &normalized)
     }
 
+    #[test]
+    fn agent_feedback_hardening_binary_flow_protects_and_reviews_quarantine() -> TestResult {
+        let artifact_dir = unique_artifact_dir("feedback-hardening")?;
+        let workspace = artifact_dir.join("workspace");
+        fs::create_dir_all(&workspace).map_err(|error| {
+            format!(
+                "failed to create workspace {}: {error}",
+                workspace.display()
+            )
+        })?;
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+        let database = workspace.join(".ee").join("ee.db");
+        let database_arg = database.to_string_lossy().into_owned();
+
+        run_json_stdout(&["--json", "--workspace", &workspace_arg, "init"], true)?;
+
+        let remember = run_json_stdout(
+            &[
+                "--json",
+                "--workspace",
+                &workspace_arg,
+                "remember",
+                "Run cargo fmt --check before release.",
+                "--level",
+                "procedural",
+                "--kind",
+                "rule",
+                "--source",
+                "file://AGENTS.md#L164-173",
+                "--confidence",
+                "0.92",
+            ],
+            true,
+        )?;
+        let memory_id = remember["data"]["memory_id"]
+            .as_str()
+            .ok_or_else(|| "remember response missing memory_id".to_string())?
+            .to_owned();
+
+        let rule_add = run_json_stdout(
+            &[
+                "--json",
+                "--workspace",
+                &workspace_arg,
+                "rule",
+                "add",
+                "Require distinct harmful sources before rule inversion.",
+                "--database",
+                &database_arg,
+                "--source-memory",
+                &memory_id,
+                "--maturity",
+                "candidate",
+                "--actor",
+                "golden-test",
+            ],
+            true,
+        )?;
+        let rule_id = rule_add["data"]["ruleId"]
+            .as_str()
+            .ok_or_else(|| "rule add response missing ruleId".to_string())?
+            .to_owned();
+
+        let protected = run_json_stdout(
+            &[
+                "--json",
+                "--workspace",
+                &workspace_arg,
+                "rule",
+                "protect",
+                &rule_id,
+                "--database",
+                &database_arg,
+                "--actor",
+                "golden-test",
+            ],
+            true,
+        )?;
+        ensure_equal(
+            &protected["data"]["status"],
+            &serde_json::json!("updated"),
+            "rule protect status",
+        )?;
+        ensure_equal(
+            &protected["data"]["protected"],
+            &serde_json::json!(true),
+            "rule protect marker",
+        )?;
+        ensure_equal(
+            &protected["data"]["previousProtected"],
+            &serde_json::json!(false),
+            "rule protect previous marker",
+        )?;
+        ensure(
+            protected["data"]["auditId"].is_string(),
+            "rule protect audit id must be present",
+        )?;
+
+        let first_harmful = run_json_stdout(
+            &[
+                "--json",
+                "--workspace",
+                &workspace_arg,
+                "outcome",
+                &memory_id,
+                "--database",
+                &database_arg,
+                "--signal",
+                "harmful",
+                "--source-type",
+                "outcome_observed",
+                "--source-id",
+                "golden-source",
+                "--reason",
+                "First harmful signal stays live.",
+                "--event-id",
+                "fb_41234567890123456789012345",
+                "--actor",
+                "golden-test",
+                "--harmful-per-source-per-hour",
+                "1",
+            ],
+            true,
+        )?;
+        ensure_equal(
+            &first_harmful["data"]["status"],
+            &serde_json::json!("recorded"),
+            "first harmful status",
+        )?;
+
+        let quarantined = run_json_stdout(
+            &[
+                "--json",
+                "--workspace",
+                &workspace_arg,
+                "outcome",
+                &memory_id,
+                "--database",
+                &database_arg,
+                "--signal",
+                "harmful",
+                "--source-type",
+                "outcome_observed",
+                "--source-id",
+                "golden-source",
+                "--reason",
+                "Second harmful signal must be quarantined.",
+                "--evidence-json",
+                r#"{"fixture":"feedback-hardening"}"#,
+                "--event-id",
+                "fb_51234567890123456789012345",
+                "--actor",
+                "golden-test",
+                "--harmful-per-source-per-hour",
+                "1",
+            ],
+            true,
+        )?;
+        ensure_equal(
+            &quarantined["data"]["status"],
+            &serde_json::json!("feedback_quarantined"),
+            "second harmful status",
+        )?;
+        ensure_equal(
+            &quarantined["data"]["feedback"]["totalCount"],
+            &serde_json::json!(1),
+            "quarantined event must not affect live feedback count",
+        )?;
+        let quarantine_id = quarantined["data"]["quarantine"]["id"]
+            .as_str()
+            .ok_or_else(|| "quarantined response missing quarantine id".to_string())?
+            .to_owned();
+        ensure(
+            quarantine_id.starts_with("fq_"),
+            "quarantine id must use feedback quarantine prefix",
+        )?;
+
+        let pending = run_json_stdout(
+            &[
+                "--json",
+                "--workspace",
+                &workspace_arg,
+                "outcome",
+                "quarantine",
+                "list",
+                "--database",
+                &database_arg,
+            ],
+            true,
+        )?;
+        ensure_equal(
+            &pending["data"]["queueDepth"],
+            &serde_json::json!(1),
+            "pending quarantine depth",
+        )?;
+        ensure_equal(
+            &pending["data"]["records"][0]["id"],
+            &serde_json::json!(quarantine_id),
+            "pending quarantine id",
+        )?;
+        ensure(
+            pending["data"]["records"][0]["rawEventHash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "pending quarantine raw event hash",
+        )?;
+
+        let released = run_json_stdout(
+            &[
+                "--json",
+                "--workspace",
+                &workspace_arg,
+                "outcome",
+                "quarantine",
+                "release",
+                &quarantine_id,
+                "--database",
+                &database_arg,
+                "--actor",
+                "golden-test",
+            ],
+            true,
+        )?;
+        ensure_equal(
+            &released["data"]["status"],
+            &serde_json::json!("released"),
+            "quarantine release status",
+        )?;
+        ensure_equal(
+            &released["data"]["feedbackEventId"],
+            &serde_json::json!("fb_51234567890123456789012345"),
+            "released feedback event id",
+        )?;
+        ensure(
+            released["data"]["auditId"].is_string(),
+            "quarantine release audit id must be present",
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let feedback = connection
+            .list_feedback_events_for_target("memory", &memory_id)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&feedback.len(), &2_usize, "released feedback count")?;
+        let released_rows = connection
+            .list_feedback_quarantine(
+                pending["data"]["workspaceId"]
+                    .as_str()
+                    .ok_or_else(|| "pending list missing workspaceId".to_string())?,
+                Some("released"),
+            )
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &released_rows.len(),
+            &1_usize,
+            "released quarantine row count",
+        )
+    }
+
     fn normalize_outcome_json(json: &str) -> String {
         let mut value: serde_json::Value = match serde_json::from_str(json) {
             Ok(v) => v,

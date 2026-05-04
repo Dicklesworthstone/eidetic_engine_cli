@@ -1427,6 +1427,7 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
         &workspace,
         "search",
         "clippy release",
+        "--explain",
         "--json",
     ])?;
     let search_stderr = String::from_utf8_lossy(&search.stderr);
@@ -1452,6 +1453,26 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
             .iter()
             .any(|hit| hit["doc_id"].as_str() == Some(failure_id)),
         "search results must include the release failure memory",
+    )?;
+    let rule_search_hit = search_results
+        .iter()
+        .find(|hit| hit["doc_id"].as_str() == Some(rule_id))
+        .ok_or_else(|| "search result for release rule must be present".to_string())?;
+    ensure(
+        rule_search_hit["score"].as_f64().is_some(),
+        "search hit must expose a numeric score",
+    )?;
+    ensure(
+        rule_search_hit["explanation"]["factors"]
+            .as_array()
+            .is_some_and(|factors| !factors.is_empty()),
+        "search --explain must expose score factors",
+    )?;
+    ensure(
+        search_json["data"]["metrics"]["field_coverage"]["explanation_count"]
+            .as_u64()
+            .is_some_and(|count| count >= 2),
+        "search metrics must count explanation coverage",
     )?;
 
     let context = run_ee(&[
@@ -1501,6 +1522,61 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
             .is_some_and(|hash| hash.starts_with("blake3:")),
         "context pack must persist a blake3 hash",
     )?;
+    let context_pack_hash = context_json["data"]["pack"]["hash"]
+        .as_str()
+        .ok_or_else(|| "context pack hash must be a string".to_string())?;
+    for item in pack_items {
+        ensure(
+            item["scores"]["relevance"].as_f64().is_some()
+                && item["scores"]["utility"].as_f64().is_some(),
+            "context pack item must expose numeric score components",
+        )?;
+        ensure(
+            item["provenance"]
+                .as_array()
+                .is_some_and(|provenance| !provenance.is_empty()),
+            "context pack item must carry provenance",
+        )?;
+        ensure(
+            item["why"].as_str().is_some_and(|why| !why.is_empty()),
+            "context pack item must include a selection explanation",
+        )?;
+    }
+    ensure(
+        context_json["data"]["pack"]["quality"]["provenanceComplete"] == serde_json::json!(true),
+        "context pack quality must report complete provenance",
+    )?;
+    ensure(
+        context_json["data"]["pack"]["selectionCertificate"]["algorithm"]
+            .as_str()
+            .is_some_and(|algorithm| !algorithm.is_empty()),
+        "context pack selection certificate must name the deterministic algorithm",
+    )?;
+    let selected_items = context_json["data"]["pack"]["selectionCertificate"]["selectedItems"]
+        .as_array()
+        .ok_or_else(|| "selection certificate selectedItems must be an array".to_string())?;
+    ensure_equal(
+        &selected_items.len(),
+        &pack_items.len(),
+        "selection certificate selected item count",
+    )?;
+    ensure(
+        selected_items
+            .iter()
+            .any(|item| item["memoryId"].as_str() == Some(rule_id)),
+        "selection certificate must include the release rule memory",
+    )?;
+    let selection_steps = context_json["data"]["pack"]["selectionCertificate"]["steps"]
+        .as_array()
+        .ok_or_else(|| "selection certificate steps must be an array".to_string())?;
+    ensure(
+        selection_steps.iter().all(|step| {
+            step["marginalGain"].as_f64().is_some()
+                && step["objectiveValue"].as_f64().is_some()
+                && step["tokenCost"].as_u64().is_some()
+        }),
+        "selection certificate steps must expose formulaic objective components",
+    )?;
 
     let why = run_ee(&["--workspace", &workspace, "why", rule_id, "--json"])?;
     let why_stderr = String::from_utf8_lossy(&why.stderr);
@@ -1527,6 +1603,53 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
             .as_str()
             .is_some_and(|pack_id| pack_id.starts_with("pack_")),
         "why latest pack selection must include a persisted pack id",
+    )?;
+    ensure_equal(
+        &why_json["data"]["storage"]["provenance_uri"],
+        &serde_json::json!("file://tests/fixtures/eval/release_failure/source_memory.json#L1"),
+        "why storage provenance",
+    )?;
+    ensure(
+        why_json["data"]["retrieval"]["confidence"]
+            .as_f64()
+            .is_some()
+            && why_json["data"]["retrieval"]["utility"].as_f64().is_some()
+            && why_json["data"]["retrieval"]["importance"]
+                .as_f64()
+                .is_some(),
+        "why retrieval explanation must expose numeric score inputs",
+    )?;
+    ensure(
+        why_json["data"]["retrieval"]["tags"]
+            .as_array()
+            .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some("release"))),
+        "why retrieval explanation must preserve tags",
+    )?;
+    ensure(
+        why_json["data"]["selection"]["selectionScore"]
+            .as_f64()
+            .is_some(),
+        "why selection must expose a numeric score",
+    )?;
+    ensure(
+        why_json["data"]["selection"]["scoreBreakdown"]
+            .as_str()
+            .is_some_and(|breakdown| breakdown.contains("selection_score = 0.5 * confidence")),
+        "why selection must expose the deterministic score formula",
+    )?;
+    ensure_equal(
+        &why_json["data"]["selection"]["latestPackSelection"]["packHash"],
+        &serde_json::json!(context_pack_hash),
+        "why latest pack selection must reference the persisted context pack hash",
+    )?;
+    ensure(
+        why_json["data"]["selection"]["latestPackSelection"]["relevance"]
+            .as_f64()
+            .is_some()
+            && why_json["data"]["selection"]["latestPackSelection"]["utility"]
+                .as_f64()
+                .is_some(),
+        "why latest pack selection must expose recorded relevance and utility",
     )?;
 
     let doctor = run_ee(&["--workspace", &workspace, "doctor", "--fix-plan", "--json"])?;
@@ -1931,20 +2054,16 @@ fn causal_promote_plan_invalid_action_still_returns_usage_error() -> TestResult 
 }
 
 // ============================================================================
-// Counterfactual Lab Tests (EE-382 - Degraded until stored episodes exist)
+// Counterfactual Lab Tests (EE-382 - Evidence-only reports)
 // ============================================================================
 
-fn assert_lab_unavailable(output: &std::process::Output, command: &str) -> TestResult {
-    ensure_equal(
-        &output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "exit code",
-    )?;
+fn assert_lab_report_common(output: &std::process::Output) -> Result<serde_json::Value, String> {
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     ensure(stdout_is_json(output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(output), "stdout must be clean")?;
     ensure(
         output.stderr.is_empty(),
-        "json degraded response must keep stderr empty",
+        "json response must keep stderr empty",
     )?;
     let json = stdout_json(output)?;
     ensure_equal(
@@ -1952,38 +2071,12 @@ fn assert_lab_unavailable(output: &std::process::Output, command: &str) -> TestR
         &serde_json::json!("ee.response.v1"),
         "response schema",
     )?;
-    ensure_equal(&json["success"], &serde_json::json!(false), "success")?;
-    ensure_equal(
-        &json["data"]["command"],
-        &serde_json::json!(command),
-        "command",
-    )?;
-    ensure_equal(
-        &json["data"]["code"],
-        &serde_json::json!("lab_replay_unavailable"),
-        "degraded code",
-    )?;
-    ensure_equal(
-        &json["data"]["repair"],
-        &serde_json::json!("ee status --json"),
-        "repair",
-    )?;
-    ensure_equal(
-        &json["data"]["followUpBead"],
-        &serde_json::json!("eidetic_engine_cli-db4z"),
-        "follow-up bead",
-    )?;
-    ensure_equal(
-        &json["data"]["sideEffectClass"],
-        &serde_json::json!(
-            "unavailable before lab episode capture, replay, or counterfactual mutation"
-        ),
-        "side-effect class",
-    )
+    ensure_equal(&json["success"], &serde_json::json!(true), "success")?;
+    Ok(json)
 }
 
 #[test]
-fn lab_capture_degrades_until_stored_episodes_exist() -> TestResult {
+fn lab_capture_reports_redacted_episode_metadata_without_storage_claim() -> TestResult {
     let output = run_ee(&[
         "lab",
         "capture",
@@ -1992,27 +2085,118 @@ fn lab_capture_degrades_until_stored_episodes_exist() -> TestResult {
         "--dry-run",
         "--json",
     ])?;
-    assert_lab_unavailable(&output, "lab capture")
+    let json = assert_lab_report_common(&output)?;
+    ensure_equal(
+        &json["data"]["task_input"],
+        &serde_json::json!("fix failing release workflow"),
+        "task input",
+    )?;
+    ensure_equal(
+        &json["data"]["redactionStatus"],
+        &serde_json::json!("redacted"),
+        "redaction status",
+    )?;
+    ensure_equal(
+        &json["data"]["stored"],
+        &serde_json::json!(false),
+        "stored flag",
+    )?;
+    ensure_equal(
+        &json["data"]["episodeHash"],
+        &serde_json::Value::Null,
+        "episode hash",
+    )?;
+    ensure(
+        json["data"]["evidenceIds"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "capture reports evidence IDs",
+    )
 }
 
 #[test]
-fn lab_replay_degrades_until_stored_episodes_exist() -> TestResult {
-    let output = run_ee(&["lab", "replay", "ep_fixture_001", "--dry-run", "--json"])?;
-    assert_lab_unavailable(&output, "lab replay")
+fn lab_replay_reports_missing_frozen_inputs_without_success_claim() -> TestResult {
+    let output = run_ee(&[
+        "lab",
+        "replay",
+        "ep_missing_evidence",
+        "--dry-run",
+        "--json",
+    ])?;
+    let json = assert_lab_report_common(&output)?;
+    ensure_equal(
+        &json["data"]["status"],
+        &serde_json::json!("episode_not_found"),
+        "replay status",
+    )?;
+    ensure_equal(
+        &json["data"]["replayEvidenceAvailable"],
+        &serde_json::json!(false),
+        "replay evidence availability",
+    )?;
+    ensure_equal(
+        &json["data"]["frozenInputs"],
+        &serde_json::json!(false),
+        "frozen inputs",
+    )?;
+    ensure_equal(
+        &json["data"]["missingFrozenInputs"],
+        &serde_json::json!([
+            "frozen episode manifest",
+            "frozen memory snapshot",
+            "frozen action trace"
+        ]),
+        "missing frozen inputs",
+    )?;
+    ensure_equal(
+        &json["data"]["mutableCurrentStateAccess"],
+        &serde_json::json!([]),
+        "mutable current-state access",
+    )
 }
 
 #[test]
-fn lab_counterfactual_degrades_until_evidence_only_replay_exists() -> TestResult {
+fn lab_counterfactual_reports_hypothesis_only_without_behavior_claims() -> TestResult {
     let output = run_ee(&[
         "lab",
         "counterfactual",
-        "ep_fixture_001",
+        "ep_missing_evidence",
         "--add-memory",
         "mem_release_rule",
         "--dry-run",
         "--json",
     ])?;
-    assert_lab_unavailable(&output, "lab counterfactual")
+    let json = assert_lab_report_common(&output)?;
+    ensure_equal(
+        &json["data"]["status"],
+        &serde_json::json!("missing_replay_evidence"),
+        "counterfactual status",
+    )?;
+    ensure_equal(
+        &json["data"]["replayEvidenceAvailable"],
+        &serde_json::json!(false),
+        "replay evidence availability",
+    )?;
+    ensure_equal(
+        &json["data"]["behaviorClaims"],
+        &serde_json::json!([]),
+        "behavior claims",
+    )?;
+    ensure_equal(
+        &json["data"]["durableMutation"],
+        &serde_json::json!(false),
+        "durable mutation",
+    )?;
+    ensure(
+        json["data"]["degradationCodes"]
+            .as_array()
+            .is_some_and(|codes| {
+                codes
+                    .iter()
+                    .any(|code| code == &serde_json::json!("lab_replay_unavailable"))
+            }),
+        "counterfactual reports missing replay evidence degradation",
+    )
 }
 
 // ============================================================================

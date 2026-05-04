@@ -509,23 +509,12 @@ fn candidate_from_hit(
     let relevance = unit_score(hit.score)?;
     let utility = unit_score(memory.utility)?;
     let content = memory.content.clone();
-    let why = artifact_id.map_or_else(
-        || {
-            format!(
-                "Selected for query `{query}` from {} search result with score {:.4} and utility {:.4}.",
-                hit.source.as_str(),
-                hit.score,
-                memory.utility
-            )
-        },
-        |artifact_id| {
-            format!(
-                "Selected for query `{query}` through registered artifact {artifact_id} from {} search result with score {:.4} and linked memory utility {:.4}.",
-                hit.source.as_str(),
-                hit.score,
-                memory.utility
-            )
-        },
+    let why = candidate_selection_why(
+        query,
+        hit.source.as_str(),
+        hit.score,
+        memory.utility,
+        artifact_id.as_deref(),
     );
     let candidate = PackCandidate::new(PackCandidateInput {
         memory_id,
@@ -543,6 +532,31 @@ fn candidate_from_hit(
         candidate
             .with_diversity_key(diversity_key_for_memory(&memory, &tags))
             .with_trust_signal(trust_signal_for_memory(&memory, memory_id, degraded)),
+    )
+}
+
+fn candidate_selection_why(
+    query: &str,
+    search_source: &str,
+    search_score: f32,
+    memory_utility: f32,
+    artifact_id: Option<&str>,
+) -> String {
+    let (selection, utility_field) = match artifact_id {
+        Some(artifact_id) => (
+            format!(
+                "Selected for query `{query}` through registered artifact {artifact_id} from {search_source} search result."
+            ),
+            "linked_memory.utility",
+        ),
+        None => (
+            format!("Selected for query `{query}` from {search_source} search result."),
+            "memory.utility",
+        ),
+    };
+
+    format!(
+        "{selection} Deterministic pack scoring: relevance=unit_score(search_hit.score) with search_hit.score={search_score:.4}; utility=unit_score({utility_field}) with {utility_field}={memory_utility:.4}; unit_score(field)=clamp(field, 0.0, 1.0) for finite fields, otherwise 0.0."
     )
 }
 
@@ -739,7 +753,7 @@ fn push_degradation(
 mod tests {
     use std::path::PathBuf;
 
-    use super::{AccessLevel, CapabilitySet, CommandContext};
+    use super::{AccessLevel, CapabilitySet, CommandContext, candidate_selection_why};
     use crate::config::WorkspaceLocation;
     use crate::core::budget::RequestBudget;
 
@@ -950,6 +964,41 @@ mod tests {
         context.budget_mut().record_io_bytes(1024);
         assert_eq!(context.budget().tokens_used(), 42);
         assert_eq!(context.budget().io_used_bytes(), 1024);
+    }
+
+    #[test]
+    fn candidate_selection_why_names_direct_source_fields() {
+        let why = candidate_selection_why("prepare release", "lexical", 0.812_34, 0.456_78, None);
+
+        assert!(why.contains("Selected for query `prepare release` from lexical search result."));
+        assert!(why.contains("relevance=unit_score(search_hit.score)"));
+        assert!(why.contains("search_hit.score=0.8123"));
+        assert!(why.contains("utility=unit_score(memory.utility)"));
+        assert!(why.contains("memory.utility=0.4568"));
+        assert!(
+            why.contains(
+                "unit_score(field)=clamp(field, 0.0, 1.0) for finite fields, otherwise 0.0"
+            )
+        );
+    }
+
+    #[test]
+    fn candidate_selection_why_names_artifact_link_source_fields() {
+        let why = candidate_selection_why(
+            "prepare release",
+            "hybrid",
+            0.912_34,
+            0.556_78,
+            Some("art_0123456789abcdef01234567"),
+        );
+
+        assert!(why.contains(
+            "through registered artifact art_0123456789abcdef01234567 from hybrid search result"
+        ));
+        assert!(why.contains("relevance=unit_score(search_hit.score)"));
+        assert!(why.contains("search_hit.score=0.9123"));
+        assert!(why.contains("utility=unit_score(linked_memory.utility)"));
+        assert!(why.contains("linked_memory.utility=0.5568"));
     }
 
     #[test]

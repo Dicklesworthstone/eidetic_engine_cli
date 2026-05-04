@@ -96,6 +96,27 @@ pub struct ScoreFactor {
     pub name: String,
     pub value: f32,
     pub contribution: String,
+    pub source_field: String,
+    pub formula: String,
+}
+
+impl ScoreFactor {
+    #[must_use]
+    pub fn new(
+        name: &str,
+        value: f32,
+        contribution: &str,
+        source_field: &str,
+        formula: &str,
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            value,
+            contribution: contribution.to_string(),
+            source_field: source_field.to_string(),
+            formula: formula.to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -240,6 +261,8 @@ impl SearchReport {
                                 "name": f.name,
                                 "value": f.value,
                                 "contribution": f.contribution,
+                                "source_field": f.source_field,
+                                "formula": f.formula,
                             })
                         })
                         .collect();
@@ -426,73 +449,89 @@ impl ScoreExplanation {
         match hit.source {
             ScoreSource::Lexical => {
                 if let Some(lex) = hit.lexical_score {
-                    factors.push(ScoreFactor {
-                        name: "lexical".to_string(),
-                        value: lex,
-                        contribution: "BM25 term matching".to_string(),
-                    });
+                    factors.push(ScoreFactor::new(
+                        "lexical",
+                        lex,
+                        "BM25 term matching",
+                        "lexical_score",
+                        "score = lexical_score",
+                    ));
                     summary_parts.push(format!("lexical match ({:.2})", lex));
                 }
             }
             ScoreSource::SemanticFast => {
                 if let Some(fast) = hit.fast_score {
-                    factors.push(ScoreFactor {
-                        name: "semantic_fast".to_string(),
-                        value: fast,
-                        contribution: "hash-based embedding similarity".to_string(),
-                    });
+                    factors.push(ScoreFactor::new(
+                        "semantic_fast",
+                        fast,
+                        "hash-based embedding similarity",
+                        "fast_score",
+                        "score = fast_score",
+                    ));
                     summary_parts.push(format!("fast semantic ({:.2})", fast));
                 }
             }
             ScoreSource::SemanticQuality => {
                 if let Some(quality) = hit.quality_score {
-                    factors.push(ScoreFactor {
-                        name: "semantic_quality".to_string(),
-                        value: quality,
-                        contribution: "dense embedding similarity".to_string(),
-                    });
+                    factors.push(ScoreFactor::new(
+                        "semantic_quality",
+                        quality,
+                        "dense embedding similarity",
+                        "quality_score",
+                        "score = quality_score",
+                    ));
                     summary_parts.push(format!("quality semantic ({:.2})", quality));
                 }
             }
             ScoreSource::Hybrid => {
                 if let Some(fast) = hit.fast_score {
-                    factors.push(ScoreFactor {
-                        name: "semantic_fast".to_string(),
-                        value: fast,
-                        contribution: "hash-based embedding similarity".to_string(),
-                    });
+                    factors.push(ScoreFactor::new(
+                        "semantic_fast",
+                        fast,
+                        "hash-based embedding similarity",
+                        "fast_score",
+                        "component = fast_score; final score = score",
+                    ));
                 }
                 if let Some(quality) = hit.quality_score {
-                    factors.push(ScoreFactor {
-                        name: "semantic_quality".to_string(),
-                        value: quality,
-                        contribution: "dense embedding similarity".to_string(),
-                    });
+                    factors.push(ScoreFactor::new(
+                        "semantic_quality",
+                        quality,
+                        "dense embedding similarity",
+                        "quality_score",
+                        "component = quality_score; final score = score",
+                    ));
                 }
                 if let Some(lex) = hit.lexical_score {
-                    factors.push(ScoreFactor {
-                        name: "lexical".to_string(),
-                        value: lex,
-                        contribution: "BM25 term matching".to_string(),
-                    });
+                    factors.push(ScoreFactor::new(
+                        "lexical",
+                        lex,
+                        "BM25 term matching",
+                        "lexical_score",
+                        "component = lexical_score; final score = score",
+                    ));
                 }
                 summary_parts.push(format!("RRF fusion of {} signals", factors.len()));
             }
             ScoreSource::Reranked => {
                 if let Some(rerank) = hit.rerank_score {
-                    factors.push(ScoreFactor {
-                        name: "rerank".to_string(),
-                        value: rerank,
-                        contribution: "cross-encoder reranking".to_string(),
-                    });
+                    factors.push(ScoreFactor::new(
+                        "rerank",
+                        rerank,
+                        "cross-encoder reranking",
+                        "rerank_score",
+                        "score = rerank_score",
+                    ));
                     summary_parts.push(format!("reranked ({:.2})", rerank));
                 }
                 if let Some(fast) = hit.fast_score {
-                    factors.push(ScoreFactor {
-                        name: "semantic_fast".to_string(),
-                        value: fast,
-                        contribution: "initial hash-based candidate".to_string(),
-                    });
+                    factors.push(ScoreFactor::new(
+                        "semantic_fast",
+                        fast,
+                        "initial hash-based candidate",
+                        "fast_score",
+                        "candidate component = fast_score; final score = rerank_score",
+                    ));
                 }
             }
         }
@@ -924,6 +963,8 @@ mod tests {
         assert_eq!(explanation.factors[0].name, "lexical");
         assert!((explanation.factors[0].value - 0.75).abs() < 0.001);
         assert!(explanation.factors[0].contribution.contains("BM25"));
+        assert_eq!(explanation.factors[0].source_field, "lexical_score");
+        assert_eq!(explanation.factors[0].formula, "score = lexical_score");
     }
 
     #[test]
@@ -944,6 +985,13 @@ mod tests {
         assert!(explanation.summary.contains("0.85"));
         assert!(explanation.summary.contains("RRF fusion"));
         assert_eq!(explanation.factors.len(), 3);
+        assert_eq!(explanation.factors[0].source_field, "fast_score");
+        assert_eq!(
+            explanation.factors[0].formula,
+            "component = fast_score; final score = score"
+        );
+        assert_eq!(explanation.factors[1].source_field, "quality_score");
+        assert_eq!(explanation.factors[2].source_field, "lexical_score");
     }
 
     #[test]
@@ -965,6 +1013,8 @@ mod tests {
         assert!(explanation.summary.contains("reranked"));
         assert_eq!(explanation.factors.len(), 2);
         assert_eq!(explanation.factors[0].name, "rerank");
+        assert_eq!(explanation.factors[0].source_field, "rerank_score");
+        assert_eq!(explanation.factors[0].formula, "score = rerank_score");
         assert!(
             explanation.factors[0]
                 .contribution
@@ -1013,6 +1063,14 @@ mod tests {
                 .map(Vec::len)
                 .unwrap_or(0),
             1
+        );
+        assert_eq!(
+            result["explanation"]["factors"][0]["source_field"],
+            "fast_score"
+        );
+        assert_eq!(
+            result["explanation"]["factors"][0]["formula"],
+            "score = fast_score"
         );
     }
 

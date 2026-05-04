@@ -1277,6 +1277,12 @@ fn generate_graph_snapshot_id() -> String {
 
 /// Schema for graph feature enrichment reports.
 pub const GRAPH_FEATURE_ENRICHMENT_SCHEMA_V1: &str = "ee.graph.feature_enrichment.v1";
+const GRAPH_PAGERANK_WEIGHT: f64 = 0.6;
+const GRAPH_BETWEENNESS_WEIGHT: f64 = 0.4;
+const GRAPH_COMBINED_SCORE_FORMULA: &str =
+    "combined_score = 0.6 * pagerank.normalized + 0.4 * betweenness.normalized";
+const GRAPH_SELECTION_BOOST_FORMULA: &str =
+    "selection_boost = combined_score * bounded_selection_boost_cap(max_selection_boost)";
 
 /// Status of graph feature enrichment over centrality outputs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1321,14 +1327,30 @@ pub struct GraphEnrichedFeature {
     pub memory_id: String,
     pub combined_score: f64,
     pub selection_boost: f64,
+    pub combined_score_formula: &'static str,
+    pub selection_boost_formula: &'static str,
     pub pagerank: f64,
     pub pagerank_normalized: f64,
     pub pagerank_rank: Option<usize>,
     pub betweenness: f64,
     pub betweenness_normalized: f64,
     pub betweenness_rank: Option<usize>,
+    pub metric_components: Vec<GraphMetricComponent>,
     pub labels: Vec<String>,
     pub reasons: Vec<String>,
+}
+
+/// Deterministic graph metric component used to compute a selection boost.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphMetricComponent {
+    pub name: &'static str,
+    pub source_field: &'static str,
+    pub raw_score: f64,
+    pub normalized_score: f64,
+    pub rank: Option<usize>,
+    pub weight: f64,
+    pub contribution: f64,
+    pub formula: &'static str,
 }
 
 /// Machine-readable degraded metadata for graph feature enrichment.
@@ -1361,10 +1383,28 @@ impl GraphFeatureEnrichmentReport {
             .features
             .iter()
             .map(|feature| {
+                let metric_components: Vec<_> = feature
+                    .metric_components
+                    .iter()
+                    .map(|component| {
+                        serde_json::json!({
+                            "name": component.name,
+                            "sourceField": component.source_field,
+                            "rawScore": score_json(component.raw_score),
+                            "normalizedScore": score_json(component.normalized_score),
+                            "rank": component.rank,
+                            "weight": score_json(component.weight),
+                            "contribution": score_json(component.contribution),
+                            "formula": component.formula,
+                        })
+                    })
+                    .collect();
                 serde_json::json!({
                     "memoryId": feature.memory_id,
                     "combinedScore": score_json(feature.combined_score),
                     "selectionBoost": score_json(feature.selection_boost),
+                    "combinedScoreFormula": feature.combined_score_formula,
+                    "selectionBoostFormula": feature.selection_boost_formula,
                     "pagerank": {
                         "raw": score_json(feature.pagerank),
                         "normalized": score_json(feature.pagerank_normalized),
@@ -1375,6 +1415,7 @@ impl GraphFeatureEnrichmentReport {
                         "normalized": score_json(feature.betweenness_normalized),
                         "rank": feature.betweenness_rank,
                     },
+                    "metricComponents": metric_components,
                     "labels": feature.labels,
                     "reasons": feature.reasons,
                 })
@@ -1521,7 +1562,12 @@ fn enriched_feature_for_score(
 ) -> Option<GraphEnrichedFeature> {
     let pagerank_normalized = normalize_graph_score(score.pagerank, pagerank_max);
     let betweenness_normalized = normalize_graph_score(score.betweenness, betweenness_max);
-    let combined_score = round_score((pagerank_normalized * 0.6) + (betweenness_normalized * 0.4));
+    let pagerank_contribution = round_score(pagerank_normalized * GRAPH_PAGERANK_WEIGHT);
+    let betweenness_contribution = round_score(betweenness_normalized * GRAPH_BETWEENNESS_WEIGHT);
+    let combined_score = round_score(
+        (pagerank_normalized * GRAPH_PAGERANK_WEIGHT)
+            + (betweenness_normalized * GRAPH_BETWEENNESS_WEIGHT),
+    );
     if combined_score < options.min_combined_score {
         return None;
     }
@@ -1543,17 +1589,42 @@ fn enriched_feature_for_score(
         betweenness_normalized,
         betweenness_rank,
     );
+    let metric_components = vec![
+        GraphMetricComponent {
+            name: "pagerank",
+            source_field: "scores[].pagerank",
+            raw_score: score.pagerank,
+            normalized_score: pagerank_normalized,
+            rank: pagerank_rank,
+            weight: GRAPH_PAGERANK_WEIGHT,
+            contribution: pagerank_contribution,
+            formula: "pagerank_contribution = pagerank.normalized * 0.6",
+        },
+        GraphMetricComponent {
+            name: "betweenness",
+            source_field: "scores[].betweenness",
+            raw_score: score.betweenness,
+            normalized_score: betweenness_normalized,
+            rank: betweenness_rank,
+            weight: GRAPH_BETWEENNESS_WEIGHT,
+            contribution: betweenness_contribution,
+            formula: "betweenness_contribution = betweenness.normalized * 0.4",
+        },
+    ];
 
     Some(GraphEnrichedFeature {
         memory_id: score.memory_id.clone(),
         combined_score,
         selection_boost,
+        combined_score_formula: GRAPH_COMBINED_SCORE_FORMULA,
+        selection_boost_formula: GRAPH_SELECTION_BOOST_FORMULA,
         pagerank: score.pagerank,
         pagerank_normalized,
         pagerank_rank,
         betweenness: score.betweenness,
         betweenness_normalized,
         betweenness_rank,
+        metric_components,
         labels,
         reasons,
     })
@@ -3328,11 +3399,52 @@ mod tests {
         assert!(report.features[0].selection_boost <= 0.12);
         assert!(report.features[0].labels.contains(&"hub".to_owned()));
         assert!(report.features[1].labels.contains(&"bridge".to_owned()));
+        assert_eq!(
+            report.features[0].combined_score_formula,
+            super::GRAPH_COMBINED_SCORE_FORMULA
+        );
+        assert_eq!(
+            report.features[0].selection_boost_formula,
+            super::GRAPH_SELECTION_BOOST_FORMULA
+        );
+        assert_eq!(report.features[0].metric_components.len(), 2);
+        assert_eq!(report.features[0].metric_components[0].name, "pagerank");
+        assert_eq!(
+            report.features[0].metric_components[0].source_field,
+            "scores[].pagerank"
+        );
+        assert_eq!(report.features[0].metric_components[0].rank, Some(1));
+        assert!((report.features[0].metric_components[0].weight - 0.6).abs() < f64::EPSILON);
+        assert_eq!(
+            report.features[0].metric_components[0].formula,
+            "pagerank_contribution = pagerank.normalized * 0.6"
+        );
+        assert_eq!(report.features[0].metric_components[1].name, "betweenness");
 
         let json = report.data_json();
         assert_eq!(json["schema"], "ee.graph.feature_enrichment.v1");
         assert_eq!(json["summary"]["featureCount"], 2);
         assert_eq!(json["features"][0]["memoryId"], MEMORY_A);
+        assert_eq!(
+            json["features"][0]["combinedScoreFormula"],
+            super::GRAPH_COMBINED_SCORE_FORMULA
+        );
+        assert_eq!(
+            json["features"][0]["selectionBoostFormula"],
+            super::GRAPH_SELECTION_BOOST_FORMULA
+        );
+        assert_eq!(
+            json["features"][0]["metricComponents"][0]["sourceField"],
+            "scores[].pagerank"
+        );
+        assert_eq!(
+            json["features"][0]["metricComponents"][0]["formula"],
+            "pagerank_contribution = pagerank.normalized * 0.6"
+        );
+        assert_eq!(
+            json["features"][0]["metricComponents"][1]["sourceField"],
+            "scores[].betweenness"
+        );
         Ok(())
     }
 

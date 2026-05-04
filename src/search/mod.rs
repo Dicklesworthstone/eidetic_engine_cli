@@ -6,8 +6,8 @@ use crate::models::{
 
 pub use frankensearch::core::types::IndexableDocument;
 pub use frankensearch::{
-    Embedder, EmbedderStack, HashEmbedder, IndexBuilder, ScoreSource, TwoTierConfig, TwoTierIndex,
-    TwoTierSearcher,
+    Embedder, EmbedderStack, HashEmbedder, IndexBuilder, ScoreSource, ScoredResult, TwoTierConfig,
+    TwoTierIndex, TwoTierSearcher,
 };
 
 pub const SUBSYSTEM: &str = "search";
@@ -561,7 +561,7 @@ static SEARCH_CAPABILITIES: [SearchCapability; 8] = [
     SearchCapability::pending(
         SearchCapabilityName::ScoreExplanation,
         SearchSurface::Explanation,
-        "Carry Frankensearch score metadata into ee explanations.",
+        "Wire Frankensearch score components into ee search/context/why output renderers.",
     ),
 ];
 
@@ -735,6 +735,86 @@ pub const fn module_readiness() -> SearchModuleReadiness {
         subsystem: SUBSYSTEM,
         retrieval_engine: REQUIRED_RETRIEVAL_ENGINE,
         capabilities: &SEARCH_CAPABILITIES,
+    }
+}
+
+/// Deterministic score explanation for one Frankensearch result.
+///
+/// This is an ee-owned bridge type, not a second ranking system. It only
+/// carries score values already produced by Frankensearch so higher-level
+/// `search`, `context`, and `why` renderers can explain retrieval without
+/// inventing narrative reasons.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchScoreExplanation {
+    pub doc_id: String,
+    pub source: &'static str,
+    pub final_score: f32,
+    pub components: Vec<SearchScoreComponent>,
+    pub frankensearch_explanation_available: bool,
+    pub metadata_available: bool,
+}
+
+impl SearchScoreExplanation {
+    #[must_use]
+    pub fn from_scored_result(result: &ScoredResult) -> Self {
+        let mut components = Vec::with_capacity(5);
+        components.push(SearchScoreComponent::new("primary_score", result.score));
+        push_optional_score_component(&mut components, "lexical_score", result.lexical_score);
+        push_optional_score_component(&mut components, "semantic_fast_score", result.fast_score);
+        push_optional_score_component(
+            &mut components,
+            "semantic_quality_score",
+            result.quality_score,
+        );
+        push_optional_score_component(&mut components, "rerank_score", result.rerank_score);
+
+        Self {
+            doc_id: result.doc_id.clone(),
+            source: score_source_name(result.source),
+            final_score: result.score,
+            components,
+            frankensearch_explanation_available: result.explanation.is_some(),
+            metadata_available: result.metadata.is_some(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SearchScoreComponent {
+    pub name: &'static str,
+    pub value: f32,
+}
+
+impl SearchScoreComponent {
+    #[must_use]
+    pub const fn new(name: &'static str, value: f32) -> Self {
+        Self { name, value }
+    }
+}
+
+#[must_use]
+pub fn explain_scored_result(result: &ScoredResult) -> SearchScoreExplanation {
+    SearchScoreExplanation::from_scored_result(result)
+}
+
+fn push_optional_score_component(
+    components: &mut Vec<SearchScoreComponent>,
+    name: &'static str,
+    value: Option<f32>,
+) {
+    if let Some(value) = value {
+        components.push(SearchScoreComponent::new(name, value));
+    }
+}
+
+#[must_use]
+pub const fn score_source_name(source: ScoreSource) -> &'static str {
+    match source {
+        ScoreSource::Lexical => "lexical",
+        ScoreSource::SemanticFast => "semantic_fast",
+        ScoreSource::SemanticQuality => "semantic_quality",
+        ScoreSource::Hybrid => "hybrid",
+        ScoreSource::Reranked => "reranked",
     }
 }
 
@@ -1084,9 +1164,11 @@ impl Default for IndexManifest {
 mod tests {
     use super::{
         CanonicalSearchDocument, DocumentSource, Embedder, HashEmbedder, REQUIRED_RETRIEVAL_ENGINE,
-        SearchCapabilityName, SearchSurface, module_readiness, subsystem_name,
+        ScoreSource, ScoredResult, SearchCapabilityName, SearchSurface, explain_scored_result,
+        module_readiness, score_source_name, subsystem_name,
     };
     use crate::models::CapabilityStatus;
+    use serde_json::json;
 
     #[test]
     fn subsystem_name_is_stable() {
@@ -1185,6 +1267,90 @@ mod tests {
                 .map(|capability| capability.repair().contains("score"))
                 .unwrap_or(false)
         );
+    }
+
+    #[test]
+    fn score_source_names_are_stable() {
+        assert_eq!(score_source_name(ScoreSource::Lexical), "lexical");
+        assert_eq!(
+            score_source_name(ScoreSource::SemanticFast),
+            "semantic_fast"
+        );
+        assert_eq!(
+            score_source_name(ScoreSource::SemanticQuality),
+            "semantic_quality"
+        );
+        assert_eq!(score_source_name(ScoreSource::Hybrid), "hybrid");
+        assert_eq!(score_source_name(ScoreSource::Reranked), "reranked");
+    }
+
+    #[test]
+    fn scored_result_explanation_preserves_components_in_stable_order() {
+        let result = ScoredResult {
+            doc_id: "mem-release-rule".to_owned(),
+            score: 0.875,
+            source: ScoreSource::Hybrid,
+            index: Some(17),
+            fast_score: Some(0.82),
+            quality_score: None,
+            lexical_score: Some(3.5),
+            rerank_score: Some(0.91),
+            explanation: None,
+            metadata: Some(json!({
+                "source": "memory",
+                "schema": super::CANONICAL_DOCUMENT_SCHEMA,
+            })),
+        };
+
+        let explanation = explain_scored_result(&result);
+        let components: Vec<(&str, String)> = explanation
+            .components
+            .iter()
+            .map(|component| (component.name, format!("{:.3}", component.value)))
+            .collect();
+
+        assert_eq!(explanation.doc_id, "mem-release-rule");
+        assert_eq!(explanation.source, "hybrid");
+        assert_eq!(format!("{:.3}", explanation.final_score), "0.875");
+        assert_eq!(
+            components,
+            vec![
+                ("primary_score", "0.875".to_owned()),
+                ("lexical_score", "3.500".to_owned()),
+                ("semantic_fast_score", "0.820".to_owned()),
+                ("rerank_score", "0.910".to_owned()),
+            ]
+        );
+        assert!(!explanation.frankensearch_explanation_available);
+        assert!(explanation.metadata_available);
+    }
+
+    #[test]
+    fn scored_result_explanation_omits_absent_optional_scores() {
+        let result = ScoredResult {
+            doc_id: "mem-lexical-only".to_owned(),
+            score: 1.25,
+            source: ScoreSource::Lexical,
+            index: None,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: None,
+            rerank_score: None,
+            explanation: None,
+            metadata: None,
+        };
+
+        let explanation = explain_scored_result(&result);
+        let component_names: Vec<&str> = explanation
+            .components
+            .iter()
+            .map(|component| component.name)
+            .collect();
+
+        assert_eq!(explanation.source, "lexical");
+        assert_eq!(component_names, vec!["primary_score"]);
+        assert!(!explanation.frankensearch_explanation_available);
+        assert!(!explanation.metadata_available);
     }
 
     #[test]
