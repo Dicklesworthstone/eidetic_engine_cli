@@ -86,7 +86,7 @@ use crate::core::rule::{
     RuleProtectReport, RuleShowOptions, RuleShowReport, add_rule, list_rules, protect_rule,
     show_rule,
 };
-use crate::core::search::{SearchOptions, run_search};
+use crate::core::search::{SearchOptions, SearchReport, run_search};
 use crate::core::status::StatusReport;
 use crate::core::task_frame::{
     TaskEvidenceLink, TaskFrameCloseOptions, TaskFrameCreateOptions, TaskFrameReport,
@@ -10992,26 +10992,11 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &report.human_summary())
             }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &format!(
-                    "SEARCH|{}|{}|{:.1}ms\n",
-                    report.query,
-                    report.results.len(),
-                    report.elapsed_ms
-                ),
-            ),
+            output::Renderer::Toon => write_stdout(stdout, &(format_search_toon(&report) + "\n")),
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
-                    "success": true,
-                    "data": report.data_json(),
-                });
-                write_stdout(stdout, &(json.to_string() + "\n"))
-            }
+            | output::Renderer::Hook => write_stdout(stdout, &(format_search_json(&report) + "\n")),
         },
         Err(error) => {
             let domain_error = DomainError::SearchIndex {
@@ -11021,6 +11006,19 @@ where
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
     }
+}
+
+fn format_search_json(report: &SearchReport) -> String {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": report.data_json(),
+    })
+    .to_string()
+}
+
+fn format_search_toon(report: &SearchReport) -> String {
+    output::render_toon_from_json(&format_search_json(report))
 }
 
 fn handle_outcome<W, E>(
@@ -11252,13 +11250,8 @@ where
                 write_stdout(stdout, &output)
             }
             output::Renderer::Toon => {
-                let output = format!(
-                    "WHY|{}|{}|{:.2}\n",
-                    report.memory_id,
-                    report.found,
-                    report.selection.as_ref().map_or(0.0, |s| s.selection_score)
-                );
-                write_stdout(stdout, &output)
+                let output = output::render_toon_from_json(&format_why_json(&report));
+                write_stdout(stdout, &(output + "\n"))
             }
             output::Renderer::Json
             | output::Renderer::Jsonl
@@ -15665,7 +15658,13 @@ mod tests {
         OutcomeQuarantineCommand, OutputFormat, RuleCommand, ShadowMode, SituationCommand,
         TaskFrameCommand, TaskFrameSubgoalCommand, run,
     };
-    use crate::core::why::{RationaleTraceSummary, WhyReport};
+    use crate::core::search::{
+        ScoreExplanation, ScoreFactor, ScoreSource, SearchHit, SearchReport, SearchStatus,
+    };
+    use crate::core::why::{
+        PackSelectionExplanation, RationaleTraceSummary, RetrievalExplanation,
+        SelectionExplanation, StorageExplanation, WhyReport,
+    };
     use crate::models::error_codes::ALL_ERROR_CODES;
     use crate::models::{ALL_DEGRADATION_CODES, MemoryId, ProcessExitCode};
     use crate::output;
@@ -15710,6 +15709,17 @@ mod tests {
             haystack.ends_with(suffix),
             format!("{context}: expected output to end with {suffix:?}, got {haystack:?}"),
         )
+    }
+
+    fn ensure_toon_matches_json(json: &str, toon: &str, context: &str) -> TestResult {
+        let expected_json = serde_json::from_str::<serde_json::Value>(json)
+            .map_err(|error| format!("{context}: JSON should parse: {error}"))?;
+        let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
+        let decoded = toon::try_decode(toon, None)
+            .map_err(|error| format!("{context}: TOON should decode: {error}"))?;
+        let actual = serde_json::Value::from(decoded);
+
+        ensure_equal(&actual, &expected, context)
     }
 
     fn invoke(args: &[&str]) -> (ProcessExitCode, String, String) {
@@ -15803,6 +15813,125 @@ mod tests {
                 created_at: "2026-05-04T09:55:00Z".to_string(),
             },
         ])
+    }
+
+    fn search_report_fixture() -> SearchReport {
+        SearchReport {
+            status: SearchStatus::Success,
+            query: "release format".to_string(),
+            requested_limit: 5,
+            results: vec![SearchHit {
+                doc_id: "mem_release_rule".to_string(),
+                score: 0.91,
+                source: ScoreSource::Hybrid,
+                fast_score: Some(0.81),
+                quality_score: Some(0.77),
+                lexical_score: Some(0.69),
+                rerank_score: Some(0.93),
+                metadata: Some(serde_json::json!({
+                    "memoryId": "mem_release_rule",
+                    "provenanceUri": "file://AGENTS.md#L42"
+                })),
+                explanation: Some(ScoreExplanation {
+                    summary: "release query overlaps formatting rule".to_string(),
+                    factors: vec![ScoreFactor::new(
+                        "query_overlap",
+                        0.91,
+                        "matched release formatting terms",
+                        "content",
+                        "hash_bm25 + semantic",
+                    )],
+                }),
+            }],
+            elapsed_ms: 12.34,
+            errors: Vec::new(),
+        }
+    }
+
+    fn why_found_fixture() -> WhyReport {
+        WhyReport::found(
+            "mem_release_rule".to_string(),
+            StorageExplanation {
+                origin: "remember".to_string(),
+                trust_class: "human_explicit".to_string(),
+                trust_subclass: Some("project_rule".to_string()),
+                provenance_uri: Some("file://AGENTS.md#L42".to_string()),
+                created_at: "2026-05-04T12:00:00Z".to_string(),
+                valid_from: Some("2026-05-04T00:00:00Z".to_string()),
+                valid_to: None,
+                validity_status: "active".to_string(),
+                validity_window_kind: "open_ended".to_string(),
+            },
+            RetrievalExplanation {
+                confidence: 0.88,
+                utility: 0.74,
+                importance: 0.61,
+                tags: vec!["release".to_string(), "formatting".to_string()],
+                level: "procedural".to_string(),
+                kind: "rule".to_string(),
+            },
+            SelectionExplanation {
+                selection_score: 0.82,
+                above_confidence_threshold: true,
+                is_active: true,
+                score_breakdown: "confidence * utility with provenance boost".to_string(),
+                latest_pack_selection: Some(PackSelectionExplanation {
+                    pack_id: "pack_release".to_string(),
+                    query: "prepare release".to_string(),
+                    profile: "balanced".to_string(),
+                    rank: 1,
+                    section: "procedural_rules".to_string(),
+                    estimated_tokens: 12,
+                    relevance: 0.9,
+                    utility: 0.8,
+                    why: "release preparation needs formatting guardrail".to_string(),
+                    pack_hash: "blake3:pack".to_string(),
+                    selected_at: "2026-05-04T12:01:00Z".to_string(),
+                }),
+            },
+        )
+    }
+
+    #[test]
+    fn search_toon_matches_json_contract() -> TestResult {
+        let report = search_report_fixture();
+        let json = super::format_search_json(&report);
+        let toon = super::format_search_toon(&report);
+
+        ensure_toon_matches_json(&json, &toon, "search TOON matches JSON")?;
+        ensure(
+            !toon.starts_with("SEARCH|") && !toon.contains('|'),
+            format!("search TOON must not use legacy pipe summary: {toon:?}"),
+        )?;
+        let decoded = toon::try_decode(&toon, None)
+            .map_err(|error| format!("search TOON should decode for field checks: {error}"))?;
+        let actual = serde_json::Value::from(decoded);
+        ensure_equal(
+            &actual["data"]["results"][0]["docId"],
+            &serde_json::json!("mem_release_rule"),
+            "search TOON preserves result doc id",
+        )
+    }
+
+    #[test]
+    fn why_toon_matches_json_contract() -> TestResult {
+        let report = why_found_fixture();
+        let json = super::format_why_json(&report);
+        let toon = output::render_toon_from_json(&json);
+
+        ensure_toon_matches_json(&json, &toon, "why TOON matches JSON")?;
+        ensure(
+            !toon.starts_with("WHY|") && !toon.contains('|'),
+            format!("why TOON must not use legacy pipe summary: {toon:?}"),
+        )?;
+        let decoded = toon::try_decode(&toon, None)
+            .map_err(|error| format!("why TOON should decode for field checks: {error}"))?;
+        let actual = serde_json::Value::from(decoded);
+        ensure_equal(
+            &actual["data"]["selection"]["latestPackSelection"]["packId"],
+            &serde_json::json!("pack_release"),
+            "why TOON preserves latest pack selection provenance",
+        )
     }
 
     #[test]

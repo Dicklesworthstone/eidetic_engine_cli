@@ -1494,8 +1494,6 @@ pub fn render_context_response_toon(response: &ContextResponse) -> String {
 /// pack section, with provenance and why explanations preserved.
 #[must_use]
 pub fn render_context_response_markdown(response: &ContextResponse) -> String {
-    use std::collections::BTreeMap;
-
     let mut output = String::new();
 
     output.push_str(&format!(
@@ -1534,15 +1532,21 @@ pub fn render_context_response_markdown(response: &ContextResponse) -> String {
     if response.data.pack.items.is_empty() {
         output.push_str("*No items in pack.*\n\n");
     } else {
-        let mut by_section: BTreeMap<&str, Vec<&PackDraftItem>> = BTreeMap::new();
+        // Group items by section while preserving pack rank order.
+        // Sections appear in order of their first item's rank, not alphabetically.
+        let mut by_section: std::collections::HashMap<&str, Vec<&PackDraftItem>> =
+            std::collections::HashMap::new();
+        let mut section_order: Vec<&str> = Vec::new();
         for item in &response.data.pack.items {
-            by_section
-                .entry(item.section.as_str())
-                .or_default()
-                .push(item);
+            let section = item.section.as_str();
+            if !by_section.contains_key(section) {
+                section_order.push(section);
+            }
+            by_section.entry(section).or_default().push(item);
         }
 
-        for (section, items) in by_section {
+        for section in section_order {
+            let items = &by_section[section];
             output.push_str(&format!("## {}\n\n", section_display_name(section)));
             for item in items {
                 output.push_str(&format!(
@@ -4486,7 +4490,11 @@ fn render_single_schema_export(schema_id: &str) -> String {
             b.field_object("error", |e| {
                 e.field_str("code", "schema_not_found");
                 e.field_str("message", &format!("Schema '{}' not found", schema_id));
+                e.field_str("severity", "low");
                 e.field_str("repair", "ee schema list");
+                e.field_object("details", |details| {
+                    details.field_str("schemaId", schema_id);
+                });
             });
             b.finish()
         }
@@ -4523,7 +4531,7 @@ fn response_schema_definition() -> String {
 }
 
 fn error_schema_definition() -> String {
-    r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"ee.error.v1","type":"object","required":["schema","error"],"properties":{"schema":{"const":"ee.error.v1"},"error":{"type":"object","required":["code","message"],"properties":{"code":{"type":"string"},"message":{"type":"string"},"repair":{"type":"string"}}}}}"#.to_string()
+    r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"ee.error.v1","type":"object","required":["schema","error"],"properties":{"schema":{"const":"ee.error.v1"},"error":{"type":"object","required":["code","message","severity","details"],"properties":{"code":{"type":"string"},"message":{"type":"string"},"severity":{"type":"string","enum":["low","medium","high"]},"repair":{"type":"string"},"details":{"type":"object"}}}}}"#.to_string()
 }
 
 fn mcp_manifest_schema_definition() -> String {
@@ -4730,7 +4738,7 @@ pub fn render_toon_from_json(json: &str) -> String {
     toon::json_to_toon(json).unwrap_or_else(|error| {
         let message = escape_toon_quoted_string(&format!("TOON encoding failed: {error}"));
         format!(
-            "schema: {ERROR_SCHEMA_V1}\nerror:\n  code: toon_encoding_failed\n  message: \"{message}\"\n"
+            "schema: {ERROR_SCHEMA_V1}\nerror:\n  code: toon_encoding_failed\n  message: \"{message}\"\n  severity: medium\n  details:\n"
         )
     })
 }
@@ -5809,28 +5817,47 @@ pub fn render_agent_docs_toon(report: &AgentDocsReport) -> String {
 
 #[must_use]
 pub fn error_response_json(error: &DomainError) -> String {
-    let code = error.code();
-    let message = escape_json_string(&error.message());
-    match error.repair() {
-        Some(repair) => {
-            let repair = escape_json_string(repair);
-            format!(
-                "{{\"schema\":\"{schema}\",\"error\":{{\"code\":\"{code}\",\"message\":\"{message}\",\"repair\":\"{repair}\"}}}}",
-                schema = ERROR_SCHEMA_V1
-            )
+    let message = error.message();
+    let mut envelope = JsonBuilder::new();
+    envelope.field_str("schema", ERROR_SCHEMA_V1);
+    envelope.field_object("error", |obj| {
+        obj.field_str("code", error.code());
+        obj.field_str("message", &message);
+        obj.field_str("severity", domain_error_severity(error));
+        if let Some(repair) = error.repair() {
+            obj.field_str("repair", repair);
         }
-        None => {
-            format!(
-                "{{\"schema\":\"{schema}\",\"error\":{{\"code\":\"{code}\",\"message\":\"{message}\"}}}}",
-                schema = ERROR_SCHEMA_V1
-            )
-        }
-    }
+        obj.field_object("details", |details| {
+            domain_error_details(details, error);
+        });
+    });
+    envelope.finish()
 }
 
 #[must_use]
 pub fn error_response_toon(error: &DomainError) -> String {
     render_toon_from_json(&error_response_json(error))
+}
+
+fn domain_error_severity(error: &DomainError) -> &'static str {
+    match error {
+        DomainError::Usage { .. } | DomainError::NotFound { .. } => "low",
+        DomainError::Storage { .. } => "high",
+        DomainError::Configuration { .. }
+        | DomainError::SearchIndex { .. }
+        | DomainError::Graph { .. }
+        | DomainError::Import { .. }
+        | DomainError::UnsatisfiedDegradedMode { .. }
+        | DomainError::PolicyDenied { .. }
+        | DomainError::MigrationRequired { .. } => "medium",
+    }
+}
+
+fn domain_error_details(details: &mut JsonBuilder, error: &DomainError) {
+    if let DomainError::NotFound { resource, id, .. } = error {
+        details.field_str("resource", resource);
+        details.field_str("id", id);
+    }
 }
 
 fn escape_mermaid_label(value: &str) -> String {
@@ -8550,13 +8577,7 @@ pub fn render_handoff_preview_human(report: &HandoffPreviewReport) -> String {
 /// Render a handoff preview report as TOON.
 #[must_use]
 pub fn render_handoff_preview_toon(report: &HandoffPreviewReport) -> String {
-    format!(
-        "HANDOFF_PREVIEW|profile={}|sections={}|tokens={}|sufficient={}",
-        report.profile,
-        report.planned_sections.len(),
-        report.token_estimate,
-        report.sufficient_for_resume
-    )
+    render_toon_from_json(&render_handoff_preview_json(report))
 }
 
 /// Render a handoff create report as JSON.
@@ -8611,14 +8632,7 @@ pub fn render_handoff_create_human(report: &HandoffCreateReport) -> String {
 /// Render a handoff create report as TOON.
 #[must_use]
 pub fn render_handoff_create_toon(report: &HandoffCreateReport) -> String {
-    format!(
-        "HANDOFF_CREATE|id={}|profile={}|sections={}|tokens={}|dry_run={}",
-        report.capsule_id,
-        report.profile,
-        report.sections_included,
-        report.token_count,
-        report.dry_run
-    )
+    render_toon_from_json(&render_handoff_create_json(report))
 }
 
 /// Render a handoff inspect report as JSON.
@@ -8687,10 +8701,7 @@ pub fn render_handoff_inspect_human(report: &HandoffInspectReport) -> String {
 /// Render a handoff inspect report as TOON.
 #[must_use]
 pub fn render_handoff_inspect_toon(report: &HandoffInspectReport) -> String {
-    format!(
-        "HANDOFF_INSPECT|id={}|status={}|sections={}|hash_valid={}",
-        report.capsule_id, report.validation_status, report.section_count, report.hash_valid
-    )
+    render_toon_from_json(&render_handoff_inspect_json(report))
 }
 
 /// Render a handoff resume report as JSON.
@@ -8773,13 +8784,7 @@ pub fn render_handoff_resume_human(report: &HandoffResumeReport) -> String {
 /// Render a handoff resume report as TOON.
 #[must_use]
 pub fn render_handoff_resume_toon(report: &HandoffResumeReport) -> String {
-    format!(
-        "HANDOFF_RESUME|id={}|actions={}|blockers={}|dnr={}",
-        report.capsule_id,
-        report.next_actions.len(),
-        report.blockers.len(),
-        report.do_not_repeat.len()
-    )
+    render_toon_from_json(&render_handoff_resume_json(report))
 }
 
 // ============================================================================
@@ -8899,6 +8904,7 @@ pub fn render_diag_claims_toon(report: &crate::core::claims::DiagClaimsReport) -
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::str::FromStr;
 
     use uuid::Uuid;
@@ -8908,15 +8914,23 @@ mod tests {
         OutputEnvironment, Renderer, ResponseEnvelope, SHADOW_RUN_SCHEMA_V1, ShadowRunComparison,
         ShadowRunReport, error_response_json, escape_json_string, help_text, human_status,
         render_agent_docs_json, render_agent_docs_toon, render_context_response_json,
-        render_context_response_toon, render_doctor_json, render_doctor_toon, render_health_json,
+        render_context_response_markdown, render_context_response_toon, render_doctor_json,
+        render_doctor_toon,
+        render_handoff_create_json, render_handoff_create_toon, render_handoff_inspect_json,
+        render_handoff_inspect_toon, render_handoff_preview_json, render_handoff_preview_toon,
+        render_handoff_resume_json, render_handoff_resume_toon, render_health_json,
         render_health_toon, render_learn_experiment_proposal_human,
         render_learn_experiment_proposal_json, render_learn_experiment_proposal_toon,
-        render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
-        render_status_json, render_status_json_filtered, render_status_toon, render_version_json,
-        status_response_json,
+        render_schema_export_json, render_shadow_run_human, render_shadow_run_json,
+        render_shadow_run_toon, render_status_json, render_status_json_filtered,
+        render_status_toon, render_version_json, status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::doctor::DoctorReport;
+    use crate::core::handoff::{
+        CapsuleProfile, CreateReport as HandoffCreateReport, InspectReport as HandoffInspectReport,
+        PreviewReport as HandoffPreviewReport, ResumeReport as HandoffResumeReport,
+    };
     use crate::core::health::HealthReport;
     use crate::core::learn::{
         ExperimentBudget, ExperimentDecisionImpact, ExperimentProposal, ExperimentSafetyPlan,
@@ -9289,23 +9303,11 @@ mod tests {
             "\"profile\":\"current_thread\"",
             "status runtime profile",
         )?;
-        ensure_contains(
-            &json,
-            "\"storage_not_implemented\"",
-            "status storage degradation",
-        )?;
-        ensure_contains(
-            &json,
-            "\"search_not_implemented\"",
-            "status search degradation",
-        )?;
+        // After fix: gather() inspects current workspace, so we get actual
+        // degradation codes (degraded/missing) instead of not_inspected.
+        ensure_contains(&json, "\"degraded\":[", "status degraded array")?;
         ensure_contains(&json, "\"derivedAssets\":[", "derived assets")?;
-        ensure_contains(&json, "\"name\":\"search_index\"", "search index asset")?;
-        ensure_contains(
-            &json,
-            "\"assetHighWatermark\":null",
-            "asset watermark field",
-        )
+        ensure_contains(&json, "\"name\":\"search_index\"", "search index asset")
     }
 
     #[test]
@@ -9336,11 +9338,12 @@ mod tests {
             "\"message\":\"unrecognized subcommand 'foo'\"",
             "error message",
         )?;
+        ensure_contains(&json, "\"severity\":\"low\"", "error severity")?;
         ensure_contains(&json, "\"repair\":\"ee --help\"", "error repair")
     }
 
     #[test]
-    fn error_json_without_repair_omits_field() -> TestResult {
+    fn error_json_without_repair_omits_repair_but_keeps_details() -> TestResult {
         let error = DomainError::Storage {
             message: "Database locked".to_string(),
             repair: None,
@@ -9348,6 +9351,8 @@ mod tests {
         let json = error_response_json(&error);
         ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "error schema")?;
         ensure_contains(&json, "\"code\":\"storage\"", "error code")?;
+        ensure_contains(&json, "\"severity\":\"high\"", "error severity")?;
+        ensure_contains(&json, "\"details\":{}", "empty details object")?;
         ensure(!json.contains("repair"), "repair field should be absent")
     }
 
@@ -9438,6 +9443,17 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn ensure_toon_matches_json(json: &str, toon: &str, context: &str) -> TestResult {
+        let expected_json = serde_json::from_str::<serde_json::Value>(json)
+            .map_err(|error| format!("{context}: JSON should parse: {error}"))?;
+        let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
+        let decoded = toon::try_decode(toon, None)
+            .map_err(|error| format!("{context}: TOON should decode: {error}"))?;
+        let actual = serde_json::Value::from(decoded);
+
+        ensure_equal(&actual, &expected, context)
     }
 
     #[test]
@@ -9800,6 +9816,94 @@ mod tests {
     }
 
     #[test]
+    fn context_markdown_preserves_section_order_by_rank() -> TestResult {
+        // Create items in a specific non-alphabetical order: Failures (rank 1),
+        // ProceduralRules (rank 2), Decisions (rank 3). Alphabetically this would
+        // be Decisions, Failures, ProceduralRules. The markdown must preserve
+        // the pack rank order, not sort alphabetically.
+        let request = ContextRequest::from_query("test rank order")
+            .map_err(|error| format!("request rejected: {error:?}"))?;
+        let budget =
+            TokenBudget::new(500).map_err(|error| format!("budget rejected: {error:?}"))?;
+
+        let failure_candidate = PackCandidate::new(PackCandidateInput {
+            memory_id: memory_id(1),
+            section: PackSection::Failures,
+            content: "Failure memory content".to_string(),
+            estimated_tokens: 10,
+            relevance: score(0.9)?,
+            utility: score(0.9)?,
+            provenance: Vec::new(),
+            why: "highest ranked".to_string(),
+        })
+        .map_err(|error| format!("failure candidate rejected: {error:?}"))?;
+
+        let rule_candidate = PackCandidate::new(PackCandidateInput {
+            memory_id: memory_id(2),
+            section: PackSection::ProceduralRules,
+            content: "Rule memory content".to_string(),
+            estimated_tokens: 10,
+            relevance: score(0.8)?,
+            utility: score(0.8)?,
+            provenance: Vec::new(),
+            why: "second ranked".to_string(),
+        })
+        .map_err(|error| format!("rule candidate rejected: {error:?}"))?;
+
+        let decision_candidate = PackCandidate::new(PackCandidateInput {
+            memory_id: memory_id(3),
+            section: PackSection::Decisions,
+            content: "Decision memory content".to_string(),
+            estimated_tokens: 10,
+            relevance: score(0.7)?,
+            utility: score(0.7)?,
+            provenance: Vec::new(),
+            why: "third ranked".to_string(),
+        })
+        .map_err(|error| format!("decision candidate rejected: {error:?}"))?;
+
+        let draft = assemble_draft(
+            &request.query,
+            budget,
+            vec![failure_candidate, rule_candidate, decision_candidate],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        let response = ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| format!("response rejected: {error:?}"))?;
+
+        let markdown = render_context_response_markdown(&response);
+
+        // Find positions of section headers in the output
+        let failures_pos = markdown
+            .find("## Failures")
+            .ok_or("Failures section not found in markdown")?;
+        let rules_pos = markdown
+            .find("## Procedural Rules")
+            .ok_or("Procedural Rules section not found in markdown")?;
+        let decisions_pos = markdown
+            .find("## Decisions")
+            .ok_or("Decisions section not found in markdown")?;
+
+        // Verify order: Failures < Rules < Decisions (by pack rank, not alphabetically)
+        // Alphabetical would be: Decisions < Failures < Procedural Rules
+        if failures_pos > rules_pos {
+            return Err(format!(
+                "Failures (rank 1) should appear before Procedural Rules (rank 2): {} > {}",
+                failures_pos, rules_pos
+            ));
+        }
+        if rules_pos > decisions_pos {
+            return Err(format!(
+                "Procedural Rules (rank 2) should appear before Decisions (rank 3): {} > {}",
+                rules_pos, decisions_pos
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn degradation_severity_strings_are_stable() -> TestResult {
         ensure_equal(&DegradationSeverity::Low.as_str(), &"low", "low")?;
         ensure_equal(&DegradationSeverity::Medium.as_str(), &"medium", "medium")?;
@@ -9833,6 +9937,8 @@ mod tests {
     // - schema: "ee.error.v1"
     // - error.code: stable string matching the error variant
     // - error.message: human-readable description
+    // - error.severity: stable low/medium/high classification
+    // - error.details: always-present structured object
     // - error.repair: optional remediation command (present when provided)
     // ========================================================================
 
@@ -9846,6 +9952,8 @@ mod tests {
         ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
         ensure_contains(&json, "\"code\":\"usage\"", "code")?;
         ensure_contains(&json, "\"message\":\"Unknown command 'xyz'.\"", "message")?;
+        ensure_contains(&json, "\"severity\":\"low\"", "severity")?;
+        ensure_contains(&json, "\"details\":{}", "details")?;
         ensure_contains(&json, "\"repair\":\"ee --help\"", "repair")
     }
 
@@ -9863,6 +9971,8 @@ mod tests {
             "\"message\":\"Invalid config file format.\"",
             "message",
         )?;
+        ensure_contains(&json, "\"severity\":\"medium\"", "severity")?;
+        ensure_contains(&json, "\"details\":{}", "details")?;
         ensure_contains(
             &json,
             "\"repair\":\"ee doctor --fix-plan --json\"",
@@ -9880,6 +9990,8 @@ mod tests {
         ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
         ensure_contains(&json, "\"code\":\"storage\"", "code")?;
         ensure_contains(&json, "\"message\":\"Database file corrupted.\"", "message")?;
+        ensure_contains(&json, "\"severity\":\"high\"", "severity")?;
+        ensure_contains(&json, "\"details\":{}", "details")?;
         ensure_contains(
             &json,
             "\"repair\":\"ee doctor --fix-plan --json\"",
@@ -9897,6 +10009,8 @@ mod tests {
         ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
         ensure_contains(&json, "\"code\":\"search_index\"", "code")?;
         ensure_contains(&json, "generation 9", "message contains details")?;
+        ensure_contains(&json, "\"severity\":\"medium\"", "severity")?;
+        ensure_contains(&json, "\"details\":{}", "details")?;
         ensure_contains(&json, "\"repair\":\"ee index rebuild\"", "repair")
     }
 
@@ -9914,6 +10028,8 @@ mod tests {
             "\"message\":\"CASS session file not found.\"",
             "message",
         )?;
+        ensure_contains(&json, "\"severity\":\"medium\"", "severity")?;
+        ensure_contains(&json, "\"details\":{}", "details")?;
         ensure_contains(&json, "\"repair\":\"ee import cass --dry-run\"", "repair")
     }
 
@@ -9927,6 +10043,8 @@ mod tests {
         ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
         ensure_contains(&json, "\"code\":\"unsatisfied_degraded_mode\"", "code")?;
         ensure_contains(&json, "--require-semantic", "message contains flag")?;
+        ensure_contains(&json, "\"severity\":\"medium\"", "severity")?;
+        ensure_contains(&json, "\"details\":{}", "details")?;
         ensure_contains(&json, "\"repair\":\"ee index reembed --dry-run\"", "repair")
     }
 
@@ -9944,6 +10062,8 @@ mod tests {
             "\"message\":\"Redaction policy prevents this operation.\"",
             "message",
         )?;
+        ensure_contains(&json, "\"severity\":\"medium\"", "severity")?;
+        ensure_contains(&json, "\"details\":{}", "details")?;
         ensure_contains(
             &json,
             "\"repair\":\"ee doctor --fix-plan --json\"",
@@ -9961,24 +10081,45 @@ mod tests {
         ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
         ensure_contains(&json, "\"code\":\"migration_required\"", "code")?;
         ensure_contains(&json, "version 3", "message contains version")?;
+        ensure_contains(&json, "\"severity\":\"medium\"", "severity")?;
+        ensure_contains(&json, "\"details\":{}", "details")?;
         ensure_contains(&json, "\"repair\":\"ee init --workspace .\"", "repair")
     }
 
     #[test]
+    fn error_schema_not_found_details_are_structured() -> TestResult {
+        let error = DomainError::NotFound {
+            resource: "memory".to_string(),
+            id: "mem_abc123".to_string(),
+            repair: Some("ee memory list --json".to_string()),
+        };
+        let json = error_response_json(&error);
+        ensure_contains(&json, "\"code\":\"not_found\"", "code")?;
+        ensure_contains(&json, "\"severity\":\"low\"", "severity")?;
+        ensure_contains(&json, "\"details\":{", "details object")?;
+        ensure_contains(&json, "\"resource\":\"memory\"", "details resource")?;
+        ensure_contains(&json, "\"id\":\"mem_abc123\"", "details id")
+    }
+
+    #[test]
     fn error_schema_all_codes_are_covered() -> TestResult {
-        // Ensure we have tests for all 8 error types
         let codes = [
             "usage",
             "configuration",
             "storage",
             "search_index",
+            "graph",
             "import",
+            "not_found",
             "unsatisfied_degraded_mode",
             "policy_denied",
             "migration_required",
         ];
+        let severities = [
+            "low", "medium", "high", "medium", "medium", "medium", "low", "medium", "medium",
+            "medium",
+        ];
 
-        // Verify each code produces valid JSON
         let errors = [
             DomainError::Usage {
                 message: "test".to_string(),
@@ -9996,8 +10137,17 @@ mod tests {
                 message: "test".to_string(),
                 repair: None,
             },
+            DomainError::Graph {
+                message: "test".to_string(),
+                repair: None,
+            },
             DomainError::Import {
                 message: "test".to_string(),
+                repair: None,
+            },
+            DomainError::NotFound {
+                resource: "thing".to_string(),
+                id: "item_1".to_string(),
                 repair: None,
             },
             DomainError::UnsatisfiedDegradedMode {
@@ -10014,7 +10164,9 @@ mod tests {
             },
         ];
 
-        for (error, expected_code) in errors.iter().zip(codes.iter()) {
+        for ((error, expected_code), expected_severity) in
+            errors.iter().zip(codes.iter()).zip(severities.iter())
+        {
             let json = error_response_json(error);
             ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", expected_code)?;
             ensure_contains(
@@ -10022,6 +10174,12 @@ mod tests {
                 &format!("\"code\":\"{expected_code}\""),
                 expected_code,
             )?;
+            ensure_contains(
+                &json,
+                &format!("\"severity\":\"{expected_severity}\""),
+                expected_code,
+            )?;
+            ensure_contains(&json, "\"details\":{", expected_code)?;
         }
         Ok(())
     }
@@ -10073,18 +10231,10 @@ mod tests {
     fn toon_status_has_degradation_details() -> TestResult {
         let report = StatusReport::gather();
         let toon = render_status_toon(&report);
-        ensure_contains(
-            &toon,
-            "degraded[3]{code,severity,message}:",
-            "degradation section",
-        )?;
-        ensure_contains(&toon, "storage_not_implemented", "storage degradation code")?;
-        ensure_contains(&toon, "search_not_implemented", "search degradation code")?;
-        ensure_contains(
-            &toon,
-            "memory_health_unavailable",
-            "memory health degradation code",
-        )
+        // After fix: gather() inspects current workspace, so degradation count
+        // varies based on actual workspace state. Just verify the section exists.
+        ensure_contains(&toon, "degraded[", "degradation section")?;
+        ensure_contains(&toon, "{code,severity,message}:", "degradation columns")
     }
 
     #[test]
@@ -10157,55 +10307,114 @@ mod tests {
         let json = render_context_response_json(&response);
         let toon = render_context_response_toon(&response);
 
-        let expected_json = serde_json::from_str::<serde_json::Value>(&json)
-            .map_err(|error| format!("context JSON should parse: {error}"))?;
-        let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
-        let decoded = toon::try_decode(&toon, None)
-            .map_err(|error| format!("context TOON should decode: {error}"))?;
-        let actual = serde_json::Value::from(decoded);
+        ensure_toon_matches_json(&json, &toon, "decoded TOON matches context JSON")
+    }
 
-        ensure_equal(&actual, &expected, "decoded TOON matches context JSON")
+    #[test]
+    fn handoff_toon_renderers_decode_to_json_contracts() -> TestResult {
+        let mut preview = HandoffPreviewReport::new(
+            PathBuf::from("/tmp/ee-handoff-workspace"),
+            CapsuleProfile::Resume,
+        );
+        preview.generated_at = "2026-05-04T12:00:00Z".to_string();
+        preview.token_estimate = 42;
+        preview.byte_estimate = 420;
+        preview.sufficient_for_resume = true;
+
+        let mut create = HandoffCreateReport::new(
+            "hcap_toon_fixture".to_string(),
+            PathBuf::from("/tmp/ee-handoff-workspace"),
+            PathBuf::from("/tmp/ee-handoff-workspace/handoff.json"),
+        );
+        create.created_at = "2026-05-04T12:01:00Z".to_string();
+        create.sections_included = 2;
+        create.evidence_count = 1;
+        create.token_count = 99;
+        create.byte_count = 999;
+        create.content_hash = "blake3:fixture".to_string();
+        create.dry_run = true;
+
+        let mut inspect =
+            HandoffInspectReport::new(PathBuf::from("/tmp/ee-handoff-workspace/handoff.json"));
+        inspect.inspected_at = "2026-05-04T12:02:00Z".to_string();
+        inspect.capsule_id = "hcap_toon_fixture".to_string();
+        inspect.section_count = 2;
+        inspect.evidence_count = 1;
+
+        let mut resume = HandoffResumeReport::new(
+            "hcap_toon_fixture".to_string(),
+            PathBuf::from("/tmp/ee-handoff-workspace/handoff.json"),
+        );
+        resume.resumed_at = "2026-05-04T12:03:00Z".to_string();
+        resume.workspace = Some("workspace_toon_fixture".to_string());
+
+        let pairs = [
+            (
+                render_handoff_preview_json(&preview),
+                render_handoff_preview_toon(&preview),
+                "handoff preview",
+            ),
+            (
+                render_handoff_create_json(&create),
+                render_handoff_create_toon(&create),
+                "handoff create",
+            ),
+            (
+                render_handoff_inspect_json(&inspect),
+                render_handoff_inspect_toon(&inspect),
+                "handoff inspect",
+            ),
+            (
+                render_handoff_resume_json(&resume),
+                render_handoff_resume_toon(&resume),
+                "handoff resume",
+            ),
+        ];
+
+        for (json, toon, context) in pairs {
+            ensure_toon_matches_json(&json, &toon, context)?;
+            ensure(
+                !toon.starts_with("HANDOFF_") && !toon.contains('|'),
+                format!("{context}: TOON must not use legacy pipe summary: {toon:?}"),
+            )?;
+        }
+
+        Ok(())
     }
 
     #[test]
     fn invalid_json_to_toon_returns_stable_error() -> TestResult {
         let toon = super::render_toon_from_json("{not valid json");
         ensure_contains(&toon, "schema: ee.error.v1", "error schema")?;
-        ensure_contains(&toon, "code: toon_encoding_failed", "error code")
+        ensure_contains(&toon, "code: toon_encoding_failed", "error code")?;
+        ensure_contains(&toon, "severity: medium", "error severity")?;
+        ensure_contains(&toon, "details:", "error details")
     }
 
-    const TOON_STATUS_GOLDEN: &str = include_str!("../../tests/fixtures/golden/toon/status.golden");
+    #[test]
+    fn unknown_schema_export_error_has_required_fields() -> TestResult {
+        let json = render_schema_export_json(Some("ee.missing.v1"));
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_contains(&json, "\"code\":\"schema_not_found\"", "code")?;
+        ensure_contains(&json, "\"severity\":\"low\"", "severity")?;
+        ensure_contains(&json, "\"details\":{", "details")?;
+        ensure_contains(&json, "\"schemaId\":\"ee.missing.v1\"", "schema id")
+    }
 
     #[test]
-    fn toon_status_matches_golden() -> TestResult {
+    fn toon_status_has_required_structure() -> TestResult {
         let report = StatusReport::gather();
         let actual = render_status_toon(&report);
 
-        // Normalize both for comparison (trim trailing whitespace)
-        let actual_lines: Vec<&str> = actual.lines().collect();
-        let golden_lines: Vec<&str> = TOON_STATUS_GOLDEN.lines().collect();
-
-        if actual_lines.len() != golden_lines.len() {
-            return Err(format!(
-                "line count mismatch: actual={} golden={}",
-                actual_lines.len(),
-                golden_lines.len()
-            ));
-        }
-
-        for (i, (actual_line, golden_line)) in
-            actual_lines.iter().zip(golden_lines.iter()).enumerate()
-        {
-            if actual_line.trim_end() != golden_line.trim_end() {
-                return Err(format!(
-                    "line {} mismatch:\n  actual:  {:?}\n  golden:  {:?}",
-                    i + 1,
-                    actual_line,
-                    golden_line
-                ));
-            }
-        }
-        Ok(())
+        // Verify required TOON structure is present (not exact content, since
+        // gather() now inspects actual workspace state which varies).
+        ensure_contains(&actual, "schema: ee.response.v1", "schema")?;
+        ensure_contains(&actual, "success: true", "success flag")?;
+        ensure_contains(&actual, "data:", "data section")?;
+        ensure_contains(&actual, "command: status", "command field")?;
+        ensure_contains(&actual, "capabilities:", "capabilities section")?;
+        ensure_contains(&actual, "runtime:", "runtime section")?;
+        ensure_contains(&actual, "derivedAssets[", "derived assets array")
     }
 
     #[test]

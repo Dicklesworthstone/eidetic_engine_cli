@@ -37,7 +37,7 @@ use crate::pack::{
     ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
     ContextResponseDegradation, ContextResponseSeverity, PackCandidate, PackCandidateInput,
     PackProvenance, PackSection, PackTrustSignal, TokenBudget, assemble_draft_with_profile,
-    estimate_tokens_default,
+    estimate_tokens_default, pack_item_provenance_json,
 };
 
 /// Per-subsystem permission level. `None < Read < Write` under the
@@ -377,13 +377,17 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
         assemble_draft_with_profile(request.profile, request.query.clone(), budget, candidates)
             .map_err(|error| ContextPackError::Pack(error.to_string()))?;
 
-    draft.hash = Some(compute_pack_hash(&request, &draft));
+    draft.hash = Some(compute_pack_hash(&request, &draft, &degraded));
 
-    let mut response_degraded = degraded;
+    let mut response_degraded = degraded.clone();
 
-    if let Err(persist_error) =
-        persist_pack_record(&connection, &options.workspace_path, &request, &draft)
-    {
+    if let Err(persist_error) = persist_pack_record(
+        &connection,
+        &options.workspace_path,
+        &request,
+        &draft,
+        &degraded,
+    ) {
         push_degradation(
             &mut response_degraded,
             "context_pack_persist_failed",
@@ -402,6 +406,7 @@ fn persist_pack_record(
     workspace_path: &Path,
     request: &ContextRequest,
     draft: &crate::pack::PackDraft,
+    degraded: &[ContextResponseDegradation],
 ) -> Result<(), String> {
     let workspace = connection
         .get_workspace_by_path(&workspace_path.display().to_string())
@@ -412,7 +417,26 @@ fn persist_pack_record(
     let pack_hash = draft
         .hash
         .clone()
-        .unwrap_or_else(|| compute_pack_hash(request, draft));
+        .unwrap_or_else(|| compute_pack_hash(request, draft, degraded));
+
+    let degraded_json = if degraded.is_empty() {
+        None
+    } else {
+        serde_json::to_string(
+            &degraded
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "code": d.code,
+                        "severity": d.severity.as_str(),
+                        "message": d.message,
+                        "repair": d.repair,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .ok()
+    };
 
     let input = CreatePackRecordInput {
         workspace_id: workspace.id.clone(),
@@ -423,7 +447,7 @@ fn persist_pack_record(
         item_count: draft.items.len() as u32,
         omitted_count: draft.omitted.len() as u32,
         pack_hash,
-        degraded_json: None,
+        degraded_json,
         created_by: Some("ee context".to_string()),
     };
 
@@ -440,6 +464,9 @@ fn persist_pack_record(
             utility: item.utility.into_inner(),
             why: item.why.clone(),
             diversity_key: item.diversity_key.clone(),
+            provenance_json: pack_item_provenance_json(&item.provenance),
+            trust_class: item.trust.class.as_str().to_string(),
+            trust_subclass: item.trust.subclass.clone(),
         })
         .collect();
 
@@ -459,7 +486,11 @@ fn persist_pack_record(
         .map_err(|e| format!("insert failed: {e}"))
 }
 
-fn compute_pack_hash(request: &ContextRequest, draft: &crate::pack::PackDraft) -> String {
+fn compute_pack_hash(
+    request: &ContextRequest,
+    draft: &crate::pack::PackDraft,
+    degraded: &[ContextResponseDegradation],
+) -> String {
     use blake3::Hasher;
     let mut hasher = Hasher::new();
     hasher.update(request.query.as_bytes());
@@ -469,6 +500,36 @@ fn compute_pack_hash(request: &ContextRequest, draft: &crate::pack::PackDraft) -
     for item in &draft.items {
         hasher.update(item.memory_id.to_string().as_bytes());
         hasher.update(&item.rank.to_le_bytes());
+        hasher.update(item.section.as_str().as_bytes());
+        hasher.update(item.content.as_bytes());
+        hasher.update(&item.estimated_tokens.to_le_bytes());
+        hasher.update(&item.relevance.into_inner().to_le_bytes());
+        hasher.update(&item.utility.into_inner().to_le_bytes());
+        hasher.update(item.why.as_bytes());
+        for provenance in &item.provenance {
+            hasher.update(provenance.uri.to_string().as_bytes());
+            hasher.update(provenance.note.as_bytes());
+        }
+        if let Some(diversity_key) = &item.diversity_key {
+            hasher.update(diversity_key.as_bytes());
+        }
+        hasher.update(item.trust.class.as_str().as_bytes());
+        if let Some(subclass) = &item.trust.subclass {
+            hasher.update(subclass.as_bytes());
+        }
+    }
+    for omission in &draft.omitted {
+        hasher.update(omission.memory_id.to_string().as_bytes());
+        hasher.update(&omission.estimated_tokens.to_le_bytes());
+        hasher.update(omission.reason.as_str().as_bytes());
+    }
+    for degradation in degraded {
+        hasher.update(degradation.code.as_bytes());
+        hasher.update(degradation.severity.as_str().as_bytes());
+        hasher.update(degradation.message.as_bytes());
+        if let Some(repair) = &degradation.repair {
+            hasher.update(repair.as_bytes());
+        }
     }
     format!("blake3:{}", hasher.finalize().to_hex())
 }
@@ -1291,5 +1352,238 @@ mod tests {
             .with_narrowed_capabilities(mask_b);
         let combined = context.with_narrowed_capabilities(mask_a.narrow(mask_b));
         assert_eq!(chained.capabilities(), combined.capabilities());
+    }
+
+    #[test]
+    fn pack_hash_includes_content_provenance_and_degradation() -> Result<(), String> {
+        use super::{ContextResponseDegradation, ContextResponseSeverity, compute_pack_hash};
+        use crate::models::{ProvenanceUri, TrustClass};
+        use crate::pack::{
+            ContextRequest, PackDraft, PackDraftItem, PackGuaranteeStatus, PackOmission,
+            PackOmissionReason, PackProvenance, PackSection, PackSelectionCertificate,
+            PackSelectionObjective, PackTrustSignal, TokenBudget,
+        };
+
+        let request =
+            ContextRequest::from_query("test query").map_err(|error| error.to_string())?;
+
+        let mem_a = MemoryId::from_uuid(uuid::Uuid::from_u128(1));
+        let mem_b = MemoryId::from_uuid(uuid::Uuid::from_u128(2));
+        let mem_c = MemoryId::from_uuid(uuid::Uuid::from_u128(3));
+        let mem_d = MemoryId::from_uuid(uuid::Uuid::from_u128(4));
+        let budget = TokenBudget::default_context();
+
+        let base_item = PackDraftItem {
+            rank: 1,
+            memory_id: mem_a,
+            section: PackSection::ProceduralRules,
+            content: "original content".to_string(),
+            estimated_tokens: 10,
+            relevance: crate::models::UnitScore::parse(0.8).map_err(|error| error.to_string())?,
+            utility: crate::models::UnitScore::parse(0.7).map_err(|error| error.to_string())?,
+            provenance: vec![
+                PackProvenance::new(ProvenanceUri::EeMemory(mem_b), "source note")
+                    .map_err(|error| error.to_string())?,
+            ],
+            why: "test explanation".to_string(),
+            diversity_key: None,
+            trust: PackTrustSignal::new(TrustClass::AgentAssertion, None),
+        };
+
+        let base_draft = PackDraft {
+            query: "test query".to_string(),
+            budget,
+            used_tokens: 10,
+            items: vec![base_item.clone()],
+            omitted: vec![],
+            selection_certificate: PackSelectionCertificate {
+                certificate_id: None,
+                profile: request.profile,
+                objective: PackSelectionObjective::MmrRedundancy,
+                algorithm: "test_deterministic_selection",
+                guarantee: "test certificate only",
+                guarantee_status: PackGuaranteeStatus::Conditional,
+                candidate_count: 1,
+                selected_count: 1,
+                omitted_count: 0,
+                budget_limit: budget.max_tokens(),
+                budget_used: 10,
+                total_objective_value: 1.0,
+                monotone: false,
+                submodular: false,
+                selected_items: Vec::new(),
+                rejected_frontier: Vec::new(),
+                steps: Vec::new(),
+            },
+            hash: None,
+        };
+
+        let base_degraded: Vec<ContextResponseDegradation> = vec![];
+
+        let hash_base = compute_pack_hash(&request, &base_draft, &base_degraded);
+
+        // Different content produces different hash.
+        let mut draft_content = base_draft.clone();
+        draft_content.items[0].content = "different content".to_string();
+        let hash_content = compute_pack_hash(&request, &draft_content, &base_degraded);
+        assert_ne!(hash_base, hash_content, "content change must alter hash");
+
+        // Different provenance produces different hash.
+        let mut draft_provenance = base_draft.clone();
+        draft_provenance.items[0].provenance = vec![
+            PackProvenance::new(ProvenanceUri::EeMemory(mem_c), "different source")
+                .map_err(|error| error.to_string())?,
+        ];
+        let hash_provenance = compute_pack_hash(&request, &draft_provenance, &base_degraded);
+        assert_ne!(
+            hash_base, hash_provenance,
+            "provenance change must alter hash"
+        );
+
+        // Different why explanation produces different hash.
+        let mut draft_why = base_draft.clone();
+        draft_why.items[0].why = "different explanation".to_string();
+        let hash_why = compute_pack_hash(&request, &draft_why, &base_degraded);
+        assert_ne!(hash_base, hash_why, "why change must alter hash");
+
+        // Different trust signal produces different hash.
+        let mut draft_trust = base_draft.clone();
+        draft_trust.items[0].trust =
+            PackTrustSignal::new(TrustClass::AgentValidated, Some("verified".to_string()));
+        let hash_trust = compute_pack_hash(&request, &draft_trust, &base_degraded);
+        assert_ne!(hash_base, hash_trust, "trust change must alter hash");
+
+        // Different omissions produce different hash.
+        let mut draft_omission = base_draft.clone();
+        draft_omission.omitted = vec![PackOmission {
+            memory_id: mem_d,
+            estimated_tokens: 50,
+            reason: PackOmissionReason::TokenBudgetExceeded,
+        }];
+        let hash_omission = compute_pack_hash(&request, &draft_omission, &base_degraded);
+        assert_ne!(hash_base, hash_omission, "omission change must alter hash");
+
+        // Different degradations produce different hash.
+        let degraded_with_issue = vec![ContextResponseDegradation {
+            code: "test_degradation".to_string(),
+            severity: ContextResponseSeverity::Medium,
+            message: "Something degraded".to_string(),
+            repair: Some("ee fix something".to_string()),
+        }];
+        let hash_degraded = compute_pack_hash(&request, &base_draft, &degraded_with_issue);
+        assert_ne!(
+            hash_base, hash_degraded,
+            "degradation change must alter hash"
+        );
+
+        // Same inputs produce same hash (determinism check).
+        let hash_repeat = compute_pack_hash(&request, &base_draft, &base_degraded);
+        assert_eq!(hash_base, hash_repeat, "same inputs must produce same hash");
+        Ok(())
+    }
+
+    #[test]
+    fn persist_pack_record_preserves_item_provenance_and_trust() -> Result<(), String> {
+        use super::{compute_pack_hash, persist_pack_record};
+        use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+        use crate::models::{ProvenanceUri, TrustClass};
+        use crate::pack::{
+            ContextRequest, PackCandidate, PackCandidateInput, PackProvenance, PackSection,
+            PackTrustSignal, TokenBudget, assemble_draft, pack_item_provenance_json,
+        };
+
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_01234567890123456789088888";
+        let workspace_path = "/tmp/ee-context-persist-signals";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.to_string(),
+                    name: Some("context persist signals".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(88));
+        connection
+            .insert_memory(
+                &memory_id.to_string(),
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_string(),
+                    level: "procedural".to_string(),
+                    kind: "rule".to_string(),
+                    content: "Run cargo fmt before release.".to_string(),
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: Some("file://AGENTS.md#L42".to_string()),
+                    trust_class: TrustClass::AgentValidated.as_str().to_string(),
+                    trust_subclass: Some("reviewed".to_string()),
+                    tags: vec!["release".to_string()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let provenance = vec![
+            PackProvenance::new(
+                ProvenanceUri::from_str("file://AGENTS.md#L42")
+                    .map_err(|error| error.to_string())?,
+                "project rule source",
+            )
+            .map_err(|error| error.to_string())?,
+            PackProvenance::new(
+                ProvenanceUri::from_str("cass-session://session-a#L20-22")
+                    .map_err(|error| error.to_string())?,
+                "session confirmation",
+            )
+            .map_err(|error| error.to_string())?,
+        ];
+        let candidate = PackCandidate::new(PackCandidateInput {
+            memory_id,
+            section: PackSection::ProceduralRules,
+            content: "Run cargo fmt before release.".to_string(),
+            estimated_tokens: 9,
+            relevance: UnitScore::parse(0.95).map_err(|error| error.to_string())?,
+            utility: UnitScore::parse(0.8).map_err(|error| error.to_string())?,
+            provenance: provenance.clone(),
+            why: "Selected because the task is release formatting.".to_string(),
+        })
+        .map_err(|error| error.to_string())?
+        .with_trust_signal(PackTrustSignal::new(
+            TrustClass::AgentValidated,
+            Some("reviewed".to_string()),
+        ));
+        let request =
+            ContextRequest::from_query("prepare release").map_err(|error| error.to_string())?;
+        let mut draft = assemble_draft("prepare release", TokenBudget::default_context(), [candidate])
+            .map_err(|error| error.to_string())?;
+        draft.hash = Some(compute_pack_hash(&request, &draft, &[]));
+
+        persist_pack_record(
+            &connection,
+            Path::new(workspace_path),
+            &request,
+            &draft,
+            &[],
+        )?;
+
+        let history = connection
+            .list_pack_records_for_memory(&memory_id.to_string(), 10)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(history.len(), 1);
+        let stored_item = &history[0].1;
+        assert_eq!(
+            stored_item.provenance_json,
+            pack_item_provenance_json(&provenance)
+        );
+        assert_eq!(stored_item.trust_class, "agent_validated");
+        assert_eq!(stored_item.trust_subclass.as_deref(), Some("reviewed"));
+
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(())
     }
 }
