@@ -1,0 +1,148 @@
+{
+  "schema": "ee.skill.active_learning_experiment_planner.fixtures.v1",
+  "fixtures": [
+    {
+      "id": "alp_empty_records",
+      "task": "Plan the next learning experiment for a fresh workspace.",
+      "eeCommands": [
+        "ee status --workspace <workspace> --json",
+        "ee --workspace <workspace> learn summary --period week --detailed --json",
+        "ee --workspace <workspace> learn uncertainty --min-uncertainty 0.3 --json",
+        "ee learn observe <experiment-id> --measurement-name <name> --signal neutral --evidence-id <evidence-id> --redaction-status redacted --dry-run --json"
+      ],
+      "observationRecordIds": [],
+      "evalRecordIds": [],
+      "evidenceIds": [],
+      "degradedCodes": [],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "expectedDisposition": "request_data_collection",
+      "expectedGeneratedExperimentCount": 0,
+      "firstFailureDiagnosis": "learning_observations_empty"
+    },
+    {
+      "id": "alp_high_uncertainty",
+      "task": "Choose a dry-run experiment for memories with high retrieval uncertainty.",
+      "eeCommands": [
+        "ee --workspace <workspace> learn uncertainty --min-uncertainty 0.7 --json",
+        "ee --workspace <workspace> learn experiment run --id <experiment-id> --dry-run --json",
+        "ee learn observe <experiment-id> --measurement-name retrieval_precision --signal positive --evidence-id ev.learn.uncertainty.001 --redaction-status redacted --dry-run --json"
+      ],
+      "observationRecordIds": [
+        "lobs_high_uncertainty_001",
+        "lobs_high_uncertainty_002"
+      ],
+      "evalRecordIds": [
+        "eval_retrieval_precision_001"
+      ],
+      "evidenceIds": [
+        "ev.learn.uncertainty.001",
+        "ev.eval.retrieval_precision.001"
+      ],
+      "degradedCodes": [],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "expectedDisposition": "generate_plan",
+      "expectedGeneratedExperimentCount": 2,
+      "firstFailureDiagnosis": null
+    },
+    {
+      "id": "alp_contradictory_outcomes",
+      "task": "Plan follow-up when two eval records disagree about a memory rule.",
+      "eeCommands": [
+        "ee --workspace <workspace> learn summary --period month --detailed --json",
+        "ee causal compare --workspace <workspace> --json",
+        "ee learn observe <experiment-id> --measurement-name stratified_replay --signal neutral --evidence-id ev.learn.contradiction.001 --redaction-status redacted --dry-run --json"
+      ],
+      "observationRecordIds": [
+        "lobs_contradictory_001",
+        "lobs_contradictory_002"
+      ],
+      "evalRecordIds": [
+        "eval_release_success_001",
+        "eval_release_failure_001"
+      ],
+      "evidenceIds": [
+        "ev.learn.contradiction.001"
+      ],
+      "degradedCodes": [],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "expectedDisposition": "propose_replication",
+      "expectedGeneratedExperimentCount": 1,
+      "firstFailureDiagnosis": null
+    },
+    {
+      "id": "alp_insufficient_sample_size",
+      "task": "Decide whether three observations are enough to close an experiment.",
+      "eeCommands": [
+        "ee --workspace <workspace> learn summary --period all --detailed --json",
+        "ee learn observe <experiment-id> --measurement-name sample_size --signal neutral --evidence-id ev.learn.sample.001 --redaction-status redacted --dry-run --json"
+      ],
+      "observationRecordIds": [
+        "lobs_sample_001",
+        "lobs_sample_002",
+        "lobs_sample_003"
+      ],
+      "evalRecordIds": [],
+      "evidenceIds": [
+        "ev.learn.sample.001"
+      ],
+      "sampleSize": 3,
+      "degradedCodes": [],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "expectedDisposition": "request_more_samples",
+      "expectedGeneratedExperimentCount": 1,
+      "firstFailureDiagnosis": "learning_sample_underpowered"
+    },
+    {
+      "id": "alp_redacted_evidence",
+      "task": "Plan from observation evidence that still contains raw secrets.",
+      "eeCommands": [
+        "ee --workspace <workspace> learn summary --period week --detailed --json"
+      ],
+      "observationRecordIds": [
+        "lobs_secret_001"
+      ],
+      "evalRecordIds": [
+        "eval_secret_001"
+      ],
+      "evidenceIds": [
+        "ev.learn.redaction_failed"
+      ],
+      "degradedCodes": [
+        "redaction_failed"
+      ],
+      "redactionStatus": "failed",
+      "rawSecretsIncluded": true,
+      "expectedDisposition": "refuse",
+      "expectedGeneratedExperimentCount": 0,
+      "firstFailureDiagnosis": "learning_redaction_unverified"
+    },
+    {
+      "id": "alp_degraded_dependencies",
+      "task": "Plan while learn summary and economy records are degraded.",
+      "eeCommands": [
+        "ee --workspace <workspace> learn summary --period week --detailed --json",
+        "ee economy score --workspace <workspace> --json"
+      ],
+      "observationRecordIds": [
+        "lobs_degraded_001"
+      ],
+      "evalRecordIds": [],
+      "evidenceIds": [
+        "ev.learn.degraded.001"
+      ],
+      "degradedCodes": [
+        "learning_records_unavailable",
+        "economy_records_unavailable"
+      ],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "expectedDisposition": "request_repair",
+      "expectedGeneratedExperimentCount": 0,
+      "firstFailureDiagnosis": "learning_records_unavailable"
+    }
+  ]
+}
