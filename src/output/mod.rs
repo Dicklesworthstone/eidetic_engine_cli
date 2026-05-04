@@ -5842,7 +5842,7 @@ pub fn error_response_toon(error: &DomainError) -> String {
 fn domain_error_severity(error: &DomainError) -> &'static str {
     match error {
         DomainError::Usage { .. } | DomainError::NotFound { .. } => "low",
-        DomainError::Storage { .. } => "high",
+        DomainError::Storage { .. } | DomainError::MigrationDrift { .. } => "high",
         DomainError::Configuration { .. }
         | DomainError::SearchIndex { .. }
         | DomainError::Graph { .. }
