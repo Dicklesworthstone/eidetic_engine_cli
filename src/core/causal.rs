@@ -8,9 +8,8 @@ use serde_json::{Value as JsonValue, json};
 
 use crate::models::causal::{
     CAUSAL_TRACE_SCHEMA_V1, CausalDecisionTrace, CausalEvidenceStrength, CausalExposureChannel,
-    DecisionTraceOutcome, PromotionAction, PromotionPlan, PromotionPlanStatus,
+    PromotionAction, PromotionPlan, PromotionPlanStatus,
 };
-use crate::models::decision::DecisionPlane;
 
 /// Schema for causal trace list response.
 pub const CAUSAL_TRACE_LIST_SCHEMA_V1: &str = "ee.causal.trace_list.v1";
@@ -238,6 +237,38 @@ impl TraceDegradation {
     }
 }
 
+fn trace_degradation(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    severity: impl Into<String>,
+) -> TraceDegradation {
+    TraceDegradation {
+        code: code.into(),
+        message: message.into(),
+        severity: severity.into(),
+    }
+}
+
+fn causal_evidence_unavailable(scope: &str) -> TraceDegradation {
+    trace_degradation(
+        "causal_evidence_unavailable",
+        format!(
+            "No persisted causal evidence ledger rows are available for {scope}; refusing to infer exposures, decisions, outcomes, or uplift from IDs."
+        ),
+        "warning",
+    )
+}
+
+fn causal_sample_underpowered(scope: &str) -> TraceDegradation {
+    trace_degradation(
+        "causal_sample_underpowered",
+        format!(
+            "{scope} has sample size 0 with no observed baseline/outcome ledger; no causal effect is actionable."
+        ),
+        "warning",
+    )
+}
+
 /// Report from tracing causal chains.
 #[derive(Clone, Debug)]
 pub struct TraceReport {
@@ -369,24 +400,16 @@ pub fn trace_causal_chains(options: &TraceOptions) -> TraceReport {
     }
 
     if !options.has_any_filter() {
-        degradations.push(TraceDegradation {
-            code: "no_filters".to_string(),
-            message: "No filters provided; returning empty trace".to_string(),
-            severity: "info".to_string(),
-        });
+        degradations.push(trace_degradation(
+            "no_filters",
+            "No filters provided; returning empty trace.",
+            "info",
+        ));
+    } else if !options.dry_run {
+        degradations.push(causal_evidence_unavailable("causal trace"));
     }
 
-    // Placeholder: In a full implementation, this would query the database
-    // for recorder runs, pack records, preflight closes, tripwire checks,
-    // and procedure uses matching the filters, then build causal chains.
-    //
-    // For now, we return an empty but valid report structure.
-    let chains = if options.dry_run || !options.has_any_filter() {
-        Vec::new()
-    } else {
-        // Build a sample chain to demonstrate the structure
-        build_sample_chains(options)
-    };
+    let chains: Vec<CausalChain> = Vec::new();
 
     let total_exposures: usize = chains.iter().map(|c| c.exposure_count()).sum();
     let total_decisions = chains.len();
@@ -400,92 +423,6 @@ pub fn trace_causal_chains(options: &TraceOptions) -> TraceReport {
         degradations,
         dry_run: options.dry_run,
     }
-}
-
-fn build_sample_chains(options: &TraceOptions) -> Vec<CausalChain> {
-    // For demonstration/testing, build a minimal chain if filters are provided
-    let chain_id = options
-        .memory_id
-        .as_ref()
-        .or(options.run_id.as_ref())
-        .or(options.pack_id.as_ref())
-        .cloned()
-        .unwrap_or_else(|| "trace-0001".to_string());
-
-    let decision_trace = CausalDecisionTrace::new(
-        format!("decision-for-{chain_id}"),
-        format!("trace-{chain_id}"),
-        DecisionPlane::Observe,
-        chrono::Utc::now().to_rfc3339(),
-        options.agent_id.as_deref().unwrap_or("unknown"),
-        "Traced decision from causal analysis",
-    )
-    .with_outcome(DecisionTraceOutcome::Used);
-
-    let mut exposures = Vec::new();
-    let mut recorder_run_ids = Vec::new();
-    let mut context_pack_ids = Vec::new();
-    let mut preflight_ids = Vec::new();
-    let mut tripwire_ids = Vec::new();
-    let mut procedure_ids = Vec::new();
-
-    if let Some(ref run_id) = options.run_id {
-        recorder_run_ids.push(run_id.clone());
-        exposures.push(CausalExposure {
-            exposure_id: format!("exp-{run_id}"),
-            channel: CausalExposureChannel::ContextPack,
-            artifact_id: run_id.clone(),
-            artifact_type: "recorder_run".to_string(),
-            exposed_at: chrono::Utc::now().to_rfc3339(),
-            context_pack_id: None,
-            recorder_run_id: Some(run_id.clone()),
-        });
-    }
-
-    if let Some(ref pack_id) = options.pack_id {
-        context_pack_ids.push(pack_id.clone());
-        exposures.push(CausalExposure {
-            exposure_id: format!("exp-{pack_id}"),
-            channel: CausalExposureChannel::ContextPack,
-            artifact_id: pack_id.clone(),
-            artifact_type: "context_pack".to_string(),
-            exposed_at: chrono::Utc::now().to_rfc3339(),
-            context_pack_id: Some(pack_id.clone()),
-            recorder_run_id: None,
-        });
-    }
-
-    if let Some(ref preflight_id) = options.preflight_id {
-        preflight_ids.push(preflight_id.clone());
-    }
-
-    if let Some(ref tripwire_id) = options.tripwire_id {
-        tripwire_ids.push(tripwire_id.clone());
-    }
-
-    if let Some(ref procedure_id) = options.procedure_id {
-        procedure_ids.push(procedure_id.clone());
-        exposures.push(CausalExposure {
-            exposure_id: format!("exp-{procedure_id}"),
-            channel: CausalExposureChannel::Procedure,
-            artifact_id: procedure_id.clone(),
-            artifact_type: "procedure".to_string(),
-            exposed_at: chrono::Utc::now().to_rfc3339(),
-            context_pack_id: None,
-            recorder_run_id: None,
-        });
-    }
-
-    vec![CausalChain {
-        chain_id,
-        decision_trace,
-        exposures,
-        recorder_run_ids,
-        context_pack_ids,
-        preflight_ids,
-        tripwire_ids,
-        procedure_ids,
-    }]
 }
 
 // ============================================================================
@@ -854,28 +791,34 @@ pub fn estimate_causal_uplift(options: &EstimateOptions) -> EstimateReport {
             message: "No artifact or decision ID provided; cannot compute estimate".to_string(),
             severity: "warning".to_string(),
         });
+    } else if !options.dry_run {
+        degradations.push(TraceDegradation {
+            code: "causal_sample_underpowered".to_string(),
+            message: "Sample size 0 with no observed baseline/outcome ledger; no causal estimate is actionable.".to_string(),
+            severity: "warning".to_string(),
+        });
+        if options.include_confounders {
+            degradations.push(TraceDegradation {
+                code: "causal_confounders_unavailable".to_string(),
+                message: "No explicit confounder ledger rows were supplied; refusing to fabricate confounders.".to_string(),
+                severity: "warning".to_string(),
+            });
+        }
     }
 
-    // Build estimates
-    let estimates = if options.dry_run || !options.has_any_filter() {
-        Vec::new()
-    } else {
-        build_sample_estimates(options, &method_used)
-    };
+    // Causal estimate requires real sample data from exposure/outcome ledgers.
+    // Without persisted evidence, we abstain rather than invent uplift values.
+    let estimates: Vec<CausalUpliftEstimate> = Vec::new();
 
-    // Build assumptions based on method
+    // Assumptions depend on the method, but without samples they are purely informational.
     let assumptions = if options.include_assumptions {
         build_method_assumptions(&method_used)
     } else {
         Vec::new()
     };
 
-    // Identify confounders
-    let confounders = if options.include_confounders && !estimates.is_empty() {
-        build_sample_confounders(options)
-    } else {
-        Vec::new()
-    };
+    // No confounders without real evidence data.
+    let confounders: Vec<EstimateConfounder> = Vec::new();
 
     EstimateReport {
         schema: CAUSAL_ESTIMATE_SCHEMA_V1,
@@ -887,39 +830,6 @@ pub fn estimate_causal_uplift(options: &EstimateOptions) -> EstimateReport {
         method_used,
         dry_run: options.dry_run,
     }
-}
-
-fn build_sample_estimates(options: &EstimateOptions, method: &str) -> Vec<CausalUpliftEstimate> {
-    let artifact_id = options
-        .artifact_id
-        .clone()
-        .unwrap_or_else(|| "unknown-artifact".to_string());
-    let decision_id = options
-        .decision_id
-        .clone()
-        .unwrap_or_else(|| "unknown-decision".to_string());
-
-    // Determine evidence strength based on method
-    let (evidence_strength, confidence_state, uplift, confidence) = match method {
-        "experiment" => ("experiment_supported", ConfidenceState::High, 0.15, 0.92),
-        "replay" => ("replay_supported", ConfidenceState::Medium, 0.12, 0.78),
-        "matching" => ("correlational", ConfidenceState::Low, 0.08, 0.55),
-        _ => ("exposure_only", ConfidenceState::Insufficient, 0.05, 0.30),
-    };
-
-    vec![CausalUpliftEstimate {
-        estimate_id: format!("est-{}-{}", artifact_id, decision_id),
-        artifact_id,
-        decision_id,
-        method: method.to_string(),
-        uplift,
-        direction: if uplift > 0.0 { "positive" } else { "neutral" }.to_string(),
-        confidence,
-        evidence_strength: evidence_strength.to_string(),
-        confidence_state,
-        sample_size: 42,
-        estimated_at: chrono::Utc::now().to_rfc3339(),
-    }]
 }
 
 fn build_method_assumptions(method: &str) -> Vec<EstimateAssumption> {
@@ -973,33 +883,6 @@ fn build_method_assumptions(method: &str) -> Vec<EstimateAssumption> {
     }
 
     assumptions
-}
-
-fn build_sample_confounders(options: &EstimateOptions) -> Vec<EstimateConfounder> {
-    vec![
-        EstimateConfounder {
-            confounder_id: format!(
-                "conf-task-complexity-{}",
-                options.artifact_id.as_deref().unwrap_or("unknown")
-            ),
-            kind: "task_complexity".to_string(),
-            description: "Task complexity correlates with both memory usage and success"
-                .to_string(),
-            severity: 0.6,
-            mitigation: "Stratify by task difficulty or use matching".to_string(),
-        },
-        EstimateConfounder {
-            confounder_id: format!(
-                "conf-agent-skill-{}",
-                options.artifact_id.as_deref().unwrap_or("unknown")
-            ),
-            kind: "agent_capability".to_string(),
-            description: "More capable agents may both use memory more and succeed more"
-                .to_string(),
-            severity: 0.4,
-            mitigation: "Include agent-level fixed effects".to_string(),
-        },
-    ]
 }
 
 // ============================================================================
@@ -1292,67 +1175,25 @@ pub fn compare_causal_evidence(options: &CompareOptions) -> CompareReport {
         };
     }
 
-    if options.dry_run {
-        return CompareReport {
-            schema: CAUSAL_COMPARE_SCHEMA_V1,
-            comparisons: Vec::new(),
-            filters_applied,
-            degradations,
-            method_used,
-            dry_run: true,
-        };
+    // Causal comparison requires real fixture replay, shadow run, counterfactual
+    // episode, or experiment evidence. Without persisted baseline/outcome ledgers,
+    // we cannot compare uplift and must abstain rather than fabricate verdicts.
+    if !options.dry_run {
+        degradations.push(TraceDegradation {
+            code: "causal_comparison_evidence_unavailable".to_string(),
+            message: "No persisted comparison evidence ledger rows are available; refusing to synthesize baseline/candidate comparisons from source IDs.".to_string(),
+            severity: "warning".to_string(),
+        });
     }
-
-    let (strength, method_uplift) = method_signal(&method_used);
-    let confidence = ConfidenceState::from_evidence_strength(strength);
-
-    let comparisons = selected_sources
-        .into_iter()
-        .map(|(source_kind, source_id)| {
-            let offset = deterministic_uplift_offset(source_kind, source_id);
-            let baseline_uplift = (method_uplift - 0.03_f64).clamp(-1.0, 1.0);
-            let candidate_uplift = (method_uplift + offset).clamp(-1.0, 1.0);
-            let uplift_delta = candidate_uplift - baseline_uplift;
-            let verdict = if uplift_delta > 0.01 {
-                "improves"
-            } else if uplift_delta < -0.01 {
-                "regresses"
-            } else {
-                "flat"
-            };
-
-            CausalComparison {
-                comparison_id: format!("cmp-{source_kind}-{source_id}"),
-                source_kind: source_kind.to_string(),
-                source_id: source_id.to_string(),
-                baseline_uplift,
-                candidate_uplift,
-                uplift_delta,
-                confidence_state: confidence,
-                evidence_strength: strength.as_str().to_string(),
-                verdict: verdict.to_string(),
-            }
-        })
-        .collect::<Vec<_>>();
 
     CompareReport {
         schema: CAUSAL_COMPARE_SCHEMA_V1,
-        comparisons,
+        comparisons: Vec::new(),
         filters_applied,
         degradations,
         method_used,
-        dry_run: false,
+        dry_run: options.dry_run,
     }
-}
-
-fn deterministic_uplift_offset(source_kind: &str, source_id: &str) -> f64 {
-    let mut hash: u64 = 1469598103934665603;
-    for byte in source_kind.bytes().chain(source_id.bytes()) {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(1099511628211);
-    }
-    let normalized = (hash % 21) as f64 - 10.0;
-    normalized / 100.0
 }
 
 /// Options for producing a dry-run-first causal promotion plan.
@@ -1769,24 +1610,23 @@ pub fn promote_causal_plan(options: &PromotePlanOptions) -> PromotePlanReport {
         .clone()
         .unwrap_or_else(|| "replay".to_string());
     let method_used = normalize_method(&requested_method, &mut degradations);
-    let (evidence_strength, estimated_uplift) = method_signal(method_used.as_str());
+    let evidence_strength = CausalEvidenceStrength::ExposureOnly;
+    let estimated_uplift = 0.0;
 
     if !options.dry_run {
-        degradations.push(TraceDegradation {
-            code: "dry_run_recommended".to_string(),
-            message: "Promotion planning is policy-conservative; prefer --dry-run in automation."
-                .to_string(),
-            severity: "info".to_string(),
-        });
+        degradations.push(trace_degradation(
+            "dry_run_recommended",
+            "Promotion planning is report-only; prefer --dry-run in automation.",
+            "info",
+        ));
     }
 
     if !options.has_any_filter() {
-        degradations.push(TraceDegradation {
-            code: "no_filters".to_string(),
-            message: "No artifact, decision, or estimate ID provided; cannot produce plan."
-                .to_string(),
-            severity: "warning".to_string(),
-        });
+        degradations.push(trace_degradation(
+            "no_filters",
+            "No artifact, decision, or estimate ID provided; cannot produce plan.",
+            "warning",
+        ));
         return PromotePlanReport {
             schema: CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
             plans: Vec::new(),
@@ -1802,6 +1642,20 @@ pub fn promote_causal_plan(options: &PromotePlanOptions) -> PromotePlanReport {
             method_used,
             dry_run: options.dry_run,
         };
+    }
+
+    degradations.push(causal_sample_underpowered("causal promote-plan"));
+    if let Some(action) = options.action
+        && action != PromotionAction::Hold
+    {
+        degradations.push(trace_degradation(
+            "action_override_not_actionable",
+            format!(
+                "Requested action `{}` is recorded as review input only; underpowered evidence cannot promote, demote, archive, or quarantine.",
+                action.as_str()
+            ),
+            "warning",
+        ));
     }
 
     let artifact_id = options
@@ -1821,13 +1675,11 @@ pub fn promote_causal_plan(options: &PromotePlanOptions) -> PromotePlanReport {
         })
         .unwrap_or_else(|| "artifact-unknown".to_string());
 
-    let action = options.action.unwrap_or_else(|| {
-        derive_action(estimated_uplift, options.minimum_uplift, evidence_strength)
-    });
+    let action = PromotionAction::Hold;
     let downstream_effects =
         project_downstream_effects(action, evidence_strength, estimated_uplift, options.dry_run);
 
-    let mut plan = PromotionPlan::new(
+    let plan = PromotionPlan::new(
         format!("plan-{artifact_id}"),
         artifact_id.clone(),
         action,
@@ -1841,63 +1693,31 @@ pub fn promote_causal_plan(options: &PromotePlanOptions) -> PromotePlanReport {
     .with_evidence_strength(evidence_strength)
     .with_minimum_uplift(options.minimum_uplift)
     .with_estimated_uplift(estimated_uplift)
-    .with_required_evidence(format!("evidence-{artifact_id}"))
-    .with_audit_id(format!("audit-promote-plan-{artifact_id}"));
-
-    if matches!(
-        action,
-        PromotionAction::Demote | PromotionAction::Archive | PromotionAction::Quarantine
-    ) {
-        plan = plan.with_blocking_confounder(format!("confounder-{artifact_id}"));
-    }
+    .with_audit_id(format!("audit-review-only-{artifact_id}"));
 
     let mut recommendations = PromotePlanRecommendations::default();
     recommendations.safety_guards.push(
         "Safety-critical warnings remain pinned and are never randomized away for evidence collection."
             .to_string(),
     );
-    if options.include_revalidation
-        || matches!(
-            action,
-            PromotionAction::Hold | PromotionAction::Demote | PromotionAction::Quarantine
-        )
-    {
+    if options.include_revalidation || action == PromotionAction::Hold {
         recommendations.revalidation_steps.push(format!(
-            "Re-run `ee causal estimate --artifact-id {artifact_id} --method replay --json` before applying changes."
+            "Collect persisted exposure, baseline, outcome, and confounder evidence for `{artifact_id}` before any causal estimate."
         ));
     }
-    if options.include_narrower_routing
-        || matches!(
-            action,
-            PromotionAction::Demote | PromotionAction::Archive | PromotionAction::Quarantine
-        )
-    {
+    if options.include_narrower_routing {
         recommendations.narrower_routing_steps.push(format!(
-            "Narrow routing scope for `{artifact_id}` to higher-confidence task families."
+            "Review routing scope for `{artifact_id}` manually; this report does not reroute memory."
         ));
     }
-    if !matches!(
-        evidence_strength,
-        CausalEvidenceStrength::ExperimentSupported | CausalEvidenceStrength::ReplaySupported
-    ) {
-        recommendations.review_recommendations.push(format!(
-            "Route `{artifact_id}` to review before promotion; `{}` evidence is underpowered for direct promotion.",
-            evidence_strength.as_str()
-        ));
-    }
-    if matches!(
-        action,
-        PromotionAction::Demote | PromotionAction::Archive | PromotionAction::Quarantine
-    ) {
-        recommendations.review_recommendations.push(format!(
-            "Review blocking confounders for `{artifact_id}` before changing memory priority."
-        ));
-    }
+    recommendations.review_recommendations.push(format!(
+        "Route `{artifact_id}` to review only; sample size 0 and `exposure_only` evidence are underpowered for promotion, demotion, or rerouting."
+    ));
     if options.include_experiment_proposals
-        || evidence_strength != CausalEvidenceStrength::ExperimentSupported
+        || evidence_strength == CausalEvidenceStrength::ExposureOnly
     {
         recommendations.experiment_proposals.push(format!(
-            "Propose controlled experiment for `{artifact_id}` with `ee learn experiment --artifact-id {artifact_id} --dry-run --json`."
+            "Design an explicit experiment for `{artifact_id}` and persist treatment, baseline, outcome, and confounder evidence before re-running causal promotion review."
         ));
     }
 
@@ -1919,6 +1739,45 @@ fn project_downstream_effects(
     estimated_uplift: f64,
     dry_run: bool,
 ) -> PromotePlanDownstreamEffects {
+    // Without actionable evidence, return review-only projections
+    let actionable_evidence = matches!(
+        evidence_strength,
+        CausalEvidenceStrength::ExperimentSupported | CausalEvidenceStrength::ReplaySupported
+    ) && estimated_uplift.abs() > 0.0
+        && action != PromotionAction::Hold;
+
+    if !actionable_evidence {
+        return PromotePlanDownstreamEffects {
+            schema: CAUSAL_DOWNSTREAM_EFFECTS_SCHEMA_V1,
+            economy_score: PromotePlanEconomyProjection {
+                priority_delta: 0,
+                utility_delta: 0.0,
+                confidence_delta: 0.0,
+                reasoning: "No supported causal evidence is available; economy scoring remains unchanged.".to_string(),
+            },
+            learning_agenda: PromotePlanLearningAgendaProjection {
+                priority_delta: 0,
+                queue_action: "review_only".to_string(),
+                reasoning: "Underpowered causal evidence opens only a review task and does not mutate learning priority.".to_string(),
+            },
+            preflight_routing: PromotePlanPreflightRoutingProjection {
+                profile: "unchanged".to_string(),
+                confidence_gate: "low".to_string(),
+                reasoning: "No causal routing change is projected without persisted baseline/outcome evidence.".to_string(),
+            },
+            procedure_verification: PromotePlanProcedureVerificationProjection {
+                status: "evidence_required".to_string(),
+                requires_revalidation: true,
+                reasoning: "Procedure verification requires explicit causal evidence before status changes.".to_string(),
+            },
+            audit: PromotePlanDownstreamAudit {
+                mutation_mode: if dry_run { "dry_run_review_only".to_string() } else { "proposal_review_only".to_string() },
+                raw_evidence_replaced: false,
+                silent_mutation: false,
+            },
+        };
+    }
+
     let priority_delta = match action {
         PromotionAction::Promote => 3,
         PromotionAction::Hold => 1,
@@ -2055,38 +1914,10 @@ fn normalize_method(method: &str, degradations: &mut Vec<TraceDegradation>) -> S
     }
 }
 
-fn method_signal(method: &str) -> (CausalEvidenceStrength, f64) {
-    match method {
-        "experiment" => (CausalEvidenceStrength::ExperimentSupported, 0.16),
-        "replay" => (CausalEvidenceStrength::ReplaySupported, 0.10),
-        "matching" => (CausalEvidenceStrength::Correlational, 0.04),
-        _ => (CausalEvidenceStrength::ExposureOnly, 0.01),
-    }
-}
-
-fn derive_action(
-    estimated_uplift: f64,
-    minimum_uplift: f64,
-    evidence_strength: CausalEvidenceStrength,
-) -> PromotionAction {
-    if estimated_uplift < 0.0 {
-        return PromotionAction::Demote;
-    }
-    if estimated_uplift >= minimum_uplift
-        && matches!(
-            evidence_strength,
-            CausalEvidenceStrength::ExperimentSupported | CausalEvidenceStrength::ReplaySupported
-        )
-    {
-        PromotionAction::Promote
-    } else {
-        PromotionAction::Hold
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::decision::DecisionPlane;
 
     #[test]
     fn trace_options_builder_works() {
@@ -2124,13 +1955,25 @@ mod tests {
     }
 
     #[test]
-    fn trace_with_run_id_returns_chain() {
+    fn trace_with_run_id_abstains_without_evidence_ledger() {
         let opts = TraceOptions::new().with_run_id("run-test-001");
         let report = trace_causal_chains(&opts);
 
-        assert!(!report.is_empty());
-        assert_eq!(report.chains.len(), 1);
-        assert!(!report.chains[0].recorder_run_ids.is_empty());
+        assert!(
+            report.is_empty(),
+            "Without evidence ledger, trace should be empty"
+        );
+        assert!(
+            report
+                .degradations
+                .iter()
+                .any(|d| d.code == "causal_evidence_unavailable"),
+            "Should report causal_evidence_unavailable degradation"
+        );
+        assert!(
+            !report.filters_applied.is_empty(),
+            "Filter should still be recorded"
+        );
     }
 
     #[test]
@@ -2247,20 +2090,31 @@ mod tests {
     }
 
     #[test]
-    fn estimate_with_artifact_returns_estimate() {
+    fn estimate_with_artifact_abstains_without_evidence_ledger() {
         let opts = EstimateOptions::new()
             .with_artifact_id("memory-001")
             .with_decision_id("decision-001");
         let report = estimate_causal_uplift(&opts);
 
-        assert!(!report.is_empty());
-        assert_eq!(report.estimates.len(), 1);
-        assert_eq!(report.estimates[0].artifact_id, "memory-001");
-        assert_eq!(report.estimates[0].decision_id, "decision-001");
+        assert!(
+            report.is_empty(),
+            "Without evidence ledger, estimates should be empty"
+        );
+        assert!(
+            report
+                .degradations
+                .iter()
+                .any(|d| d.code == "causal_sample_underpowered"),
+            "Should report causal_sample_underpowered degradation"
+        );
+        assert!(
+            !report.filters_applied.is_empty(),
+            "Filters should still be recorded"
+        );
     }
 
     #[test]
-    fn estimate_method_affects_confidence() {
+    fn estimate_method_is_recorded_even_without_evidence() {
         let naive = EstimateOptions::new()
             .with_artifact_id("art-001")
             .with_method("naive");
@@ -2271,13 +2125,15 @@ mod tests {
         let naive_report = estimate_causal_uplift(&naive);
         let exp_report = estimate_causal_uplift(&experiment);
 
-        assert_eq!(
-            naive_report.estimates[0].confidence_state,
-            ConfidenceState::Insufficient
+        assert_eq!(naive_report.method_used, "naive");
+        assert_eq!(exp_report.method_used, "experiment");
+        assert!(
+            naive_report.estimates.is_empty(),
+            "No estimates without evidence"
         );
-        assert_eq!(
-            exp_report.estimates[0].confidence_state,
-            ConfidenceState::High
+        assert!(
+            exp_report.estimates.is_empty(),
+            "No estimates without evidence"
         );
     }
 
@@ -2293,18 +2149,22 @@ mod tests {
     }
 
     #[test]
-    fn estimate_includes_confounders_when_requested() {
+    fn estimate_confounders_unavailable_without_evidence_ledger() {
         let opts = EstimateOptions::new()
             .with_artifact_id("art-001")
             .with_confounders();
         let report = estimate_causal_uplift(&opts);
 
-        assert!(report.has_confounders());
+        assert!(
+            !report.has_confounders(),
+            "No confounders without evidence ledger"
+        );
         assert!(
             report
-                .confounders
+                .degradations
                 .iter()
-                .any(|c| c.kind == "task_complexity")
+                .any(|d| d.code == "causal_confounders_unavailable"),
+            "Should report causal_confounders_unavailable degradation"
         );
     }
 
@@ -2412,7 +2272,7 @@ mod tests {
     }
 
     #[test]
-    fn compare_with_sources_returns_comparisons() {
+    fn compare_with_sources_abstains_without_evidence_ledger() {
         let report = compare_causal_evidence(
             &CompareOptions::new()
                 .with_artifact_id("mem-001")
@@ -2425,12 +2285,16 @@ mod tests {
 
         assert_eq!(report.schema, CAUSAL_COMPARE_SCHEMA_V1);
         assert_eq!(report.method_used, "experiment");
-        assert_eq!(report.comparisons.len(), 4);
+        assert!(
+            report.comparisons.is_empty(),
+            "No comparisons without evidence ledger"
+        );
         assert!(
             report
-                .comparisons
+                .degradations
                 .iter()
-                .all(|comparison| !comparison.verdict.is_empty())
+                .any(|d| d.code == "causal_comparison_evidence_unavailable"),
+            "Should report causal_comparison_evidence_unavailable degradation"
         );
     }
 
@@ -2547,7 +2411,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_plan_action_override_is_honored() {
+    fn promote_plan_action_override_recorded_but_not_actionable() {
         let report = promote_causal_plan(
             &PromotePlanOptions::new()
                 .with_artifact_id("mem-001")
@@ -2555,12 +2419,15 @@ mod tests {
                 .dry_run(),
         );
 
-        assert_eq!(report.plans[0].action, PromotionAction::Archive);
+        // With underpowered evidence, action is Hold regardless of override
+        assert_eq!(report.plans[0].action, PromotionAction::Hold);
+        // But the override is recorded as a degradation
         assert!(
-            report.plans[0]
-                .blocking_confounder_ids
+            report
+                .degradations
                 .iter()
-                .any(|confounder| confounder.contains("confounder-"))
+                .any(|d| d.code == "action_override_not_actionable"),
+            "Should report action_override_not_actionable degradation"
         );
     }
 
@@ -2588,7 +2455,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_plan_projects_cross_surface_effects_without_mutation() {
+    fn promote_plan_projects_review_only_effects_without_evidence() {
         let report = promote_causal_plan(
             &PromotePlanOptions::new()
                 .with_artifact_id("mem-001")
@@ -2598,15 +2465,20 @@ mod tests {
         let downstream = &report.downstream_effects;
 
         assert_eq!(downstream.schema, CAUSAL_DOWNSTREAM_EFFECTS_SCHEMA_V1);
-        assert_eq!(downstream.economy_score.priority_delta, 3);
-        assert_eq!(downstream.learning_agenda.queue_action, "raise_priority");
-        assert_eq!(downstream.preflight_routing.profile, "standard");
+        // Without evidence, no priority delta
+        assert_eq!(downstream.economy_score.priority_delta, 0);
+        // Review-only queue action
+        assert_eq!(downstream.learning_agenda.queue_action, "review_only");
+        // No profile change without evidence
+        assert_eq!(downstream.preflight_routing.profile, "unchanged");
+        // Evidence required before status changes
         assert_eq!(
             downstream.procedure_verification.status,
-            "validated_by_uplift"
+            "evidence_required"
         );
-        assert!(!downstream.procedure_verification.requires_revalidation);
-        assert_eq!(downstream.audit.mutation_mode, "dry_run_projection");
+        assert!(downstream.procedure_verification.requires_revalidation);
+        // Mutation mode reflects review-only
+        assert_eq!(downstream.audit.mutation_mode, "dry_run_review_only");
         assert!(!downstream.audit.raw_evidence_replaced);
         assert!(!downstream.audit.silent_mutation);
     }
