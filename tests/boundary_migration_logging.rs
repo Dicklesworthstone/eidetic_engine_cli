@@ -658,6 +658,32 @@ fn build_boundary_log_summary(log_paths: &[PathBuf]) -> Result<JsonValue, String
     }))
 }
 
+fn write_boundary_log_with_mechanical_evidence(
+    dir: &Path,
+    record: &BoundaryLogRecord,
+    evidence: JsonValue,
+) -> TestResult {
+    write_boundary_log(dir, record)?;
+    let path = dir.join("boundary-log.json");
+    let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let mut log: JsonValue = serde_json::from_str(&content).map_err(|error| error.to_string())?;
+    let Some(log_object) = log.as_object_mut() else {
+        return Err("boundary log root must be a JSON object".to_owned());
+    };
+    if let Some(schema_validation) = log_object
+        .get_mut("schema_validation")
+        .and_then(JsonValue::as_object_mut)
+    {
+        schema_validation.insert("status".to_owned(), JsonValue::String("matched".to_owned()));
+    }
+    log_object.insert("mechanical_evidence".to_owned(), evidence);
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&log).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn make_record(
     dir: &Path,
     output: &Output,
@@ -709,6 +735,271 @@ fn make_record(
         reproduction_command: render_reproduction_command(&cwd, &command, &argv),
         first_failure: None,
     })
+}
+
+#[test]
+fn boundary_log_records_v76q_claim_and_certificate_manifest_evidence() -> TestResult {
+    let root = unique_dossier_dir("boundary-logging-v76q-evidence")?;
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+
+    let claim_id = ee::models::ClaimId::from_uuid(uuid::Uuid::from_u128(
+        0x7600_0000_0000_0000_0000_0000_0000_0001,
+    ))
+    .to_string();
+    let claims_file = workspace.join("claims.yaml");
+    fs::write(
+        &claims_file,
+        format!(
+            "schema: ee.claims_file.v1\nversion: 1\nclaims:\n  - id: {claim_id}\n    title: V76Q real claim\n    status: active\n    frequency: weekly\n"
+        ),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let claim_dir = workspace.join("artifacts").join(&claim_id);
+    fs::create_dir_all(&claim_dir).map_err(|error| error.to_string())?;
+    let claim_payload = b"{\"claim\":\"v76q\",\"ok\":true}\n";
+    let claim_payload_hash = blake3::hash(claim_payload).to_hex().to_string();
+    fs::write(claim_dir.join("stdout.json"), claim_payload).map_err(|error| error.to_string())?;
+    let claim_manifest_path = claim_dir.join("manifest.json");
+    fs::write(
+        &claim_manifest_path,
+        serde_json::to_string_pretty(&json!({
+            "schema": "ee.claim_manifest.v1",
+            "claimId": claim_id,
+            "verificationStatus": "passing",
+            "artifacts": [
+                {
+                    "path": "stdout.json",
+                    "artifactType": "report",
+                    "blake3Hash": claim_payload_hash,
+                    "sizeBytes": claim_payload.len(),
+                    "createdAt": "2026-05-04T00:00:00Z"
+                }
+            ]
+        }))
+        .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let certificate_id = "cert_v76q_valid";
+    let certificate_payload = b"{\"certificate\":\"v76q\",\"ok\":true}\n";
+    let certificate_payload_hash = blake3::hash(certificate_payload).to_hex().to_string();
+    let certificate_payload_path = workspace.join("certificate-payload.json");
+    fs::write(&certificate_payload_path, certificate_payload).map_err(|error| error.to_string())?;
+    let certificate_manifest_path = workspace.join("certificates.json");
+    fs::write(
+        &certificate_manifest_path,
+        serde_json::to_string_pretty(&json!({
+            "schema": ee::core::certificate::CERTIFICATE_MANIFEST_SCHEMA_V1,
+            "certificates": [
+                {
+                    "id": certificate_id,
+                    "kind": "pack",
+                    "status": "valid",
+                    "workspaceId": "workspace_v76q",
+                    "issuedAt": "2026-05-04T00:00:00Z",
+                    "expiresAt": "2999-01-01T00:00:00Z",
+                    "payloadPath": "certificate-payload.json",
+                    "payloadHash": certificate_payload_hash,
+                    "payloadSchema": ee::core::certificate::CERTIFICATE_PAYLOAD_SCHEMA_V1,
+                    "assumptions": [{"valid": true}]
+                }
+            ]
+        }))
+        .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let workspace_arg = workspace.display().to_string();
+    let claim_output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "--json",
+        "claim",
+        "verify",
+        &claim_id,
+    ])?;
+    ensure(
+        claim_output.status.success(),
+        "claim verify fixture should pass",
+    )?;
+    ensure(
+        claim_output.stderr.is_empty(),
+        "claim verify JSON stderr must stay empty",
+    )?;
+    let claim_dir_log = root.join("claim-verify");
+    write_step_artifacts(&claim_dir_log, &claim_output)?;
+    let mut claim_record = make_record(&claim_dir_log, &claim_output, "ee.claim_verify.v1")?;
+    claim_record.argv = vec![
+        "--workspace".to_owned(),
+        workspace_arg.clone(),
+        "--json".to_owned(),
+        "claim".to_owned(),
+        "verify".to_owned(),
+        claim_id.clone(),
+    ];
+    claim_record.workspace = Some(workspace.clone());
+    claim_record.evidence_ids = vec![
+        "v76q.claims_file".to_owned(),
+        "v76q.claim_manifest".to_owned(),
+    ];
+    claim_record.command_boundary_matrix_row = Some("claim".to_owned());
+    claim_record.golden_path =
+        Some("tests/fixtures/golden/claims/verified_claim.json.golden".to_owned());
+    claim_record.golden_status = "schema_only".to_owned();
+    claim_record.fixture_hashes.insert(
+        "v76q.claims_file".to_owned(),
+        blake3::hash(
+            fs::read(&claims_file)
+                .map_err(|error| error.to_string())?
+                .as_slice(),
+        )
+        .to_hex()
+        .to_string(),
+    );
+    claim_record.fixture_hashes.insert(
+        "v76q.claim_artifact_stdout".to_owned(),
+        claim_payload_hash.clone(),
+    );
+    claim_record.fixture_hashes.insert(
+        "v76q.claim_manifest".to_owned(),
+        blake3::hash(
+            fs::read(&claim_manifest_path)
+                .map_err(|error| error.to_string())?
+                .as_slice(),
+        )
+        .to_hex()
+        .to_string(),
+    );
+    claim_record.reproduction_command =
+        render_reproduction_command(&claim_record.cwd, &claim_record.command, &claim_record.argv);
+    write_boundary_log_with_mechanical_evidence(
+        &claim_dir_log,
+        &claim_record,
+        json!({
+            "claims_file_path": claims_file.display().to_string(),
+            "artifact_manifest_paths": [claim_manifest_path.display().to_string()],
+            "checked_hashes": {
+                "claim_artifact_stdout": claim_payload_hash
+            },
+            "degradation_codes": []
+        }),
+    )?;
+
+    let certificate_output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "--json",
+        "certificate",
+        "verify",
+        certificate_id,
+    ])?;
+    ensure(
+        certificate_output.status.success(),
+        "certificate verify fixture should pass",
+    )?;
+    ensure(
+        certificate_output.stderr.is_empty(),
+        "certificate verify JSON stderr must stay empty",
+    )?;
+    let certificate_dir_log = root.join("certificate-verify");
+    write_step_artifacts(&certificate_dir_log, &certificate_output)?;
+    let mut certificate_record = make_record(
+        &certificate_dir_log,
+        &certificate_output,
+        "ee.certificate.verify.v1",
+    )?;
+    certificate_record.argv = vec![
+        "--workspace".to_owned(),
+        workspace_arg,
+        "--json".to_owned(),
+        "certificate".to_owned(),
+        "verify".to_owned(),
+        certificate_id.to_owned(),
+    ];
+    certificate_record.workspace = Some(workspace);
+    certificate_record.evidence_ids = vec![
+        "v76q.certificate_manifest".to_owned(),
+        "v76q.certificate_payload".to_owned(),
+    ];
+    certificate_record.command_boundary_matrix_row = Some("certificate".to_owned());
+    certificate_record.golden_status = "schema_only".to_owned();
+    certificate_record.fixture_hashes.insert(
+        "v76q.certificate_manifest".to_owned(),
+        blake3::hash(
+            fs::read(&certificate_manifest_path)
+                .map_err(|error| error.to_string())?
+                .as_slice(),
+        )
+        .to_hex()
+        .to_string(),
+    );
+    certificate_record.fixture_hashes.insert(
+        "v76q.certificate_payload".to_owned(),
+        certificate_payload_hash.clone(),
+    );
+    certificate_record.reproduction_command = render_reproduction_command(
+        &certificate_record.cwd,
+        &certificate_record.command,
+        &certificate_record.argv,
+    );
+    write_boundary_log_with_mechanical_evidence(
+        &certificate_dir_log,
+        &certificate_record,
+        json!({
+            "certificate_manifest_path": certificate_manifest_path.display().to_string(),
+            "artifact_manifest_paths": [certificate_manifest_path.display().to_string()],
+            "checked_hashes": {
+                "certificate_payload": certificate_payload_hash
+            },
+            "degradation_codes": []
+        }),
+    )?;
+
+    for (path, required_fixtures) in [
+        (
+            claim_dir_log.join("boundary-log.json"),
+            vec![
+                "v76q.claims_file",
+                "v76q.claim_manifest",
+                "v76q.claim_artifact_stdout",
+            ],
+        ),
+        (
+            certificate_dir_log.join("boundary-log.json"),
+            vec!["v76q.certificate_manifest", "v76q.certificate_payload"],
+        ),
+    ] {
+        validate_boundary_log_extended(&path)
+            .map_err(|failure| format!("v76q boundary log should validate: {failure:?}"))?;
+        let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        let log: JsonValue = serde_json::from_str(&content).map_err(|error| error.to_string())?;
+        ensure(
+            validate_fixture_hashes(&log, &required_fixtures).is_none(),
+            "v76q log should include required fixture hashes",
+        )?;
+        ensure(
+            log.pointer("/schema_validation/status")
+                .and_then(JsonValue::as_str)
+                == Some("matched"),
+            "v76q log should record schema validation result",
+        )?;
+        ensure(
+            log.pointer("/golden_validation/status")
+                .and_then(JsonValue::as_str)
+                == Some("schema_only"),
+            "v76q log should record golden validation result",
+        )?;
+        ensure(
+            log.pointer("/mechanical_evidence/checked_hashes")
+                .and_then(JsonValue::as_object)
+                .is_some_and(|hashes| !hashes.is_empty()),
+            "v76q log should record checked hashes",
+        )?;
+    }
+
+    Ok(())
 }
 
 #[test]
