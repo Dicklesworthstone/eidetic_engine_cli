@@ -17,6 +17,9 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::core::focus::{focus_state_hash, read_active_focus_state};
+use crate::core::task_frame::{
+    TaskFrameRecord, TaskFrameShowOptions, NON_EXECUTING_CONTRACT, show_task_frame,
+};
 use crate::models::DomainError;
 
 /// Schema for handoff capsule format.
@@ -349,6 +352,8 @@ pub struct PreviewOptions {
     pub since: Option<String>,
     /// Include token estimates.
     pub include_estimates: bool,
+    /// Optional task-frame scope to include.
+    pub task_frame_id: Option<String>,
 }
 
 impl Default for PreviewOptions {
@@ -358,6 +363,7 @@ impl Default for PreviewOptions {
             profile: CapsuleProfile::Resume,
             since: None,
             include_estimates: true,
+            task_frame_id: None,
         }
     }
 }
@@ -372,6 +378,7 @@ pub struct PreviewReport {
     pub omitted_sections: Vec<OmittedSection>,
     pub evidence_ids: Vec<String>,
     pub active_focus: Option<serde_json::Value>,
+    pub task_frame: Option<serde_json::Value>,
     pub token_estimate: usize,
     pub byte_estimate: usize,
     pub redaction_posture: String,
@@ -408,6 +415,7 @@ impl PreviewReport {
             omitted_sections: Vec::new(),
             evidence_ids: Vec::new(),
             active_focus: None,
+            task_frame: None,
             token_estimate: 0,
             byte_estimate: 0,
             redaction_posture: "standard".to_owned(),
@@ -445,6 +453,8 @@ pub struct CreateOptions {
     pub since: Option<String>,
     /// Whether to run in dry-run mode.
     pub dry_run: bool,
+    /// Optional task-frame scope to include.
+    pub task_frame_id: Option<String>,
 }
 
 impl Default for CreateOptions {
@@ -455,6 +465,7 @@ impl Default for CreateOptions {
             profile: CapsuleProfile::Resume,
             since: None,
             dry_run: false,
+            task_frame_id: None,
         }
     }
 }
@@ -470,6 +481,7 @@ pub struct CreateReport {
     pub sections_included: usize,
     pub evidence_count: usize,
     pub active_focus: Option<serde_json::Value>,
+    pub task_frame: Option<serde_json::Value>,
     pub token_count: usize,
     pub byte_count: usize,
     pub content_hash: String,
@@ -490,6 +502,7 @@ impl CreateReport {
             sections_included: 0,
             evidence_count: 0,
             active_focus: None,
+            task_frame: None,
             token_count: 0,
             byte_count: 0,
             content_hash: String::new(),
@@ -633,6 +646,8 @@ pub struct ResumeOptions {
     pub workspace: PathBuf,
     /// Maximum sections to include.
     pub max_sections: Option<usize>,
+    /// Optional task-frame scope to merge into the resume payload.
+    pub task_frame_id: Option<String>,
 }
 
 impl Default for ResumeOptions {
@@ -642,6 +657,7 @@ impl Default for ResumeOptions {
             use_latest: false,
             workspace: PathBuf::from("."),
             max_sections: None,
+            task_frame_id: None,
         }
     }
 }
@@ -662,6 +678,7 @@ pub struct ResumeReport {
     pub recent_outcomes: Vec<String>,
     pub selected_memories: Vec<SelectedMemory>,
     pub active_focus: Option<serde_json::Value>,
+    pub task_frame: Option<serde_json::Value>,
     pub artifact_pointers: Vec<ArtifactPointer>,
     pub degradations: Vec<DegradationInfo>,
     pub resumed_at: String,
@@ -700,6 +717,7 @@ impl ResumeReport {
             recent_outcomes: Vec::new(),
             selected_memories: Vec::new(),
             active_focus: None,
+            task_frame: None,
             artifact_pointers: Vec::new(),
             degradations: Vec::new(),
             resumed_at: Utc::now().to_rfc3339(),
@@ -769,6 +787,177 @@ fn render_focus_section(focus_state: &crate::models::FocusState) -> String {
     lines.join("\n")
 }
 
+fn task_frame_evidence_ids(frame: &TaskFrameRecord) -> Vec<String> {
+    let mut ids = vec![frame.id.clone()];
+    ids.extend(
+        frame
+            .evidence_links
+            .iter()
+            .map(|link| format!("{}:{}", link.kind, link.id)),
+    );
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn render_task_frame_section(frame: &TaskFrameRecord) -> String {
+    let mut lines = vec![
+        format!("Task frame: {}", frame.id),
+        format!("Goal: {}", frame.root_goal),
+        format!("Status: {}", frame.status.as_str()),
+        format!("Redaction: {}", frame.redaction_status),
+        format!("Contract: {NON_EXECUTING_CONTRACT}"),
+    ];
+    if let Some(focus) = &frame.current_focus {
+        lines.push(format!("Current focus: {focus}"));
+    }
+    if !frame.blockers.is_empty() {
+        lines.push("Blockers:".to_owned());
+        for blocker in &frame.blockers {
+            lines.push(format!("- {blocker}"));
+        }
+    }
+    if !frame.subgoals.is_empty() {
+        lines.push("Subgoals:".to_owned());
+        for subgoal in &frame.subgoals {
+            let parent = subgoal
+                .parent_id
+                .as_deref()
+                .map_or(String::new(), |parent| format!(" parent={parent}"));
+            lines.push(format!(
+                "- {} [{}{}] {}",
+                subgoal.id,
+                subgoal.status.as_str(),
+                parent,
+                subgoal.title
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn read_handoff_task_frame(
+    workspace: &Path,
+    task_frame_id: Option<&str>,
+) -> Result<Option<TaskFrameRecord>, DomainError> {
+    match show_task_frame(&TaskFrameShowOptions {
+        workspace_path: workspace.to_path_buf(),
+        frame_id: task_frame_id.map(ToOwned::to_owned),
+        active: task_frame_id.is_none(),
+    }) {
+        Ok(report) => Ok(report.frame),
+        Err(error) if task_frame_id.is_none() && error.code() == "not_found" => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn task_frame_json(frame: &TaskFrameRecord) -> Option<serde_json::Value> {
+    serde_json::to_value(frame).ok()
+}
+
+fn add_task_frame_to_resume(report: &mut ResumeReport, task_frame: serde_json::Value) {
+    let frame_id = task_frame
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let status = task_frame
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let redaction_status = task_frame
+        .get("redactionStatus")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+
+    if let Some(goal) = task_frame.get("rootGoal").and_then(serde_json::Value::as_str) {
+        report.current_objective = Some(goal.to_owned());
+    }
+    report.status_summary = Some(format!(
+        "Passive task frame {frame_id} is {status}; redaction={redaction_status}; non_executing=true."
+    ));
+    report.next_actions.push(
+        NextAction::new(1, "Review passive task-frame state.")
+            .with_command(format!("ee task-frame show {frame_id} --json"))
+            .with_reason("Task frame was included as durable resume context, not as an execution plan."),
+    );
+
+    if let Some(blockers) = task_frame
+        .get("blockers")
+        .and_then(serde_json::Value::as_array)
+    {
+        for (index, blocker) in blockers.iter().enumerate() {
+            if let Some(description) = blocker.as_str() {
+                report.blockers.push(
+                    Blocker::new(format!("task_frame_blocker_{}", index + 1), description)
+                        .with_resolution(format!("Resolve or update {frame_id} before closing."))
+                        .hard(),
+                );
+            }
+        }
+    }
+
+    if let Some(subgoals) = task_frame
+        .get("subgoals")
+        .and_then(serde_json::Value::as_array)
+    {
+        for subgoal in subgoals {
+            let subgoal_status = subgoal
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let title = subgoal
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("untitled subgoal");
+            if subgoal_status == "blocked" {
+                let subgoal_id = subgoal
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown_subgoal");
+                report.blockers.push(
+                    Blocker::new(subgoal_id, format!("Blocked subgoal: {title}"))
+                        .with_resolution(format!("Update {frame_id} subgoal status when resolved."))
+                        .hard(),
+                );
+            }
+        }
+    }
+
+    if let Some(links) = task_frame
+        .get("evidenceLinks")
+        .and_then(serde_json::Value::as_array)
+    {
+        for link in links {
+            let kind = link
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let id = link
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if kind.is_empty() || id.is_empty() {
+                continue;
+            }
+            if kind == "memory" {
+                report.selected_memories.push(SelectedMemory {
+                    id: id.to_owned(),
+                    reason: format!("Linked by passive task frame {frame_id}."),
+                    confidence: "verified".to_owned(),
+                });
+            } else {
+                report.artifact_pointers.push(ArtifactPointer {
+                    id: id.to_owned(),
+                    path: None,
+                    description: format!("{kind} linked by passive task frame {frame_id}."),
+                });
+            }
+        }
+    }
+
+    report.task_frame = Some(task_frame);
+}
+
 /// Preview a handoff capsule without writing it.
 pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, DomainError> {
     let mut report = PreviewReport::new(options.workspace.clone(), options.profile);
@@ -832,6 +1021,33 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
                 format!("Active focus state could not be read: {}", error.message()),
             )
             .with_next_action("ee focus show --json"),
+        ),
+    }
+
+    match read_handoff_task_frame(&options.workspace, options.task_frame_id.as_deref()) {
+        Ok(Some(frame)) => {
+            let evidence_ids = task_frame_evidence_ids(&frame);
+            let task_frame_section = CapsuleSection::new("task_frame", "Passive Task Frame")
+                .with_content(render_task_frame_section(&frame))
+                .with_confidence(EvidenceConfidence::Verified)
+                .with_evidence(evidence_ids.clone());
+            report.evidence_ids.extend(evidence_ids);
+            report.task_frame = task_frame_json(&frame);
+            report.planned_sections.push(PlannedSection {
+                id: task_frame_section.id.clone(),
+                title: task_frame_section.title.clone(),
+                confidence: task_frame_section.confidence.as_str().to_owned(),
+                evidence_count: task_frame_section.evidence_ids.len(),
+                token_estimate: task_frame_section.token_estimate,
+            });
+        }
+        Ok(None) => {}
+        Err(error) => report.degradations.push(
+            DegradationInfo::new(
+                "handoff_task_frame_unavailable",
+                format!("Task-frame state could not be read: {}", error.message()),
+            )
+            .with_next_action("ee task-frame show --active --json"),
         ),
     }
 
@@ -915,6 +1131,22 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
     };
     report.active_focus = active_focus.clone();
 
+    let task_frame = read_handoff_task_frame(&options.workspace, options.task_frame_id.as_deref())?;
+    let task_frame_json = task_frame.as_ref().and_then(task_frame_json);
+    if let Some(frame) = &task_frame {
+        let task_frame_evidence_ids = task_frame_evidence_ids(frame);
+        sections.push(
+            CapsuleSection::new("task_frame", "Passive Task Frame")
+                .with_content(render_task_frame_section(frame))
+                .with_confidence(EvidenceConfidence::Verified)
+                .with_evidence(task_frame_evidence_ids.clone()),
+        );
+        report.evidence_count = report
+            .evidence_count
+            .saturating_add(task_frame_evidence_ids.len());
+    }
+    report.task_frame = task_frame_json.clone();
+
     if options.profile.include_full_evidence() {
         sections.push(
             CapsuleSection::new("decisions", "Recent Decisions")
@@ -934,6 +1166,7 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         "profile": options.profile.as_str(),
         "sections": sections,
         "active_focus": active_focus,
+        "task_frame": task_frame_json,
         "created_at": Utc::now().to_rfc3339(),
     });
 
@@ -1088,6 +1321,31 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         }
     }
 
+    let task_frame = match options.task_frame_id.as_deref() {
+        Some(_) => match read_handoff_task_frame(&options.workspace, options.task_frame_id.as_deref())
+        {
+            Ok(Some(frame)) => task_frame_json(&frame),
+            Ok(None) => None,
+            Err(error) => {
+                report.degradations.push(
+                    DegradationInfo::new(
+                        "handoff_task_frame_unavailable",
+                        format!("Task-frame state could not be read: {}", error.message()),
+                    )
+                    .with_next_action("ee task-frame show --active --json"),
+                );
+                None
+            }
+        },
+        None => capsule
+            .get("task_frame")
+            .cloned()
+            .filter(|value| !value.is_null()),
+    };
+    if let Some(task_frame) = task_frame {
+        add_task_frame_to_resume(&mut report, task_frame);
+    }
+
     if let Some(sections) = capsule.get("sections").and_then(|v| v.as_array()) {
         for section in sections {
             let section_id = section.get("id").and_then(|v| v.as_str()).unwrap_or("");
@@ -1097,7 +1355,7 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
                 .unwrap_or("");
 
             match section_id {
-                "objective" => {
+                "objective" if report.current_objective.is_none() => {
                     report.current_objective = Some(section_content.to_owned());
                 }
                 "next_actions" => {
@@ -1376,6 +1634,7 @@ mod tests {
             profile: CapsuleProfile::Resume,
             since: None,
             include_estimates: true,
+            task_frame_id: None,
         })
         .map_err(|error| error.message())?;
         ensure(preview.active_focus.is_some(), "preview includes focus")?;
@@ -1394,6 +1653,7 @@ mod tests {
             profile: CapsuleProfile::Resume,
             since: None,
             dry_run: false,
+            task_frame_id: None,
         })
         .map_err(|error| error.message())?;
         ensure(create.active_focus.is_some(), "create includes focus")?;
@@ -1403,6 +1663,7 @@ mod tests {
             use_latest: false,
             workspace: dir.path().to_path_buf(),
             max_sections: None,
+            task_frame_id: None,
         })
         .map_err(|error| error.message())?;
         ensure(resume.active_focus.is_some(), "resume includes focus")?;
@@ -1412,6 +1673,98 @@ mod tests {
                 .iter()
                 .any(|memory| memory.id == memory_id),
             "resume selected focused memory",
+        )
+    }
+
+    #[test]
+    fn handoff_preview_create_and_resume_include_redacted_task_frame() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let created =
+            crate::core::task_frame::create_task_frame(&crate::core::task_frame::TaskFrameCreateOptions {
+                workspace_path: dir.path().to_path_buf(),
+                goal: "Continue release with api_key=sk-live-123".to_owned(),
+                actor: "cod-pane6".to_owned(),
+                status: crate::core::task_frame::TaskFrameStatus::Active,
+                current_focus: Some("verify handoff".to_owned()),
+                blockers: vec!["password=hunter2 still unavailable".to_owned()],
+                evidence_links: vec![
+                    crate::core::task_frame::TaskEvidenceLink {
+                        kind: "memory".to_owned(),
+                        id: "mem_task_frame".to_owned(),
+                    },
+                    crate::core::task_frame::TaskEvidenceLink {
+                        kind: "context_pack".to_owned(),
+                        id: "pack_task_frame".to_owned(),
+                    },
+                ],
+                created_at: Some("2026-05-04T00:00:00Z".to_owned()),
+                dry_run: false,
+            })
+            .map_err(|error| error.message())?;
+        let frame_id = created.frame.ok_or_else(|| "missing frame".to_owned())?.id;
+
+        let preview = preview_handoff(&PreviewOptions {
+            workspace: dir.path().to_path_buf(),
+            profile: CapsuleProfile::Resume,
+            since: None,
+            include_estimates: true,
+            task_frame_id: Some(frame_id.clone()),
+        })
+        .map_err(|error| error.message())?;
+        ensure(preview.task_frame.is_some(), "preview includes task frame")?;
+        ensure(
+            preview
+                .planned_sections
+                .iter()
+                .any(|section| section.id == "task_frame"),
+            "preview includes task-frame section",
+        )?;
+
+        let output = dir.path().join("handoff.json");
+        let create = create_handoff(&CreateOptions {
+            workspace: dir.path().to_path_buf(),
+            output: output.clone(),
+            profile: CapsuleProfile::Resume,
+            since: None,
+            dry_run: false,
+            task_frame_id: Some(frame_id.clone()),
+        })
+        .map_err(|error| error.message())?;
+        ensure(create.task_frame.is_some(), "create includes task frame")?;
+
+        let capsule_text = std::fs::read_to_string(&output).map_err(|error| error.to_string())?;
+        ensure(
+            !capsule_text.contains("sk-live-123") && !capsule_text.contains("hunter2"),
+            "capsule must contain redacted task-frame state",
+        )?;
+
+        let resume = resume_handoff(&ResumeOptions {
+            path: output,
+            use_latest: false,
+            workspace: dir.path().to_path_buf(),
+            max_sections: None,
+            task_frame_id: None,
+        })
+        .map_err(|error| error.message())?;
+        ensure(resume.task_frame.is_some(), "resume includes task frame")?;
+        ensure_equal(
+            &resume.current_objective,
+            &Some("Continue release with api_key=***REDACTED***".to_owned()),
+            "resume objective comes from redacted task frame",
+        )?;
+        ensure(
+            resume
+                .selected_memories
+                .iter()
+                .any(|memory| memory.id == "mem_task_frame"),
+            "resume links task-frame memory evidence",
+        )?;
+        ensure(
+            resume
+                .artifact_pointers
+                .iter()
+                .any(|artifact| artifact.id == "pack_task_frame"),
+            "resume links task-frame artifacts",
         )
     }
 
@@ -1447,6 +1800,7 @@ mod tests {
             profile: CapsuleProfile::Resume,
             since: None,
             include_estimates: true,
+            task_frame_id: None,
         };
 
         let result = preview_handoff(&options);

@@ -19,6 +19,21 @@ pub const TASK_FRAME_REPORT_SCHEMA_V1: &str = "ee.task_frame.report.v1";
 pub const TASK_FRAME_ID_PREFIX: &str = "tf_";
 pub const TASK_SUBGOAL_ID_PREFIX: &str = "tg_";
 pub const NON_EXECUTING_CONTRACT: &str = "records task state only; never executes shell commands, plans tools, or mutates workspace files";
+const REDACTION_PLACEHOLDER: &str = "***REDACTED***";
+const SECRET_KEYS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "auth_token",
+    "bearer_token",
+    "client_secret",
+    "database_url",
+    "password",
+    "passwd",
+    "private_key",
+    "secret",
+    "ssh_key",
+    "token",
+];
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -276,20 +291,25 @@ pub fn create_task_frame(options: &TaskFrameCreateOptions) -> Result<TaskFrameRe
         });
     }
 
+    let (root_goal, goal_redacted) = redact_task_text(options.goal.trim());
+    let (current_focus, focus_redacted) = redact_optional_task_text(options.current_focus.clone());
+    let (blockers, blockers_redacted) = redact_task_strings(&options.blockers);
+    let redacted = goal_redacted || focus_redacted || blockers_redacted;
+
     let frame = TaskFrameRecord {
         schema: TASK_FRAME_SCHEMA_V1.to_owned(),
         id: frame_id,
         workspace_root,
-        root_goal: options.goal.trim().to_owned(),
+        root_goal,
         status: options.status,
         actor: options.actor.trim().to_owned(),
         source: "ee task-frame create".to_owned(),
-        current_focus: normalize_optional(options.current_focus.clone()),
-        blockers: normalized_strings(&options.blockers),
+        current_focus,
+        blockers,
         subgoals: Vec::new(),
         evidence_links: normalized_evidence_links(&options.evidence_links),
         suggested_commands: suggested_commands(None),
-        redaction_status: "none".to_owned(),
+        redaction_status: redaction_status(redacted),
         non_executing_contract: NON_EXECUTING_CONTRACT.to_owned(),
         created_at: now.clone(),
         updated_at: now,
@@ -361,11 +381,15 @@ pub fn update_task_frame(options: &TaskFrameUpdateOptions) -> Result<TaskFrameRe
             frame.closed_at = Some(now.clone());
         }
     }
+    let mut redacted = frame.redaction_status == "redacted";
     if options.current_focus.is_some() {
-        frame.current_focus = normalize_optional(options.current_focus.clone());
+        let (current_focus, focus_redacted) = redact_optional_task_text(options.current_focus.clone());
+        frame.current_focus = current_focus;
+        redacted |= focus_redacted;
     }
-    append_unique_strings(&mut frame.blockers, &options.blockers);
+    redacted |= append_unique_task_strings(&mut frame.blockers, &options.blockers);
     append_unique_evidence_links(&mut frame.evidence_links, &options.evidence_links);
+    frame.redaction_status = redaction_status(redacted);
     frame.updated_at = now;
     frame.suggested_commands = suggested_commands(Some(&frame.id));
 
@@ -408,7 +432,9 @@ pub fn close_task_frame(options: &TaskFrameCloseOptions) -> Result<TaskFrameRepo
     frame.status = options.status;
     frame.updated_at = now.clone();
     frame.closed_at = Some(now);
-    frame.close_reason = Some(options.reason.trim().to_owned());
+    let (close_reason, reason_redacted) = redact_task_text(options.reason.trim());
+    frame.close_reason = Some(close_reason);
+    frame.redaction_status = redaction_status(frame.redaction_status == "redacted" || reason_redacted);
     frame.suggested_commands = suggested_commands(Some(&frame.id));
 
     if !options.dry_run {
@@ -463,12 +489,14 @@ pub fn add_task_subgoal(options: &TaskSubgoalAddOptions) -> Result<TaskFrameRepo
     }
 
     let now = options.created_at.clone().unwrap_or_else(now_rfc3339);
+    let (title, title_redacted) = redact_task_text(options.title.trim());
+    let (blockers, blockers_redacted) = redact_task_strings(&options.blockers);
     let subgoal = TaskSubgoal {
         id: stable_id(TASK_SUBGOAL_ID_PREFIX, &[&frame.id, &options.title, &now]),
         parent_id: normalize_optional(options.parent_id.clone()),
-        title: options.title.trim().to_owned(),
+        title,
         status: options.status,
-        blockers: normalized_strings(&options.blockers),
+        blockers,
         created_at: now.clone(),
         updated_at: now.clone(),
         closed_at: None,
@@ -482,6 +510,9 @@ pub fn add_task_subgoal(options: &TaskSubgoalAddOptions) -> Result<TaskFrameRepo
     });
     frame.updated_at = now;
     frame.suggested_commands = suggested_commands(Some(&frame.id));
+    frame.redaction_status = redaction_status(
+        frame.redaction_status == "redacted" || title_redacted || blockers_redacted,
+    );
 
     if !options.dry_run {
         store.frames[index] = frame.clone();
@@ -671,6 +702,7 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
     })
 }
 
+#[expect(dead_code, reason = "utility prepared for future subgoal bulk operations")]
 fn normalized_strings(values: &[String]) -> Vec<String> {
     let mut normalized = values
         .iter()
@@ -688,10 +720,197 @@ fn normalized_strings(values: &[String]) -> Vec<String> {
     normalized
 }
 
+#[expect(dead_code, reason = "utility prepared for future subgoal bulk operations")]
 fn append_unique_strings(target: &mut Vec<String>, values: &[String]) {
     target.extend(normalized_strings(values));
     target.sort();
     target.dedup();
+}
+
+fn redact_task_text(value: &str) -> (String, bool) {
+    let trimmed = value.trim();
+    let (without_key_values, key_value_redacted) = redact_secret_key_values(trimmed);
+    let (without_url_passwords, url_redacted) = redact_url_passwords(&without_key_values);
+    (without_url_passwords, key_value_redacted || url_redacted)
+}
+
+fn redact_optional_task_text(value: Option<String>) -> (Option<String>, bool) {
+    match normalize_optional(value) {
+        Some(inner) => {
+            let (redacted, changed) = redact_task_text(&inner);
+            (Some(redacted), changed)
+        }
+        None => (None, false),
+    }
+}
+
+fn redact_task_strings(values: &[String]) -> (Vec<String>, bool) {
+    let mut changed = false;
+    let mut redacted = values
+        .iter()
+        .filter_map(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                let (redacted, item_changed) = redact_task_text(trimmed);
+                changed |= item_changed;
+                Some(redacted)
+            }
+        })
+        .collect::<Vec<_>>();
+    redacted.sort();
+    redacted.dedup();
+    (redacted, changed)
+}
+
+fn append_unique_task_strings(target: &mut Vec<String>, values: &[String]) -> bool {
+    let (redacted, changed) = redact_task_strings(values);
+    target.extend(redacted);
+    target.sort();
+    target.dedup();
+    changed
+}
+
+fn redaction_status(redacted: bool) -> String {
+    if redacted {
+        "redacted".to_owned()
+    } else {
+        "none".to_owned()
+    }
+}
+
+fn redact_secret_key_values(input: &str) -> (String, bool) {
+    let mut output = input.to_owned();
+    let mut changed = false;
+
+    for key in SECRET_KEYS {
+        let mut search_start = 0;
+        loop {
+            let lower = output.to_ascii_lowercase();
+            if search_start >= lower.len() {
+                break;
+            }
+            let Some(relative) = lower[search_start..].find(key) else {
+                break;
+            };
+            let key_start = search_start + relative;
+            let key_end = key_start + key.len();
+            if !is_key_boundary(lower.as_bytes(), key_start, key_end) {
+                search_start = key_end;
+                continue;
+            }
+
+            let Some((value_start, value_end)) = secret_value_range(&output, key_end) else {
+                search_start = key_end;
+                continue;
+            };
+            if value_start == value_end {
+                search_start = key_end;
+                continue;
+            }
+            output.replace_range(value_start..value_end, REDACTION_PLACEHOLDER);
+            changed = true;
+            search_start = value_start + REDACTION_PLACEHOLDER.len();
+        }
+    }
+
+    (output, changed)
+}
+
+fn is_key_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
+    let before_ok = start == 0
+        || bytes
+            .get(start.saturating_sub(1))
+            .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
+    let after_ok = bytes
+        .get(end)
+        .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
+    before_ok && after_ok
+}
+
+fn secret_value_range(input: &str, key_end: usize) -> Option<(usize, usize)> {
+    let mut cursor = key_end;
+    cursor = skip_ascii_spaces(input, cursor);
+    let separator = input.as_bytes().get(cursor).copied()?;
+    if !matches!(separator, b'=' | b':') {
+        return None;
+    }
+    cursor += 1;
+    cursor = skip_ascii_spaces(input, cursor);
+    if cursor >= input.len() {
+        return None;
+    }
+
+    let quote = input.as_bytes().get(cursor).copied();
+    if matches!(quote, Some(b'"' | b'\'')) {
+        let quote = quote?;
+        let value_start = cursor + 1;
+        let value_end = input[value_start..]
+            .bytes()
+            .position(|byte| byte == quote)
+            .map_or(input.len(), |relative| value_start + relative);
+        return Some((value_start, value_end));
+    }
+
+    let value_end = input[cursor..]
+        .char_indices()
+        .find_map(|(offset, ch)| {
+            if ch.is_whitespace() || matches!(ch, ',' | ';' | '&') {
+                Some(cursor + offset)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(input.len());
+    Some((cursor, value_end))
+}
+
+fn skip_ascii_spaces(input: &str, mut cursor: usize) -> usize {
+    while matches!(input.as_bytes().get(cursor), Some(b' ' | b'\t')) {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn redact_url_passwords(input: &str) -> (String, bool) {
+    let mut output = input.to_owned();
+    let mut changed = false;
+    let mut search_start = 0;
+
+    loop {
+        if search_start >= output.len() {
+            break;
+        }
+        let lower = output.to_ascii_lowercase();
+        let Some(relative_scheme) = lower[search_start..].find("://") else {
+            break;
+        };
+        let scheme_marker = search_start + relative_scheme + 3;
+        let segment_end = output[scheme_marker..]
+            .char_indices()
+            .find_map(|(offset, ch)| ch.is_whitespace().then_some(scheme_marker + offset))
+            .unwrap_or(output.len());
+        let Some(at_relative) = output[scheme_marker..segment_end].find('@') else {
+            search_start = segment_end;
+            continue;
+        };
+        let at_index = scheme_marker + at_relative;
+        let Some(colon_relative) = output[scheme_marker..at_index].rfind(':') else {
+            search_start = at_index + 1;
+            continue;
+        };
+        let value_start = scheme_marker + colon_relative + 1;
+        if value_start < at_index {
+            output.replace_range(value_start..at_index, REDACTION_PLACEHOLDER);
+            changed = true;
+            search_start = value_start + REDACTION_PLACEHOLDER.len();
+        } else {
+            search_start = at_index + 1;
+        }
+    }
+
+    (output, changed)
 }
 
 fn normalized_evidence_links(values: &[TaskEvidenceLink]) -> Vec<TaskEvidenceLink> {
@@ -892,6 +1111,82 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.code(), "usage");
+        Ok(())
+    }
+
+    #[test]
+    fn task_frame_redacts_secret_like_values_before_persisting() -> TestResult {
+        let workspace = temp_workspace("redaction")?;
+        let mut options = create_options(workspace.clone());
+        options.goal = "Rotate api_key=sk-live-123 before release".to_owned();
+        options.current_focus = Some(
+            "Check DATABASE_URL=postgres://user:hunter2@example.test/db".to_owned(),
+        );
+        options.blockers = vec![
+            "needs password='open-sesame' from operator".to_owned(),
+            "token: ghp_secret_token".to_owned(),
+        ];
+        let report = create_task_frame(&options).map_err(|e| e.message())?;
+        let frame = report.frame.ok_or_else(|| "missing frame".to_owned())?;
+        let serialized = serde_json::to_string(&frame).map_err(|error| error.to_string())?;
+
+        assert_eq!(frame.redaction_status, "redacted");
+        assert!(serialized.contains(REDACTION_PLACEHOLDER));
+        assert!(!serialized.contains("sk-live-123"));
+        assert!(!serialized.contains("hunter2"));
+        assert!(!serialized.contains("open-sesame"));
+        assert!(!serialized.contains("ghp_secret_token"));
+        assert!(task_frame_store_path(&workspace).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn update_subgoal_and_close_redact_late_secret_inputs() -> TestResult {
+        let workspace = temp_workspace("redaction-update")?;
+        let created =
+            create_task_frame(&create_options(workspace.clone())).map_err(|e| e.message())?;
+        let frame_id = created.frame.ok_or_else(|| "missing frame".to_owned())?.id;
+
+        update_task_frame(&TaskFrameUpdateOptions {
+            workspace_path: workspace.clone(),
+            frame_id: frame_id.clone(),
+            status: Some(TaskFrameStatus::Active),
+            current_focus: Some("new token=abc123".to_owned()),
+            blockers: vec!["secret: hidden".to_owned()],
+            evidence_links: Vec::new(),
+            updated_at: Some("2026-05-04T00:06:00Z".to_owned()),
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        add_task_subgoal(&TaskSubgoalAddOptions {
+            workspace_path: workspace.clone(),
+            frame_id: frame_id.clone(),
+            parent_id: None,
+            title: "remove private_key=abcdef".to_owned(),
+            status: TaskFrameStatus::Open,
+            blockers: Vec::new(),
+            created_at: Some("2026-05-04T00:07:00Z".to_owned()),
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        let closed = close_task_frame(&TaskFrameCloseOptions {
+            workspace_path: workspace,
+            frame_id,
+            status: TaskFrameStatus::Completed,
+            reason: "completed after password=done".to_owned(),
+            closed_at: Some("2026-05-04T00:08:00Z".to_owned()),
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        let frame = closed.frame.ok_or_else(|| "missing frame".to_owned())?;
+        let serialized = serde_json::to_string(&frame).map_err(|error| error.to_string())?;
+
+        assert_eq!(frame.redaction_status, "redacted");
+        assert!(serialized.contains(REDACTION_PLACEHOLDER));
+        assert!(!serialized.contains("abc123"));
+        assert!(!serialized.contains("hidden"));
+        assert!(!serialized.contains("abcdef"));
+        assert!(!serialized.contains("done"));
         Ok(())
     }
 }
