@@ -23,6 +23,11 @@ pub const REHEARSE_INSPECT_SCHEMA_V1: &str = "ee.rehearse.inspect.v1";
 /// Schema for rehearsal promote-plan report.
 pub const REHEARSE_PROMOTE_PLAN_SCHEMA_V1: &str = "ee.rehearse.promote_plan.v1";
 
+const REHEARSAL_UNAVAILABLE_CODE: &str = "rehearsal_unavailable";
+const REHEARSAL_UNAVAILABLE_MESSAGE: &str =
+    "Rehearsal sandbox execution is unavailable until core helpers create real isolated artifacts.";
+const UNAVAILABLE_VALUE: &str = "unavailable";
+
 // ============================================================================
 // Command Spec Types
 // ============================================================================
@@ -114,6 +119,7 @@ pub struct RehearsePlanReport {
     pub side_path_size_estimate: String,
     pub profile: String,
     pub can_proceed: bool,
+    pub degradation_codes: Vec<String>,
     pub next_actions: Vec<String>,
     pub created_at: String,
 }
@@ -183,50 +189,50 @@ pub fn plan_rehearsal(options: &RehearsePlanOptions) -> Result<RehearsePlanRepor
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "default".to_string());
 
-    let mut non_rehearsable = Vec::new();
-    let mut rehearsable_count = 0u32;
+    let non_rehearsable = options
+        .commands
+        .iter()
+        .map(|cmd| {
+            if is_rehearsable(&cmd.command) {
+                NonRehearsableCommand {
+                    command_id: cmd.id.clone(),
+                    command: cmd.command.clone(),
+                    reason_code: REHEARSAL_UNAVAILABLE_CODE.to_string(),
+                    reason: REHEARSAL_UNAVAILABLE_MESSAGE.to_string(),
+                    next_action: Some("ee status --json".to_string()),
+                }
+            } else {
+                NonRehearsableCommand {
+                    command_id: cmd.id.clone(),
+                    command: cmd.command.clone(),
+                    reason_code: "external_io".to_string(),
+                    reason: format!(
+                        "Command '{}' requires external I/O or is not supported in rehearsal",
+                        cmd.command
+                    ),
+                    next_action: Some("Use --dry-run flag on the real command instead".to_string()),
+                }
+            }
+        })
+        .collect();
 
-    for cmd in &options.commands {
-        if is_rehearsable(&cmd.command) {
-            rehearsable_count += 1;
-        } else {
-            non_rehearsable.push(NonRehearsableCommand {
-                command_id: cmd.id.clone(),
-                command: cmd.command.clone(),
-                reason_code: "external_io".to_string(),
-                reason: format!(
-                    "Command '{}' requires external I/O or is not supported in rehearsal",
-                    cmd.command
-                ),
-                next_action: Some("Use --dry-run flag on the real command instead".to_string()),
-            });
-        }
-    }
-
-    let can_proceed = non_rehearsable.is_empty() || options.profile == RehearsalProfile::Quick;
-
-    let mut next_actions = Vec::new();
-    if can_proceed {
-        next_actions.push(format!(
-            "ee rehearse run --commands <spec> --workspace {}",
-            workspace_id
-        ));
-    } else {
-        next_actions.push("Remove or replace non-rehearsable commands".to_string());
-        next_actions.push("Or use --profile quick to skip non-rehearsable commands".to_string());
-    }
+    let next_actions = vec![
+        "ee status --json".to_string(),
+        "Use command-specific --dry-run paths until rehearsal isolation is implemented".to_string(),
+    ];
 
     Ok(RehearsePlanReport {
         schema: REHEARSE_PLAN_SCHEMA_V1.to_string(),
         plan_id,
         workspace_id,
         command_count: options.commands.len() as u32,
-        rehearsable_count,
+        rehearsable_count: 0,
         non_rehearsable,
-        estimated_artifacts: vec!["sandbox.db".to_string(), "manifest.json".to_string()],
-        side_path_size_estimate: "~10MB".to_string(),
+        estimated_artifacts: Vec::new(),
+        side_path_size_estimate: UNAVAILABLE_VALUE.to_string(),
         profile: options.profile.as_str().to_string(),
-        can_proceed,
+        can_proceed: false,
+        degradation_codes: vec![REHEARSAL_UNAVAILABLE_CODE.to_string()],
         next_actions,
         created_at,
     })
@@ -345,127 +351,61 @@ impl RehearseRunReport {
 pub fn run_rehearsal(options: &RehearseRunOptions) -> Result<RehearseRunReport, DomainError> {
     let run_id = format!("rrun_{}", generate_id());
     let created_at = Utc::now().to_rfc3339();
-    let start_time = std::time::Instant::now();
-
     let workspace_id = options
         .workspace
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "default".to_string());
 
-    let sandbox_path = options
-        .output_dir
-        .clone()
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("ee-rehearse-{}", &run_id)));
-
-    let source_state_hash = format!("sha256:{:016x}", generate_hash_stub());
-    let command_list_hash = format!("sha256:{:016x}", generate_hash_stub());
-
-    // Simulate command execution
-    let mut command_results = Vec::new();
-    let mut expected_effects = Vec::new();
-    let mut observed_effects = Vec::new();
-
-    for (i, cmd) in options.commands.iter().enumerate() {
-        let cmd_start = std::time::Instant::now();
-
-        // Simulate the command execution
-        let (exit_code, result) = if is_rehearsable(&cmd.command) {
-            (0, "success".to_string())
-        } else {
-            (1, "skipped".to_string())
-        };
-
-        let operation_id = if exit_code == 0 {
-            Some(format!("op_{}_{}", run_id, i))
-        } else {
-            None
-        };
-
-        command_results.push(CommandResult {
+    let command_results = options
+        .commands
+        .iter()
+        .map(|cmd| CommandResult {
             command_id: cmd.id.clone(),
             command: cmd.command.clone(),
-            exit_code,
-            result: result.clone(),
-            elapsed_ms: cmd_start.elapsed().as_millis() as u64,
-            operation_id,
-            error_message: if exit_code != 0 {
-                Some("Command not rehearsable".to_string())
-            } else {
-                None
-            },
-        });
+            exit_code: -1,
+            result: "not_executed".to_string(),
+            elapsed_ms: 0,
+            operation_id: None,
+            error_message: Some(REHEARSAL_UNAVAILABLE_MESSAGE.to_string()),
+        })
+        .collect();
 
-        expected_effects.push(EffectRecord {
+    let expected_effects = options
+        .commands
+        .iter()
+        .map(|cmd| EffectRecord {
             command_id: cmd.id.clone(),
             effect_type: cmd.expected_effect.clone(),
-            target: format!("{}/*", cmd.command),
+            target: UNAVAILABLE_VALUE.to_string(),
             description: format!(
-                "Expected {} effect from {}",
+                "Planned {} effect from {}; not observed because rehearsal execution is unavailable",
                 cmd.expected_effect, cmd.command
             ),
-        });
-
-        if exit_code == 0 {
-            observed_effects.push(EffectRecord {
-                command_id: cmd.id.clone(),
-                effect_type: cmd.expected_effect.clone(),
-                target: format!("{}/*", cmd.command),
-                description: format!(
-                    "Observed {} effect from {}",
-                    cmd.expected_effect, cmd.command
-                ),
-            });
-        }
-    }
-
-    let elapsed_ms = start_time.elapsed().as_millis() as u64;
-    let all_passed = command_results.iter().all(|r| r.exit_code == 0);
-    let overall_result = if all_passed {
-        "success".to_string()
-    } else if command_results.iter().any(|r| r.exit_code == 0) {
-        "partial".to_string()
-    } else {
-        "failed".to_string()
-    };
-
-    let mut artifact_paths = HashMap::new();
-    artifact_paths.insert(
-        "manifest".to_string(),
-        format!("{}/manifest.json", sandbox_path.display()),
-    );
-    artifact_paths.insert(
-        "log".to_string(),
-        format!("{}/rehearsal.log", sandbox_path.display()),
-    );
-
-    let mut next_actions = Vec::new();
-    next_actions.push(format!("ee rehearse inspect {}", run_id));
-    if overall_result == "success" {
-        next_actions.push(format!("ee rehearse promote-plan {}", run_id));
-    }
+        })
+        .collect();
 
     Ok(RehearseRunReport {
         schema: REHEARSE_RUN_SCHEMA_V1.to_string(),
         run_id,
         workspace_id,
-        sandbox_path: sandbox_path.display().to_string(),
-        source_state_hash,
-        command_list_hash,
+        sandbox_path: UNAVAILABLE_VALUE.to_string(),
+        source_state_hash: UNAVAILABLE_VALUE.to_string(),
+        command_list_hash: UNAVAILABLE_VALUE.to_string(),
         command_results,
         expected_effects,
-        observed_effects,
-        changed_artifacts: vec!["memories".to_string(), "index".to_string()],
-        degradation_codes: Vec::new(),
+        observed_effects: Vec::new(),
+        changed_artifacts: Vec::new(),
+        degradation_codes: vec![REHEARSAL_UNAVAILABLE_CODE.to_string()],
         redaction_status: if options.profile == RehearsalProfile::Privacy {
             "redacted".to_string()
         } else {
             "none".to_string()
         },
-        elapsed_ms,
-        overall_result,
-        artifact_paths,
-        next_actions,
+        elapsed_ms: 0,
+        overall_result: UNAVAILABLE_VALUE.to_string(),
+        artifact_paths: HashMap::new(),
+        next_actions: vec!["ee status --json".to_string()],
         created_at,
     })
 }
@@ -569,28 +509,23 @@ pub fn inspect_rehearsal(
     Ok(RehearseInspectReport {
         schema: REHEARSE_INSPECT_SCHEMA_V1.to_string(),
         artifact_id: options.artifact_id.clone(),
-        artifact_type: "rehearsal_run".to_string(),
+        artifact_type: UNAVAILABLE_VALUE.to_string(),
         schema_version: REHEARSE_RUN_SCHEMA_V1.to_string(),
-        manifest_hash: format!("sha256:{:016x}", generate_hash_stub()),
-        command_spec_hash: format!("sha256:{:016x}", generate_hash_stub()),
-        source_state_hash: format!("sha256:{:016x}", generate_hash_stub()),
-        sandbox_state_hash: format!("sha256:{:016x}", generate_hash_stub()),
-        command_count: 3,
-        success_count: 3,
+        manifest_hash: UNAVAILABLE_VALUE.to_string(),
+        command_spec_hash: UNAVAILABLE_VALUE.to_string(),
+        source_state_hash: UNAVAILABLE_VALUE.to_string(),
+        sandbox_state_hash: UNAVAILABLE_VALUE.to_string(),
+        command_count: 0,
+        success_count: 0,
         failure_count: 0,
         redaction_summary: RedactionSummary {
             redacted_fields: 0,
             redacted_artifacts: 0,
-            policy: "none".to_string(),
+            policy: UNAVAILABLE_VALUE.to_string(),
         },
-        effect_summary: EffectSummary {
-            read_only: 1,
-            write_memory: 1,
-            write_index: 1,
-            write_config: 0,
-        },
-        integrity_status: "valid".to_string(),
-        warnings: Vec::new(),
+        effect_summary: EffectSummary::default(),
+        integrity_status: UNAVAILABLE_VALUE.to_string(),
+        warnings: vec![REHEARSAL_UNAVAILABLE_MESSAGE.to_string()],
         inspected_at,
     })
 }
@@ -715,73 +650,23 @@ pub fn promote_plan_rehearsal(
 ) -> Result<RehearsePromotePlanReport, DomainError> {
     let created_at = Utc::now().to_rfc3339();
 
-    let plan_steps = vec![
-        PromoteStep {
-            sequence: 1,
-            command: "remember".to_string(),
-            args: vec![
-                "--level".to_string(),
-                "episodic".to_string(),
-                "Example memory".to_string(),
-            ],
-            expected_effect: "write_memory".to_string(),
-            confirmation_required: false,
-            rollback_command: None,
-        },
-        PromoteStep {
-            sequence: 2,
-            command: "index".to_string(),
-            args: vec!["rebuild".to_string()],
-            expected_effect: "write_index".to_string(),
-            confirmation_required: false,
-            rollback_command: Some("ee index rebuild".to_string()),
-        },
-        PromoteStep {
-            sequence: 3,
-            command: "search".to_string(),
-            args: vec!["Example".to_string()],
-            expected_effect: "read_only".to_string(),
-            confirmation_required: false,
-            rollback_command: None,
-        },
-    ];
-
-    let preconditions = vec![
-        Precondition {
-            check: "workspace_initialized".to_string(),
-            description: "Workspace must be initialized with ee init".to_string(),
-            required: true,
-        },
-        Precondition {
-            check: "no_pending_migrations".to_string(),
-            description: "All database migrations must be applied".to_string(),
-            required: true,
-        },
-        Precondition {
-            check: "source_state_unchanged".to_string(),
-            description: "Source state hash matches rehearsal snapshot".to_string(),
-            required: false,
-        },
-    ];
-
     Ok(RehearsePromotePlanReport {
         schema: REHEARSE_PROMOTE_PLAN_SCHEMA_V1.to_string(),
         artifact_id: options.artifact_id.clone(),
-        plan_steps,
-        preconditions,
-        backup_requirements: vec!["ee backup create --workspace .".to_string()],
-        audit_checks: vec!["ee audit timeline --last 10 --json".to_string()],
-        stop_conditions: vec![
-            "Any command exits with non-zero status".to_string(),
-            "Database lock acquisition fails".to_string(),
-            "Disk space below 100MB".to_string(),
-        ],
-        expected_queries: vec![
-            "ee memory list --limit 5 --json".to_string(),
-            "ee search <query> --limit 3 --json".to_string(),
-        ],
-        warnings: Vec::new(),
-        is_safe: true,
+        plan_steps: Vec::new(),
+        preconditions: vec![Precondition {
+            check: "artifact_manifest_available".to_string(),
+            description:
+                "A real rehearsal artifact manifest must exist before promotion can be planned"
+                    .to_string(),
+            required: true,
+        }],
+        backup_requirements: Vec::new(),
+        audit_checks: Vec::new(),
+        stop_conditions: Vec::new(),
+        expected_queries: Vec::new(),
+        warnings: vec![REHEARSAL_UNAVAILABLE_MESSAGE.to_string()],
+        is_safe: false,
         created_at,
     })
 }
@@ -822,15 +707,6 @@ fn generate_id() -> String {
     format!("{:x}", timestamp & 0xFFFFFFFF)
 }
 
-/// Generate a stub hash for demonstration.
-fn generate_hash_stub() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -842,7 +718,7 @@ mod tests {
     type TestResult = Result<(), String>;
 
     #[test]
-    fn plan_validates_command_specs() -> TestResult {
+    fn plan_reports_unavailable_without_sandbox_artifact_claims() -> TestResult {
         let options = RehearsePlanOptions {
             commands: vec![CommandSpec {
                 id: "cmd_1".to_string(),
@@ -858,8 +734,19 @@ mod tests {
         let report = plan_rehearsal(&options).map_err(|e| e.message())?;
         assert!(report.plan_id.starts_with("rplan_"));
         assert_eq!(report.command_count, 1);
-        assert_eq!(report.rehearsable_count, 1);
-        assert!(report.can_proceed);
+        assert_eq!(report.rehearsable_count, 0);
+        assert_eq!(report.non_rehearsable.len(), 1);
+        assert_eq!(
+            report.non_rehearsable[0].reason_code,
+            REHEARSAL_UNAVAILABLE_CODE
+        );
+        assert!(report.estimated_artifacts.is_empty());
+        assert_eq!(report.side_path_size_estimate, UNAVAILABLE_VALUE);
+        assert!(!report.can_proceed);
+        assert_eq!(
+            report.degradation_codes,
+            vec![REHEARSAL_UNAVAILABLE_CODE.to_string()]
+        );
         Ok(())
     }
 
@@ -879,12 +766,36 @@ mod tests {
 
         let report = plan_rehearsal(&options).map_err(|e| e.message())?;
         assert_eq!(report.non_rehearsable.len(), 1);
+        assert_eq!(report.non_rehearsable[0].reason_code, "external_io");
         assert!(!report.can_proceed);
         Ok(())
     }
 
     #[test]
-    fn run_creates_sandbox_and_executes() -> TestResult {
+    fn quick_profile_does_not_override_unavailable_rehearsal_isolation() -> TestResult {
+        let options = RehearsePlanOptions {
+            profile: RehearsalProfile::Quick,
+            commands: vec![CommandSpec {
+                id: "cmd_1".to_string(),
+                command: "status".to_string(),
+                args: Vec::new(),
+                expected_effect: "read_only".to_string(),
+                stop_on_failure: true,
+                idempotency_key: None,
+            }],
+            ..Default::default()
+        };
+
+        let report = plan_rehearsal(&options).map_err(|e| e.message())?;
+        assert_eq!(report.profile, "quick");
+        assert_eq!(report.rehearsable_count, 0);
+        assert!(!report.can_proceed);
+        assert!(report.estimated_artifacts.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn run_reports_unavailable_without_simulated_artifacts() -> TestResult {
         let options = RehearseRunOptions {
             commands: vec![CommandSpec {
                 id: "cmd_1".to_string(),
@@ -899,34 +810,60 @@ mod tests {
 
         let report = run_rehearsal(&options).map_err(|e| e.message())?;
         assert!(report.run_id.starts_with("rrun_"));
+        assert_eq!(report.sandbox_path, UNAVAILABLE_VALUE);
+        assert_eq!(report.source_state_hash, UNAVAILABLE_VALUE);
+        assert_eq!(report.command_list_hash, UNAVAILABLE_VALUE);
         assert_eq!(report.command_results.len(), 1);
-        assert_eq!(report.overall_result, "success");
+        assert_eq!(report.command_results[0].exit_code, -1);
+        assert_eq!(report.command_results[0].result, "not_executed");
+        assert!(report.command_results[0].operation_id.is_none());
+        assert!(report.observed_effects.is_empty());
+        assert!(report.changed_artifacts.is_empty());
+        assert!(report.artifact_paths.is_empty());
+        assert_eq!(
+            report.degradation_codes,
+            vec![REHEARSAL_UNAVAILABLE_CODE.to_string()]
+        );
+        assert_eq!(report.overall_result, UNAVAILABLE_VALUE);
         Ok(())
     }
 
     #[test]
-    fn inspect_validates_artifact() -> TestResult {
+    fn inspect_reports_unavailable_without_hash_claims() -> TestResult {
         let options = RehearseInspectOptions {
             artifact_id: "rrun_test".to_string(),
             ..Default::default()
         };
 
         let report = inspect_rehearsal(&options).map_err(|e| e.message())?;
-        assert_eq!(report.integrity_status, "valid");
+        assert_eq!(report.artifact_type, UNAVAILABLE_VALUE);
+        assert_eq!(report.manifest_hash, UNAVAILABLE_VALUE);
+        assert_eq!(report.command_spec_hash, UNAVAILABLE_VALUE);
+        assert_eq!(report.source_state_hash, UNAVAILABLE_VALUE);
+        assert_eq!(report.sandbox_state_hash, UNAVAILABLE_VALUE);
+        assert_eq!(report.command_count, 0);
+        assert_eq!(report.success_count, 0);
+        assert_eq!(report.integrity_status, UNAVAILABLE_VALUE);
+        assert!(!report.warnings.is_empty());
         Ok(())
     }
 
     #[test]
-    fn promote_plan_generates_steps() -> TestResult {
+    fn promote_plan_reports_unavailable_without_canned_steps() -> TestResult {
         let options = RehearsePromotePlanOptions {
             artifact_id: "rrun_test".to_string(),
             ..Default::default()
         };
 
         let report = promote_plan_rehearsal(&options).map_err(|e| e.message())?;
-        assert!(!report.plan_steps.is_empty());
+        assert!(report.plan_steps.is_empty());
         assert!(!report.preconditions.is_empty());
-        assert!(report.is_safe);
+        assert!(report.backup_requirements.is_empty());
+        assert!(report.audit_checks.is_empty());
+        assert!(report.stop_conditions.is_empty());
+        assert!(report.expected_queries.is_empty());
+        assert!(!report.is_safe);
+        assert!(!report.warnings.is_empty());
         Ok(())
     }
 

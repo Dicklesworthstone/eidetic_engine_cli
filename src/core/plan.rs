@@ -1,8 +1,9 @@
-//! Agent goal planner and command recipe resolver (EE-PLAN-001).
+//! Static command recipe catalog (EE-PLAN-001).
 //!
-//! Deterministic, local, schema-validated recipe resolver over known EE commands,
-//! current workspace posture, capabilities, effect metadata, and degraded state.
-//! This is NOT an autonomous executor - it only emits plans for explicit execution.
+//! Deterministic, local, schema-validated catalog over known EE commands,
+//! capabilities, effect metadata, and degraded branches. Goal planning and recipe
+//! selection are intentionally unavailable at the CLI boundary until they are
+//! backed by explicit evidence rather than keyword reasoning.
 
 use std::cmp::Reverse;
 
@@ -12,6 +13,7 @@ pub const GOAL_PLAN_SCHEMA_V1: &str = "ee.plan.goal.v1";
 pub const RECIPE_LIST_SCHEMA_V1: &str = "ee.plan.recipe_list.v1";
 pub const RECIPE_SHOW_SCHEMA_V1: &str = "ee.plan.recipe.v1";
 pub const PLAN_EXPLAIN_SCHEMA_V1: &str = "ee.plan.explain.v1";
+pub const PLAN_RECIPE_CATALOG_SOURCE_V1: &str = "ee.plan.recipe_catalog.v1";
 
 // ============================================================================
 // Goal Classification
@@ -286,8 +288,10 @@ pub fn classify_goal(goal: &str) -> GoalClassification {
         };
     }
 
-    let top_score = scores[0].1;
-    let primary = scores[0].0;
+    let (primary, top_score) = scores
+        .first()
+        .map(|(category, score)| (*category, *score))
+        .unwrap_or((GoalCategory::Unknown, 0));
 
     // Check for ambiguity (multiple high scores)
     let alternatives: Vec<GoalCategory> = scores
@@ -391,6 +395,11 @@ impl Recipe {
         json!({
             "id": self.id,
             "version": self.version,
+            "sourceKind": "static_command_catalog",
+            "sourceId": recipe_source_id(&self.id),
+            "catalogSource": PLAN_RECIPE_CATALOG_SOURCE_V1,
+            "decisionBoundary": "mechanical_command_catalog_only",
+            "goalPlanning": false,
             "category": self.category.as_str(),
             "name": self.name,
             "description": self.description,
@@ -407,6 +416,11 @@ impl Recipe {
         json!({
             "id": self.id,
             "version": self.version,
+            "sourceKind": "static_command_catalog",
+            "sourceId": recipe_source_id(&self.id),
+            "catalogSource": PLAN_RECIPE_CATALOG_SOURCE_V1,
+            "decisionBoundary": "mechanical_command_catalog_only",
+            "goalPlanning": false,
             "category": self.category.as_str(),
             "name": self.name,
             "effectPosture": self.effect_posture.as_str(),
@@ -415,6 +429,10 @@ impl Recipe {
             "profiles": self.profiles,
         })
     }
+}
+
+fn recipe_source_id(recipe_id: &str) -> String {
+    format!("{PLAN_RECIPE_CATALOG_SOURCE_V1}#{recipe_id}")
 }
 
 /// A degraded branch in a recipe.
@@ -1164,6 +1182,35 @@ mod tests {
         let recipes = builtin_recipes();
         assert!(!recipes.is_empty());
         assert!(recipes.len() >= 10);
+    }
+
+    #[test]
+    fn builtin_recipes_expose_static_catalog_provenance() -> TestResult {
+        let recipe = get_recipe("init-workspace")
+            .ok_or_else(|| "init-workspace recipe missing".to_string())?;
+        let json = recipe.summary_json();
+
+        assert_eq!(
+            json.get("sourceKind").and_then(JsonValue::as_str),
+            Some("static_command_catalog")
+        );
+        assert_eq!(
+            json.get("catalogSource").and_then(JsonValue::as_str),
+            Some(PLAN_RECIPE_CATALOG_SOURCE_V1)
+        );
+        assert_eq!(
+            json.get("sourceId").and_then(JsonValue::as_str),
+            Some("ee.plan.recipe_catalog.v1#init-workspace")
+        );
+        assert_eq!(
+            json.get("goalPlanning").and_then(JsonValue::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            json.get("decisionBoundary").and_then(JsonValue::as_str),
+            Some("mechanical_command_catalog_only")
+        );
+        Ok(())
     }
 
     #[test]

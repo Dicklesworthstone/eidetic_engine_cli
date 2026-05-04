@@ -5,13 +5,14 @@
 //! separately proves machine output stays on stdout without diagnostics.
 
 use ee::core::learn::{
-    AgendaItem, LEARN_AGENDA_SCHEMA_V1, LEARN_CLOSE_SCHEMA_V1, LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1,
-    LEARN_EXPERIMENT_RUN_SCHEMA_V1, LEARN_OBSERVE_SCHEMA_V1, LEARN_UNCERTAINTY_SCHEMA_V1,
-    LearnAgendaReport, LearnCloseOptions, LearnExperimentProposeOptions, LearnExperimentRunOptions,
-    LearnObserveOptions, LearnUncertaintyReport, UncertaintyItem, close_experiment,
-    observe_experiment, propose_experiments, run_experiment,
+    AgendaItem, ExperimentBudget, ExperimentDecisionImpact, ExperimentProposal,
+    ExperimentSafetyPlan, LEARN_AGENDA_SCHEMA_V1, LEARN_CLOSE_SCHEMA_V1,
+    LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1, LEARN_EXPERIMENT_RUN_SCHEMA_V1, LEARN_OBSERVE_SCHEMA_V1,
+    LEARN_UNCERTAINTY_SCHEMA_V1, LearnAgendaReport, LearnCloseOptions,
+    LearnExperimentProposalReport, LearnExperimentRunOptions, LearnObserveOptions,
+    LearnUncertaintyReport, UncertaintyItem, close_experiment, observe_experiment, run_experiment,
 };
-use ee::models::{ExperimentOutcomeStatus, ExperimentSafetyBoundary, LearningObservationSignal};
+use ee::models::{ExperimentOutcomeStatus, LearningObservationSignal};
 use ee::output::{
     render_learn_agenda_json, render_learn_close_json, render_learn_experiment_proposal_json,
     render_learn_experiment_run_json, render_learn_observe_json, render_learn_uncertainty_json,
@@ -149,16 +150,98 @@ fn uncertainty_fixture() -> LearnUncertaintyReport {
 }
 
 fn proposal_fixture() -> Result<String, String> {
-    let mut report = propose_experiments(&LearnExperimentProposeOptions {
-        limit: 2,
+    let report = LearnExperimentProposalReport {
+        schema: LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1.to_string(),
+        total_candidates: 3,
+        returned: 2,
         min_expected_value: 0.3,
         max_attention_tokens: 800,
         max_runtime_seconds: 180,
-        safety_boundary: ExperimentSafetyBoundary::HumanReview,
-        ..LearnExperimentProposeOptions::default()
-    })
-    .map_err(|error| error.message())?;
-    report.generated_at = FIXED_TIME.to_string();
+        generated_at: FIXED_TIME.to_string(),
+        proposals: vec![
+            ExperimentProposal {
+                experiment_id: "exp_replay_error_boundary".to_string(),
+                question_id: "gap_001".to_string(),
+                title: "Replay async error boundary failures".to_string(),
+                hypothesis: "A dry-run replay can distinguish missing propagation evidence from a weak procedural rule.".to_string(),
+                status: "proposed".to_string(),
+                topic: "error_handling".to_string(),
+                expected_value: 0.539,
+                uncertainty_reduction: 0.32,
+                confidence: 0.48,
+                budget: ExperimentBudget {
+                    attention_tokens: 800,
+                    max_runtime_seconds: 180,
+                    dry_run_required: true,
+                    budget_class: "medium".to_string(),
+                },
+                safety: ExperimentSafetyPlan {
+                    boundary: "human_review".to_string(),
+                    dry_run_first: true,
+                    mutation_allowed: false,
+                    review_required: true,
+                    stop_conditions: vec![
+                        "Stop after the replay produces a pass/fail explanation or safety finding.".to_string(),
+                        "Stop before any durable memory mutation; close with observe/close evidence first.".to_string(),
+                    ],
+                    denied_reasons: vec![],
+                },
+                decision_impact: ExperimentDecisionImpact {
+                    decision_id: "decision_error_boundary_rule".to_string(),
+                    target_artifact_ids: vec!["mem_002".to_string()],
+                    current_decision: "Keep async error propagation guidance at low confidence."
+                        .to_string(),
+                    possible_change: "Promote or demote the rule based on replayed failure evidence."
+                        .to_string(),
+                    impact_score: 0.85,
+                },
+                evidence_ids: vec!["gap_001".to_string(), "mem_002".to_string()],
+                next_command: "ee learn experiment run --dry-run --id exp_replay_error_boundary --json"
+                    .to_string(),
+            },
+            ExperimentProposal {
+                experiment_id: "exp_database_contract_fixture".to_string(),
+                question_id: "gap_002".to_string(),
+                title: "Run database-operation contract fixture".to_string(),
+                hypothesis: "A fixture-only dry run can show whether database-operation memories need stronger integration-test evidence.".to_string(),
+                status: "proposed".to_string(),
+                topic: "testing".to_string(),
+                expected_value: 0.392,
+                uncertainty_reduction: 0.28,
+                confidence: 0.55,
+                budget: ExperimentBudget {
+                    attention_tokens: 700,
+                    max_runtime_seconds: 180,
+                    dry_run_required: true,
+                    budget_class: "medium".to_string(),
+                },
+                safety: ExperimentSafetyPlan {
+                    boundary: "human_review".to_string(),
+                    dry_run_first: true,
+                    mutation_allowed: false,
+                    review_required: true,
+                    stop_conditions: vec![
+                        "Stop after fixture output records stdout/stderr separation and mutation posture.".to_string(),
+                        "Stop before any durable memory mutation; close with observe/close evidence first.".to_string(),
+                    ],
+                    denied_reasons: vec![],
+                },
+                decision_impact: ExperimentDecisionImpact {
+                    decision_id: "decision_database_test_pattern".to_string(),
+                    target_artifact_ids: vec!["mem_001".to_string()],
+                    current_decision: "Treat database integration guidance as plausible but under-sampled."
+                        .to_string(),
+                    possible_change: "Increase confidence or request more evidence before promotion."
+                        .to_string(),
+                    impact_score: 0.7,
+                },
+                evidence_ids: vec!["gap_002".to_string(), "mem_001".to_string()],
+                next_command:
+                    "ee learn experiment run --dry-run --id exp_database_contract_fixture --json"
+                        .to_string(),
+            },
+        ],
+    };
     Ok(render_learn_experiment_proposal_json(&report))
 }
 

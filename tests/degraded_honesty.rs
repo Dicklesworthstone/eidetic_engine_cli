@@ -88,6 +88,26 @@ fn collect_degradation_codes(value: &Value) -> Vec<String> {
         }
     }
 
+    for pointer in ["/degradationCodes", "/data/degradationCodes"] {
+        if let Some(items) = value.pointer(pointer).and_then(Value::as_array) {
+            for item in items {
+                if let Some(code) = item.as_str() {
+                    codes.push(code.to_owned());
+                }
+            }
+        }
+    }
+
+    if let Some(items) = value.pointer("/data/warnings").and_then(Value::as_array) {
+        for item in items {
+            if let Some((code, _)) = item.as_str().and_then(|warning| warning.split_once(':')) {
+                if code.ends_with("_unavailable") {
+                    codes.push(code.to_owned());
+                }
+            }
+        }
+    }
+
     codes.sort();
     codes.dedup();
     codes
@@ -183,7 +203,7 @@ fn side_effect_class(args: &[String]) -> &'static str {
     } else if args.iter().any(|arg| arg == "learn") {
         "conservative abstention; no learning agenda, uncertainty, summary, proposal, or experiment template emitted"
     } else if args.iter().any(|arg| arg == "lab") {
-        "unavailable before lab episode capture, replay, or counterfactual mutation"
+        "evidence-only lab report; no behavior inference or durable mutation"
     } else if args.iter().any(|arg| arg == "economy" || arg == "causal") {
         "read-only, conservative abstention"
     } else if args.iter().any(|arg| arg == "procedure") {
@@ -1599,86 +1619,84 @@ fn learn_read_and_proposal_commands_degrade_instead_of_reporting_seed_templates(
 }
 
 #[test]
-fn lab_replay_degrades_instead_of_reporting_generated_replay_success() -> TestResult {
+fn lab_replay_reports_missing_frozen_inputs_without_generated_success() -> TestResult {
     let result = run_ee_logged(
-        "lab-replay-unavailable",
+        "lab-replay-missing-frozen-inputs",
         None,
         vec![
             "--json".to_owned(),
             "lab".to_owned(),
             "replay".to_owned(),
-            "ep_fixture_001".to_owned(),
+            "ep_missing_evidence".to_owned(),
             "--dry-run".to_owned(),
         ],
     )?;
 
-    ensure_equal(
-        &result.exit_code,
-        &UNSATISFIED_DEGRADED_MODE_EXIT,
-        "lab unavailable exit code",
-    )?;
+    ensure_equal(&result.exit_code, &0, "lab replay report exit code")?;
     ensure(
         result.stderr.is_empty(),
-        "lab JSON degraded response must keep stderr empty",
+        "lab JSON replay response must keep stderr empty",
     )?;
-    ensure_no_ansi(&result.stdout, "lab degraded stdout")?;
+    ensure_no_ansi(&result.stdout, "lab replay stdout")?;
     ensure_json_pointer(
         &result.parsed,
         "/schema",
         json!("ee.response.v1"),
-        "lab degraded response schema",
+        "lab replay response schema",
     )?;
-    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+    ensure_json_pointer(&result.parsed, "/success", json!(true), "success flag")?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/code",
-        json!("lab_replay_unavailable"),
-        "lab degraded code",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/degraded/0/code",
-        json!("lab_replay_unavailable"),
-        "lab degraded array code",
+        "/data/status",
+        json!("episode_not_found"),
+        "lab replay status",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/followUpBead",
-        json!("eidetic_engine_cli-db4z"),
-        "lab follow-up bead",
+        "/data/replayEvidenceAvailable",
+        json!(false),
+        "lab replay evidence availability",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/sideEffectClass",
-        json!("unavailable before lab episode capture, replay, or counterfactual mutation"),
-        "lab side-effect class",
+        "/data/frozenInputs",
+        json!(false),
+        "lab replay frozen inputs",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/evidenceIds",
+        "/data/missingFrozenInputs",
+        json!([
+            "frozen episode manifest",
+            "frozen memory snapshot",
+            "frozen action trace"
+        ]),
+        "lab missing frozen inputs",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/mutableCurrentStateAccess",
         json!([]),
-        "lab evidence ids",
+        "lab mutable current-state access",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/sourceIds",
-        json!([]),
-        "lab source ids",
+        "/data/warnings/0",
+        json!("lab_replay_unavailable: missing frozen episode manifest for ep_missing_evidence"),
+        "lab replay warning",
     )?;
 
-    let fake_success = validate_no_fake_success_output("lab replay", false, false, &result.stdout);
+    let fake_success = validate_no_fake_success_output("lab replay", true, false, &result.stdout);
     ensure(
         fake_success.passed,
-        format!("degraded lab output should not be fake success: {fake_success:?}"),
+        format!("lab replay report should not be fake success: {fake_success:?}"),
     )?;
 
     let unsupported_claims =
-        validate_no_unsupported_evidence_claims("lab replay", false, false, &result.stdout);
+        validate_no_unsupported_evidence_claims("lab replay", true, false, &result.stdout);
     ensure(
         unsupported_claims.passed,
-        format!(
-            "degraded lab output should not count as unsupported success: {unsupported_claims:?}"
-        ),
+        format!("lab replay report should not overclaim evidence: {unsupported_claims:?}"),
     )?;
 
     let log_text = fs::read_to_string(&result.log_path)
@@ -1694,7 +1712,7 @@ fn lab_replay_degrades_instead_of_reporting_generated_replay_success() -> TestRe
     ensure_json_pointer(
         &log_json,
         "/repairCommand",
-        json!("ee status --json"),
+        Value::Null,
         "logged lab repair command",
     )?;
     ensure_json_pointer(
@@ -1706,7 +1724,7 @@ fn lab_replay_degrades_instead_of_reporting_generated_replay_success() -> TestRe
     ensure_json_pointer(
         &log_json,
         "/sideEffectClass",
-        json!("unavailable before lab episode capture, replay, or counterfactual mutation"),
+        json!("evidence-only lab report; no behavior inference or durable mutation"),
         "logged lab side-effect class",
     )
 }
@@ -2596,6 +2614,10 @@ fn preflight_and_tripwire_commands_degrade_instead_of_reporting_fixture_risk_sta
         )
     })?;
     let workspace_arg = workspace.display().to_string();
+    let tripwire_database_arg = workspace_root
+        .join("missing-tripwire-store.ee.db")
+        .display()
+        .to_string();
 
     let cases = [
         (
@@ -2661,6 +2683,8 @@ fn preflight_and_tripwire_commands_degrade_instead_of_reporting_fixture_risk_sta
                 "--json".to_owned(),
                 "tripwire".to_owned(),
                 "list".to_owned(),
+                "--database".to_owned(),
+                tripwire_database_arg.clone(),
                 "--include-disarmed".to_owned(),
             ],
         ),
@@ -2677,6 +2701,8 @@ fn preflight_and_tripwire_commands_degrade_instead_of_reporting_fixture_risk_sta
                 "tripwire".to_owned(),
                 "check".to_owned(),
                 "tw_004".to_owned(),
+                "--database".to_owned(),
+                tripwire_database_arg,
                 "--task-outcome".to_owned(),
                 "success".to_owned(),
                 "--dry-run".to_owned(),

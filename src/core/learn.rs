@@ -12,8 +12,7 @@ use crate::core::outcome::{OutcomeRecordOptions, OutcomeRecordReport, record_out
 use crate::db::{CreateWorkspaceInput, DbConnection};
 use crate::models::{
     DomainError, ExperimentOutcome, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
-    LearningExperimentStatus, LearningObservation, LearningObservationSignal, LearningTargetKind,
-    WorkspaceId,
+    LearningObservation, LearningObservationSignal, LearningTargetKind, WorkspaceId,
 };
 
 /// Schema for learning agenda report.
@@ -39,6 +38,17 @@ pub const LEARN_CLOSE_SCHEMA_V1: &str = "ee.learn.close.v1";
 
 /// Schema for downstream learning feedback projections.
 pub const LEARN_DOWNSTREAM_EFFECTS_SCHEMA_V1: &str = "ee.learn.downstream_effects.v1";
+
+const LEARNING_RECORDS_UNAVAILABLE_MESSAGE: &str = "Learning agenda, uncertainty, summary, and experiment proposal records are unavailable until learn commands read persisted observation and evaluation ledgers instead of seed data.";
+const LEARNING_RECORDS_UNAVAILABLE_REPAIR: &str =
+    "ee learn observe <experiment-id> --dry-run --json";
+
+fn learning_records_unavailable() -> DomainError {
+    DomainError::UnsatisfiedDegradedMode {
+        message: LEARNING_RECORDS_UNAVAILABLE_MESSAGE.to_string(),
+        repair: Some(LEARNING_RECORDS_UNAVAILABLE_REPAIR.to_string()),
+    }
+}
 
 // ============================================================================
 // Agenda Operation
@@ -86,64 +96,8 @@ impl LearnAgendaReport {
 }
 
 /// Show the active learning agenda.
-pub fn show_agenda(options: &LearnAgendaOptions) -> Result<LearnAgendaReport, DomainError> {
-    let now = Utc::now().to_rfc3339();
-
-    let all_items = vec![
-        AgendaItem {
-            id: "gap_001".to_owned(),
-            topic: "error_handling".to_owned(),
-            gap_description: "Missing patterns for async error propagation".to_owned(),
-            priority: 85,
-            uncertainty: 0.72,
-            source: "curation_review".to_owned(),
-            status: "open".to_owned(),
-            created_at: now.clone(),
-        },
-        AgendaItem {
-            id: "gap_002".to_owned(),
-            topic: "testing".to_owned(),
-            gap_description: "No integration test patterns for database operations".to_owned(),
-            priority: 70,
-            uncertainty: 0.65,
-            source: "failure_analysis".to_owned(),
-            status: "open".to_owned(),
-            created_at: now.clone(),
-        },
-        AgendaItem {
-            id: "gap_003".to_owned(),
-            topic: "cli".to_owned(),
-            gap_description: "Unclear argument validation conventions".to_owned(),
-            priority: 55,
-            uncertainty: 0.45,
-            source: "user_feedback".to_owned(),
-            status: "resolved".to_owned(),
-            created_at: now.clone(),
-        },
-    ];
-
-    let filtered: Vec<_> = all_items
-        .into_iter()
-        .filter(|item| {
-            (options.include_resolved || item.status != "resolved")
-                && options
-                    .topic
-                    .as_ref()
-                    .is_none_or(|t| item.topic.contains(t))
-        })
-        .take(options.limit as usize)
-        .collect();
-
-    let high_priority = filtered.iter().filter(|i| i.priority >= 70).count() as u32;
-
-    Ok(LearnAgendaReport {
-        schema: LEARN_AGENDA_SCHEMA_V1.to_owned(),
-        total_gaps: 3,
-        high_priority_count: high_priority,
-        resolved_count: 1,
-        items: filtered,
-        generated_at: now,
-    })
+pub fn show_agenda(_options: &LearnAgendaOptions) -> Result<LearnAgendaReport, DomainError> {
+    Err(learning_records_unavailable())
 }
 
 // ============================================================================
@@ -192,66 +146,9 @@ impl LearnUncertaintyReport {
 
 /// Show uncertainty estimates and sampling priorities.
 pub fn show_uncertainty(
-    options: &LearnUncertaintyOptions,
+    _options: &LearnUncertaintyOptions,
 ) -> Result<LearnUncertaintyReport, DomainError> {
-    let now = Utc::now().to_rfc3339();
-
-    let all_items = vec![
-        UncertaintyItem {
-            memory_id: "mem_001".to_owned(),
-            content_preview: "Always run cargo fmt before committing...".to_owned(),
-            kind: "procedural".to_owned(),
-            uncertainty: 0.82,
-            confidence: 0.35,
-            retrieval_count: 2,
-            last_accessed: Some(now.clone()),
-        },
-        UncertaintyItem {
-            memory_id: "mem_002".to_owned(),
-            content_preview: "Use Result<T, E> for fallible operations...".to_owned(),
-            kind: "episodic".to_owned(),
-            uncertainty: 0.55,
-            confidence: 0.65,
-            retrieval_count: 8,
-            last_accessed: Some(now.clone()),
-        },
-        UncertaintyItem {
-            memory_id: "mem_003".to_owned(),
-            content_preview: "The search index lives in .ee/index/...".to_owned(),
-            kind: "semantic".to_owned(),
-            uncertainty: 0.38,
-            confidence: 0.78,
-            retrieval_count: 15,
-            last_accessed: Some(now.clone()),
-        },
-    ];
-
-    let filtered: Vec<_> = all_items
-        .into_iter()
-        .filter(|item| {
-            item.uncertainty >= options.min_uncertainty
-                && options.kind.as_ref().is_none_or(|k| &item.kind == k)
-                && (!options.low_confidence || item.confidence < 0.5)
-        })
-        .take(options.limit as usize)
-        .collect();
-
-    let mean = if filtered.is_empty() {
-        0.0
-    } else {
-        filtered.iter().map(|i| i.uncertainty).sum::<f64>() / filtered.len() as f64
-    };
-
-    let high_uncertainty = filtered.iter().filter(|i| i.uncertainty > 0.7).count() as u32;
-
-    Ok(LearnUncertaintyReport {
-        schema: LEARN_UNCERTAINTY_SCHEMA_V1.to_owned(),
-        mean_uncertainty: mean,
-        high_uncertainty_count: high_uncertainty,
-        sampling_candidates: filtered.len() as u32,
-        items: filtered,
-        generated_at: now,
-    })
+    Err(learning_records_unavailable())
 }
 
 // ============================================================================
@@ -306,46 +203,8 @@ impl LearnSummaryReport {
 }
 
 /// Show learning summary for a period.
-pub fn show_summary(options: &LearnSummaryOptions) -> Result<LearnSummaryReport, DomainError> {
-    let now = Utc::now().to_rfc3339();
-
-    let summary = LearningSummary {
-        period: options.period.clone(),
-        memories_created: 15,
-        memories_promoted: 3,
-        memories_demoted: 1,
-        rules_learned: 2,
-        rules_validated: 1,
-        gaps_identified: 4,
-        gaps_resolved: 2,
-        net_knowledge_delta: 12,
-    };
-
-    let events = if options.detailed {
-        vec![
-            LearningEvent {
-                event_type: "rule_learned".to_owned(),
-                description: "New rule: Always validate input at API boundaries".to_owned(),
-                impact: "high".to_owned(),
-                occurred_at: now.clone(),
-            },
-            LearningEvent {
-                event_type: "gap_resolved".to_owned(),
-                description: "Resolved: Missing async error handling patterns".to_owned(),
-                impact: "medium".to_owned(),
-                occurred_at: now.clone(),
-            },
-        ]
-    } else {
-        Vec::new()
-    };
-
-    Ok(LearnSummaryReport {
-        schema: LEARN_SUMMARY_SCHEMA_V1.to_owned(),
-        summary,
-        events,
-        generated_at: now,
-    })
+pub fn show_summary(_options: &LearnSummaryOptions) -> Result<LearnSummaryReport, DomainError> {
+    Err(learning_records_unavailable())
 }
 
 // ============================================================================
@@ -1633,38 +1492,9 @@ impl LearnExperimentRunReport {
 
 /// Propose safe dry-run-first experiments that could change memory decisions.
 pub fn propose_experiments(
-    options: &LearnExperimentProposeOptions,
+    _options: &LearnExperimentProposeOptions,
 ) -> Result<LearnExperimentProposalReport, DomainError> {
-    let now = Utc::now().to_rfc3339();
-    let candidates = experiment_seed_candidates(options);
-    let total_candidates = candidates.len() as u32;
-    let limit = options.limit as usize;
-    let min_expected_value = bounded_metric(options.min_expected_value);
-
-    let mut proposals: Vec<_> = candidates
-        .into_iter()
-        .filter(|proposal| {
-            options
-                .topic
-                .as_ref()
-                .is_none_or(|topic| proposal.topic.contains(topic))
-                && proposal.expected_value >= min_expected_value
-        })
-        .collect();
-
-    proposals.sort_by(compare_proposals);
-    proposals.truncate(limit);
-
-    Ok(LearnExperimentProposalReport {
-        schema: LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1.to_owned(),
-        returned: proposals.len() as u32,
-        proposals,
-        total_candidates,
-        min_expected_value,
-        max_attention_tokens: options.max_attention_tokens,
-        max_runtime_seconds: options.max_runtime_seconds,
-        generated_at: now,
-    })
+    Err(learning_records_unavailable())
 }
 
 /// Run a deterministic dry-run-only active learning experiment rehearsal.
@@ -2010,138 +1840,6 @@ fn run_next_actions(experiment_id: &str, signal: &str, outcome_status: &str) -> 
     ]
 }
 
-fn experiment_seed_candidates(options: &LearnExperimentProposeOptions) -> Vec<ExperimentProposal> {
-    [
-        ExperimentSeed {
-            experiment_id: "exp_replay_error_boundary",
-            question_id: "gap_001",
-            topic: "error_handling",
-            title: "Replay async error boundary failures",
-            hypothesis: "A dry-run replay can distinguish missing propagation evidence from a weak procedural rule.",
-            evidence_ids: &["gap_001", "mem_002"],
-            decision_id: "decision_error_boundary_rule",
-            target_artifact_ids: &["mem_002"],
-            current_decision: "Keep async error propagation guidance at low confidence.",
-            possible_change: "Promote or demote the rule based on replayed failure evidence.",
-            priority: 85.0,
-            uncertainty: 0.72,
-            confidence: 0.48,
-            uncertainty_reduction: 0.32,
-            runtime_seconds: 240,
-            attention_tokens: 900,
-            stop_condition: "Stop after the replay produces a pass/fail explanation or safety finding.",
-        },
-        ExperimentSeed {
-            experiment_id: "exp_database_contract_fixture",
-            question_id: "gap_002",
-            topic: "testing",
-            title: "Run database-operation contract fixture",
-            hypothesis: "A fixture-only dry run can show whether database-operation memories need stronger integration-test evidence.",
-            evidence_ids: &["gap_002", "mem_001"],
-            decision_id: "decision_database_test_pattern",
-            target_artifact_ids: &["mem_001"],
-            current_decision: "Treat database integration guidance as plausible but under-sampled.",
-            possible_change: "Increase confidence or request more evidence before promotion.",
-            priority: 70.0,
-            uncertainty: 0.65,
-            confidence: 0.55,
-            uncertainty_reduction: 0.28,
-            runtime_seconds: 180,
-            attention_tokens: 700,
-            stop_condition: "Stop after fixture output records stdout/stderr separation and mutation posture.",
-        },
-        ExperimentSeed {
-            experiment_id: "exp_cli_validation_shadow",
-            question_id: "gap_003",
-            topic: "cli",
-            title: "Shadow CLI validation examples",
-            hypothesis: "Shadowing invalid arguments can clarify whether CLI validation rules are resolved or still ambiguous.",
-            evidence_ids: &["gap_003", "mem_003"],
-            decision_id: "decision_cli_validation_convention",
-            target_artifact_ids: &["mem_003"],
-            current_decision: "Keep CLI validation convention marked resolved unless new ambiguity appears.",
-            possible_change: "Reopen the learning question or keep it resolved with supporting evidence.",
-            priority: 55.0,
-            uncertainty: 0.45,
-            confidence: 0.72,
-            uncertainty_reduction: 0.18,
-            runtime_seconds: 120,
-            attention_tokens: 500,
-            stop_condition: "Stop after two invalid argument examples produce stable repair text.",
-        },
-    ]
-    .into_iter()
-    .map(|seed| seed.into_proposal(options))
-    .collect()
-}
-
-#[derive(Clone, Copy, Debug)]
-struct ExperimentSeed {
-    experiment_id: &'static str,
-    question_id: &'static str,
-    topic: &'static str,
-    title: &'static str,
-    hypothesis: &'static str,
-    evidence_ids: &'static [&'static str],
-    decision_id: &'static str,
-    target_artifact_ids: &'static [&'static str],
-    current_decision: &'static str,
-    possible_change: &'static str,
-    priority: f64,
-    uncertainty: f64,
-    confidence: f64,
-    uncertainty_reduction: f64,
-    runtime_seconds: u32,
-    attention_tokens: u32,
-    stop_condition: &'static str,
-}
-
-impl ExperimentSeed {
-    fn into_proposal(self, options: &LearnExperimentProposeOptions) -> ExperimentProposal {
-        let attention_tokens = self.attention_tokens.min(options.max_attention_tokens);
-        let runtime_seconds = self.runtime_seconds.min(options.max_runtime_seconds);
-        let safety = safety_plan(options.safety_boundary, self.stop_condition);
-        let expected_value = expected_value(self.priority, self.uncertainty, self.confidence);
-        let experiment_id = self.experiment_id.to_owned();
-
-        ExperimentProposal {
-            next_command: format!("ee learn experiment run --dry-run --id {experiment_id} --json"),
-            experiment_id,
-            question_id: self.question_id.to_owned(),
-            title: self.title.to_owned(),
-            hypothesis: self.hypothesis.to_owned(),
-            status: LearningExperimentStatus::Proposed.as_str().to_owned(),
-            topic: self.topic.to_owned(),
-            expected_value,
-            uncertainty_reduction: rounded_metric(self.uncertainty_reduction),
-            confidence: rounded_metric(self.confidence),
-            budget: ExperimentBudget {
-                attention_tokens,
-                max_runtime_seconds: runtime_seconds,
-                dry_run_required: true,
-                budget_class: budget_class(attention_tokens, runtime_seconds).to_owned(),
-            },
-            safety,
-            decision_impact: ExperimentDecisionImpact {
-                decision_id: self.decision_id.to_owned(),
-                target_artifact_ids: self
-                    .target_artifact_ids
-                    .iter()
-                    .map(|id| (*id).to_owned())
-                    .collect(),
-                current_decision: self.current_decision.to_owned(),
-                possible_change: self.possible_change.to_owned(),
-                impact_score: rounded_metric(self.priority / 100.0),
-            },
-            evidence_ids: self
-                .evidence_ids
-                .iter()
-                .map(|id| (*id).to_owned())
-                .collect(),
-        }
-    }
-}
-
 fn safety_plan(
     boundary: ExperimentSafetyBoundary,
     stop_condition: &'static str,
@@ -2172,21 +1870,9 @@ fn safety_plan(
     }
 }
 
-fn expected_value(priority: f64, uncertainty: f64, confidence: f64) -> f64 {
-    rounded_metric((priority / 100.0) * uncertainty * (1.0 - confidence * 0.25))
-}
-
 fn rounded_metric(value: f64) -> f64 {
     if value.is_finite() {
         (value * 1000.0).round() / 1000.0
-    } else {
-        0.0
-    }
-}
-
-fn bounded_metric(value: f64) -> f64 {
-    if value.is_finite() {
-        value.clamp(0.0, 1.0)
     } else {
         0.0
     }
@@ -2198,13 +1884,6 @@ fn budget_class(attention_tokens: u32, runtime_seconds: u32) -> &'static str {
         (0..=1_000, 0..=240) => "medium",
         _ => "large",
     }
-}
-
-fn compare_proposals(left: &ExperimentProposal, right: &ExperimentProposal) -> std::cmp::Ordering {
-    right
-        .expected_value
-        .total_cmp(&left.expected_value)
-        .then_with(|| left.experiment_id.cmp(&right.experiment_id))
 }
 
 #[cfg(test)]
@@ -2229,84 +1908,52 @@ mod tests {
         Ok((dir, database))
     }
 
+    fn assert_learning_records_unavailable<T>(result: Result<T, DomainError>) -> TestResult {
+        match result {
+            Err(DomainError::UnsatisfiedDegradedMode { message, repair }) => {
+                assert_eq!(message, LEARNING_RECORDS_UNAVAILABLE_MESSAGE);
+                assert_eq!(repair.as_deref(), Some(LEARNING_RECORDS_UNAVAILABLE_REPAIR));
+                Ok(())
+            }
+            Err(error) => Err(format!(
+                "expected unsatisfied degraded mode, got {}",
+                error.code()
+            )),
+            Ok(_) => Err("expected unsatisfied degraded mode, got success".to_string()),
+        }
+    }
+
     #[test]
-    fn agenda_filters_resolved() -> TestResult {
+    fn agenda_reports_unavailable_until_backed_by_learning_records() -> TestResult {
         let options = LearnAgendaOptions {
             limit: 10,
             include_resolved: false,
             ..Default::default()
         };
 
-        let report = show_agenda(&options).map_err(|e| e.message())?;
-        assert!(report.items.iter().all(|i| i.status != "resolved"));
-        Ok(())
+        assert_learning_records_unavailable(show_agenda(&options))
     }
 
     #[test]
-    fn agenda_filters_by_topic() -> TestResult {
-        let options = LearnAgendaOptions {
-            limit: 10,
-            topic: Some("error".to_owned()),
-            include_resolved: true,
-            ..Default::default()
-        };
-
-        let report = show_agenda(&options).map_err(|e| e.message())?;
-        assert!(report.items.iter().all(|i| i.topic.contains("error")));
-        Ok(())
-    }
-
-    #[test]
-    fn uncertainty_filters_by_threshold() -> TestResult {
+    fn uncertainty_reports_unavailable_until_backed_by_learning_records() -> TestResult {
         let options = LearnUncertaintyOptions {
             limit: 10,
             min_uncertainty: 0.5,
             ..Default::default()
         };
 
-        let report = show_uncertainty(&options).map_err(|e| e.message())?;
-        assert!(report.items.iter().all(|i| i.uncertainty >= 0.5));
-        Ok(())
+        assert_learning_records_unavailable(show_uncertainty(&options))
     }
 
     #[test]
-    fn uncertainty_filters_low_confidence() -> TestResult {
-        let options = LearnUncertaintyOptions {
-            limit: 10,
-            min_uncertainty: 0.0,
-            low_confidence: true,
-            ..Default::default()
-        };
-
-        let report = show_uncertainty(&options).map_err(|e| e.message())?;
-        assert!(report.items.iter().all(|i| i.confidence < 0.5));
-        Ok(())
-    }
-
-    #[test]
-    fn summary_includes_events_when_detailed() -> TestResult {
+    fn summary_reports_unavailable_until_backed_by_learning_records() -> TestResult {
         let options = LearnSummaryOptions {
             period: "week".to_owned(),
             detailed: true,
             ..Default::default()
         };
 
-        let report = show_summary(&options).map_err(|e| e.message())?;
-        assert!(!report.events.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn summary_no_events_when_not_detailed() -> TestResult {
-        let options = LearnSummaryOptions {
-            period: "week".to_owned(),
-            detailed: false,
-            ..Default::default()
-        };
-
-        let report = show_summary(&options).map_err(|e| e.message())?;
-        assert!(report.events.is_empty());
-        Ok(())
+        assert_learning_records_unavailable(show_summary(&options))
     }
 
     #[test]
@@ -2576,81 +2223,10 @@ mod tests {
     }
 
     #[test]
-    fn learn_experiment_proposals_are_ranked_by_expected_value() -> TestResult {
-        let report = propose_experiments(&LearnExperimentProposeOptions {
-            limit: 2,
-            ..Default::default()
-        })
-        .map_err(|e| e.message())?;
-
-        assert_eq!(report.schema, LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1);
-        assert_eq!(report.total_candidates, 3);
-        assert_eq!(report.returned, 2);
-        assert_eq!(
-            report.proposals[0].experiment_id,
-            "exp_replay_error_boundary"
-        );
-        assert!(
-            report.proposals[0].expected_value >= report.proposals[1].expected_value,
-            "proposals must be sorted by expected value"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn learn_experiment_proposals_filter_topic_and_expected_value() -> TestResult {
-        let report = propose_experiments(&LearnExperimentProposeOptions {
-            limit: 10,
-            topic: Some("testing".to_owned()),
-            min_expected_value: 0.3,
-            ..Default::default()
-        })
-        .map_err(|e| e.message())?;
-
-        assert_eq!(report.returned, 1);
-        assert_eq!(report.proposals[0].topic, "testing");
-        assert!(report.proposals[0].expected_value >= 0.3);
-        Ok(())
-    }
-
-    #[test]
-    fn learn_experiment_proposals_enforce_safety_and_budget_caps() -> TestResult {
-        let report = propose_experiments(&LearnExperimentProposeOptions {
-            limit: 1,
-            max_attention_tokens: 600,
-            max_runtime_seconds: 90,
-            safety_boundary: ExperimentSafetyBoundary::HumanReview,
-            ..Default::default()
-        })
-        .map_err(|e| e.message())?;
-
-        let proposal = &report.proposals[0];
-        assert_eq!(proposal.budget.attention_tokens, 600);
-        assert_eq!(proposal.budget.max_runtime_seconds, 90);
-        assert_eq!(proposal.safety.boundary, "human_review");
-        assert!(proposal.safety.dry_run_first);
-        assert!(!proposal.safety.mutation_allowed);
-        assert!(proposal.safety.review_required);
-        assert!(
-            proposal
-                .decision_impact
-                .possible_change
-                .contains("Promote or demote")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn learn_experiment_proposals_allow_empty_limit() -> TestResult {
-        let report = propose_experiments(&LearnExperimentProposeOptions {
-            limit: 0,
-            ..Default::default()
-        })
-        .map_err(|e| e.message())?;
-
-        assert_eq!(report.returned, 0);
-        assert!(report.proposals.is_empty());
-        Ok(())
+    fn learn_experiment_proposals_report_unavailable_until_backed_by_records() -> TestResult {
+        assert_learning_records_unavailable(propose_experiments(
+            &LearnExperimentProposeOptions::default(),
+        ))
     }
 
     #[test]

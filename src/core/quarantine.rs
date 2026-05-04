@@ -105,8 +105,8 @@ impl From<&TrustAdvisory> for AdvisoryLevel {
 impl QuarantineReport {
     /// Gather quarantine report from current trust state.
     ///
-    /// In the current implementation, this returns a placeholder report since
-    /// no persistent source tracking exists yet. Once EE-278's storage is wired,
+    /// In the current implementation, this derives an empty report because no
+    /// persistent source tracking exists yet. Once EE-278's storage is wired,
     /// this will query the feedback_events table.
     #[must_use]
     pub fn gather() -> Self {
@@ -357,13 +357,9 @@ mod tests {
     }
 
     #[test]
-    fn gather_produces_valid_placeholder() -> TestResult {
+    fn gather_without_source_store_produces_empty_report() -> TestResult {
         let report = QuarantineReport::gather();
-        ensure(
-            report.summary.total_sources,
-            0,
-            "placeholder has no sources",
-        )?;
-        ensure(report.has_issues(), false, "placeholder has no issues")
+        ensure(report.summary.total_sources, 0, "no tracked sources")?;
+        ensure(report.has_issues(), false, "empty report has no issues")
     }
 }

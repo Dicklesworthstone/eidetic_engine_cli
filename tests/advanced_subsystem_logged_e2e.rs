@@ -1,7 +1,7 @@
 //! EE-TST-005 logged advanced subsystem scenarios.
 //!
 //! Captures structured, replay-friendly logs for recorder, preflight,
-//! procedure, economy, learning, and causal commands.
+//! procedure, lab, economy, learning, and causal commands.
 
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -203,6 +203,20 @@ fn extract_degradation_codes(value: Option<&JsonValue>) -> Vec<String> {
     let mut codes = Vec::new();
     if let Some(value) = value {
         collect_string_fields(value, "code", &mut codes);
+        collect_string_fields(value, "Code", &mut codes);
+        collect_string_fields(value, "Codes", &mut codes);
+        if let Some(warnings) = value
+            .pointer("/data/warnings")
+            .and_then(JsonValue::as_array)
+        {
+            for warning in warnings {
+                if let Some((code, _)) = warning.as_str().and_then(|text| text.split_once(':')) {
+                    if code.ends_with("_unavailable") {
+                        codes.push(code.to_owned());
+                    }
+                }
+            }
+        }
         codes.sort();
         codes.dedup();
     }
@@ -384,6 +398,399 @@ fn run_logged_step(
     })
 }
 
+fn read_logged_stdout_json(log: &CommandLog) -> Result<JsonValue, String> {
+    let stdout = fs::read_to_string(&log.stdout_artifact_path).map_err(|error| {
+        format!(
+            "failed to read stdout artifact {}: {error}",
+            log.stdout_artifact_path
+        )
+    })?;
+    serde_json::from_str(&stdout).map_err(|error| {
+        format!(
+            "stdout artifact {} is not valid JSON: {error}",
+            log.stdout_artifact_path
+        )
+    })
+}
+
+fn json_string_at(value: &JsonValue, pointer: &str, context: &str) -> Result<String, String> {
+    value
+        .pointer(pointer)
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{context} missing string at {pointer}"))
+}
+
+fn json_string_array_at(
+    value: &JsonValue,
+    pointer: &str,
+    context: &str,
+) -> Result<Vec<String>, String> {
+    value
+        .pointer(pointer)
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| format!("{context} missing array at {pointer}"))?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{context} contains non-string item at {pointer}"))
+        })
+        .collect()
+}
+
+fn derived_asset<'a>(status_json: &'a JsonValue, name: &str) -> Result<&'a JsonValue, String> {
+    status_json
+        .pointer("/data/derivedAssets")
+        .and_then(JsonValue::as_array)
+        .and_then(|assets| {
+            assets
+                .iter()
+                .find(|asset| asset.get("name").and_then(JsonValue::as_str) == Some(name))
+        })
+        .ok_or_else(|| format!("status output missing derived asset {name}"))
+}
+
+#[test]
+fn memory_revise_and_status_health_emit_logged_honest_contracts() -> TestResult {
+    let scenario_id = "ee_6956_memory_revise_status_honesty";
+    let scenario_dir = unique_scenario_dir(scenario_id)?;
+    let workspace = scenario_dir.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+
+    let workspace_arg = workspace.display().to_string();
+    let env_overrides = [
+        ("EE_E2E_TRACE_LEVEL", "contract"),
+        ("EE_E2E_REDACT", "strict"),
+    ];
+
+    let init_log = run_logged_step(
+        &scenario_dir,
+        &workspace,
+        &env_overrides,
+        &StepSpec {
+            subsystem: "setup",
+            name: "memory_status_init_workspace",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "init".to_owned(),
+            ],
+            expected_schema_contains: "ee.response.v1",
+            expected_exit_code: 0,
+            expect_clean_stderr: true,
+        },
+    )?;
+    ensure_equal(&init_log.exit_code, &0, "init exit code")?;
+    ensure(init_log.stdout_json_valid, "init stdout JSON")?;
+    ensure(init_log.stderr_is_empty, "init stderr clean")?;
+
+    let remember_log = run_logged_step(
+        &scenario_dir,
+        &workspace,
+        &env_overrides,
+        &StepSpec {
+            subsystem: "memory",
+            name: "remember_original_memory",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "remember".to_owned(),
+                "Run cargo fmt --check before release.".to_owned(),
+                "--level".to_owned(),
+                "procedural".to_owned(),
+                "--kind".to_owned(),
+                "rule".to_owned(),
+                "--confidence".to_owned(),
+                "0.86".to_owned(),
+                "--source".to_owned(),
+                "file://AGENTS.md#L164-173".to_owned(),
+            ],
+            expected_schema_contains: "ee.response.v1",
+            expected_exit_code: 0,
+            expect_clean_stderr: true,
+        },
+    )?;
+    ensure_equal(&remember_log.exit_code, &0, "remember exit code")?;
+    ensure(remember_log.stdout_json_valid, "remember stdout JSON")?;
+    ensure(remember_log.stderr_is_empty, "remember stderr clean")?;
+    let remember_json = read_logged_stdout_json(&remember_log)?;
+    let original_memory_id = json_string_at(&remember_json, "/data/memory_id", "remember")?;
+    ensure(
+        original_memory_id.starts_with("mem_"),
+        format!("unexpected memory id {original_memory_id}"),
+    )?;
+
+    let revise_dry_run_log = run_logged_step(
+        &scenario_dir,
+        &workspace,
+        &env_overrides,
+        &StepSpec {
+            subsystem: "memory",
+            name: "memory_revise_dry_run_preview",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "memory".to_owned(),
+                "revise".to_owned(),
+                original_memory_id.clone(),
+                "--content".to_owned(),
+                "Run cargo fmt --check and clippy before release.".to_owned(),
+                "--confidence".to_owned(),
+                "0.91".to_owned(),
+                "--source".to_owned(),
+                "file://README.md#L267".to_owned(),
+                "--reason".to_owned(),
+                "correction".to_owned(),
+                "--dry-run".to_owned(),
+            ],
+            expected_schema_contains: "ee.response.v1",
+            expected_exit_code: 0,
+            expect_clean_stderr: true,
+        },
+    )?;
+    ensure_equal(&revise_dry_run_log.exit_code, &0, "dry-run exit code")?;
+    ensure(revise_dry_run_log.stdout_json_valid, "dry-run stdout JSON")?;
+    ensure(revise_dry_run_log.stderr_is_empty, "dry-run stderr clean")?;
+    let revise_dry_run_json = read_logged_stdout_json(&revise_dry_run_log)?;
+    ensure_equal(
+        &revise_dry_run_json["data"]["original_id"],
+        &serde_json::json!(original_memory_id),
+        "dry-run original memory id",
+    )?;
+    ensure_equal(
+        &revise_dry_run_json["data"]["new_id"],
+        &JsonValue::Null,
+        "dry-run does not emit stub new_id",
+    )?;
+    ensure_equal(
+        &revise_dry_run_json["data"]["revision_number"],
+        &JsonValue::Null,
+        "dry-run does not emit stub revision number",
+    )?;
+    let changed_fields =
+        json_string_array_at(&revise_dry_run_json, "/data/changed_fields", "dry-run")?;
+    ensure_equal(
+        &changed_fields,
+        &vec![
+            "content".to_owned(),
+            "confidence".to_owned(),
+            "provenance_uri".to_owned(),
+        ],
+        "dry-run changed fields",
+    )?;
+    ensure_equal(
+        &revise_dry_run_json["data"]["degraded"],
+        &serde_json::json!(["revision_write_unavailable"]),
+        "dry-run degraded code",
+    )?;
+
+    let revise_write_log = run_logged_step(
+        &scenario_dir,
+        &workspace,
+        &env_overrides,
+        &StepSpec {
+            subsystem: "memory",
+            name: "memory_revise_non_dry_run_policy_denied",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "memory".to_owned(),
+                "revise".to_owned(),
+                original_memory_id.clone(),
+                "--content".to_owned(),
+                "Run cargo fmt --check and clippy before release.".to_owned(),
+            ],
+            expected_schema_contains: "ee.error.v1",
+            expected_exit_code: 8,
+            expect_clean_stderr: true,
+        },
+    )?;
+    ensure_equal(
+        &revise_write_log.exit_code,
+        &8,
+        "non-dry-run policy exit code",
+    )?;
+    ensure(revise_write_log.stdout_json_valid, "policy stdout JSON")?;
+    ensure(revise_write_log.stderr_is_empty, "policy stderr clean")?;
+    ensure(
+        revise_write_log
+            .first_failure
+            .as_ref()
+            .is_some_and(|diagnosis| diagnosis == "error.code=policy_denied"),
+        format!(
+            "policy denial first-failure diagnosis missing: {:?}",
+            revise_write_log.first_failure
+        ),
+    )?;
+    let revise_write_json = read_logged_stdout_json(&revise_write_log)?;
+    ensure_equal(
+        &revise_write_json["error"]["code"],
+        &serde_json::json!("policy_denied"),
+        "policy denied error code",
+    )?;
+
+    let status_log = run_logged_step(
+        &scenario_dir,
+        &workspace,
+        &env_overrides,
+        &StepSpec {
+            subsystem: "status",
+            name: "status_after_memory_revise_preview",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "status".to_owned(),
+            ],
+            expected_schema_contains: "ee.response.v1",
+            expected_exit_code: 0,
+            expect_clean_stderr: true,
+        },
+    )?;
+    ensure_equal(&status_log.exit_code, &0, "status exit code")?;
+    ensure(status_log.stdout_json_valid, "status stdout JSON")?;
+    ensure(status_log.stderr_is_empty, "status stderr clean")?;
+    let status_json = read_logged_stdout_json(&status_log)?;
+    let memory_health = status_json
+        .pointer("/data/memoryHealth")
+        .ok_or_else(|| "status missing memoryHealth".to_owned())?;
+    ensure(
+        memory_health["status"] != serde_json::json!("unavailable"),
+        "workspace status must read DB-backed memory health",
+    )?;
+    ensure_equal(
+        &memory_health["totalCount"],
+        &serde_json::json!(1),
+        "memory health total count",
+    )?;
+    ensure_equal(
+        &memory_health["activeCount"],
+        &serde_json::json!(1),
+        "memory health active count",
+    )?;
+    ensure_equal(
+        &memory_health["tombstonedCount"],
+        &serde_json::json!(0),
+        "memory health tombstoned count",
+    )?;
+    ensure(
+        memory_health["healthScore"].is_number(),
+        "memory health score must be computed from real rows",
+    )?;
+    ensure(
+        memory_health["scoreComponents"].is_object(),
+        "memory health score components must be logged",
+    )?;
+    let search_asset = derived_asset(&status_json, "search_index")?;
+    ensure(
+        search_asset
+            .get("status")
+            .and_then(JsonValue::as_str)
+            .is_some(),
+        "search index status must be logged",
+    )?;
+    ensure(
+        search_asset.get("sourceHighWatermark").is_some(),
+        "source high watermark field must be logged",
+    )?;
+    ensure(
+        search_asset.get("assetHighWatermark").is_some(),
+        "asset high watermark field must be logged",
+    )?;
+
+    let database_path = workspace.join(".ee").join("ee.db");
+    ensure(
+        database_path.is_file(),
+        "workspace database file must exist",
+    )?;
+
+    let commands = vec![
+        init_log.clone(),
+        remember_log.clone(),
+        revise_dry_run_log.clone(),
+        revise_write_log.clone(),
+        status_log.clone(),
+    ];
+    for log in &commands {
+        ensure(
+            Path::new(&log.stdout_artifact_path).is_file(),
+            format!("{} stdout artifact missing", log.step_name),
+        )?;
+        ensure(
+            Path::new(&log.stderr_artifact_path).is_file(),
+            format!("{} stderr artifact missing", log.step_name),
+        )?;
+    }
+
+    let summary = serde_json::json!({
+        "schema": "ee.e2e.memory_revise_status_log.v1",
+        "scenarioId": scenario_id,
+        "workspace": workspace.display().to_string(),
+        "database": {
+            "path": database_path.display().to_string(),
+            "exists": database_path.is_file(),
+        },
+        "originalMemoryId": original_memory_id,
+        "dryRun": {
+            "newMemoryId": revise_dry_run_json["data"]["new_id"].clone(),
+            "revisionNumber": revise_dry_run_json["data"]["revision_number"].clone(),
+            "changedFields": changed_fields,
+            "indexJobStatus": revise_dry_run_json["data"]["index_status"].clone(),
+            "degraded": revise_dry_run_json["data"]["degraded"].clone(),
+        },
+        "nonDryRun": {
+            "exitCode": revise_write_log.exit_code,
+            "firstFailure": revise_write_log.first_failure.clone(),
+            "errorCode": revise_write_json["error"]["code"].clone(),
+        },
+        "statusHealth": {
+            "memoryHealth": memory_health.clone(),
+            "searchIndex": search_asset.clone(),
+        },
+        "commands": commands,
+    });
+    let summary_path = scenario_dir.join("memory-revise-status-summary.json");
+    let rendered_summary = serde_json::to_string_pretty(&summary)
+        .map_err(|error| format!("failed to render summary JSON: {error}"))?;
+    write_text(&summary_path, &format!("{rendered_summary}\n"))?;
+    ensure(
+        summary_path.is_file(),
+        "memory revise status summary missing",
+    )?;
+
+    let parsed_summary: JsonValue = serde_json::from_str(&rendered_summary)
+        .map_err(|error| format!("summary JSON parse failed: {error}"))?;
+    ensure_equal(
+        &parsed_summary["schema"],
+        &serde_json::json!("ee.e2e.memory_revise_status_log.v1"),
+        "summary schema",
+    )?;
+    ensure_equal(
+        &parsed_summary["dryRun"]["newMemoryId"],
+        &JsonValue::Null,
+        "summary dry-run has no fake new memory",
+    )?;
+    ensure_equal(
+        &parsed_summary["nonDryRun"]["errorCode"],
+        &serde_json::json!("policy_denied"),
+        "summary policy-denied code",
+    )?;
+    ensure(
+        parsed_summary["statusHealth"]["memoryHealth"]["scoreComponents"].is_object(),
+        "summary includes memory health components",
+    )
+}
+
 #[test]
 fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
     let scenario_id = "ee_tst_005_advanced_logged_bundle";
@@ -486,7 +893,7 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "--dry-run".to_owned(),
             ],
             expected_schema_contains: "ee.response.v1",
-            expected_exit_code: 7,
+            expected_exit_code: 0,
             expect_clean_stderr: true,
         },
         StepSpec {
@@ -541,6 +948,59 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
             expected_exit_code: 7,
             expect_clean_stderr: true,
         },
+        StepSpec {
+            subsystem: "lab",
+            name: "lab_capture_dry_run",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace.display().to_string(),
+                "--json".to_owned(),
+                "lab".to_owned(),
+                "capture".to_owned(),
+                "--task-input".to_owned(),
+                "prepare release with evidence-only lab replay".to_owned(),
+                "--include-memories".to_owned(),
+                "--include-actions".to_owned(),
+                "--dry-run".to_owned(),
+            ],
+            expected_schema_contains: "ee.response.v1",
+            expected_exit_code: 0,
+            expect_clean_stderr: true,
+        },
+        StepSpec {
+            subsystem: "lab",
+            name: "lab_replay_dry_run",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace.display().to_string(),
+                "--json".to_owned(),
+                "lab".to_owned(),
+                "replay".to_owned(),
+                "ep_missing_evidence".to_owned(),
+                "--dry-run".to_owned(),
+            ],
+            expected_schema_contains: "ee.response.v1",
+            expected_exit_code: 0,
+            expect_clean_stderr: true,
+        },
+        StepSpec {
+            subsystem: "lab",
+            name: "lab_counterfactual_dry_run",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace.display().to_string(),
+                "--json".to_owned(),
+                "lab".to_owned(),
+                "counterfactual".to_owned(),
+                "ep_missing_evidence".to_owned(),
+                "--add-memory".to_owned(),
+                "mem_evidence_candidate".to_owned(),
+                "--dry-run".to_owned(),
+            ],
+            expected_schema_contains: "ee.response.v1",
+            expected_exit_code: 0,
+            expect_clean_stderr: true,
+        },
     ];
 
     let mut command_logs = Vec::with_capacity(steps.len());
@@ -590,6 +1050,7 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
         &vec![
             "causal".to_owned(),
             "economy".to_owned(),
+            "lab".to_owned(),
             "learning".to_owned(),
             "preflight".to_owned(),
             "procedure".to_owned(),
@@ -631,8 +1092,40 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
     )?;
     ensure_equal(
         &parsed_summary["command_count"],
-        &serde_json::json!(7),
+        &serde_json::json!(10),
         "summary command count",
+    )?;
+    let commands = parsed_summary["commands"]
+        .as_array()
+        .ok_or_else(|| "summary commands missing".to_string())?;
+    let lab_capture = commands
+        .iter()
+        .find(|entry| entry["step_name"] == serde_json::json!("lab_capture_dry_run"))
+        .ok_or_else(|| "lab capture command missing".to_string())?;
+    ensure_equal(
+        &lab_capture["redaction_status"],
+        &serde_json::json!("redacted"),
+        "lab capture redaction status",
+    )?;
+    ensure(
+        lab_capture["evidence_ids"]
+            .as_array()
+            .is_some_and(|ids| !ids.is_empty()),
+        "lab capture records evidence IDs",
+    )?;
+    ensure(
+        commands
+            .iter()
+            .filter(|entry| {
+                entry["step_name"] == serde_json::json!("lab_replay_dry_run")
+                    || entry["step_name"] == serde_json::json!("lab_counterfactual_dry_run")
+            })
+            .all(|entry| {
+                entry["degradation_codes"]
+                    .as_array()
+                    .is_some_and(|codes| codes.iter().any(|code| code == "lab_replay_unavailable"))
+            }),
+        "lab replay/counterfactual commands must record the missing replay evidence code",
     )?;
     ensure(
         parsed_summary["commands"]
