@@ -28,6 +28,9 @@ pub const RECORDER_TAIL_FOLLOW_EVENT_SCHEMA_V1: &str = "ee.recorder.tail_follow_
 /// Schema for recorder import dry-run plans.
 pub const RECORDER_IMPORT_PLAN_SCHEMA_V1: &str = "ee.recorder.import_plan.v1";
 
+/// Schema for recorder import execution results.
+pub const RECORDER_IMPORT_RESULT_SCHEMA_V1: &str = "ee.recorder.import_result.v1";
+
 /// Default maximum recorder event payload size accepted by the CLI.
 pub const DEFAULT_MAX_RECORDER_PAYLOAD_BYTES: usize = 64 * 1024;
 
@@ -610,22 +613,22 @@ impl RecorderImportPlanReport {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecorderImportErrorCode {
-    DryRunRequired,
     InvalidInputJson,
     InvalidSourceType,
     InvalidSourceShape,
     PayloadTooLarge,
+    DatabaseError,
 }
 
 impl RecorderImportErrorCode {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::DryRunRequired => "recorder_import_dry_run_required",
             Self::InvalidInputJson => "recorder_import_invalid_json",
             Self::InvalidSourceType => "recorder_import_invalid_source_type",
             Self::InvalidSourceShape => "recorder_import_invalid_source_shape",
             Self::PayloadTooLarge => "recorder_import_payload_too_large",
+            Self::DatabaseError => "recorder_import_database_error",
         }
     }
 }
@@ -678,15 +681,6 @@ struct SourceEvent {
 pub fn plan_recorder_import(
     options: &RecorderImportOptions,
 ) -> Result<RecorderImportPlanReport, RecorderImportError> {
-    if !options.dry_run {
-        return Err(RecorderImportError {
-            code: RecorderImportErrorCode::DryRunRequired,
-            message: "Recorder import writes are not implemented; use --dry-run.".to_string(),
-            repair: "Re-run with ee recorder import --dry-run --json.".to_string(),
-            details: Box::new(json!({"dryRun": options.dry_run})),
-        });
-    }
-
     let source_events = parse_import_source_events(options)?;
     let discovered = usize_to_u64(source_events.len());
     let max_events = options.max_events.max(1);
@@ -1554,6 +1548,154 @@ pub fn list_links_from_records(
 }
 
 // ============================================================================
+// Recorder Import Execution (EE-400, eidetic_engine_cli-nmxc)
+// ============================================================================
+
+/// Result of executing a recorder import (non-dry-run).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecorderImportResult {
+    pub schema: &'static str,
+    pub source_type: ImportSourceType,
+    pub source_id: String,
+    pub run_id: String,
+    pub agent_id: String,
+    pub workspace_id: Option<String>,
+    pub dry_run: bool,
+    pub events_imported: u64,
+    pub events_rejected: u64,
+    pub payload_bytes: u64,
+    pub redacted_count: u64,
+    pub chain_complete: bool,
+    pub started_at: String,
+    pub ended_at: String,
+    pub warnings: Vec<String>,
+}
+
+impl RecorderImportResult {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "schema": self.schema,
+            "command": "recorder import",
+            "sourceType": self.source_type.as_str(),
+            "sourceId": self.source_id,
+            "runId": self.run_id,
+            "agentId": self.agent_id,
+            "workspaceId": self.workspace_id,
+            "dryRun": self.dry_run,
+            "eventsImported": self.events_imported,
+            "eventsRejected": self.events_rejected,
+            "payloadBytes": self.payload_bytes,
+            "redactedCount": self.redacted_count,
+            "chainComplete": self.chain_complete,
+            "startedAt": self.started_at,
+            "endedAt": self.ended_at,
+            "warnings": self.warnings,
+        })
+    }
+}
+
+/// Execute a recorder import, persisting events to the database.
+///
+/// This function plans the import then persists the run and events. It requires
+/// a database connection and workspace ID for storage.
+///
+/// # Errors
+///
+/// Returns [`RecorderImportError`] for planning failures or database errors.
+pub fn execute_recorder_import(
+    options: &RecorderImportOptions,
+    connection: &crate::db::DbConnection,
+) -> Result<RecorderImportResult, RecorderImportError> {
+    use crate::db::{CreateRecorderEventInput, CreateRecorderRunInput};
+    use chrono::Utc;
+
+    let plan_options = RecorderImportOptions {
+        dry_run: true,
+        ..options.clone()
+    };
+    let plan = plan_recorder_import(&plan_options)?;
+
+    let started_at = Utc::now().to_rfc3339();
+
+    let run_input = CreateRecorderRunInput {
+        workspace_id: plan.workspace_id.clone(),
+        agent_id: plan.agent_id.clone(),
+        session_id: plan.session_id.clone(),
+        source_type: plan.source_type.as_str().to_string(),
+        source_id: Some(plan.source_id.clone()),
+        status: "imported".to_string(),
+        started_at: started_at.clone(),
+        ended_at: None,
+        event_count: plan.events_mapped,
+        redacted_count: plan.redacted_count,
+        payload_bytes: plan.payload_bytes,
+        chain_complete: plan.chain_complete,
+    };
+
+    connection
+        .insert_recorder_run(&plan.run_id, &run_input)
+        .map_err(|error| RecorderImportError {
+            code: RecorderImportErrorCode::DatabaseError,
+            message: format!("Failed to insert recorder run: {error}"),
+            repair: "Check database connectivity and workspace initialization.".to_string(),
+            details: Box::new(json!({"runId": plan.run_id, "dbError": error.to_string()})),
+        })?;
+
+    for event in &plan.events {
+        let event_input = CreateRecorderEventInput {
+            run_id: plan.run_id.clone(),
+            sequence: event.sequence,
+            event_type: event.event_type.as_str().to_string(),
+            timestamp: event.timestamp.clone(),
+            payload_hash: event.payload_hash.clone(),
+            payload_bytes: event.payload_bytes,
+            redaction_status: event.redaction_status.as_db_str().to_string(),
+            redacted_bytes: event.redacted_bytes,
+            previous_event_hash: event.previous_event_hash.clone(),
+            event_hash: event.event_hash.clone(),
+            chain_status: event.chain_status.as_str().to_string(),
+            source_span_id: Some(event.source_span_id.clone()),
+            source_line_start: Some(event.source_line_start),
+            source_line_end: Some(event.source_line_end),
+        };
+
+        connection
+            .insert_recorder_event(&event.event_id, &event_input)
+            .map_err(|error| RecorderImportError {
+                code: RecorderImportErrorCode::DatabaseError,
+                message: format!("Failed to insert recorder event: {error}"),
+                repair: "Check database connectivity.".to_string(),
+                details: Box::new(json!({
+                    "eventId": event.event_id,
+                    "sequence": event.sequence,
+                    "dbError": error.to_string()
+                })),
+            })?;
+    }
+
+    let ended_at = Utc::now().to_rfc3339();
+
+    Ok(RecorderImportResult {
+        schema: RECORDER_IMPORT_RESULT_SCHEMA_V1,
+        source_type: plan.source_type,
+        source_id: plan.source_id,
+        run_id: plan.run_id,
+        agent_id: plan.agent_id,
+        workspace_id: plan.workspace_id,
+        dry_run: false,
+        events_imported: plan.events_mapped,
+        events_rejected: plan.events_rejected,
+        payload_bytes: plan.payload_bytes,
+        redacted_count: plan.redacted_count,
+        chain_complete: plan.chain_complete,
+        started_at,
+        ended_at,
+        warnings: plan.warnings,
+    })
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1860,7 +2002,7 @@ mod tests {
     }
 
     #[test]
-    fn recorder_import_plan_requires_dry_run() -> TestResult {
+    fn recorder_import_plan_is_always_dry_run() -> TestResult {
         let options = RecorderImportOptions {
             source_type: ImportSourceType::Cass,
             source_id: "cass://session/write".to_string(),
@@ -1875,16 +2017,9 @@ mod tests {
             dry_run: false,
         };
 
-        let error = match plan_recorder_import(&options) {
-            Ok(_) => return Err("non-dry-run recorder import should fail".to_string()),
-            Err(error) => error,
-        };
+        let plan = plan_recorder_import(&options).map_err(|error| error.message)?;
 
-        ensure(
-            error.code,
-            RecorderImportErrorCode::DryRunRequired,
-            "error code",
-        )
+        ensure(plan.dry_run, true, "plan remains dry-run")
     }
 
     #[test]
@@ -2254,5 +2389,168 @@ mod tests {
                 .iter()
                 .all(|link| link.link_type == RecorderLinkType::ContextPack)
         );
+    }
+
+    #[test]
+    fn import_result_schema_is_stable() -> TestResult {
+        ensure(
+            RECORDER_IMPORT_RESULT_SCHEMA_V1,
+            "ee.recorder.import_result.v1",
+            "import result schema",
+        )
+    }
+
+    #[test]
+    fn import_dry_run_plans_without_persisting() -> TestResult {
+        let input = json!({
+            "lines": [
+                {"line": 1, "content": "test line"}
+            ]
+        });
+        let options = RecorderImportOptions {
+            source_type: ImportSourceType::Cass,
+            source_id: "cass://dry-run-test".to_string(),
+            input_json: Some(input.to_string()),
+            input_path: None,
+            agent_id: Some("test-agent".to_string()),
+            session_id: None,
+            workspace_id: None,
+            max_events: DEFAULT_RECORDER_IMPORT_LIMIT,
+            redact: false,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: true,
+        };
+
+        let plan = plan_recorder_import(&options).map_err(|e| e.message)?;
+
+        ensure(plan.dry_run, true, "plan marked dry_run")?;
+        ensure(plan.events_mapped, 1, "one event mapped")?;
+        ensure(
+            plan.events[0].action,
+            "would_record",
+            "action is would_record",
+        )
+    }
+
+    #[test]
+    fn import_execute_persists_to_database() -> TestResult {
+        use crate::db::DbConnection;
+
+        let connection = DbConnection::open_memory().map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+
+        let input = json!({
+            "lines": [
+                {"line": 1, "content": "{\"type\":\"message\",\"role\":\"user\"}"},
+                {"line": 2, "content": "{\"type\":\"tool_use\",\"name\":\"shell\"}"}
+            ]
+        });
+        let options = RecorderImportOptions {
+            source_type: ImportSourceType::Cass,
+            source_id: "cass://execute-test".to_string(),
+            input_json: Some(input.to_string()),
+            input_path: Some("/sessions/test.jsonl".to_string()),
+            agent_id: Some("test-agent".to_string()),
+            session_id: Some("session-123".to_string()),
+            workspace_id: Some("workspace-abc".to_string()),
+            max_events: DEFAULT_RECORDER_IMPORT_LIMIT,
+            redact: false,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: false,
+        };
+
+        let result = execute_recorder_import(&options, &connection).map_err(|e| e.message)?;
+
+        ensure(result.dry_run, false, "result not dry_run")?;
+        ensure(result.events_imported, 2, "two events imported")?;
+        ensure(result.source_type, ImportSourceType::Cass, "source type")?;
+        ensure(result.agent_id, "test-agent".to_string(), "agent_id")?;
+
+        let stored_run = connection
+            .get_recorder_run(&result.run_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("run not found in database")?;
+        ensure(
+            stored_run.agent_id,
+            "test-agent".to_string(),
+            "stored agent",
+        )?;
+        ensure(stored_run.event_count, 2, "stored event_count")?;
+
+        let stored_events = connection
+            .list_recorder_events(&result.run_id)
+            .map_err(|e| e.to_string())?;
+        ensure(stored_events.len(), 2, "stored events count")?;
+        ensure(stored_events[0].sequence, 1, "first event sequence")?;
+        ensure(stored_events[1].sequence, 2, "second event sequence")
+    }
+
+    #[test]
+    fn import_result_json_has_required_fields() -> TestResult {
+        use crate::db::DbConnection;
+
+        let connection = DbConnection::open_memory().map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+
+        let input = json!({
+            "lines": [
+                {"line": 1, "content": "test content"}
+            ]
+        });
+        let options = RecorderImportOptions {
+            source_type: ImportSourceType::Cass,
+            source_id: "cass://json-test".to_string(),
+            input_json: Some(input.to_string()),
+            input_path: None,
+            agent_id: None,
+            session_id: None,
+            workspace_id: Some("ws-test".to_string()),
+            max_events: DEFAULT_RECORDER_IMPORT_LIMIT,
+            redact: false,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: false,
+        };
+
+        let result = execute_recorder_import(&options, &connection).map_err(|e| e.message)?;
+        let json = result.data_json();
+
+        ensure(
+            json.get("schema").and_then(|v| v.as_str()),
+            Some(RECORDER_IMPORT_RESULT_SCHEMA_V1),
+            "schema field",
+        )?;
+        ensure(
+            json.get("command").and_then(|v| v.as_str()),
+            Some("recorder import"),
+            "command field",
+        )?;
+        ensure(json.get("runId").is_some(), true, "runId present")?;
+        ensure(json.get("sourceType").is_some(), true, "sourceType present")?;
+        ensure(json.get("sourceId").is_some(), true, "sourceId present")?;
+        ensure(json.get("agentId").is_some(), true, "agentId present")?;
+        ensure(json.get("dryRun").is_some(), true, "dryRun present")?;
+        ensure(
+            json.get("eventsImported").is_some(),
+            true,
+            "eventsImported present",
+        )?;
+        ensure(
+            json.get("eventsRejected").is_some(),
+            true,
+            "eventsRejected present",
+        )?;
+        ensure(
+            json.get("payloadBytes").is_some(),
+            true,
+            "payloadBytes present",
+        )?;
+        ensure(
+            json.get("chainComplete").is_some(),
+            true,
+            "chainComplete present",
+        )?;
+        ensure(json.get("startedAt").is_some(), true, "startedAt present")?;
+        ensure(json.get("endedAt").is_some(), true, "endedAt present")?;
+        ensure(json.get("warnings").is_some(), true, "warnings present")
     }
 }

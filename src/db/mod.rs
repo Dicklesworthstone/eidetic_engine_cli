@@ -2298,6 +2298,71 @@ CREATE INDEX idx_pack_items_trust_class ON pack_items(trust_class);
     "blake3:v026_pack_item_context_signals_2026_05_04",
 );
 
+/// V027: Add recorder_runs and recorder_events tables (EE-400, eidetic_engine_cli-nmxc).
+pub const V027_RECORDER_STORE: Migration = Migration::new(
+    27,
+    "recorder_store",
+    r#"
+-- Recorder runs table (EE-400)
+-- Captures imported or live-recorded agent sessions.
+CREATE TABLE recorder_runs (
+    run_id TEXT PRIMARY KEY CHECK (run_id GLOB 'run_*' AND length(run_id) >= 8),
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL CHECK (length(trim(agent_id)) > 0),
+    session_id TEXT CHECK (session_id IS NULL OR length(trim(session_id)) > 0),
+    source_type TEXT NOT NULL CHECK (source_type IN ('cass', 'live', 'replay', 'synthetic')),
+    source_id TEXT CHECK (source_id IS NULL OR length(trim(source_id)) > 0),
+    status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'abandoned', 'imported')),
+    started_at TEXT NOT NULL CHECK (length(trim(started_at)) > 0),
+    ended_at TEXT CHECK (ended_at IS NULL OR length(trim(ended_at)) > 0),
+    event_count INTEGER NOT NULL DEFAULT 0 CHECK (event_count >= 0),
+    redacted_count INTEGER NOT NULL DEFAULT 0 CHECK (redacted_count >= 0),
+    payload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (payload_bytes >= 0),
+    chain_complete INTEGER NOT NULL DEFAULT 1 CHECK (chain_complete IN (0, 1)),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0)
+);
+
+CREATE INDEX idx_recorder_runs_workspace ON recorder_runs(workspace_id) WHERE workspace_id IS NOT NULL;
+CREATE INDEX idx_recorder_runs_agent ON recorder_runs(agent_id);
+CREATE INDEX idx_recorder_runs_session ON recorder_runs(session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX idx_recorder_runs_source ON recorder_runs(source_type, source_id);
+CREATE INDEX idx_recorder_runs_status ON recorder_runs(status);
+CREATE INDEX idx_recorder_runs_started ON recorder_runs(started_at);
+
+-- Recorder events table (EE-400)
+-- Individual events within a recorder run, with chain hashes for integrity.
+CREATE TABLE recorder_events (
+    event_id TEXT PRIMARY KEY CHECK (event_id GLOB 'evt_*' AND length(event_id) >= 8),
+    run_id TEXT NOT NULL REFERENCES recorder_runs(run_id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    event_type TEXT NOT NULL CHECK (event_type IN (
+        'tool_call', 'tool_result', 'user_message', 'assistant_message',
+        'system_message', 'error', 'state_change'
+    )),
+    timestamp TEXT NOT NULL CHECK (length(trim(timestamp)) > 0),
+    payload_hash TEXT CHECK (payload_hash IS NULL OR payload_hash GLOB 'blake3:*'),
+    payload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (payload_bytes >= 0),
+    redaction_status TEXT NOT NULL CHECK (redaction_status IN ('clean', 'redacted', 'quarantined')),
+    redacted_bytes INTEGER NOT NULL DEFAULT 0 CHECK (redacted_bytes >= 0),
+    previous_event_hash TEXT CHECK (previous_event_hash IS NULL OR previous_event_hash GLOB 'blake3:*'),
+    event_hash TEXT NOT NULL CHECK (event_hash GLOB 'blake3:*'),
+    chain_status TEXT NOT NULL CHECK (chain_status IN ('root', 'linked', 'broken')),
+    source_span_id TEXT CHECK (source_span_id IS NULL OR length(trim(source_span_id)) > 0),
+    source_line_start INTEGER CHECK (source_line_start IS NULL OR source_line_start >= 0),
+    source_line_end INTEGER CHECK (source_line_end IS NULL OR source_line_end >= 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    UNIQUE (run_id, sequence)
+);
+
+CREATE INDEX idx_recorder_events_run ON recorder_events(run_id);
+CREATE INDEX idx_recorder_events_type ON recorder_events(event_type);
+CREATE INDEX idx_recorder_events_timestamp ON recorder_events(timestamp);
+CREATE INDEX idx_recorder_events_redaction ON recorder_events(redaction_status);
+CREATE INDEX idx_recorder_events_chain ON recorder_events(chain_status);
+"#,
+    "blake3:v027_recorder_store_2026_05_04",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -2326,6 +2391,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V024_TRIPWIRE_STORE,
     V025_RATIONALE_TRACES,
     V026_PACK_ITEM_CONTEXT_SIGNALS,
+    V027_RECORDER_STORE,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -8762,6 +8828,211 @@ fn stored_graph_snapshot_from_row(row: &Row) -> Result<StoredGraphSnapshot> {
         created_at: required_text(row, 10, DbOperation::Query, "created_at")?.to_string(),
         expires_at: optional_text(row, 11)?.map(str::to_string),
         status,
+    })
+}
+
+// ============================================================================
+// Recorder Store (EE-400)
+// ============================================================================
+
+/// Input for creating a recorder run record.
+#[derive(Clone, Debug)]
+pub struct CreateRecorderRunInput {
+    pub workspace_id: Option<String>,
+    pub agent_id: String,
+    pub session_id: Option<String>,
+    pub source_type: String,
+    pub source_id: Option<String>,
+    pub status: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub event_count: u64,
+    pub redacted_count: u64,
+    pub payload_bytes: u64,
+    pub chain_complete: bool,
+}
+
+/// Input for creating a recorder event record.
+#[derive(Clone, Debug)]
+pub struct CreateRecorderEventInput {
+    pub run_id: String,
+    pub sequence: u64,
+    pub event_type: String,
+    pub timestamp: String,
+    pub payload_hash: Option<String>,
+    pub payload_bytes: u64,
+    pub redaction_status: String,
+    pub redacted_bytes: u64,
+    pub previous_event_hash: Option<String>,
+    pub event_hash: String,
+    pub chain_status: String,
+    pub source_span_id: Option<String>,
+    pub source_line_start: Option<u32>,
+    pub source_line_end: Option<u32>,
+}
+
+/// Stored recorder run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredRecorderRun {
+    pub run_id: String,
+    pub workspace_id: Option<String>,
+    pub agent_id: String,
+    pub session_id: Option<String>,
+    pub source_type: String,
+    pub source_id: Option<String>,
+    pub status: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub event_count: u64,
+    pub redacted_count: u64,
+    pub payload_bytes: u64,
+    pub chain_complete: bool,
+    pub created_at: String,
+}
+
+/// Stored recorder event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredRecorderEvent {
+    pub event_id: String,
+    pub run_id: String,
+    pub sequence: u64,
+    pub event_type: String,
+    pub timestamp: String,
+    pub payload_hash: Option<String>,
+    pub payload_bytes: u64,
+    pub redaction_status: String,
+    pub redacted_bytes: u64,
+    pub previous_event_hash: Option<String>,
+    pub event_hash: String,
+    pub chain_status: String,
+    pub source_span_id: Option<String>,
+    pub source_line_start: Option<u32>,
+    pub source_line_end: Option<u32>,
+    pub created_at: String,
+}
+
+impl DbConnection {
+    /// Insert a recorder run record.
+    pub fn insert_recorder_run(&self, run_id: &str, input: &CreateRecorderRunInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO recorder_runs (run_id, workspace_id, agent_id, session_id, source_type, source_id, status, started_at, ended_at, event_count, redacted_count, payload_bytes, chain_complete, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            &[
+                Value::Text(run_id.to_string()),
+                input.workspace_id.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::Text(input.agent_id.clone()),
+                input.session_id.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::Text(input.source_type.clone()),
+                input.source_id.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::Text(input.status.clone()),
+                Value::Text(input.started_at.clone()),
+                input.ended_at.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::from_u64_clamped(input.event_count),
+                Value::from_u64_clamped(input.redacted_count),
+                Value::from_u64_clamped(input.payload_bytes),
+                Value::BigInt(i64::from(input.chain_complete)),
+                Value::Text(now),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Insert a recorder event record.
+    pub fn insert_recorder_event(
+        &self,
+        event_id: &str,
+        input: &CreateRecorderEventInput,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO recorder_events (event_id, run_id, sequence, event_type, timestamp, payload_hash, payload_bytes, redaction_status, redacted_bytes, previous_event_hash, event_hash, chain_status, source_span_id, source_line_start, source_line_end, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            &[
+                Value::Text(event_id.to_string()),
+                Value::Text(input.run_id.clone()),
+                Value::from_u64_clamped(input.sequence),
+                Value::Text(input.event_type.clone()),
+                Value::Text(input.timestamp.clone()),
+                input.payload_hash.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::from_u64_clamped(input.payload_bytes),
+                Value::Text(input.redaction_status.clone()),
+                Value::from_u64_clamped(input.redacted_bytes),
+                input.previous_event_hash.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::Text(input.event_hash.clone()),
+                Value::Text(input.chain_status.clone()),
+                input.source_span_id.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                input
+                    .source_line_start
+                    .map_or(Value::Null, |v| Value::BigInt(i64::from(v))),
+                input
+                    .source_line_end
+                    .map_or(Value::Null, |v| Value::BigInt(i64::from(v))),
+                Value::Text(now),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get a recorder run by ID.
+    pub fn get_recorder_run(&self, run_id: &str) -> Result<Option<StoredRecorderRun>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT run_id, workspace_id, agent_id, session_id, source_type, source_id, status, started_at, ended_at, event_count, redacted_count, payload_bytes, chain_complete, created_at FROM recorder_runs WHERE run_id = ?1",
+            &[Value::Text(run_id.to_string())],
+        )?;
+        rows.first().map(stored_recorder_run_from_row).transpose()
+    }
+
+    /// List recorder events for a run in sequence order.
+    pub fn list_recorder_events(&self, run_id: &str) -> Result<Vec<StoredRecorderEvent>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT event_id, run_id, sequence, event_type, timestamp, payload_hash, payload_bytes, redaction_status, redacted_bytes, previous_event_hash, event_hash, chain_status, source_span_id, source_line_start, source_line_end, created_at FROM recorder_events WHERE run_id = ?1 ORDER BY sequence ASC",
+            &[Value::Text(run_id.to_string())],
+        )?;
+        rows.iter().map(stored_recorder_event_from_row).collect()
+    }
+}
+
+fn stored_recorder_run_from_row(row: &Row) -> Result<StoredRecorderRun> {
+    Ok(StoredRecorderRun {
+        run_id: required_text(row, 0, DbOperation::Query, "run_id")?.to_string(),
+        workspace_id: optional_text(row, 1)?.map(str::to_string),
+        agent_id: required_text(row, 2, DbOperation::Query, "agent_id")?.to_string(),
+        session_id: optional_text(row, 3)?.map(str::to_string),
+        source_type: required_text(row, 4, DbOperation::Query, "source_type")?.to_string(),
+        source_id: optional_text(row, 5)?.map(str::to_string),
+        status: required_text(row, 6, DbOperation::Query, "status")?.to_string(),
+        started_at: required_text(row, 7, DbOperation::Query, "started_at")?.to_string(),
+        ended_at: optional_text(row, 8)?.map(str::to_string),
+        event_count: row.get(9).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+        redacted_count: row.get(10).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+        payload_bytes: row.get(11).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+        chain_complete: row.get(12).and_then(|v| v.as_i64()).unwrap_or(1) != 0,
+        created_at: required_text(row, 13, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
+fn stored_recorder_event_from_row(row: &Row) -> Result<StoredRecorderEvent> {
+    Ok(StoredRecorderEvent {
+        event_id: required_text(row, 0, DbOperation::Query, "event_id")?.to_string(),
+        run_id: required_text(row, 1, DbOperation::Query, "run_id")?.to_string(),
+        sequence: row.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+        event_type: required_text(row, 3, DbOperation::Query, "event_type")?.to_string(),
+        timestamp: required_text(row, 4, DbOperation::Query, "timestamp")?.to_string(),
+        payload_hash: optional_text(row, 5)?.map(str::to_string),
+        payload_bytes: row.get(6).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+        redaction_status: required_text(row, 7, DbOperation::Query, "redaction_status")?
+            .to_string(),
+        redacted_bytes: row.get(8).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+        previous_event_hash: optional_text(row, 9)?.map(str::to_string),
+        event_hash: required_text(row, 10, DbOperation::Query, "event_hash")?.to_string(),
+        chain_status: required_text(row, 11, DbOperation::Query, "chain_status")?.to_string(),
+        source_span_id: optional_text(row, 12)?.map(str::to_string),
+        source_line_start: row.get(13).and_then(|v| v.as_i64()).map(|v| v as u32),
+        source_line_end: row.get(14).and_then(|v| v.as_i64()).map(|v| v as u32),
+        created_at: required_text(row, 15, DbOperation::Query, "created_at")?.to_string(),
     })
 }
 

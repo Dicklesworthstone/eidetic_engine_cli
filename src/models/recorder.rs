@@ -459,6 +459,16 @@ impl RedactionStatus {
         }
     }
 
+    /// Database-compatible status string for V027 recorder_events constraint.
+    #[must_use]
+    pub const fn as_db_str(self) -> &'static str {
+        match self {
+            Self::None => "clean",
+            Self::Full | Self::Verified => "redacted",
+            Self::Pending | Self::Partial => "quarantined",
+        }
+    }
+
     #[must_use]
     pub const fn requires_redaction(self) -> bool {
         matches!(self, Self::Pending | Self::Partial)
