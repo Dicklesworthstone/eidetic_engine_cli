@@ -10,7 +10,9 @@ use sqlmodel_frankensqlite::FrankenConnection;
 
 use crate::models::{
     EMBEDDING_METADATA_SCHEMA_V1, EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider,
-    ModelPurpose, ModelRegistryStatus,
+    ModelPurpose, ModelRegistryStatus, RATIONALE_TRACE_SCHEMA_V1, RationaleTrace,
+    RationaleTraceKind, RationaleTracePosture, RationaleTraceVisibility, RedactionStatus,
+    validate_rationale_summary,
 };
 
 pub const SUBSYSTEM: &str = "db";
@@ -46,6 +48,7 @@ pub mod audit_actions {
     pub const CURATION_CANDIDATE_DISPOSITION: &str = "curation_candidate.disposition";
     pub const RULE_CREATE: &str = "rule.create";
     pub const RULE_PROTECT: &str = "rule.protect";
+    pub const RATIONALE_TRACE_CREATE: &str = "rationale_trace.create";
     pub const TRIPWIRE_CHECK: &str = "tripwire.check";
     pub const TRIPWIRE_CREATE: &str = "tripwire.create";
 }
@@ -2143,6 +2146,68 @@ CREATE INDEX idx_tripwire_check_events_workspace ON tripwire_check_events(worksp
     "blake3:v024_tripwire_store_2026_05_03",
 );
 
+/// V025: Persist safe rationale traces and durable target links.
+pub const V025_RATIONALE_TRACES: Migration = Migration::new(
+    25,
+    "rationale_traces",
+    r#"
+-- Safe rationale traces are explicit user/agent-visible summaries and
+-- evidence links. Private chain-of-thought is rejected before insertion.
+CREATE TABLE rationale_traces (
+    trace_id TEXT PRIMARY KEY CHECK (trace_id GLOB 'rat_*' AND length(trim(trace_id)) > 0),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    schema TEXT NOT NULL CHECK (schema = 'ee.rationale_trace.v1'),
+    kind TEXT NOT NULL CHECK (kind IN (
+        'hypothesis', 'decision', 'question', 'rejected_alternative', 'observation', 'conclusion'
+    )),
+    author TEXT NOT NULL CHECK (length(trim(author)) > 0),
+    summary TEXT NOT NULL CHECK (length(trim(summary)) > 0),
+    posture TEXT NOT NULL CHECK (posture IN ('asserted', 'supported', 'contradicted', 'unresolved')),
+    confidence_basis_points INTEGER NOT NULL CHECK (
+        confidence_basis_points >= 0 AND confidence_basis_points <= 10000
+    ),
+    visibility TEXT NOT NULL CHECK (visibility IN ('public', 'redacted')),
+    redaction_status TEXT NOT NULL CHECK (redaction_status IN (
+        'none', 'pending', 'partial', 'full', 'verified'
+    )),
+    evidence_uris_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(evidence_uris_json)),
+    linked_memory_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(linked_memory_ids_json)),
+    linked_context_pack_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(linked_context_pack_ids_json)),
+    linked_recorder_run_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(linked_recorder_run_ids_json)),
+    linked_recorder_event_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(linked_recorder_event_ids_json)),
+    linked_causal_trace_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(linked_causal_trace_ids_json)),
+    supersedes_trace_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(supersedes_trace_ids_json)),
+    contradicted_by_trace_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(contradicted_by_trace_ids_json)),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0)
+);
+CREATE INDEX idx_rationale_traces_workspace_created
+    ON rationale_traces(workspace_id, created_at, trace_id);
+CREATE INDEX idx_rationale_traces_kind
+    ON rationale_traces(workspace_id, kind, created_at, trace_id);
+CREATE INDEX idx_rationale_traces_posture
+    ON rationale_traces(workspace_id, posture, created_at, trace_id);
+
+CREATE TABLE rationale_trace_links (
+    trace_id TEXT NOT NULL REFERENCES rationale_traces(trace_id) ON DELETE CASCADE,
+    target_type TEXT NOT NULL CHECK (target_type IN (
+        'memory', 'context_pack', 'recorder_run', 'recorder_event', 'causal_trace',
+        'rationale_trace', 'evidence_uri', 'curation_candidate'
+    )),
+    target_id TEXT NOT NULL CHECK (length(trim(target_id)) > 0),
+    relation TEXT NOT NULL CHECK (relation IN (
+        'linked', 'evidence', 'reuses', 'supersedes', 'contradicted_by'
+    )),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    PRIMARY KEY (trace_id, target_type, target_id, relation)
+);
+CREATE INDEX idx_rationale_trace_links_target
+    ON rationale_trace_links(target_type, target_id, trace_id);
+CREATE INDEX idx_rationale_trace_links_trace
+    ON rationale_trace_links(trace_id, target_type, target_id, relation);
+"#,
+    "blake3:v025_rationale_traces_2026_05_04",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -2169,6 +2234,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V022_FEEDBACK_RATE_PROTECTION,
     V023_FEEDBACK_QUARANTINE_PAYLOAD,
     V024_TRIPWIRE_STORE,
+    V025_RATIONALE_TRACES,
 ];
 
 /// Result of applying migrations.
@@ -7285,6 +7351,410 @@ fn stored_pack_item_from_joined_row(row: &Row, offset: usize) -> Result<StoredPa
 }
 
 // ============================================================================
+// EE-RATIONALE-TRACE-001: Safe rationale traces
+// ============================================================================
+
+/// Durable rationale trace row plus its workspace scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredRationaleTrace {
+    pub workspace_id: String,
+    pub trace: RationaleTrace,
+}
+
+/// One durable link from a rationale trace to an evidence or target artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredRationaleTraceLink {
+    pub trace_id: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub relation: String,
+    pub created_at: String,
+}
+
+impl DbConnection {
+    /// Store one safe rationale trace and its target links.
+    ///
+    /// Private chain-of-thought and `private_rejected` summaries are refused
+    /// before any durable mutation. Link vectors are normalized so future `why`,
+    /// curation, export, and handoff flows can reuse trace IDs deterministically.
+    pub fn insert_rationale_trace(&self, workspace_id: &str, trace: &RationaleTrace) -> Result<()> {
+        let trace = normalized_rationale_trace(trace)?;
+        self.with_transaction(|| {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO rationale_traces (trace_id, workspace_id, schema, kind, author, summary, posture, confidence_basis_points, visibility, redaction_status, evidence_uris_json, linked_memory_ids_json, linked_context_pack_ids_json, linked_recorder_run_ids_json, linked_recorder_event_ids_json, linked_causal_trace_ids_json, supersedes_trace_ids_json, contradicted_by_trace_ids_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                &[
+                    Value::Text(trace.trace_id.clone()),
+                    Value::Text(workspace_id.to_string()),
+                    Value::Text(trace.schema.to_string()),
+                    Value::Text(trace.kind.as_str().to_string()),
+                    Value::Text(trace.author.clone()),
+                    Value::Text(trace.summary.clone()),
+                    Value::Text(trace.posture.as_str().to_string()),
+                    Value::BigInt(i64::from(trace.confidence_basis_points)),
+                    Value::Text(trace.visibility.as_str().to_string()),
+                    Value::Text(trace.redaction_status.as_str().to_string()),
+                    Value::Text(json_string_vec(&trace.evidence_uris, "rationale evidence URIs")?),
+                    Value::Text(json_string_vec(
+                        &trace.linked_memory_ids,
+                        "rationale memory links",
+                    )?),
+                    Value::Text(json_string_vec(
+                        &trace.linked_context_pack_ids,
+                        "rationale context-pack links",
+                    )?),
+                    Value::Text(json_string_vec(
+                        &trace.linked_recorder_run_ids,
+                        "rationale recorder-run links",
+                    )?),
+                    Value::Text(json_string_vec(
+                        &trace.linked_recorder_event_ids,
+                        "rationale recorder-event links",
+                    )?),
+                    Value::Text(json_string_vec(
+                        &trace.linked_causal_trace_ids,
+                        "rationale causal-trace links",
+                    )?),
+                    Value::Text(json_string_vec(
+                        &trace.supersedes_trace_ids,
+                        "rationale supersession links",
+                    )?),
+                    Value::Text(json_string_vec(
+                        &trace.contradicted_by_trace_ids,
+                        "rationale contradiction links",
+                    )?),
+                    Value::Text(trace.created_at.clone()),
+                ],
+            )?;
+
+            for link in rationale_trace_link_rows(&trace) {
+                self.insert_rationale_trace_link(&link)?;
+            }
+
+            Ok(())
+        })
+    }
+
+    /// Get one rationale trace by ID.
+    pub fn get_rationale_trace(&self, trace_id: &str) -> Result<Option<StoredRationaleTrace>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            RATIONALE_TRACE_SELECT_SQL_WITH_WHERE,
+            &[Value::Text(trace_id.to_string())],
+        )?;
+
+        rows.first()
+            .map(stored_rationale_trace_from_row)
+            .transpose()
+    }
+
+    /// List rationale traces linked to one target in stable creation order.
+    pub fn list_rationale_traces_for_target(
+        &self,
+        workspace_id: &str,
+        target_type: &str,
+        target_id: &str,
+    ) -> Result<Vec<StoredRationaleTrace>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT rt.trace_id, rt.workspace_id, rt.schema, rt.kind, rt.author, rt.summary, rt.posture, rt.confidence_basis_points, rt.visibility, rt.redaction_status, rt.evidence_uris_json, rt.linked_memory_ids_json, rt.linked_context_pack_ids_json, rt.linked_recorder_run_ids_json, rt.linked_recorder_event_ids_json, rt.linked_causal_trace_ids_json, rt.supersedes_trace_ids_json, rt.contradicted_by_trace_ids_json, rt.created_at FROM rationale_trace_links rtl JOIN rationale_traces rt ON rt.trace_id = rtl.trace_id WHERE rt.workspace_id = ?1 AND rtl.target_type = ?2 AND rtl.target_id = ?3 ORDER BY rt.created_at ASC, rt.trace_id ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(target_type.to_string()),
+                Value::Text(target_id.to_string()),
+            ],
+        )?;
+
+        rows.iter().map(stored_rationale_trace_from_row).collect()
+    }
+
+    /// List all durable target links for one rationale trace.
+    pub fn list_rationale_trace_links(
+        &self,
+        trace_id: &str,
+    ) -> Result<Vec<StoredRationaleTraceLink>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT trace_id, target_type, target_id, relation, created_at FROM rationale_trace_links WHERE trace_id = ?1 ORDER BY target_type ASC, target_id ASC, relation ASC",
+            &[Value::Text(trace_id.to_string())],
+        )?;
+
+        rows.iter()
+            .map(stored_rationale_trace_link_from_row)
+            .collect()
+    }
+
+    fn insert_rationale_trace_link(&self, link: &StoredRationaleTraceLink) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO rationale_trace_links (trace_id, target_type, target_id, relation, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            &[
+                Value::Text(link.trace_id.clone()),
+                Value::Text(link.target_type.clone()),
+                Value::Text(link.target_id.clone()),
+                Value::Text(link.relation.clone()),
+                Value::Text(link.created_at.clone()),
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+const RATIONALE_TRACE_SELECT_SQL_WITH_WHERE: &str = "SELECT trace_id, workspace_id, schema, kind, author, summary, posture, confidence_basis_points, visibility, redaction_status, evidence_uris_json, linked_memory_ids_json, linked_context_pack_ids_json, linked_recorder_run_ids_json, linked_recorder_event_ids_json, linked_causal_trace_ids_json, supersedes_trace_ids_json, contradicted_by_trace_ids_json, created_at FROM rationale_traces WHERE trace_id = ?1";
+
+fn normalized_rationale_trace(trace: &RationaleTrace) -> Result<RationaleTrace> {
+    if trace.schema != RATIONALE_TRACE_SCHEMA_V1 {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: format!(
+                "rationale trace {} has unsupported schema {}",
+                trace.trace_id, trace.schema
+            ),
+        });
+    }
+    if !trace.visibility.is_storable() {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: format!(
+                "rationale trace {} has private rejected visibility and cannot be stored",
+                trace.trace_id
+            ),
+        });
+    }
+    validate_rationale_summary(&trace.summary).map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message: format!("rationale trace {} rejected: {error}", trace.trace_id),
+    })?;
+    if trace.confidence_basis_points > 10_000 {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: format!(
+                "rationale trace {} confidenceBasisPoints exceeds 10000",
+                trace.trace_id
+            ),
+        });
+    }
+
+    let mut normalized = trace.clone();
+    normalize_string_vec(&mut normalized.evidence_uris);
+    normalize_string_vec(&mut normalized.linked_memory_ids);
+    normalize_string_vec(&mut normalized.linked_context_pack_ids);
+    normalize_string_vec(&mut normalized.linked_recorder_run_ids);
+    normalize_string_vec(&mut normalized.linked_recorder_event_ids);
+    normalize_string_vec(&mut normalized.linked_causal_trace_ids);
+    normalize_string_vec(&mut normalized.supersedes_trace_ids);
+    normalize_string_vec(&mut normalized.contradicted_by_trace_ids);
+    Ok(normalized)
+}
+
+fn normalize_string_vec(values: &mut Vec<String>) {
+    values.sort();
+    values.dedup();
+}
+
+fn rationale_trace_link_rows(trace: &RationaleTrace) -> Vec<StoredRationaleTraceLink> {
+    let mut links = Vec::new();
+    extend_rationale_trace_links(
+        &mut links,
+        trace,
+        "evidence_uri",
+        "evidence",
+        &trace.evidence_uris,
+    );
+    extend_rationale_trace_links(
+        &mut links,
+        trace,
+        "memory",
+        "linked",
+        &trace.linked_memory_ids,
+    );
+    extend_rationale_trace_links(
+        &mut links,
+        trace,
+        "context_pack",
+        "linked",
+        &trace.linked_context_pack_ids,
+    );
+    extend_rationale_trace_links(
+        &mut links,
+        trace,
+        "recorder_run",
+        "linked",
+        &trace.linked_recorder_run_ids,
+    );
+    extend_rationale_trace_links(
+        &mut links,
+        trace,
+        "recorder_event",
+        "linked",
+        &trace.linked_recorder_event_ids,
+    );
+    extend_rationale_trace_links(
+        &mut links,
+        trace,
+        "causal_trace",
+        "reuses",
+        &trace.linked_causal_trace_ids,
+    );
+    extend_rationale_trace_links(
+        &mut links,
+        trace,
+        "rationale_trace",
+        "supersedes",
+        &trace.supersedes_trace_ids,
+    );
+    extend_rationale_trace_links(
+        &mut links,
+        trace,
+        "rationale_trace",
+        "contradicted_by",
+        &trace.contradicted_by_trace_ids,
+    );
+    links.sort_by(|left, right| {
+        left.target_type
+            .cmp(&right.target_type)
+            .then_with(|| left.target_id.cmp(&right.target_id))
+            .then_with(|| left.relation.cmp(&right.relation))
+    });
+    links.dedup_by(|left, right| {
+        left.target_type == right.target_type
+            && left.target_id == right.target_id
+            && left.relation == right.relation
+    });
+    links
+}
+
+fn extend_rationale_trace_links(
+    links: &mut Vec<StoredRationaleTraceLink>,
+    trace: &RationaleTrace,
+    target_type: &str,
+    relation: &str,
+    target_ids: &[String],
+) {
+    links.extend(target_ids.iter().map(|target_id| StoredRationaleTraceLink {
+        trace_id: trace.trace_id.clone(),
+        target_type: target_type.to_string(),
+        target_id: target_id.clone(),
+        relation: relation.to_string(),
+        created_at: trace.created_at.clone(),
+    }));
+}
+
+fn stored_rationale_trace_from_row(row: &Row) -> Result<StoredRationaleTrace> {
+    let schema = required_text(row, 2, DbOperation::Query, "schema")?;
+    if schema != RATIONALE_TRACE_SCHEMA_V1 {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: format!("rationale trace schema is unsupported: {schema}"),
+        });
+    }
+    let confidence_basis_points =
+        required_u32(row, 7, DbOperation::Query, "confidence_basis_points")?;
+    let confidence_basis_points =
+        u16::try_from(confidence_basis_points).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "confidence_basis_points must fit u16".to_string(),
+        })?;
+
+    Ok(StoredRationaleTrace {
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        trace: RationaleTrace {
+            schema: RATIONALE_TRACE_SCHEMA_V1,
+            trace_id: required_text(row, 0, DbOperation::Query, "trace_id")?.to_string(),
+            kind: parse_rationale_trace_kind(required_text(row, 3, DbOperation::Query, "kind")?)?,
+            author: required_text(row, 4, DbOperation::Query, "author")?.to_string(),
+            summary: required_text(row, 5, DbOperation::Query, "summary")?.to_string(),
+            posture: parse_rationale_trace_posture(required_text(
+                row,
+                6,
+                DbOperation::Query,
+                "posture",
+            )?)?,
+            confidence_basis_points,
+            visibility: parse_rationale_trace_visibility(required_text(
+                row,
+                8,
+                DbOperation::Query,
+                "visibility",
+            )?)?,
+            redaction_status: parse_redaction_status(required_text(
+                row,
+                9,
+                DbOperation::Query,
+                "redaction_status",
+            )?)?,
+            evidence_uris: required_json_string_vec(row, 10, "evidence_uris_json")?,
+            linked_memory_ids: required_json_string_vec(row, 11, "linked_memory_ids_json")?,
+            linked_context_pack_ids: required_json_string_vec(
+                row,
+                12,
+                "linked_context_pack_ids_json",
+            )?,
+            linked_recorder_run_ids: required_json_string_vec(
+                row,
+                13,
+                "linked_recorder_run_ids_json",
+            )?,
+            linked_recorder_event_ids: required_json_string_vec(
+                row,
+                14,
+                "linked_recorder_event_ids_json",
+            )?,
+            linked_causal_trace_ids: required_json_string_vec(
+                row,
+                15,
+                "linked_causal_trace_ids_json",
+            )?,
+            supersedes_trace_ids: required_json_string_vec(row, 16, "supersedes_trace_ids_json")?,
+            contradicted_by_trace_ids: required_json_string_vec(
+                row,
+                17,
+                "contradicted_by_trace_ids_json",
+            )?,
+            created_at: required_text(row, 18, DbOperation::Query, "created_at")?.to_string(),
+        },
+    })
+}
+
+fn stored_rationale_trace_link_from_row(row: &Row) -> Result<StoredRationaleTraceLink> {
+    Ok(StoredRationaleTraceLink {
+        trace_id: required_text(row, 0, DbOperation::Query, "trace_id")?.to_string(),
+        target_type: required_text(row, 1, DbOperation::Query, "target_type")?.to_string(),
+        target_id: required_text(row, 2, DbOperation::Query, "target_id")?.to_string(),
+        relation: required_text(row, 3, DbOperation::Query, "relation")?.to_string(),
+        created_at: required_text(row, 4, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
+fn parse_rationale_trace_kind(value: &str) -> Result<RationaleTraceKind> {
+    value.parse().map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("invalid rationale trace kind `{value}`: {error}"),
+    })
+}
+
+fn parse_rationale_trace_posture(value: &str) -> Result<RationaleTracePosture> {
+    value.parse().map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("invalid rationale trace posture `{value}`: {error}"),
+    })
+}
+
+fn parse_rationale_trace_visibility(value: &str) -> Result<RationaleTraceVisibility> {
+    value.parse().map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("invalid rationale trace visibility `{value}`: {error}"),
+    })
+}
+
+fn parse_redaction_status(value: &str) -> Result<RedactionStatus> {
+    value.parse().map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("invalid redaction status `{value}`: {error}"),
+    })
+}
+
+// ============================================================================
 // EE-CONC-001: Advisory Lock and Concurrent-Writer Contract
 // ============================================================================
 
@@ -8100,7 +8570,8 @@ mod tests {
     };
     use crate::models::{
         EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose,
-        ModelRegistryStatus,
+        ModelRegistryStatus, RationaleTrace, RationaleTraceKind, RationaleTracePosture,
+        RationaleTraceVisibility, RedactionStatus,
     };
 
     type TestResult = std::result::Result<(), TestFailure>;
@@ -8830,6 +9301,150 @@ mod tests {
             "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_01234567890123456789012345', '/tmp/test', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
         )?;
         Ok(())
+    }
+
+    fn rationale_trace_fixture(
+        id: &str,
+        created_at: &str,
+    ) -> std::result::Result<RationaleTrace, TestFailure> {
+        RationaleTrace::new(
+            id,
+            RationaleTraceKind::Decision,
+            "cod-pane5",
+            "Visible evidence supported linking the context pack to this memory.",
+            created_at,
+        )
+        .map_err(|error| TestFailure::new(error.to_string()))?
+        .with_confidence_basis_points(8100)
+        .map_err(|error| TestFailure::new(error.to_string()))
+        .map(|trace| {
+            trace
+                .with_posture(RationaleTracePosture::Supported)
+                .with_visibility(
+                    RationaleTraceVisibility::Redacted,
+                    RedactionStatus::Verified,
+                )
+                .with_evidence_uri("agent-mail://eidetic_engine_cli-kz1.2/1929")
+                .with_evidence_uri("cass-session://session_001#L10-L12")
+                .with_memory_id("mem_shared_rationale")
+                .with_context_pack_id("pack_shared_rationale")
+                .with_recorder_run_id("rrun_kz12")
+                .with_recorder_event_id("revt_kz12_0001")
+                .with_causal_trace_id("causal_trace_kz12")
+                .supersedes_trace("rat_prior_kz12")
+                .contradicted_by_trace("rat_counter_kz12")
+        })
+    }
+
+    #[test]
+    fn rationale_trace_store_roundtrips_links_and_orders_by_target() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let newer = rationale_trace_fixture("rat_store_newer", "2026-05-04T06:22:00Z")?;
+        let older = rationale_trace_fixture("rat_store_older", "2026-05-04T06:21:00Z")?;
+        connection.insert_rationale_trace("wsp_01234567890123456789012345", &newer)?;
+        connection.insert_rationale_trace("wsp_01234567890123456789012345", &older)?;
+
+        let stored = connection
+            .get_rationale_trace("rat_store_newer")?
+            .ok_or_else(|| TestFailure::new("stored rationale trace missing"))?;
+        ensure_equal(
+            &stored.workspace_id,
+            &"wsp_01234567890123456789012345".to_string(),
+            "workspace",
+        )?;
+        ensure_equal(&stored.trace.trace_id, &newer.trace_id, "trace id")?;
+        ensure_equal(
+            &stored.trace.visibility,
+            &RationaleTraceVisibility::Redacted,
+            "visibility",
+        )?;
+        ensure_equal(
+            &stored.trace.redaction_status,
+            &RedactionStatus::Verified,
+            "redaction",
+        )?;
+
+        let by_memory = connection.list_rationale_traces_for_target(
+            "wsp_01234567890123456789012345",
+            "memory",
+            "mem_shared_rationale",
+        )?;
+        ensure_equal(&by_memory.len(), &2, "memory-linked trace count")?;
+        ensure_equal(
+            &by_memory
+                .iter()
+                .map(|stored| stored.trace.trace_id.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["rat_store_older", "rat_store_newer"],
+            "memory-linked trace order",
+        )?;
+
+        let links = connection.list_rationale_trace_links("rat_store_newer")?;
+        ensure_equal(&links.len(), &9, "durable link count")?;
+        ensure(
+            links.iter().any(|link| {
+                link.target_type == "context_pack"
+                    && link.target_id == "pack_shared_rationale"
+                    && link.relation == "linked"
+            }),
+            "context pack link must be present for export/handoff reuse",
+        )?;
+        ensure(
+            links.iter().any(|link| {
+                link.target_type == "rationale_trace"
+                    && link.target_id == "rat_counter_kz12"
+                    && link.relation == "contradicted_by"
+            }),
+            "contradiction posture link must be present",
+        )
+    }
+
+    #[test]
+    fn rationale_trace_store_rejects_private_or_sensitive_material() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let mut private = rationale_trace_fixture("rat_store_private", "2026-05-04T06:23:00Z")?;
+        private.summary =
+            "raw chain-of-thought: first I inspected the hidden scratchpad".to_string();
+        ensure(
+            matches!(
+                connection.insert_rationale_trace("wsp_01234567890123456789012345", &private),
+                Err(DbError::MalformedRow { .. })
+            ),
+            "private reasoning summary must be rejected",
+        )?;
+
+        let hidden = rationale_trace_fixture("rat_store_hidden", "2026-05-04T06:24:00Z")?
+            .with_visibility(
+                RationaleTraceVisibility::PrivateRejected,
+                RedactionStatus::Full,
+            );
+        ensure(
+            matches!(
+                connection.insert_rationale_trace("wsp_01234567890123456789012345", &hidden),
+                Err(DbError::MalformedRow { .. })
+            ),
+            "private rejected visibility must not be stored",
+        )?;
+
+        let mut sensitive = rationale_trace_fixture("rat_store_sensitive", "2026-05-04T06:25:00Z")?;
+        let key_like_prefix: String = ['s', 'k', '-'].into_iter().collect();
+        sensitive.summary = format!(
+            "Visible summary accidentally included {key_like_prefix}{}.",
+            "a".repeat(16)
+        );
+        ensure(
+            matches!(
+                connection.insert_rationale_trace("wsp_01234567890123456789012345", &sensitive),
+                Err(DbError::MalformedRow { .. })
+            ),
+            "sensitive key-shaped summary must be rejected",
+        )
     }
 
     #[test]
