@@ -5,6 +5,7 @@
 
 use std::fmt::Debug;
 use std::fs;
+use std::path::Path;
 use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
@@ -1846,10 +1847,7 @@ fn preflight_show_rejects_invalid_run_id_with_usage_error() -> TestResult {
         &serde_json::json!("usage"),
         "error code",
     )?;
-    ensure(
-        output.status.code() == Some(0) || output.status.code() == Some(1),
-        "json usage errors must return a process exit code",
-    )?;
+    ensure_equal(&output.status.code(), &Some(1), "usage exit code")?;
     ensure(
         json["error"]["repair"]
             .as_str()
@@ -2275,18 +2273,17 @@ fn post_task_outcome_scenario_commands_emit_machine_data() -> TestResult {
 // ============================================================================
 
 #[test]
-fn rehearse_plan_degrades_until_real_sandbox_exists() -> TestResult {
-    let output = run_ee(&["rehearse", "plan", "--json"])?;
-    ensure_equal(
-        &output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "exit code",
-    )?;
+fn rehearse_plan_reports_sandbox_ready_contract() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    fs::write(workspace.path().join("state.txt"), "source").map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.path().to_string_lossy().to_string();
+    let output = run_ee(&["--workspace", &workspace_arg, "rehearse", "plan", "--json"])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
         output.stderr.is_empty(),
-        "rehearse plan JSON degraded response must keep stderr empty",
+        "rehearse plan JSON response must keep stderr empty",
     )?;
     let value = stdout_json(&output)?;
     ensure_equal(
@@ -2294,33 +2291,29 @@ fn rehearse_plan_degrades_until_real_sandbox_exists() -> TestResult {
         &serde_json::json!("ee.response.v1"),
         "schema",
     )?;
-    ensure_equal(&value["success"], &serde_json::json!(false), "success")?;
+    ensure_equal(&value["success"], &serde_json::json!(true), "success")?;
     ensure_equal(
-        &value["data"]["command"],
-        &serde_json::json!("rehearse plan"),
-        "command",
+        &value["data"]["schema"],
+        &serde_json::json!("ee.rehearse.plan.v1"),
+        "plan schema",
     )?;
     ensure_equal(
-        &value["data"]["code"],
-        &serde_json::json!("rehearsal_unavailable"),
-        "degraded code",
-    )?;
-    ensure_equal(
-        &value["data"]["repair"],
-        &serde_json::json!("ee status --json"),
-        "repair command",
+        &value["data"]["can_proceed"],
+        &serde_json::json!(true),
+        "can proceed",
     )?;
     ensure(
-        value.get("plan_id").is_none()
-            && value.get("estimated_artifacts").is_none()
-            && value.get("can_proceed").is_none()
-            && value.get("next_actions").is_none(),
-        "degraded plan must not emit generated plan artifacts or proceed guidance",
+        value["data"]["estimated_artifacts"]
+            .as_array()
+            .is_some_and(|artifacts| artifacts.len() >= 3),
+        "plan must estimate manifest and snapshot artifacts",
     )
 }
 
 #[test]
-fn rehearse_plan_with_command_spec_degrades_before_claiming_artifacts() -> TestResult {
+fn rehearse_plan_with_command_spec_reports_unsupported_commands() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.path().to_string_lossy().to_string();
     let command_spec = r#"[{
       "id":"cmd_non_rehearsable",
       "command":"serve",
@@ -2330,6 +2323,8 @@ fn rehearse_plan_with_command_spec_degrades_before_claiming_artifacts() -> TestR
       "idempotency_key":null
     }]"#;
     let output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
         "rehearse",
         "plan",
         "--commands-json",
@@ -2338,16 +2333,12 @@ fn rehearse_plan_with_command_spec_degrades_before_claiming_artifacts() -> TestR
         "full",
         "--json",
     ])?;
-    ensure_equal(
-        &output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "exit code",
-    )?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
         output.stderr.is_empty(),
-        "rehearse plan JSON degraded response must keep stderr empty",
+        "rehearse plan JSON response must keep stderr empty",
     )?;
     let value = stdout_json(&output)?;
     ensure_equal(
@@ -2355,28 +2346,32 @@ fn rehearse_plan_with_command_spec_degrades_before_claiming_artifacts() -> TestR
         &serde_json::json!("ee.response.v1"),
         "schema",
     )?;
-    ensure_equal(&value["success"], &serde_json::json!(false), "success")?;
+    ensure_equal(&value["success"], &serde_json::json!(true), "success")?;
     ensure_equal(
-        &value["data"]["code"],
-        &serde_json::json!("rehearsal_unavailable"),
-        "degraded code",
+        &value["data"]["can_proceed"],
+        &serde_json::json!(false),
+        "can proceed",
     )?;
     ensure_equal(
-        &value["data"]["repair"],
-        &serde_json::json!("ee status --json"),
-        "repair command",
+        &value["data"]["non_rehearsable"][0]["reason_code"],
+        &serde_json::json!("external_io"),
+        "unsupported reason",
     )?;
     ensure(
-        value.get("non_rehearsable").is_none()
-            && value.get("can_proceed").is_none()
-            && value.get("estimated_artifacts").is_none()
-            && value.get("next_actions").is_none(),
-        "degraded plan must not emit command-classification or artifact claims",
+        value["data"]["estimated_artifacts"]
+            .as_array()
+            .is_some_and(|artifacts| artifacts.iter().any(|artifact| artifact == "manifest.json")),
+        "plan should still describe artifact contract",
     )
 }
 
 #[test]
-fn rehearse_run_degrades_until_real_sandbox_exists() -> TestResult {
+fn rehearse_run_creates_sandbox_manifest_without_mutating_source() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let out = tempfile::tempdir().map_err(|error| error.to_string())?;
+    fs::write(workspace.path().join("state.txt"), "source").map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.path().to_string_lossy().to_string();
+    let out_arg = out.path().to_string_lossy().to_string();
     let command_spec = r#"[{
       "id":"cmd_status",
       "command":"status",
@@ -2386,19 +2381,19 @@ fn rehearse_run_degrades_until_real_sandbox_exists() -> TestResult {
       "idempotency_key":"idem-status-001"
     }]"#;
     let output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
         "rehearse",
         "run",
         "--commands-json",
         command_spec,
+        "--out",
+        &out_arg,
         "--profile",
         "quick",
         "--json",
     ])?;
-    ensure_equal(
-        &output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "exit code",
-    )?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     let value = stdout_json(&output)?;
     ensure_equal(
@@ -2406,23 +2401,70 @@ fn rehearse_run_degrades_until_real_sandbox_exists() -> TestResult {
         &serde_json::json!("ee.response.v1"),
         "schema",
     )?;
-    ensure_equal(&value["success"], &serde_json::json!(false), "success")?;
+    ensure_equal(&value["success"], &serde_json::json!(true), "success")?;
     ensure_equal(
-        &value["data"]["code"],
-        &serde_json::json!("rehearsal_unavailable"),
-        "degraded code",
+        &value["data"]["schema"],
+        &serde_json::json!("ee.rehearse.run.v1"),
+        "run schema",
+    )?;
+    ensure_equal(
+        &value["data"]["overall_result"],
+        &serde_json::json!("passed"),
+        "overall result",
+    )?;
+    ensure(
+        value["data"]["sandbox_path"]
+            .as_str()
+            .is_some_and(|path| Path::new(path).join("state.txt").is_file()),
+        "sandbox should contain copied workspace file",
+    )?;
+    ensure(
+        value["data"]["artifact_paths"]["manifest"]
+            .as_str()
+            .is_some_and(|path| Path::new(path).is_file()),
+        "manifest artifact should exist",
+    )?;
+    ensure_equal(
+        &fs::read_to_string(workspace.path().join("state.txt"))
+            .map_err(|error| error.to_string())?,
+        &"source".to_string(),
+        "source workspace remains unchanged",
     )?;
     ensure(stdout_is_clean(&output), "stdout must be clean")
 }
 
 #[test]
-fn rehearse_inspect_and_promote_plan_degrade_until_artifacts_exist() -> TestResult {
-    let inspect_output = run_ee(&["rehearse", "inspect", "rrun_fixture_001", "--json"])?;
-    ensure_equal(
-        &inspect_output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "inspect exit code",
-    )?;
+fn rehearse_inspect_and_promote_plan_read_run_manifest() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let out = tempfile::tempdir().map_err(|error| error.to_string())?;
+    fs::write(workspace.path().join("state.txt"), "source").map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.path().to_string_lossy().to_string();
+    let out_arg = out.path().to_string_lossy().to_string();
+    let run_output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "rehearse",
+        "run",
+        "--out",
+        &out_arg,
+        "--json",
+    ])?;
+    ensure_equal(&run_output.status.code(), &Some(0), "run exit code")?;
+    let run_json = stdout_json(&run_output)?;
+    let manifest = run_json["data"]["artifact_paths"]["manifest"]
+        .as_str()
+        .ok_or_else(|| "run manifest path missing".to_string())?
+        .to_string();
+
+    let inspect_output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "rehearse",
+        "inspect",
+        &manifest,
+        "--json",
+    ])?;
+    ensure_equal(&inspect_output.status.code(), &Some(0), "inspect exit code")?;
     ensure(
         stdout_is_json(&inspect_output),
         "inspect stdout must be valid JSON",
@@ -2434,15 +2476,22 @@ fn rehearse_inspect_and_promote_plan_degrade_until_artifacts_exist() -> TestResu
         "inspect schema",
     )?;
     ensure_equal(
-        &inspect_json["data"]["code"],
-        &serde_json::json!("rehearsal_unavailable"),
-        "inspect degraded code",
+        &inspect_json["data"]["integrity_status"],
+        &serde_json::json!("valid"),
+        "inspect integrity",
     )?;
 
-    let promote_output = run_ee(&["rehearse", "promote-plan", "rrun_fixture_001", "--json"])?;
+    let promote_output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "rehearse",
+        "promote-plan",
+        &manifest,
+        "--json",
+    ])?;
     ensure_equal(
         &promote_output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
+        &Some(0),
         "promote-plan exit code",
     )?;
     ensure(
@@ -2456,9 +2505,9 @@ fn rehearse_inspect_and_promote_plan_degrade_until_artifacts_exist() -> TestResu
         "promote schema",
     )?;
     ensure_equal(
-        &promote_json["data"]["code"],
-        &serde_json::json!("rehearsal_unavailable"),
-        "promote degraded code",
+        &promote_json["data"]["schema"],
+        &serde_json::json!("ee.rehearse.promote_plan.v1"),
+        "promote schema",
     )?;
     ensure(
         stdout_is_clean(&promote_output),
@@ -2468,19 +2517,58 @@ fn rehearse_inspect_and_promote_plan_degrade_until_artifacts_exist() -> TestResu
 
 #[test]
 fn all_rehearse_commands_produce_stdout_only_data() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let out = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.path().to_string_lossy().to_string();
+    let out_arg = out.path().to_string_lossy().to_string();
+    let run_output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "rehearse",
+        "run",
+        "--out",
+        &out_arg,
+        "--json",
+    ])?;
+    let run_json = stdout_json(&run_output)?;
+    let manifest = run_json["data"]["artifact_paths"]["manifest"]
+        .as_str()
+        .ok_or_else(|| "run manifest path missing".to_string())?
+        .to_string();
     let commands = [
-        vec!["rehearse", "plan", "--json"],
-        vec!["rehearse", "run", "--profile", "quick", "--json"],
-        vec!["rehearse", "inspect", "rrun_fixture_001", "--json"],
-        vec!["rehearse", "promote-plan", "rrun_fixture_001", "--json"],
+        vec!["--workspace", &workspace_arg, "rehearse", "plan", "--json"],
+        vec![
+            "--workspace",
+            &workspace_arg,
+            "rehearse",
+            "run",
+            "--out",
+            &out_arg,
+            "--profile",
+            "quick",
+            "--json",
+        ],
+        vec![
+            "--workspace",
+            &workspace_arg,
+            "rehearse",
+            "inspect",
+            &manifest,
+            "--json",
+        ],
+        vec![
+            "--workspace",
+            &workspace_arg,
+            "rehearse",
+            "promote-plan",
+            &manifest,
+            "--json",
+        ],
     ];
 
     for args in &commands {
         let output = run_ee(args)?;
-        if matches!(
-            output.status.code(),
-            Some(0) | Some(UNSATISFIED_DEGRADED_MODE_EXIT)
-        ) {
+        if matches!(output.status.code(), Some(0) | Some(1)) {
             ensure(
                 stdout_is_clean(&output),
                 format!("ee {} must have clean stdout", args.join(" ")),

@@ -222,8 +222,13 @@ fn side_effect_class(args: &[String]) -> &'static str {
         "read-only, idempotent"
     } else if args.iter().any(|arg| arg == "claim") {
         "read-only, conservative abstention; no claim manifest parse or verification result"
+    } else if args
+        .windows(2)
+        .any(|window| matches!(window, [first, second] if first == "rehearse" && second == "run"))
+    {
+        "sandboxed rehearsal side-path artifact write; source workspace unchanged"
     } else if args.iter().any(|arg| arg == "rehearse") {
-        "unavailable before sandbox mutation"
+        "read-only rehearsal planning, inspection, or promotion guidance"
     } else if args.iter().any(|arg| arg == "learn") {
         "conservative abstention; no learning agenda, uncertainty, summary, proposal, or experiment template emitted"
     } else if args.iter().any(|arg| arg == "lab") {
@@ -1498,7 +1503,7 @@ fn diag_quarantine_degrades_instead_of_reporting_placeholder_health() -> TestRes
 }
 
 #[test]
-fn rehearse_commands_degrade_instead_of_reporting_simulated_success() -> TestResult {
+fn rehearse_commands_emit_real_sandbox_artifacts_instead_of_degraded_stub() -> TestResult {
     let command_spec = r#"[{
       "id":"cmd_status",
       "command":"status",
@@ -1507,164 +1512,248 @@ fn rehearse_commands_degrade_instead_of_reporting_simulated_success() -> TestRes
       "stop_on_failure":false,
       "idempotency_key":"idem-status-001"
     }]"#;
-    let cases = [
+
+    let workspace_root = unique_artifact_dir("rehearse-sandbox-workspace")?;
+    let workspace = workspace_root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    fs::write(workspace.join("state.txt"), "source")
+        .map_err(|error| format!("failed to seed source workspace: {error}"))?;
+    let out = unique_artifact_dir("rehearse-sandbox-out")?;
+    let workspace_arg = workspace.display().to_string();
+    let out_arg = out.display().to_string();
+
+    let plan = run_ee_logged(
+        "rehearse-plan-sandbox-ready",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "rehearse".to_owned(),
+            "plan".to_owned(),
+            "--commands-json".to_owned(),
+            command_spec.to_owned(),
+        ],
+    )?;
+    ensure_equal(&plan.exit_code, &0, "rehearse plan exit code")?;
+    ensure(
+        plan.stderr.is_empty(),
+        "rehearse plan must keep stderr empty",
+    )?;
+    ensure_no_ansi(&plan.stdout, "rehearse plan stdout")?;
+    ensure_json_pointer(
+        &plan.parsed,
+        "/schema",
+        json!("ee.response.v1"),
+        "rehearse plan response schema",
+    )?;
+    ensure_json_pointer(&plan.parsed, "/success", json!(true), "plan success flag")?;
+    ensure_json_pointer(
+        &plan.parsed,
+        "/data/schema",
+        json!("ee.rehearse.plan.v1"),
+        "plan data schema",
+    )?;
+    ensure_json_pointer(
+        &plan.parsed,
+        "/data/can_proceed",
+        json!(true),
+        "plan can proceed",
+    )?;
+    ensure_json_pointer(
+        &plan.parsed,
+        "/data/degradation_codes",
+        json!([]),
+        "plan degradation codes",
+    )?;
+    ensure(
+        plan.parsed["data"]["estimated_artifacts"]
+            .as_array()
+            .is_some_and(|artifacts| {
+                artifacts.iter().any(|artifact| artifact == "manifest.json")
+                    && artifacts
+                        .iter()
+                        .any(|artifact| artifact == "source_snapshot.json")
+                    && artifacts
+                        .iter()
+                        .any(|artifact| artifact == "sandbox_snapshot.json")
+            }),
+        "rehearse plan must advertise manifest and filesystem snapshot artifacts",
+    )?;
+
+    let run = run_ee_logged(
+        "rehearse-run-sandbox-artifacts",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "rehearse".to_owned(),
+            "run".to_owned(),
+            "--commands-json".to_owned(),
+            command_spec.to_owned(),
+            "--out".to_owned(),
+            out_arg.clone(),
+            "--profile".to_owned(),
+            "quick".to_owned(),
+        ],
+    )?;
+    ensure_equal(&run.exit_code, &0, "rehearse run exit code")?;
+    ensure(run.stderr.is_empty(), "rehearse run must keep stderr empty")?;
+    ensure_no_ansi(&run.stdout, "rehearse run stdout")?;
+    ensure_json_pointer(
+        &run.parsed,
+        "/data/schema",
+        json!("ee.rehearse.run.v1"),
+        "run data schema",
+    )?;
+    ensure_json_pointer(
+        &run.parsed,
+        "/data/overall_result",
+        json!("passed"),
+        "run overall result",
+    )?;
+    ensure_json_pointer(
+        &run.parsed,
+        "/data/degradation_codes",
+        json!([]),
+        "run degradation codes",
+    )?;
+    ensure_json_pointer(
+        &run.parsed,
+        "/data/command_results/0/exit_code",
+        json!(0),
+        "run command exit code",
+    )?;
+    ensure(
+        run.parsed["data"]["sandbox_path"]
+            .as_str()
+            .is_some_and(|path| Path::new(path).join("state.txt").is_file()),
+        "rehearse run must copy the source workspace into a readable sandbox",
+    )?;
+    let manifest = run.parsed["data"]["artifact_paths"]["manifest"]
+        .as_str()
+        .ok_or_else(|| "run manifest path missing".to_string())?
+        .to_owned();
+    for artifact_key in ["manifest", "source_snapshot", "sandbox_snapshot"] {
+        ensure(
+            run.parsed["data"]["artifact_paths"][artifact_key]
+                .as_str()
+                .is_some_and(|path| Path::new(path).is_file()),
+            format!("rehearse run must write {artifact_key} artifact"),
+        )?;
+    }
+    ensure_equal(
+        &fs::read_to_string(workspace.join("state.txt"))
+            .map_err(|error| format!("failed to read source workspace: {error}"))?,
+        &"source".to_owned(),
+        "rehearse run must not mutate the source workspace",
+    )?;
+
+    let inspect = run_ee_logged(
+        "rehearse-inspect-manifest",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "rehearse".to_owned(),
+            "inspect".to_owned(),
+            manifest.clone(),
+        ],
+    )?;
+    ensure_equal(&inspect.exit_code, &0, "rehearse inspect exit code")?;
+    ensure_json_pointer(
+        &inspect.parsed,
+        "/data/schema",
+        json!("ee.rehearse.inspect.v1"),
+        "inspect data schema",
+    )?;
+    ensure_json_pointer(
+        &inspect.parsed,
+        "/data/integrity_status",
+        json!("valid"),
+        "inspect integrity status",
+    )?;
+    ensure_json_pointer(
+        &inspect.parsed,
+        "/data/command_count",
+        json!(1),
+        "inspect command count",
+    )?;
+
+    let promote = run_ee_logged(
+        "rehearse-promote-plan-manifest",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg,
+            "--json".to_owned(),
+            "rehearse".to_owned(),
+            "promote-plan".to_owned(),
+            manifest,
+        ],
+    )?;
+    ensure_equal(&promote.exit_code, &0, "rehearse promote-plan exit code")?;
+    ensure_json_pointer(
+        &promote.parsed,
+        "/data/schema",
+        json!("ee.rehearse.promote_plan.v1"),
+        "promote-plan data schema",
+    )?;
+    ensure_json_pointer(
+        &promote.parsed,
+        "/data/is_safe",
+        json!(true),
+        "promote-plan safety",
+    )?;
+
+    for (command, result, expected_side_effect) in [
         (
-            "rehearse-plan-unavailable",
             "rehearse plan",
-            vec![
-                "--json".to_owned(),
-                "rehearse".to_owned(),
-                "plan".to_owned(),
-                "--commands-json".to_owned(),
-                command_spec.to_owned(),
-            ],
+            &plan,
+            "read-only rehearsal planning, inspection, or promotion guidance",
         ),
         (
-            "rehearse-run-unavailable",
             "rehearse run",
-            vec![
-                "--json".to_owned(),
-                "rehearse".to_owned(),
-                "run".to_owned(),
-                "--profile".to_owned(),
-                "quick".to_owned(),
-            ],
+            &run,
+            "sandboxed rehearsal side-path artifact write; source workspace unchanged",
         ),
         (
-            "rehearse-inspect-unavailable",
             "rehearse inspect",
-            vec![
-                "--json".to_owned(),
-                "rehearse".to_owned(),
-                "inspect".to_owned(),
-                "rrun_fixture_001".to_owned(),
-            ],
+            &inspect,
+            "read-only rehearsal planning, inspection, or promotion guidance",
         ),
         (
-            "rehearse-promote-plan-unavailable",
             "rehearse promote-plan",
-            vec![
-                "--json".to_owned(),
-                "rehearse".to_owned(),
-                "promote-plan".to_owned(),
-                "rrun_fixture_001".to_owned(),
-            ],
+            &promote,
+            "read-only rehearsal planning, inspection, or promotion guidance",
         ),
-    ];
-
-    for (artifact_name, command, args) in cases {
-        let result = run_ee_logged(artifact_name, None, args)?;
-
-        ensure_equal(
-            &result.exit_code,
-            &UNSATISFIED_DEGRADED_MODE_EXIT,
-            &format!("{command} unavailable exit code"),
-        )?;
-        ensure(
-            result.stderr.is_empty(),
-            format!("{command} JSON degraded response must keep stderr empty"),
-        )?;
-        ensure_no_ansi(&result.stdout, &format!("{command} degraded stdout"))?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/schema",
-            json!("ee.response.v1"),
-            &format!("{command} degraded response schema"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/success",
-            json!(false),
-            &format!("{command} success flag"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/command",
-            json!(command),
-            &format!("{command} command label"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/code",
-            json!("rehearsal_unavailable"),
-            &format!("{command} degraded code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/degraded/0/code",
-            json!("rehearsal_unavailable"),
-            &format!("{command} degraded array code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/repair",
-            json!("ee status --json"),
-            &format!("{command} repair command"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/followUpBead",
-            json!("eidetic_engine_cli-nd65"),
-            &format!("{command} follow-up bead"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sideEffectClass",
-            json!("unavailable before sandbox mutation"),
-            &format!("{command} side-effect class"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/evidenceIds",
-            json!([]),
-            &format!("{command} evidence ids"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sourceIds",
-            json!([]),
-            &format!("{command} source ids"),
-        )?;
-        ensure(
-            result.parsed.pointer("/plan_id").is_none()
-                && result.parsed.pointer("/run_id").is_none()
-                && result.parsed.pointer("/artifact_id").is_none()
-                && result.parsed.pointer("/estimated_artifacts").is_none()
-                && result.parsed.pointer("/sandbox_path").is_none()
-                && result.parsed.pointer("/can_proceed").is_none()
-                && result.parsed.pointer("/next_actions").is_none(),
-            format!("{command} must not emit generated rehearsal artifacts or proceed guidance"),
-        )?;
-
-        let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
+    ] {
+        let fake_success = validate_no_fake_success_output(command, true, false, &result.stdout);
         ensure(
             fake_success.passed,
-            format!("degraded {command} output should not be fake success: {fake_success:?}"),
+            format!("{command} output should not contain fake success markers: {fake_success:?}"),
         )?;
-
-        let unsupported_claims =
-            validate_no_unsupported_evidence_claims(command, false, false, &result.stdout);
-        ensure(
-            unsupported_claims.passed,
-            format!(
-                "degraded {command} output should not count as unsupported success: {unsupported_claims:?}"
-            ),
-        )?;
-
         let log_text = fs::read_to_string(&result.log_path)
             .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
         let log_json: Value = serde_json::from_str(&log_text)
-            .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+            .map_err(|error| format!("{command} e2e log must be JSON: {error}"))?;
         ensure_json_pointer(
             &log_json,
             "/degradationCodes",
-            json!(["rehearsal_unavailable"]),
-            &format!("logged {command} degradation code"),
+            json!([]),
+            &format!("logged {command} degradation codes"),
         )?;
         ensure_json_pointer(
             &log_json,
             "/repairCommand",
-            json!("ee status --json"),
+            json!(null),
             &format!("logged {command} repair command"),
         )?;
         ensure_json_pointer(
@@ -1676,7 +1765,7 @@ fn rehearse_commands_degrade_instead_of_reporting_simulated_success() -> TestRes
         ensure_json_pointer(
             &log_json,
             "/sideEffectClass",
-            json!("unavailable before sandbox mutation"),
+            json!(expected_side_effect),
             &format!("logged {command} side-effect class"),
         )?;
     }

@@ -58,7 +58,10 @@ use crate::core::index::{
     reembed_index,
 };
 use crate::core::init::{InitOptions, init_workspace};
-use crate::core::install::{InstallCheckOptions, InstallPlanOptions, check_install, plan_install};
+use crate::core::install::{
+    InstallCheckOptions, InstallExecutionResult, InstallPlanOptions, check_install,
+    execute_install_plan, plan_install,
+};
 use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use crate::core::lab::{
     CaptureOptions as LabCaptureOptions, CounterfactualOptions as LabCounterfactualOptions,
@@ -80,6 +83,11 @@ use crate::core::outcome::{
     OutcomeQuarantineListOptions, OutcomeQuarantineListReport, OutcomeQuarantineReviewOptions,
     OutcomeQuarantineReviewReport, OutcomeRecordOptions, list_feedback_quarantine, record_outcome,
     review_feedback_quarantine,
+};
+use crate::core::rehearse::{
+    CommandSpec, RehearsalProfile, RehearseInspectOptions, RehearsePlanOptions,
+    RehearsePromotePlanOptions, RehearseRunOptions, inspect_rehearsal, plan_rehearsal,
+    promote_plan_rehearsal, run_rehearsal,
 };
 use crate::core::rule::{
     RuleAddOptions, RuleAddReport, RuleListOptions, RuleListReport, RuleProtectOptions,
@@ -6148,14 +6156,6 @@ where
     W: Write,
     E: Write,
 {
-    if !args.dry_run {
-        let error = DomainError::PolicyDenied {
-            message: "ee update apply is not implemented; use --dry-run for an agent-safe plan"
-                .to_owned(),
-            repair: Some("ee update --dry-run --json --manifest <path>".to_owned()),
-        };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-    }
     let options = InstallPlanOptions {
         operation: InstallOperation::Update,
         manifest: args.manifest.clone(),
@@ -6169,7 +6169,24 @@ where
         offline: args.offline,
     };
     let report = plan_install(&options);
-    render_install_plan(cli, &report, stdout)
+
+    if args.dry_run {
+        return render_install_plan(cli, &report, stdout);
+    }
+
+    // Execute the plan
+    let Some(artifact_root) = &args.artifact_root else {
+        let error = DomainError::PolicyDenied {
+            message:
+                "update apply requires --artifact-root pointing at downloaded release artifacts"
+                    .to_owned(),
+            repair: Some("ee update --artifact-root <path> --manifest <path>".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    };
+
+    let result = execute_install_plan(&report, artifact_root);
+    render_install_execution(cli, &report, &result, stdout, stderr)
 }
 
 fn render_install_plan<W>(
@@ -6193,6 +6210,56 @@ where
         | output::Renderer::Hook => {
             write_stdout(stdout, &(output::render_install_plan_json(report) + "\n"))
         }
+    }
+}
+
+fn render_install_execution<W, E>(
+    cli: &Cli,
+    plan: &crate::models::InstallPlanReport,
+    result: &InstallExecutionResult,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !result.success {
+        let error = DomainError::Storage {
+            message: result
+                .error_message
+                .clone()
+                .unwrap_or_else(|| "update apply failed".to_owned()),
+            repair: Some("ee update --dry-run --json --manifest <path>".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "command": "update apply",
+            "schema": "ee.update.apply.v1",
+            "success": result.success,
+            "artifactVerified": result.artifact_verified,
+            "binaryInstalled": result.binary_installed,
+            "backupPath": result.backup_path,
+            "installedVersion": plan.target_version,
+            "installPath": plan.target.install_path,
+        });
+        write_stdout(stdout, &(json.to_string() + "\n"))
+    } else {
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "Update applied successfully to {}",
+            plan.target.install_path
+        ));
+        if let Some(version) = &plan.target_version {
+            lines.push(format!("Installed version: {version}"));
+        }
+        if let Some(backup) = &result.backup_path {
+            lines.push(format!("Previous binary backed up to: {backup}"));
+        }
+        write_stdout(stdout, &(lines.join("\n") + "\n"))
     }
 }
 
@@ -8886,69 +8953,6 @@ where
 // EE-REHEARSE-001: Rehearsal Handlers
 // ============================================================================
 
-const REHEARSAL_UNAVAILABLE_CODE: &str = "rehearsal_unavailable";
-const REHEARSAL_UNAVAILABLE_MESSAGE: &str = "Rehearsal sandbox execution and artifact inspection are unavailable until real isolated dry-run artifacts are implemented.";
-const REHEARSAL_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const REHEARSAL_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-nd65";
-
-fn write_rehearsal_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": REHEARSAL_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": REHEARSAL_UNAVAILABLE_MESSAGE,
-                "repair": REHEARSAL_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": REHEARSAL_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": REHEARSAL_UNAVAILABLE_MESSAGE,
-                        "repair": REHEARSAL_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": REHEARSAL_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": "unavailable before sandbox mutation",
-                "dryRunIsolation": {
-                    "status": "unavailable",
-                    "reason": "real isolated dry-run execution is not implemented",
-                    "commandSpecValidation": "unavailable before execution planning",
-                    "unsupportedCommandPolicy": "report unavailable instead of simulating success"
-                },
-                "mutationPosture": {
-                    "durableMutation": false,
-                    "sandboxCreated": false,
-                    "artifactsCreated": false,
-                    "worktreeCreated": false,
-                    "filesDeleted": false
-                },
-                "firstFailureDiagnosis": "real isolated dry-run artifacts are not implemented"
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
-
-    let _ = writeln!(stderr, "error: {REHEARSAL_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {REHEARSAL_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
-}
-
 fn handle_rehearse_plan<W, E>(
     cli: &Cli,
     args: &RehearsePlanArgs,
@@ -8959,8 +8963,24 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_rehearsal_unavailable(cli, "rehearse plan", stdout, stderr)
+    let commands =
+        match load_rehearsal_commands(args.commands.as_deref(), args.commands_json.as_deref()) {
+            Ok(commands) => commands,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    let profile = match parse_rehearsal_profile(&args.profile) {
+        Ok(profile) => profile,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let options = RehearsePlanOptions {
+        workspace: rehearse_workspace(cli),
+        commands,
+        profile,
+    };
+    match plan_rehearsal(&options) {
+        Ok(report) => write_rehearse_report(cli, &report, |report| report.human_summary(), stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_rehearse_run<W, E>(
@@ -8973,8 +8993,36 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_rehearsal_unavailable(cli, "rehearse run", stdout, stderr)
+    let commands =
+        match load_rehearsal_commands(args.commands.as_deref(), args.commands_json.as_deref()) {
+            Ok(commands) => commands,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    let profile = match parse_rehearsal_profile(&args.profile) {
+        Ok(profile) => profile,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let ee_binary = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            let domain_error = DomainError::Configuration {
+                message: format!("Failed to locate current ee binary for rehearsal: {error}"),
+                repair: Some("Run ee rehearse from an installed ee binary".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let options = RehearseRunOptions {
+        workspace: rehearse_workspace(cli),
+        commands,
+        output_dir: args.out.clone(),
+        profile,
+        ee_binary: Some(ee_binary),
+    };
+    match run_rehearsal(&options) {
+        Ok(report) => write_rehearse_report(cli, &report, |report| report.human_summary(), stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_rehearse_inspect<W, E>(
@@ -8987,8 +9035,14 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_rehearsal_unavailable(cli, "rehearse inspect", stdout, stderr)
+    let options = RehearseInspectOptions {
+        artifact_id: args.artifact.clone(),
+        workspace: rehearse_workspace(cli),
+    };
+    match inspect_rehearsal(&options) {
+        Ok(report) => write_rehearse_report(cli, &report, |report| report.human_summary(), stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_rehearse_promote_plan<W, E>(
@@ -9001,8 +9055,84 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_rehearsal_unavailable(cli, "rehearse promote-plan", stdout, stderr)
+    let options = RehearsePromotePlanOptions {
+        artifact_id: args.artifact.clone(),
+        workspace: rehearse_workspace(cli),
+    };
+    match promote_plan_rehearsal(&options) {
+        Ok(report) => write_rehearse_report(cli, &report, |report| report.human_summary(), stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn rehearse_workspace(cli: &Cli) -> PathBuf {
+    cli.workspace.clone().unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    })
+}
+
+fn parse_rehearsal_profile(profile: &str) -> Result<RehearsalProfile, DomainError> {
+    RehearsalProfile::from_str(profile).ok_or_else(|| DomainError::Usage {
+        message: format!("Invalid rehearsal profile: {profile}"),
+        repair: Some("Use --profile quick, --profile full, or --profile privacy".to_string()),
+    })
+}
+
+fn load_rehearsal_commands(
+    commands_path: Option<&Path>,
+    commands_json: Option<&str>,
+) -> Result<Vec<CommandSpec>, DomainError> {
+    let raw = match (commands_path, commands_json) {
+        (Some(_), Some(_)) => {
+            return Err(DomainError::Usage {
+                message: "Use either --commands or --commands-json, not both".to_string(),
+                repair: Some("ee rehearse plan --commands <path> --json".to_string()),
+            });
+        }
+        (Some(path), None) => fs::read_to_string(path).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to read rehearsal command spec {}: {error}",
+                path.display()
+            ),
+            repair: Some("Pass a readable JSON command spec path".to_string()),
+        })?,
+        (None, Some(raw)) => raw.to_string(),
+        (None, None) => return Ok(Vec::new()),
+    };
+
+    serde_json::from_str::<Vec<CommandSpec>>(&raw).map_err(|error| DomainError::Usage {
+        message: format!("Failed to parse rehearsal command spec JSON: {error}"),
+        repair: Some(
+            "Provide a JSON array of {id, command, args, expected_effect, stop_on_failure}"
+                .to_string(),
+        ),
+    })
+}
+
+fn write_rehearse_report<W, T, F>(
+    cli: &Cli,
+    report: &T,
+    human_summary: F,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+    T: serde::Serialize,
+    F: FnOnce(&T) -> String,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &human_summary(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&workspace_response_json(report)) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(workspace_response_json(report) + "\n")),
+    }
 }
 
 // ============================================================================
@@ -10208,6 +10338,7 @@ struct QueryFileRequest {
     candidate_pool: Option<u32>,
     renderer: Option<output::Renderer>,
     degraded: Vec<ContextResponseDegradation>,
+    filters: crate::models::QueryFilters,
 }
 
 type QueryOutputControls = (
@@ -16992,6 +17123,32 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn preflight_show_invalid_run_id_returns_usage_exit() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--json", "preflight", "show", "invalid"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "preflight show usage exit")?;
+        ensure(stderr.is_empty(), "preflight JSON usage stderr clean")?;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.error.v1"),
+            "error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("usage"),
+            "error code",
+        )?;
+        ensure(
+            value["error"]["repair"]
+                .as_str()
+                .is_some_and(|repair| repair.contains("pf_<uuid>")),
+            "repair should describe preflight ID format",
+        )
     }
 
     #[test]
