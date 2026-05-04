@@ -49,13 +49,15 @@ serde_yaml = { version = "0.9.34" }
 sha2 = { version = "0.10.9" }
 sqlmodel-core = { version = "0.2.2", path = "/data/projects/sqlmodel_rust/crates/sqlmodel-core" }
 sqlmodel-frankensqlite = { version = "0.2.2", path = "/data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite" }
+tempfile = { version = "3.27.0" }
 toon = { package = "tru", version = "0.2.2", path = "/data/projects/toon_rust", default-features = false }
 toml_edit = { version = "0.25.11", default-features = false, features = ["parse"] }
 uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
-tempfile = { version = "3.27.0" }
 criterion = { version = "0.5", features = ["html_reports"] }
+insta = { version = "1.47.2", features = ["json"] }
+proptest = { version = "1.9.0", default-features = false, features = ["std"] }
 
 [[bench]]
 name = "remember"
