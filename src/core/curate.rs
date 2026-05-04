@@ -13,7 +13,8 @@ use serde::Serialize;
 
 use crate::curate::{
     CandidateInput, CandidateSource, CandidateStatus, CandidateType, CandidateValidationError,
-    ReviewQueueState, validate_candidate, validate_review_queue_transition,
+    ReviewQueueState, validate_candidate, validate_candidate_trust_evidence,
+    validate_review_queue_transition,
 };
 use crate::db::{
     ApplyMemoryCurationInput, CreateAuditInput, CurationCandidateReviewUpdate, DbConnection,
@@ -1732,6 +1733,54 @@ fn evaluate_candidate_for_apply(
         }
     };
 
+    if stored.proposed_trust_class.is_some() {
+        let source_type = match CandidateSource::from_str(&stored.source_type) {
+            Ok(source_type) => source_type,
+            Err(error) => {
+                errors.push(validation_issue(
+                    "invalid_candidate_source",
+                    error.to_string(),
+                    "Regenerate the candidate with a supported source type.",
+                ));
+                return blocked_apply(
+                    stored,
+                    target_before,
+                    errors,
+                    warnings,
+                    "ee curate candidates --json".to_owned(),
+                );
+            }
+        };
+        match stored
+            .source_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(source_id) => {
+                if let Err(error) = validate_candidate_trust_evidence(
+                    stored.proposed_trust_class.as_deref(),
+                    source_type,
+                    source_id,
+                ) {
+                    errors.push(validation_issue(
+                        error.code(),
+                        error.to_string(),
+                        validation_repair(&error),
+                    ));
+                }
+            }
+            None => {
+                let error = CandidateValidationError::MissingSourceEvidence;
+                errors.push(validation_issue(
+                    error.code(),
+                    error.to_string(),
+                    validation_repair(&error),
+                ));
+            }
+        }
+    }
+
     let Some(target_memory) = target_memory else {
         return blocked_apply(
             stored,
@@ -2801,6 +2850,9 @@ fn validation_repair(error: &CandidateValidationError) -> &'static str {
         CandidateValidationError::InvalidProposedTrustClass { .. } => {
             "Use a supported trust class."
         }
+        CandidateValidationError::TrustPromotionEvidenceRejected { .. } => {
+            "Attach evidence from the required durable ID namespace for this trust class."
+        }
         CandidateValidationError::ContentRequiredForType { .. } => {
             "Add proposed content before validating this candidate."
         }
@@ -3628,7 +3680,7 @@ mod tests {
                     proposed_confidence: Some(0.8),
                     proposed_trust_class: Some("agent_validated".to_owned()),
                     source_type: "feedback_event".to_owned(),
-                    source_id: Some("outcome_helpful".to_owned()),
+                    source_id: Some("fb_01234567890123456789012345".to_owned()),
                     reason: "Useful during release verification.".to_owned(),
                     confidence: 0.76,
                     status: Some("pending".to_owned()),
@@ -4060,6 +4112,73 @@ mod tests {
             .ok_or_else(|| "audit entry missing".to_owned())?;
         assert_eq!(audit.action, audit_actions::CURATION_CANDIDATE_APPLY);
         assert_eq!(audit.target_id.as_deref(), Some(memory_id.as_str()));
+        Ok(())
+    }
+
+    #[test]
+    fn apply_curation_candidate_blocks_spoofed_trust_evidence() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(30)).to_string();
+        let seed_id = curate_id(31);
+        let spoof_id = curate_id(32);
+        let connection = seed_candidate_database(
+            &database_path,
+            &workspace_id,
+            &memory_id,
+            &seed_id,
+            "promote",
+            Some("approved"),
+            None,
+        )?;
+        connection
+            .insert_curation_candidate(
+                &spoof_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "promote".to_owned(),
+                    target_memory_id: memory_id.clone(),
+                    proposed_content: None,
+                    proposed_confidence: Some(0.95),
+                    proposed_trust_class: Some("agent_validated".to_owned()),
+                    source_type: "human_request".to_owned(),
+                    source_id: Some("reviewer".to_owned()),
+                    reason: "Spoofed reviewer string must not promote trust.".to_owned(),
+                    confidence: 0.91,
+                    status: Some("approved".to_owned()),
+                    created_at: Some("2026-05-01T00:00:06Z".to_owned()),
+                    ttl_expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let report = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &spoof_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.application.status, "blocked");
+        assert!(
+            report
+                .application
+                .errors
+                .iter()
+                .any(|issue| issue.code == "trust_promotion_evidence_rejected")
+        );
+        assert!(!report.mutation.persisted);
+
+        let memory = connection
+            .get_memory(&memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory missing after blocked spoof apply".to_owned())?;
+        assert!((memory.confidence - 0.7).abs() < 0.001);
+        assert_eq!(memory.trust_class, "human_explicit");
         Ok(())
     }
 

@@ -410,6 +410,12 @@ pub enum CandidateValidationError {
     InvalidProposedTrustClass {
         value: String,
     },
+    TrustPromotionEvidenceRejected {
+        trust_class: String,
+        source_type: CandidateSource,
+        source_id: String,
+        reason: &'static str,
+    },
     ContentRequiredForType {
         candidate_type: CandidateType,
     },
@@ -455,6 +461,17 @@ impl fmt::Display for CandidateValidationError {
             }
             Self::InvalidProposedTrustClass { value } => {
                 write!(f, "invalid proposed trust class `{value}`")
+            }
+            Self::TrustPromotionEvidenceRejected {
+                trust_class,
+                source_type,
+                source_id,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "proposed trust class `{trust_class}` cannot use {source_type} evidence `{source_id}`: {reason}"
+                )
             }
             Self::ContentRequiredForType { candidate_type } => {
                 write!(
@@ -513,6 +530,9 @@ impl CandidateValidationError {
             Self::ConfidenceOutOfRange { .. } => "confidence_out_of_range",
             Self::ProposedConfidenceOutOfRange { .. } => "proposed_confidence_out_of_range",
             Self::InvalidProposedTrustClass { .. } => "invalid_proposed_trust_class",
+            Self::TrustPromotionEvidenceRejected { .. } => {
+                crate::policy::TRUST_PROMOTION_EVIDENCE_REJECTED_CODE
+            }
             Self::ContentRequiredForType { .. } => "content_required_for_type",
             Self::ContentForbiddenForType { .. } => "content_forbidden_for_type",
             Self::CandidateTooGeneric { .. } => CANDIDATE_TOO_GENERIC_CODE,
@@ -1739,6 +1759,32 @@ fn duplicate_rule_decision(
     }
 }
 
+/// Validate that a proposed trust-class mutation is supported by evidence from
+/// the correct deterministic namespace.
+pub fn validate_candidate_trust_evidence(
+    proposed_trust_class: Option<&str>,
+    source_type: CandidateSource,
+    source_id: &str,
+) -> Result<(), CandidateValidationError> {
+    let Some(trust_class) = proposed_trust_class
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let source_id = source_id.trim();
+
+    crate::policy::validate_trust_promotion_evidence(trust_class, source_type.as_str(), source_id)
+        .map_err(
+            |rejection| CandidateValidationError::TrustPromotionEvidenceRejected {
+                trust_class: trust_class.to_owned(),
+                source_type,
+                source_id: source_id.to_owned(),
+                reason: rejection.reason,
+            },
+        )
+}
+
 /// Validate a candidate input and produce a validated candidate.
 pub fn validate_candidate(
     input: CandidateInput,
@@ -1798,6 +1844,11 @@ pub fn validate_candidate(
             return Err(CandidateValidationError::InvalidProposedTrustClass { value: tc.clone() });
         }
     }
+    validate_candidate_trust_evidence(
+        input.proposed_trust_class.as_deref(),
+        input.source_type,
+        &source_id,
+    )?;
 
     // Validate content requirements based on candidate type
     let has_content = input
@@ -3749,7 +3800,7 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
             proposed_confidence: Some(0.8),
             proposed_trust_class: Some("agent_validated".to_string()),
             source_type: CandidateSource::FeedbackEvent,
-            source_id: Some("feedback_789".to_string()),
+            source_id: Some("fb_01234567890123456789012345".to_string()),
             reason: "Positive feedback received".to_string(),
             confidence: 0.75,
             ttl_seconds: Some(3600),
@@ -3928,6 +3979,72 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
             result,
             Err(CandidateValidationError::InvalidProposedTrustClass { .. })
         ));
+    }
+
+    #[test]
+    fn validate_candidate_rejects_agent_validated_spoofed_source_id() {
+        let mut input = valid_input();
+        input.source_id = Some("reviewer".to_string());
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+
+        assert!(matches!(
+            result,
+            Err(CandidateValidationError::TrustPromotionEvidenceRejected {
+                trust_class,
+                source_type: CandidateSource::FeedbackEvent,
+                source_id,
+                reason: "agent_validated_requires_feedback_event_id",
+            }) if trust_class == "agent_validated" && source_id == "reviewer"
+        ));
+    }
+
+    #[test]
+    fn validate_candidate_rejects_agent_validated_from_human_request() {
+        let mut input = valid_input();
+        input.source_type = CandidateSource::HumanRequest;
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+
+        assert!(matches!(
+            result,
+            Err(CandidateValidationError::TrustPromotionEvidenceRejected {
+                trust_class,
+                source_type: CandidateSource::HumanRequest,
+                source_id,
+                reason: "agent_validated_requires_feedback_event_source",
+            }) if trust_class == "agent_validated"
+                && source_id == "fb_01234567890123456789012345"
+        ));
+    }
+
+    #[test]
+    fn validate_candidate_rejects_human_explicit_spoofed_source_id() {
+        let mut input = valid_input();
+        input.proposed_trust_class = Some("human_explicit".to_string());
+        input.source_type = CandidateSource::HumanRequest;
+        input.source_id = Some("reviewer".to_string());
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+
+        assert!(matches!(
+            result,
+            Err(CandidateValidationError::TrustPromotionEvidenceRejected {
+                trust_class,
+                source_type: CandidateSource::HumanRequest,
+                source_id,
+                reason: "human_explicit_requires_audit_log_id",
+            }) if trust_class == "human_explicit" && source_id == "reviewer"
+        ));
+    }
+
+    #[test]
+    fn validate_candidate_accepts_human_explicit_with_audit_evidence() {
+        let mut input = valid_input();
+        input.proposed_trust_class = Some("human_explicit".to_string());
+        input.source_type = CandidateSource::HumanRequest;
+        input.source_id = Some("audit_01234567890123456789012345".to_string());
+
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+
+        assert!(result.is_ok());
     }
 
     #[test]

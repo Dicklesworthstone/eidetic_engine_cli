@@ -7,14 +7,19 @@
 pub mod security_profile;
 pub mod trust_decay;
 
+use std::str::FromStr;
+
 pub use security_profile::{
     FilePermissionCheck, FilePermissionReport, ParseSecurityProfileError, SecurityProfile,
     check_workspace_permissions, load_profile_from_env,
 };
 pub use trust_decay::{DecayConfig, SourceTrustState, TrustAdvisory, TrustDecayCalculator};
 
+use crate::models::TrustClass;
+
 pub const SUBSYSTEM: &str = "policy";
 pub const INSTRUCTION_LIKE_SCORE_THRESHOLD: f32 = 0.45;
+pub const TRUST_PROMOTION_EVIDENCE_REJECTED_CODE: &str = "trust_promotion_evidence_rejected";
 
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
@@ -98,6 +103,84 @@ pub struct InstructionLikeReport {
     pub threshold: f32,
     pub signals: Vec<InstructionSignalMatch>,
     pub rejected_reasons: Vec<&'static str>,
+}
+
+/// Stable rejection returned when privileged trust promotion evidence is not
+/// allowed to support the proposed trust class.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TrustPromotionEvidenceRejection {
+    pub code: &'static str,
+    pub reason: &'static str,
+}
+
+impl TrustPromotionEvidenceRejection {
+    const fn new(reason: &'static str) -> Self {
+        Self {
+            code: TRUST_PROMOTION_EVIDENCE_REJECTED_CODE,
+            reason,
+        }
+    }
+}
+
+/// Validate the evidence namespace allowed to support privileged trust classes.
+///
+/// Shape validation is deterministic and independent of storage so curation
+/// validation can reject spoofed evidence before any durable mutation.
+pub fn validate_trust_promotion_evidence(
+    proposed_trust_class: &str,
+    source_type: &str,
+    source_id: &str,
+) -> Result<(), TrustPromotionEvidenceRejection> {
+    let proposed_trust_class = proposed_trust_class.trim();
+    let source_type = source_type.trim();
+    let source_id = source_id.trim();
+    let Ok(trust_class) = TrustClass::from_str(proposed_trust_class) else {
+        return Ok(());
+    };
+
+    match trust_class {
+        TrustClass::AgentValidated => {
+            if source_type != "feedback_event" {
+                return Err(TrustPromotionEvidenceRejection::new(
+                    "agent_validated_requires_feedback_event_source",
+                ));
+            }
+            if !is_feedback_event_id(source_id) {
+                return Err(TrustPromotionEvidenceRejection::new(
+                    "agent_validated_requires_feedback_event_id",
+                ));
+            }
+            Ok(())
+        }
+        TrustClass::HumanExplicit => {
+            if source_type != "human_request" {
+                return Err(TrustPromotionEvidenceRejection::new(
+                    "human_explicit_requires_human_request_source",
+                ));
+            }
+            if !is_audit_log_id(source_id) {
+                return Err(TrustPromotionEvidenceRejection::new(
+                    "human_explicit_requires_audit_log_id",
+                ));
+            }
+            Ok(())
+        }
+        TrustClass::AgentAssertion | TrustClass::CassEvidence | TrustClass::LegacyImport => Ok(()),
+    }
+}
+
+fn is_feedback_event_id(value: &str) -> bool {
+    let Some(payload) = value.strip_prefix("fb_") else {
+        return false;
+    };
+    value.len() == 29 && payload.chars().all(|ch| ch.is_ascii_alphanumeric())
+}
+
+fn is_audit_log_id(value: &str) -> bool {
+    let Some(payload) = value.strip_prefix("audit_") else {
+        return false;
+    };
+    value.len() == 32 && payload.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 const INSTRUCTION_PATTERNS: &[InstructionPattern] = &[
@@ -303,7 +386,8 @@ fn round_score(score: f32) -> f32 {
 mod tests {
     use super::{
         INSTRUCTION_LIKE_SCORE_THRESHOLD, InstructionRisk, InstructionSignalKind,
-        detect_instruction_like_content, subsystem_name,
+        TRUST_PROMOTION_EVIDENCE_REJECTED_CODE, detect_instruction_like_content, subsystem_name,
+        validate_trust_promotion_evidence,
     };
 
     #[test]
@@ -412,5 +496,73 @@ mod tests {
         assert!(report.is_instruction_like);
         assert_eq!(report.score, 1.0);
         assert_eq!(report.risk, InstructionRisk::High);
+    }
+
+    #[test]
+    fn trust_promotion_accepts_feedback_event_for_agent_validated() {
+        let result = validate_trust_promotion_evidence(
+            "agent_validated",
+            "feedback_event",
+            "fb_01234567890123456789012345",
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn trust_promotion_rejects_arbitrary_agent_validated_source_id() {
+        let rejection =
+            validate_trust_promotion_evidence("agent_validated", "feedback_event", "reviewer")
+                .expect_err("reviewer must not spoof feedback evidence");
+
+        assert_eq!(rejection.code, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE);
+        assert_eq!(
+            rejection.reason,
+            "agent_validated_requires_feedback_event_id"
+        );
+    }
+
+    #[test]
+    fn trust_promotion_rejects_agent_validated_without_feedback_source() {
+        let rejection = validate_trust_promotion_evidence(
+            "agent_validated",
+            "human_request",
+            "fb_01234567890123456789012345",
+        )
+        .expect_err("human request source must not spoof validated agent outcome evidence");
+
+        assert_eq!(
+            rejection.reason,
+            "agent_validated_requires_feedback_event_source"
+        );
+    }
+
+    #[test]
+    fn trust_promotion_accepts_audit_log_for_human_explicit() {
+        let result = validate_trust_promotion_evidence(
+            "human_explicit",
+            "human_request",
+            "audit_01234567890123456789012345",
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn trust_promotion_rejects_arbitrary_human_explicit_source_id() {
+        let rejection =
+            validate_trust_promotion_evidence("human_explicit", "human_request", "reviewer")
+                .expect_err("reviewer must not spoof human-explicit audit evidence");
+
+        assert_eq!(rejection.code, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE);
+        assert_eq!(rejection.reason, "human_explicit_requires_audit_log_id");
+    }
+
+    #[test]
+    fn trust_promotion_allows_non_privileged_trust_classes() {
+        let result =
+            validate_trust_promotion_evidence("agent_assertion", "agent_inference", "reviewer");
+
+        assert!(result.is_ok());
     }
 }
