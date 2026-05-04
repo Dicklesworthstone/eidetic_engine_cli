@@ -88,6 +88,11 @@ use crate::core::rule::{
 };
 use crate::core::search::{SearchOptions, run_search};
 use crate::core::status::StatusReport;
+use crate::core::task_frame::{
+    TaskEvidenceLink, TaskFrameCloseOptions, TaskFrameCreateOptions, TaskFrameReport,
+    TaskFrameShowOptions, TaskFrameStatus, TaskFrameUpdateOptions, TaskSubgoalAddOptions,
+    add_task_subgoal, close_task_frame, create_task_frame, show_task_frame, update_task_frame,
+};
 use crate::core::tripwire::{
     CheckOptions as TripwireCheckOptions, ListOptions as TripwireListOptions, TripwireEventPayload,
     check_tripwire, list_tripwires,
@@ -384,6 +389,9 @@ pub enum Command {
     /// Create or inspect redacted diagnostic support bundles.
     #[command(subcommand)]
     Support(SupportCommand),
+    /// Durable passive task frames and goal stacks.
+    #[command(name = "task-frame", subcommand)]
+    TaskFrame(TaskFrameCommand),
     /// List and check tripwires from preflight assessments.
     #[command(subcommand)]
     Tripwire(TripwireCommand),
@@ -3412,6 +3420,189 @@ pub struct FocusClearArgs {
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct FocusExplainArgs {}
 
+/// Subcommands for `ee task-frame`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum TaskFrameCommand {
+    /// Create a durable passive task frame.
+    Create(TaskFrameCreateArgs),
+    /// Show one task frame, the active frame, or all frames.
+    Show(TaskFrameShowArgs),
+    /// Update passive task-frame state.
+    Update(TaskFrameUpdateArgs),
+    /// Close a task frame with an explicit terminal state.
+    Close(TaskFrameCloseArgs),
+    /// Manage nested task-frame subgoals.
+    #[command(subcommand)]
+    Subgoal(TaskFrameSubgoalCommand),
+}
+
+/// Subcommands for `ee task-frame subgoal`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum TaskFrameSubgoalCommand {
+    /// Add a subgoal under a task frame.
+    Add(TaskFrameSubgoalAddArgs),
+}
+
+/// Arguments for `ee task-frame create`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TaskFrameCreateArgs {
+    /// Root goal to record.
+    #[arg(long, value_name = "TEXT")]
+    pub goal: String,
+
+    /// Actor recording the frame.
+    #[arg(long, default_value = "agent")]
+    pub actor: String,
+
+    /// Initial frame status.
+    #[arg(long, default_value = "open")]
+    pub status: String,
+
+    /// Current focus label or short note.
+    #[arg(long, value_name = "TEXT")]
+    pub current_focus: Option<String>,
+
+    /// Blocker note. Repeat for multiple blockers.
+    #[arg(long = "blocker", value_name = "TEXT")]
+    pub blockers: Vec<String>,
+
+    /// Memory evidence ID. Repeat for multiple memories.
+    #[arg(long = "memory-id", value_name = "ID")]
+    pub memory_ids: Vec<String>,
+
+    /// Context-pack evidence ID. Repeat for multiple packs.
+    #[arg(long = "context-pack-id", value_name = "ID")]
+    pub context_pack_ids: Vec<String>,
+
+    /// Recorder-run evidence ID. Repeat for multiple recorder runs.
+    #[arg(long = "recorder-run-id", value_name = "ID")]
+    pub recorder_run_ids: Vec<String>,
+
+    /// Handoff evidence ID. Repeat for multiple handoffs.
+    #[arg(long = "handoff-id", value_name = "ID")]
+    pub handoff_ids: Vec<String>,
+
+    /// Deterministic timestamp override for tests and replay.
+    #[arg(long, value_name = "RFC3339")]
+    pub created_at: Option<String>,
+
+    /// Preview the frame without writing `.ee/task_frames.json`.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee task-frame show`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TaskFrameShowArgs {
+    /// Task-frame ID to inspect. Omit to list frames.
+    #[arg(value_name = "FRAME_ID")]
+    pub frame_id: Option<String>,
+
+    /// Select the only active/open/blocked frame in the workspace.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub active: bool,
+}
+
+/// Arguments for `ee task-frame update`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TaskFrameUpdateArgs {
+    /// Task-frame ID to update.
+    #[arg(value_name = "FRAME_ID")]
+    pub frame_id: String,
+
+    /// New frame status.
+    #[arg(long)]
+    pub status: Option<String>,
+
+    /// Replacement current focus note. Empty string clears it.
+    #[arg(long, value_name = "TEXT")]
+    pub current_focus: Option<String>,
+
+    /// Blocker note to append. Repeat for multiple blockers.
+    #[arg(long = "blocker", value_name = "TEXT")]
+    pub blockers: Vec<String>,
+
+    /// Memory evidence ID. Repeat for multiple memories.
+    #[arg(long = "memory-id", value_name = "ID")]
+    pub memory_ids: Vec<String>,
+
+    /// Context-pack evidence ID. Repeat for multiple packs.
+    #[arg(long = "context-pack-id", value_name = "ID")]
+    pub context_pack_ids: Vec<String>,
+
+    /// Recorder-run evidence ID. Repeat for multiple recorder runs.
+    #[arg(long = "recorder-run-id", value_name = "ID")]
+    pub recorder_run_ids: Vec<String>,
+
+    /// Handoff evidence ID. Repeat for multiple handoffs.
+    #[arg(long = "handoff-id", value_name = "ID")]
+    pub handoff_ids: Vec<String>,
+
+    /// Deterministic timestamp override for tests and replay.
+    #[arg(long, value_name = "RFC3339")]
+    pub updated_at: Option<String>,
+
+    /// Preview the update without writing `.ee/task_frames.json`.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee task-frame close`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TaskFrameCloseArgs {
+    /// Task-frame ID to close.
+    #[arg(value_name = "FRAME_ID")]
+    pub frame_id: String,
+
+    /// Terminal close status.
+    #[arg(long, default_value = "completed")]
+    pub status: String,
+
+    /// Reason recorded with the close event.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
+
+    /// Deterministic timestamp override for tests and replay.
+    #[arg(long, value_name = "RFC3339")]
+    pub closed_at: Option<String>,
+
+    /// Preview the close without writing `.ee/task_frames.json`.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee task-frame subgoal add`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TaskFrameSubgoalAddArgs {
+    /// Parent task-frame ID.
+    #[arg(value_name = "FRAME_ID")]
+    pub frame_id: String,
+
+    /// Subgoal title.
+    #[arg(long, value_name = "TEXT")]
+    pub title: String,
+
+    /// Parent subgoal ID for nesting.
+    #[arg(long, value_name = "SUBGOAL_ID")]
+    pub parent: Option<String>,
+
+    /// Initial subgoal status.
+    #[arg(long, default_value = "open")]
+    pub status: String,
+
+    /// Blocker note. Repeat for multiple blockers.
+    #[arg(long = "blocker", value_name = "TEXT")]
+    pub blockers: Vec<String>,
+
+    /// Deterministic timestamp override for tests and replay.
+    #[arg(long, value_name = "RFC3339")]
+    pub created_at: Option<String>,
+
+    /// Preview the subgoal without writing `.ee/task_frames.json`.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
 /// Subcommands for `ee analyze`.
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum AnalyzeCommand {
@@ -4429,6 +4620,10 @@ where
             EvalCommand::Run { .. } => write_eval_unavailable(&cli, "eval run", stdout, stderr),
             EvalCommand::List => write_eval_unavailable(&cli, "eval list", stdout, stderr),
         },
+        Some(Command::Focus(ref focus_cmd)) => handle_focus(&cli, focus_cmd, stdout, stderr),
+        Some(Command::TaskFrame(ref task_frame_cmd)) => {
+            handle_task_frame(&cli, task_frame_cmd, stdout, stderr)
+        }
         Some(Command::Import(ImportCommand::Cass(ref args))) => {
             handle_import_cass(&cli, args, stdout, stderr)
         }
@@ -5040,6 +5235,178 @@ fn render_focus_human(report: &FocusReport) -> String {
         focal,
         report.mutated,
         report.state_hash
+    )
+}
+
+fn handle_task_frame<W, E>(
+    cli: &Cli,
+    command: &TaskFrameCommand,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let result = match command {
+        TaskFrameCommand::Create(args) => {
+            parse_task_frame_status(&args.status).and_then(|status| {
+                create_task_frame(&TaskFrameCreateOptions {
+                    workspace_path,
+                    goal: args.goal.clone(),
+                    actor: args.actor.clone(),
+                    status,
+                    current_focus: args.current_focus.clone(),
+                    blockers: args.blockers.clone(),
+                    evidence_links: task_frame_evidence_links(
+                        &args.memory_ids,
+                        &args.context_pack_ids,
+                        &args.recorder_run_ids,
+                        &args.handoff_ids,
+                    ),
+                    created_at: args.created_at.clone(),
+                    dry_run: args.dry_run,
+                })
+            })
+        }
+        TaskFrameCommand::Show(args) => show_task_frame(&TaskFrameShowOptions {
+            workspace_path,
+            frame_id: args.frame_id.clone(),
+            active: args.active,
+        }),
+        TaskFrameCommand::Update(args) => args
+            .status
+            .as_deref()
+            .map(parse_task_frame_status)
+            .transpose()
+            .and_then(|status| {
+                update_task_frame(&TaskFrameUpdateOptions {
+                    workspace_path,
+                    frame_id: args.frame_id.clone(),
+                    status,
+                    current_focus: args.current_focus.clone(),
+                    blockers: args.blockers.clone(),
+                    evidence_links: task_frame_evidence_links(
+                        &args.memory_ids,
+                        &args.context_pack_ids,
+                        &args.recorder_run_ids,
+                        &args.handoff_ids,
+                    ),
+                    updated_at: args.updated_at.clone(),
+                    dry_run: args.dry_run,
+                })
+            }),
+        TaskFrameCommand::Close(args) => parse_task_frame_status(&args.status).and_then(|status| {
+            close_task_frame(&TaskFrameCloseOptions {
+                workspace_path,
+                frame_id: args.frame_id.clone(),
+                status,
+                reason: args.reason.clone(),
+                closed_at: args.closed_at.clone(),
+                dry_run: args.dry_run,
+            })
+        }),
+        TaskFrameCommand::Subgoal(TaskFrameSubgoalCommand::Add(args)) => {
+            parse_task_frame_status(&args.status).and_then(|status| {
+                add_task_subgoal(&TaskSubgoalAddOptions {
+                    workspace_path,
+                    frame_id: args.frame_id.clone(),
+                    parent_id: args.parent.clone(),
+                    title: args.title.clone(),
+                    status,
+                    blockers: args.blockers.clone(),
+                    created_at: args.created_at.clone(),
+                    dry_run: args.dry_run,
+                })
+            })
+        }
+    };
+
+    match result {
+        Ok(report) => write_task_frame_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn parse_task_frame_status(raw: &str) -> Result<TaskFrameStatus, DomainError> {
+    TaskFrameStatus::from_str(raw)
+}
+
+fn task_frame_evidence_links(
+    memory_ids: &[String],
+    context_pack_ids: &[String],
+    recorder_run_ids: &[String],
+    handoff_ids: &[String],
+) -> Vec<TaskEvidenceLink> {
+    let mut links = Vec::new();
+    push_task_frame_evidence(&mut links, "memory", memory_ids);
+    push_task_frame_evidence(&mut links, "context_pack", context_pack_ids);
+    push_task_frame_evidence(&mut links, "recorder_run", recorder_run_ids);
+    push_task_frame_evidence(&mut links, "handoff", handoff_ids);
+    links
+}
+
+fn push_task_frame_evidence(links: &mut Vec<TaskEvidenceLink>, kind: &str, ids: &[String]) {
+    links.extend(ids.iter().map(|id| TaskEvidenceLink {
+        kind: kind.to_owned(),
+        id: id.clone(),
+    }));
+}
+
+fn write_task_frame_report<W>(
+    cli: &Cli,
+    report: &TaskFrameReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_task_frame_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&task_frame_response_json(report)) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(task_frame_response_json(report) + "\n"))
+        }
+    }
+}
+
+fn task_frame_response_json(report: &TaskFrameReport) -> String {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": report.data_json(),
+    })
+    .to_string()
+}
+
+fn render_task_frame_human(report: &TaskFrameReport) -> String {
+    if let Some(frame) = &report.frame {
+        return format!(
+            "Task frame: {}\n  Goal: {}\n  Status: {}\n  Subgoals: {} active / {} total\n  Mutated: {}\n  Store: {}\n",
+            frame.id,
+            frame.root_goal,
+            frame.status.as_str(),
+            frame.active_subgoal_count(),
+            frame.subgoals.len(),
+            report.mutated,
+            report.store_path
+        );
+    }
+
+    format!(
+        "Task frames: {} total\n  Mutated: {}\n  Store: {}\n",
+        report.frames.len(),
+        report.mutated,
+        report.store_path
     )
 }
 
@@ -13802,6 +14169,8 @@ const RULE_SUBCOMMANDS: &[&str] = &["add", "list", "show", "protect"];
 const SCHEMA_SUBCOMMANDS: &[&str] = &["list", "export"];
 const SITUATION_SUBCOMMANDS: &[&str] = &["classify", "compare", "link", "show", "explain"];
 const SUPPORT_SUBCOMMANDS: &[&str] = &["bundle", "inspect"];
+const TASK_FRAME_SUBCOMMANDS: &[&str] = &["create", "show", "update", "close", "subgoal"];
+const TASK_FRAME_SUBGOAL_SUBCOMMANDS: &[&str] = &["add"];
 const TRIPWIRE_SUBCOMMANDS: &[&str] = &["list", "check"];
 const WORKSPACE_SUBCOMMANDS: &[&str] = &["resolve", "list", "alias"];
 
@@ -14068,6 +14437,15 @@ impl NormalizedInvocation {
                     SupportCommand::Bundle(_) => "support bundle".to_string(),
                     SupportCommand::Inspect(_) => "support inspect".to_string(),
                 },
+                Command::TaskFrame(task_frame) => match task_frame {
+                    TaskFrameCommand::Create(_) => "task-frame create".to_string(),
+                    TaskFrameCommand::Show(_) => "task-frame show".to_string(),
+                    TaskFrameCommand::Update(_) => "task-frame update".to_string(),
+                    TaskFrameCommand::Close(_) => "task-frame close".to_string(),
+                    TaskFrameCommand::Subgoal(TaskFrameSubgoalCommand::Add(_)) => {
+                        "task-frame subgoal add".to_string()
+                    }
+                },
                 Command::Workspace(workspace) => match workspace {
                     WorkspaceCommand::Resolve(_) => "workspace resolve".to_string(),
                     WorkspaceCommand::List(_) => "workspace list".to_string(),
@@ -14192,6 +14570,8 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "schema" => Some(SCHEMA_SUBCOMMANDS),
         "situation" => Some(SITUATION_SUBCOMMANDS),
         "support" => Some(SUPPORT_SUBCOMMANDS),
+        "task-frame" => Some(TASK_FRAME_SUBCOMMANDS),
+        "task-frame subgoal" => Some(TASK_FRAME_SUBGOAL_SUBCOMMANDS),
         "tripwire" => Some(TRIPWIRE_SUBCOMMANDS),
         "workspace" => Some(WORKSPACE_SUBCOMMANDS),
         _ => None,
@@ -14719,7 +15099,8 @@ mod tests {
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli,
         Command, CurateCommand, DiagCommand, EconomyCommand, FieldsLevel, FocusCommand,
         GraphCommand, ImportCommand, LearnCommand, LearnExperimentCommand, MemoryCommand,
-        OutcomeQuarantineCommand, OutputFormat, RuleCommand, ShadowMode, SituationCommand, run,
+        OutcomeQuarantineCommand, OutputFormat, RuleCommand, ShadowMode, SituationCommand,
+        TaskFrameCommand, TaskFrameSubgoalCommand, run,
     };
     use crate::models::error_codes::ALL_ERROR_CODES;
     use crate::models::{ALL_DEGRADATION_CODES, MemoryId, ProcessExitCode};
@@ -15223,6 +15604,233 @@ mod tests {
             &clear_json["data"]["focusState"]["capacity"],
             &serde_json::json!(4),
             "clear capacity",
+        )
+    }
+
+    #[test]
+    fn parser_accepts_task_frame_lifecycle_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "task-frame",
+            "create",
+            "--goal",
+            "Ship task frames",
+            "--actor",
+            "cod-pane6",
+            "--status",
+            "active",
+            "--current-focus",
+            "wire CLI",
+            "--blocker",
+            "mail down",
+            "--memory-id",
+            "mem_123",
+            "--context-pack-id",
+            "pack_123",
+            "--recorder-run-id",
+            "run_123",
+            "--handoff-id",
+            "handoff_123",
+            "--created-at",
+            "2026-05-04T00:00:00Z",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse task-frame create: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::TaskFrame(TaskFrameCommand::Create(args))) => {
+                ensure_equal(&args.goal, &"Ship task frames".to_owned(), "goal")?;
+                ensure_equal(&args.actor, &"cod-pane6".to_owned(), "actor")?;
+                ensure_equal(&args.status, &"active".to_owned(), "status")?;
+                ensure_equal(
+                    &args.current_focus,
+                    &Some("wire CLI".to_owned()),
+                    "current focus",
+                )?;
+                ensure_equal(&args.blockers, &vec!["mail down".to_owned()], "blockers")?;
+                ensure_equal(&args.memory_ids, &vec!["mem_123".to_owned()], "memory ids")?;
+                ensure_equal(
+                    &args.context_pack_ids,
+                    &vec!["pack_123".to_owned()],
+                    "context pack ids",
+                )?;
+                ensure_equal(
+                    &args.recorder_run_ids,
+                    &vec!["run_123".to_owned()],
+                    "recorder run ids",
+                )?;
+                ensure_equal(
+                    &args.handoff_ids,
+                    &vec!["handoff_123".to_owned()],
+                    "handoff ids",
+                )?;
+                ensure_equal(&args.dry_run, &true, "dry run")
+            }
+            other => Err(format!("expected task-frame create command, got {other:?}")),
+        }?;
+
+        let subgoal = Cli::try_parse_from([
+            "ee",
+            "task-frame",
+            "subgoal",
+            "add",
+            "tf_123",
+            "--title",
+            "Define schema",
+            "--parent",
+            "tg_parent",
+            "--status",
+            "blocked",
+            "--blocker",
+            "needs review",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse task-frame subgoal add: {:?}", error.kind()))?;
+
+        match subgoal.command {
+            Some(Command::TaskFrame(TaskFrameCommand::Subgoal(TaskFrameSubgoalCommand::Add(
+                args,
+            )))) => {
+                ensure_equal(&args.frame_id, &"tf_123".to_owned(), "frame id")?;
+                ensure_equal(&args.title, &"Define schema".to_owned(), "title")?;
+                ensure_equal(&args.parent, &Some("tg_parent".to_owned()), "parent")?;
+                ensure_equal(&args.status, &"blocked".to_owned(), "status")?;
+                ensure_equal(&args.blockers, &vec!["needs review".to_owned()], "blockers")?;
+                ensure_equal(&args.dry_run, &true, "dry run")
+            }
+            other => Err(format!(
+                "expected task-frame subgoal add command, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn task_frame_create_subgoal_show_close_json_workflow_is_stable() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().to_string_lossy().into_owned();
+
+        let (create_exit, create_stdout, create_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--json",
+            "task-frame",
+            "create",
+            "--goal",
+            "Ship task frames",
+            "--actor",
+            "cod-pane6",
+            "--status",
+            "active",
+            "--current-focus",
+            "wire CLI",
+            "--blocker",
+            "mail down",
+            "--memory-id",
+            "mem_123",
+            "--created-at",
+            "2026-05-04T00:00:00Z",
+        ]);
+        ensure_equal(&create_exit, &ProcessExitCode::Success, "create exit")?;
+        ensure(create_stderr.is_empty(), "create JSON stderr clean")?;
+        let create_json: serde_json::Value =
+            serde_json::from_str(&create_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &create_json["data"]["schema"],
+            &serde_json::json!("ee.task_frame.report.v1"),
+            "report schema",
+        )?;
+        ensure_equal(
+            &create_json["data"]["frame"]["status"],
+            &serde_json::json!("active"),
+            "create status",
+        )?;
+        ensure(
+            create_json["data"]["frame"]["nonExecutingContract"]
+                .as_str()
+                .is_some_and(|contract| contract.contains("never executes shell commands")),
+            "non-executing contract must be explicit",
+        )?;
+        let frame_id = create_json["data"]["frame"]["id"]
+            .as_str()
+            .ok_or_else(|| "missing frame id".to_owned())?
+            .to_owned();
+        ensure(
+            dir.path().join(".ee/task_frames.json").exists(),
+            "create persists task-frame store",
+        )?;
+
+        let (subgoal_exit, subgoal_stdout, subgoal_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--json",
+            "task-frame",
+            "subgoal",
+            "add",
+            &frame_id,
+            "--title",
+            "Define schema",
+            "--status",
+            "open",
+            "--created-at",
+            "2026-05-04T00:01:00Z",
+        ]);
+        ensure_equal(&subgoal_exit, &ProcessExitCode::Success, "subgoal exit")?;
+        ensure(subgoal_stderr.is_empty(), "subgoal JSON stderr clean")?;
+        let subgoal_json: serde_json::Value =
+            serde_json::from_str(&subgoal_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &subgoal_json["data"]["frame"]["subgoals"][0]["title"],
+            &serde_json::json!("Define schema"),
+            "subgoal title",
+        )?;
+
+        let (show_exit, show_stdout, show_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--json",
+            "task-frame",
+            "show",
+            "--active",
+        ]);
+        ensure_equal(&show_exit, &ProcessExitCode::Success, "show active exit")?;
+        ensure(show_stderr.is_empty(), "show JSON stderr clean")?;
+        let show_json: serde_json::Value =
+            serde_json::from_str(&show_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &show_json["data"]["frame"]["id"],
+            &serde_json::json!(frame_id.clone()),
+            "active frame id",
+        )?;
+
+        let (close_exit, close_stdout, close_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--json",
+            "task-frame",
+            "close",
+            &frame_id,
+            "--reason",
+            "completed in test",
+            "--closed-at",
+            "2026-05-04T00:02:00Z",
+        ]);
+        ensure_equal(&close_exit, &ProcessExitCode::Success, "close exit")?;
+        ensure(close_stderr.is_empty(), "close JSON stderr clean")?;
+        let close_json: serde_json::Value =
+            serde_json::from_str(&close_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &close_json["data"]["frame"]["status"],
+            &serde_json::json!("completed"),
+            "close status",
+        )?;
+        ensure_equal(
+            &close_json["data"]["frame"]["closeReason"],
+            &serde_json::json!("completed in test"),
+            "close reason",
         )
     }
 

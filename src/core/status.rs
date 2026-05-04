@@ -494,12 +494,96 @@ pub struct CapabilityReport {
 impl CapabilityReport {
     #[must_use]
     pub fn gather() -> Self {
+        let workspace_path = default_workspace_path();
+        Self::gather_with_workspace(workspace_path.as_deref())
+    }
+
+    #[must_use]
+    pub fn gather_for_workspace(workspace_path: &Path) -> Self {
+        Self::gather_with_workspace(Some(workspace_path))
+    }
+
+    #[must_use]
+    pub fn gather_with_workspace(workspace_path: Option<&Path>) -> Self {
         Self {
             runtime: CapabilityStatus::Ready,
-            storage: CapabilityStatus::Unimplemented,
-            search: CapabilityStatus::Unimplemented,
+            storage: probe_storage_capability(workspace_path),
+            search: probe_search_capability(workspace_path),
             agent_detection: CapabilityStatus::Ready,
         }
+    }
+}
+
+#[must_use]
+pub fn default_workspace_path() -> Option<PathBuf> {
+    std::env::current_dir().ok()
+}
+
+#[must_use]
+pub fn probe_storage_capability(workspace_path: Option<&Path>) -> CapabilityStatus {
+    let Some(workspace_path) = workspace_path else {
+        return CapabilityStatus::Pending;
+    };
+
+    let database_path = workspace_database_path(workspace_path);
+    if !database_path.exists() {
+        return CapabilityStatus::Pending;
+    }
+
+    match DbConnection::open_file(&database_path).and_then(|connection| {
+        connection.ping()?;
+        connection.needs_migration()
+    }) {
+        Ok(false) => CapabilityStatus::Ready,
+        Ok(true) | Err(_) => CapabilityStatus::Degraded,
+    }
+}
+
+#[must_use]
+pub fn probe_search_capability(workspace_path: Option<&Path>) -> CapabilityStatus {
+    let Some(workspace_path) = workspace_path else {
+        return CapabilityStatus::Pending;
+    };
+
+    match probe_storage_capability(Some(workspace_path)) {
+        CapabilityStatus::Ready => {}
+        CapabilityStatus::Pending => return CapabilityStatus::Pending,
+        CapabilityStatus::Degraded | CapabilityStatus::Unimplemented => {
+            return CapabilityStatus::Degraded;
+        }
+    }
+
+    let options = IndexStatusOptions {
+        workspace_path: workspace_path.to_path_buf(),
+        database_path: None,
+        index_dir: None,
+    };
+
+    match get_index_status(&options) {
+        Ok(report) if report.health == IndexHealth::Ready => CapabilityStatus::Ready,
+        Ok(_) | Err(_) => CapabilityStatus::Degraded,
+    }
+}
+
+fn workspace_database_path(workspace_path: &Path) -> PathBuf {
+    workspace_path.join(".ee").join("ee.db")
+}
+
+#[must_use]
+pub fn probe_cass_capability() -> CapabilityStatus {
+    use std::process::Command;
+    match Command::new("cass").arg("--version").output() {
+        Ok(output) if output.status.success() => CapabilityStatus::Ready,
+        Ok(_) => CapabilityStatus::Degraded,
+        Err(_) => CapabilityStatus::Pending,
+    }
+}
+
+#[must_use]
+pub fn probe_runtime_capability() -> CapabilityStatus {
+    match super::build_cli_runtime() {
+        Ok(_) => CapabilityStatus::Ready,
+        Err(_) => CapabilityStatus::Degraded,
     }
 }
 
@@ -647,7 +731,8 @@ impl StatusReport {
     /// Gather current subsystem status with explicit options.
     #[must_use]
     pub fn gather_with_options(options: &StatusOptions) -> Self {
-        let capabilities = CapabilityReport::gather();
+        let capabilities =
+            CapabilityReport::gather_with_workspace(options.workspace_path.as_deref());
         let runtime = RuntimeReport::gather();
         let (memory_health, memory_health_degradations) =
             gather_memory_health(options.workspace_path.as_deref());
@@ -661,23 +746,16 @@ impl StatusReport {
 
         let mut degradations = Vec::new();
 
-        if capabilities.storage == CapabilityStatus::Unimplemented {
-            degradations.push(DegradationReport {
-                code: "storage_not_implemented",
-                severity: "medium",
-                message: "Storage subsystem is not wired yet.",
-                repair: "Implement EE-040 through EE-044.",
-            });
-        }
-
-        if capabilities.search == CapabilityStatus::Unimplemented {
-            degradations.push(DegradationReport {
-                code: "search_not_implemented",
-                severity: "medium",
-                message: "Search subsystem is not wired yet.",
-                repair: "Implement EE-120 and dependent search beads.",
-            });
-        }
+        push_storage_capability_degradation(
+            &mut degradations,
+            capabilities.storage,
+            options.workspace_path.as_deref(),
+        );
+        push_search_capability_degradation(
+            &mut degradations,
+            capabilities.search,
+            options.workspace_path.as_deref(),
+        );
 
         degradations.extend(memory_health_degradations);
         degradations.extend(curation_degradations);
@@ -694,6 +772,90 @@ impl StatusReport {
             derived_assets,
             agent_inventory,
             degradations,
+        }
+    }
+}
+
+fn push_storage_capability_degradation(
+    degradations: &mut Vec<DegradationReport>,
+    status: CapabilityStatus,
+    workspace_path: Option<&Path>,
+) {
+    match status {
+        CapabilityStatus::Ready => {}
+        CapabilityStatus::Pending if workspace_path.is_none() => {
+            degradations.push(DegradationReport {
+                code: "storage_not_inspected",
+                severity: "low",
+                message: "Storage readiness was not inspected because no workspace was selected.",
+                repair: "Run `ee status --workspace . --json`.",
+            });
+        }
+        CapabilityStatus::Pending => {
+            degradations.push(DegradationReport {
+                code: "storage_not_initialized",
+                severity: "medium",
+                message: "Workspace storage is unavailable because .ee/ee.db is missing.",
+                repair: "Run `ee init --workspace .`.",
+            });
+        }
+        CapabilityStatus::Degraded => {
+            degradations.push(DegradationReport {
+                code: "storage_degraded",
+                severity: "medium",
+                message: "Workspace storage exists but could not be opened or needs migration.",
+                repair: "Run `ee doctor --json`.",
+            });
+        }
+        CapabilityStatus::Unimplemented => {
+            degradations.push(DegradationReport {
+                code: "storage_unimplemented",
+                severity: "high",
+                message: "Storage has no compiled implementation in this binary.",
+                repair: "Use a binary built with the storage subsystem enabled.",
+            });
+        }
+    }
+}
+
+fn push_search_capability_degradation(
+    degradations: &mut Vec<DegradationReport>,
+    status: CapabilityStatus,
+    workspace_path: Option<&Path>,
+) {
+    match status {
+        CapabilityStatus::Ready => {}
+        CapabilityStatus::Pending if workspace_path.is_none() => {
+            degradations.push(DegradationReport {
+                code: "search_not_inspected",
+                severity: "low",
+                message: "Search readiness was not inspected because no workspace was selected.",
+                repair: "Run `ee status --workspace . --json`.",
+            });
+        }
+        CapabilityStatus::Pending => {
+            degradations.push(DegradationReport {
+                code: "search_waiting_for_storage",
+                severity: "medium",
+                message: "Search readiness is pending until workspace storage is initialized.",
+                repair: "Run `ee init --workspace .`.",
+            });
+        }
+        CapabilityStatus::Degraded => {
+            degradations.push(DegradationReport {
+                code: "search_index_degraded",
+                severity: "medium",
+                message: "Search is compiled but the selected workspace index is missing, stale, corrupt, or unreadable.",
+                repair: "Run `ee index status --workspace . --json`.",
+            });
+        }
+        CapabilityStatus::Unimplemented => {
+            degradations.push(DegradationReport {
+                code: "search_unimplemented",
+                severity: "high",
+                message: "Search has no compiled implementation in this binary.",
+                repair: "Use a binary built with search support enabled.",
+            });
         }
     }
 }
@@ -1650,7 +1812,7 @@ mod tests {
 
     #[test]
     fn status_report_gather_returns_valid_report() -> TestResult {
-        let report = StatusReport::gather();
+        let report = StatusReport::gather_with_options(&StatusOptions::default());
 
         ensure(
             report.capabilities.runtime,
@@ -1659,13 +1821,13 @@ mod tests {
         )?;
         ensure(
             report.capabilities.storage,
-            CapabilityStatus::Unimplemented,
-            "storage not yet implemented",
+            CapabilityStatus::Pending,
+            "storage not inspected without workspace",
         )?;
         ensure(
             report.capabilities.search,
-            CapabilityStatus::Unimplemented,
-            "search not yet implemented",
+            CapabilityStatus::Pending,
+            "search not inspected without workspace",
         )?;
         ensure(
             report.capabilities.agent_detection,
@@ -1684,7 +1846,7 @@ mod tests {
 
     #[test]
     fn status_report_includes_deferred_agent_inventory() -> TestResult {
-        let report = StatusReport::gather();
+        let report = StatusReport::gather_with_options(&StatusOptions::default());
 
         ensure(
             report.agent_inventory.status.as_str(),
@@ -1704,21 +1866,21 @@ mod tests {
     }
 
     #[test]
-    fn status_report_includes_degradations_for_unimplemented_subsystems() -> TestResult {
-        let report = StatusReport::gather();
+    fn status_report_includes_degradations_for_uninspected_subsystems() -> TestResult {
+        let report = StatusReport::gather_with_options(&StatusOptions::default());
 
         ensure(report.degradations.len(), 3, "three degradations expected")?;
 
         let storage_deg = report
             .degradations
             .iter()
-            .find(|d| d.code == "storage_not_implemented");
+            .find(|d| d.code == "storage_not_inspected");
         ensure(storage_deg.is_some(), true, "storage degradation exists")?;
 
         let search_deg = report
             .degradations
             .iter()
-            .find(|d| d.code == "search_not_implemented");
+            .find(|d| d.code == "search_not_inspected");
         ensure(search_deg.is_some(), true, "search degradation exists")?;
 
         let memory_health_deg = report

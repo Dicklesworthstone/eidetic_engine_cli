@@ -2291,6 +2291,129 @@ mod tests {
     }
 
     #[test]
+    fn rejecting_quarantined_feedback_preserves_evidence_without_live_event() -> TestResult {
+        let (dir, database) =
+            seed_outcome_database_with_workspace_id("ee-outcome-quarantine-reject", None)?;
+
+        let first = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "harmful".to_string(),
+            weight: None,
+            source_type: "automated_check".to_string(),
+            source_id: Some("reject-source".to_string()),
+            reason: Some("First harmful signal establishes the rate bucket.".to_string()),
+            evidence_json: None,
+            session_id: None,
+            event_id: Some("fb_00000000000000000000000995".to_string()),
+            actor: Some("test".to_string()),
+            dry_run: false,
+            harmful_per_source_per_hour: 1,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &first.status,
+            &OutcomeRecordStatus::Recorded,
+            "first status",
+        )?;
+
+        let proposed_event_id = "fb_00000000000000000000000996".to_string();
+        let quarantined = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "harmful".to_string(),
+            weight: Some(3.5),
+            source_type: "automated_check".to_string(),
+            source_id: Some("reject-source".to_string()),
+            reason: Some("Rejected payload must remain inspectable.".to_string()),
+            evidence_json: Some(r#"{"kind":"reject-fixture"}"#.to_string()),
+            session_id: Some("sess_00000000000000000000000996".to_string()),
+            event_id: Some(proposed_event_id.clone()),
+            actor: Some("test".to_string()),
+            dry_run: false,
+            harmful_per_source_per_hour: 1,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &quarantined.status,
+            &OutcomeRecordStatus::Quarantined,
+            "second status",
+        )?;
+
+        let quarantine_id = quarantined
+            .quarantine
+            .as_ref()
+            .and_then(|quarantine| quarantine.id.clone())
+            .ok_or_else(|| "quarantine id missing".to_string())?;
+        let review = super::review_feedback_quarantine(&super::OutcomeQuarantineReviewOptions {
+            workspace_path: dir.path(),
+            database_path: Some(&database),
+            quarantine_id: &quarantine_id,
+            reject: true,
+            actor: Some("reviewer"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure_equal(&review.status.as_str(), &"rejected", "review status")?;
+        ensure_equal(&review.changed, &true, "review changed")?;
+        ensure_equal(&review.feedback_event_id, &None, "no released event id")?;
+        ensure_equal(&review.audit_id.is_some(), &true, "audit id present")?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let live_events = connection
+            .list_feedback_events_for_target("memory", OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&live_events.len(), &1_usize, "only original live event")?;
+        ensure_equal(
+            &connection
+                .get_feedback_event(&proposed_event_id)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            &true,
+            "rejected event not inserted",
+        )?;
+
+        let rejected_rows = connection
+            .list_feedback_quarantine(
+                &crate::core::curate::stable_workspace_id(dir.path()),
+                Some("rejected"),
+            )
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&rejected_rows.len(), &1_usize, "rejected row retained")?;
+        let rejected_row = rejected_rows
+            .first()
+            .ok_or_else(|| "rejected row missing after length check".to_string())?;
+        ensure_equal(&rejected_row.id, &quarantine_id, "retained row id")?;
+        ensure_equal(
+            &rejected_row.status.as_str(),
+            &"rejected",
+            "retained row status",
+        )?;
+        ensure_equal(
+            &rejected_row.proposed_event_id,
+            &Some(proposed_event_id),
+            "retained proposed event id",
+        )?;
+        ensure_equal(
+            &rejected_row.raw_event_hash.starts_with("blake3:"),
+            &true,
+            "retained raw event hash",
+        )?;
+        ensure_equal(
+            &rejected_row.released_feedback_event_id,
+            &None,
+            "no released feedback event",
+        )
+    }
+
+    #[test]
     fn record_outcome_rejects_invalid_evidence_json() -> TestResult {
         let (_dir, database) = seed_outcome_database("ee-outcome-invalid-json")?;
         let result = record_outcome(&OutcomeRecordOptions {
