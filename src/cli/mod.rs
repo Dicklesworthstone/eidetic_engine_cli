@@ -43,6 +43,11 @@ use crate::core::economy::{
     generate_economy_report, generate_prune_plan, score_artifact, simulate_budgets,
 };
 use crate::core::feedback::{PreflightFeedbackKind, TaskOutcome};
+use crate::core::focus::{
+    DEFAULT_FOCUS_CAPACITY, FocusAddOptions, FocusClearOptions, FocusExplainOptions,
+    FocusRemoveOptions, FocusReport, FocusScope, FocusSetOptions, FocusShowOptions, add_focus,
+    clear_focus, explain_focus, remove_focus, set_focus, show_focus,
+};
 use crate::core::handoff::{
     InspectOptions as HandoffInspectOptions, ResumeOptions as HandoffResumeOptions,
     inspect_handoff, resume_handoff,
@@ -295,6 +300,9 @@ pub enum Command {
     /// Run evaluation scenarios against fixtures.
     #[command(subcommand)]
     Eval(EvalCommand),
+    /// Show and manage passive active-memory focus state.
+    #[command(subcommand)]
+    Focus(FocusCommand),
     /// Session handoff and resume capsules for agent continuity.
     #[command(subcommand)]
     Handoff(HandoffCommand),
@@ -13409,6 +13417,7 @@ const COMMAND_NAMES: &[&str] = &[
     "demo",
     "economy",
     "eval",
+    "focus",
     "graph",
     "handoff",
     "health",
@@ -13476,6 +13485,7 @@ const DIAG_SUBCOMMANDS: &[&str] = &[
 ];
 const ECONOMY_SUBCOMMANDS: &[&str] = &["report", "score", "simulate", "prune-plan"];
 const EVAL_SUBCOMMANDS: &[&str] = &["run", "list"];
+const FOCUS_SUBCOMMANDS: &[&str] = &["show", "set", "add", "remove", "clear", "explain"];
 const GRAPH_SUBCOMMANDS: &[&str] = &[
     "export",
     "centrality-refresh",
@@ -13637,6 +13647,14 @@ impl NormalizedInvocation {
                 Command::Eval(eval) => match eval {
                     EvalCommand::Run { .. } => "eval run".to_string(),
                     EvalCommand::List => "eval list".to_string(),
+                },
+                Command::Focus(focus) => match focus {
+                    FocusCommand::Show(_) => "focus show".to_string(),
+                    FocusCommand::Set(_) => "focus set".to_string(),
+                    FocusCommand::Add(_) => "focus add".to_string(),
+                    FocusCommand::Remove(_) => "focus remove".to_string(),
+                    FocusCommand::Clear(_) => "focus clear".to_string(),
+                    FocusCommand::Explain(_) => "focus explain".to_string(),
                 },
                 Command::Handoff(handoff) => match handoff {
                     HandoffCommand::Preview(_) => "handoff preview".to_string(),
@@ -13871,6 +13889,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "diag" => Some(DIAG_SUBCOMMANDS),
         "economy" => Some(ECONOMY_SUBCOMMANDS),
         "eval" => Some(EVAL_SUBCOMMANDS),
+        "focus" => Some(FOCUS_SUBCOMMANDS),
         "graph" => Some(GRAPH_SUBCOMMANDS),
         "handoff" => Some(HANDOFF_SUBCOMMANDS),
         "import" => Some(IMPORT_SUBCOMMANDS),
@@ -14424,7 +14443,7 @@ mod tests {
         OutcomeQuarantineCommand, OutputFormat, RuleCommand, ShadowMode, SituationCommand, run,
     };
     use crate::models::error_codes::ALL_ERROR_CODES;
-    use crate::models::{ALL_DEGRADATION_CODES, ProcessExitCode};
+    use crate::models::{ALL_DEGRADATION_CODES, MemoryId, ProcessExitCode};
     use crate::output;
 
     type TestResult = Result<(), String>;

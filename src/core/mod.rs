@@ -23,6 +23,7 @@ pub mod doctor;
 pub mod economy;
 pub mod effect;
 pub mod feedback;
+pub mod focus;
 pub mod handoff;
 pub mod health;
 pub mod index;

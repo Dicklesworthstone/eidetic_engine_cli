@@ -27,6 +27,7 @@ use std::str::FromStr;
 
 use crate::config::WorkspaceLocation;
 use crate::core::budget::RequestBudget;
+use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
 use crate::core::search::{SearchError, SearchOptions, SearchStatus, run_search};
 use crate::db::{
     CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DbConnection, StoredMemory,
@@ -348,7 +349,25 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
         );
     }
 
-    let candidates = candidates_from_search(&connection, &search_report, &mut degraded);
+    let mut candidates = candidates_from_search(&connection, &search_report, &mut degraded);
+    match read_active_focus_state(&options.workspace_path) {
+        Ok(Some(focus_state)) => {
+            candidates.extend(focus_candidates_from_state(
+                &connection,
+                &options.workspace_path,
+                &focus_state,
+                &mut degraded,
+            ));
+        }
+        Ok(None) => {}
+        Err(error) => push_degradation(
+            &mut degraded,
+            "context_focus_state_unavailable",
+            ContextResponseSeverity::Low,
+            format!("Passive focus state could not be read: {}", error.message()),
+            Some("ee focus show --json".to_string()),
+        ),
+    }
     let budget = match options.max_tokens {
         Some(max_tokens) => TokenBudget::new(max_tokens)
             .map_err(|error| ContextPackError::Pack(error.to_string()))?,
@@ -476,6 +495,162 @@ fn candidates_from_search(
         }
     }
     candidates
+}
+
+fn focus_candidates_from_state(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    focus_state: &crate::models::FocusState,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Vec<PackCandidate> {
+    let mut candidates = Vec::new();
+    let focus_hash = focus_state_hash(focus_state);
+    let storage_path = focus_state_path(workspace_path).display().to_string();
+    for item in &focus_state.items {
+        match focus_candidate_from_item(
+            connection,
+            item,
+            focus_state,
+            &focus_hash,
+            &storage_path,
+            degraded,
+        ) {
+            Some(candidate) => candidates.push(candidate),
+            None => push_degradation(
+                degraded,
+                "context_focus_candidate_skipped",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Focused memory {} could not be converted into a pack candidate.",
+                    item.memory_id
+                ),
+                Some(format!("ee focus remove {} --json", item.memory_id)),
+            ),
+        }
+    }
+    candidates
+}
+
+fn focus_candidate_from_item(
+    connection: &DbConnection,
+    item: &crate::models::FocusItem,
+    focus_state: &crate::models::FocusState,
+    focus_hash: &str,
+    storage_path: &str,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Option<PackCandidate> {
+    let memory = match connection.get_memory(&item.memory_id.to_string()) {
+        Ok(Some(memory)) if memory.tombstoned_at.is_none() => memory,
+        Ok(Some(_)) => {
+            push_degradation(
+                degraded,
+                "context_focus_tombstoned_memory",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Focused memory {} is tombstoned and was excluded from context.",
+                    item.memory_id
+                ),
+                Some(format!("ee focus remove {} --json", item.memory_id)),
+            );
+            return None;
+        }
+        Ok(None) => {
+            push_degradation(
+                degraded,
+                "context_focus_missing_memory",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Focused memory {} is missing and was excluded from context.",
+                    item.memory_id
+                ),
+                Some(format!("ee focus remove {} --json", item.memory_id)),
+            );
+            return None;
+        }
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_focus_memory_lookup_unavailable",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Focused memory {} could not be loaded: {error}",
+                    item.memory_id
+                ),
+                Some("ee status --json".to_string()),
+            );
+            return None;
+        }
+    };
+    let tags = connection
+        .get_memory_tags(&memory.id)
+        .unwrap_or_else(|_| Vec::new());
+    let mut provenance = Vec::new();
+    if let Some(memory_provenance) = provenance_for_memory(&memory, item.memory_id, degraded) {
+        provenance.push(memory_provenance);
+    }
+    if let Ok(focus_provenance) = PackProvenance::new(
+        ProvenanceUri::File {
+            path: storage_path.to_owned(),
+            span: None,
+        },
+        format!(
+            "Passive focus state {focus_hash} included memory {}; reason={}; provenance={}",
+            item.memory_id,
+            item.reason,
+            item.provenance.join(",")
+        ),
+    ) {
+        provenance.push(focus_provenance);
+    }
+    let relevance = focus_relevance(item, focus_state)?;
+    let utility = unit_score(memory.utility.max(0.75))?;
+    let why = focus_candidate_why(item, focus_state, focus_hash);
+    let candidate = PackCandidate::new(PackCandidateInput {
+        memory_id: item.memory_id,
+        section: section_for_memory(&memory),
+        content: memory.content.clone(),
+        estimated_tokens: estimate_tokens_default(&memory.content),
+        relevance,
+        utility,
+        provenance,
+        why,
+    })
+    .ok()?;
+
+    Some(
+        candidate
+            .with_diversity_key(diversity_key_for_memory(&memory, &tags))
+            .with_trust_signal(trust_signal_for_memory(&memory, item.memory_id, degraded)),
+    )
+}
+
+fn focus_relevance(
+    item: &crate::models::FocusItem,
+    focus_state: &crate::models::FocusState,
+) -> Option<UnitScore> {
+    let value = if focus_state.focal_memory_id == Some(item.memory_id) {
+        1.0
+    } else if item.pinned {
+        0.97
+    } else {
+        0.94
+    };
+    unit_score(value)
+}
+
+fn focus_candidate_why(
+    item: &crate::models::FocusItem,
+    focus_state: &crate::models::FocusState,
+    focus_hash: &str,
+) -> String {
+    format!(
+        "Selected as passive active-memory input: focus_state_hash={focus_hash}; focal={}; pinned={}; capacity={}; reason={}; provenance={}; source=ee_focus_state; no hidden mutation or agent-plan inference occurred.",
+        focus_state.focal_memory_id == Some(item.memory_id),
+        item.pinned,
+        focus_state.capacity,
+        item.reason,
+        item.provenance.join(",")
+    )
 }
 
 fn candidate_from_hit(
@@ -753,9 +928,13 @@ fn push_degradation(
 mod tests {
     use std::path::PathBuf;
 
-    use super::{AccessLevel, CapabilitySet, CommandContext, candidate_selection_why, unit_score};
+    use super::{
+        AccessLevel, CapabilitySet, CommandContext, candidate_selection_why, focus_candidate_why,
+        focus_relevance, unit_score,
+    };
     use crate::config::WorkspaceLocation;
     use crate::core::budget::RequestBudget;
+    use crate::models::{FocusItem, FocusState, MemoryId, WorkspaceId};
 
     fn workspace_at(root: &str) -> WorkspaceLocation {
         WorkspaceLocation::new(PathBuf::from(root))
@@ -1026,6 +1205,41 @@ mod tests {
                 "explanation used qualitative reasoning term `{forbidden}`: {why}"
             );
         }
+    }
+
+    #[test]
+    fn focus_candidate_why_declares_passive_context_influence() -> Result<(), String> {
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(44));
+        let mut state = FocusState::new(
+            WorkspaceId::from_uuid(uuid::Uuid::from_u128(1)),
+            3,
+            "2026-05-04T00:00:00Z",
+        )
+        .map_err(|error| error.to_string())?
+        .with_focal_memory_id(memory_id);
+        let item = FocusItem::new(
+            memory_id,
+            "Resume the failing test context.",
+            "2026-05-04T00:00:00Z",
+        )
+        .map_err(|error| error.to_string())?
+        .pinned(true)
+        .with_provenance("ee focus set");
+        state = state
+            .with_item(item.clone())
+            .map_err(|error| error.to_string())?;
+
+        let why = focus_candidate_why(&item, &state, "blake3:test");
+        assert!(why.contains("focus_state_hash=blake3:test"), "{why}");
+        assert!(why.contains("focal=true"), "{why}");
+        assert!(why.contains("pinned=true"), "{why}");
+        assert!(why.contains("source=ee_focus_state"), "{why}");
+        assert!(why.contains("no hidden mutation"), "{why}");
+        assert!(why.contains("agent-plan inference"), "{why}");
+
+        let relevance = focus_relevance(&item, &state).map(|score| score.into_inner());
+        assert_eq!(relevance, Some(1.0));
+        Ok(())
     }
 
     #[test]

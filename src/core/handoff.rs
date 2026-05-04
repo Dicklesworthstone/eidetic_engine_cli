@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::core::focus::{focus_state_hash, read_active_focus_state};
 use crate::models::DomainError;
 
 /// Schema for handoff capsule format.
@@ -370,6 +371,7 @@ pub struct PreviewReport {
     pub planned_sections: Vec<PlannedSection>,
     pub omitted_sections: Vec<OmittedSection>,
     pub evidence_ids: Vec<String>,
+    pub active_focus: Option<serde_json::Value>,
     pub token_estimate: usize,
     pub byte_estimate: usize,
     pub redaction_posture: String,
@@ -405,6 +407,7 @@ impl PreviewReport {
             planned_sections: Vec::new(),
             omitted_sections: Vec::new(),
             evidence_ids: Vec::new(),
+            active_focus: None,
             token_estimate: 0,
             byte_estimate: 0,
             redaction_posture: "standard".to_owned(),
@@ -466,6 +469,7 @@ pub struct CreateReport {
     pub profile: String,
     pub sections_included: usize,
     pub evidence_count: usize,
+    pub active_focus: Option<serde_json::Value>,
     pub token_count: usize,
     pub byte_count: usize,
     pub content_hash: String,
@@ -485,6 +489,7 @@ impl CreateReport {
             profile: CapsuleProfile::Resume.as_str().to_owned(),
             sections_included: 0,
             evidence_count: 0,
+            active_focus: None,
             token_count: 0,
             byte_count: 0,
             content_hash: String::new(),
@@ -656,6 +661,7 @@ pub struct ResumeReport {
     pub recent_decisions: Vec<String>,
     pub recent_outcomes: Vec<String>,
     pub selected_memories: Vec<SelectedMemory>,
+    pub active_focus: Option<serde_json::Value>,
     pub artifact_pointers: Vec<ArtifactPointer>,
     pub degradations: Vec<DegradationInfo>,
     pub resumed_at: String,
@@ -693,6 +699,7 @@ impl ResumeReport {
             recent_decisions: Vec::new(),
             recent_outcomes: Vec::new(),
             selected_memories: Vec::new(),
+            active_focus: None,
             artifact_pointers: Vec::new(),
             degradations: Vec::new(),
             resumed_at: Utc::now().to_rfc3339(),
@@ -731,6 +738,35 @@ fn compute_content_hash(content: &str) -> String {
     let mut hasher = Hasher::new();
     hasher.update(content.as_bytes());
     hasher.finalize().to_hex()[..16].to_owned()
+}
+
+fn focus_memory_ids(focus_state: &crate::models::FocusState) -> Vec<String> {
+    focus_state
+        .items
+        .iter()
+        .map(|item| item.memory_id.to_string())
+        .collect()
+}
+
+fn render_focus_section(focus_state: &crate::models::FocusState) -> String {
+    let mut lines = vec![format!(
+        "Passive focus state: {} memories / capacity {} (hash {})",
+        focus_state.item_count(),
+        focus_state.capacity,
+        focus_state_hash(focus_state)
+    )];
+    if let Some(focal) = focus_state.focal_memory_id {
+        lines.push(format!("Focal memory: {focal}"));
+    }
+    for item in &focus_state.items {
+        lines.push(format!(
+            "- {}{}: {}",
+            item.memory_id,
+            if item.pinned { " [pinned]" } else { "" },
+            item.reason
+        ));
+    }
+    lines.join("\n")
 }
 
 /// Preview a handoff capsule without writing it.
@@ -772,6 +808,32 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
         evidence_count: 0,
         token_estimate: actions_section.token_estimate,
     });
+
+    match read_active_focus_state(&options.workspace) {
+        Ok(Some(focus_state)) => {
+            let focus_section = CapsuleSection::new("active_focus", "Active Memory Focus")
+                .with_content(render_focus_section(&focus_state))
+                .with_confidence(EvidenceConfidence::Verified)
+                .with_evidence(focus_memory_ids(&focus_state));
+            report.evidence_ids.extend(focus_memory_ids(&focus_state));
+            report.active_focus = Some(focus_state.data_json());
+            report.planned_sections.push(PlannedSection {
+                id: focus_section.id.clone(),
+                title: focus_section.title.clone(),
+                confidence: focus_section.confidence.as_str().to_owned(),
+                evidence_count: focus_section.evidence_ids.len(),
+                token_estimate: focus_section.token_estimate,
+            });
+        }
+        Ok(None) => {}
+        Err(error) => report.degradations.push(
+            DegradationInfo::new(
+                "handoff_focus_state_unavailable",
+                format!("Active focus state could not be read: {}", error.message()),
+            )
+            .with_next_action("ee focus show --json"),
+        ),
+    }
 
     if options.profile == CapsuleProfile::Compact {
         report.omitted_sections.push(OmittedSection {
@@ -836,6 +898,23 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         .with_content("1. Review current state\n2. Check for uncommitted changes\n3. Continue implementation")
         .with_confidence(EvidenceConfidence::Inferred));
 
+    let active_focus = match read_active_focus_state(&options.workspace) {
+        Ok(Some(focus_state)) => {
+            let focus_memory_ids = focus_memory_ids(&focus_state);
+            sections.push(
+                CapsuleSection::new("active_focus", "Active Memory Focus")
+                    .with_content(render_focus_section(&focus_state))
+                    .with_confidence(EvidenceConfidence::Verified)
+                    .with_evidence(focus_memory_ids.clone()),
+            );
+            report.evidence_count = report.evidence_count.saturating_add(focus_memory_ids.len());
+            Some(focus_state.data_json())
+        }
+        Ok(None) => None,
+        Err(_) => None,
+    };
+    report.active_focus = active_focus.clone();
+
     if options.profile.include_full_evidence() {
         sections.push(
             CapsuleSection::new("decisions", "Recent Decisions")
@@ -854,6 +933,7 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         "workspace": options.workspace,
         "profile": options.profile.as_str(),
         "sections": sections,
+        "active_focus": active_focus,
         "created_at": Utc::now().to_rfc3339(),
     });
 
@@ -985,6 +1065,28 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         .get("workspace")
         .and_then(|v| v.as_str())
         .map(|s| s.to_owned());
+
+    report.active_focus = capsule
+        .get("active_focus")
+        .cloned()
+        .filter(|value| !value.is_null());
+    if let Some(active_focus) = &report.active_focus {
+        if let Some(items) = active_focus.get("items").and_then(|value| value.as_array()) {
+            for item in items {
+                if let Some(memory_id) = item.get("memoryId").and_then(|value| value.as_str()) {
+                    let reason = item
+                        .get("reason")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("Included by passive focus state.");
+                    report.selected_memories.push(SelectedMemory {
+                        id: memory_id.to_owned(),
+                        reason: format!("From active focus state: {reason}"),
+                        confidence: "verified".to_owned(),
+                    });
+                }
+            }
+        }
+    }
 
     if let Some(sections) = capsule.get("sections").and_then(|v| v.as_array()) {
         for section in sections {
@@ -1250,6 +1352,66 @@ mod tests {
             &report.schema,
             &HANDOFF_RESUME_SCHEMA_V1.to_owned(),
             "schema",
+        )
+    }
+
+    #[test]
+    fn handoff_preview_create_and_resume_include_active_focus() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(99)).to_string();
+        crate::core::focus::set_focus(&crate::core::focus::FocusSetOptions {
+            workspace_path: dir.path().to_path_buf(),
+            memory_ids: vec![memory_id.clone()],
+            focal_memory_id: Some(memory_id.clone()),
+            pinned_memory_ids: vec![memory_id.clone()],
+            capacity: 3,
+            reason: "handoff continuity".to_owned(),
+            provenance: vec!["test".to_owned()],
+            scope: crate::core::focus::FocusScope::default(),
+        })
+        .map_err(|error| error.message())?;
+
+        let preview = preview_handoff(&PreviewOptions {
+            workspace: dir.path().to_path_buf(),
+            profile: CapsuleProfile::Resume,
+            since: None,
+            include_estimates: true,
+        })
+        .map_err(|error| error.message())?;
+        ensure(preview.active_focus.is_some(), "preview includes focus")?;
+        ensure(
+            preview
+                .planned_sections
+                .iter()
+                .any(|section| section.id == "active_focus"),
+            "preview includes focus section",
+        )?;
+
+        let output = dir.path().join("handoff.json");
+        let create = create_handoff(&CreateOptions {
+            workspace: dir.path().to_path_buf(),
+            output: output.clone(),
+            profile: CapsuleProfile::Resume,
+            since: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        ensure(create.active_focus.is_some(), "create includes focus")?;
+
+        let resume = resume_handoff(&ResumeOptions {
+            path: output,
+            use_latest: false,
+            workspace: dir.path().to_path_buf(),
+            max_sections: None,
+        })
+        .map_err(|error| error.message())?;
+        ensure(resume.active_focus.is_some(), "resume includes focus")?;
+        ensure(
+            resume
+                .selected_memories
+                .iter()
+                .any(|memory| memory.id == memory_id),
+            "resume selected focused memory",
         )
     }
 

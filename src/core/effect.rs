@@ -745,6 +745,8 @@ impl EffectManifest {
             CommandEffect::read_only("doctor", "Run health checks"),
             CommandEffect::read_only("eval list", "List evaluation scenarios"),
             CommandEffect::read_only("eval run", "Run evaluation (reads fixtures)"),
+            CommandEffect::read_only("focus explain", "Explain passive active-memory focus state"),
+            CommandEffect::read_only("focus show", "Show passive active-memory focus state"),
             CommandEffect::read_only(
                 "economy prune-plan",
                 "Plan economy pruning without mutation",
@@ -1279,6 +1281,26 @@ impl EffectManifest {
                 "backup restore",
                 vec!["<side-path>/"],
                 "Restore backup contents into an explicit side path",
+            ),
+            CommandEffect::workspace_file_write(
+                "focus add",
+                vec![".ee/focus/state.json"],
+                "Add explicit memories to passive focus state without eviction",
+            ),
+            CommandEffect::workspace_file_write(
+                "focus clear",
+                vec![".ee/focus/state.json"],
+                "Clear passive focus state by writing an empty state artifact",
+            ),
+            CommandEffect::workspace_file_write(
+                "focus remove",
+                vec![".ee/focus/state.json"],
+                "Remove explicit memories from passive focus state",
+            ),
+            CommandEffect::workspace_file_write(
+                "focus set",
+                vec![".ee/focus/state.json"],
+                "Replace passive focus state from explicit command arguments",
             ),
         ]
     }

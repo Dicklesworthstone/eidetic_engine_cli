@@ -8484,6 +8484,7 @@ pub fn render_handoff_preview_json(report: &HandoffPreviewReport) -> String {
         "planned_sections": report.planned_sections,
         "omitted_sections": report.omitted_sections,
         "evidence_ids": report.evidence_ids,
+        "active_focus": report.active_focus,
         "token_estimate": report.token_estimate,
         "byte_estimate": report.byte_estimate,
         "redaction_posture": report.redaction_posture,
@@ -8523,6 +8524,9 @@ pub fn render_handoff_preview_human(report: &HandoffPreviewReport) -> String {
         "Estimates: ~{} tokens, ~{} bytes",
         report.token_estimate, report.byte_estimate
     ));
+    if report.active_focus.is_some() {
+        lines.push("Active focus: included".to_owned());
+    }
     lines.push(format!(
         "Sufficient for resume: {}",
         if report.sufficient_for_resume {
@@ -8566,6 +8570,7 @@ pub fn render_handoff_create_json(report: &HandoffCreateReport) -> String {
         "profile": report.profile,
         "sections_included": report.sections_included,
         "evidence_count": report.evidence_count,
+        "active_focus": report.active_focus,
         "token_count": report.token_count,
         "byte_count": report.byte_count,
         "content_hash": report.content_hash,
@@ -8593,6 +8598,9 @@ pub fn render_handoff_create_human(report: &HandoffCreateReport) -> String {
     lines.push(String::new());
     lines.push(format!("Sections: {}", report.sections_included));
     lines.push(format!("Evidence items: {}", report.evidence_count));
+    if report.active_focus.is_some() {
+        lines.push("Active focus: included".to_owned());
+    }
     lines.push(format!("Tokens: {}", report.token_count));
     lines.push(format!("Bytes: {}", report.byte_count));
     lines.push(format!("Content hash: {}", report.content_hash));
@@ -8701,6 +8709,7 @@ pub fn render_handoff_resume_json(report: &HandoffResumeReport) -> String {
         "recent_decisions": report.recent_decisions,
         "recent_outcomes": report.recent_outcomes,
         "selected_memories": report.selected_memories,
+        "active_focus": report.active_focus,
         "artifact_pointers": report.artifact_pointers,
         "degradations": report.degradations,
         "resumed_at": report.resumed_at

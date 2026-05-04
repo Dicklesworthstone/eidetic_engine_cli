@@ -11,6 +11,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
+use chrono::{DateTime, Duration};
+
 pub const SUBSYSTEM: &str = "curate";
 pub const DEFAULT_SPECIFICITY_MIN: f32 = 0.45;
 pub const CANDIDATE_TOO_GENERIC_CODE: &str = "candidate_too_generic";
@@ -1839,11 +1841,11 @@ pub fn validate_candidate(
         });
     }
 
-    // Calculate TTL expiry
-    let ttl_expires_at = input.ttl_seconds.map(|secs| {
-        // Simple: just store as "now + N seconds" string
-        // In real impl would use chrono to calculate actual timestamp
-        format!("{now_rfc3339}+{secs}s")
+    // Calculate TTL expiry as proper RFC3339 timestamp
+    let ttl_expires_at = input.ttl_seconds.and_then(|secs| {
+        let now = DateTime::parse_from_rfc3339(now_rfc3339).ok()?;
+        let duration = Duration::seconds(i64::try_from(secs).ok()?);
+        Some((now + duration).to_rfc3339())
     });
 
     Ok(ValidatedCandidate {
@@ -3219,6 +3221,8 @@ pub fn evaluate_abstain(
 mod tests {
     use std::str::FromStr;
 
+    use chrono::DateTime;
+
     use super::{
         CANDIDATE_TOO_GENERIC_CODE, CandidateInput, CandidateSource, CandidateStatus,
         CandidateType, CandidateValidationError, DUPLICATE_RULE_CHECK_SCHEMA_V1,
@@ -3762,6 +3766,54 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
         assert_eq!(validated.workspace_id, "ws_123");
         assert_eq!(validated.confidence, 0.75);
         assert!(validated.ttl_expires_at.is_some());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn validate_candidate_ttl_is_rfc3339_parseable() {
+        let input = valid_input();
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z").unwrap();
+        let ttl = result.ttl_expires_at.unwrap();
+        // Must be parseable as RFC3339
+        let parsed = DateTime::parse_from_rfc3339(&ttl);
+        assert!(parsed.is_ok(), "TTL must be valid RFC3339: {ttl}");
+        // Should be 1 hour (3600s) after now
+        let expected = DateTime::parse_from_rfc3339("2026-04-29T13:00:00Z").unwrap();
+        assert_eq!(parsed.unwrap(), expected);
+    }
+
+    #[test]
+    fn validate_candidate_ttl_none_when_no_ttl_seconds() {
+        let mut input = valid_input();
+        input.ttl_seconds = None;
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+        assert!(result.is_ok());
+        assert!(result.unwrap().ttl_expires_at.is_none());
+    }
+
+    #[test]
+    fn validate_candidate_ttl_handles_zero_seconds() {
+        let mut input = valid_input();
+        input.ttl_seconds = Some(0);
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+        assert!(result.is_ok());
+        let ttl = result.unwrap().ttl_expires_at.unwrap();
+        let parsed = DateTime::parse_from_rfc3339(&ttl);
+        assert!(parsed.is_ok(), "Zero TTL must still be valid RFC3339");
+        // Zero seconds means expires at now
+        let expected = DateTime::parse_from_rfc3339("2026-04-29T12:00:00Z").unwrap();
+        assert_eq!(parsed.unwrap(), expected);
+    }
+
+    #[test]
+    fn validate_candidate_ttl_handles_large_seconds() {
+        let mut input = valid_input();
+        input.ttl_seconds = Some(86400 * 365); // 1 year in seconds
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+        assert!(result.is_ok());
+        let ttl = result.unwrap().ttl_expires_at.unwrap();
+        let parsed = DateTime::parse_from_rfc3339(&ttl);
+        assert!(parsed.is_ok(), "Large TTL must be valid RFC3339: {ttl}");
     }
 
     #[test]
