@@ -24,6 +24,7 @@ pub mod preflight;
 pub mod procedure;
 pub mod progress;
 pub mod provenance;
+pub mod query;
 pub mod recorder;
 pub mod release;
 pub mod repro;
@@ -186,6 +187,9 @@ pub use progress::{
     ProgressEventType, progress_completed, progress_failed, progress_running, progress_started,
 };
 pub use provenance::{LineSpan, ProvenanceUri, ProvenanceUriError};
+pub use query::{
+    FilterOperator, FilterPredicate, FilterValue, QueryFilter, QueryFilters, parse_filters,
+};
 pub use recorder::{
     IMPORT_CURSOR_SCHEMA_V1, ImportCursor, ImportSourceType, ParseImportSourceTypeError,
     ParsePayloadContentTypeError, ParseRationaleTraceKindError, ParseRationaleTracePostureError,

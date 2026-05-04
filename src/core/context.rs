@@ -268,6 +268,7 @@ pub struct ContextPackOptions {
     pub profile: Option<ContextPackProfile>,
     pub max_tokens: Option<u32>,
     pub candidate_pool: Option<u32>,
+    pub filters: crate::models::QueryFilters,
 }
 
 #[derive(Debug)]
@@ -323,7 +324,7 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
     let connection = DbConnection::open_file(&database_path)
         .map_err(|error| ContextPackError::Storage(format!("Failed to open database: {error}")))?;
 
-    let search_report = run_search(&SearchOptions {
+    let mut search_report = run_search(&SearchOptions {
         workspace_path: options.workspace_path.clone(),
         database_path: Some(database_path),
         index_dir: options.index_dir.clone(),
@@ -340,6 +341,27 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
     }
 
     let mut degraded = Vec::new();
+
+    // Apply query filters to search results
+    if !options.filters.is_empty() {
+        let pre_filter_count = search_report.results.len();
+        search_report.results.retain(|hit| {
+            options.filters.matches(hit.metadata.as_ref())
+        });
+        let filtered_count = pre_filter_count - search_report.results.len();
+        if filtered_count > 0 {
+            push_degradation(
+                &mut degraded,
+                "context_filtered_results",
+                ContextResponseSeverity::Low,
+                format!(
+                    "{} of {} search results excluded by query filters.",
+                    filtered_count, pre_filter_count
+                ),
+                None,
+            );
+        }
+    }
     if search_report.status == SearchStatus::NoResults {
         push_degradation(
             &mut degraded,

@@ -10236,6 +10236,7 @@ where
         profile: Some(profile),
         max_tokens: Some(args.max_tokens),
         candidate_pool: Some(args.candidate_pool),
+        filters: crate::models::QueryFilters::default(),
     };
 
     match run_context_pack(&options) {
@@ -10386,6 +10387,7 @@ where
         profile,
         max_tokens: args.max_tokens.or(request.max_tokens),
         candidate_pool: args.candidate_pool.or(request.candidate_pool),
+        filters: request.filters,
     };
     let renderer = effective_pack_renderer(cli, request.renderer);
 
@@ -10570,13 +10572,9 @@ fn validate_unsupported_query_features(
 ) -> Result<(), QueryFileError> {
     validate_temporal_fields(object)?;
 
+    // Validate filter syntax (filters are now wired into pack execution)
     if let Some(filters) = object.get("filters") {
         validate_filters(filters)?;
-        return Err(QueryFileError::new(
-            QueryFileErrorCode::UnsupportedFeature,
-            "ee.query.v1 filters are validated but not yet wired into context pack execution.",
-            Some("Remove filters or use a plain query until filter execution lands.".to_string()),
-        ));
     }
 
     for feature in [
@@ -10604,6 +10602,15 @@ fn validate_unsupported_query_features(
     }
 
     Ok(())
+}
+
+fn extract_query_filters(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> crate::models::QueryFilters {
+    object
+        .get("filters")
+        .and_then(crate::models::parse_filters)
+        .unwrap_or_default()
 }
 
 fn validate_temporal_fields(
