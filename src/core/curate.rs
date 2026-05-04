@@ -2790,7 +2790,8 @@ fn validation_repair(error: &CandidateValidationError) -> &'static str {
     match error {
         CandidateValidationError::EmptyWorkspaceId
         | CandidateValidationError::EmptyTargetMemoryId
-        | CandidateValidationError::EmptyReason => {
+        | CandidateValidationError::EmptyReason
+        | CandidateValidationError::MissingSourceEvidence => {
             "Regenerate the candidate with all required fields populated."
         }
         CandidateValidationError::ConfidenceOutOfRange { .. }
@@ -2808,6 +2809,9 @@ fn validation_repair(error: &CandidateValidationError) -> &'static str {
         }
         CandidateValidationError::CandidateTooGeneric { .. } => {
             "Add concrete commands, files, error codes, metrics, or provenance."
+        }
+        CandidateValidationError::PromptInjectionFlagged { .. } => {
+            "Quarantine the source evidence and recreate the candidate from trusted spans."
         }
         CandidateValidationError::InvalidStatusTransition { .. } => {
             "Refresh the queue and validate an eligible candidate."
@@ -3902,6 +3906,83 @@ mod tests {
             .ok_or_else(|| "candidate missing after dry run".to_owned())?;
         assert_eq!(stored.status, "pending");
         assert!(stored.reviewed_at.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn validate_curation_candidate_rejects_low_evidence_without_applying() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(27)).to_string();
+        let candidate_id = curate_id(28);
+        let connection = seed_candidate_database(
+            &database_path,
+            &workspace_id,
+            &memory_id,
+            &candidate_id,
+            "promote",
+            Some("pending"),
+            None,
+        )?;
+        let missing_evidence_id = curate_id(29);
+        connection
+            .insert_curation_candidate(
+                &missing_evidence_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "promote".to_owned(),
+                    target_memory_id: memory_id.clone(),
+                    proposed_content: None,
+                    proposed_confidence: Some(0.91),
+                    proposed_trust_class: Some("agent_validated".to_owned()),
+                    source_type: "agent_inference".to_owned(),
+                    source_id: None,
+                    reason: "Candidate lacks explicit source evidence.".to_owned(),
+                    confidence: 0.90,
+                    status: Some("pending".to_owned()),
+                    created_at: Some("2026-05-01T00:00:05Z".to_owned()),
+                    ttl_expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let report = validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &missing_evidence_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.validation.status, "failed");
+        assert_eq!(report.validation.decision, "rejected");
+        assert!(
+            report
+                .validation
+                .errors
+                .iter()
+                .any(|issue| issue.code == "candidate_missing_source_evidence")
+        );
+        assert_eq!(report.mutation.to_status, "rejected");
+        assert!(report.mutation.persisted);
+        assert!(report.mutation.audit_id.is_some());
+
+        let stored = connection
+            .get_curation_candidate(&workspace_id, &missing_evidence_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "candidate missing after low-evidence validation".to_owned())?;
+        assert_eq!(stored.status, "rejected");
+        assert!(stored.applied_at.is_none());
+
+        let memory = connection
+            .get_memory(&memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory missing after low-evidence validation".to_owned())?;
+        assert!((memory.confidence - 0.7).abs() < 0.001);
+        assert_eq!(memory.trust_class, "human_explicit");
         Ok(())
     }
 
