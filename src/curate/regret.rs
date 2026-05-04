@@ -11,7 +11,8 @@
 //! Regret scores feed into curation candidates for memory improvement.
 
 use crate::models::episode::{
-    CounterfactualRun, EpisodeOutcome, REGRET_ENTRY_SCHEMA_V1, RegretCategory, RegretEntry,
+    CounterfactualRun, EpisodeOutcome, Intervention, InterventionType, REGRET_ENTRY_SCHEMA_V1,
+    RegretCategory, RegretEntry,
 };
 
 /// Schema version for regret scoring output.
@@ -114,6 +115,8 @@ pub struct RegretScoringInput {
     pub episode_id: String,
     /// Counterfactual run being scored.
     pub counterfactual_run: CounterfactualRun,
+    /// Interventions applied in this counterfactual run.
+    pub interventions: Vec<Intervention>,
     /// Original episode outcome.
     pub original_outcome: EpisodeOutcome,
     /// Timestamp for the regret entry.
@@ -149,8 +152,8 @@ pub fn score_counterfactual(
 ) -> RegretScoringOutput {
     let cfr = &input.counterfactual_run;
 
-    // Determine regret category from intervention types
-    let category = categorize_interventions(cfr);
+    // Determine regret category from actual intervention types
+    let category = categorize_interventions(&input.interventions);
 
     // Calculate base regret from outcome improvement
     let raw_score = calculate_outcome_improvement(input.original_outcome, cfr.hypothetical_outcome);
@@ -209,28 +212,54 @@ pub fn score_counterfactual(
     }
 }
 
-/// Categorize regret based on intervention types.
-fn categorize_interventions(cfr: &CounterfactualRun) -> RegretCategory {
-    // In a real implementation, we'd look at the actual interventions.
-    // For now, infer from the analysis text or use default.
-    if let Some(ref analysis) = cfr.analysis {
-        let lower = analysis.to_lowercase();
-        if lower.contains("missing") || lower.contains("not retrieved") {
-            return RegretCategory::MissingKnowledge;
-        }
-        if lower.contains("stale") || lower.contains("outdated") {
-            return RegretCategory::StaleInformation;
-        }
-        if lower.contains("wrong") || lower.contains("incorrect") || lower.contains("harmful") {
-            return RegretCategory::Misinformation;
-        }
-        if lower.contains("noisy") || lower.contains("irrelevant") || lower.contains("distract") {
-            return RegretCategory::UnderutilizedMemory;
-        }
-        if lower.contains("retrieval") || lower.contains("search") {
-            return RegretCategory::RetrievalFailure;
+/// Categorize regret based on actual intervention types.
+///
+/// Maps intervention types to regret categories:
+/// - `AddMemory` → `MissingKnowledge` (adding memory that was missing)
+/// - `RemoveMemory` → `UnderutilizedMemory` (removing noisy/irrelevant memory)
+/// - `ReplaceContent` → `Misinformation` (replacing wrong/outdated content)
+/// - `Strengthen` → `RetrievalFailure` (boosting under-ranked relevant memory)
+/// - `Weaken` → `UnderutilizedMemory` (reducing over-weighted irrelevant memory)
+/// - `Rerank` → `RetrievalFailure` (fixing retrieval ordering issues)
+fn categorize_interventions(interventions: &[Intervention]) -> RegretCategory {
+    if interventions.is_empty() {
+        return RegretCategory::Other;
+    }
+
+    // Count intervention types to determine dominant pattern
+    let mut add_count = 0u32;
+    let mut remove_count = 0u32;
+    let mut replace_count = 0u32;
+    let mut strengthen_count = 0u32;
+    let mut weaken_count = 0u32;
+    let mut rerank_count = 0u32;
+
+    for intervention in interventions {
+        match intervention.intervention_type {
+            InterventionType::AddMemory => add_count += 1,
+            InterventionType::RemoveMemory => remove_count += 1,
+            InterventionType::ReplaceContent => replace_count += 1,
+            InterventionType::Strengthen => strengthen_count += 1,
+            InterventionType::Weaken => weaken_count += 1,
+            InterventionType::Rerank => rerank_count += 1,
         }
     }
+
+    // Priority order: AddMemory > ReplaceContent > Strengthen/Rerank > Remove/Weaken
+    // This reflects severity: missing knowledge and misinformation are more critical
+    if add_count > 0 {
+        return RegretCategory::MissingKnowledge;
+    }
+    if replace_count > 0 {
+        return RegretCategory::Misinformation;
+    }
+    if strengthen_count > 0 || rerank_count > 0 {
+        return RegretCategory::RetrievalFailure;
+    }
+    if remove_count > 0 || weaken_count > 0 {
+        return RegretCategory::UnderutilizedMemory;
+    }
+
     RegretCategory::Other
 }
 
@@ -601,11 +630,25 @@ mod tests {
         cfr
     }
 
-    fn sample_input(original: EpisodeOutcome, cfr: CounterfactualRun) -> RegretScoringInput {
+    fn sample_intervention(intervention_type: InterventionType) -> Intervention {
+        Intervention::new(
+            "int_test_001",
+            intervention_type,
+            format!("Test {} intervention", intervention_type.as_str()),
+            "2026-04-30T12:00:00Z",
+        )
+    }
+
+    fn sample_input(
+        original: EpisodeOutcome,
+        cfr: CounterfactualRun,
+        interventions: Vec<Intervention>,
+    ) -> RegretScoringInput {
         RegretScoringInput {
             entry_id: "reg_test_001".to_string(),
             episode_id: "ep_test_001".to_string(),
             counterfactual_run: cfr,
+            interventions,
             original_outcome: original,
             timestamp: "2026-04-30T12:00:00Z".to_string(),
         }
@@ -650,47 +693,70 @@ mod tests {
     }
 
     #[test]
-    fn categorize_missing_knowledge() {
-        let cfr = sample_cfr(
-            EpisodeOutcome::Success,
-            0.8,
-            Some("The missing knowledge about API format would have helped"),
-        );
-        let category = categorize_interventions(&cfr);
+    fn categorize_add_memory_as_missing_knowledge() {
+        let interventions = vec![sample_intervention(InterventionType::AddMemory)];
+        let category = categorize_interventions(&interventions);
         assert_eq!(category, RegretCategory::MissingKnowledge);
     }
 
     #[test]
-    fn categorize_stale_information() {
-        let cfr = sample_cfr(
-            EpisodeOutcome::Success,
-            0.8,
-            Some("Using stale outdated version info caused the failure"),
-        );
-        let category = categorize_interventions(&cfr);
-        assert_eq!(category, RegretCategory::StaleInformation);
+    fn categorize_replace_content_as_misinformation() {
+        let interventions = vec![sample_intervention(InterventionType::ReplaceContent)];
+        let category = categorize_interventions(&interventions);
+        assert_eq!(category, RegretCategory::Misinformation);
     }
 
     #[test]
-    fn categorize_misinformation() {
-        let cfr = sample_cfr(
-            EpisodeOutcome::Success,
-            0.8,
-            Some("The wrong incorrect information was harmful"),
-        );
-        let category = categorize_interventions(&cfr);
-        assert_eq!(category, RegretCategory::Misinformation);
+    fn categorize_strengthen_as_retrieval_failure() {
+        let interventions = vec![sample_intervention(InterventionType::Strengthen)];
+        let category = categorize_interventions(&interventions);
+        assert_eq!(category, RegretCategory::RetrievalFailure);
+    }
+
+    #[test]
+    fn categorize_rerank_as_retrieval_failure() {
+        let interventions = vec![sample_intervention(InterventionType::Rerank)];
+        let category = categorize_interventions(&interventions);
+        assert_eq!(category, RegretCategory::RetrievalFailure);
+    }
+
+    #[test]
+    fn categorize_remove_memory_as_underutilized() {
+        let interventions = vec![sample_intervention(InterventionType::RemoveMemory)];
+        let category = categorize_interventions(&interventions);
+        assert_eq!(category, RegretCategory::UnderutilizedMemory);
+    }
+
+    #[test]
+    fn categorize_weaken_as_underutilized() {
+        let interventions = vec![sample_intervention(InterventionType::Weaken)];
+        let category = categorize_interventions(&interventions);
+        assert_eq!(category, RegretCategory::UnderutilizedMemory);
+    }
+
+    #[test]
+    fn categorize_empty_interventions_as_other() {
+        let interventions: Vec<Intervention> = vec![];
+        let category = categorize_interventions(&interventions);
+        assert_eq!(category, RegretCategory::Other);
+    }
+
+    #[test]
+    fn categorize_prioritizes_add_over_remove() {
+        let interventions = vec![
+            sample_intervention(InterventionType::RemoveMemory),
+            sample_intervention(InterventionType::AddMemory),
+        ];
+        let category = categorize_interventions(&interventions);
+        assert_eq!(category, RegretCategory::MissingKnowledge);
     }
 
     #[test]
     fn score_actionable_regret() {
         let config = RegretScoringConfig::default();
-        let cfr = sample_cfr(
-            EpisodeOutcome::Success,
-            0.9,
-            Some("Missing knowledge about the API"),
-        );
-        let input = sample_input(EpisodeOutcome::Failure, cfr);
+        let cfr = sample_cfr(EpisodeOutcome::Success, 0.9, None);
+        let interventions = vec![sample_intervention(InterventionType::AddMemory)];
+        let input = sample_input(EpisodeOutcome::Failure, cfr, interventions);
 
         let output = score_counterfactual(&input, &config);
 
@@ -704,7 +770,8 @@ mod tests {
     fn score_low_confidence_not_actionable() {
         let config = RegretScoringConfig::default();
         let cfr = sample_cfr(EpisodeOutcome::Success, 0.3, None);
-        let input = sample_input(EpisodeOutcome::Failure, cfr);
+        let interventions = vec![sample_intervention(InterventionType::AddMemory)];
+        let input = sample_input(EpisodeOutcome::Failure, cfr, interventions);
 
         let output = score_counterfactual(&input, &config);
 
@@ -716,7 +783,8 @@ mod tests {
     fn score_no_improvement_not_actionable() {
         let config = RegretScoringConfig::default();
         let cfr = sample_cfr(EpisodeOutcome::Failure, 0.9, None);
-        let input = sample_input(EpisodeOutcome::Failure, cfr);
+        let interventions = vec![sample_intervention(InterventionType::AddMemory)];
+        let input = sample_input(EpisodeOutcome::Failure, cfr, interventions);
 
         let output = score_counterfactual(&input, &config);
 
@@ -728,12 +796,20 @@ mod tests {
     fn filter_actionable_entries() {
         let config = RegretScoringConfig::default();
 
-        let cfr1 = sample_cfr(EpisodeOutcome::Success, 0.9, Some("Missing knowledge"));
+        let cfr1 = sample_cfr(EpisodeOutcome::Success, 0.9, None);
         let cfr2 = sample_cfr(EpisodeOutcome::Failure, 0.9, None);
 
         let inputs = vec![
-            sample_input(EpisodeOutcome::Failure, cfr1),
-            sample_input(EpisodeOutcome::Failure, cfr2),
+            sample_input(
+                EpisodeOutcome::Failure,
+                cfr1,
+                vec![sample_intervention(InterventionType::AddMemory)],
+            ),
+            sample_input(
+                EpisodeOutcome::Failure,
+                cfr2,
+                vec![sample_intervention(InterventionType::RemoveMemory)],
+            ),
         ];
 
         let outputs = score_counterfactuals(&inputs, &config);
@@ -746,12 +822,20 @@ mod tests {
     fn statistics_from_outputs() {
         let config = RegretScoringConfig::default();
 
-        let cfr1 = sample_cfr(EpisodeOutcome::Success, 0.9, Some("Missing knowledge"));
-        let cfr2 = sample_cfr(EpisodeOutcome::Unknown, 0.7, Some("Stale outdated info"));
+        let cfr1 = sample_cfr(EpisodeOutcome::Success, 0.9, None);
+        let cfr2 = sample_cfr(EpisodeOutcome::Unknown, 0.7, None);
 
         let inputs = vec![
-            sample_input(EpisodeOutcome::Failure, cfr1),
-            sample_input(EpisodeOutcome::Failure, cfr2),
+            sample_input(
+                EpisodeOutcome::Failure,
+                cfr1,
+                vec![sample_intervention(InterventionType::AddMemory)],
+            ),
+            sample_input(
+                EpisodeOutcome::Failure,
+                cfr2,
+                vec![sample_intervention(InterventionType::ReplaceContent)],
+            ),
         ];
 
         let outputs = score_counterfactuals(&inputs, &config);

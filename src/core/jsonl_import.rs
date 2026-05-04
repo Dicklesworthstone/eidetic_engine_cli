@@ -83,6 +83,71 @@ impl JsonlImportIssue {
     }
 }
 
+/// Error returned by the narrow JSONL header parser used by import validation
+/// and fuzzing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum JsonlHeaderParseError {
+    EmptyLine,
+    InvalidJson { message: String },
+    MissingSchema,
+    WrongSchema { schema: String },
+    InvalidHeader { message: String },
+}
+
+impl fmt::Display for JsonlHeaderParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyLine => formatter.write_str("JSONL header line is empty"),
+            Self::InvalidJson { message } => {
+                write!(formatter, "invalid JSONL header JSON: {message}")
+            }
+            Self::MissingSchema => {
+                formatter.write_str("JSONL header is missing a non-empty schema field")
+            }
+            Self::WrongSchema { schema } => write!(
+                formatter,
+                "JSONL header schema must be {EXPORT_HEADER_SCHEMA_V1}, got {schema}"
+            ),
+            Self::InvalidHeader { message } => write!(formatter, "invalid JSONL header: {message}"),
+        }
+    }
+}
+
+/// Parse one JSONL header line.
+///
+/// This is intentionally smaller than [`import_jsonl_records`]: fuzzing should
+/// exercise the record parser directly without opening files or databases.
+pub fn parse_jsonl_header_line(input: &str) -> Result<ExportHeader, JsonlHeaderParseError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(JsonlHeaderParseError::EmptyLine);
+    }
+
+    let value = serde_json::from_str::<JsonValue>(trimmed).map_err(|error| {
+        JsonlHeaderParseError::InvalidJson {
+            message: error.to_string(),
+        }
+    })?;
+    let schema = value
+        .get("schema")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|schema| !schema.is_empty())
+        .ok_or(JsonlHeaderParseError::MissingSchema)?;
+
+    if schema != EXPORT_HEADER_SCHEMA_V1 {
+        return Err(JsonlHeaderParseError::WrongSchema {
+            schema: schema.to_owned(),
+        });
+    }
+
+    serde_json::from_value::<ExportHeader>(value).map_err(|error| {
+        JsonlHeaderParseError::InvalidHeader {
+            message: error.to_string(),
+        }
+    })
+}
+
 /// Summary returned by `ee import jsonl`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JsonlImportReport {
@@ -882,6 +947,25 @@ mod tests {
             r#"{"schema":"ee.export.footer.v1","export_id":"exp-001","completed_at":"2026-04-30T00:01:00Z","total_records":3,"memory_count":1,"link_count":0,"tag_count":1,"audit_count":0,"checksum":null,"success":true,"error_message":null}"#,
         ]
         .join("\n")
+    }
+
+    #[test]
+    fn parse_jsonl_header_line_accepts_header_record_only() -> TestResult {
+        let header_line = sample_jsonl()
+            .lines()
+            .next()
+            .ok_or_else(|| "sample JSONL must include a header line".to_string())?
+            .to_string();
+        let header = parse_jsonl_header_line(&header_line).map_err(|error| error.to_string())?;
+
+        ensure(header.export_id, "exp-001".to_string(), "export id")?;
+        ensure(
+            parse_jsonl_header_line(r#"{"schema":"ee.export.memory.v1"}"#),
+            Err(JsonlHeaderParseError::WrongSchema {
+                schema: "ee.export.memory.v1".to_string(),
+            }),
+            "wrong schema",
+        )
     }
 
     #[test]
