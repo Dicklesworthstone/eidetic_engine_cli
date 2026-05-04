@@ -6,6 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ee::core::degraded_honesty::{
     validate_no_fake_success_output, validate_no_unsupported_evidence_claims,
+    validate_repair_command,
 };
 use serde_json::{Value, json};
 
@@ -127,8 +128,21 @@ fn first_repair_command(value: &Value) -> Option<String> {
 }
 
 fn command_boundary_matrix_row(args: &[String]) -> &'static str {
-    if args.iter().any(|arg| arg == "context") {
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "context" | "pack" | "search" | "why"))
+    {
         "context, pack, search, why"
+    } else if args.iter().any(|arg| arg == "graph") {
+        "graph"
+    } else if args.iter().any(|arg| arg == "memory") {
+        "memory, remember"
+    } else if args.iter().any(|arg| arg == "curate") {
+        "curate"
+    } else if args.iter().any(|arg| arg == "rule") {
+        "curate"
+    } else if args.iter().any(|arg| arg == "status") {
+        "capabilities, check, health, status"
     } else if args.iter().any(|arg| arg == "audit") {
         "audit"
     } else if args.iter().any(|arg| arg == "support") {
@@ -181,8 +195,18 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
 }
 
 fn side_effect_class(args: &[String]) -> &'static str {
-    if args.iter().any(|arg| arg == "context") {
+    if args.iter().any(|arg| arg == "context" || arg == "pack") {
         "audited pack write when storage is available; storage error before mutation here"
+    } else if args.iter().any(|arg| arg == "search" || arg == "why") {
+        "read-only query/explanation; storage or search error before reasoning output"
+    } else if args.iter().any(|arg| arg == "graph") {
+        "derived graph read/rebuild only; source database remains unchanged on missing storage"
+    } else if args.iter().any(|arg| arg == "memory") {
+        "audited memory mutation only when storage is available; missing storage prevents mutation"
+    } else if args.iter().any(|arg| arg == "curate" || arg == "rule") {
+        "audited curation/rule mutation only when storage is available; missing storage prevents mutation"
+    } else if args.iter().any(|arg| arg == "status") {
+        "read-only capability probe; no workspace, database, index, job, or adapter mutation"
     } else if args.iter().any(|arg| arg == "audit") {
         "read-only, conservative abstention; no audit log record or hash-chain verification emitted"
     } else if args.iter().any(|arg| arg == "support") {
@@ -243,6 +267,97 @@ fn side_effect_class(args: &[String]) -> &'static str {
     } else {
         "unknown"
     }
+}
+
+fn success_flag(value: &Value) -> bool {
+    value
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn ensure_no_fake_or_unsupported_claims(
+    command: &str,
+    success: bool,
+    fixture_mode: bool,
+    stdout: &str,
+) -> TestResult {
+    let fake_success = validate_no_fake_success_output(command, success, fixture_mode, stdout);
+    ensure(
+        fake_success.passed,
+        format!("{command} output should not be fake success: {fake_success:?}"),
+    )?;
+
+    let unsupported_claims =
+        validate_no_unsupported_evidence_claims(command, success, fixture_mode, stdout);
+    ensure(
+        unsupported_claims.passed,
+        format!(
+            "{command} output should not overclaim unsupported reasoning: {unsupported_claims:?}"
+        ),
+    )
+}
+
+fn ensure_repair_command_is_actionable(value: &Value, context: &str) -> TestResult {
+    if let Some(repair) = first_repair_command(value) {
+        let report = validate_repair_command(&repair);
+        ensure(
+            report.passed,
+            format!("{context} repair command must be actionable: {report:?}"),
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_logged_contract_shape(result: &LoggedCommand, context: &str) -> TestResult {
+    let log_text = fs::read_to_string(&result.log_path)
+        .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+    let log_json: Value = serde_json::from_str(&log_text)
+        .map_err(|error| format!("{context} e2e log must be JSON: {error}"))?;
+
+    ensure_json_pointer(
+        &log_json,
+        "/schema",
+        json!("ee.degraded_honesty.e2e_log.v1"),
+        &format!("{context} e2e log schema"),
+    )?;
+    ensure(
+        log_json
+            .pointer("/stdoutPath")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("stdout.json")),
+        format!("{context} log must record stdout artifact path"),
+    )?;
+    ensure(
+        log_json
+            .pointer("/stderrPath")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("stderr.txt")),
+        format!("{context} log must record stderr artifact path"),
+    )?;
+    ensure(
+        log_json
+            .pointer("/parsedJsonSchema")
+            .and_then(Value::as_str)
+            .is_some_and(|schema| schema.starts_with("ee.")),
+        format!("{context} log must record parsed JSON schema"),
+    )?;
+    ensure(
+        log_json
+            .pointer("/commandBoundaryMatrixRow")
+            .and_then(Value::as_str)
+            .is_some_and(|row| row != "unknown"),
+        format!("{context} log must map to a command-boundary matrix row"),
+    )?;
+    ensure(
+        log_json
+            .pointer("/sideEffectClass")
+            .and_then(Value::as_str)
+            .is_some_and(|side_effect| side_effect != "unknown"),
+        format!("{context} log must record a side-effect summary"),
+    )?;
+
+    Ok(())
 }
 
 fn run_ee_logged(
@@ -469,6 +584,171 @@ fn successful_capabilities_output_has_no_fake_success_markers() -> TestResult {
         unsupported_claims.passed,
         format!("capabilities output contains unsupported evidence claim: {unsupported_claims:?}"),
     )
+}
+
+#[test]
+fn retrieval_graph_memory_curate_rule_and_status_commands_have_no_fake_contract_logs() -> TestResult
+{
+    let workspace_root = unique_artifact_dir("boundary-contract-workspace")?;
+    let workspace = workspace_root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    let workspace_arg = workspace.display().to_string();
+    let query_file = workspace.join("task.eeq.json");
+    fs::write(
+        &query_file,
+        r#"{
+          "version": "ee.query.v1",
+          "query": {"text": "prepare release", "mode": "hybrid"},
+          "budget": {"maxTokens": 1200, "candidatePool": 8},
+          "output": {"format": "json", "profile": "compact"}
+        }"#,
+    )
+    .map_err(|error| format!("failed to write {}: {error}", query_file.display()))?;
+    let query_file_arg = query_file.display().to_string();
+
+    let status_result = run_ee_logged(
+        "status-success-contract",
+        None,
+        vec!["--json".to_owned(), "status".to_owned()],
+    )?;
+    ensure_equal(&status_result.exit_code, &0, "status exit code")?;
+    ensure(
+        status_result.stderr.is_empty(),
+        "status JSON response must keep stderr empty",
+    )?;
+    ensure_no_ansi(&status_result.stdout, "status stdout")?;
+    ensure_no_fake_or_unsupported_claims(
+        "status",
+        success_flag(&status_result.parsed),
+        false,
+        &status_result.stdout,
+    )?;
+    ensure_logged_contract_shape(&status_result, "status")?;
+
+    let cases = [
+        (
+            "search-missing-db-contract",
+            "search",
+            vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "search".to_owned(),
+                "prepare release".to_owned(),
+            ],
+        ),
+        (
+            "pack-missing-db-contract",
+            "pack",
+            vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "pack".to_owned(),
+                "--query-file".to_owned(),
+                query_file_arg,
+            ],
+        ),
+        (
+            "why-missing-db-contract",
+            "why",
+            vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "why".to_owned(),
+                "mem_00000000000000000000000000".to_owned(),
+            ],
+        ),
+        (
+            "graph-export-missing-db-contract",
+            "graph export",
+            vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "graph".to_owned(),
+                "export".to_owned(),
+            ],
+        ),
+        (
+            "graph-neighborhood-missing-db-contract",
+            "graph neighborhood",
+            vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "graph".to_owned(),
+                "neighborhood".to_owned(),
+                "mem_00000000000000000000000000".to_owned(),
+            ],
+        ),
+        (
+            "memory-revise-missing-db-contract",
+            "memory revise",
+            vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "memory".to_owned(),
+                "revise".to_owned(),
+                "mem_00000000000000000000000000".to_owned(),
+                "--content".to_owned(),
+                "Corrected memory text".to_owned(),
+                "--dry-run".to_owned(),
+            ],
+        ),
+        (
+            "curate-candidates-missing-db-contract",
+            "curate candidates",
+            vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "curate".to_owned(),
+                "candidates".to_owned(),
+            ],
+        ),
+        (
+            "rule-list-missing-db-contract",
+            "rule list",
+            vec![
+                "--workspace".to_owned(),
+                workspace_arg,
+                "--json".to_owned(),
+                "rule".to_owned(),
+                "list".to_owned(),
+            ],
+        ),
+    ];
+
+    for (artifact_name, command, args) in cases {
+        let result = run_ee_logged(artifact_name, Some(&workspace), args)?;
+        ensure(
+            result.stderr.is_empty(),
+            format!("{command} JSON response must keep stderr empty"),
+        )?;
+        ensure_no_ansi(&result.stdout, &format!("{command} stdout"))?;
+        ensure(
+            result.exit_code != 0 || success_flag(&result.parsed),
+            format!("{command} successful exit must set success=true"),
+        )?;
+        ensure_no_fake_or_unsupported_claims(
+            command,
+            success_flag(&result.parsed),
+            false,
+            &result.stdout,
+        )?;
+        ensure_repair_command_is_actionable(&result.parsed, command)?;
+        ensure_logged_contract_shape(&result, command)?;
+    }
+
+    Ok(())
 }
 
 #[test]
@@ -1582,38 +1862,47 @@ fn learn_read_and_proposal_commands_degrade_instead_of_reporting_seed_templates(
     )?;
     ensure_equal(
         &run_result.exit_code,
-        &0,
-        "learn experiment run dry-run exit code",
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "learn experiment run degraded exit code",
     )?;
     ensure(
         run_result.stderr.is_empty(),
-        "learn experiment run dry-run JSON stderr empty",
+        "learn experiment run degraded JSON stderr empty",
     )?;
-    ensure_no_ansi(&run_result.stdout, "learn experiment run dry-run stdout")?;
+    ensure_no_ansi(&run_result.stdout, "learn experiment run degraded stdout")?;
     ensure_json_pointer(
         &run_result.parsed,
         "/schema",
-        json!("ee.learn.experiment_run.v1"),
-        "learn experiment run dry-run schema",
+        json!("ee.error.v1"),
+        "learn experiment run degraded schema",
     )?;
     ensure_json_pointer(
         &run_result.parsed,
-        "/dryRun",
-        json!(true),
-        "learn experiment run dry-run flag",
-    )?;
-    ensure_json_pointer(
-        &run_result.parsed,
-        "/status",
-        json!("dry_run"),
-        "learn experiment run dry-run status",
+        "/error/code",
+        json!("unsatisfied_degraded_mode"),
+        "learn experiment run degraded code",
     )?;
     let fake_success =
-        validate_no_fake_success_output("learn experiment run", true, true, &run_result.stdout);
+        validate_no_fake_success_output("learn experiment run", false, false, &run_result.stdout);
     ensure(
         fake_success.passed,
-        format!("learn experiment run dry-run output should not be fake success: {fake_success:?}"),
+        format!(
+            "learn experiment run degraded output should not be fake success: {fake_success:?}"
+        ),
     )?;
+    let unsupported_claims = validate_no_unsupported_evidence_claims(
+        "learn experiment run",
+        false,
+        false,
+        &run_result.stdout,
+    );
+    ensure(
+        unsupported_claims.passed,
+        format!(
+            "learn experiment run degraded output should not count as unsupported success: {unsupported_claims:?}"
+        ),
+    )?;
+    ensure_logged_contract_shape(&run_result, "learn experiment run")?;
 
     Ok(())
 }
@@ -1731,10 +2020,21 @@ fn lab_replay_reports_missing_frozen_inputs_without_generated_success() -> TestR
 
 #[test]
 fn economy_report_degrades_instead_of_reporting_seed_metrics() -> TestResult {
+    let workspace_root = unique_artifact_dir("economy-report-unavailable-workspace")?;
+    let workspace = workspace_root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    let workspace_arg = workspace.display().to_string();
     let result = run_ee_logged(
         "economy-report-unavailable",
-        None,
+        Some(&workspace),
         vec![
+            "--workspace".to_owned(),
+            workspace_arg,
             "--json".to_owned(),
             "economy".to_owned(),
             "report".to_owned(),
@@ -1751,43 +2051,65 @@ fn economy_report_degrades_instead_of_reporting_seed_metrics() -> TestResult {
         "economy JSON degraded response must keep stderr empty",
     )?;
     ensure_no_ansi(&result.stdout, "economy degraded stdout")?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/schema",
-        json!("ee.response.v1"),
-        "economy degraded response schema",
-    )?;
-    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/code",
-        json!("economy_metrics_unavailable"),
-        "economy degraded code",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/degraded/0/code",
-        json!("economy_metrics_unavailable"),
-        "economy degraded array code",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/followUpBead",
-        json!("eidetic_engine_cli-ve0w"),
-        "economy follow-up bead",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/evidenceIds",
-        json!([]),
-        "economy evidence ids",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/sourceIds",
-        json!([]),
-        "economy source ids",
-    )?;
+    let schema = result
+        .parsed
+        .pointer("/schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "economy response missing schema".to_owned())?;
+    match schema {
+        "ee.error.v1" => {
+            ensure_json_pointer(
+                &result.parsed,
+                "/error/code",
+                json!("unsatisfied_degraded_mode"),
+                "economy missing-database degraded code",
+            )?;
+            ensure_json_pointer(
+                &result.parsed,
+                "/error/repair",
+                json!("ee init --workspace ."),
+                "economy missing-database repair command",
+            )?;
+        }
+        "ee.response.v1" => {
+            ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+            ensure_json_pointer(
+                &result.parsed,
+                "/data/code",
+                json!("economy_metrics_unavailable"),
+                "economy degraded code",
+            )?;
+            ensure_json_pointer(
+                &result.parsed,
+                "/data/degraded/0/code",
+                json!("economy_metrics_unavailable"),
+                "economy degraded array code",
+            )?;
+            ensure_json_pointer(
+                &result.parsed,
+                "/data/followUpBead",
+                json!("eidetic_engine_cli-ve0w"),
+                "economy follow-up bead",
+            )?;
+            ensure_json_pointer(
+                &result.parsed,
+                "/data/evidenceIds",
+                json!([]),
+                "economy evidence ids",
+            )?;
+            ensure_json_pointer(
+                &result.parsed,
+                "/data/sourceIds",
+                json!([]),
+                "economy source ids",
+            )?;
+        }
+        other => {
+            return Err(format!(
+                "economy response schema must be ee.error.v1 or ee.response.v1, got {other}"
+            ));
+        }
+    }
 
     let fake_success =
         validate_no_fake_success_output("economy report", false, false, &result.stdout);
@@ -1809,16 +2131,18 @@ fn economy_report_degrades_instead_of_reporting_seed_metrics() -> TestResult {
         .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
     let log_json: Value = serde_json::from_str(&log_text)
         .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+    let expected_degradation_codes = collect_degradation_codes(&result.parsed);
+    let expected_repair = first_repair_command(&result.parsed);
     ensure_json_pointer(
         &log_json,
         "/degradationCodes",
-        json!(["economy_metrics_unavailable"]),
+        json!(expected_degradation_codes),
         "logged economy degradation code",
     )?;
     ensure_json_pointer(
         &log_json,
         "/repairCommand",
-        json!("ee status --json"),
+        expected_repair.map_or(Value::Null, Value::String),
         "logged economy repair command",
     )?;
     ensure_json_pointer(

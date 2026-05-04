@@ -307,6 +307,15 @@ pub const FORBIDDEN_SUCCESS_MARKERS: &[&str] = &[
 /// renderer formatting do not change the result.
 pub const UNSUPPORTED_EVIDENCE_CLAIM_MARKERS: &[(&str, &str)] = &[
     ("persisted records", r#""persisted":true"#),
+    ("pack selection", r#""selected":true"#),
+    ("pack selection reason", r#""selectionreason":"#),
+    ("risk assessment", r#""risklevel":"#),
+    ("risk score", r#""riskscore":"#),
+    ("curation maturity", r#""maturity":"#),
+    ("graph PageRank", r#""pagerank":"#),
+    ("graph PageRank", "\"pagerank\":"),
+    ("graph betweenness", "\"betweenness\":"),
+    ("graph explanation", r#""graphexplanation":"#),
     ("certificate validity", r#""result":"valid""#),
     ("certificate hash verification", r#""hashverified":true"#),
     (
@@ -332,6 +341,11 @@ pub const CONCRETE_EVIDENCE_SOURCE_MARKERS: &[&str] = &[
     r#""payloadhash":""#,
     r#""databasepath":""#,
     r#""auditid":""#,
+    r#""provenance":["#,
+    r#""scorecomponents":{"#,
+    r#""scorebreakdown":{"#,
+    r#""packhash":""#,
+    r#""graphsnapshotid":""#,
     r#""recorderrunids":["#,
     r#""contextpackids":["#,
     r#""preflightids":["#,
@@ -669,6 +683,55 @@ mod tests {
         );
 
         assert!(report.passed);
+    }
+
+    #[test]
+    fn unsupported_evidence_claim_rejects_pack_risk_graph_and_curation_claims_without_sources() {
+        let outputs = [
+            (
+                "context",
+                r#"{"schema":"ee.response.v1","success":true,"data":{"items":[{"selected":true,"selectionReason":"best match"}]}}"#,
+            ),
+            (
+                "preflight show",
+                r#"{"schema":"ee.response.v1","success":true,"data":{"riskLevel":"high","riskScore":0.91}}"#,
+            ),
+            (
+                "rule show",
+                r#"{"schema":"ee.response.v1","success":true,"data":{"maturity":"validated"}}"#,
+            ),
+            (
+                "graph neighborhood",
+                r#"{"schema":"ee.response.v1","success":true,"data":{"pageRank":0.42,"betweenness":0.11,"graphExplanation":"central evidence node"}}"#,
+            ),
+        ];
+
+        for (command, output) in outputs {
+            let report = validate_no_unsupported_evidence_claims(command, true, false, output);
+            assert!(
+                !report.passed,
+                "{command} should reject unsupported successful reasoning claims"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_evidence_claim_accepts_pack_and_graph_claims_with_sources() {
+        let pack_report = validate_no_unsupported_evidence_claims(
+            "context",
+            true,
+            false,
+            r#"{"schema":"ee.response.v1","success":true,"data":{"items":[{"selected":true,"selectionReason":"best match","provenance":["mem://abc"],"scoreComponents":{"lexical":0.4}}],"packHash":"blake3:pack"}}"#,
+        );
+        let graph_report = validate_no_unsupported_evidence_claims(
+            "graph neighborhood",
+            true,
+            false,
+            r#"{"schema":"ee.response.v1","success":true,"data":{"pageRank":0.42,"betweenness":0.11,"graphSnapshotId":"graph_001","sourceIds":["mem_001"]}}"#,
+        );
+
+        assert!(pack_report.passed);
+        assert!(graph_report.passed);
     }
 
     #[test]
