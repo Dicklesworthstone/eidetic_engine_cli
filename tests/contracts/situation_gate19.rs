@@ -10,10 +10,7 @@ use ee::core::situation::{
     SITUATION_LINK_DRY_RUN_SCHEMA_V1, SituationCompareOptions, classify_task, compare_situations,
     evaluate_built_in_situation_fixtures, plan_situation_link_dry_run,
 };
-use ee::models::{
-    ContextProfileName, ROUTING_DECISION_SCHEMA_V1, SITUATION_CLASSIFY_SCHEMA_V1,
-    SITUATION_LINK_SCHEMA_V1, SituationRoutingSurface,
-};
+use ee::models::SITUATION_CLASSIFY_SCHEMA_V1;
 use serde_json::Value as JsonValue;
 use std::env;
 use std::fs;
@@ -62,32 +59,6 @@ fn classification_envelope(text: &str) -> JsonValue {
         "success": true,
         "data": result.data_json(),
     })
-}
-
-fn ensure_context_routes_use_shipped_profiles(envelope: &JsonValue) -> TestResult {
-    let routes = envelope
-        .pointer("/data/routingDecisions")
-        .and_then(JsonValue::as_array)
-        .ok_or("routing decisions missing")?;
-
-    for route in routes {
-        if route.get("surface").and_then(JsonValue::as_str) != Some("context_profile") {
-            continue;
-        }
-
-        for field in ["selectedProfile", "retrievalProfile"] {
-            let profile = route
-                .get(field)
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| format!("context route missing {field}"))?;
-            ensure(
-                ContextProfileName::parse(profile).is_some(),
-                format!("context route emitted unsupported profile `{profile}`"),
-            )?;
-        }
-    }
-
-    Ok(())
 }
 
 fn release_bug_compare_options() -> SituationCompareOptions {
@@ -192,7 +163,7 @@ fn gate19_cli_classify_async_migration_degrades_until_boundary_rework() -> TestR
 }
 
 #[test]
-fn gate19_low_confidence_and_high_risk_goldens_are_stable() -> TestResult {
+fn gate19_heuristic_tag_goldens_are_stable_and_non_decisioning() -> TestResult {
     let low_confidence = classification_envelope("docs fix");
     let high_risk = classification_envelope("fix failing release workflow");
     let async_migration = classification_envelope("migrate async runtime from tokio to asupersync");
@@ -209,38 +180,58 @@ fn gate19_low_confidence_and_high_risk_goldens_are_stable() -> TestResult {
         async_migration == read_golden("classify_async_migration")?,
         "async migration classification golden mismatch",
     )?;
-    ensure_context_routes_use_shipped_profiles(&low_confidence)?;
-    ensure_context_routes_use_shipped_profiles(&high_risk)?;
-    ensure_context_routes_use_shipped_profiles(&async_migration)?;
+
+    for (name, envelope) in [
+        ("low-confidence", &low_confidence),
+        ("high-risk", &high_risk),
+        ("async-migration", &async_migration),
+    ] {
+        ensure_json_equal(
+            envelope.pointer("/data/classificationMode"),
+            JsonValue::String("heuristic_tagging".to_owned()),
+            format!("{name} mode").as_str(),
+        )?;
+        ensure_json_equal(
+            envelope.pointer("/data/heuristic"),
+            JsonValue::Bool(true),
+            format!("{name} heuristic flag").as_str(),
+        )?;
+        ensure_json_equal(
+            envelope.pointer("/data/decisioningAllowed"),
+            JsonValue::Bool(false),
+            format!("{name} decisioning").as_str(),
+        )?;
+        ensure_json_equal(
+            envelope.pointer("/data/confidence"),
+            JsonValue::String("low".to_owned()),
+            format!("{name} confidence").as_str(),
+        )?;
+        ensure_json_equal(
+            envelope.pointer("/data/routingDecisions"),
+            serde_json::json!([]),
+            format!("{name} routes").as_str(),
+        )?;
+    }
 
     let low_routes = low_confidence
         .pointer("/data/routingDecisions")
         .and_then(JsonValue::as_array)
         .ok_or("low-confidence routing decisions missing")?;
     ensure(
-        low_routes
-            .iter()
-            .any(|route| route.get("surface").and_then(JsonValue::as_str) == Some("manual_review")),
-        "low-confidence classifications must include manual review",
+        low_routes.is_empty(),
+        "low-confidence classifications must not route",
     )?;
 
-    let high_routes = high_risk
-        .pointer("/data/routingDecisions")
-        .and_then(JsonValue::as_array)
-        .ok_or("high-risk routing decisions missing")?;
     ensure(
-        high_routes.iter().any(|route| {
-            route.get("surface").and_then(JsonValue::as_str) == Some("tripwire_candidate")
-                && route
-                    .get("tripwireCandidateIds")
-                    .and_then(JsonValue::as_array)
-                    .is_some_and(|ids| {
-                        ids.iter().any(|id| {
-                            id.as_str() == Some("tripwire.situation.deployment_alternative")
-                        })
-                    })
-        }),
-        "high-risk alternative must add a deterministic tripwire candidate",
+        high_risk
+            .pointer("/data/alternativeCategories")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|alternatives| {
+                alternatives.iter().any(|entry| {
+                    entry.get("category").and_then(JsonValue::as_str) == Some("deployment")
+                })
+            }),
+        "high-risk alternative must remain visible as a heuristic tag",
     )
 }
 
@@ -275,10 +266,16 @@ fn gate19_compare_and_link_dry_run_goldens_are_stable() -> TestResult {
         JsonValue::Bool(false),
         "link mutation",
     )?;
+    ensure_json_equal(link.get("plannedLink"), JsonValue::Null, "planned link")?;
     ensure_json_equal(
-        link.pointer("/plannedLink/schema"),
-        JsonValue::String(SITUATION_LINK_SCHEMA_V1.to_string()),
-        "planned link schema",
+        compare.get("recommended"),
+        JsonValue::Bool(false),
+        "compare recommendation",
+    )?;
+    ensure_json_equal(
+        compare.pointer("/overlap/routingTargets"),
+        serde_json::json!([]),
+        "routing targets",
     )?;
     ensure(
         compare == read_golden("compare_release_bug_to_login_bug")?,
@@ -314,7 +311,7 @@ fn gate19_fixture_metrics_match_golden_and_cover_gate_surfaces() -> TestResult {
     )?;
     ensure_json_equal(
         actual.get("routingUsefulness"),
-        serde_json::json!(1.0),
+        serde_json::json!(0.0),
         "routing usefulness",
     )?;
     ensure_json_equal(
@@ -329,46 +326,21 @@ fn gate19_fixture_metrics_match_golden_and_cover_gate_surfaces() -> TestResult {
 }
 
 #[test]
-fn gate19_routing_decisions_preserve_schema_and_downstream_targets() -> TestResult {
+fn gate19_heuristic_tags_never_emit_downstream_routes() -> TestResult {
     let result = classify_task("fix failing release workflow");
     ensure(
-        result
-            .routing_decisions
-            .iter()
-            .all(|decision| decision.schema == ROUTING_DECISION_SCHEMA_V1),
-        "all routing decisions must carry the stable routing schema",
+        result.routing_decisions.is_empty(),
+        "heuristic tags must not route",
     )?;
-
-    let surfaces: Vec<&str> = result
-        .routing_decisions
-        .iter()
-        .map(|decision| decision.surface.as_str())
-        .collect();
-    let missing_surface = [
-        SituationRoutingSurface::ContextProfile.as_str(),
-        SituationRoutingSurface::PreflightProfile.as_str(),
-        SituationRoutingSurface::ProcedureCandidate.as_str(),
-        SituationRoutingSurface::FixtureFamily.as_str(),
-        SituationRoutingSurface::TripwireCandidate.as_str(),
-        SituationRoutingSurface::CounterfactualReplay.as_str(),
-    ]
-    .into_iter()
-    .find(|expected| !surfaces.contains(expected));
-    if let Some(expected) = missing_surface {
-        return Err(format!("missing routing surface {expected}"));
-    }
-
-    let fixtures = result
-        .routing_decisions
-        .iter()
-        .find(|decision| decision.surface == SituationRoutingSurface::FixtureFamily)
-        .ok_or("fixture-family route missing")?;
-    ensure(
-        fixtures.fixture_ids
-            == vec![
-                "fixture.situation.bug_fix".to_string(),
-                "fixture.preflight.standard".to_string(),
-            ],
-        "fixture-family routing changed",
+    let json = result.data_json();
+    ensure_json_equal(
+        json.get("decisioningAllowed"),
+        JsonValue::Bool(false),
+        "decisioning allowed",
+    )?;
+    ensure_json_equal(
+        json.get("plannerEligible"),
+        JsonValue::Bool(false),
+        "planner eligible",
     )
 }
