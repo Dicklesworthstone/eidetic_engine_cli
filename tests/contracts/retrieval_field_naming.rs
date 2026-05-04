@@ -293,18 +293,38 @@ fn field_naming_contract_is_stable() -> TestResult {
         )?;
     }
 
-    // Verify hit fields (those that are Some)
+    // Verify required hit fields are present
+    // Bug: eidetic_engine_cli-9nw7 - old code was tautological (is_some || is_none always true)
     let hit = &json["results"][0];
-    for field in expected_hit_fields {
-        if field == "rerankScore" || field == "metadata" || field == "explanation" {
-            // These may be absent when None, but when present must be camelCase
-            continue;
-        }
+
+    // Required fields must always be present
+    let required_hit_fields = ["docId", "score", "source"];
+    for field in required_hit_fields {
         ensure(
-            hit.get(field).is_some() || hit.get(field).is_none(),
-            format!("hit field naming issue: {field}"),
+            hit.get(field).is_some(),
+            format!("hit missing required field: {field}"),
         )?;
     }
+
+    // Optional score fields - present when fixture provides them
+    // The fixture above sets fastScore, qualityScore, lexicalScore, rerankScore
+    let fixture_provided_score_fields = ["fastScore", "qualityScore", "lexicalScore", "rerankScore"];
+    for field in fixture_provided_score_fields {
+        ensure(
+            hit.get(field).is_some(),
+            format!("hit missing fixture-provided field: {field}"),
+        )?;
+    }
+
+    // Optional fields that are set in fixture - metadata and explanation
+    ensure(
+        hit.get("metadata").is_some(),
+        "hit missing fixture-provided metadata",
+    )?;
+    ensure(
+        hit.get("explanation").is_some(),
+        "hit missing fixture-provided explanation",
+    )?;
 
     // Verify metrics fields
     let metrics = &json["metrics"];
@@ -314,6 +334,67 @@ fn field_naming_contract_is_stable() -> TestResult {
             format!("metrics missing expected field: {field}"),
         )?;
     }
+
+    Ok(())
+}
+
+#[test]
+fn optional_hit_fields_absent_when_none() -> TestResult {
+    // Bug: eidetic_engine_cli-9nw7
+    // Verify optional fields are NOT present in JSON when None in struct.
+    // This confirms the contract: optional fields omitted unless populated.
+    let report = SearchReport {
+        status: SearchStatus::Success,
+        query: "minimal hit".to_string(),
+        requested_limit: 5,
+        results: vec![SearchHit {
+            doc_id: "minimal-doc".to_string(),
+            score: 0.5,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: None,
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        }],
+        elapsed_ms: 1.0,
+        errors: Vec::new(),
+    };
+
+    let json = report.data_json();
+    let hit = &json["results"][0];
+
+    // Required fields must still be present
+    ensure(hit.get("docId").is_some(), "docId must be present")?;
+    ensure(hit.get("score").is_some(), "score must be present")?;
+    ensure(hit.get("source").is_some(), "source must be present")?;
+
+    // Optional fields must be absent when None
+    ensure(
+        hit.get("fastScore").is_none(),
+        "fastScore should be absent when None",
+    )?;
+    ensure(
+        hit.get("qualityScore").is_none(),
+        "qualityScore should be absent when None",
+    )?;
+    ensure(
+        hit.get("lexicalScore").is_none(),
+        "lexicalScore should be absent when None",
+    )?;
+    ensure(
+        hit.get("rerankScore").is_none(),
+        "rerankScore should be absent when None",
+    )?;
+    ensure(
+        hit.get("metadata").is_none(),
+        "metadata should be absent when None",
+    )?;
+    ensure(
+        hit.get("explanation").is_none(),
+        "explanation should be absent when None",
+    )?;
 
     Ok(())
 }
