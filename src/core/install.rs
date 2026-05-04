@@ -701,6 +701,314 @@ fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// Result of executing an install/update plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstallExecutionResult {
+    pub success: bool,
+    pub artifact_verified: bool,
+    pub binary_installed: bool,
+    pub backup_path: Option<String>,
+    pub error_message: Option<String>,
+}
+
+/// Execute a verified install plan, installing the binary from the artifact root.
+///
+/// Pre-conditions:
+/// - `plan.status` must be `Ready` or `Idempotent`
+/// - `artifact_root` must contain the artifact named in the plan
+/// - The artifact must pass checksum verification
+///
+/// Steps:
+/// 1. Verify artifact checksum
+/// 2. Extract binary from archive
+/// 3. Back up existing binary (if present)
+/// 4. Install new binary with executable permissions
+pub fn execute_install_plan(
+    plan: &InstallPlanReport,
+    artifact_root: &Path,
+) -> InstallExecutionResult {
+    if plan.status != InstallPlanStatus::Ready && plan.status != InstallPlanStatus::Idempotent {
+        return InstallExecutionResult {
+            success: false,
+            artifact_verified: false,
+            binary_installed: false,
+            backup_path: None,
+            error_message: Some(format!(
+                "plan status '{}' is not executable; status must be 'ready' or 'idempotent'",
+                plan.status.as_str()
+            )),
+        };
+    }
+
+    let artifact = match &plan.artifact {
+        Some(artifact) => artifact,
+        None => {
+            return InstallExecutionResult {
+                success: false,
+                artifact_verified: false,
+                binary_installed: false,
+                backup_path: None,
+                error_message: Some("no artifact selected in plan".to_owned()),
+            };
+        }
+    };
+
+    let artifact_path = artifact_root.join(&artifact.file_name);
+    if !artifact_path.is_file() {
+        return InstallExecutionResult {
+            success: false,
+            artifact_verified: false,
+            binary_installed: false,
+            backup_path: None,
+            error_message: Some(format!(
+                "artifact '{}' not found in artifact root '{}'",
+                artifact.file_name,
+                artifact_root.display()
+            )),
+        };
+    }
+
+    // Verify checksum
+    if !verify_artifact_checksum(
+        &artifact_path,
+        &artifact.checksum_algorithm,
+        &artifact.checksum,
+    ) {
+        return InstallExecutionResult {
+            success: false,
+            artifact_verified: false,
+            binary_installed: false,
+            backup_path: None,
+            error_message: Some(format!(
+                "checksum verification failed for '{}'",
+                artifact.file_name
+            )),
+        };
+    }
+
+    let install_path = Path::new(&plan.target.install_path);
+    let install_dir = install_path.parent().unwrap_or(Path::new("."));
+
+    // Create install directory if needed
+    if !install_dir.exists() {
+        if let Err(error) = fs::create_dir_all(install_dir) {
+            return InstallExecutionResult {
+                success: false,
+                artifact_verified: true,
+                binary_installed: false,
+                backup_path: None,
+                error_message: Some(format!(
+                    "failed to create install directory '{}': {error}",
+                    install_dir.display()
+                )),
+            };
+        }
+    }
+
+    // Back up existing binary
+    let backup_path = if install_path.exists() {
+        let backup = install_path.with_extension("backup");
+        if let Err(error) = fs::rename(install_path, &backup) {
+            return InstallExecutionResult {
+                success: false,
+                artifact_verified: true,
+                binary_installed: false,
+                backup_path: None,
+                error_message: Some(format!(
+                    "failed to back up existing binary to '{}': {error}",
+                    backup.display()
+                )),
+            };
+        }
+        Some(normalize_path(&backup))
+    } else {
+        None
+    };
+
+    // Extract binary from archive
+    let extraction_result =
+        extract_binary_from_archive(&artifact_path, &artifact.archive_format, install_path);
+    if let Err(error) = extraction_result {
+        // Restore backup on failure
+        if let Some(backup) = &backup_path {
+            let _ = fs::rename(backup, install_path);
+        }
+        return InstallExecutionResult {
+            success: false,
+            artifact_verified: true,
+            binary_installed: false,
+            backup_path,
+            error_message: Some(format!("failed to extract binary: {error}")),
+        };
+    }
+
+    // Set executable permissions (Unix only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = fs::metadata(install_path) {
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(0o755);
+            let _ = fs::set_permissions(install_path, permissions);
+        }
+    }
+
+    InstallExecutionResult {
+        success: true,
+        artifact_verified: true,
+        binary_installed: true,
+        backup_path,
+        error_message: None,
+    }
+}
+
+fn verify_artifact_checksum(path: &Path, algorithm: &str, expected: &str) -> bool {
+    match algorithm {
+        "sha256" | "SHA256" => {
+            let Ok(bytes) = fs::read(path) else {
+                return false;
+            };
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let result = hasher.finalize();
+            let actual = bytes_to_hex(&result);
+            actual.eq_ignore_ascii_case(expected)
+        }
+        "blake3" | "BLAKE3" => {
+            let Ok(bytes) = fs::read(path) else {
+                return false;
+            };
+            let actual = blake3::hash(&bytes).to_hex().to_string();
+            actual.eq_ignore_ascii_case(expected)
+        }
+        _ => false,
+    }
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn extract_binary_from_archive(
+    archive_path: &Path,
+    archive_format: &str,
+    install_path: &Path,
+) -> Result<(), String> {
+    let temp_dir = env::temp_dir().join(format!("ee-extract-{}", std::process::id()));
+    fs::create_dir_all(&temp_dir).map_err(|e| format!("failed to create temp directory: {e}"))?;
+
+    let result = match archive_format {
+        "tar.xz" | "tar+xz" => extract_tar_xz(archive_path, &temp_dir),
+        "tar.gz" | "tar+gzip" => extract_tar_gz(archive_path, &temp_dir),
+        _ => Err(format!("unsupported archive format: {archive_format}")),
+    };
+
+    if let Err(error) = result {
+        let _ = fs::remove_dir_all(&temp_dir);
+        return Err(error);
+    }
+
+    // Find the extracted binary (should be named 'ee' or 'ee.exe')
+    let binary_name = install_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("ee");
+
+    let extracted_binary = find_binary_in_dir(&temp_dir, binary_name)?;
+
+    // Move binary to install path
+    fs::copy(&extracted_binary, install_path)
+        .map_err(|e| format!("failed to copy binary to '{}': {e}", install_path.display()))?;
+
+    let _ = fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+fn extract_tar_xz(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
+    use std::process::Command;
+
+    let status = Command::new("tar")
+        .args([
+            "-xJf",
+            &archive_path.to_string_lossy(),
+            "-C",
+            &dest_dir.to_string_lossy(),
+        ])
+        .status()
+        .map_err(|e| format!("failed to run tar: {e}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("tar extraction failed with status {status}"))
+    }
+}
+
+fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
+    use std::process::Command;
+
+    let status = Command::new("tar")
+        .args([
+            "-xzf",
+            &archive_path.to_string_lossy(),
+            "-C",
+            &dest_dir.to_string_lossy(),
+        ])
+        .status()
+        .map_err(|e| format!("failed to run tar: {e}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("tar extraction failed with status {status}"))
+    }
+}
+
+fn find_binary_in_dir(dir: &Path, binary_name: &str) -> Result<PathBuf, String> {
+    // First try direct match
+    let direct = dir.join(binary_name);
+    if direct.is_file() {
+        return Ok(direct);
+    }
+
+    // Search recursively (archives often have a top-level directory)
+    for entry in walkdir_simple(dir, 3) {
+        if let Some(name) = entry.file_name().and_then(|n| n.to_str()) {
+            if name == binary_name && entry.is_file() {
+                return Ok(entry);
+            }
+        }
+    }
+
+    Err(format!(
+        "binary '{}' not found in extracted archive",
+        binary_name
+    ))
+}
+
+fn walkdir_simple(dir: &Path, max_depth: usize) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    walkdir_recurse(dir, 0, max_depth, &mut result);
+    result
+}
+
+fn walkdir_recurse(dir: &Path, depth: usize, max_depth: usize, result: &mut Vec<PathBuf>) {
+    if depth > max_depth {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        result.push(path.clone());
+        if path.is_dir() {
+            walkdir_recurse(&path, depth + 1, max_depth, result);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -891,5 +1199,150 @@ mod tests {
                 .any(|finding| finding.code == InstallFindingCode::InstallDirNotWritable),
             "install_dir_not_writable finding",
         )
+    }
+
+    #[test]
+    fn execute_install_plan_rejects_blocked_status() -> TestResult {
+        let report = InstallPlanReport {
+            command: "update".to_owned(),
+            schema: UPDATE_PLAN_SCHEMA_V1.to_owned(),
+            version: "0.1.0".to_owned(),
+            operation: InstallOperation::Update,
+            dry_run: true,
+            status: InstallPlanStatus::Blocked,
+            current_version: "0.1.0".to_owned(),
+            target_version: Some("0.2.0".to_owned()),
+            pinned_version: None,
+            target: InstallTarget {
+                target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+                supported: true,
+                binary_name: "ee".to_owned(),
+                executable_name: "ee".to_owned(),
+                install_dir: "/tmp/ee-test".to_owned(),
+                install_path: "/tmp/ee-test/ee".to_owned(),
+            },
+            artifact: None,
+            verification: InstallVerificationPlan {
+                manifest_status: "loaded".to_owned(),
+                checksum_status: "planned".to_owned(),
+                signature_status: "missing".to_owned(),
+                target_status: "matched".to_owned(),
+                overwrite_status: "new_file".to_owned(),
+            },
+            planned_operations: Vec::new(),
+            idempotency_key: "test".to_owned(),
+            rollback: "side_path_before_replace".to_owned(),
+            findings: Vec::new(),
+        };
+
+        let result = execute_install_plan(&report, Path::new("/tmp/artifacts"));
+        ensure(!result.success, "blocked plan should fail")?;
+        ensure(
+            result
+                .error_message
+                .as_ref()
+                .is_some_and(|msg| msg.contains("not executable")),
+            "error message should mention non-executable status",
+        )
+    }
+
+    #[test]
+    fn execute_install_plan_rejects_missing_artifact() -> TestResult {
+        let report = InstallPlanReport {
+            command: "update".to_owned(),
+            schema: UPDATE_PLAN_SCHEMA_V1.to_owned(),
+            version: "0.1.0".to_owned(),
+            operation: InstallOperation::Update,
+            dry_run: true,
+            status: InstallPlanStatus::Ready,
+            current_version: "0.1.0".to_owned(),
+            target_version: Some("0.2.0".to_owned()),
+            pinned_version: None,
+            target: InstallTarget {
+                target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+                supported: true,
+                binary_name: "ee".to_owned(),
+                executable_name: "ee".to_owned(),
+                install_dir: "/tmp/ee-test".to_owned(),
+                install_path: "/tmp/ee-test/ee".to_owned(),
+            },
+            artifact: None,
+            verification: InstallVerificationPlan {
+                manifest_status: "loaded".to_owned(),
+                checksum_status: "planned".to_owned(),
+                signature_status: "missing".to_owned(),
+                target_status: "matched".to_owned(),
+                overwrite_status: "new_file".to_owned(),
+            },
+            planned_operations: Vec::new(),
+            idempotency_key: "test".to_owned(),
+            rollback: "side_path_before_replace".to_owned(),
+            findings: Vec::new(),
+        };
+
+        let result = execute_install_plan(&report, Path::new("/tmp/artifacts"));
+        ensure(!result.success, "missing artifact should fail")?;
+        ensure(
+            result
+                .error_message
+                .as_ref()
+                .is_some_and(|msg| msg.contains("no artifact")),
+            "error message should mention missing artifact",
+        )
+    }
+
+    #[test]
+    fn verify_checksum_blake3_matches() -> TestResult {
+        let temp_dir = env::temp_dir().join("ee-checksum-test");
+        let _ = fs::create_dir_all(&temp_dir);
+        let test_file = temp_dir.join("test.bin");
+        fs::write(&test_file, b"hello world").expect("write test file");
+
+        let expected = blake3::hash(b"hello world").to_hex().to_string();
+        ensure(
+            verify_artifact_checksum(&test_file, "blake3", &expected),
+            "blake3 checksum should match",
+        )?;
+        ensure(
+            !verify_artifact_checksum(
+                &test_file,
+                "blake3",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            "blake3 checksum should not match wrong value",
+        )?;
+
+        let _ = fs::remove_dir_all(&temp_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_checksum_sha256_matches() -> TestResult {
+        use sha2::{Digest, Sha256};
+
+        let temp_dir = env::temp_dir().join("ee-sha256-test");
+        let _ = fs::create_dir_all(&temp_dir);
+        let test_file = temp_dir.join("test.bin");
+        fs::write(&test_file, b"hello world").expect("write test file");
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"hello world");
+        let expected = bytes_to_hex(&hasher.finalize());
+
+        ensure(
+            verify_artifact_checksum(&test_file, "sha256", &expected),
+            "sha256 checksum should match",
+        )?;
+        ensure(
+            !verify_artifact_checksum(
+                &test_file,
+                "sha256",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            "sha256 checksum should not match wrong value",
+        )?;
+
+        let _ = fs::remove_dir_all(&temp_dir);
+        Ok(())
     }
 }
