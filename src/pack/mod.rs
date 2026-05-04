@@ -15,6 +15,7 @@ pub const DEFAULT_MMR_RELEVANCE_WEIGHT: f32 = 0.75;
 pub const FACILITY_LOCATION_RELEVANCE_WEIGHT: f32 = 0.70;
 pub const FACILITY_LOCATION_UTILITY_WEIGHT: f32 = 0.30;
 pub const FACILITY_LOCATION_EPSILON: f32 = 0.000_001;
+pub const PACK_ITEM_PROVENANCE_SCHEMA_V1: &str = "ee.pack_item.provenance.v1";
 
 /// Conservative characters-per-token ratio for heuristic estimation.
 /// Uses 3.5 instead of 4.0 to bias toward overestimation.
@@ -501,6 +502,24 @@ impl From<&PackProvenance> for RenderedPackProvenance {
             note: provenance.note.clone(),
         }
     }
+}
+
+#[must_use]
+pub fn pack_item_provenance_json(provenance: &[PackProvenance]) -> String {
+    let entries = provenance
+        .iter()
+        .map(|source| {
+            serde_json::json!({
+                "uri": source.uri.to_string(),
+                "note": source.note.as_str(),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema": PACK_ITEM_PROVENANCE_SCHEMA_V1,
+        "entries": entries,
+    })
+    .to_string()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1841,22 +1860,38 @@ fn certificate_features(candidate: &PackCandidate) -> Vec<String> {
     features
 }
 
+/// Compute similarity between a candidate and a selected signature.
+///
+/// Uses a richer signature (kind+id+content-hash) rather than coarse diversity keys.
+/// Matching diversity_key alone does NOT cause full redundancy—two unrelated memories
+/// can share a coarse tag like "formatting" without being duplicates.
+///
+/// Bug: eidetic_engine_cli-6cjh
 fn candidate_similarity(candidate: &PackCandidate, selected: &CandidateSignature) -> f32 {
+    // Same memory is always fully redundant
     if candidate.memory_id == selected.memory_id {
         return 1.0;
     }
 
-    if let Some(diversity_key) = &candidate.diversity_key
-        && selected.diversity_key.as_ref() == Some(diversity_key)
-    {
-        return 1.0;
-    }
-
+    // Exact content match is fully redundant
     if normalize_redundancy_content(&candidate.content) == selected.normalized_content {
         return 1.0;
     }
 
-    0.0
+    // Compute content overlap similarity
+    let content_similarity = content_overlap_similarity(&candidate.content, &selected.normalized_content);
+
+    // Matching diversity_key boosts similarity but doesn't cause full redundancy by itself.
+    // Two memories tagged "formatting" with different content are NOT duplicates.
+    if let Some(diversity_key) = &candidate.diversity_key
+        && selected.diversity_key.as_ref() == Some(diversity_key)
+    {
+        // Boost content similarity when diversity keys match, but cap below 1.0
+        // unless content actually overlaps significantly
+        return content_similarity.max(0.5).min(0.95);
+    }
+
+    content_similarity
 }
 
 fn normalize_redundancy_content(content: &str) -> String {
@@ -2175,12 +2210,13 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        CONTEXT_COMMAND, ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
-        ContextResponseDegradation, ContextResponseSeverity, DEFAULT_CHARS_PER_TOKEN,
-        PackCandidate, PackCandidateInput, PackOmissionReason, PackProvenance, PackSection,
-        PackSelectionObjective, PackTrustSignal, PackValidationError, SectionQuota, SectionQuotas,
-        TokenBudget, TokenEstimationStrategy, assemble_draft, assemble_draft_with_profile,
-        estimate_tokens, estimate_tokens_default, subsystem_name,
+        CONTEXT_COMMAND, CandidateSignature, ContextPackProfile, ContextRequest,
+        ContextRequestInput, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
+        DEFAULT_CHARS_PER_TOKEN, PackCandidate, PackCandidateInput, PackOmissionReason,
+        PackProvenance, PackSection, PackSelectionObjective, PackTrustSignal, PackValidationError,
+        SectionQuota, SectionQuotas, TokenBudget, TokenEstimationStrategy, assemble_draft,
+        assemble_draft_with_profile, candidate_similarity, estimate_tokens, estimate_tokens_default,
+        pack_item_provenance_json, subsystem_name,
     };
     use crate::models::{ContextProfile, MemoryId, ProvenanceUri, TrustClass, UnitScore};
     use crate::testing::ensure_contains;
@@ -2975,6 +3011,37 @@ mod tests {
     }
 
     #[test]
+    fn pack_item_provenance_json_preserves_full_sources() -> TestResult {
+        let json = pack_item_provenance_json(&[
+            provenance("file://src/lib.rs#L42")?,
+            provenance("cass-session://session-a#L20-22")?,
+        ]);
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(super::PACK_ITEM_PROVENANCE_SCHEMA_V1),
+            "provenance schema",
+        )?;
+        ensure_equal(
+            &value["entries"][0]["uri"],
+            &serde_json::json!("file://src/lib.rs#L42"),
+            "first provenance uri",
+        )?;
+        ensure_equal(
+            &value["entries"][0]["note"],
+            &serde_json::json!("source evidence"),
+            "first provenance note",
+        )?;
+        ensure_equal(
+            &value["entries"][1]["uri"],
+            &serde_json::json!("cass-session://session-a#L20-22"),
+            "second provenance uri",
+        )
+    }
+
+    #[test]
     fn pack_provenance_footer_is_deterministic() -> TestResult {
         let id = memory_id(8);
         let candidate = PackCandidate::new(candidate_input(
@@ -3026,13 +3093,15 @@ mod tests {
     #[test]
     fn pack_quality_metrics_summarize_selected_and_omitted_items() -> TestResult {
         let budget = TokenBudget::new(48).map_err(|error| format!("budget rejected: {error:?}"))?;
+        // redundant must have SAME CONTENT to be truly redundant (not just same diversity_key)
+        let shared_content = "Run cargo fmt --check before release.";
         let first = candidate_in_section(
             1,
             PackSection::ProceduralRules,
             1.0,
             0.5,
             10,
-            "Run cargo fmt --check before release.",
+            shared_content,
         )?
         .with_diversity_key("release-formatting");
         let redundant = candidate_in_section(
@@ -3041,7 +3110,7 @@ mod tests {
             0.9,
             0.6,
             5,
-            "Repeat the release formatting rule.",
+            shared_content,
         )?
         .with_diversity_key("release-formatting");
         let evidence = candidate_in_section(
@@ -3251,9 +3320,14 @@ mod tests {
             Ok(budget) => budget,
             Err(error) => return Err(format!("budget rejected: {error:?}")),
         };
-        let first = candidate(1, 1.0, 0.5, 10)?.with_diversity_key("release-formatting");
-        let duplicate = candidate(2, 0.99, 0.5, 10)?.with_diversity_key("release-formatting");
-        let diverse = candidate(3, 0.8, 0.5, 10)?.with_diversity_key("release-checks");
+        // Duplicate must have SAME CONTENT to be redundant (not just same diversity_key)
+        let shared_content = "Run cargo fmt --check before release.";
+        let first = candidate_with_content(1, 1.0, 0.5, 10, shared_content)?
+            .with_diversity_key("release-formatting");
+        let duplicate = candidate_with_content(2, 0.99, 0.5, 10, shared_content)?
+            .with_diversity_key("release-formatting");
+        let diverse = candidate_with_content(3, 0.8, 0.5, 10, "Verify release checksums.")?
+            .with_diversity_key("release-checks");
 
         let draft = assemble_draft("prepare release", budget, vec![duplicate, diverse, first])
             .map_err(|error| format!("draft rejected: {error:?}"))?;
@@ -3283,6 +3357,66 @@ mod tests {
                 .map(|omission| omission.reason.as_str()),
             &Some("redundant_candidate"),
             "redundant omission reason wire name",
+        )
+    }
+
+    #[test]
+    fn mmr_does_not_drop_unrelated_memories_sharing_diversity_key() -> TestResult {
+        // Bug: eidetic_engine_cli-6cjh
+        // Two unrelated memories with the same diversity_key but different content
+        // should NOT be considered redundant. The old code dropped the second one
+        // just because they shared a coarse tag like "formatting".
+        let budget = TokenBudget::new(100)
+            .map_err(|error| format!("budget rejected: {error:?}"))?;
+
+        // Same diversity_key, but completely different content
+        let fmt_rule = candidate_with_content(1, 1.0, 0.5, 10, "Run cargo fmt before release.")?
+            .with_diversity_key("formatting");
+        let rustfmt_config = candidate_with_content(2, 0.9, 0.5, 10, "Use rustfmt.toml for configuration.")?
+            .with_diversity_key("formatting");
+        let lint_rule = candidate_with_content(3, 0.8, 0.5, 10, "Run clippy with warnings as errors.")?
+            .with_diversity_key("linting");
+
+        let draft = assemble_draft("prepare release", budget, vec![fmt_rule, rustfmt_config, lint_rule])
+            .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        // All three should be selected because they have different content
+        // (order may vary due to MMR similarity penalties, but none should be dropped)
+        let mut ids: Vec<MemoryId> = draft.items.iter().map(|item| item.memory_id).collect();
+        ids.sort();
+        let mut expected = vec![memory_id(1), memory_id(2), memory_id(3)];
+        expected.sort();
+        ensure_equal(
+            &ids,
+            &expected,
+            "unrelated memories with same diversity_key should NOT be dropped",
+        )?;
+        ensure_equal(&draft.used_tokens, &30, "all three selected")?;
+        ensure_equal(&draft.omitted.len(), &0, "no redundant candidates")
+    }
+
+    #[test]
+    fn candidate_similarity_uses_content_not_just_diversity_key() -> TestResult {
+        // Bug: eidetic_engine_cli-6cjh
+        // Verify candidate_similarity returns < 1.0 when diversity_key matches
+        // but content differs.
+        let first = candidate_with_content(1, 1.0, 0.5, 10, "Run cargo fmt before release.")?
+            .with_diversity_key("formatting");
+        let unrelated = candidate_with_content(2, 0.9, 0.5, 10, "Use rustfmt.toml for configuration.")?
+            .with_diversity_key("formatting");
+
+        let first_sig = CandidateSignature::from(&first);
+        let similarity = candidate_similarity(&unrelated, &first_sig);
+
+        // Matching diversity_key with different content should NOT return 1.0
+        ensure(
+            similarity < 1.0,
+            &format!("similarity should be < 1.0 for different content, got {similarity}"),
+        )?;
+        // Should return boosted content overlap (around 0.5 since there's some word overlap)
+        ensure(
+            similarity >= 0.5,
+            &format!("similarity should be >= 0.5 for matching diversity_key, got {similarity}"),
         )
     }
 
