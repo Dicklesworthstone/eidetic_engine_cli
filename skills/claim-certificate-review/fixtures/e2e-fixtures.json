@@ -1,0 +1,207 @@
+{
+  "schema": "ee.skill.claim_certificate_review.fixtures.v1",
+  "skillPath": "skills/claim-certificate-review/SKILL.md",
+  "fixtures": [
+    {
+      "id": "ccr_verified",
+      "description": "Claim and certificate verification pass with matching hashes, current schema, valid expiry, and passed assumptions.",
+      "eeCommands": [
+        "ee --workspace <workspace> --json claim verify claim_release_context_demo --claims-file fixtures/claims.yaml --artifacts-dir fixtures/artifacts --fail-fast",
+        "ee --workspace <workspace> --json certificate verify cert_release_context_demo --manifest fixtures/certificates.json"
+      ],
+      "claimIds": ["claim_release_context_demo"],
+      "certificateIds": ["cert_release_context_demo"],
+      "manifestPaths": [
+        "fixtures/claims.yaml",
+        "fixtures/artifacts/claim_release_context_demo/manifest.json",
+        "fixtures/certificates.json"
+      ],
+      "evidenceIds": ["ccr.claim.verified", "ccr.certificate.verified"],
+      "hashStatus": "passed",
+      "schemaStatus": "passed",
+      "expiryStatus": "valid",
+      "assumptionStatus": "passed",
+      "redactionStatus": "passed",
+      "trustClass": "mechanical_manifest",
+      "degradedCodes": [],
+      "expectedDisposition": "review_supported",
+      "mayStrengthenClaim": true,
+      "firstFailureDiagnosis": null
+    },
+    {
+      "id": "ccr_stale_payload",
+      "description": "Claim manifest reports stale payload hash and cannot support stronger prose.",
+      "eeCommands": [
+        "ee --workspace <workspace> --json claim verify claim_stale_payload --claims-file fixtures/claims.yaml --artifacts-dir fixtures/artifacts --fail-fast"
+      ],
+      "claimIds": ["claim_stale_payload"],
+      "certificateIds": [],
+      "manifestPaths": [
+        "fixtures/claims.yaml",
+        "fixtures/artifacts/claim_stale_payload/manifest.json"
+      ],
+      "evidenceIds": ["ccr.claim.stale_payload"],
+      "hashStatus": "stale",
+      "schemaStatus": "passed",
+      "expiryStatus": "unknown",
+      "assumptionStatus": "unknown",
+      "redactionStatus": "passed",
+      "trustClass": "mechanical_manifest",
+      "degradedCodes": [],
+      "expectedDisposition": "refuse_strengthen",
+      "mayStrengthenClaim": false,
+      "firstFailureDiagnosis": "claim_certificate_hash_unverified"
+    },
+    {
+      "id": "ccr_stale_schema",
+      "description": "Certificate payload schema is stale and schema-sensitive claim strengthening is blocked.",
+      "eeCommands": [
+        "ee --workspace <workspace> --json certificate verify cert_stale_schema --manifest fixtures/certificates.json",
+        "ee --workspace <workspace> --json schema export ee.certificate.verify.v1"
+      ],
+      "claimIds": [],
+      "certificateIds": ["cert_stale_schema"],
+      "manifestPaths": ["fixtures/certificates.json", "fixtures/certificate-payload.json"],
+      "evidenceIds": ["ccr.certificate.stale_schema"],
+      "hashStatus": "passed",
+      "schemaStatus": "stale",
+      "expiryStatus": "valid",
+      "assumptionStatus": "passed",
+      "redactionStatus": "passed",
+      "trustClass": "mechanical_manifest",
+      "degradedCodes": [],
+      "expectedDisposition": "refuse_strengthen",
+      "mayStrengthenClaim": false,
+      "firstFailureDiagnosis": "claim_certificate_schema_stale"
+    },
+    {
+      "id": "ccr_expired_certificate",
+      "description": "Certificate verification reports expired certificate.",
+      "eeCommands": [
+        "ee --workspace <workspace> --json certificate verify cert_expired --manifest fixtures/certificates.json"
+      ],
+      "claimIds": [],
+      "certificateIds": ["cert_expired"],
+      "manifestPaths": ["fixtures/certificates.json"],
+      "evidenceIds": ["ccr.certificate.expired"],
+      "hashStatus": "passed",
+      "schemaStatus": "passed",
+      "expiryStatus": "expired",
+      "assumptionStatus": "passed",
+      "redactionStatus": "passed",
+      "trustClass": "mechanical_manifest",
+      "degradedCodes": [],
+      "expectedDisposition": "refuse_strengthen",
+      "mayStrengthenClaim": false,
+      "firstFailureDiagnosis": "claim_certificate_expired"
+    },
+    {
+      "id": "ccr_missing_manifest",
+      "description": "Claim or certificate manifest path is absent.",
+      "eeCommands": [
+        "ee --workspace <workspace> --json claim verify claim_missing_manifest --claims-file fixtures/claims.yaml --artifacts-dir fixtures/artifacts --fail-fast"
+      ],
+      "claimIds": ["claim_missing_manifest"],
+      "certificateIds": [],
+      "manifestPaths": [],
+      "evidenceIds": [],
+      "hashStatus": "missing",
+      "schemaStatus": "unknown",
+      "expiryStatus": "unknown",
+      "assumptionStatus": "unknown",
+      "redactionStatus": "passed",
+      "trustClass": "unknown",
+      "degradedCodes": [],
+      "expectedDisposition": "request_evidence",
+      "mayStrengthenClaim": false,
+      "firstFailureDiagnosis": "claim_certificate_manifest_missing"
+    },
+    {
+      "id": "ccr_failed_assumption",
+      "description": "Certificate assumptions are present but failed.",
+      "eeCommands": [
+        "ee --workspace <workspace> --json certificate verify cert_failed_assumption --manifest fixtures/certificates.json"
+      ],
+      "claimIds": [],
+      "certificateIds": ["cert_failed_assumption"],
+      "manifestPaths": ["fixtures/certificates.json"],
+      "evidenceIds": ["ccr.certificate.failed_assumption"],
+      "hashStatus": "passed",
+      "schemaStatus": "passed",
+      "expiryStatus": "valid",
+      "assumptionStatus": "failed",
+      "redactionStatus": "passed",
+      "trustClass": "mechanical_manifest",
+      "degradedCodes": [],
+      "expectedDisposition": "refuse_strengthen",
+      "mayStrengthenClaim": false,
+      "firstFailureDiagnosis": "claim_certificate_assumption_failed"
+    },
+    {
+      "id": "ccr_redacted_evidence",
+      "description": "Evidence bundle reports raw secrets included.",
+      "eeCommands": [
+        "ee --workspace <workspace> --json claim show claim_secret --claims-file fixtures/claims.yaml --include-manifest"
+      ],
+      "claimIds": ["claim_secret"],
+      "certificateIds": [],
+      "manifestPaths": ["fixtures/claims.yaml"],
+      "evidenceIds": ["ccr.claim.secret"],
+      "hashStatus": "passed",
+      "schemaStatus": "passed",
+      "expiryStatus": "unknown",
+      "assumptionStatus": "unknown",
+      "redactionStatus": "failed",
+      "rawSecretsIncluded": true,
+      "trustClass": "mechanical_manifest",
+      "degradedCodes": [],
+      "expectedDisposition": "refuse",
+      "mayStrengthenClaim": false,
+      "firstFailureDiagnosis": "claim_certificate_redaction_unverified"
+    },
+    {
+      "id": "ccr_malformed_verification_output",
+      "description": "Verification output is not parseable machine JSON.",
+      "eeCommands": [
+        "ee --workspace <workspace> --json claim verify claim_malformed --claims-file fixtures/claims.yaml --artifacts-dir fixtures/artifacts --fail-fast"
+      ],
+      "claimIds": ["claim_malformed"],
+      "certificateIds": [],
+      "manifestPaths": ["fixtures/claims.yaml"],
+      "evidenceIds": [],
+      "hashStatus": "unknown",
+      "schemaStatus": "unknown",
+      "expiryStatus": "unknown",
+      "assumptionStatus": "unknown",
+      "redactionStatus": "unknown",
+      "malformedVerificationOutput": true,
+      "trustClass": "unknown",
+      "degradedCodes": [],
+      "expectedDisposition": "request_repair",
+      "mayStrengthenClaim": false,
+      "firstFailureDiagnosis": "claim_certificate_json_unavailable"
+    },
+    {
+      "id": "ccr_degraded_verification",
+      "description": "Claim and certificate verification are degraded or unavailable.",
+      "eeCommands": [
+        "ee --workspace <workspace> --json claim verify claim_degraded --claims-file fixtures/claims.yaml --artifacts-dir fixtures/artifacts --fail-fast",
+        "ee --workspace <workspace> --json certificate verify cert_degraded --manifest fixtures/certificates.json"
+      ],
+      "claimIds": ["claim_degraded"],
+      "certificateIds": ["cert_degraded"],
+      "manifestPaths": ["fixtures/claims.yaml", "fixtures/certificates.json"],
+      "evidenceIds": ["ccr.degraded.claim", "ccr.degraded.certificate"],
+      "hashStatus": "degraded",
+      "schemaStatus": "degraded",
+      "expiryStatus": "unknown",
+      "assumptionStatus": "unknown",
+      "redactionStatus": "passed",
+      "trustClass": "unknown",
+      "degradedCodes": ["claim_verification_unavailable", "certificate_store_unavailable"],
+      "expectedDisposition": "request_repair",
+      "mayStrengthenClaim": false,
+      "firstFailureDiagnosis": "claim_certificate_hash_unverified"
+    }
+  ]
+}
