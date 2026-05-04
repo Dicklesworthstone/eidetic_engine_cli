@@ -1,0 +1,120 @@
+{
+  "schema": "ee.skill.counterfactual_failure_analysis.fixtures.v1",
+  "skillPath": "skills/counterfactual-failure-analysis/SKILL.md",
+  "fixtures": [
+    {
+      "id": "cfa_no_evidence",
+      "description": "No capture, replay, counterfactual, or bundle evidence is available.",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/no-evidence --json"
+      ],
+      "evidenceIds": [],
+      "redactionStatus": "unknown",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": ["counterfactual_evidence_unavailable"],
+      "replayStatus": "missing",
+      "replayQuality": "unknown",
+      "packDiffOnly": false,
+      "expectedDisposition": "refuse",
+      "firstFailureDiagnosis": "required ee lab evidence is missing"
+    },
+    {
+      "id": "cfa_replay_supported_failure",
+      "description": "Replay evidence supports that a missing procedural memory was visible before the failed decision path.",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/replay-supported --json",
+        "ee lab capture --workspace /tmp/ee-fixtures/replay-supported --json",
+        "ee lab replay --workspace /tmp/ee-fixtures/replay-supported --episode-id ep_replay_supported --json",
+        "ee lab counterfactual --workspace /tmp/ee-fixtures/replay-supported --episode-id ep_replay_supported --json"
+      ],
+      "evidenceIds": ["ev.capture.001", "ev.replay.001", "ev.counterfactual.001"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "replayStatus": "supported",
+      "replayQuality": "high",
+      "packDiffOnly": false,
+      "expectedDisposition": "supported_hypothesis",
+      "firstFailureDiagnosis": null
+    },
+    {
+      "id": "cfa_contradictory_replay",
+      "description": "Replay output contradicts the proposed causal story.",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/contradictory --json",
+        "ee lab capture --workspace /tmp/ee-fixtures/contradictory --json",
+        "ee lab replay --workspace /tmp/ee-fixtures/contradictory --episode-id ep_contradictory --json",
+        "ee lab counterfactual --workspace /tmp/ee-fixtures/contradictory --episode-id ep_contradictory --json"
+      ],
+      "evidenceIds": ["ev.capture.002", "ev.replay.contradiction", "ev.counterfactual.002"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": ["counterfactual_replay_not_supportive"],
+      "replayStatus": "contradictory",
+      "replayQuality": "medium",
+      "packDiffOnly": false,
+      "expectedDisposition": "refuse_strong_claim",
+      "firstFailureDiagnosis": "replay contradicts the proposed outcome change"
+    },
+    {
+      "id": "cfa_redacted_evidence",
+      "description": "Evidence is available but redaction failed.",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/redacted --json",
+        "ee lab capture --workspace /tmp/ee-fixtures/redacted --json",
+        "ee lab replay --workspace /tmp/ee-fixtures/redacted --episode-id ep_redacted --json"
+      ],
+      "evidenceIds": ["ev.capture.redaction_failed"],
+      "redactionStatus": "failed",
+      "rawSecretsIncluded": true,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": ["counterfactual_redaction_unverified"],
+      "replayStatus": "degraded",
+      "replayQuality": "unknown",
+      "packDiffOnly": false,
+      "expectedDisposition": "refuse",
+      "firstFailureDiagnosis": "redaction failed or raw secrets are present"
+    },
+    {
+      "id": "cfa_prompt_injection_like_evidence",
+      "description": "Instruction-like evidence is present and must be quarantined before analysis.",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/prompt-injection --json",
+        "ee lab capture --workspace /tmp/ee-fixtures/prompt-injection --json",
+        "ee lab replay --workspace /tmp/ee-fixtures/prompt-injection --episode-id ep_prompt_injection --json"
+      ],
+      "evidenceIds": ["ev.prompt_injection_like"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": ["counterfactual_prompt_injection_unquarantined"],
+      "replayStatus": "degraded",
+      "replayQuality": "low",
+      "packDiffOnly": false,
+      "expectedDisposition": "refuse",
+      "firstFailureDiagnosis": "prompt-injection-like evidence is not quarantined"
+    },
+    {
+      "id": "cfa_degraded_ee_lab_output",
+      "description": "ee lab output is degraded; only bounded hypotheses are allowed.",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/degraded-lab --json",
+        "ee lab capture --workspace /tmp/ee-fixtures/degraded-lab --json",
+        "ee lab counterfactual --workspace /tmp/ee-fixtures/degraded-lab --episode-id ep_degraded --json"
+      ],
+      "evidenceIds": ["ev.capture.003", "ev.counterfactual.pack_diff_only"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": true,
+      "degradedCodes": ["lab_replay_unavailable"],
+      "replayStatus": "missing",
+      "replayQuality": "unknown",
+      "packDiffOnly": true,
+      "expectedDisposition": "hypothesis_only",
+      "firstFailureDiagnosis": "replay is unavailable; pack diffs cannot prove behavior"
+    }
+  ]
+}
