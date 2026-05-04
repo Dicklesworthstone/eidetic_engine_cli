@@ -113,6 +113,48 @@ fn status_command_does_not_mutate_workspace() -> TestResult {
 }
 
 #[test]
+fn bare_status_inspects_current_workspace() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    let workspace = temp.path();
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be valid UTF-8".to_string())?;
+
+    // Initialize the workspace first
+    let init_output = run_ee(&["init", "--workspace", workspace_arg])?;
+    ensure(
+        init_output.status.success(),
+        true,
+        "init should succeed",
+    )?;
+
+    // Run bare status from the workspace directory (using --workspace to simulate cwd)
+    // The fix ensures that when --workspace is omitted, it defaults to "."
+    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["status", "--json"])
+        .current_dir(workspace)
+        .output()
+        .map_err(|e| format!("Failed to run ee status: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // The status should report the workspace with actual content, not null.
+    // JSON output uses "workspace":{"source":..., "root":...} structure.
+    // Note: other subsystems may legitimately report "not_inspected" (e.g., agent_inventory),
+    // so we only check that the workspace field is populated.
+    ensure(
+        stdout.contains("\"workspace\":{\"source\":"),
+        true,
+        "bare status should report workspace with source field populated",
+    )?;
+    ensure(
+        !stdout.contains("\"workspace\":null"),
+        true,
+        "bare status should not have null workspace",
+    )
+}
+
+#[test]
 fn check_command_does_not_mutate_workspace() -> TestResult {
     let temp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
     let workspace = temp.path();

@@ -410,6 +410,9 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     // Fetch memory links (EE-LINK-USAGE-001)
     let links = fetch_links(&conn, options.memory_id);
 
+    // Fetch rationale traces (EE-RATIONALE-TRACE-001)
+    let rationale_traces = fetch_rationale_traces(&conn, &memory.workspace_id, options.memory_id);
+
     let validity = memory_validity(&memory.valid_from, &memory.valid_to);
     let storage = StorageExplanation {
         origin: determine_origin(&memory.trust_class),
@@ -451,6 +454,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
                     latest_pack_selection: None,
                     contradictions,
                     links,
+                    rationale_traces,
                 },
             );
             return report.with_degradation(WhyDegradation {
@@ -473,6 +477,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
             latest_pack_selection,
             contradictions,
             links,
+            rationale_traces,
         },
     )
 }
@@ -484,6 +489,7 @@ struct ReportSelectionInputs {
     latest_pack_selection: Option<PackSelectionExplanation>,
     contradictions: Vec<ContradictionMetadata>,
     links: Vec<MemoryLinkSummary>,
+    rationale_traces: Vec<RationaleTraceSummary>,
 }
 
 fn build_report(
@@ -509,6 +515,7 @@ fn build_report(
     WhyReport::found(options.memory_id.to_string(), storage, retrieval, selection)
         .with_contradictions(selection_inputs.contradictions)
         .with_links(selection_inputs.links)
+        .with_rationale_traces(selection_inputs.rationale_traces)
 }
 
 fn determine_origin(trust_class: &str) -> String {
@@ -644,6 +651,23 @@ fn fetch_links(conn: &DbConnection, memory_id: &str) -> Vec<MemoryLinkSummary> {
         .collect()
 }
 
+/// Fetch rationale traces linked to a memory (EE-RATIONALE-TRACE-001).
+fn fetch_rationale_traces(
+    conn: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+) -> Vec<RationaleTraceSummary> {
+    let stored = match conn.list_rationale_traces_for_target(workspace_id, "memory", memory_id) {
+        Ok(traces) => traces,
+        Err(_) => return Vec::new(),
+    };
+
+    stored
+        .into_iter()
+        .filter_map(|s| RationaleTraceSummary::from_trace(&s.trace))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -759,6 +783,7 @@ mod tests {
                 latest_pack_selection: Some(selection),
                 contradictions: Vec::new(),
                 links: Vec::new(),
+                rationale_traces: Vec::new(),
             },
         );
 

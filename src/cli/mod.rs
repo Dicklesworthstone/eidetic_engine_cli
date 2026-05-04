@@ -365,6 +365,9 @@ pub enum Command {
     /// Record agent activity for outcomes and replay.
     #[command(subcommand)]
     Recorder(RecorderCommand),
+    /// Attach safe rationale traces to memories, packs, or recorder events.
+    #[command(subcommand)]
+    Rationale(RationaleCommand),
     /// Rehearse EE command sequences in an isolated sandbox.
     #[command(subcommand)]
     Rehearse(RehearseCommand),
@@ -2524,6 +2527,85 @@ pub struct RecorderImportArgs {
     pub dry_run: bool,
 }
 
+/// Subcommands for `ee rationale`.
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum RationaleCommand {
+    /// Attach a safe rationale trace to a memory, context pack, or recorder event.
+    Attach(RationaleAttachArgs),
+    /// Show a rationale trace by ID.
+    Show(RationaleShowArgs),
+    /// List rationale traces for a target.
+    List(RationaleListArgs),
+}
+
+/// Arguments for `ee rationale attach`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct RationaleAttachArgs {
+    /// Target type: memory, context_pack, recorder_run, recorder_event, causal_trace.
+    #[arg(long, value_name = "TYPE")]
+    pub target_type: String,
+
+    /// Target ID to attach the rationale trace to.
+    #[arg(long, value_name = "ID")]
+    pub target_id: String,
+
+    /// Rationale kind: hypothesis, decision, question, rejected_alternative, observation, conclusion.
+    #[arg(long, value_name = "KIND")]
+    pub kind: String,
+
+    /// Author or source label.
+    #[arg(long, value_name = "AUTHOR")]
+    pub author: String,
+
+    /// Concise rationale summary (user/agent-visible, not private chain-of-thought).
+    #[arg(long, value_name = "SUMMARY")]
+    pub summary: String,
+
+    /// Optional confidence in basis points (0-10000, default 5000).
+    #[arg(long, value_name = "CONFIDENCE")]
+    pub confidence: Option<u16>,
+
+    /// Optional evidence URIs (comma-separated).
+    #[arg(long, value_name = "URIS")]
+    pub evidence_uris: Option<String>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "DATABASE")]
+    pub database: Option<PathBuf>,
+
+    /// Report what would be done without storing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee rationale show`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct RationaleShowArgs {
+    /// Rationale trace ID.
+    #[arg(value_name = "TRACE_ID")]
+    pub trace_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "DATABASE")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee rationale list`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct RationaleListArgs {
+    /// Target type: memory, context_pack, recorder_run, recorder_event, causal_trace.
+    #[arg(long, value_name = "TYPE")]
+    pub target_type: String,
+
+    /// Target ID.
+    #[arg(long, value_name = "ID")]
+    pub target_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "DATABASE")]
+    pub database: Option<PathBuf>,
+}
+
 /// Subcommands for `ee rehearse`.
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum RehearseCommand {
@@ -3610,6 +3692,8 @@ pub enum AnalyzeCommand {
     ScienceStatus,
     /// Analyze drift between frozen evaluation snapshots.
     Drift(AnalyzeDriftArgs),
+    /// Analyze clustering over consolidation candidates.
+    Clustering(AnalyzeClusteringArgs),
 }
 
 /// Arguments for `ee analyze drift`.
@@ -3628,6 +3712,26 @@ pub struct AnalyzeDriftArgs {
     pub threshold: f64,
 
     /// Include metric-level detail in the report.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub detailed: bool,
+}
+
+/// Arguments for `ee analyze clustering`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct AnalyzeClusteringArgs {
+    /// Optional candidate type filter.
+    #[arg(long, value_name = "TYPE")]
+    pub candidate_type: Option<String>,
+
+    /// Optional status filter.
+    #[arg(long, value_name = "STATUS")]
+    pub status: Option<String>,
+
+    /// Maximum number of candidates to analyze.
+    #[arg(long, default_value = "100", value_name = "LIMIT")]
+    pub limit: u32,
+
+    /// Include per-cluster detail in the report.
     #[arg(long, action = ArgAction::SetTrue)]
     pub detailed: bool,
 }
@@ -4255,6 +4359,9 @@ where
         Some(Command::Analyze(AnalyzeCommand::Drift(ref args))) => {
             handle_analyze_drift(&cli, args, stdout)
         }
+        Some(Command::Analyze(AnalyzeCommand::Clustering(ref args))) => {
+            handle_analyze_clustering(&cli, args, stdout)
+        }
         Some(Command::Agent(AgentCommand::Status(ref args))) => {
             handle_agent_status(&cli, args, stdout, stderr)
         }
@@ -4532,6 +4639,7 @@ where
                     use_latest,
                     workspace: workspace_path,
                     max_sections: args.max_sections,
+                    task_frame_id: None,
                 };
                 match resume_handoff(&options) {
                     Ok(report) => match cli.renderer() {
@@ -4781,6 +4889,15 @@ where
         Some(Command::Recorder(RecorderCommand::Import(ref args))) => {
             handle_recorder_import(&cli, args, stdout, stderr)
         }
+        Some(Command::Rationale(RationaleCommand::Attach(ref args))) => {
+            handle_rationale_attach(&cli, args, stdout, stderr)
+        }
+        Some(Command::Rationale(RationaleCommand::Show(ref args))) => {
+            handle_rationale_show(&cli, args, stdout, stderr)
+        }
+        Some(Command::Rationale(RationaleCommand::List(ref args))) => {
+            handle_rationale_list(&cli, args, stdout, stderr)
+        }
         Some(Command::Rehearse(RehearseCommand::Plan(ref args))) => {
             handle_rehearse_plan(&cli, args, stdout, stderr)
         }
@@ -4949,10 +5066,8 @@ where
         }
         Some(Command::Status) => {
             let timing_capture = crate::models::TimingCapture::start();
-            let report = cli
-                .workspace
-                .as_deref()
-                .map_or_else(StatusReport::gather, StatusReport::gather_for_workspace);
+            let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+            let report = StatusReport::gather_for_workspace(&workspace_path);
             let timing = timing_capture.finish();
             let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
@@ -5609,19 +5724,21 @@ where
 
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &report.human_summary())
+            write_stdout(stdout, &report.human_summary());
         }
-        output::Renderer::Toon => write_stdout(
-            stdout,
-            &(output::render_toon_from_json(
-                &serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
-                    "success": success,
-                    "data": data,
-                })
-                .to_string(),
-            ) + "\n"),
-        ),
+        output::Renderer::Toon => {
+            write_stdout(
+                stdout,
+                &(output::render_toon_from_json(
+                    &serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V1,
+                        "success": success,
+                        "data": data,
+                    })
+                    .to_string(),
+                ) + "\n"),
+            );
+        }
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
@@ -5636,7 +5753,7 @@ where
                     })
                     .to_string()
                         + "\n"),
-                )
+                );
             } else {
                 write_stdout(
                     stdout,
@@ -5656,9 +5773,94 @@ where
                     .to_string()
                         + "\n"),
                 );
-                ProcessExitCode::UnsatisfiedDegradedMode
             }
         }
+    }
+    if success {
+        ProcessExitCode::Success
+    } else {
+        ProcessExitCode::UnsatisfiedDegradedMode
+    }
+}
+
+fn handle_analyze_clustering<W>(
+    cli: &Cli,
+    args: &AnalyzeClusteringArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = crate::science::ClusteringAnalysisOptions {
+        workspace: workspace_path,
+        candidate_type: args.candidate_type.clone(),
+        status: args.status.clone(),
+        limit: args.limit,
+        detailed: args.detailed,
+    };
+    let report = crate::science::analyze_clustering(&options);
+    let data = report.data_json();
+    let success = report.degradations.is_empty();
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary());
+        }
+        output::Renderer::Toon => {
+            write_stdout(
+                stdout,
+                &(output::render_toon_from_json(
+                    &serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V1,
+                        "success": success,
+                        "data": data,
+                    })
+                    .to_string(),
+                ) + "\n"),
+            );
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            if success {
+                write_stdout(
+                    stdout,
+                    &(serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V1,
+                        "success": true,
+                        "data": data,
+                    })
+                    .to_string()
+                        + "\n"),
+                );
+            } else {
+                write_stdout(
+                    stdout,
+                    &(serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V1,
+                        "success": false,
+                        "data": data,
+                        "degraded": report.degradations.iter().map(|d| {
+                            serde_json::json!({
+                                "code": d.code,
+                                "message": d.message,
+                                "severity": d.severity,
+                                "repair": d.repair,
+                            })
+                        }).collect::<Vec<_>>(),
+                    })
+                    .to_string()
+                        + "\n"),
+                );
+            }
+        }
+    }
+    if success {
+        ProcessExitCode::Success
+    } else {
+        ProcessExitCode::UnsatisfiedDegradedMode
     }
 }
 
@@ -8378,6 +8580,300 @@ where
         let _ = writeln!(stderr, "\nNext:\n  {}", error.repair);
     }
     ProcessExitCode::Usage
+}
+
+// ============================================================================
+// EE-RATIONALE-TRACE-001: Rationale Trace Handlers
+// ============================================================================
+
+fn handle_rationale_attach<W, E>(
+    cli: &Cli,
+    args: &RationaleAttachArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::models::{RationaleTrace, RationaleTraceKind};
+
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let kind = match args.kind.parse::<RationaleTraceKind>() {
+        Ok(k) => k,
+        Err(_) => {
+            let domain_error = DomainError::Usage {
+                message: format!("Invalid rationale kind '{}'", args.kind),
+                repair: Some("Use one of: hypothesis, decision, question, rejected_alternative, observation, conclusion".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let valid_target_types = ["memory", "context_pack", "recorder_run", "recorder_event", "causal_trace"];
+    if !valid_target_types.contains(&args.target_type.as_str()) {
+        let domain_error = DomainError::Usage {
+            message: format!("Invalid target type '{}'", args.target_type),
+            repair: Some("Use one of: memory, context_pack, recorder_run, recorder_event, causal_trace".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let trace_id = format!("rat_{}", uuid::Uuid::now_v7());
+
+    let mut trace = match RationaleTrace::new(
+        &trace_id,
+        kind,
+        &args.author,
+        &args.summary,
+        &now,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            let domain_error = DomainError::Usage {
+                message: format!("Invalid rationale trace: {e}"),
+                repair: Some("Ensure summary does not contain private chain-of-thought markers or secrets".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    if let Some(confidence) = args.confidence {
+        trace.confidence_basis_points = confidence.min(10000);
+    }
+
+    if let Some(ref uris) = args.evidence_uris {
+        trace.evidence_uris = uris.split(',').map(|s| s.trim().to_string()).collect();
+    }
+
+    match args.target_type.as_str() {
+        "memory" => trace.linked_memory_ids.push(args.target_id.clone()),
+        "context_pack" => trace.linked_context_pack_ids.push(args.target_id.clone()),
+        "recorder_run" => trace.linked_recorder_run_ids.push(args.target_id.clone()),
+        "recorder_event" => trace.linked_recorder_event_ids.push(args.target_id.clone()),
+        "causal_trace" => trace.linked_causal_trace_ids.push(args.target_id.clone()),
+        _ => {}
+    }
+
+    if args.dry_run {
+        let output = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": true,
+            "dryRun": true,
+            "data": {
+                "traceId": trace_id,
+                "kind": args.kind,
+                "targetType": args.target_type,
+                "targetId": args.target_id,
+                "author": args.author,
+                "summary": args.summary,
+            }
+        });
+        return write_stdout(stdout, &(output.to_string() + "\n"));
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(c) => c,
+        Err(e) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {e}"),
+                repair: Some("ee init --workspace .".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let workspace_id = crate::core::curate::stable_workspace_id(&workspace_path);
+
+    if let Err(e) = conn.insert_rationale_trace(&workspace_id, &trace) {
+        let domain_error = DomainError::Storage {
+            message: format!("Failed to store rationale trace: {e}"),
+            repair: Some("ee db migrate".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let output = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "traceId": trace_id,
+            "kind": args.kind,
+            "targetType": args.target_type,
+            "targetId": args.target_id,
+            "author": args.author,
+            "createdAt": now,
+        }
+    });
+    write_stdout(stdout, &(output.to_string() + "\n"))
+}
+
+fn handle_rationale_show<W, E>(
+    cli: &Cli,
+    args: &RationaleShowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(c) => c,
+        Err(e) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {e}"),
+                repair: Some("ee init --workspace .".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    match conn.get_rationale_trace(&args.trace_id) {
+        Ok(Some(stored)) => {
+            let output = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": {
+                    "traceId": stored.trace.trace_id,
+                    "workspaceId": stored.workspace_id,
+                    "kind": stored.trace.kind.as_str(),
+                    "author": stored.trace.author,
+                    "summary": stored.trace.summary,
+                    "posture": stored.trace.posture.as_str(),
+                    "confidenceBasisPoints": stored.trace.confidence_basis_points,
+                    "visibility": stored.trace.visibility.as_str(),
+                    "evidenceUris": stored.trace.evidence_uris,
+                    "linkedMemoryIds": stored.trace.linked_memory_ids,
+                    "linkedContextPackIds": stored.trace.linked_context_pack_ids,
+                    "linkedRecorderRunIds": stored.trace.linked_recorder_run_ids,
+                    "linkedRecorderEventIds": stored.trace.linked_recorder_event_ids,
+                    "linkedCausalTraceIds": stored.trace.linked_causal_trace_ids,
+                    "createdAt": stored.trace.created_at,
+                }
+            });
+            write_stdout(stdout, &(output.to_string() + "\n"))
+        }
+        Ok(None) => {
+            let domain_error = DomainError::NotFound {
+                resource: "rationale_trace".to_string(),
+                id: args.trace_id.clone(),
+                repair: Some("ee rationale list --target-type memory --target-id <id>".to_string()),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+        Err(e) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to query rationale trace: {e}"),
+                repair: Some("ee db migrate".to_string()),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_rationale_list<W, E>(
+    cli: &Cli,
+    args: &RationaleListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(c) => c,
+        Err(e) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {e}"),
+                repair: Some("ee init --workspace .".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let workspace_id = crate::core::curate::stable_workspace_id(&workspace_path);
+
+    match conn.list_rationale_traces_for_target(&workspace_id, &args.target_type, &args.target_id) {
+        Ok(traces) => {
+            let trace_summaries: Vec<_> = traces
+                .iter()
+                .map(|stored| {
+                    serde_json::json!({
+                        "traceId": stored.trace.trace_id,
+                        "kind": stored.trace.kind.as_str(),
+                        "author": stored.trace.author,
+                        "summary": stored.trace.summary,
+                        "posture": stored.trace.posture.as_str(),
+                        "confidenceBasisPoints": stored.trace.confidence_basis_points,
+                        "createdAt": stored.trace.created_at,
+                    })
+                })
+                .collect();
+
+            let output = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": {
+                    "targetType": args.target_type,
+                    "targetId": args.target_id,
+                    "count": trace_summaries.len(),
+                    "traces": trace_summaries,
+                }
+            });
+            write_stdout(stdout, &(output.to_string() + "\n"))
+        }
+        Err(e) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to list rationale traces: {e}"),
+                repair: Some("ee db migrate".to_string()),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
 }
 
 // ============================================================================
@@ -14222,6 +14718,7 @@ impl NormalizedInvocation {
                 Command::Analyze(analyze) => match analyze {
                     AnalyzeCommand::ScienceStatus => "analyze science-status".to_string(),
                     AnalyzeCommand::Drift(_) => "analyze drift".to_string(),
+                    AnalyzeCommand::Clustering(_) => "analyze clustering".to_string(),
                 },
                 Command::AgentDocs(_) => "agent-docs".to_string(),
                 Command::Audit(audit) => match audit {
@@ -14403,6 +14900,11 @@ impl NormalizedInvocation {
                     RecorderCommand::Finish(_) => "recorder finish".to_string(),
                     RecorderCommand::Tail(_) => "recorder tail".to_string(),
                     RecorderCommand::Import(_) => "recorder import".to_string(),
+                },
+                Command::Rationale(rat) => match rat {
+                    RationaleCommand::Attach(_) => "rationale attach".to_string(),
+                    RationaleCommand::Show(_) => "rationale show".to_string(),
+                    RationaleCommand::List(_) => "rationale list".to_string(),
                 },
                 Command::Remember(_) => "remember".to_string(),
                 Command::Rehearse(rehearse) => match rehearse {
@@ -17064,11 +17566,9 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Success, "status format TOON exit")?;
         ensure_starts_with(&stdout, "schema: ee.response.v1", "status TOON schema")?;
         ensure_contains(&stdout, "command: status", "status TOON command")?;
-        ensure_contains(
-            &stdout,
-            "degraded[3]{code,severity,message}:",
-            "status TOON degradation table",
-        )?;
+        // After fix: gather() inspects current workspace, degradation count varies
+        ensure_contains(&stdout, "degraded[", "status TOON degradation section")?;
+        ensure_contains(&stdout, "{code,severity,message}:", "status TOON degradation columns")?;
         ensure_ends_with(&stdout, '\n', "status TOON trailing newline")?;
         ensure(stderr.is_empty(), "status format TOON stderr must be empty")
     }
