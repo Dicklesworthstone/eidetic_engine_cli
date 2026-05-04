@@ -24,9 +24,10 @@ first, then bring the JSON output to this skill for review.
 
 Before producing any recommendation:
 
-1. Run `ee rehearse plan --workspace <workspace> --json` or equivalent
-2. If unavailable, the skill must refuse with explicit degraded status
-3. Parse the rehearsal JSON for artifacts, mutations, preconditions, and status
+1. Run `ee status --workspace <workspace> --json` to verify workspace readiness
+2. Run `ee rehearse plan --workspace <workspace> --json` or equivalent
+3. If unavailable, the skill must refuse with explicit degraded status
+4. Parse the rehearsal JSON for artifacts, mutations, preconditions, and status
 
 Acceptable input schemas:
 

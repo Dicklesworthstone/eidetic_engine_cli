@@ -26,6 +26,28 @@
       "firstFailureDiagnosis": null
     },
     {
+      "id": "rpr_failed_preconditions",
+      "description": "Rehearsal plan with critical preconditions failing completely.",
+      "taskClass": "failed-preconditions",
+      "eeCommands": [
+        "ee status --workspace /tmp/ee-fixtures/rehearsal-failed --json",
+        "ee rehearse plan --workspace /tmp/ee-fixtures/rehearsal-failed --json"
+      ],
+      "evidenceIds": ["ev.rehearsal.failed.001", "ev.precondition.critical_fail"],
+      "rehearsalArtifactIds": ["reh.plan.fail.001"],
+      "rehearsalArtifactPaths": ["/tmp/ee-fixtures/rehearsal-failed/.ee/rehearsals/reh.plan.fail.001"],
+      "redactionStatus": "passed",
+      "rawSecretsIncluded": false,
+      "promptInjectionQuarantined": false,
+      "degradedCodes": [],
+      "mutationPosture": "dry-run",
+      "expectedPreconditionStatus": "critical_fail",
+      "expectedMutationRiskLevel": "blocked",
+      "expectedGoNoGoClass": "no-go",
+      "expectedEscalationRequired": false,
+      "firstFailureDiagnosis": "critical precondition failed: required resource unavailable"
+    },
+    {
       "id": "rpr_partial_failure",
       "description": "Rehearsal run with some preconditions failing and partial artifacts.",
       "taskClass": "partial-failure",
