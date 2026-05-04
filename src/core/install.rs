@@ -941,10 +941,9 @@ fn extract_with_trusted_tar(
     dest_dir: &Path,
     extract_flag: &str,
 ) -> Result<(), String> {
-    use std::process::Command;
-
     let tar_path = resolve_trusted_tar_binary()?;
-    let status = Command::new(&tar_path)
+    let mut command = trusted_tar_command(&tar_path)?;
+    let status = command
         .arg(extract_flag)
         .arg(archive_path)
         .arg("-C")
@@ -961,6 +960,19 @@ fn extract_with_trusted_tar(
         Err(format!(
             "trusted tar '{}' extraction failed with status {status}",
             tar_path.display()
+        ))
+    }
+}
+
+fn trusted_tar_command(path: &Path) -> Result<std::process::Command, String> {
+    if path == Path::new("/usr/bin/tar") {
+        Ok(std::process::Command::new("/usr/bin/tar"))
+    } else if path == Path::new("/bin/tar") {
+        Ok(std::process::Command::new("/bin/tar"))
+    } else {
+        Err(format!(
+            "tar binary '{}' is not in the trusted command allowlist",
+            path.display()
         ))
     }
 }
@@ -1277,8 +1289,15 @@ mod tests {
     #[test]
     fn trusted_tar_resolver_rejects_path_based_invocation() -> TestResult {
         let candidates = [Path::new("tar")];
-        let error = resolve_trusted_tar_binary_from_candidates(candidates)
-            .expect_err("relative tar candidate must be rejected");
+        let error = match resolve_trusted_tar_binary_from_candidates(candidates) {
+            Ok(path) => {
+                return Err(format!(
+                    "relative tar candidate resolved to {}",
+                    path.display()
+                ));
+            }
+            Err(error) => error,
+        };
 
         ensure(
             error.contains("refusing PATH lookup"),
