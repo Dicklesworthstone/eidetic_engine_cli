@@ -9874,28 +9874,29 @@ mod tests {
 
         let markdown = render_context_response_markdown(&response);
 
-        // Find positions of section headers in the output
+        // Find positions of section headers in the output.
+        // Section names are as_str() values passed through section_display_name().
         let failures_pos = markdown
-            .find("## Failures")
-            .ok_or("Failures section not found in markdown")?;
+            .find("## failures")
+            .ok_or("failures section not found in markdown")?;
         let rules_pos = markdown
-            .find("## Procedural Rules")
-            .ok_or("Procedural Rules section not found in markdown")?;
+            .find("## procedural_rules")
+            .ok_or("procedural_rules section not found in markdown")?;
         let decisions_pos = markdown
-            .find("## Decisions")
-            .ok_or("Decisions section not found in markdown")?;
+            .find("## decisions")
+            .ok_or("decisions section not found in markdown")?;
 
-        // Verify order: Failures < Rules < Decisions (by pack rank, not alphabetically)
-        // Alphabetical would be: Decisions < Failures < Procedural Rules
+        // Verify order: failures < procedural_rules < decisions (by pack rank, not
+        // alphabetically). Alphabetical would be: decisions < failures < procedural_rules
         if failures_pos > rules_pos {
             return Err(format!(
-                "Failures (rank 1) should appear before Procedural Rules (rank 2): {} > {}",
+                "failures (rank 1) should appear before procedural_rules (rank 2): {} > {}",
                 failures_pos, rules_pos
             ));
         }
         if rules_pos > decisions_pos {
             return Err(format!(
-                "Procedural Rules (rank 2) should appear before Decisions (rank 3): {} > {}",
+                "procedural_rules (rank 2) should appear before decisions (rank 3): {} > {}",
                 rules_pos, decisions_pos
             ));
         }
