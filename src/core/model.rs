@@ -366,7 +366,13 @@ fn resolve_workspace_id(
     let path_str = workspace_path.to_string_lossy().into_owned();
     let workspace = connection
         .get_workspace_by_path(&path_str)
-        .map_err(|error| db_error_to_domain(error, "Failed to resolve workspace", Some("ee init --workspace .".to_string())))?;
+        .map_err(|error| {
+            db_error_to_domain(
+                error,
+                "Failed to resolve workspace",
+                Some("ee init --workspace .".to_string()),
+            )
+        })?;
     workspace
         .map(|workspace| workspace.id)
         .ok_or_else(|| DomainError::Configuration {
@@ -381,13 +387,24 @@ pub fn build_model_status_report(
 ) -> Result<ModelStatusReport, DomainError> {
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
     let database_path = resolved_database_path(&workspace_path, options.database_path)?;
-    let connection = DbConnection::open_file(&database_path)
-        .map_err(|error| db_error_to_domain(error, "Failed to open database", Some("ee init --workspace .".to_string())))?;
+    let connection = DbConnection::open_file(&database_path).map_err(|error| {
+        db_error_to_domain(
+            error,
+            "Failed to open database",
+            Some("ee init --workspace .".to_string()),
+        )
+    })?;
     let workspace_id = resolve_workspace_id(&connection, &workspace_path)?;
 
     let entries = connection
         .list_model_registry_entries(&workspace_id)
-        .map_err(|error| db_error_to_domain(error, "Failed to list model registry entries", Some("ee doctor".to_string())))?;
+        .map_err(|error| {
+            db_error_to_domain(
+                error,
+                "Failed to list model registry entries",
+                Some("ee doctor".to_string()),
+            )
+        })?;
 
     let registered_count = entries.len();
     let available_count = entries
@@ -443,13 +460,24 @@ pub fn build_model_list_report(
 ) -> Result<ModelListReport, DomainError> {
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
     let database_path = resolved_database_path(&workspace_path, options.database_path)?;
-    let connection = DbConnection::open_file(&database_path)
-        .map_err(|error| db_error_to_domain(error, "Failed to open database", Some("ee init --workspace .".to_string())))?;
+    let connection = DbConnection::open_file(&database_path).map_err(|error| {
+        db_error_to_domain(
+            error,
+            "Failed to open database",
+            Some("ee init --workspace .".to_string()),
+        )
+    })?;
     let workspace_id = resolve_workspace_id(&connection, &workspace_path)?;
 
     let entries = connection
         .list_model_registry_entries(&workspace_id)
-        .map_err(|error| db_error_to_domain(error, "Failed to list model registry entries", Some("ee doctor".to_string())))?;
+        .map_err(|error| {
+            db_error_to_domain(
+                error,
+                "Failed to list model registry entries",
+                Some("ee doctor".to_string()),
+            )
+        })?;
 
     let mut degradations = Vec::new();
     if entries.is_empty() {

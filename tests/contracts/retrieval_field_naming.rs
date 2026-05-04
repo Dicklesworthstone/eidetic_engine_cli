@@ -135,7 +135,10 @@ fn retrieval_metrics_data_json_uses_camel_case_fields() -> TestResult {
     }
 
     // Verify expected camelCase keys exist
-    ensure(json.get("requestedLimit").is_some(), "missing requestedLimit")?;
+    ensure(
+        json.get("requestedLimit").is_some(),
+        "missing requestedLimit",
+    )?;
     ensure(json.get("returnedCount").is_some(), "missing returnedCount")?;
     ensure(json.get("errorCount").is_some(), "missing errorCount")?;
     ensure(json.get("elapsedMs").is_some(), "missing elapsedMs")?;
@@ -238,7 +241,7 @@ fn field_naming_contract_is_stable() -> TestResult {
         "errors",
     ];
 
-    let expected_hit_fields = [
+    let _expected_hit_fields = [
         "docId",
         "score",
         "source",
@@ -308,7 +311,8 @@ fn field_naming_contract_is_stable() -> TestResult {
 
     // Optional score fields - present when fixture provides them
     // The fixture above sets fastScore, qualityScore, lexicalScore, rerankScore
-    let fixture_provided_score_fields = ["fastScore", "qualityScore", "lexicalScore", "rerankScore"];
+    let fixture_provided_score_fields =
+        ["fastScore", "qualityScore", "lexicalScore", "rerankScore"];
     for field in fixture_provided_score_fields {
         ensure(
             hit.get(field).is_some(),

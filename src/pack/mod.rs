@@ -1879,7 +1879,8 @@ fn candidate_similarity(candidate: &PackCandidate, selected: &CandidateSignature
     }
 
     // Compute content overlap similarity
-    let content_similarity = content_overlap_similarity(&candidate.content, &selected.normalized_content);
+    let content_similarity =
+        content_overlap_similarity(&candidate.content, &selected.normalized_content);
 
     // Matching diversity_key boosts similarity but doesn't cause full redundancy by itself.
     // Two memories tagged "formatting" with different content are NOT duplicates.
@@ -3104,15 +3105,9 @@ mod tests {
             shared_content,
         )?
         .with_diversity_key("release-formatting");
-        let redundant = candidate_in_section(
-            2,
-            PackSection::ProceduralRules,
-            0.9,
-            0.6,
-            5,
-            shared_content,
-        )?
-        .with_diversity_key("release-formatting");
+        let redundant =
+            candidate_in_section(2, PackSection::ProceduralRules, 0.9, 0.6, 5, shared_content)?
+                .with_diversity_key("release-formatting");
         let evidence = candidate_in_section(
             3,
             PackSection::Evidence,
@@ -3366,19 +3361,25 @@ mod tests {
         // Two unrelated memories with the same diversity_key but different content
         // should NOT be considered redundant. The old code dropped the second one
         // just because they shared a coarse tag like "formatting".
-        let budget = TokenBudget::new(100)
-            .map_err(|error| format!("budget rejected: {error:?}"))?;
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
 
         // Same diversity_key, but completely different content
         let fmt_rule = candidate_with_content(1, 1.0, 0.5, 10, "Run cargo fmt before release.")?
             .with_diversity_key("formatting");
-        let rustfmt_config = candidate_with_content(2, 0.9, 0.5, 10, "Use rustfmt.toml for configuration.")?
-            .with_diversity_key("formatting");
-        let lint_rule = candidate_with_content(3, 0.8, 0.5, 10, "Run clippy with warnings as errors.")?
-            .with_diversity_key("linting");
+        let rustfmt_config =
+            candidate_with_content(2, 0.9, 0.5, 10, "Use rustfmt.toml for configuration.")?
+                .with_diversity_key("formatting");
+        let lint_rule =
+            candidate_with_content(3, 0.8, 0.5, 10, "Run clippy with warnings as errors.")?
+                .with_diversity_key("linting");
 
-        let draft = assemble_draft("prepare release", budget, vec![fmt_rule, rustfmt_config, lint_rule])
-            .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let draft = assemble_draft(
+            "prepare release",
+            budget,
+            vec![fmt_rule, rustfmt_config, lint_rule],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
 
         // All three should be selected because they have different content
         // (order may vary due to MMR similarity penalties, but none should be dropped)
@@ -3402,8 +3403,9 @@ mod tests {
         // but content differs.
         let first = candidate_with_content(1, 1.0, 0.5, 10, "Run cargo fmt before release.")?
             .with_diversity_key("formatting");
-        let unrelated = candidate_with_content(2, 0.9, 0.5, 10, "Use rustfmt.toml for configuration.")?
-            .with_diversity_key("formatting");
+        let unrelated =
+            candidate_with_content(2, 0.9, 0.5, 10, "Use rustfmt.toml for configuration.")?
+                .with_diversity_key("formatting");
 
         let first_sig = CandidateSignature::from(&first);
         let similarity = candidate_similarity(&unrelated, &first_sig);
