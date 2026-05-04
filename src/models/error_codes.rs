@@ -281,6 +281,34 @@ pub const MIGRATION_FAILED: ErrorCode = ErrorCode {
     default_repair: Some("ee init --workspace . --repair-plan --json"),
 };
 
+pub const RUNTIME_UNAVAILABLE: ErrorCode = ErrorCode {
+    id: "EE-E505",
+    category: ErrorCategory::UnsatisfiedDegradedMode,
+    description: "Asupersync runtime initialization failed",
+    default_repair: None,
+};
+
+pub const CASS_NOT_FOUND: ErrorCode = ErrorCode {
+    id: "EE-E506",
+    category: ErrorCategory::UnsatisfiedDegradedMode,
+    description: "CASS binary not found in PATH",
+    default_repair: Some("Ensure cass is installed and in PATH"),
+};
+
+pub const CASS_DEGRADED: ErrorCode = ErrorCode {
+    id: "EE-E507",
+    category: ErrorCategory::UnsatisfiedDegradedMode,
+    description: "CASS binary found but capabilities are limited",
+    default_repair: Some("cass health"),
+};
+
+pub const CASS_UNAVAILABLE: ErrorCode = ErrorCode {
+    id: "EE-E508",
+    category: ErrorCategory::UnsatisfiedDegradedMode,
+    description: "CASS integration is unavailable",
+    default_repair: Some("Check cass installation"),
+};
+
 /// All registered error codes for enumeration.
 pub const ALL_ERROR_CODES: &[ErrorCode] = &[
     // Usage
@@ -319,6 +347,11 @@ pub const ALL_ERROR_CODES: &[ErrorCode] = &[
     // Migration
     MIGRATION_REQUIRED,
     MIGRATION_FAILED,
+    // Runtime and CASS
+    RUNTIME_UNAVAILABLE,
+    CASS_NOT_FOUND,
+    CASS_DEGRADED,
+    CASS_UNAVAILABLE,
 ];
 
 /// Look up an error code by its stable ID (e.g., "EE-E001").

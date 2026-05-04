@@ -6,7 +6,7 @@
 //! The `--fix-plan` flag (EE-241) outputs a structured repair plan that
 //! agents can execute step-by-step.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::core::agent_detect::{AgentInventoryReport, AgentInventoryStatus};
 use crate::db::{
@@ -15,6 +15,10 @@ use crate::db::{
 };
 use crate::models::TrustClass;
 use crate::models::error_codes::{self, ErrorCode};
+
+use super::build_cli_runtime;
+use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
+use super::status::{default_workspace_path, probe_cass_capability};
 
 pub const DEPENDENCY_DIAGNOSTICS_SCHEMA_V1: &str = "ee.diag.dependencies.v1";
 pub const FRANKEN_HEALTH_SCHEMA_V1: &str = "ee.doctor.franken_health.v1";
@@ -123,11 +127,22 @@ impl DoctorReport {
     /// Run all health checks and return a report.
     #[must_use]
     pub fn gather() -> Self {
+        let workspace_path = default_workspace_path();
+        Self::gather_with_workspace(workspace_path.as_deref())
+    }
+
+    #[must_use]
+    pub fn gather_for_workspace(workspace_path: &Path) -> Self {
+        Self::gather_with_workspace(Some(workspace_path))
+    }
+
+    #[must_use]
+    pub fn gather_with_workspace(workspace_path: Option<&Path>) -> Self {
         let checks = vec![
             check_runtime(),
-            check_workspace(),
-            check_database(),
-            check_search_index(),
+            check_workspace(workspace_path),
+            check_database(workspace_path),
+            check_search_index(workspace_path),
             check_cass(),
         ];
 
@@ -1250,35 +1265,149 @@ impl FrankenHealthSummary {
 }
 
 fn check_runtime() -> CheckResult {
-    CheckResult::ok("runtime", "Asupersync runtime is available.")
+    match build_cli_runtime() {
+        Ok(_runtime) => CheckResult::ok("runtime", "Asupersync runtime initialized successfully."),
+        Err(error) => CheckResult::error(
+            "runtime",
+            format!("Asupersync runtime initialization failed: {error}"),
+            error_codes::RUNTIME_UNAVAILABLE,
+        ),
+    }
 }
 
-fn check_workspace() -> CheckResult {
-    CheckResult::warning(
-        "workspace",
-        "No workspace specified. Use --workspace or run from a workspace directory.",
-        error_codes::WORKSPACE_NOT_SPECIFIED,
-    )
+fn check_workspace(workspace_path: Option<&Path>) -> CheckResult {
+    let Some(workspace_path) = workspace_path else {
+        return CheckResult::warning(
+            "workspace",
+            "No workspace path was provided for inspection.",
+            error_codes::WORKSPACE_NOT_SPECIFIED,
+        );
+    };
+
+    if workspace_path.join(".ee").exists() {
+        CheckResult::ok(
+            "workspace",
+            format!("Workspace inspected at {}.", workspace_path.display()),
+        )
+    } else {
+        CheckResult::warning(
+            "workspace",
+            format!(
+                "Selected workspace has no .ee state at {}.",
+                workspace_path.display()
+            ),
+            error_codes::WORKSPACE_NOT_SPECIFIED,
+        )
+    }
 }
 
-fn check_database() -> CheckResult {
-    CheckResult::warning(
-        "database",
-        "Database subsystem is not yet implemented.",
-        error_codes::DATABASE_NOT_FOUND,
-    )
+fn check_database(workspace_path: Option<&Path>) -> CheckResult {
+    let Some(workspace_path) = workspace_path else {
+        return CheckResult::warning(
+            "database",
+            "Database could not be inspected without a workspace path.",
+            error_codes::DATABASE_NOT_FOUND,
+        );
+    };
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return CheckResult::warning(
+            "database",
+            format!("Database file not found at {}.", database_path.display()),
+            error_codes::DATABASE_NOT_FOUND,
+        );
+    }
+
+    match DbConnection::open_file(&database_path).and_then(|connection| {
+        connection.ping()?;
+        connection.needs_migration()
+    }) {
+        Ok(false) => CheckResult::ok(
+            "database",
+            format!(
+                "Database opened and schema is current at {}.",
+                database_path.display()
+            ),
+        ),
+        Ok(true) => CheckResult::warning(
+            "database",
+            "Database opened but schema migrations are pending.",
+            error_codes::MIGRATION_REQUIRED,
+        ),
+        Err(error) => CheckResult::error(
+            "database",
+            format!("Database readiness check failed: {error}"),
+            error_codes::DATABASE_CORRUPTED,
+        ),
+    }
 }
 
-fn check_search_index() -> CheckResult {
-    CheckResult::warning(
-        "search_index",
-        "Search index subsystem is not yet implemented.",
-        error_codes::INDEX_NOT_FOUND,
-    )
+fn check_search_index(workspace_path: Option<&Path>) -> CheckResult {
+    let Some(workspace_path) = workspace_path else {
+        return CheckResult::warning(
+            "search_index",
+            "Search index could not be inspected without a workspace path.",
+            error_codes::INDEX_NOT_FOUND,
+        );
+    };
+    let options = IndexStatusOptions {
+        workspace_path: workspace_path.to_path_buf(),
+        database_path: None,
+        index_dir: None,
+    };
+
+    match get_index_status(&options) {
+        Ok(report) => match report.health {
+            IndexHealth::Ready => CheckResult::ok(
+                "search_index",
+                format!("Search index is ready at {}.", report.index_dir.display()),
+            ),
+            IndexHealth::Stale => CheckResult::warning(
+                "search_index",
+                "Search index exists but is stale.",
+                error_codes::INDEX_STALE,
+            ),
+            IndexHealth::Missing => CheckResult::warning(
+                "search_index",
+                "Search index is missing for the current workspace.",
+                error_codes::INDEX_NOT_FOUND,
+            ),
+            IndexHealth::Corrupt => CheckResult::error(
+                "search_index",
+                "Search index failed integrity checks.",
+                error_codes::INDEX_CORRUPTED,
+            ),
+        },
+        Err(error) => CheckResult::warning(
+            "search_index",
+            format!("Search index readiness check failed: {error}"),
+            error_codes::INDEX_NOT_FOUND,
+        ),
+    }
 }
 
 fn check_cass() -> CheckResult {
-    CheckResult::ok("cass", "CASS binary discovery is available.")
+    use crate::models::CapabilityStatus;
+    match probe_cass_capability() {
+        CapabilityStatus::Ready => {
+            CheckResult::ok("cass", "CASS binary discovered and accessible.")
+        }
+        CapabilityStatus::Degraded => CheckResult::warning(
+            "cass",
+            "CASS binary found but capabilities are limited.",
+            error_codes::CASS_DEGRADED,
+        ),
+        CapabilityStatus::Pending => CheckResult::warning(
+            "cass",
+            "CASS binary not found in PATH.",
+            error_codes::CASS_NOT_FOUND,
+        ),
+        CapabilityStatus::Unimplemented => CheckResult::warning(
+            "cass",
+            "CASS integration is unavailable.",
+            error_codes::CASS_UNAVAILABLE,
+        ),
+    }
 }
 
 fn count_status(entries: &[DependencyContractEntry], status: &str) -> usize {
@@ -1621,7 +1750,7 @@ mod tests {
 
     #[test]
     fn doctor_report_gather_returns_checks() -> TestResult {
-        let report = DoctorReport::gather();
+        let report = DoctorReport::gather_with_workspace(None);
 
         ensure(
             report.checks.len() >= 5,
@@ -1642,7 +1771,7 @@ mod tests {
 
     #[test]
     fn doctor_report_overall_healthy_reflects_all_checks() -> TestResult {
-        let report = DoctorReport::gather();
+        let report = DoctorReport::gather_with_workspace(None);
 
         let has_issues = report.checks.iter().any(|c| !c.severity.is_healthy());
 
@@ -1676,7 +1805,7 @@ mod tests {
 
     #[test]
     fn fix_plan_contains_only_fixable_issues() -> TestResult {
-        let report = DoctorReport::gather();
+        let report = DoctorReport::gather_with_workspace(None);
         let plan = report.to_fix_plan();
 
         for step in &plan.steps {
@@ -1693,7 +1822,7 @@ mod tests {
 
     #[test]
     fn fix_plan_steps_are_ordered() -> TestResult {
-        let report = DoctorReport::gather();
+        let report = DoctorReport::gather_with_workspace(None);
         let plan = report.to_fix_plan();
 
         for (idx, step) in plan.steps.iter().enumerate() {
@@ -1705,7 +1834,7 @@ mod tests {
 
     #[test]
     fn fix_plan_counts_match() -> TestResult {
-        let report = DoctorReport::gather();
+        let report = DoctorReport::gather_with_workspace(None);
         let plan = report.to_fix_plan();
 
         let unhealthy_count = report
@@ -1724,6 +1853,33 @@ mod tests {
         ensure(plan.steps.len(), fixable_count, "steps count matches")?;
 
         Ok(())
+    }
+
+    #[test]
+    fn doctor_report_uses_explicit_workspace_path() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(dir.path().join(".ee"))
+            .map_err(|error| format!("failed to create .ee dir: {error}"))?;
+
+        let report = DoctorReport::gather_for_workspace(dir.path());
+        let workspace = report
+            .checks
+            .iter()
+            .find(|check| check.name == "workspace")
+            .ok_or_else(|| "workspace check missing".to_string())?;
+
+        ensure(
+            workspace.severity,
+            CheckSeverity::Ok,
+            "workspace check should inspect selected path",
+        )?;
+        ensure(
+            workspace
+                .message
+                .contains(&dir.path().display().to_string()),
+            true,
+            "workspace message includes selected path",
+        )
     }
 
     #[test]
