@@ -1,0 +1,54 @@
+[package]
+name = "ee-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+ee = { path = ".." }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "jsonl_header"
+path = "fuzz_targets/jsonl_header.rs"
+test = false
+doc = false
+bench = false
+
+[patch.crates-io]
+fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
+fsqlite-core = { path = "/data/projects/frankensqlite/crates/fsqlite-core" }
+fsqlite-error = { path = "/data/projects/frankensqlite/crates/fsqlite-error" }
+fsqlite-types = { path = "/data/projects/frankensqlite/crates/fsqlite-types" }
+fsqlite-func = { path = "/data/projects/frankensqlite/crates/fsqlite-func" }
+fsqlite-ext-fts5 = { path = "/data/projects/frankensqlite/crates/fsqlite-ext-fts5" }
+fsqlite-ext-json = { path = "/data/projects/frankensqlite/crates/fsqlite-ext-json" }
+fsqlite-ast = { path = "/data/projects/frankensqlite/crates/fsqlite-ast" }
+fsqlite-btree = { path = "/data/projects/frankensqlite/crates/fsqlite-btree" }
+fsqlite-pager = { path = "/data/projects/frankensqlite/crates/fsqlite-pager" }
+fsqlite-parser = { path = "/data/projects/frankensqlite/crates/fsqlite-parser" }
+fsqlite-planner = { path = "/data/projects/frankensqlite/crates/fsqlite-planner" }
+fsqlite-vdbe = { path = "/data/projects/frankensqlite/crates/fsqlite-vdbe" }
+fsqlite-vfs = { path = "/data/projects/frankensqlite/crates/fsqlite-vfs" }
+fsqlite-wal = { path = "/data/projects/frankensqlite/crates/fsqlite-wal" }
+fsqlite-mvcc = { path = "/data/projects/frankensqlite/crates/fsqlite-mvcc" }
+fsqlite-observability = { path = "/data/projects/frankensqlite/crates/fsqlite-observability" }
+frankensearch = { path = "/data/projects/frankensearch/frankensearch" }
+frankensearch-core = { path = "/data/projects/frankensearch/crates/frankensearch-core" }
+frankensearch-embed = { path = "/data/projects/frankensearch/crates/frankensearch-embed" }
+frankensearch-index = { path = "/data/projects/frankensearch/crates/frankensearch-index" }
+frankensearch-lexical = { path = "/data/projects/frankensearch/crates/frankensearch-lexical" }
+frankensearch-fusion = { path = "/data/projects/frankensearch/crates/frankensearch-fusion" }
+frankensearch-rerank = { path = "/data/projects/frankensearch/crates/frankensearch-rerank" }
+frankensearch-storage = { path = "/data/projects/frankensearch/crates/frankensearch-storage" }
+frankensearch-durability = { path = "/data/projects/frankensearch/crates/frankensearch-durability" }
+fnx-runtime = { path = "/data/projects/franken_networkx/crates/fnx-runtime" }
+fnx-classes = { path = "/data/projects/franken_networkx/crates/fnx-classes" }
+fnx-algorithms = { path = "/data/projects/franken_networkx/crates/fnx-algorithms" }
+fnx-views = { path = "/data/projects/franken_networkx/crates/fnx-views" }
+fnx-dispatch = { path = "/data/projects/franken_networkx/crates/fnx-dispatch" }
+fnx-convert = { path = "/data/projects/franken_networkx/crates/fnx-convert" }
+fnx-generators = { path = "/data/projects/franken_networkx/crates/fnx-generators" }
