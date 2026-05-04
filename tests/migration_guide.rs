@@ -87,10 +87,15 @@ fn migration_guide_documents_command_families() {
         // Look for the command family in headers or code blocks
         let patterns = [
             format!("`{}`", family),
-            format!("### {}", family.chars().next().unwrap().to_uppercase().to_string() + &family[1..]),
+            format!(
+                "### {}",
+                family.chars().next().unwrap().to_uppercase().to_string() + &family[1..]
+            ),
             format!("`{} ", family),
         ];
-        let found = patterns.iter().any(|p| MIGRATION_GUIDE.contains(p.as_str()));
+        let found = patterns
+            .iter()
+            .any(|p| MIGRATION_GUIDE.contains(p.as_str()));
         if !found {
             missing.push(*family);
         }
@@ -192,15 +197,14 @@ fn migration_guide_states_no_features_dropped() {
 
 #[test]
 fn migration_guide_explains_split_responsibilities() {
-    let required_concepts = [
-        "Mechanical CLI",
-        "project-local skill",
-        "degraded",
-    ];
+    let required_concepts = ["Mechanical CLI", "project-local skill", "degraded"];
 
     let mut missing = Vec::new();
     for concept in required_concepts {
-        if !MIGRATION_GUIDE.to_lowercase().contains(&concept.to_lowercase()) {
+        if !MIGRATION_GUIDE
+            .to_lowercase()
+            .contains(&concept.to_lowercase())
+        {
             missing.push(concept);
         }
     }

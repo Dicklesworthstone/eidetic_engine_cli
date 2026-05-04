@@ -92,8 +92,20 @@ pub const SCIENCE_STATUS_SCHEMA_V1: &str = "ee.science.status.v1";
 /// Stable schema for clustering diagnostics over consolidation candidates.
 pub const CLUSTERING_DIAGNOSTICS_SCHEMA_V1: &str = "ee.science.clustering_diagnostics.v1";
 
+/// Stable schema for drift analysis reports over frozen evaluation snapshots.
+pub const DRIFT_ANALYSIS_SCHEMA_V1: &str = "ee.science.drift_analysis.v1";
+
+/// Degradation code for drift analysis unavailable.
+pub const DEGRADATION_CODE_DRIFT_UNAVAILABLE: &str = "drift_analysis_unavailable";
+
+/// Degradation code for missing evaluation snapshots.
+pub const DEGRADATION_CODE_NO_SNAPSHOTS: &str = "drift_no_evaluation_snapshots";
+
 /// Canonical command path for science status diagnostics.
 pub const SCIENCE_STATUS_COMMAND: &str = "analyze science-status";
+
+/// Canonical command path for drift analysis.
+pub const DRIFT_ANALYSIS_COMMAND: &str = "analyze drift";
 
 /// Feature flag that enables science analytics.
 pub const SCIENCE_ANALYTICS_FEATURE: &str = "science-analytics";
@@ -356,6 +368,221 @@ impl ScienceDegradation {
             "repair": self.repair,
         })
     }
+}
+
+// ============================================================================
+// Drift Analysis (EE-179)
+// ============================================================================
+
+/// Options for drift analysis over frozen evaluation snapshots.
+#[derive(Clone, Debug, Default)]
+pub struct DriftAnalysisOptions {
+    /// Path to the baseline evaluation snapshot.
+    pub baseline_snapshot: Option<std::path::PathBuf>,
+    /// Path to the current evaluation snapshot for comparison.
+    pub current_snapshot: Option<std::path::PathBuf>,
+    /// Workspace path for snapshot discovery.
+    pub workspace: std::path::PathBuf,
+    /// Drift detection threshold (0.0-1.0). Changes below this are not flagged.
+    pub threshold: f64,
+    /// Include metric-level detail in the report.
+    pub detailed: bool,
+}
+
+/// Report from analyzing drift between frozen evaluation snapshots.
+#[derive(Clone, Debug)]
+pub struct DriftAnalysisReport {
+    /// Versioned schema for the report.
+    pub schema: &'static str,
+    /// Canonical command path.
+    pub command: &'static str,
+    /// Whether drift was detected above the threshold.
+    pub drift_detected: bool,
+    /// Overall drift magnitude (0.0-1.0).
+    pub drift_magnitude: f64,
+    /// Drift detection threshold used.
+    pub threshold: f64,
+    /// Baseline snapshot identifier.
+    pub baseline_id: Option<String>,
+    /// Current snapshot identifier.
+    pub current_id: Option<String>,
+    /// Individual metric drift observations.
+    pub metric_drifts: Vec<MetricDrift>,
+    /// Degradations encountered during analysis.
+    pub degradations: Vec<DriftDegradation>,
+    /// Recommended next actions.
+    pub next_actions: Vec<String>,
+    /// Report generation timestamp.
+    pub generated_at: String,
+}
+
+impl DriftAnalysisReport {
+    /// Build a degraded report when snapshots are unavailable.
+    #[must_use]
+    pub fn unavailable(options: &DriftAnalysisOptions) -> Self {
+        Self {
+            schema: DRIFT_ANALYSIS_SCHEMA_V1,
+            command: DRIFT_ANALYSIS_COMMAND,
+            drift_detected: false,
+            drift_magnitude: 0.0,
+            threshold: options.threshold,
+            baseline_id: None,
+            current_id: None,
+            metric_drifts: Vec::new(),
+            degradations: vec![DriftDegradation {
+                code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+                message: "No frozen evaluation snapshots found for drift analysis.".to_string(),
+                severity: "high".to_string(),
+                repair: "Run ee eval run --workspace . --json to create evaluation snapshots."
+                    .to_string(),
+            }],
+            next_actions: vec![
+                "ee eval run --workspace . --json".to_string(),
+                "ee analyze science-status --json".to_string(),
+            ],
+            generated_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// Stable machine-readable payload.
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": self.schema,
+            "command": self.command,
+            "driftDetected": self.drift_detected,
+            "driftMagnitude": self.drift_magnitude,
+            "threshold": self.threshold,
+            "baselineId": self.baseline_id,
+            "currentId": self.current_id,
+            "metricDrifts": self.metric_drifts.iter().map(MetricDrift::data_json).collect::<Vec<_>>(),
+            "degradations": self.degradations.iter().map(DriftDegradation::data_json).collect::<Vec<_>>(),
+            "nextActions": self.next_actions,
+            "generatedAt": self.generated_at,
+        })
+    }
+
+    /// Human-readable summary.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("ee {}\n\n", self.command));
+        out.push_str(&format!(
+            "Drift detected: {} (magnitude: {:.3}, threshold: {:.3})\n",
+            self.drift_detected, self.drift_magnitude, self.threshold
+        ));
+        if let Some(ref baseline) = self.baseline_id {
+            out.push_str(&format!("Baseline: {baseline}\n"));
+        }
+        if let Some(ref current) = self.current_id {
+            out.push_str(&format!("Current: {current}\n"));
+        }
+        if !self.metric_drifts.is_empty() {
+            out.push_str("\nMetric drifts:\n");
+            for drift in &self.metric_drifts {
+                out.push_str(&format!(
+                    "  - {}: {:.3} -> {:.3} (delta: {:.3})\n",
+                    drift.metric_name, drift.baseline_value, drift.current_value, drift.delta
+                ));
+            }
+        }
+        if !self.degradations.is_empty() {
+            out.push_str("\nDegradations:\n");
+            for degradation in &self.degradations {
+                out.push_str(&format!(
+                    "  - [{}] {} -> {}\n",
+                    degradation.code, degradation.message, degradation.repair
+                ));
+            }
+        }
+        if !self.next_actions.is_empty() {
+            out.push_str("\nNext:\n");
+            for action in &self.next_actions {
+                out.push_str(&format!("  - {action}\n"));
+            }
+        }
+        out
+    }
+}
+
+/// Drift observation for a single metric.
+#[derive(Clone, Debug)]
+pub struct MetricDrift {
+    /// Metric identifier.
+    pub metric_name: String,
+    /// Value in baseline snapshot.
+    pub baseline_value: f64,
+    /// Value in current snapshot.
+    pub current_value: f64,
+    /// Absolute difference.
+    pub delta: f64,
+    /// Whether this metric's drift exceeds the threshold.
+    pub exceeds_threshold: bool,
+}
+
+impl MetricDrift {
+    #[must_use]
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "metricName": self.metric_name,
+            "baselineValue": self.baseline_value,
+            "currentValue": self.current_value,
+            "delta": self.delta,
+            "exceedsThreshold": self.exceeds_threshold,
+        })
+    }
+}
+
+/// Degradation entry for drift analysis.
+#[derive(Clone, Debug)]
+pub struct DriftDegradation {
+    pub code: String,
+    pub message: String,
+    pub severity: String,
+    pub repair: String,
+}
+
+impl DriftDegradation {
+    #[must_use]
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "code": self.code,
+            "message": self.message,
+            "severity": self.severity,
+            "repair": self.repair,
+        })
+    }
+}
+
+/// Analyze drift between frozen evaluation snapshots.
+///
+/// Returns a degraded report if snapshots are unavailable.
+#[must_use]
+pub fn analyze_drift(options: &DriftAnalysisOptions) -> DriftAnalysisReport {
+    // Check if science analytics is available
+    if !is_available() {
+        return DriftAnalysisReport {
+            schema: DRIFT_ANALYSIS_SCHEMA_V1,
+            command: DRIFT_ANALYSIS_COMMAND,
+            drift_detected: false,
+            drift_magnitude: 0.0,
+            threshold: options.threshold,
+            baseline_id: None,
+            current_id: None,
+            metric_drifts: Vec::new(),
+            degradations: vec![DriftDegradation {
+                code: DEGRADATION_CODE_NOT_COMPILED.to_string(),
+                message: "Science analytics not compiled into this binary.".to_string(),
+                severity: "high".to_string(),
+                repair: "Rebuild ee with --features science-analytics.".to_string(),
+            }],
+            next_actions: vec!["Rebuild ee with --features science-analytics.".to_string()],
+            generated_at: chrono::Utc::now().to_rfc3339(),
+        };
+    }
+
+    // For now, return degraded until evaluation snapshots are implemented
+    DriftAnalysisReport::unavailable(options)
 }
 
 #[must_use]

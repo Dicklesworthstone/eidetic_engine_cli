@@ -3252,10 +3252,32 @@ pub enum EvalCommand {
 }
 
 /// Subcommands for `ee analyze`.
-#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+#[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum AnalyzeCommand {
     /// Report science analytics availability and degraded posture.
     ScienceStatus,
+    /// Analyze drift between frozen evaluation snapshots.
+    Drift(AnalyzeDriftArgs),
+}
+
+/// Arguments for `ee analyze drift`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct AnalyzeDriftArgs {
+    /// Path to baseline evaluation snapshot file.
+    #[arg(long, value_name = "PATH")]
+    pub baseline: Option<PathBuf>,
+
+    /// Path to current evaluation snapshot file for comparison.
+    #[arg(long, value_name = "PATH")]
+    pub current: Option<PathBuf>,
+
+    /// Drift detection threshold (0.0-1.0). Changes below this are not flagged.
+    #[arg(long, default_value = "0.05", value_name = "THRESHOLD")]
+    pub threshold: f64,
+
+    /// Include metric-level detail in the report.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub detailed: bool,
 }
 
 /// Subcommands for `ee economy`.
@@ -3877,6 +3899,9 @@ where
         }
         Some(Command::Analyze(AnalyzeCommand::ScienceStatus)) => {
             handle_analyze_science_status(&cli, stdout)
+        }
+        Some(Command::Analyze(AnalyzeCommand::Drift(ref args))) => {
+            handle_analyze_drift(&cli, args, stdout)
         }
         Some(Command::Agent(AgentCommand::Status(ref args))) => {
             handle_agent_status(&cli, args, stdout, stderr)
@@ -4910,6 +4935,77 @@ fn science_status_human(report: &crate::science::ScienceStatusReport) -> String 
         }
     }
     out
+}
+
+fn handle_analyze_drift<W>(cli: &Cli, args: &AnalyzeDriftArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = crate::science::DriftAnalysisOptions {
+        baseline_snapshot: args.baseline.clone(),
+        current_snapshot: args.current.clone(),
+        workspace: workspace_path,
+        threshold: args.threshold,
+        detailed: args.detailed,
+    };
+    let report = crate::science::analyze_drift(&options);
+    let data = report.data_json();
+    let success = report.degradations.is_empty();
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(
+                &serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": success,
+                    "data": data,
+                })
+                .to_string(),
+            ) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            if success {
+                write_stdout(
+                    stdout,
+                    &(serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V1,
+                        "success": true,
+                        "data": data,
+                    })
+                    .to_string()
+                        + "\n"),
+                )
+            } else {
+                write_stdout(
+                    stdout,
+                    &(serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V1,
+                        "success": false,
+                        "data": data,
+                        "degraded": report.degradations.iter().map(|d| {
+                            serde_json::json!({
+                                "code": d.code,
+                                "message": d.message,
+                                "severity": d.severity,
+                                "repair": d.repair,
+                            })
+                        }).collect::<Vec<_>>(),
+                    })
+                    .to_string()
+                        + "\n"),
+                );
+                ProcessExitCode::UnsatisfiedDegradedMode
+            }
+        }
+    }
 }
 
 fn handle_backup_create<W, E>(
@@ -13467,6 +13563,7 @@ impl NormalizedInvocation {
                 },
                 Command::Analyze(analyze) => match analyze {
                     AnalyzeCommand::ScienceStatus => "analyze science-status".to_string(),
+                    AnalyzeCommand::Drift(_) => "analyze drift".to_string(),
                 },
                 Command::AgentDocs(_) => "agent-docs".to_string(),
                 Command::Audit(audit) => match audit {
