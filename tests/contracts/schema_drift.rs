@@ -145,6 +145,13 @@ pub const CONTEXT_SCHEMAS: &[SchemaEntry] = &[
         "ee.context.profile.schemas.v1",
         SchemaCategory::Context,
     ),
+    SchemaEntry::new("focus_item", "ee.focus.item.v1", SchemaCategory::Context),
+    SchemaEntry::new("focus_state", "ee.focus.state.v1", SchemaCategory::Context),
+    SchemaEntry::new(
+        "focus_schema_catalog",
+        "ee.focus.schemas.v1",
+        SchemaCategory::Context,
+    ),
     SchemaEntry::new("query", "ee.query.v1", SchemaCategory::Context),
     SchemaEntry::new(
         "search_results",
@@ -743,6 +750,23 @@ mod tests {
         };
         ensure_equal(&entry.name, &"query", "schema name")?;
         ensure_equal(&entry.category, &SchemaCategory::Context, "schema category")
+    }
+
+    #[test]
+    fn focus_schemas_are_registered_as_context_contracts() -> TestResult {
+        let versions: Vec<&str> = CONTEXT_SCHEMAS.iter().map(|s| s.version).collect();
+        ensure(
+            versions.contains(&"ee.focus.item.v1"),
+            "context schemas must include focus item",
+        )?;
+        ensure(
+            versions.contains(&"ee.focus.state.v1"),
+            "context schemas must include focus state",
+        )?;
+        ensure(
+            versions.contains(&"ee.focus.schemas.v1"),
+            "context schemas must include focus schema catalog",
+        )
     }
 
     #[test]

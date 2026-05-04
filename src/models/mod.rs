@@ -11,6 +11,7 @@ pub mod demo;
 pub mod economy;
 pub mod episode;
 pub mod error_codes;
+pub mod focus;
 pub mod id;
 pub mod install;
 pub mod jsonl;
@@ -104,6 +105,11 @@ pub use episode::{
     ParseRegretCategoryError, REGRET_DELTA_SCHEMA_V1, REGRET_ENTRY_ID_PREFIX,
     REGRET_ENTRY_SCHEMA_V1, REGRET_LEDGER_SCHEMA_V1, RegretCategory, RegretDelta, RegretEntry,
     RegretLedger, RegretSummary, TASK_EPISODE_SCHEMA_V1, TaskEpisode,
+};
+pub use focus::{
+    FOCUS_ITEM_SCHEMA_V1, FOCUS_SCHEMA_CATALOG_V1, FOCUS_STATE_SCHEMA_V1, FocusCapacityStatus,
+    FocusFieldSchema, FocusItem, FocusObjectSchema, FocusState, FocusValidationError,
+    focus_schema_catalog_json, focus_schemas,
 };
 pub use id::{
     AuditId, BackupId, CandidateId, ClaimId, DemoId, EXECUTABLE_ID_SCHEMA_V1, EvidenceId,

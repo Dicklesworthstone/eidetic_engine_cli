@@ -1,0 +1,70 @@
+{
+  "schema": "ee.focus.schemas.v1",
+  "schemas": [
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:focus-item:v1",
+      "eeSchema": "ee.focus.item.v1",
+      "kind": "focus_item",
+      "title": "FocusItem",
+      "description": "One explicit memory entry in a passive active-memory set.",
+      "type": "object",
+      "required": [
+        "schema",
+        "memoryId",
+        "pinned",
+        "reason",
+        "provenance",
+        "addedAt"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "memoryId", "type": "string", "required": true, "description": "Focused memory identifier."},
+        {"name": "pinned", "type": "boolean", "required": true, "description": "Whether capacity handling must retain it."},
+        {"name": "reason", "type": "string", "required": true, "description": "Visible reason for including this memory."},
+        {"name": "provenance", "type": "array<string>", "required": true, "description": "Explicit command, handoff, recorder, or user provenance."},
+        {"name": "addedAt", "type": "string", "required": true, "description": "RFC 3339 inclusion timestamp."}
+      ],
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:ee:schema:focus-state:v1",
+      "eeSchema": "ee.focus.state.v1",
+      "kind": "focus_state",
+      "title": "FocusState",
+      "description": "Passive active-memory set scoped to a workspace and optional task context.",
+      "type": "object",
+      "required": [
+        "schema",
+        "workspaceId",
+        "capacity",
+        "itemCount",
+        "pinnedCount",
+        "capacityStatus",
+        "items",
+        "updatedAt",
+        "provenance",
+        "mutationPosture"
+      ],
+      "fields": [
+        {"name": "schema", "type": "string", "required": true, "description": "Schema identifier."},
+        {"name": "workspaceId", "type": "string", "required": true, "description": "Workspace scope identifier."},
+        {"name": "taskFrameId", "type": "string|null", "required": false, "description": "Optional task-frame scope identifier."},
+        {"name": "recorderRunId", "type": "string|null", "required": false, "description": "Optional recorder-run scope identifier."},
+        {"name": "handoffId", "type": "string|null", "required": false, "description": "Optional handoff/resume capsule scope identifier."},
+        {"name": "profile", "type": "string|null", "required": false, "description": "Optional profile or task label for parallel work in one workspace."},
+        {"name": "capacity", "type": "integer", "required": true, "description": "Maximum active-memory set size."},
+        {"name": "itemCount", "type": "integer", "required": true, "description": "Number of focused memories."},
+        {"name": "pinnedCount", "type": "integer", "required": true, "description": "Number of pinned focused memories."},
+        {"name": "capacityStatus", "type": "string", "required": true, "description": "Deterministic capacity posture."},
+        {"name": "focalMemoryId", "type": "string|null", "required": false, "description": "Optional focal memory that must also appear in items."},
+        {"name": "items", "type": "array<focus_item>", "required": true, "description": "Stable active-memory entries sorted by memory ID."},
+        {"name": "updatedAt", "type": "string", "required": true, "description": "RFC 3339 update timestamp."},
+        {"name": "provenance", "type": "array<string>", "required": true, "description": "Explicit state-level provenance."},
+        {"name": "mutationPosture", "type": "string", "required": true, "description": "Always passive_state_only; focus state never executes plans."}
+      ],
+      "additionalProperties": false
+    }
+  ]
+}
