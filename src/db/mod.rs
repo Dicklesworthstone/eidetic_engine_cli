@@ -2272,16 +2272,41 @@ impl DbConnection {
                 continue;
             }
 
-            self.execute_raw_for(DbOperation::Execute, migration.sql)?;
-
             let now = Utc::now().to_rfc3339();
-            let record =
-                MigrationRecord::new(migration.version, migration.name, migration.checksum, now)?;
-            self.record_migration(&record)?;
+            self.apply_migration(migration, &now)?;
             applied.push(migration.version);
         }
 
         Ok(MigrationResult { applied, skipped })
+    }
+
+    fn apply_migration(&self, migration: &Migration, applied_at: &str) -> Result<()> {
+        let record = MigrationRecord::new(
+            migration.version,
+            migration.name,
+            migration.checksum,
+            applied_at,
+        )?;
+
+        self.begin_transaction(IsolationLevel::RepeatableRead)?;
+        let result = (|| {
+            self.execute_raw_for(DbOperation::Execute, migration.sql)?;
+            self.record_migration(&record)
+        })();
+
+        match result {
+            Ok(()) => match self.commit() {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let _ = self.rollback();
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.rollback();
+                Err(error)
+            }
+        }
     }
 
     /// Check if the database schema is up to date.
@@ -8566,7 +8591,7 @@ mod tests {
     use super::{
         CreateArtifactInput, CreateArtifactLinkInput, CreateWorkspaceInput, DatabaseConfig,
         DatabaseLocation, DatabaseOpenMode, DbConnection, DbError, DbOperation,
-        MIGRATION_TABLE_NAME, MigrationRecord, MigrationTableColumn, subsystem_name,
+        MIGRATION_TABLE_NAME, Migration, MigrationRecord, MigrationTableColumn, subsystem_name,
     };
     use crate::models::{
         EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose,
@@ -8637,6 +8662,18 @@ mod tests {
         migrations
             .first()
             .ok_or_else(|| TestFailure::new(format!("{context}: missing first migration")))
+    }
+
+    fn table_exists(
+        connection: &DbConnection,
+        table_name: &str,
+    ) -> std::result::Result<bool, TestFailure> {
+        let rows = connection.query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
+            &[Value::Text(table_name.to_string())],
+        )?;
+
+        Ok(!rows.is_empty())
     }
 
     fn column_signature(columns: &[MigrationTableColumn]) -> Vec<(&str, &str, bool, u32)> {
@@ -9057,6 +9094,65 @@ mod tests {
             &second.skipped().to_vec(),
             &migration_versions(),
             "second run skips all migrations",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn migration_apply_rolls_back_schema_when_record_insert_fails() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_migration_table()?;
+        let existing = MigrationRecord::new(
+            1,
+            "conflicting_migration_name",
+            "blake3:existing",
+            "2026-05-04T10:00:00Z",
+        )?;
+        connection.record_migration(&existing)?;
+
+        let migration_sql = "CREATE TABLE migration_atomic_marker (id TEXT PRIMARY KEY)";
+        let failing = Migration::new(
+            2,
+            "conflicting_migration_name",
+            migration_sql,
+            "blake3:failing",
+        );
+        let failed = connection.apply_migration(&failing, "2026-05-04T10:01:00Z");
+        ensure(
+            matches!(
+                failed,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::RecordMigration,
+                    ..
+                })
+            ),
+            "record insertion failure must surface from migration apply",
+        )?;
+        ensure(
+            !table_exists(&connection, "migration_atomic_marker")?,
+            "DDL from a failed migration record insert must be rolled back",
+        )?;
+        ensure(
+            !connection.has_migration(2)?,
+            "failed migration version must not be recorded",
+        )?;
+
+        let retry = Migration::new(
+            2,
+            "non_conflicting_migration_name",
+            migration_sql,
+            "blake3:retry",
+        );
+        connection.apply_migration(&retry, "2026-05-04T10:02:00Z")?;
+        ensure(
+            table_exists(&connection, "migration_atomic_marker")?,
+            "retry must be able to apply the schema change after rollback",
+        )?;
+        ensure(
+            connection.has_migration(2)?,
+            "retry must record the migration version",
         )?;
 
         connection.close()?;
