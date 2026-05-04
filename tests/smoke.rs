@@ -411,15 +411,15 @@ fn ensure_ends_with(haystack: &str, suffix: char, context: &str) -> TestResult {
 #[cfg(unix)]
 fn parse_logged_response(run: &LoggedEeRun, context: &str) -> Result<serde_json::Value, String> {
     let stderr = String::from_utf8_lossy(&run.output.stderr);
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
     ensure(
         run.output.status.success(),
-        format!("{context} should succeed; stderr: {stderr}"),
+        format!("{context} should succeed; stdout: {stdout}; stderr: {stderr}"),
     )?;
     ensure(
         run.output.stderr.is_empty(),
         format!("{context} stderr must be empty"),
     )?;
-    let stdout = String::from_utf8_lossy(&run.output.stdout);
     ensure_no_ansi(&stdout, context)?;
     let json: serde_json::Value = serde_json::from_slice(&run.output.stdout)
         .map_err(|error| format!("{context} stdout must be JSON: {error}"))?;
@@ -3650,6 +3650,573 @@ fn artifact_registry_registers_indexes_exports_and_supports_context() -> TestRes
     ensure(
         !String::from_utf8_lossy(&support.stdout).contains("redaction-fixture"),
         "support bundle dry-run output must omit raw secret value",
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
+    let scenario = "lp4p2-expanded-memory-composition";
+    let workspace = unique_artifact_dir("lp4p2-memory-composition")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let summary_dir = unique_e2e_dossier_dir(scenario)?;
+    fs::create_dir_all(&summary_dir).map_err(|error| error.to_string())?;
+
+    let logs_dir = workspace.join("logs");
+    fs::create_dir_all(&logs_dir).map_err(|error| error.to_string())?;
+    let artifact_path = logs_dir.join("lp4p2-release.log");
+    fs::write(
+        &artifact_path,
+        [
+            "lp4p2 aggregate release evidence sentinel",
+            "query-file pack persisted from a logged command",
+            "registered artifact should select linked memory",
+        ]
+        .join("\n"),
+    )
+    .map_err(|error| error.to_string())?;
+    let artifact_hash = format!(
+        "blake3:{}",
+        blake3::hash(&fs::read(&artifact_path).map_err(|error| error.to_string())?).to_hex()
+    );
+
+    let mut command_dossiers = Vec::new();
+
+    let init = run_ee_logged(
+        scenario,
+        &["--workspace", workspace_arg.as_str(), "--json", "init"],
+        &workspace,
+        None,
+        "lp4p2-init",
+        "ee.response.v1",
+        None,
+    )?;
+    command_dossiers.push(("init", init.dossier_dir.clone()));
+    let _init_json = parse_logged_response(&init, "lp4p2 init")?;
+
+    let remember_rule = run_ee_logged(
+        scenario,
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "remember",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--tags",
+            "lp4p2,release,composition",
+            "--confidence",
+            "0.92",
+            "--source",
+            "file://logs/lp4p2-release.log",
+            "Use the lp4p2 aggregate release evidence sentinel before shipping memory composition changes.",
+        ],
+        &workspace,
+        None,
+        "lp4p2-remember-procedural-rule",
+        "ee.response.v1",
+        None,
+    )?;
+    command_dossiers.push(("remember-rule", remember_rule.dossier_dir.clone()));
+    let remember_rule_json = parse_logged_response(&remember_rule, "lp4p2 remember rule")?;
+    let rule_id = remember_rule_json["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "lp4p2 rule memory_id must be a string".to_string())?
+        .to_string();
+    ensure_equal(
+        &remember_rule_json["data"]["persisted"],
+        &serde_json::json!(true),
+        "lp4p2 rule memory persisted",
+    )?;
+
+    let remember_fact = run_ee_logged(
+        scenario,
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "remember",
+            "--level",
+            "semantic",
+            "--kind",
+            "fact",
+            "--tags",
+            "lp4p2,temporal,composition",
+            "--valid-from",
+            "2020-01-01T00:00:00Z",
+            "--valid-to",
+            "2099-01-01T00:00:00Z",
+            "Current temporal memory for the lp4p2 aggregate composition workspace.",
+        ],
+        &workspace,
+        None,
+        "lp4p2-remember-temporal-fact",
+        "ee.response.v1",
+        None,
+    )?;
+    command_dossiers.push(("remember-fact", remember_fact.dossier_dir.clone()));
+    let remember_fact_json = parse_logged_response(&remember_fact, "lp4p2 remember fact")?;
+    let fact_id = remember_fact_json["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "lp4p2 fact memory_id must be a string".to_string())?
+        .to_string();
+    ensure_equal(
+        &remember_fact_json["data"]["validity_status"],
+        &serde_json::json!("current"),
+        "lp4p2 temporal memory validity",
+    )?;
+
+    let memory_rebuild = run_ee_logged(
+        scenario,
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "index",
+            "rebuild",
+        ],
+        &workspace,
+        None,
+        "lp4p2-memory-index-rebuild",
+        "ee.response.v1",
+        None,
+    )?;
+    command_dossiers.push(("memory-index-rebuild", memory_rebuild.dossier_dir.clone()));
+    let memory_rebuild_json = parse_logged_response(&memory_rebuild, "lp4p2 memory index rebuild")?;
+    ensure_equal(
+        &memory_rebuild_json["data"]["memories_indexed"],
+        &serde_json::json!(2),
+        "lp4p2 memory indexed count",
+    )?;
+
+    let query_file = workspace.join("lp4p2-task.eeq.json");
+    fs::write(
+        &query_file,
+        r#"{
+          "version": "ee.query.v1",
+          "query": {"text": "lp4p2 aggregate release evidence sentinel", "mode": "hybrid"},
+          "budget": {"maxTokens": 3000, "candidatePool": 20},
+          "output": {"format": "json", "profile": "balanced"}
+        }"#,
+    )
+    .map_err(|error| error.to_string())?;
+    let query_hash = format!(
+        "blake3:{}",
+        blake3::hash(&fs::read(&query_file).map_err(|error| error.to_string())?).to_hex()
+    );
+    let query_file_arg = query_file.to_string_lossy().into_owned();
+    let pack = run_ee_logged(
+        scenario,
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "pack",
+            "--query-file",
+            query_file_arg.as_str(),
+        ],
+        &workspace,
+        Some(&query_file),
+        "lp4p2-query-file-pack",
+        "ee.response.v1",
+        Some("tests/fixtures/golden/agent/query_file_context_pack.json.golden"),
+    )?;
+    command_dossiers.push(("query-file-pack", pack.dossier_dir.clone()));
+    let pack_json = parse_logged_response(&pack, "lp4p2 query-file pack")?;
+    ensure_equal(
+        &pack_json["data"]["request"]["query"],
+        &serde_json::json!("lp4p2 aggregate release evidence sentinel"),
+        "lp4p2 pack request query",
+    )?;
+
+    let why_after_pack = run_ee_logged(
+        scenario,
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "why",
+            rule_id.as_str(),
+        ],
+        &workspace,
+        None,
+        "lp4p2-why-after-pack",
+        "ee.response.v1",
+        None,
+    )?;
+    command_dossiers.push(("why-after-pack", why_after_pack.dossier_dir.clone()));
+    let why_after_pack_json = parse_logged_response(&why_after_pack, "lp4p2 why after pack")?;
+    let latest_pack = &why_after_pack_json["data"]["selection"]["latestPackSelection"];
+    ensure_equal(
+        &latest_pack["query"],
+        &serde_json::json!("lp4p2 aggregate release evidence sentinel"),
+        "lp4p2 latest pack query",
+    )?;
+    let pack_id = latest_pack["packId"]
+        .as_str()
+        .ok_or_else(|| "lp4p2 latest pack id must be present".to_string())?
+        .to_string();
+    let pack_hash = latest_pack["packHash"]
+        .as_str()
+        .ok_or_else(|| "lp4p2 latest pack hash must be present".to_string())?
+        .to_string();
+    ensure(
+        pack_id.starts_with("pack_"),
+        "lp4p2 latest pack id should be persisted",
+    )?;
+    ensure(
+        pack_hash.starts_with("blake3:"),
+        "lp4p2 latest pack hash should be stable",
+    )?;
+
+    let artifact_register = run_ee_logged(
+        scenario,
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "artifact",
+            "register",
+            "logs/lp4p2-release.log",
+            "--kind",
+            "log",
+            "--title",
+            "lp4p2 aggregate release log",
+            "--link-memory",
+            rule_id.as_str(),
+        ],
+        &workspace,
+        None,
+        "lp4p2-artifact-register",
+        "ee.response.v1",
+        None,
+    )?;
+    command_dossiers.push(("artifact-register", artifact_register.dossier_dir.clone()));
+    let artifact_register_json =
+        parse_logged_response(&artifact_register, "lp4p2 artifact register")?;
+    let artifact_id = artifact_register_json["data"]["artifact"]["id"]
+        .as_str()
+        .ok_or_else(|| "lp4p2 artifact id must be a string".to_string())?
+        .to_string();
+    ensure_equal(
+        &artifact_register_json["data"]["persisted"],
+        &serde_json::json!(true),
+        "lp4p2 artifact persisted",
+    )?;
+
+    let artifact_rebuild = run_ee_logged(
+        scenario,
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "index",
+            "rebuild",
+        ],
+        &workspace,
+        None,
+        "lp4p2-artifact-index-rebuild",
+        "ee.response.v1",
+        None,
+    )?;
+    command_dossiers.push((
+        "artifact-index-rebuild",
+        artifact_rebuild.dossier_dir.clone(),
+    ));
+    let rebuild_json = parse_logged_response(&artifact_rebuild, "lp4p2 artifact index rebuild")?;
+    ensure_equal(
+        &rebuild_json["data"]["artifacts_indexed"],
+        &serde_json::json!(1),
+        "lp4p2 artifact indexed count",
+    )?;
+
+    let search = run_ee_logged(
+        scenario,
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "search",
+            "lp4p2 aggregate release evidence sentinel",
+        ],
+        &workspace,
+        None,
+        "lp4p2-search",
+        "ee.response.v1",
+        None,
+    )?;
+    command_dossiers.push(("search", search.dossier_dir.clone()));
+    let search_json = parse_logged_response(&search, "lp4p2 search")?;
+    ensure(
+        search_json["data"]["results"]
+            .as_array()
+            .is_some_and(|results| results.iter().any(|hit| hit["doc_id"] == artifact_id)),
+        "lp4p2 search results include registered artifact document",
+    )?;
+
+    let context = run_ee_logged(
+        scenario,
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "context",
+            "registered artifact should select linked memory",
+            "--max-tokens",
+            "1600",
+        ],
+        &workspace,
+        None,
+        "lp4p2-context-artifact-link",
+        "ee.response.v1",
+        None,
+    )?;
+    command_dossiers.push(("context", context.dossier_dir.clone()));
+    let context_json = parse_logged_response(&context, "lp4p2 context")?;
+    ensure(
+        context_json["data"]["pack"]["items"]
+            .as_array()
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item["memoryId"] == rule_id
+                        && item["why"]
+                            .as_str()
+                            .is_some_and(|why| why.contains("registered artifact"))
+                })
+            }),
+        "lp4p2 context selects linked memory through artifact hit",
+    )?;
+
+    let support = run_ee_logged(
+        scenario,
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "support",
+            "bundle",
+            "--dry-run",
+        ],
+        &workspace,
+        None,
+        "lp4p2-support-bundle-dry-run",
+        "ee.response.v1",
+        None,
+    )?;
+    command_dossiers.push(("support-bundle", support.dossier_dir.clone()));
+    let support_stderr = String::from_utf8_lossy(&support.output.stderr);
+    ensure(
+        support.output.status.code() == Some(7),
+        format!("lp4p2 support bundle should degrade; stderr: {support_stderr}"),
+    )?;
+    ensure(
+        support.output.stderr.is_empty(),
+        "lp4p2 support bundle stderr clean",
+    )?;
+    let support_json: serde_json::Value = serde_json::from_slice(&support.output.stdout)
+        .map_err(|error| format!("lp4p2 support stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &support_json["success"],
+        &serde_json::json!(false),
+        "lp4p2 support degraded success flag",
+    )?;
+    ensure_equal(
+        &support_json["data"]["code"],
+        &serde_json::json!("support_bundle_unavailable"),
+        "lp4p2 support degraded code",
+    )?;
+
+    let required_dossier_files = [
+        "command.txt",
+        "cwd.txt",
+        "workspace.txt",
+        "env.sanitized.json",
+        "exit-code.txt",
+        "elapsed-ms.txt",
+        "stdout",
+        "stderr",
+        "stderr.events.jsonl",
+        "stdout.schema.json",
+        "degradation-report.json",
+        "redaction-report.json",
+        "first-failure.md",
+    ];
+    for (command_id, dossier_dir) in &command_dossiers {
+        for file_name in required_dossier_files {
+            ensure(
+                dossier_dir.join(file_name).is_file(),
+                format!("{command_id} dossier should include {file_name}"),
+            )?;
+        }
+        let schema_report: serde_json::Value = serde_json::from_slice(
+            &fs::read(dossier_dir.join("stdout.schema.json")).map_err(|error| {
+                format!(
+                    "failed to read {} stdout schema report: {error}",
+                    dossier_dir.display()
+                )
+            })?,
+        )
+        .map_err(|error| format!("{command_id} schema report must be JSON: {error}"))?;
+        ensure_equal(
+            &schema_report["schemaStatus"],
+            &serde_json::json!("matched"),
+            command_id,
+        )?;
+        let redaction_report: serde_json::Value = serde_json::from_slice(
+            &fs::read(dossier_dir.join("redaction-report.json")).map_err(|error| {
+                format!(
+                    "failed to read {} redaction report: {error}",
+                    dossier_dir.display()
+                )
+            })?,
+        )
+        .map_err(|error| format!("{command_id} redaction report must be JSON: {error}"))?;
+        ensure_equal(
+            &redaction_report["status"],
+            &serde_json::json!("checked"),
+            command_id,
+        )?;
+        ensure_equal(
+            &redaction_report["secretPatternsObserved"],
+            &serde_json::json!(false),
+            command_id,
+        )?;
+    }
+    let mut dossier_paths = command_dossiers
+        .iter()
+        .map(|(_, path)| path.display().to_string())
+        .collect::<Vec<_>>();
+    dossier_paths.sort();
+    let original_dossier_count = dossier_paths.len();
+    dossier_paths.dedup();
+    ensure_equal(
+        &dossier_paths.len(),
+        &original_dossier_count,
+        "lp4p2 command dossiers should be non-overlapping",
+    )?;
+
+    let database_path = workspace.join(".ee").join("ee.db");
+    ensure(database_path.is_file(), "lp4p2 database should exist")?;
+    let database_hash = format!(
+        "blake3:{}",
+        blake3::hash(&fs::read(&database_path).map_err(|error| error.to_string())?).to_hex()
+    );
+    let manifest_seed = serde_json::json!({
+        "scenarioIds": [
+            "eidetic_engine_cli-acf3",
+            "eidetic_engine_cli-d19r",
+            "eidetic_engine_cli-4ypp",
+            "eidetic_engine_cli-dc0w",
+            "eidetic_engine_cli-5c8d"
+        ],
+        "commandOrder": command_dossiers
+            .iter()
+            .map(|(command_id, _)| *command_id)
+            .collect::<Vec<_>>(),
+        "contentHashes": {
+            "queryFile": query_hash,
+            "artifact": artifact_hash,
+            "database": database_hash
+        }
+    });
+    let manifest_hash = format!(
+        "blake3:{}",
+        blake3::hash(&serde_json::to_vec(&manifest_seed).map_err(|error| error.to_string())?)
+            .to_hex()
+    );
+
+    let closeout_path = summary_dir.join("memory-composition-closeout-dossier.json");
+    write_json_artifact(
+        &closeout_path,
+        &serde_json::json!({
+            "schema": "ee.e2e.memory_composition_closeout.v1",
+            "bead": "eidetic_engine_cli-lp4p.2",
+            "scenarioId": scenario,
+            "scenarioIds": [
+                "eidetic_engine_cli-acf3",
+                "eidetic_engine_cli-d19r",
+                "eidetic_engine_cli-4ypp",
+                "eidetic_engine_cli-dc0w",
+                "eidetic_engine_cli-5c8d"
+            ],
+            "dependencyStatus": {
+                "eidetic_engine_cli-acf3": "closed_verified_by_existing_walking_skeleton_scenario",
+                "eidetic_engine_cli-d19r": "closed_verified_by_query_file_pack_scenario",
+                "eidetic_engine_cli-4ypp": "closed_verified_by_temporal_link_graph_scenario",
+                "eidetic_engine_cli-dc0w": "open_dependency_recorded_not_closed_by_aggregate",
+                "eidetic_engine_cli-5c8d": "closed_verified_by_artifact_registry_scenario"
+            },
+            "aggregateRunner": {
+                "command": "cargo test --test smoke expanded_memory_substrate_composition_logged_e2e_scenario",
+                "independentScenarioCommands": [
+                    "cargo test --test smoke walking_skeleton_durability_scenario",
+                    "cargo test --test smoke remember_persists_and_feeds_search_context_flow",
+                    "cargo test --test smoke memory_temporal_links_and_graph_outputs_compose",
+                    "cargo test --test advanced_subsystem_logged_e2e advanced_subsystems_emit_logged_json_contracts",
+                    "cargo test --test smoke artifact_registry_registers_indexes_exports_and_supports_context"
+                ],
+                "deterministicOrder": true
+            },
+            "artifactRoot": summary_dir.display().to_string(),
+            "workspace": workspace.display().to_string(),
+            "commandDossiers": command_dossiers
+                .iter()
+                .map(|(command_id, path)| serde_json::json!({
+                    "commandId": command_id,
+                    "path": path.display().to_string(),
+                    "stdout": path.join("stdout").display().to_string(),
+                    "stderr": path.join("stderr").display().to_string(),
+                    "schemaStatus": path.join("stdout.schema.json").display().to_string(),
+                    "redactionStatus": path.join("redaction-report.json").display().to_string(),
+                    "firstFailureDiagnosis": path.join("first-failure.md").display().to_string()
+                }))
+                .collect::<Vec<_>>(),
+            "state": {
+                "ruleMemoryId": rule_id,
+                "temporalMemoryId": fact_id,
+                "packId": pack_id,
+                "packHash": pack_hash,
+                "artifactId": artifact_id
+            },
+            "contentHashes": manifest_seed["contentHashes"].clone(),
+            "manifestHash": manifest_hash,
+            "effectDeltas": {
+                "memoriesPersisted": 2,
+                "packPersisted": true,
+                "artifactPersisted": true,
+                "artifactIndexed": true,
+                "supportBundle": "degraded_without_artifact_write"
+            },
+            "knownLimitations": [
+                "eidetic_engine_cli-dc0w remains open, so recorder/focus/task-frame/rationale resume proof is recorded as an external dependency rather than silently asserted by this aggregate."
+            ],
+            "followUpBeads": ["eidetic_engine_cli-dc0w"]
+        }),
+    )?;
+    ensure(
+        closeout_path.is_file(),
+        "lp4p2 aggregate closeout dossier should be written",
+    )?;
+    let closeout_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&closeout_path).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("lp4p2 closeout dossier must be JSON: {error}"))?;
+    ensure_equal(
+        &closeout_json["scenarioIds"],
+        &serde_json::json!([
+            "eidetic_engine_cli-acf3",
+            "eidetic_engine_cli-d19r",
+            "eidetic_engine_cli-4ypp",
+            "eidetic_engine_cli-dc0w",
+            "eidetic_engine_cli-5c8d"
+        ]),
+        "lp4p2 closeout scenario order",
+    )?;
+    ensure_equal(
+        &closeout_json["effectDeltas"]["memoriesPersisted"],
+        &serde_json::json!(2),
+        "lp4p2 closeout memory delta",
     )
 }
 
