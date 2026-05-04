@@ -105,3 +105,6 @@ mod eval_science;
 
 #[path = "contracts/science_analytics.rs"]
 mod science_analytics;
+
+#[path = "contracts/retrieval_field_naming.rs"]
+mod retrieval_field_naming;

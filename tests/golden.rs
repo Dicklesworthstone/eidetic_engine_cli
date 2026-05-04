@@ -661,32 +661,32 @@ mod tests {
             "search status",
         )?;
         ensure_equal(
-            &value["data"]["result_count"],
+            &value["data"]["resultCount"],
             &serde_json::json!(1),
             "search result count",
         )?;
         ensure_equal(
-            &value["data"]["results"][0]["doc_id"],
+            &value["data"]["results"][0]["docId"],
             &serde_json::json!("mem_00000000000000000000000001"),
             "search result memory id",
         )?;
         ensure_equal(
-            &value["data"]["metrics"]["requested_limit"],
+            &value["data"]["metrics"]["requestedLimit"],
             &serde_json::json!(10),
             "search metrics requested limit",
         )?;
         ensure_equal(
-            &value["data"]["metrics"]["returned_count"],
+            &value["data"]["metrics"]["returnedCount"],
             &serde_json::json!(1),
             "search metrics returned count",
         )?;
         ensure_equal(
-            &value["data"]["metrics"]["error_count"],
+            &value["data"]["metrics"]["errorCount"],
             &serde_json::json!(0),
             "search metrics error count",
         )?;
         ensure_json_number_close(
-            &value["data"]["metrics"]["score_distribution"]["top"],
+            &value["data"]["metrics"]["scoreDistribution"]["top"],
             &value["data"]["results"][0]["score"],
             0.000_001,
             "search metrics top score",
@@ -695,7 +695,7 @@ mod tests {
             .as_str()
             .ok_or_else(|| "search result source must be a string".to_string())?;
         ensure_equal(
-            &value["data"]["metrics"]["source_counts"][source],
+            &value["data"]["metrics"]["sourceCounts"][source],
             &serde_json::json!(1),
             "search metrics source count",
         )

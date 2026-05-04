@@ -281,13 +281,13 @@ impl IndexRebuildReport {
         serde_json::json!({
             "command": "index_rebuild",
             "status": self.status.as_str(),
-            "memories_indexed": self.memories_indexed,
-            "sessions_indexed": self.sessions_indexed,
-            "artifacts_indexed": self.artifacts_indexed,
-            "documents_total": self.documents_total,
-            "index_dir": self.index_dir.to_string_lossy(),
-            "elapsed_ms": self.elapsed_ms,
-            "dry_run": self.dry_run,
+            "memoriesIndexed": self.memories_indexed,
+            "sessionsIndexed": self.sessions_indexed,
+            "artifactsIndexed": self.artifacts_indexed,
+            "documentsTotal": self.documents_total,
+            "indexDir": self.index_dir.to_string_lossy(),
+            "elapsedMs": self.elapsed_ms,
+            "dryRun": self.dry_run,
             "errors": self.errors,
         })
     }
@@ -353,20 +353,20 @@ impl IndexReembedReport {
         serde_json::json!({
             "command": "index_reembed",
             "status": self.status.as_str(),
-            "job_id": self.job_id,
-            "job_status": self.job_status,
-            "job_type": self.job_type,
-            "document_source": self.document_source,
-            "embedding_scope": self.embedding_scope,
+            "jobId": self.job_id,
+            "jobStatus": self.job_status,
+            "jobType": self.job_type,
+            "documentSource": self.document_source,
+            "embeddingScope": self.embedding_scope,
             "embedding": self.embedding.data_json(),
-            "memories_indexed": self.memories_indexed,
-            "sessions_indexed": self.sessions_indexed,
-            "artifacts_indexed": self.artifacts_indexed,
-            "documents_total": self.documents_total,
-            "index_dir": self.index_dir.to_string_lossy(),
-            "elapsed_ms": self.elapsed_ms,
-            "dry_run": self.dry_run,
-            "idempotency_key": self.idempotency_key,
+            "memoriesIndexed": self.memories_indexed,
+            "sessionsIndexed": self.sessions_indexed,
+            "artifactsIndexed": self.artifacts_indexed,
+            "documentsTotal": self.documents_total,
+            "indexDir": self.index_dir.to_string_lossy(),
+            "elapsedMs": self.elapsed_ms,
+            "dryRun": self.dry_run,
+            "idempotencyKey": self.idempotency_key,
             "errors": self.errors,
         })
     }
@@ -376,15 +376,15 @@ impl ReembedEmbeddingSummary {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "fast_model_id": self.fast_model_id,
-            "fast_dimension": self.fast_dimension,
-            "quality_model_id": self.quality_model_id,
-            "quality_dimension": self.quality_dimension,
+            "fastModelId": self.fast_model_id,
+            "fastDimension": self.fast_dimension,
+            "qualityModelId": self.quality_model_id,
+            "qualityDimension": self.quality_dimension,
             "deterministic": self.deterministic,
             "semantic": self.semantic,
-            "registered_model_count": self.registered_model_count,
-            "available_model_count": self.available_model_count,
-            "selected_registry_model": self.selected_registry_model.as_ref().map(ReembedRegistryModelSummary::data_json),
+            "registeredModelCount": self.registered_model_count,
+            "availableModelCount": self.available_model_count,
+            "selectedRegistryModel": self.selected_registry_model.as_ref().map(ReembedRegistryModelSummary::data_json),
             "source": self.source,
         })
     }
@@ -396,7 +396,7 @@ impl ReembedRegistryModelSummary {
         serde_json::json!({
             "id": self.id,
             "provider": self.provider,
-            "model_name": self.model_name,
+            "modelName": self.model_name,
             "status": self.status,
             "dimension": self.dimension,
             "deterministic": self.deterministic,
@@ -408,14 +408,14 @@ impl IndexProcessingJobReport {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "job_id": self.job_id,
-            "job_type": self.job_type,
-            "document_source": self.document_source,
-            "document_id": self.document_id,
+            "jobId": self.job_id,
+            "jobType": self.job_type,
+            "documentSource": self.document_source,
+            "documentId": self.document_id,
             "outcome": self.outcome,
-            "processing_mode": self.processing_mode,
-            "documents_total": self.documents_total,
-            "documents_indexed": self.documents_indexed,
+            "processingMode": self.processing_mode,
+            "documentsTotal": self.documents_total,
+            "documentsIndexed": self.documents_indexed,
             "error": self.error,
         })
     }
@@ -427,16 +427,16 @@ impl IndexProcessingReport {
         serde_json::json!({
             "command": "index_process_jobs",
             "status": self.status.as_str(),
-            "workspace_id": self.workspace_id,
-            "database_path": self.database_path.to_string_lossy(),
-            "index_dir": self.index_dir.to_string_lossy(),
-            "pending_jobs": self.pending_jobs,
-            "processed_jobs": self.processed_jobs,
-            "completed_jobs": self.completed_jobs,
-            "failed_jobs": self.failed_jobs,
-            "dry_run": self.dry_run,
-            "job_limit": self.job_limit,
-            "elapsed_ms": self.elapsed_ms,
+            "workspaceId": self.workspace_id,
+            "databasePath": self.database_path.to_string_lossy(),
+            "indexDir": self.index_dir.to_string_lossy(),
+            "pendingJobs": self.pending_jobs,
+            "processedJobs": self.processed_jobs,
+            "completedJobs": self.completed_jobs,
+            "failedJobs": self.failed_jobs,
+            "dryRun": self.dry_run,
+            "jobLimit": self.job_limit,
+            "elapsedMs": self.elapsed_ms,
             "jobs": self
                 .jobs
                 .iter()

@@ -1445,18 +1445,18 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
     ensure(
         search_results
             .iter()
-            .any(|hit| hit["doc_id"].as_str() == Some(rule_id)),
+            .any(|hit| hit["docId"].as_str() == Some(rule_id)),
         "search results must include the release rule memory",
     )?;
     ensure(
         search_results
             .iter()
-            .any(|hit| hit["doc_id"].as_str() == Some(failure_id)),
+            .any(|hit| hit["docId"].as_str() == Some(failure_id)),
         "search results must include the release failure memory",
     )?;
     let rule_search_hit = search_results
         .iter()
-        .find(|hit| hit["doc_id"].as_str() == Some(rule_id))
+        .find(|hit| hit["docId"].as_str() == Some(rule_id))
         .ok_or_else(|| "search result for release rule must be present".to_string())?;
     ensure(
         rule_search_hit["score"].as_f64().is_some(),
@@ -1469,7 +1469,7 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
         "search --explain must expose score factors",
     )?;
     ensure(
-        search_json["data"]["metrics"]["field_coverage"]["explanation_count"]
+        search_json["data"]["metrics"]["fieldCoverage"]["explanationCount"]
             .as_u64()
             .is_some_and(|count| count >= 2),
         "search metrics must count explanation coverage",

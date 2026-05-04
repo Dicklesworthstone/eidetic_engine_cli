@@ -233,21 +233,21 @@ impl SearchReport {
             .iter()
             .map(|hit| {
                 let mut obj = serde_json::json!({
-                    "doc_id": hit.doc_id,
+                    "docId": hit.doc_id,
                     "score": hit.score,
                     "source": hit.source.as_str(),
                 });
                 if let Some(fast) = hit.fast_score {
-                    obj["fast_score"] = serde_json::json!(fast);
+                    obj["fastScore"] = serde_json::json!(fast);
                 }
                 if let Some(quality) = hit.quality_score {
-                    obj["quality_score"] = serde_json::json!(quality);
+                    obj["qualityScore"] = serde_json::json!(quality);
                 }
                 if let Some(lexical) = hit.lexical_score {
-                    obj["lexical_score"] = serde_json::json!(lexical);
+                    obj["lexicalScore"] = serde_json::json!(lexical);
                 }
                 if let Some(rerank) = hit.rerank_score {
-                    obj["rerank_score"] = serde_json::json!(rerank);
+                    obj["rerankScore"] = serde_json::json!(rerank);
                 }
                 if let Some(ref meta) = hit.metadata {
                     obj["metadata"] = meta.clone();
@@ -261,7 +261,7 @@ impl SearchReport {
                                 "name": f.name,
                                 "value": f.value,
                                 "contribution": f.contribution,
-                                "source_field": f.source_field,
+                                "sourceField": f.source_field,
                                 "formula": f.formula,
                             })
                         })
@@ -280,8 +280,8 @@ impl SearchReport {
             "status": self.status.as_str(),
             "query": self.query,
             "results": results,
-            "result_count": self.results.len(),
-            "elapsed_ms": self.elapsed_ms,
+            "resultCount": self.results.len(),
+            "elapsedMs": self.elapsed_ms,
             "metrics": self.retrieval_metrics().data_json(),
             "errors": self.errors,
         })
@@ -335,30 +335,30 @@ impl RetrievalMetrics {
     #[must_use]
     pub fn data_json(self) -> serde_json::Value {
         serde_json::json!({
-            "requested_limit": self.requested_limit,
-            "returned_count": self.returned_count,
-            "error_count": self.error_count,
-            "elapsed_ms": round_metric_f64(self.elapsed_ms),
-            "source_counts": {
+            "requestedLimit": self.requested_limit,
+            "returnedCount": self.returned_count,
+            "errorCount": self.error_count,
+            "elapsedMs": round_metric_f64(self.elapsed_ms),
+            "sourceCounts": {
                 "lexical": self.source_counts.lexical,
-                "semantic_fast": self.source_counts.semantic_fast,
-                "semantic_quality": self.source_counts.semantic_quality,
+                "semanticFast": self.source_counts.semantic_fast,
+                "semanticQuality": self.source_counts.semantic_quality,
                 "hybrid": self.source_counts.hybrid,
                 "reranked": self.source_counts.reranked,
             },
-            "score_distribution": {
+            "scoreDistribution": {
                 "top": optional_score_json(self.score_distribution.top),
                 "min": optional_score_json(self.score_distribution.min),
                 "max": optional_score_json(self.score_distribution.max),
                 "mean": optional_score_json(self.score_distribution.mean),
             },
-            "field_coverage": {
-                "fast_score_count": self.field_coverage.fast_score_count,
-                "quality_score_count": self.field_coverage.quality_score_count,
-                "lexical_score_count": self.field_coverage.lexical_score_count,
-                "rerank_score_count": self.field_coverage.rerank_score_count,
-                "metadata_count": self.field_coverage.metadata_count,
-                "explanation_count": self.field_coverage.explanation_count,
+            "fieldCoverage": {
+                "fastScoreCount": self.field_coverage.fast_score_count,
+                "qualityScoreCount": self.field_coverage.quality_score_count,
+                "lexicalScoreCount": self.field_coverage.lexical_score_count,
+                "rerankScoreCount": self.field_coverage.rerank_score_count,
+                "metadataCount": self.field_coverage.metadata_count,
+                "explanationCount": self.field_coverage.explanation_count,
             },
         })
     }
@@ -724,11 +724,11 @@ mod tests {
         assert_eq!(json["command"], "search");
         assert_eq!(json["status"], "success");
         assert_eq!(json["query"], "test query");
-        assert_eq!(json["result_count"], 1);
+        assert_eq!(json["resultCount"], 1);
         assert!(json["results"].is_array());
-        assert_eq!(json["metrics"]["requested_limit"], 10);
-        assert_eq!(json["metrics"]["returned_count"], 1);
-        assert_eq!(json["metrics"]["error_count"], 0);
+        assert_eq!(json["metrics"]["requestedLimit"], 10);
+        assert_eq!(json["metrics"]["returnedCount"], 1);
+        assert_eq!(json["metrics"]["errorCount"], 0);
     }
 
     #[test]
@@ -807,13 +807,13 @@ mod tests {
         let json = report.data_json();
         let result = &json["results"][0];
 
-        assert_eq!(result["doc_id"], "doc-hybrid");
+        assert_eq!(result["docId"], "doc-hybrid");
         assert!((result["score"].as_f64().unwrap_or(f64::NAN) - 0.88).abs() < 0.001);
         assert_eq!(result["source"], "hybrid");
-        assert!((result["fast_score"].as_f64().unwrap_or(f64::NAN) - 0.72).abs() < 0.001);
-        assert!((result["quality_score"].as_f64().unwrap_or(f64::NAN) - 0.91).abs() < 0.001);
-        assert!((result["lexical_score"].as_f64().unwrap_or(f64::NAN) - 0.65).abs() < 0.001);
-        assert!(result.get("rerank_score").is_none());
+        assert!((result["fastScore"].as_f64().unwrap_or(f64::NAN) - 0.72).abs() < 0.001);
+        assert!((result["qualityScore"].as_f64().unwrap_or(f64::NAN) - 0.91).abs() < 0.001);
+        assert!((result["lexicalScore"].as_f64().unwrap_or(f64::NAN) - 0.65).abs() < 0.001);
+        assert!(result.get("rerankScore").is_none());
         assert_eq!(result["metadata"]["level"], "procedural");
         assert_eq!(result["metadata"]["kind"], "rule");
     }
@@ -842,12 +842,12 @@ mod tests {
         let json = report.data_json();
         let result = &json["results"][0];
 
-        assert!(result.get("fast_score").is_none());
-        assert!(result.get("quality_score").is_none());
-        assert!(result.get("rerank_score").is_none());
+        assert!(result.get("fastScore").is_none());
+        assert!(result.get("qualityScore").is_none());
+        assert!(result.get("rerankScore").is_none());
         assert!(result.get("metadata").is_none());
         assert!(result.get("explanation").is_none());
-        assert!((result["lexical_score"].as_f64().unwrap_or(f64::NAN) - 0.5).abs() < 0.001);
+        assert!((result["lexicalScore"].as_f64().unwrap_or(f64::NAN) - 0.5).abs() < 0.001);
     }
 
     #[test]
@@ -904,17 +904,17 @@ mod tests {
         assert_eq!(metrics.field_coverage.explanation_count, 1);
 
         let json = metrics.data_json();
-        assert_eq!(json["requested_limit"], 4);
-        assert_eq!(json["returned_count"], 2);
-        assert_eq!(json["error_count"], 1);
-        assert_eq!(json["source_counts"]["hybrid"], 1);
-        assert_eq!(json["source_counts"]["lexical"], 1);
-        assert_eq!(json["field_coverage"]["explanation_count"], 1);
-        let mean = json["score_distribution"]["mean"]
+        assert_eq!(json["requestedLimit"], 4);
+        assert_eq!(json["returnedCount"], 2);
+        assert_eq!(json["errorCount"], 1);
+        assert_eq!(json["sourceCounts"]["hybrid"], 1);
+        assert_eq!(json["sourceCounts"]["lexical"], 1);
+        assert_eq!(json["fieldCoverage"]["explanationCount"], 1);
+        let mean = json["scoreDistribution"]["mean"]
             .as_f64()
             .unwrap_or(f64::NAN);
         assert!((mean - 0.6).abs() < 0.000_001);
-        assert_eq!(json["elapsed_ms"], serde_json::json!(2.345679));
+        assert_eq!(json["elapsedMs"], serde_json::json!(2.345679));
     }
 
     #[test]
@@ -929,15 +929,15 @@ mod tests {
         };
 
         let json = report.data_json();
-        assert_eq!(json["metrics"]["requested_limit"], 7);
-        assert_eq!(json["metrics"]["returned_count"], 0);
-        assert_eq!(json["metrics"]["source_counts"]["lexical"], 0);
+        assert_eq!(json["metrics"]["requestedLimit"], 7);
+        assert_eq!(json["metrics"]["returnedCount"], 0);
+        assert_eq!(json["metrics"]["sourceCounts"]["lexical"], 0);
         assert_eq!(
-            json["metrics"]["score_distribution"]["top"],
+            json["metrics"]["scoreDistribution"]["top"],
             serde_json::Value::Null
         );
         assert_eq!(
-            json["metrics"]["score_distribution"]["mean"],
+            json["metrics"]["scoreDistribution"]["mean"],
             serde_json::Value::Null
         );
     }
@@ -1065,7 +1065,7 @@ mod tests {
             1
         );
         assert_eq!(
-            result["explanation"]["factors"][0]["source_field"],
+            result["explanation"]["factors"][0]["sourceField"],
             "fast_score"
         );
         assert_eq!(

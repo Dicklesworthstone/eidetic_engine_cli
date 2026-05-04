@@ -10790,30 +10790,20 @@ where
     E: Write,
 {
     if wants_json {
-        let message = output::escape_json_string(&error.message);
-        let code = error.code.as_str();
-        match &error.repair {
-            Some(repair) => {
-                let repair = output::escape_json_string(repair);
-                let _ = writeln!(
-                    stdout,
-                    "{{\"schema\":\"{}\",\"error\":{{\"code\":\"{}\",\"message\":\"{}\",\"repair\":\"{}\"}}}}",
-                    crate::models::ERROR_SCHEMA_V1,
-                    code,
-                    message,
-                    repair
-                );
-            }
-            None => {
-                let _ = writeln!(
-                    stdout,
-                    "{{\"schema\":\"{}\",\"error\":{{\"code\":\"{}\",\"message\":\"{}\"}}}}",
-                    crate::models::ERROR_SCHEMA_V1,
-                    code,
-                    message
-                );
-            }
+        let mut error_json = serde_json::json!({
+            "code": error.code.as_str(),
+            "message": &error.message,
+            "severity": "low",
+            "details": {},
+        });
+        if let Some(repair) = &error.repair {
+            error_json["repair"] = serde_json::Value::String(repair.clone());
         }
+        let json = serde_json::json!({
+            "schema": crate::models::ERROR_SCHEMA_V1,
+            "error": error_json,
+        });
+        let _ = stdout.write_all((json.to_string() + "\n").as_bytes());
     } else {
         let _ = writeln!(stderr, "error: {}: {}", error.code.as_str(), error.message);
         if let Some(repair) = &error.repair {
@@ -11448,10 +11438,10 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
     let storage = report.storage.as_ref().map(|s| {
         serde_json::json!({
             "origin": s.origin,
-            "trust_class": s.trust_class,
-            "trust_subclass": s.trust_subclass,
-            "provenance_uri": s.provenance_uri,
-            "created_at": s.created_at,
+            "trustClass": s.trust_class,
+            "trustSubclass": s.trust_subclass,
+            "provenanceUri": s.provenance_uri,
+            "createdAt": s.created_at,
             "validFrom": s.valid_from,
             "validTo": s.valid_to,
             "validityStatus": s.validity_status,
@@ -11548,7 +11538,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
         "data": {
             "command": "why",
             "version": report.version,
-            "memory_id": report.memory_id,
+            "memoryId": report.memory_id,
             "found": report.found,
             "storage": storage,
             "retrieval": retrieval,
@@ -18092,6 +18082,20 @@ mod tests {
             "{\"schema\":\"ee.error.v1\"",
             "json error envelope",
         )?;
+        let json: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| format!("json error parses: {error}"))?;
+        let low = serde_json::json!("low");
+        let empty_details = serde_json::json!({});
+        ensure_equal(
+            &json.pointer("/error/severity"),
+            &Some(&low),
+            "json error severity",
+        )?;
+        ensure_equal(
+            &json.pointer("/error/details"),
+            &Some(&empty_details),
+            "json error details",
+        )?;
         ensure(stderr.is_empty(), "json error stderr must be empty")
     }
 
@@ -19133,6 +19137,20 @@ mod tests {
             &stdout,
             "\"code\":\"ERR_QUERY_FILE_NOT_FOUND\"",
             "query-file-specific error code",
+        )?;
+        let json: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("query-file error parses: {error}"))?;
+        let low = serde_json::json!("low");
+        let empty_details = serde_json::json!({});
+        ensure_equal(
+            &json.pointer("/error/severity"),
+            &Some(&low),
+            "query-file error severity",
+        )?;
+        ensure_equal(
+            &json.pointer("/error/details"),
+            &Some(&empty_details),
+            "query-file error details",
         )?;
         ensure(stderr.is_empty(), "pack json error stderr must be empty")
     }

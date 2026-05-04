@@ -1,12 +1,12 @@
 {
   "schema": "ee.response.v1",
-  "api_version": "0.1.0",
+  "apiVersion": "0.1.0",
   "command": "agent detect",
   "success": true,
   "data": {
     "agents": [],
-    "scan_paths": [],
-    "elapsed_ms": 0
+    "scanPaths": [],
+    "elapsedMs": 0
   },
   "error": null
 }

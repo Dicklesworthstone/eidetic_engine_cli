@@ -416,7 +416,7 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
         .as_array()
         .ok_or_else(|| "search results missing".to_string())?
         .iter()
-        .filter_map(|result| result["doc_id"].as_str().map(str::to_owned))
+        .filter_map(|result| result["docId"].as_str().map(str::to_owned))
         .collect::<Vec<_>>();
     ensure(
         search_ids.contains(&rule_id) && search_ids.contains(&failure_id),

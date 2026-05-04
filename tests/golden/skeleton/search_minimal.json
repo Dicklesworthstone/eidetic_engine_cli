@@ -1,13 +1,13 @@
 {
   "schema": "ee.response.v1",
-  "api_version": "0.1.0",
+  "apiVersion": "0.1.0",
   "command": "search",
   "success": true,
   "data": {
     "query": "QUERY_PLACEHOLDER",
     "results": [],
-    "total_count": 0,
-    "elapsed_ms": 0
+    "totalCount": 0,
+    "elapsedMs": 0
   },
   "error": null
 }

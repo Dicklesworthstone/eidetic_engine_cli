@@ -3560,7 +3560,7 @@ fn artifact_registry_registers_indexes_exports_and_supports_context() -> TestRes
     ensure(
         search_json["data"]["results"]
             .as_array()
-            .is_some_and(|results| results.iter().any(|hit| hit["doc_id"] == artifact_id)),
+            .is_some_and(|results| results.iter().any(|hit| hit["docId"] == artifact_id)),
         format!(
             "search results include artifact document; stdout: {}",
             String::from_utf8_lossy(&search.stdout)
@@ -3952,7 +3952,7 @@ fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
     ensure(
         search_json["data"]["results"]
             .as_array()
-            .is_some_and(|results| results.iter().any(|hit| hit["doc_id"] == artifact_id)),
+            .is_some_and(|results| results.iter().any(|hit| hit["docId"] == artifact_id)),
         "lp4p2 search results include registered artifact document",
     )?;
 
@@ -4379,7 +4379,7 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
     ensure(
         search_json["data"]["results"]
             .as_array()
-            .is_some_and(|results| results.iter().any(|hit| hit["doc_id"] == memory_id)),
+            .is_some_and(|results| results.iter().any(|hit| hit["docId"] == memory_id)),
         "search results should include remembered memory",
     )?;
 
