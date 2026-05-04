@@ -105,7 +105,7 @@ fn dependency_surface_reports_unavailable_dependency_codes() -> TestResult {
 fn eval_and_science_status_return_useful_partial_output_under_degradation() -> TestResult {
     let eval_output = run_ee(&["eval", "run", "--science", "--json"])?;
     ensure(
-        eval_output.status.code() == Some(7),
+        eval_output.status.code() == Some(6),
         format!(
             "eval run should fail closed with degraded exit code, got {:?}",
             eval_output.status.code()

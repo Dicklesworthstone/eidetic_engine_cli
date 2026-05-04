@@ -395,7 +395,7 @@ fn recorder_tail_degrades_until_persisted_events_exist() -> TestResult {
         "10",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(7), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(6), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(
         output.stderr.is_empty(),
@@ -516,7 +516,7 @@ fn procedure_promote_dry_run_degrades_until_audited_promotion_exists() -> TestRe
 #[test]
 fn procedure_promote_without_dry_run_is_policy_denied() -> TestResult {
     let output = run_ee(&["procedure", "promote", "proc_promote", "--json"])?;
-    ensure_equal(&output.status.code(), &Some(8), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(7), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(
         output.stderr.is_empty(),
@@ -692,7 +692,7 @@ fn economy_prune_plan_dry_run_degrades_until_db_backed_metrics_exist() -> TestRe
 #[test]
 fn economy_prune_plan_requires_dry_run() -> TestResult {
     let output = run_ee(&["economy", "prune-plan", "--json"])?;
-    ensure_equal(&output.status.code(), &Some(8), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(7), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(
         output.stderr.is_empty(),
@@ -783,7 +783,7 @@ fn learn_experiment_run_rejects_non_dry_run() -> TestResult {
         "exp_database_contract_fixture",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(8), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(7), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(
         output.stderr.is_empty(),
@@ -1694,7 +1694,7 @@ fn preflight_run_blocks_high_risk_deploy_task() -> TestResult {
         "deploy production database migration",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(7), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(6), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
@@ -1728,7 +1728,7 @@ fn preflight_run_blocks_high_risk_deploy_task() -> TestResult {
 #[test]
 fn preflight_show_returns_stubbed_storage_details() -> TestResult {
     let output = run_ee(&["preflight", "show", "pf_gate16_contract", "--json"])?;
-    ensure_equal(&output.status.code(), &Some(7), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(6), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
@@ -1770,7 +1770,7 @@ fn preflight_close_dry_run_records_feedback_shape() -> TestResult {
         "--dry-run",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(7), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(6), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
@@ -1804,7 +1804,7 @@ fn preflight_close_without_cleared_infers_false_alarm_for_success() -> TestResul
         "--dry-run",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(7), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(6), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(

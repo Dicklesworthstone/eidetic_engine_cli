@@ -775,6 +775,7 @@ mod tests {
         AGENT_DOC_RECIPES, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, ENV_VARS, EXAMPLES,
         EXIT_CODES, FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS,
     };
+    use crate::models::ProcessExitCode;
 
     type TestResult = Result<(), String>;
 
@@ -868,6 +869,27 @@ mod tests {
                 &i,
                 &format!("exit code {} sequential", i),
             )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn exit_codes_match_process_exit_code_contract() -> TestResult {
+        let expected = [
+            ("success", ProcessExitCode::Success),
+            ("usage", ProcessExitCode::Usage),
+            ("configuration", ProcessExitCode::Configuration),
+            ("storage", ProcessExitCode::Storage),
+            ("search_index", ProcessExitCode::SearchIndex),
+            ("import", ProcessExitCode::Import),
+            ("degraded", ProcessExitCode::UnsatisfiedDegradedMode),
+            ("policy", ProcessExitCode::PolicyDenied),
+            ("migration", ProcessExitCode::MigrationRequired),
+        ];
+        ensure_equal(&EXIT_CODES.len(), &expected.len(), "exit code count")?;
+        for (entry, (name, code)) in EXIT_CODES.iter().zip(expected) {
+            ensure_equal(&entry.name, &name, "exit code name")?;
+            ensure_equal(&entry.code, &(code as u8), "exit code value")?;
         }
         Ok(())
     }

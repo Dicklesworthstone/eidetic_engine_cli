@@ -464,9 +464,9 @@ fn gate21_close_inconclusive_json_matches_golden() -> TestResult {
 fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
     let output = run_ee(&["--json", "learn", "agenda", "--limit", "2"])?;
     ensure(
-        output.status.code() == Some(7),
+        output.status.code() == Some(6),
         format!(
-            "learn agenda CLI should report degraded unavailable exit 7, got {:?}",
+            "learn agenda CLI should report degraded unavailable exit 6, got {:?}",
             output.status.code()
         ),
     )?;

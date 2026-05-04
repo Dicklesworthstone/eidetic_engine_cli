@@ -409,9 +409,9 @@ impl DomainError {
             Self::Configuration { .. } => ProcessExitCode::Configuration,
             Self::Storage { .. } => ProcessExitCode::Storage,
             Self::SearchIndex { .. } => ProcessExitCode::SearchIndex,
-            Self::Graph { .. } => ProcessExitCode::Graph,
+            Self::Graph { .. } => ProcessExitCode::SearchIndex,
             Self::Import { .. } => ProcessExitCode::Import,
-            Self::NotFound { .. } => ProcessExitCode::NotFound,
+            Self::NotFound { .. } => ProcessExitCode::Usage,
             Self::UnsatisfiedDegradedMode { .. } => ProcessExitCode::UnsatisfiedDegradedMode,
             Self::PolicyDenied { .. } => ProcessExitCode::PolicyDenied,
             Self::MigrationRequired { .. } => ProcessExitCode::MigrationRequired,
@@ -427,12 +427,10 @@ pub enum ProcessExitCode {
     Configuration = 2,
     Storage = 3,
     SearchIndex = 4,
-    Graph = 5,
-    Import = 6,
-    UnsatisfiedDegradedMode = 7,
-    PolicyDenied = 8,
-    MigrationRequired = 9,
-    NotFound = 10,
+    Import = 5,
+    UnsatisfiedDegradedMode = 6,
+    PolicyDenied = 7,
+    MigrationRequired = 8,
 }
 
 impl From<ProcessExitCode> for ExitCode {
@@ -483,7 +481,13 @@ mod tests {
     fn exit_codes_match_project_contract() {
         assert_eq!(ProcessExitCode::Success as u8, 0);
         assert_eq!(ProcessExitCode::Usage as u8, 1);
-        assert_eq!(ProcessExitCode::MigrationRequired as u8, 9);
+        assert_eq!(ProcessExitCode::Configuration as u8, 2);
+        assert_eq!(ProcessExitCode::Storage as u8, 3);
+        assert_eq!(ProcessExitCode::SearchIndex as u8, 4);
+        assert_eq!(ProcessExitCode::Import as u8, 5);
+        assert_eq!(ProcessExitCode::UnsatisfiedDegradedMode as u8, 6);
+        assert_eq!(ProcessExitCode::PolicyDenied as u8, 7);
+        assert_eq!(ProcessExitCode::MigrationRequired as u8, 8);
     }
 
     #[test]
@@ -530,12 +534,29 @@ mod tests {
                 ProcessExitCode::SearchIndex,
             ),
             (
+                DomainError::Graph {
+                    message: String::new(),
+                    repair: None,
+                },
+                "graph",
+                ProcessExitCode::SearchIndex,
+            ),
+            (
                 DomainError::Import {
                     message: String::new(),
                     repair: None,
                 },
                 "import",
                 ProcessExitCode::Import,
+            ),
+            (
+                DomainError::NotFound {
+                    resource: String::new(),
+                    id: String::new(),
+                    repair: None,
+                },
+                "not_found",
+                ProcessExitCode::Usage,
             ),
             (
                 DomainError::UnsatisfiedDegradedMode {

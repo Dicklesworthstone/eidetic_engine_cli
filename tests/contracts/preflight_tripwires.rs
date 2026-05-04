@@ -80,7 +80,7 @@ fn assert_cli_json_stdout_clean(args: &[&str], display: &str, code: &str) -> Tes
         .map_err(|error| format!("stderr was not UTF-8 for ee {display}: {error}"))?;
 
     ensure(
-        output.status.code() == Some(7),
+        output.status.code() == Some(6),
         format!("ee {display} should degrade, stderr: {stderr}"),
     )?;
     ensure(

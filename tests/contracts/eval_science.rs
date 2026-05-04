@@ -41,7 +41,7 @@ fn eval_run_science_json_degrades_until_fixture_runner_exists() -> TestResult {
         .map_err(|error| format!("eval run --science stderr was not UTF-8: {error}"))?;
 
     ensure(
-        output.status.code() == Some(7),
+        output.status.code() == Some(6),
         format!(
             "eval run --science must fail closed with degraded exit; got {:?}; stderr: {stderr}",
             output.status.code()
@@ -100,7 +100,7 @@ fn eval_run_without_science_degrades_before_metrics_contract() -> TestResult {
     let stderr = String::from_utf8(output.stderr)
         .map_err(|error| format!("eval run stderr was not UTF-8: {error}"))?;
     ensure(
-        output.status.code() == Some(7),
+        output.status.code() == Some(6),
         format!(
             "eval run must fail closed with degraded exit; got {:?}; stderr: {stderr}",
             output.status.code()

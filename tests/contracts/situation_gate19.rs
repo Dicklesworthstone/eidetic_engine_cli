@@ -81,9 +81,9 @@ fn assert_situation_cli_degraded(
     command: &str,
 ) -> Result<JsonValue, String> {
     ensure(
-        output.status.code() == Some(7),
+        output.status.code() == Some(6),
         format!(
-            "situation CLI must exit 7 while unavailable: {}",
+            "situation CLI must exit 6 while unavailable: {}",
             output.status
         ),
     )?;

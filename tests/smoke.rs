@@ -2526,7 +2526,7 @@ fn procedure_export_skill_capsule_json_degrades_until_store_exists() -> TestResu
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     ensure(
-        output.status.code() == Some(7),
+        output.status.code() == Some(6),
         format!("procedure export should degrade until stored procedures exist; stderr: {stderr}"),
     )?;
     ensure(
@@ -2581,7 +2581,7 @@ fn procedure_promote_dry_run_json_degrades_until_audited_promotion_exists() -> T
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     ensure(
-        output.status.code() == Some(7),
+        output.status.code() == Some(6),
         format!("procedure promote should degrade until stored procedures exist; stderr: {stderr}"),
     )?;
     ensure(
@@ -3608,7 +3608,7 @@ fn artifact_registry_registers_indexes_exports_and_supports_context() -> TestRes
     ])?;
     let support_stderr = String::from_utf8_lossy(&support.stderr);
     ensure(
-        support.status.code() == Some(7),
+        support.status.code() == Some(6),
         format!(
             "support bundle should degrade until redacted archive materialization exists; stderr: {support_stderr}"
         ),
@@ -4008,7 +4008,7 @@ fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
     command_dossiers.push(("support-bundle", support.dossier_dir.clone()));
     let support_stderr = String::from_utf8_lossy(&support.output.stderr);
     ensure(
-        support.output.status.code() == Some(7),
+        support.output.status.code() == Some(6),
         format!("lp4p2 support bundle should degrade; stderr: {support_stderr}"),
     )?;
     ensure(
@@ -5770,7 +5770,7 @@ fn learn_experiment_propose_json_degrades_until_records_exist() -> TestResult {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     ensure(
-        output.status.code() == Some(7),
+        output.status.code() == Some(6),
         format!(
             "learn experiment propose should degrade until learning records exist; stderr: {stderr}"
         ),
@@ -6679,7 +6679,7 @@ fn daemon_foreground_once_json_degrades_before_simulated_jobs_run() -> TestResul
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     ensure(
-        output.status.code() == Some(7),
+        output.status.code() == Some(6),
         format!(
             "daemon foreground should report degraded mode before simulated jobs run; stderr: {stderr}"
         ),
