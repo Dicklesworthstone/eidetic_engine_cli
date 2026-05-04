@@ -4,11 +4,14 @@ use crate::models::{
     CapabilityStatus, INDEX_MANIFEST_SCHEMA_V1, SEARCH_DOCUMENT_SCHEMA_V1, SEARCH_MODULE_SCHEMA_V1,
 };
 
+pub mod query;
+
 pub use frankensearch::core::types::IndexableDocument;
 pub use frankensearch::{
     Embedder, EmbedderStack, HashEmbedder, IndexBuilder, ScoreSource, ScoredResult, TwoTierConfig,
     TwoTierIndex, TwoTierSearcher,
 };
+pub use query::{ParsedSearchQuery, SearchQueryClause, parse_search_query};
 
 pub const SUBSYSTEM: &str = "search";
 pub const CANONICAL_DOCUMENT_SCHEMA: &str = SEARCH_DOCUMENT_SCHEMA_V1;
@@ -21,6 +24,7 @@ pub enum DocumentSource {
     Rule,
     Import,
     Artifact,
+    CurationCandidate,
 }
 
 impl DocumentSource {
@@ -32,6 +36,7 @@ impl DocumentSource {
             Self::Rule => "rule",
             Self::Import => "import",
             Self::Artifact => "artifact",
+            Self::CurationCandidate => "curation_candidate",
         }
     }
 }
@@ -512,6 +517,138 @@ impl Default for ArtifactDocumentBuilder {
 #[must_use]
 pub fn artifact_to_document(artifact: &crate::db::StoredArtifact) -> CanonicalSearchDocument {
     ArtifactDocumentBuilder::new().build(artifact)
+}
+
+/// Builder for converting curation candidates to canonical search documents.
+///
+/// Candidate clustering uses this projection before embedding so the science
+/// path sees the same stable text that search indexing would consume.
+pub struct CurationCandidateDocumentBuilder {
+    workspace_path: Option<String>,
+    target_memory_content: Option<String>,
+}
+
+impl CurationCandidateDocumentBuilder {
+    /// Create a new builder with no workspace or target-memory context.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            workspace_path: None,
+            target_memory_content: None,
+        }
+    }
+
+    /// Set workspace path metadata for the document.
+    #[must_use]
+    pub fn with_workspace_path(mut self, path: impl Into<String>) -> Self {
+        self.workspace_path = Some(path.into());
+        self
+    }
+
+    /// Include target memory content in the clustering text.
+    #[must_use]
+    pub fn with_target_memory_content(mut self, content: impl Into<String>) -> Self {
+        self.target_memory_content = Some(content.into());
+        self
+    }
+
+    /// Build a canonical search document from a curation candidate row.
+    #[must_use]
+    pub fn build(self, candidate: &crate::db::StoredCurationCandidate) -> CanonicalSearchDocument {
+        let content = crate::curate::candidate_embedding_text(
+            &crate::curate::CurationCandidateEmbeddingText {
+                id: &candidate.id,
+                candidate_type: &candidate.candidate_type,
+                target_memory_id: &candidate.target_memory_id,
+                target_memory_content: self.target_memory_content.as_deref(),
+                proposed_content: candidate.proposed_content.as_deref(),
+                proposed_confidence: candidate.proposed_confidence,
+                proposed_trust_class: candidate.proposed_trust_class.as_deref(),
+                source_type: &candidate.source_type,
+                source_id: candidate.source_id.as_deref(),
+                reason: &candidate.reason,
+                confidence: candidate.confidence,
+                status: &candidate.status,
+                review_state: &candidate.review_state,
+            },
+        );
+
+        let mut doc =
+            CanonicalSearchDocument::new(&candidate.id, content, DocumentSource::CurationCandidate)
+                .with_title(format!("Curation candidate {}", candidate.id))
+                .with_kind(&candidate.candidate_type)
+                .with_created_at(&candidate.created_at)
+                .with_metadata_entry("workspace_id", &candidate.workspace_id)
+                .with_metadata_entry("candidate_type", &candidate.candidate_type)
+                .with_metadata_entry("target_memory_id", &candidate.target_memory_id)
+                .with_metadata_entry("source_type", &candidate.source_type)
+                .with_metadata_entry("confidence", format!("{:.3}", candidate.confidence))
+                .with_metadata_entry("status", &candidate.status)
+                .with_metadata_entry("review_state", &candidate.review_state);
+
+        if let Some(workspace) = self.workspace_path {
+            doc = doc.with_workspace(workspace);
+        }
+        if let Some(source_id) = &candidate.source_id {
+            doc = doc.with_metadata_entry("source_id", source_id);
+        }
+        if let Some(proposed_confidence) = candidate.proposed_confidence {
+            doc =
+                doc.with_metadata_entry("proposed_confidence", format!("{proposed_confidence:.3}"));
+        }
+        if let Some(proposed_trust_class) = &candidate.proposed_trust_class {
+            doc = doc.with_metadata_entry("proposed_trust_class", proposed_trust_class);
+        }
+        if let Some(ttl_policy_id) = &candidate.ttl_policy_id {
+            doc = doc.with_metadata_entry("ttl_policy_id", ttl_policy_id);
+        }
+
+        doc
+    }
+}
+
+impl Default for CurationCandidateDocumentBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Deterministic search embedding for one curation candidate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CurationCandidateEmbedding {
+    pub candidate_id: String,
+    pub embedding: Vec<f32>,
+}
+
+/// Convert a curation candidate directly to a canonical search document.
+#[must_use]
+pub fn curation_candidate_to_document(
+    candidate: &crate::db::StoredCurationCandidate,
+) -> CanonicalSearchDocument {
+    CurationCandidateDocumentBuilder::new().build(candidate)
+}
+
+/// Embed a curation candidate using the search module's deterministic fallback.
+#[must_use]
+pub fn curation_candidate_embedding(
+    candidate: &crate::db::StoredCurationCandidate,
+    target_memory: Option<&crate::db::StoredMemory>,
+    workspace_path: Option<&str>,
+) -> CurationCandidateEmbedding {
+    let mut builder = CurationCandidateDocumentBuilder::new();
+    if let Some(path) = workspace_path {
+        builder = builder.with_workspace_path(path);
+    }
+    if let Some(memory) = target_memory {
+        builder = builder.with_target_memory_content(&memory.content);
+    }
+
+    let document = builder.build(candidate);
+    let embedder = HashEmbedder::default_256();
+    CurationCandidateEmbedding {
+        candidate_id: candidate.id.clone(),
+        embedding: embedder.embed_sync(document.content()),
+    }
 }
 
 pub const MODULE_CONTRACT: &str = SEARCH_MODULE_SCHEMA_V1;
@@ -1593,6 +1730,10 @@ mod tests {
         assert_eq!(DocumentSource::Rule.as_str(), "rule");
         assert_eq!(DocumentSource::Import.as_str(), "import");
         assert_eq!(DocumentSource::Artifact.as_str(), "artifact");
+        assert_eq!(
+            DocumentSource::CurationCandidate.as_str(),
+            "curation_candidate"
+        );
     }
 
     #[test]
@@ -1678,6 +1819,36 @@ mod tests {
             metadata_json: r#"{"title":"build log"}"#.to_string(),
             created_at: "2026-04-29T12:00:00Z".to_string(),
             updated_at: "2026-04-29T12:01:00Z".to_string(),
+        }
+    }
+
+    fn make_test_candidate() -> crate::db::StoredCurationCandidate {
+        crate::db::StoredCurationCandidate {
+            id: "curate_01234567890123456789012345".to_string(),
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            candidate_type: "consolidate".to_string(),
+            target_memory_id: "mem_01234567890123456789012345".to_string(),
+            proposed_content: Some(
+                "Run cargo fmt --check before release verification.".to_string(),
+            ),
+            proposed_confidence: Some(0.91),
+            proposed_trust_class: Some("validated".to_string()),
+            source_type: "science_test".to_string(),
+            source_id: Some("eval-run-001".to_string()),
+            reason: "Repeated release failures cite missing format checks.".to_string(),
+            confidence: 0.84,
+            status: "pending".to_string(),
+            created_at: "2026-04-29T12:02:00Z".to_string(),
+            reviewed_at: None,
+            reviewed_by: None,
+            applied_at: None,
+            ttl_expires_at: None,
+            review_state: "new".to_string(),
+            snoozed_until: None,
+            merged_into_candidate_id: None,
+            state_entered_at: Some("2026-04-29T12:02:00Z".to_string()),
+            last_action_at: Some("2026-04-29T12:02:00Z".to_string()),
+            ttl_policy_id: Some("curation.proposed.default".to_string()),
         }
     }
 
@@ -1956,6 +2127,72 @@ mod tests {
                 &"blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                     .to_owned()
             )
+        );
+    }
+
+    #[test]
+    fn curation_candidate_document_builder_projects_embedding_text() {
+        let candidate = make_test_candidate();
+        let target = make_test_memory();
+        let doc = super::CurationCandidateDocumentBuilder::new()
+            .with_workspace_path("/workspace/project")
+            .with_target_memory_content(&target.content)
+            .build(&candidate);
+
+        assert_eq!(doc.id(), "curate_01234567890123456789012345");
+        assert_eq!(doc.source(), DocumentSource::CurationCandidate);
+        assert!(
+            doc.content()
+                .contains("Proposed content: Run cargo fmt --check")
+        );
+        assert!(
+            doc.content()
+                .contains("Target memory content: Always run cargo fmt")
+        );
+
+        let indexable = doc.into_indexable();
+        assert_eq!(
+            indexable.metadata.get("source"),
+            Some(&"curation_candidate".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("workspace"),
+            Some(&"/workspace/project".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("candidate_type"),
+            Some(&"consolidate".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("target_memory_id"),
+            Some(&"mem_01234567890123456789012345".to_owned())
+        );
+    }
+
+    #[test]
+    fn curation_candidate_embedding_is_deterministic_search_vector() {
+        let candidate = make_test_candidate();
+        let target = make_test_memory();
+
+        let first = super::curation_candidate_embedding(
+            &candidate,
+            Some(&target),
+            Some("/workspace/project"),
+        );
+        let second = super::curation_candidate_embedding(
+            &candidate,
+            Some(&target),
+            Some("/workspace/project"),
+        );
+
+        assert_eq!(first.candidate_id, candidate.id);
+        assert_eq!(first.embedding.len(), 256);
+        assert_eq!(first, second);
+        assert!(
+            first
+                .embedding
+                .iter()
+                .any(|value| value.is_finite() && *value != 0.0)
         );
     }
 

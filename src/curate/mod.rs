@@ -73,6 +73,70 @@ pub const fn subsystem_name() -> &'static str {
     SUBSYSTEM
 }
 
+/// Canonical curation candidate fields used for clustering embeddings.
+///
+/// This projection keeps science analytics and search indexing aligned on the
+/// same candidate text without making the curation domain depend on storage
+/// row types.
+#[derive(Clone, Copy, Debug)]
+pub struct CurationCandidateEmbeddingText<'a> {
+    pub id: &'a str,
+    pub candidate_type: &'a str,
+    pub target_memory_id: &'a str,
+    pub target_memory_content: Option<&'a str>,
+    pub proposed_content: Option<&'a str>,
+    pub proposed_confidence: Option<f32>,
+    pub proposed_trust_class: Option<&'a str>,
+    pub source_type: &'a str,
+    pub source_id: Option<&'a str>,
+    pub reason: &'a str,
+    pub confidence: f32,
+    pub status: &'a str,
+    pub review_state: &'a str,
+}
+
+/// Build stable text for candidate embedding and clustering.
+#[must_use]
+pub fn candidate_embedding_text(fields: &CurationCandidateEmbeddingText<'_>) -> String {
+    let mut lines = Vec::new();
+    push_embedding_line(&mut lines, "Curation candidate", fields.id);
+    push_embedding_line(&mut lines, "Candidate type", fields.candidate_type);
+    push_embedding_line(&mut lines, "Target memory", fields.target_memory_id);
+    push_optional_embedding_line(
+        &mut lines,
+        "Target memory content",
+        fields.target_memory_content,
+    );
+    push_optional_embedding_line(&mut lines, "Proposed content", fields.proposed_content);
+    if let Some(confidence) = fields.proposed_confidence {
+        lines.push(format!("Proposed confidence: {confidence:.3}"));
+    }
+    push_optional_embedding_line(
+        &mut lines,
+        "Proposed trust class",
+        fields.proposed_trust_class,
+    );
+    push_embedding_line(&mut lines, "Source type", fields.source_type);
+    push_optional_embedding_line(&mut lines, "Source id", fields.source_id);
+    push_embedding_line(&mut lines, "Reason", fields.reason);
+    lines.push(format!("Confidence: {:.3}", fields.confidence));
+    push_embedding_line(&mut lines, "Status", fields.status);
+    push_embedding_line(&mut lines, "Review state", fields.review_state);
+    lines.join("\n")
+}
+
+fn push_embedding_line(lines: &mut Vec<String>, label: &str, value: &str) {
+    if !value.trim().is_empty() {
+        lines.push(format!("{label}: {value}"));
+    }
+}
+
+fn push_optional_embedding_line(lines: &mut Vec<String>, label: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        push_embedding_line(lines, label, value);
+    }
+}
+
 /// Type of curation action being proposed.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CandidateType {
