@@ -1,0 +1,340 @@
+{
+  "schema": "ee.skill.causal_credit_review.e2e_fixtures.v1",
+  "fixtures": [
+    {
+      "id": "no_evidence_t0",
+      "description": "T0: No causal evidence available",
+      "evidenceTier": "T0",
+      "inputs": {
+        "causalTrace": {
+          "schema": "ee.causal.trace.v1",
+          "chains": [],
+          "degraded": [
+            {
+              "code": "causal_evidence_unavailable",
+              "message": "No causal chains recorded for this workspace.",
+              "severity": "high",
+              "repair": "ee causal trace --workspace . --json"
+            }
+          ]
+        }
+      },
+      "expectedOutput": {
+        "recommendation": {
+          "action": "refuse",
+          "gateReason": "No evidence available (T0)"
+        },
+        "recommendedFollowUpCommands": [
+          "ee causal trace --workspace . --json"
+        ]
+      },
+      "assertions": [
+        "recommendation.action == 'refuse'",
+        "evidenceTier.tier == 'T0'",
+        "degradedState is not empty"
+      ]
+    },
+    {
+      "id": "confounded_evidence_t2",
+      "description": "T2: Evidence with uncontrolled confounders",
+      "evidenceTier": "T2",
+      "inputs": {
+        "causalTrace": {
+          "schema": "ee.causal.trace.v1",
+          "chains": [
+            {
+              "chainId": "cc_001",
+              "evidenceIds": ["ev_001", "ev_002", "ev_003"],
+              "score": 0.65
+            }
+          ],
+          "degraded": []
+        },
+        "causalEstimate": {
+          "schema": "ee.causal.estimate.v1",
+          "estimates": [
+            {
+              "sampleSize": 25,
+              "upliftEstimate": 0.15,
+              "confidenceInterval": [0.02, 0.28],
+              "confounders": ["time_of_day", "agent_version"],
+              "controlMethod": "none"
+            }
+          ],
+          "degraded": []
+        }
+      },
+      "expectedOutput": {
+        "evidenceTier": {
+          "tier": "T2",
+          "reason": "Sample size 25 with uncontrolled confounders"
+        },
+        "recommendation": {
+          "action": "hold",
+          "actionGated": true,
+          "gateReason": "Confounders not controlled; recommend experiment"
+        },
+        "recommendedFollowUpCommands": [
+          "ee learn experiment propose --workspace . --json"
+        ]
+      },
+      "assertions": [
+        "recommendation.action in ['hold', 'refuse']",
+        "recommendation.action != 'promote'",
+        "confounderAssessment.confoundersControlled == false"
+      ]
+    },
+    {
+      "id": "underpowered_evidence_t2",
+      "description": "T2: Underpowered sample size",
+      "evidenceTier": "T2",
+      "inputs": {
+        "causalTrace": {
+          "schema": "ee.causal.trace.v1",
+          "chains": [
+            {
+              "chainId": "cc_002",
+              "evidenceIds": ["ev_010", "ev_011"],
+              "score": 0.72
+            }
+          ],
+          "degraded": []
+        },
+        "causalEstimate": {
+          "schema": "ee.causal.estimate.v1",
+          "estimates": [
+            {
+              "sampleSize": 12,
+              "upliftEstimate": 0.22,
+              "confidenceInterval": [-0.10, 0.54],
+              "confounders": [],
+              "controlMethod": "none"
+            }
+          ],
+          "degraded": [
+            {
+              "code": "causal_sample_underpowered",
+              "message": "Sample size 12 is below recommended threshold of 30.",
+              "severity": "medium"
+            }
+          ]
+        }
+      },
+      "expectedOutput": {
+        "evidenceTier": {
+          "tier": "T2",
+          "reason": "Sample size 12 below threshold"
+        },
+        "recommendation": {
+          "action": "hold",
+          "actionGated": true,
+          "gateReason": "Sample underpowered"
+        }
+      },
+      "assertions": [
+        "recommendation.action in ['hold', 'refuse']",
+        "mechanicalMeasurements.sampleSize < 30",
+        "degradedState contains 'causal_sample_underpowered'"
+      ]
+    },
+    {
+      "id": "replay_supported_t3",
+      "description": "T3: Associational evidence with replay support",
+      "evidenceTier": "T3",
+      "inputs": {
+        "causalTrace": {
+          "schema": "ee.causal.trace.v1",
+          "chains": [
+            {
+              "chainId": "cc_003",
+              "evidenceIds": ["ev_100", "ev_101", "ev_102", "ev_103"],
+              "score": 0.81,
+              "replaySupported": true
+            }
+          ],
+          "degraded": []
+        },
+        "causalEstimate": {
+          "schema": "ee.causal.estimate.v1",
+          "estimates": [
+            {
+              "sampleSize": 45,
+              "upliftEstimate": 0.18,
+              "confidenceInterval": [0.08, 0.28],
+              "confounders": ["context_length"],
+              "controlMethod": "statistical_adjustment"
+            }
+          ],
+          "degraded": []
+        },
+        "causalCompare": {
+          "schema": "ee.causal.compare.v1",
+          "comparisons": [
+            {
+              "baselineId": "mem_baseline_001",
+              "candidateId": "mem_candidate_001",
+              "upliftDelta": 0.18,
+              "confounders": ["context_length"],
+              "evidenceTier": "T3"
+            }
+          ],
+          "degraded": []
+        }
+      },
+      "expectedOutput": {
+        "evidenceTier": {
+          "tier": "T3",
+          "reason": "Sample size 45 with documented confounders"
+        },
+        "recommendation": {
+          "action": "promote",
+          "actionGated": true,
+          "gateReason": "Conditional on confounder acknowledgment"
+        }
+      },
+      "assertions": [
+        "recommendation.action in ['promote', 'hold']",
+        "recommendation.actionGated == true",
+        "risks is not empty"
+      ]
+    },
+    {
+      "id": "experiment_supported_t4",
+      "description": "T4: Experiment-backed evidence",
+      "evidenceTier": "T4",
+      "inputs": {
+        "causalTrace": {
+          "schema": "ee.causal.trace.v1",
+          "chains": [
+            {
+              "chainId": "cc_004",
+              "evidenceIds": ["ev_200", "ev_201", "ev_202"],
+              "score": 0.92,
+              "experimentBacked": true
+            }
+          ],
+          "degraded": []
+        },
+        "causalEstimate": {
+          "schema": "ee.causal.estimate.v1",
+          "estimates": [
+            {
+              "sampleSize": 60,
+              "upliftEstimate": 0.25,
+              "confidenceInterval": [0.15, 0.35],
+              "confounders": ["agent_version"],
+              "controlMethod": "randomized_experiment"
+            }
+          ],
+          "degraded": []
+        },
+        "causalPromotePlan": {
+          "schema": "ee.causal.promote_plan.v1",
+          "plans": [
+            {
+              "targetId": "mem_candidate_002",
+              "recommendedAction": "promote",
+              "confidence": 0.85,
+              "safetyNotes": []
+            }
+          ],
+          "degraded": []
+        }
+      },
+      "expectedOutput": {
+        "evidenceTier": {
+          "tier": "T4"
+        },
+        "recommendation": {
+          "action": "promote",
+          "actionGated": false
+        }
+      },
+      "assertions": [
+        "recommendation.action == 'promote'",
+        "recommendation.actionGated == false",
+        "confounderAssessment.confoundersControlled == true"
+      ]
+    },
+    {
+      "id": "redacted_evidence",
+      "description": "Evidence with proper redaction",
+      "evidenceTier": "T3",
+      "inputs": {
+        "evidenceBundle": {
+          "redactionStatus": "passed",
+          "redactionClasses": ["credentials", "paths"],
+          "rawSecretsIncluded": false
+        },
+        "causalTrace": {
+          "schema": "ee.causal.trace.v1",
+          "chains": [
+            {
+              "chainId": "cc_005",
+              "evidenceIds": ["ev_redacted_001"],
+              "score": 0.75
+            }
+          ],
+          "degraded": []
+        }
+      },
+      "expectedOutput": {
+        "evidenceBundle": {
+          "redactionStatus": "passed"
+        }
+      },
+      "assertions": [
+        "evidenceBundle.redactionStatus == 'passed'",
+        "no raw secrets in output"
+      ]
+    },
+    {
+      "id": "degraded_causal_ledger",
+      "description": "Degraded causal ledger output",
+      "evidenceTier": "T1",
+      "inputs": {
+        "causalTrace": {
+          "schema": "ee.causal.trace.v1",
+          "chains": [],
+          "degraded": [
+            {
+              "code": "causal_sample_underpowered",
+              "message": "Insufficient evidence to compute causal chains.",
+              "severity": "high",
+              "repair": "Record more outcomes with ee outcome record"
+            }
+          ]
+        },
+        "causalEstimate": {
+          "schema": "ee.causal.estimate.v1",
+          "estimates": [],
+          "degraded": [
+            {
+              "code": "causal_evidence_unavailable",
+              "message": "No estimates available.",
+              "severity": "high"
+            }
+          ]
+        }
+      },
+      "expectedOutput": {
+        "recommendation": {
+          "action": "refuse"
+        },
+        "degradedState": [
+          {
+            "code": "causal_sample_underpowered"
+          },
+          {
+            "code": "causal_evidence_unavailable"
+          }
+        ]
+      },
+      "assertions": [
+        "recommendation.action == 'refuse'",
+        "degradedState is not empty",
+        "recommendedFollowUpCommands contains repair commands"
+      ]
+    }
+  ]
+}
