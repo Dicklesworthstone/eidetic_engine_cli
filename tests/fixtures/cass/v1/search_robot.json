@@ -4,28 +4,88 @@
   "offset": 0,
   "count": 1,
   "total_matches": 1,
+  "max_tokens": 200,
   "hits": [
     {
       "source_path": "/workspace/session-a.jsonl",
       "line_number": 42,
       "agent": "codex",
+      "workspace": "/workspace",
+      "workspace_original": "/remote/workspace",
       "title": "release prep",
       "score": 1.0,
-      "content": "Run cargo fmt --check before release."
+      "content": "Run cargo fmt --check before release.",
+      "snippet": "cargo fmt --check",
+      "created_at": "2026-04-30T00:00:00Z",
+      "match_type": "lexical",
+      "source_id": "local",
+      "origin_kind": "local",
+      "origin_host": null
     }
   ],
+  "aggregations": {
+    "agent": [
+      {
+        "key": "codex",
+        "count": 1
+      }
+    ]
+  },
   "cursor": null,
   "hits_clamped": false,
   "request_id": "ee-gate6-search-001",
+  "_warning": null,
   "_meta": {
     "elapsed_ms": 12,
     "search_mode": "lexical",
     "requested_search_mode": "hybrid",
-    "semantic_refinement": "unavailable",
+    "mode_defaulted": false,
+    "semantic_refinement": false,
     "fallback_tier": "lexical",
     "fallback_reason": "semantic context unavailable in fixture",
+    "wildcard_fallback": false,
+    "cache_stats": {
+      "hits": 0,
+      "misses": 1,
+      "shortfall": 0
+    },
+    "timing": {
+      "search_ms": 9,
+      "rerank_ms": 0,
+      "other_ms": 3
+    },
+    "tokens_estimated": 24,
     "max_tokens": 200,
+    "request_id": "ee-gate6-search-001",
+    "hits_clamped": false,
     "timeout_ms": 30000,
-    "next_cursor": null
-  }
+    "timed_out": false,
+    "partial_results": false,
+    "next_cursor": null,
+    "state": {
+      "status": "fixture"
+    },
+    "index_freshness": {
+      "exists": true,
+      "status": "fresh",
+      "reason": null,
+      "fresh": true,
+      "last_indexed_at": "2026-04-30T00:00:00Z",
+      "age_seconds": 1,
+      "stale": false,
+      "stale_threshold_seconds": 300,
+      "rebuilding": false,
+      "pending_sessions": 0
+    },
+    "ann_stats": null
+  },
+  "suggestions": [
+    {
+      "query": "cargo fmt before release"
+    }
+  ],
+  "explanation": {
+    "strategy": "fixture"
+  },
+  "_timeout": null
 }

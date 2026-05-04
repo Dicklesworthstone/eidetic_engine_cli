@@ -53,8 +53,9 @@ pub use import::{
 };
 pub use process::{CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassExitClass, CassInvocation, CassOutcome};
 pub use session::{
-    CassAgent, CassRole, CassSessionInfo, CassSpanKind, CassViewSpan, ImportCursor,
-    ImportSessionResult,
+    CassAgent, CassAggregationBucket, CassIndexFreshness, CassRole, CassSearchCacheStats,
+    CassSearchHit, CassSearchMeta, CassSearchResponse, CassSearchTiming, CassSessionInfo,
+    CassSpanKind, CassTimestamp, CassViewSpan, ImportCursor, ImportSessionResult,
 };
 
 /// Stable subsystem name surfaced through `ee status` and audit logs.

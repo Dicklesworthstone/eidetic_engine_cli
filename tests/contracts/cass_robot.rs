@@ -3,7 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ee::cass::{CassClient, CassContract, REQUIRED_API_VERSION, REQUIRED_CONTRACT_VERSION};
+use ee::cass::{
+    CassAgent, CassClient, CassContract, CassSearchResponse, CassTimestamp, REQUIRED_API_VERSION,
+    REQUIRED_CONTRACT_VERSION,
+};
 use serde_json::{Map, Value};
 
 type TestResult = Result<(), String>;
@@ -32,6 +35,11 @@ fn fixture(name: &str) -> Result<Value, String> {
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
     serde_json::from_str(&text)
         .map_err(|error| format!("{} is not valid JSON: {error}", path.display()))
+}
+
+fn fixture_text(name: &str) -> Result<String, String> {
+    let path = repo_path(&format!("{FIXTURE_ROOT}/{name}"));
+    fs::read_to_string(&path).map_err(|error| format!("failed to read {}: {error}", path.display()))
 }
 
 fn object<'a>(value: &'a Value, context: &str) -> Result<&'a Map<String, Value>, String> {
@@ -90,6 +98,22 @@ fn ensure_all_present(
         missing.is_empty(),
         format!("CASS capabilities missing {description}: {missing:?}"),
     )
+}
+
+fn field_names(value: &Value, context: &str) -> Result<BTreeSet<String>, String> {
+    Ok(object(value, context)?.keys().cloned().collect())
+}
+
+fn schema_field_names(object: &Map<String, Value>, key: &str) -> Result<BTreeSet<String>, String> {
+    array(object, key)?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("schema `{key}` entries must be strings"))
+        })
+        .collect()
 }
 
 fn ensure_args(invocation_args: &[std::ffi::OsString], expected: &[&str]) -> TestResult {
@@ -156,6 +180,289 @@ fn cass_v1_capabilities_declare_the_robot_surfaces_ee_consumes() -> TestResult {
             "required capability set drifted: {:?}",
             contract.missing_required_capabilities()
         ),
+    )
+}
+
+#[test]
+fn cass_search_robot_fixture_conforms_to_schema_snapshot_and_parser() -> TestResult {
+    let schema = fixture("search_schema_snapshot.json")?;
+    let schema_root = object(&schema, "schema snapshot")?;
+    let search_schema = object(
+        schema_root
+            .get("search")
+            .ok_or_else(|| "schema snapshot missing search object".to_string())?,
+        "schema search",
+    )?;
+
+    let search = fixture("search_robot.json")?;
+    ensure(
+        field_names(&search, "search root")? == schema_field_names(search_schema, "root_fields")?,
+        "search root fields must match the CASS schema snapshot",
+    )?;
+    let hit = array(object(&search, "search root")?, "hits")?
+        .first()
+        .ok_or_else(|| "search fixture must include a hit".to_string())?;
+    ensure(
+        field_names(hit, "search hit")? == schema_field_names(search_schema, "hit_fields")?,
+        "search hit fields must match the CASS schema snapshot",
+    )?;
+    let meta = object(
+        object(&search, "search root")?
+            .get("_meta")
+            .ok_or_else(|| "search fixture missing _meta".to_string())?,
+        "search _meta",
+    )?;
+    ensure(
+        meta.keys().cloned().collect::<BTreeSet<_>>()
+            == schema_field_names(search_schema, "meta_fields")?,
+        "search _meta fields must match the CASS schema snapshot",
+    )?;
+    let cache_stats = object(
+        meta.get("cache_stats")
+            .ok_or_else(|| "search _meta missing cache_stats".to_string())?,
+        "cache_stats",
+    )?;
+    ensure(
+        cache_stats.keys().cloned().collect::<BTreeSet<_>>()
+            == schema_field_names(search_schema, "cache_stats_fields")?,
+        "cache stats fields must match the CASS schema snapshot",
+    )?;
+    let timing = object(
+        meta.get("timing")
+            .ok_or_else(|| "search _meta missing timing".to_string())?,
+        "timing",
+    )?;
+    ensure(
+        timing.keys().cloned().collect::<BTreeSet<_>>()
+            == schema_field_names(search_schema, "timing_fields")?,
+        "timing fields must match the CASS schema snapshot",
+    )?;
+    let index_freshness = object(
+        meta.get("index_freshness")
+            .ok_or_else(|| "search _meta missing index_freshness".to_string())?,
+        "index_freshness",
+    )?;
+    ensure(
+        index_freshness.keys().cloned().collect::<BTreeSet<_>>()
+            == schema_field_names(search_schema, "index_freshness_fields")?,
+        "index freshness fields must match the CASS schema snapshot",
+    )?;
+
+    let search_text = fixture_text("search_robot.json")?;
+    let parsed = CassSearchResponse::from_robot_json(search_text.as_bytes())
+        .map_err(|error| error.to_string())?;
+    ensure(parsed.query == "format before release", "parsed query")?;
+    ensure(parsed.limit == 2, "parsed limit")?;
+    ensure(parsed.offset == 0, "parsed offset")?;
+    ensure(parsed.count == 1, "parsed count")?;
+    ensure(parsed.total_matches == 1, "parsed total_matches")?;
+    ensure(parsed.max_tokens == Some(200), "parsed root max_tokens")?;
+    ensure(
+        parsed.request_id.as_deref() == Some("ee-gate6-search-001"),
+        "parsed request_id",
+    )?;
+    ensure(parsed.cursor.is_none(), "parsed cursor")?;
+    ensure(!parsed.hits_clamped, "parsed hits_clamped")?;
+    ensure(parsed.hits.len() == 1, "parsed hit count")?;
+
+    let parsed_hit = parsed
+        .hits
+        .first()
+        .ok_or_else(|| "parsed response missing hit".to_string())?;
+    ensure(
+        parsed_hit.source_path == "/workspace/session-a.jsonl",
+        "parsed hit source_path",
+    )?;
+    ensure(parsed_hit.line_number == Some(42), "parsed line_number")?;
+    ensure(parsed_hit.agent == CassAgent::Codex, "parsed agent")?;
+    ensure(
+        parsed_hit.workspace.as_deref() == Some("/workspace"),
+        "parsed workspace",
+    )?;
+    ensure(
+        parsed_hit.workspace_original.as_deref() == Some("/remote/workspace"),
+        "parsed workspace_original",
+    )?;
+    ensure(
+        parsed_hit.title.as_deref() == Some("release prep"),
+        "parsed title",
+    )?;
+    ensure(
+        parsed_hit.content.as_deref() == Some("Run cargo fmt --check before release."),
+        "parsed content",
+    )?;
+    ensure(
+        parsed_hit.snippet.as_deref() == Some("cargo fmt --check"),
+        "parsed snippet",
+    )?;
+    ensure(parsed_hit.score == Some(1.0), "parsed score")?;
+    match parsed_hit.created_at.as_ref() {
+        Some(CassTimestamp::String(timestamp)) => {
+            ensure(timestamp == "2026-04-30T00:00:00Z", "parsed created_at")?;
+        }
+        other => return Err(format!("parsed created_at had unexpected shape: {other:?}")),
+    }
+    ensure(
+        parsed_hit.match_type.as_deref() == Some("lexical"),
+        "parsed match_type",
+    )?;
+    ensure(parsed_hit.source_id == "local", "parsed source_id")?;
+    ensure(parsed_hit.origin_kind == "local", "parsed origin_kind")?;
+    ensure(parsed_hit.origin_host.is_none(), "parsed origin_host")?;
+
+    let aggregations = parsed
+        .aggregations
+        .as_ref()
+        .ok_or_else(|| "parsed response missing aggregations".to_string())?;
+    let agent_buckets = aggregations
+        .get("agent")
+        .ok_or_else(|| "parsed response missing agent aggregation".to_string())?;
+    ensure(agent_buckets.len() == 1, "parsed aggregation count")?;
+    let agent_bucket = agent_buckets
+        .first()
+        .ok_or_else(|| "parsed response missing agent aggregation bucket".to_string())?;
+    ensure(agent_bucket.key == "codex", "parsed aggregation key")?;
+    ensure(agent_bucket.count == 1, "parsed aggregation count value")?;
+
+    ensure(parsed.warning.is_none(), "parsed warning")?;
+    ensure(parsed.meta.elapsed_ms == 12, "parsed elapsed_ms")?;
+    ensure(
+        parsed.meta.search_mode.as_deref() == Some("lexical"),
+        "parsed search_mode",
+    )?;
+    ensure(
+        parsed.meta.requested_search_mode.as_deref() == Some("hybrid"),
+        "parsed requested_search_mode",
+    )?;
+    ensure(
+        parsed.meta.mode_defaulted == Some(false),
+        "parsed mode_defaulted",
+    )?;
+    ensure(
+        parsed.meta.fallback_tier.as_deref() == Some("lexical"),
+        "parsed fallback_tier",
+    )?;
+    ensure(
+        parsed.meta.fallback_reason.as_deref() == Some("semantic context unavailable in fixture"),
+        "parsed fallback_reason",
+    )?;
+    ensure(
+        parsed.meta.semantic_refinement == Some(false),
+        "parsed semantic_refinement",
+    )?;
+    ensure(!parsed.meta.wildcard_fallback, "parsed wildcard_fallback")?;
+    ensure(parsed.meta.cache_stats.hits == 0, "parsed cache hits")?;
+    ensure(parsed.meta.cache_stats.misses == 1, "parsed cache misses")?;
+    ensure(
+        parsed.meta.cache_stats.shortfall == 0,
+        "parsed cache shortfall",
+    )?;
+    ensure(parsed.meta.timing.search_ms == 9, "parsed search_ms")?;
+    ensure(parsed.meta.timing.rerank_ms == 0, "parsed rerank_ms")?;
+    ensure(parsed.meta.timing.other_ms == 3, "parsed other_ms")?;
+    ensure(
+        parsed.meta.tokens_estimated == Some(24),
+        "parsed tokens_estimated",
+    )?;
+    ensure(
+        parsed.meta.max_tokens == Some(200),
+        "parsed meta max_tokens",
+    )?;
+    ensure(
+        parsed.meta.request_id.as_deref() == Some("ee-gate6-search-001"),
+        "parsed meta request_id",
+    )?;
+    ensure(parsed.meta.next_cursor.is_none(), "parsed next_cursor")?;
+    ensure(!parsed.meta.hits_clamped, "parsed meta hits_clamped")?;
+    ensure(
+        parsed.meta.state.get("status").and_then(Value::as_str) == Some("fixture"),
+        "parsed meta state",
+    )?;
+    ensure(parsed.meta.index_freshness.exists, "parsed index exists")?;
+    ensure(
+        parsed.meta.index_freshness.status == "fresh",
+        "parsed index status",
+    )?;
+    ensure(
+        parsed.meta.index_freshness.reason.is_none(),
+        "parsed index reason",
+    )?;
+    ensure(parsed.meta.index_freshness.fresh, "parsed index fresh")?;
+    ensure(
+        parsed.meta.index_freshness.last_indexed_at.as_deref() == Some("2026-04-30T00:00:00Z"),
+        "parsed last_indexed_at",
+    )?;
+    ensure(
+        parsed.meta.index_freshness.age_seconds == Some(1),
+        "parsed age_seconds",
+    )?;
+    ensure(!parsed.meta.index_freshness.stale, "parsed stale")?;
+    ensure(
+        parsed.meta.index_freshness.stale_threshold_seconds == 300,
+        "parsed stale threshold",
+    )?;
+    ensure(!parsed.meta.index_freshness.rebuilding, "parsed rebuilding")?;
+    ensure(
+        parsed.meta.index_freshness.pending_sessions == 0,
+        "parsed pending sessions",
+    )?;
+    ensure(parsed.meta.timeout_ms == Some(30_000), "parsed timeout_ms")?;
+    ensure(parsed.meta.timed_out == Some(false), "parsed timed_out")?;
+    ensure(
+        parsed.meta.partial_results == Some(false),
+        "parsed partial_results",
+    )?;
+    ensure(parsed.meta.ann_stats.is_none(), "parsed ann_stats")?;
+    ensure(parsed.suggestions.len() == 1, "parsed suggestions")?;
+    ensure(parsed.explanation.is_some(), "parsed explanation")?;
+    ensure(parsed.timeout.is_none(), "parsed timeout")
+}
+
+#[test]
+fn cass_search_parser_rejects_contract_surprises() -> TestResult {
+    let search = fixture("search_robot.json")?;
+
+    let mut root_extra = search.clone();
+    root_extra
+        .as_object_mut()
+        .ok_or_else(|| "root fixture must be an object".to_string())?
+        .insert("surprise".to_string(), Value::Bool(true));
+    ensure(
+        CassSearchResponse::from_robot_json(
+            &serde_json::to_vec(&root_extra).map_err(|error| error.to_string())?,
+        )
+        .is_err(),
+        "undocumented root field must be rejected",
+    )?;
+
+    let mut hit_extra = search.clone();
+    let hit = hit_extra
+        .get_mut("hits")
+        .and_then(Value::as_array_mut)
+        .and_then(|hits| hits.first_mut())
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "search fixture must contain a hit object".to_string())?;
+    hit.insert("surprise".to_string(), Value::Bool(true));
+    ensure(
+        CassSearchResponse::from_robot_json(
+            &serde_json::to_vec(&hit_extra).map_err(|error| error.to_string())?,
+        )
+        .is_err(),
+        "undocumented hit field must be rejected",
+    )?;
+
+    let mut meta_extra = search;
+    let meta = meta_extra
+        .get_mut("_meta")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "search fixture must contain _meta object".to_string())?;
+    meta.insert("surprise".to_string(), Value::Bool(true));
+    ensure(
+        CassSearchResponse::from_robot_json(
+            &serde_json::to_vec(&meta_extra).map_err(|error| error.to_string())?,
+        )
+        .is_err(),
+        "undocumented _meta field must be rejected",
     )
 }
 

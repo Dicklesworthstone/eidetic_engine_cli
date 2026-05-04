@@ -13,7 +13,12 @@
 //! This module defines the *shapes* only. Actual parsing and import
 //! logic lands in follow-on beads (EE-107).
 
-use std::{convert::Infallible, fmt};
+use std::{collections::BTreeMap, convert::Infallible, fmt};
+
+use serde::Deserialize;
+use serde_json::Value as JsonValue;
+
+use super::error::CassError;
 
 /// Agent type from CASS session metadata.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -136,6 +141,228 @@ impl CassSessionInfo {
         self.content_hash = Some(hash.into());
         self
     }
+}
+
+/// Parsed response from `cass search --robot --robot-meta`.
+///
+/// The field set mirrors CASS contract version 1. Unknown fields are rejected
+/// so contract drift fails loudly in the conformance harness instead of being
+/// silently dropped before retrieval provenance is built.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CassSearchResponse {
+    /// Original query text.
+    pub query: String,
+    /// Requested result limit.
+    pub limit: u32,
+    /// Requested offset.
+    pub offset: u32,
+    /// Number of hits returned in this payload.
+    pub count: u32,
+    /// Total matches reported by CASS.
+    pub total_matches: u64,
+    /// Applied token budget, when requested.
+    pub max_tokens: Option<u32>,
+    /// Caller-supplied request ID echoed by CASS.
+    pub request_id: Option<String>,
+    /// Pagination cursor for the current page.
+    pub cursor: Option<String>,
+    /// True when CASS had to clamp the requested hit count.
+    pub hits_clamped: bool,
+    /// Search result hits.
+    pub hits: Vec<CassSearchHit>,
+    /// Aggregation buckets keyed by aggregation name.
+    pub aggregations: Option<BTreeMap<String, Vec<CassAggregationBucket>>>,
+    /// CASS warning string when degraded data is still returned.
+    #[serde(rename = "_warning")]
+    pub warning: Option<String>,
+    /// Robot metadata emitted by `--robot-meta`.
+    #[serde(rename = "_meta")]
+    pub meta: CassSearchMeta,
+    /// Query suggestions, left as documented extension objects.
+    #[serde(default)]
+    pub suggestions: Vec<JsonValue>,
+    /// Query explanation object from `--explain`, when present.
+    pub explanation: Option<JsonValue>,
+    /// Timeout diagnostic object, when CASS returns partial results.
+    #[serde(rename = "_timeout")]
+    pub timeout: Option<JsonValue>,
+}
+
+impl CassSearchResponse {
+    /// Parse a `cass search --robot` JSON payload into the typed contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CassError::InvalidStdoutJson`] when stdout is not valid JSON
+    /// or contains fields outside the documented CASS search contract.
+    pub fn from_robot_json(input: &[u8]) -> Result<Self, CassError> {
+        serde_json::from_slice(input).map_err(|error| CassError::InvalidStdoutJson {
+            hint: format!("search robot JSON did not match documented CASS contract: {error}"),
+        })
+    }
+}
+
+/// One hit from `cass search --robot`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CassSearchHit {
+    /// Session source path containing the hit.
+    pub source_path: String,
+    /// 1-indexed line number when the hit maps to a specific line.
+    pub line_number: Option<u32>,
+    /// Agent that produced the session.
+    #[serde(deserialize_with = "deserialize_agent")]
+    pub agent: CassAgent,
+    /// Current workspace path.
+    pub workspace: Option<String>,
+    /// Original workspace path before remote path mapping.
+    pub workspace_original: Option<String>,
+    /// Human-readable title, when available.
+    pub title: Option<String>,
+    /// Full content field, when requested.
+    pub content: Option<String>,
+    /// Snippet field, when requested.
+    pub snippet: Option<String>,
+    /// CASS score for the hit.
+    pub score: Option<f64>,
+    /// Creation timestamp as reported by the source connector.
+    pub created_at: Option<CassTimestamp>,
+    /// Match type label.
+    pub match_type: Option<String>,
+    /// Source identifier, for example `local`.
+    pub source_id: String,
+    /// Origin kind, for example `local` or `ssh`.
+    pub origin_kind: String,
+    /// Host label for remote sources.
+    pub origin_host: Option<String>,
+}
+
+/// CASS timestamp fields may be integer epochs or strings depending on source.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum CassTimestamp {
+    /// Numeric timestamp.
+    Integer(i64),
+    /// String timestamp.
+    String(String),
+}
+
+/// One aggregation bucket from a CASS search response.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CassAggregationBucket {
+    /// Bucket key.
+    pub key: String,
+    /// Bucket hit count.
+    pub count: u64,
+}
+
+/// Robot metadata from `cass search --robot-meta`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CassSearchMeta {
+    /// Total elapsed time in milliseconds.
+    pub elapsed_ms: u64,
+    /// Effective search mode.
+    pub search_mode: Option<String>,
+    /// Search mode requested by the caller.
+    pub requested_search_mode: Option<String>,
+    /// Whether CASS defaulted the requested mode.
+    pub mode_defaulted: Option<bool>,
+    /// Fallback tier used by degraded retrieval.
+    pub fallback_tier: Option<String>,
+    /// Fallback reason used by degraded retrieval.
+    pub fallback_reason: Option<String>,
+    /// Whether semantic refinement ran.
+    pub semantic_refinement: Option<bool>,
+    /// True when wildcard fallback was used.
+    pub wildcard_fallback: bool,
+    /// Search cache statistics.
+    pub cache_stats: CassSearchCacheStats,
+    /// Timing component breakdown.
+    pub timing: CassSearchTiming,
+    /// Estimated output tokens.
+    pub tokens_estimated: Option<u32>,
+    /// Applied token budget.
+    pub max_tokens: Option<u32>,
+    /// Request ID echoed by CASS.
+    pub request_id: Option<String>,
+    /// Next cursor for pagination.
+    pub next_cursor: Option<String>,
+    /// True when CASS had to clamp hits.
+    pub hits_clamped: bool,
+    /// Full CASS state snapshot; retained as JSON because it is large and
+    /// reused by status parsing.
+    pub state: JsonValue,
+    /// Index freshness snapshot.
+    pub index_freshness: CassIndexFreshness,
+    /// Applied timeout in milliseconds.
+    pub timeout_ms: Option<u32>,
+    /// True when the search timed out.
+    pub timed_out: Option<bool>,
+    /// True when timeout returned partial results.
+    pub partial_results: Option<bool>,
+    /// ANN diagnostics, when semantic ANN search was used.
+    pub ann_stats: Option<JsonValue>,
+}
+
+/// Search cache statistics from CASS robot metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CassSearchCacheStats {
+    /// Cache hits.
+    pub hits: u64,
+    /// Cache misses.
+    pub misses: u64,
+    /// Requested results missing after cache lookup.
+    pub shortfall: u64,
+}
+
+/// Search timing breakdown from CASS robot metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CassSearchTiming {
+    /// Core search time.
+    pub search_ms: u64,
+    /// Rerank time.
+    pub rerank_ms: u64,
+    /// Other time.
+    pub other_ms: u64,
+}
+
+/// Index freshness subset embedded in CASS search metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CassIndexFreshness {
+    /// Whether the index exists.
+    pub exists: bool,
+    /// Stable status string.
+    pub status: String,
+    /// Status reason.
+    pub reason: Option<String>,
+    /// Whether the index is fresh.
+    pub fresh: bool,
+    /// Last indexed timestamp.
+    pub last_indexed_at: Option<String>,
+    /// Index age in seconds.
+    pub age_seconds: Option<u64>,
+    /// Whether the index is stale.
+    pub stale: bool,
+    /// Staleness threshold in seconds.
+    pub stale_threshold_seconds: u64,
+    /// Whether a rebuild is active.
+    pub rebuilding: bool,
+    /// Pending session count.
+    pub pending_sessions: u64,
+}
+
+fn deserialize_agent<'de, D>(deserializer: D) -> Result<CassAgent, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    Ok(CassAgent::parse_lossy(&value))
 }
 
 /// Span kind from CASS `view` output.
@@ -578,6 +805,162 @@ mod tests {
         assert_eq!(info.agent, CassAgent::ClaudeCode);
         assert_eq!(info.workspace_dir, Some("/project".to_string()));
         assert_eq!(info.content_hash, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn cass_search_response_parses_robot_meta_contract() -> TestResult {
+        let input = br#"{
+          "query": "format before release",
+          "limit": 2,
+          "offset": 0,
+          "count": 1,
+          "total_matches": 1,
+          "max_tokens": 200,
+          "request_id": "ee-test-search-001",
+          "cursor": null,
+          "hits_clamped": false,
+          "hits": [
+            {
+              "source_path": "/workspace/session-a.jsonl",
+              "line_number": 42,
+              "agent": "codex",
+              "workspace": "/workspace",
+              "workspace_original": "/remote/workspace",
+              "title": "release prep",
+              "content": "Run cargo fmt --check before release.",
+              "snippet": "cargo fmt --check",
+              "score": 1.5,
+              "created_at": "2026-04-30T00:00:00Z",
+              "match_type": "lexical",
+              "source_id": "local",
+              "origin_kind": "local",
+              "origin_host": null
+            }
+          ],
+          "aggregations": {"agent": [{"key": "codex", "count": 1}]},
+          "_warning": null,
+          "_meta": {
+            "elapsed_ms": 12,
+            "search_mode": "lexical",
+            "requested_search_mode": "hybrid",
+            "mode_defaulted": false,
+            "fallback_tier": "lexical",
+            "fallback_reason": "semantic context unavailable in fixture",
+            "semantic_refinement": false,
+            "wildcard_fallback": false,
+            "cache_stats": {"hits": 0, "misses": 1, "shortfall": 0},
+            "timing": {"search_ms": 9, "rerank_ms": 0, "other_ms": 3},
+            "tokens_estimated": 24,
+            "max_tokens": 200,
+            "request_id": "ee-test-search-001",
+            "next_cursor": null,
+            "hits_clamped": false,
+            "state": {"status": "fixture"},
+            "index_freshness": {
+              "exists": true,
+              "status": "fresh",
+              "reason": null,
+              "fresh": true,
+              "last_indexed_at": "2026-04-30T00:00:00Z",
+              "age_seconds": 1,
+              "stale": false,
+              "stale_threshold_seconds": 300,
+              "rebuilding": false,
+              "pending_sessions": 0
+            },
+            "timeout_ms": 30000,
+            "timed_out": false,
+            "partial_results": false,
+            "ann_stats": null
+          },
+          "suggestions": [{"query": "cargo fmt before release"}],
+          "explanation": {"strategy": "fixture"},
+          "_timeout": null
+        }"#;
+
+        let parsed =
+            CassSearchResponse::from_robot_json(input).map_err(|error| error.to_string())?;
+        ensure_equal(&parsed.query.as_str(), &"format before release", "query")?;
+        ensure_equal(&parsed.hits.len(), &1, "hit count")?;
+        let hit = parsed
+            .hits
+            .first()
+            .ok_or_else(|| "parsed response missing hit".to_string())?;
+        ensure_equal(&hit.agent, &CassAgent::Codex, "hit agent")?;
+        ensure_equal(
+            &hit.workspace_original.as_deref(),
+            &Some("/remote/workspace"),
+            "workspace original",
+        )?;
+        ensure_equal(
+            &parsed.meta.index_freshness.status.as_str(),
+            &"fresh",
+            "index freshness",
+        )?;
+        ensure_equal(&parsed.meta.cache_stats.misses, &1, "cache misses")?;
+        ensure_equal(&parsed.meta.timing.search_ms, &9, "search timing")
+    }
+
+    #[test]
+    fn cass_search_response_rejects_undocumented_fields() -> TestResult {
+        let input = br#"{
+          "query": "format before release",
+          "limit": 1,
+          "offset": 0,
+          "count": 0,
+          "total_matches": 0,
+          "cursor": null,
+          "hits_clamped": false,
+          "hits": [],
+          "surprise": true,
+          "_meta": {
+            "elapsed_ms": 1,
+            "search_mode": "lexical",
+            "requested_search_mode": "lexical",
+            "mode_defaulted": false,
+            "fallback_tier": null,
+            "fallback_reason": null,
+            "semantic_refinement": false,
+            "wildcard_fallback": false,
+            "cache_stats": {"hits": 0, "misses": 0, "shortfall": 0},
+            "timing": {"search_ms": 1, "rerank_ms": 0, "other_ms": 0},
+            "tokens_estimated": null,
+            "max_tokens": null,
+            "request_id": null,
+            "next_cursor": null,
+            "hits_clamped": false,
+            "state": {},
+            "index_freshness": {
+              "exists": false,
+              "status": "missing",
+              "reason": null,
+              "fresh": false,
+              "last_indexed_at": null,
+              "age_seconds": null,
+              "stale": false,
+              "stale_threshold_seconds": 300,
+              "rebuilding": false,
+              "pending_sessions": 0
+            },
+            "timeout_ms": null,
+            "timed_out": null,
+            "partial_results": null,
+            "ann_stats": null
+          },
+          "suggestions": [],
+          "explanation": null,
+          "_timeout": null
+        }"#;
+
+        let error = match CassSearchResponse::from_robot_json(input) {
+            Ok(_) => return Err("undocumented root field must fail".to_string()),
+            Err(error) => error,
+        };
+        ensure_equal(
+            &error.kind_str(),
+            &"invalid_stdout_json",
+            "error kind for drift",
+        )
     }
 
     #[test]

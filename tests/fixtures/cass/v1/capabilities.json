@@ -1,10 +1,10 @@
 {
-  "crate_version": "0.3.0",
+  "crate_version": "0.4.1",
   "api_version": 1,
   "contract_version": "1",
-  "documentation_url": "https://github.com/Dicklesworthstone/coding_agent_session_search",
   "features": [
     "api_version_command",
+    "aggregations",
     "content_truncation",
     "cursor_pagination",
     "dry_run",
@@ -19,13 +19,29 @@
     "robot_meta",
     "status_command",
     "timeout",
+    "time_filters",
     "view_command"
   ],
   "connectors": [
+    "aider",
+    "amp",
+    "chatgpt",
     "claude_code",
+    "clawdbot",
+    "cline",
     "codex",
+    "copilot",
+    "copilot_cli",
+    "crush",
     "cursor",
-    "gemini"
+    "factory",
+    "gemini",
+    "kimi",
+    "opencode",
+    "openclaw",
+    "pi_agent",
+    "qwen",
+    "vibe"
   ],
   "limits": {
     "max_limit": 0,

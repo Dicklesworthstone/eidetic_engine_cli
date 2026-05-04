@@ -1,0 +1,92 @@
+{
+  "schema": "ee.cass.search_schema_snapshot.v1",
+  "source": {
+    "cass_crate_version": "0.4.1",
+    "cass_api_version": 1,
+    "cass_contract_version": "1",
+    "schema_command": "cass introspect --json | jq '.response_schemas.search'",
+    "docs_command": "cass robot-docs schemas --robot-format json",
+    "capabilities_command": "cass capabilities --json"
+  },
+  "search": {
+    "root_fields": [
+      "query",
+      "limit",
+      "offset",
+      "count",
+      "total_matches",
+      "max_tokens",
+      "request_id",
+      "cursor",
+      "hits_clamped",
+      "hits",
+      "aggregations",
+      "_warning",
+      "_meta",
+      "suggestions",
+      "explanation",
+      "_timeout"
+    ],
+    "hit_fields": [
+      "source_path",
+      "line_number",
+      "agent",
+      "workspace",
+      "workspace_original",
+      "title",
+      "content",
+      "snippet",
+      "score",
+      "created_at",
+      "match_type",
+      "source_id",
+      "origin_kind",
+      "origin_host"
+    ],
+    "meta_fields": [
+      "elapsed_ms",
+      "search_mode",
+      "requested_search_mode",
+      "mode_defaulted",
+      "fallback_tier",
+      "fallback_reason",
+      "semantic_refinement",
+      "wildcard_fallback",
+      "cache_stats",
+      "timing",
+      "tokens_estimated",
+      "max_tokens",
+      "request_id",
+      "next_cursor",
+      "hits_clamped",
+      "state",
+      "index_freshness",
+      "timeout_ms",
+      "timed_out",
+      "partial_results",
+      "ann_stats"
+    ],
+    "cache_stats_fields": [
+      "hits",
+      "misses",
+      "shortfall"
+    ],
+    "timing_fields": [
+      "search_ms",
+      "rerank_ms",
+      "other_ms"
+    ],
+    "index_freshness_fields": [
+      "exists",
+      "status",
+      "reason",
+      "fresh",
+      "last_indexed_at",
+      "age_seconds",
+      "stale",
+      "stale_threshold_seconds",
+      "rebuilding",
+      "pending_sessions"
+    ]
+  }
+}
