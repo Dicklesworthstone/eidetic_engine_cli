@@ -470,7 +470,6 @@ impl DriftAnalysisReport {
             "metricDrifts": self.metric_drifts.iter().map(MetricDrift::data_json).collect::<Vec<_>>(),
             "degradations": self.degradations.iter().map(DriftDegradation::data_json).collect::<Vec<_>>(),
             "nextActions": self.next_actions,
-            "generatedAt": self.generated_at,
         })
     }
 
@@ -718,7 +717,6 @@ impl ClusteringAnalysisReport {
             "diagnostics": self.diagnostics.data_json(),
             "degradations": self.degradations.iter().map(ClusteringDegradation::data_json).collect::<Vec<_>>(),
             "nextActions": self.next_actions,
-            "generatedAt": self.generated_at,
         })
     }
 

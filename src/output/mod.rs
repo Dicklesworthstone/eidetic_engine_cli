@@ -9833,7 +9833,7 @@ mod tests {
             estimated_tokens: 10,
             relevance: score(0.9)?,
             utility: score(0.9)?,
-            provenance: Vec::new(),
+            provenance: vec![pack_provenance("file://failures.md#L1")?],
             why: "highest ranked".to_string(),
         })
         .map_err(|error| format!("failure candidate rejected: {error:?}"))?;
@@ -9845,7 +9845,7 @@ mod tests {
             estimated_tokens: 10,
             relevance: score(0.8)?,
             utility: score(0.8)?,
-            provenance: Vec::new(),
+            provenance: vec![pack_provenance("file://rules.md#L1")?],
             why: "second ranked".to_string(),
         })
         .map_err(|error| format!("rule candidate rejected: {error:?}"))?;
@@ -9857,7 +9857,7 @@ mod tests {
             estimated_tokens: 10,
             relevance: score(0.7)?,
             utility: score(0.7)?,
-            provenance: Vec::new(),
+            provenance: vec![pack_provenance("file://decisions.md#L1")?],
             why: "third ranked".to_string(),
         })
         .map_err(|error| format!("decision candidate rejected: {error:?}"))?;

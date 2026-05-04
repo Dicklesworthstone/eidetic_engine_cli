@@ -1484,9 +1484,12 @@ mod tests {
 
     #[test]
     fn persist_pack_record_preserves_item_provenance_and_trust() -> Result<(), String> {
+        use std::path::Path;
+        use std::str::FromStr;
+
         use super::{compute_pack_hash, persist_pack_record};
         use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
-        use crate::models::{ProvenanceUri, TrustClass};
+        use crate::models::{ProvenanceUri, TrustClass, UnitScore};
         use crate::pack::{
             ContextRequest, PackCandidate, PackCandidateInput, PackProvenance, PackSection,
             PackTrustSignal, TokenBudget, assemble_draft, pack_item_provenance_json,
@@ -1559,8 +1562,12 @@ mod tests {
         ));
         let request =
             ContextRequest::from_query("prepare release").map_err(|error| error.to_string())?;
-        let mut draft = assemble_draft("prepare release", TokenBudget::default_context(), [candidate])
-            .map_err(|error| error.to_string())?;
+        let mut draft = assemble_draft(
+            "prepare release",
+            TokenBudget::default_context(),
+            [candidate],
+        )
+        .map_err(|error| error.to_string())?;
         draft.hash = Some(compute_pack_hash(&request, &draft, &[]));
 
         persist_pack_record(
