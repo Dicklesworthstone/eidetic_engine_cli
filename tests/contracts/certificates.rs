@@ -6,8 +6,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use ee::core::certificate::{
-    CertificateListOptions, CertificateVerifyReport, VerificationResult, list_certificates,
-    show_certificate, verify_certificate,
+    CERTIFICATE_MANIFEST_SCHEMA_V1, CERTIFICATE_PAYLOAD_SCHEMA_V1, CertificateListOptions,
+    CertificateLookupOptions, CertificateVerifyReport, VerificationResult, list_certificates,
+    show_certificate, show_certificate_with_options, verify_certificate,
+    verify_certificate_with_options,
 };
 use ee::models::PrivacyBudgetCertificate;
 use ee::models::TailRiskCertificate;
@@ -86,6 +88,119 @@ fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
+fn hash_payload(payload: &str) -> String {
+    blake3::hash(payload.as_bytes()).to_hex().to_string()
+}
+
+fn certificate_record(
+    id: &str,
+    status: &str,
+    payload_path: &str,
+    payload_hash: &str,
+    payload_schema: &str,
+    expires_at: Option<&str>,
+    assumption_valid: bool,
+) -> Value {
+    let mut record = json!({
+        "id": id,
+        "kind": "pack",
+        "status": status,
+        "workspaceId": "workspace_main",
+        "issuedAt": "2026-05-01T00:00:00Z",
+        "payloadPath": payload_path,
+        "payloadHash": payload_hash,
+        "payloadSchema": payload_schema,
+        "assumptions": [
+            {
+                "valid": assumption_valid
+            }
+        ]
+    });
+    if let Some(expires_at) = expires_at {
+        record["expiresAt"] = json!(expires_at);
+    }
+    record
+}
+
+fn write_certificate_manifest_fixture() -> Result<(tempfile::TempDir, PathBuf), String> {
+    let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let valid_payload = r#"{"packHash":"pack_valid","selected":["mem_01"]}"#;
+    let changed_payload = r#"{"packHash":"pack_changed","selected":["mem_02"]}"#;
+    let valid_hash = hash_payload(valid_payload);
+    let changed_hash = hash_payload(changed_payload);
+
+    fs::write(dir.path().join("valid-payload.json"), valid_payload)
+        .map_err(|error| error.to_string())?;
+    fs::write(dir.path().join("changed-payload.json"), changed_payload)
+        .map_err(|error| error.to_string())?;
+
+    let manifest = json!({
+        "schema": CERTIFICATE_MANIFEST_SCHEMA_V1,
+        "certificates": [
+            certificate_record(
+                "cert_pack_valid",
+                "valid",
+                "valid-payload.json",
+                &valid_hash,
+                CERTIFICATE_PAYLOAD_SCHEMA_V1,
+                Some("2999-01-01T00:00:00Z"),
+                true,
+            ),
+            certificate_record(
+                "cert_pack_hash_mismatch",
+                "valid",
+                "changed-payload.json",
+                &valid_hash,
+                CERTIFICATE_PAYLOAD_SCHEMA_V1,
+                Some("2999-01-01T00:00:00Z"),
+                true,
+            ),
+            certificate_record(
+                "cert_pack_stale_schema",
+                "valid",
+                "valid-payload.json",
+                &valid_hash,
+                "ee.certificate.payload.v0",
+                Some("2999-01-01T00:00:00Z"),
+                true,
+            ),
+            certificate_record(
+                "cert_pack_expired",
+                "expired",
+                "valid-payload.json",
+                &valid_hash,
+                CERTIFICATE_PAYLOAD_SCHEMA_V1,
+                Some("2000-01-01T00:00:00Z"),
+                true,
+            ),
+            certificate_record(
+                "cert_pack_revoked",
+                "revoked",
+                "valid-payload.json",
+                &valid_hash,
+                CERTIFICATE_PAYLOAD_SCHEMA_V1,
+                Some("2999-01-01T00:00:00Z"),
+                true,
+            ),
+            certificate_record(
+                "cert_pack_failed_assumptions",
+                "valid",
+                "valid-payload.json",
+                &changed_hash,
+                CERTIFICATE_PAYLOAD_SCHEMA_V1,
+                Some("2999-01-01T00:00:00Z"),
+                false,
+            )
+        ]
+    });
+    let manifest_path = dir.path().join("certificates.json");
+    let manifest_json =
+        serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?;
+    fs::write(&manifest_path, manifest_json).map_err(|error| error.to_string())?;
+
+    Ok((dir, manifest_path))
+}
+
 #[test]
 fn certificate_core_reports_legacy_mock_ids_as_unavailable() -> TestResult {
     let list = list_certificates(&CertificateListOptions::new().include_expired());
@@ -135,6 +250,110 @@ fn certificate_core_reports_legacy_mock_ids_as_unavailable() -> TestResult {
         &VerificationResult::NotFound,
         "legacy failed-assumptions id is not found",
     )
+}
+
+#[test]
+fn certificate_core_reads_file_backed_manifest_records() -> TestResult {
+    let (_dir, manifest_path) = write_certificate_manifest_fixture()?;
+    let list = list_certificates(
+        &CertificateListOptions::new()
+            .with_manifest_path(&manifest_path)
+            .include_expired(),
+    );
+    ensure_equal(&list.total_count, &6, "certificate total count")?;
+    ensure_equal(&list.usable_count, &4, "certificate usable count")?;
+    ensure_equal(&list.expired_count, &1, "certificate expired count")?;
+    ensure_equal(
+        &list.kinds_present,
+        &vec![ee::models::CertificateKind::Pack],
+        "certificate kinds",
+    )?;
+
+    let filtered = list_certificates(
+        &CertificateListOptions::new()
+            .with_manifest_path(&manifest_path)
+            .with_status(ee::models::CertificateStatus::Valid)
+            .with_limit(2),
+    );
+    ensure_equal(
+        &filtered.certificates.len(),
+        &2usize,
+        "filtered certificate count",
+    )?;
+    ensure_equal(
+        &filtered.certificates[0].id,
+        &"cert_pack_failed_assumptions".to_string(),
+        "stable ordering",
+    )?;
+
+    let shown = show_certificate_with_options(
+        &CertificateLookupOptions::new("cert_pack_valid").with_manifest_path(&manifest_path),
+    );
+    ensure_equal(
+        &shown.verification_status,
+        &VerificationResult::Valid,
+        "manifest-backed show verification",
+    )?;
+    ensure_equal(
+        &shown.certificate.payload_hash,
+        &hash_payload(r#"{"packHash":"pack_valid","selected":["mem_01"]}"#),
+        "manifest-backed payload hash",
+    )?;
+
+    let verified = verify_certificate_with_options(
+        &CertificateLookupOptions::new("cert_pack_valid").with_manifest_path(&manifest_path),
+    );
+    ensure_equal(
+        &verified.result,
+        &VerificationResult::Valid,
+        "manifest-backed verify result",
+    )?;
+    ensure(verified.hash_verified, "hash verified")?;
+    ensure(verified.payload_hash_fresh, "payload hash fresh")
+}
+
+#[test]
+fn certificate_verify_manifest_reports_explicit_failure_modes() -> TestResult {
+    let (_dir, manifest_path) = write_certificate_manifest_fixture()?;
+    let cases = [
+        (
+            "cert_pack_hash_mismatch",
+            VerificationResult::HashMismatch,
+            "hash_mismatch",
+        ),
+        (
+            "cert_pack_stale_schema",
+            VerificationResult::StaleSchemaVersion,
+            "stale_schema_version",
+        ),
+        ("cert_pack_expired", VerificationResult::Expired, "expired"),
+        ("cert_pack_revoked", VerificationResult::Revoked, "revoked"),
+        (
+            "cert_pack_failed_assumptions",
+            VerificationResult::FailedAssumptions,
+            "failed_assumptions",
+        ),
+    ];
+
+    for (certificate_id, expected_result, expected_code) in cases {
+        let report = verify_certificate_with_options(
+            &CertificateLookupOptions::new(certificate_id).with_manifest_path(&manifest_path),
+        );
+        ensure_equal(
+            &report.result,
+            &expected_result,
+            &format!("{certificate_id} result"),
+        )?;
+        ensure(
+            report
+                .failure_codes
+                .iter()
+                .any(|code| code == expected_code),
+            format!("{certificate_id} failure code"),
+        )?;
+    }
+
+    Ok(())
 }
 
 #[test]
