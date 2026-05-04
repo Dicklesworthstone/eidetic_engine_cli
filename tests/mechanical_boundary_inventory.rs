@@ -2,9 +2,16 @@ const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
 const INVENTORY: &str = include_str!("../docs/mechanical-boundary-command-inventory.md");
 const README_SOURCE: &str = include_str!("../README.md");
 const SKILL_STANDARDS: &str = include_str!("../skills/ee-skill-standards/SKILL.md");
+const PROCEDURE_DISTILLATION_SKILL: &str =
+    include_str!("../skills/procedure-distillation/SKILL.md");
 
-const KNOWN_PROJECT_LOCAL_SKILL_PATHS: &[(&str, &str)] =
-    &[("skills/ee-skill-standards/SKILL.md", SKILL_STANDARDS)];
+const KNOWN_PROJECT_LOCAL_SKILL_PATHS: &[(&str, &str)] = &[
+    ("skills/ee-skill-standards/SKILL.md", SKILL_STANDARDS),
+    (
+        "skills/procedure-distillation/SKILL.md",
+        PROCEDURE_DISTILLATION_SKILL,
+    ),
+];
 
 const REQUIRED_MATRIX_HEADERS: &[&str] = &[
     "Surface",
