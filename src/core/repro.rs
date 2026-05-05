@@ -4,7 +4,11 @@
 //! and demo traces. Repro packs are self-contained bundles that capture
 //! everything needed to reproduce a test result or demonstration.
 
-use std::path::PathBuf;
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Component, Path, PathBuf},
+};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -106,6 +110,12 @@ pub struct CapturedFile {
     pub path: String,
     pub hash: String,
     pub size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManifestArtifactExpectation {
+    hash: String,
+    size_bytes: Option<u64>,
 }
 
 /// Options for replaying a repro pack.
@@ -314,7 +324,7 @@ pub fn capture_pack(options: &CaptureOptions) -> Result<CaptureReport, DomainErr
             .to_owned()
     });
 
-    let pack_path = options.output_dir.join(&pack_name);
+    let pack_path = resolve_pack_output_path(&options.output_dir, &pack_name)?;
     let mut report = CaptureReport::new(
         pack_path.clone(),
         pack_name.clone(),
@@ -331,7 +341,7 @@ pub fn capture_pack(options: &CaptureOptions) -> Result<CaptureReport, DomainErr
     }
 
     if !options.dry_run {
-        if let Err(e) = std::fs::create_dir_all(&pack_path) {
+        if let Err(e) = fs::create_dir_all(&pack_path) {
             return Err(DomainError::Storage {
                 message: format!("Failed to create pack directory: {e}"),
                 repair: Some("Check directory permissions".to_string()),
@@ -341,22 +351,26 @@ pub fn capture_pack(options: &CaptureOptions) -> Result<CaptureReport, DomainErr
         let now = Utc::now().to_rfc3339();
 
         let env_json = create_env_json(options.include_env, &now);
+        let lock_json = create_lock_json(&now);
+        let prov_json = create_provenance_json(&now);
+        let env_file = captured_file_for_content("env.json", env_json.as_bytes());
+        let lock_file = captured_file_for_content("repro.lock", lock_json.as_bytes());
+        let provenance_file = captured_file_for_content("provenance.json", prov_json.as_bytes());
+        let payload_files = vec![env_file.clone(), lock_file.clone(), provenance_file.clone()];
+        let manifest_json =
+            create_manifest_json(&pack_name, &options.version, &now, &payload_files);
+
         let env_path = pack_path.join("env.json");
-        if let Err(e) = std::fs::write(&env_path, &env_json) {
+        if let Err(e) = fs::write(&env_path, &env_json) {
             return Err(DomainError::Storage {
                 message: format!("Failed to write env.json: {e}"),
                 repair: None,
             });
         }
-        report.add_file(CapturedFile {
-            path: "env.json".to_string(),
-            hash: format!("blake3:{}", hash_content(env_json.as_bytes())),
-            size_bytes: env_json.len() as u64,
-        });
+        report.add_file(env_file);
 
-        let manifest_json = create_manifest_json(&pack_name, &options.version, &now);
         let manifest_path = pack_path.join("manifest.json");
-        if let Err(e) = std::fs::write(&manifest_path, &manifest_json) {
+        if let Err(e) = fs::write(&manifest_path, &manifest_json) {
             return Err(DomainError::Storage {
                 message: format!("Failed to write manifest.json: {e}"),
                 repair: None,
@@ -365,36 +379,26 @@ pub fn capture_pack(options: &CaptureOptions) -> Result<CaptureReport, DomainErr
         report.add_file(CapturedFile {
             path: "manifest.json".to_string(),
             hash: format!("blake3:{}", hash_content(manifest_json.as_bytes())),
-            size_bytes: manifest_json.len() as u64,
+            size_bytes: len_to_u64(manifest_json.len()),
         });
 
-        let lock_json = create_lock_json(&now);
         let lock_path = pack_path.join("repro.lock");
-        if let Err(e) = std::fs::write(&lock_path, &lock_json) {
+        if let Err(e) = fs::write(&lock_path, &lock_json) {
             return Err(DomainError::Storage {
                 message: format!("Failed to write repro.lock: {e}"),
                 repair: None,
             });
         }
-        report.add_file(CapturedFile {
-            path: "repro.lock".to_string(),
-            hash: format!("blake3:{}", hash_content(lock_json.as_bytes())),
-            size_bytes: lock_json.len() as u64,
-        });
+        report.add_file(lock_file);
 
-        let prov_json = create_provenance_json(&now);
         let prov_path = pack_path.join("provenance.json");
-        if let Err(e) = std::fs::write(&prov_path, &prov_json) {
+        if let Err(e) = fs::write(&prov_path, &prov_json) {
             return Err(DomainError::Storage {
                 message: format!("Failed to write provenance.json: {e}"),
                 repair: None,
             });
         }
-        report.add_file(CapturedFile {
-            path: "provenance.json".to_string(),
-            hash: format!("blake3:{}", hash_content(prov_json.as_bytes())),
-            size_bytes: prov_json.len() as u64,
-        });
+        report.add_file(provenance_file);
     } else {
         report.add_file(CapturedFile {
             path: "env.json".to_string(),
@@ -423,26 +427,26 @@ pub fn capture_pack(options: &CaptureOptions) -> Result<CaptureReport, DomainErr
 
 /// Replay a repro pack to verify reproducibility.
 pub fn replay_pack(options: &ReplayOptions) -> Result<ReplayReport, DomainError> {
-    if !options.pack_path.exists() {
-        return Err(DomainError::NotFound {
-            resource: "pack".to_string(),
-            id: options.pack_path.display().to_string(),
-            repair: Some("Provide a valid repro pack path".to_string()),
-        });
-    }
+    validate_pack_root(&options.pack_path)?;
 
-    let manifest_path = options.pack_path.join("manifest.json");
-    let manifest_json =
-        std::fs::read_to_string(&manifest_path).map_err(|e| DomainError::Storage {
-            message: format!("Failed to read manifest.json: {e}"),
-            repair: Some("Ensure the pack contains a valid manifest.json".to_string()),
+    let manifest_bytes =
+        read_pack_file_no_symlinks(&options.pack_path, "manifest.json").map_err(|e| {
+            DomainError::Storage {
+                message: format!("Failed to read manifest.json: {e}"),
+                repair: Some("Ensure the pack contains a valid manifest.json".to_string()),
+            }
         })?;
+    let manifest_json = String::from_utf8(manifest_bytes).map_err(|e| DomainError::Import {
+        message: format!("manifest.json is not valid UTF-8: {e}"),
+        repair: None,
+    })?;
 
     let manifest: serde_json::Value =
         serde_json::from_str(&manifest_json).map_err(|e| DomainError::Import {
             message: format!("Invalid manifest.json: {e}"),
             repair: None,
         })?;
+    let expected_artifacts = manifest_artifact_expectations(&manifest)?;
 
     let pack_name = manifest["name"].as_str().unwrap_or("unknown").to_string();
     let pack_version = manifest["version"].as_str().unwrap_or("0.0.0").to_string();
@@ -452,38 +456,9 @@ pub fn replay_pack(options: &ReplayOptions) -> Result<ReplayReport, DomainError>
 
     if options.verify_hashes && !options.dry_run {
         for required_file in ["env.json", "manifest.json", "repro.lock", "provenance.json"] {
-            let file_path = options.pack_path.join(required_file);
-            if file_path.exists() {
-                match std::fs::read(&file_path) {
-                    Ok(content) => {
-                        let hash = format!("blake3:{}", hash_content(&content));
-                        report.add_verification(VerificationResult {
-                            path: required_file.to_string(),
-                            expected_hash: hash.clone(),
-                            actual_hash: Some(hash),
-                            passed: true,
-                            error: None,
-                        });
-                    }
-                    Err(e) => {
-                        report.add_verification(VerificationResult {
-                            path: required_file.to_string(),
-                            expected_hash: String::new(),
-                            actual_hash: None,
-                            passed: false,
-                            error: Some(e.to_string()),
-                        });
-                    }
-                }
-            } else {
-                report.add_verification(VerificationResult {
-                    path: required_file.to_string(),
-                    expected_hash: String::new(),
-                    actual_hash: None,
-                    passed: false,
-                    error: Some("File not found".to_string()),
-                });
-            }
+            let result =
+                verify_required_pack_file(&options.pack_path, required_file, &expected_artifacts);
+            report.add_verification(result);
         }
     } else if options.dry_run {
         report.add_verification(VerificationResult {
@@ -496,19 +471,20 @@ pub fn replay_pack(options: &ReplayOptions) -> Result<ReplayReport, DomainError>
     }
 
     if options.check_env && !options.dry_run {
-        let env_path = options.pack_path.join("env.json");
-        if let Ok(env_json_str) = std::fs::read_to_string(&env_path) {
-            if let Ok(pack_env) = serde_json::from_str::<serde_json::Value>(&env_json_str) {
-                let pack_os = pack_env["os"].as_str().unwrap_or("");
-                let pack_arch = pack_env["arch"].as_str().unwrap_or("");
-                let current_os = std::env::consts::OS;
-                let current_arch = std::env::consts::ARCH;
-                if pack_os != current_os || pack_arch != current_arch {
-                    report.env_compatible = false;
-                    report.add_warning(format!(
-                        "Environment mismatch: pack is {}/{}, current is {}/{}",
-                        pack_os, pack_arch, current_os, current_arch
-                    ));
+        if let Ok(env_bytes) = read_pack_file_no_symlinks(&options.pack_path, "env.json") {
+            if let Ok(env_json_str) = String::from_utf8(env_bytes) {
+                if let Ok(pack_env) = serde_json::from_str::<serde_json::Value>(&env_json_str) {
+                    let pack_os = pack_env["os"].as_str().unwrap_or("");
+                    let pack_arch = pack_env["arch"].as_str().unwrap_or("");
+                    let current_os = std::env::consts::OS;
+                    let current_arch = std::env::consts::ARCH;
+                    if pack_os != current_os || pack_arch != current_arch {
+                        report.env_compatible = false;
+                        report.add_warning(format!(
+                            "Environment mismatch: pack is {}/{}, current is {}/{}",
+                            pack_os, pack_arch, current_os, current_arch
+                        ));
+                    }
                 }
             }
         }
@@ -543,7 +519,7 @@ pub fn minimize_pack(options: &MinimizeOptions) -> Result<MinimizeReport, Domain
     for file_name in &required_files {
         let file_path = options.pack_path.join(file_name);
         if file_path.exists() {
-            if let Ok(metadata) = std::fs::metadata(&file_path) {
+            if let Ok(metadata) = fs::metadata(&file_path) {
                 report.add_kept(metadata.len());
             }
         }
@@ -551,7 +527,7 @@ pub fn minimize_pack(options: &MinimizeOptions) -> Result<MinimizeReport, Domain
 
     let legal_path = options.pack_path.join("LEGAL.md");
     if legal_path.exists() {
-        if let Ok(metadata) = std::fs::metadata(&legal_path) {
+        if let Ok(metadata) = fs::metadata(&legal_path) {
             if options.remove_optional {
                 report.add_removed(RemovedFile {
                     path: "LEGAL.md".to_string(),
@@ -565,6 +541,234 @@ pub fn minimize_pack(options: &MinimizeOptions) -> Result<MinimizeReport, Domain
     }
 
     Ok(report)
+}
+
+fn resolve_pack_output_path(output_dir: &Path, pack_name: &str) -> Result<PathBuf, DomainError> {
+    if !is_single_component_pack_name(pack_name) {
+        return Err(DomainError::Usage {
+            message: format!("Invalid repro pack name `{pack_name}`."),
+            repair: Some(
+                "Use a simple directory name without path separators, roots, or `..` components."
+                    .to_string(),
+            ),
+        });
+    }
+    Ok(output_dir.join(pack_name))
+}
+
+fn is_single_component_pack_name(pack_name: &str) -> bool {
+    if pack_name.trim().is_empty() {
+        return false;
+    }
+    let mut components = Path::new(pack_name).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn captured_file_for_content(path: &str, content: &[u8]) -> CapturedFile {
+    CapturedFile {
+        path: path.to_string(),
+        hash: format!("blake3:{}", hash_content(content)),
+        size_bytes: len_to_u64(content.len()),
+    }
+}
+
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+fn validate_pack_root(pack_path: &Path) -> Result<(), DomainError> {
+    let metadata = fs::symlink_metadata(pack_path).map_err(|_| DomainError::NotFound {
+        resource: "pack".to_string(),
+        id: pack_path.display().to_string(),
+        repair: Some("Provide a valid repro pack path".to_string()),
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Repro pack path traverses a symbolic link: {}",
+                pack_path.display()
+            ),
+            repair: Some("Use the real repro pack directory path".to_string()),
+        });
+    }
+    if !metadata.is_dir() {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Repro pack path is not a directory: {}",
+                pack_path.display()
+            ),
+            repair: Some("Provide a repro pack directory".to_string()),
+        });
+    }
+    Ok(())
+}
+
+fn manifest_artifact_expectations(
+    manifest: &serde_json::Value,
+) -> Result<BTreeMap<String, ManifestArtifactExpectation>, DomainError> {
+    let artifacts = manifest
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| DomainError::Import {
+            message: "manifest.json must contain an artifacts array".to_string(),
+            repair: None,
+        })?;
+
+    let mut expected = BTreeMap::new();
+    for (index, artifact) in artifacts.iter().enumerate() {
+        let path = artifact
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| DomainError::Import {
+                message: format!("manifest artifact at index {index} is missing path"),
+                repair: None,
+            })?;
+        if !is_safe_pack_member_path(path) {
+            return Err(DomainError::Import {
+                message: format!("manifest artifact path is invalid: {path}"),
+                repair: None,
+            });
+        }
+        if artifact
+            .get("required")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+        {
+            continue;
+        }
+        let hash = artifact
+            .get("hash")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| DomainError::Import {
+                message: format!("manifest artifact `{path}` is missing hash"),
+                repair: None,
+            })?
+            .to_string();
+        let size_bytes = artifact
+            .get("size_bytes")
+            .or_else(|| artifact.get("sizeBytes"))
+            .or_else(|| artifact.get("bytes"))
+            .and_then(serde_json::Value::as_u64);
+
+        expected.insert(
+            path.to_string(),
+            ManifestArtifactExpectation { hash, size_bytes },
+        );
+    }
+    Ok(expected)
+}
+
+fn verify_required_pack_file(
+    pack_path: &Path,
+    relative_path: &str,
+    expected_artifacts: &BTreeMap<String, ManifestArtifactExpectation>,
+) -> VerificationResult {
+    match read_pack_file_no_symlinks(pack_path, relative_path) {
+        Ok(content) if relative_path == "manifest.json" => {
+            let actual_hash = format!("blake3:{}", hash_content(&content));
+            VerificationResult {
+                path: relative_path.to_string(),
+                expected_hash: "manifest:parsed".to_string(),
+                actual_hash: Some(actual_hash),
+                passed: true,
+                error: None,
+            }
+        }
+        Ok(content) => {
+            let actual_digest = hash_content(&content);
+            let actual_hash = format!("blake3:{actual_digest}");
+            let Some(expected) = expected_artifacts.get(relative_path) else {
+                return VerificationResult {
+                    path: relative_path.to_string(),
+                    expected_hash: String::new(),
+                    actual_hash: Some(actual_hash),
+                    passed: false,
+                    error: Some("manifest is missing required artifact hash".to_string()),
+                };
+            };
+            let hash_matches = expected.hash.eq_ignore_ascii_case(&actual_hash)
+                || expected.hash.eq_ignore_ascii_case(&actual_digest);
+            let size_matches = expected
+                .size_bytes
+                .is_none_or(|expected_size| expected_size == len_to_u64(content.len()));
+            let passed = hash_matches && size_matches;
+            let error = if !hash_matches {
+                Some("hash mismatch".to_string())
+            } else if !size_matches {
+                Some("size mismatch".to_string())
+            } else {
+                None
+            };
+
+            VerificationResult {
+                path: relative_path.to_string(),
+                expected_hash: expected.hash.clone(),
+                actual_hash: Some(actual_hash),
+                passed,
+                error,
+            }
+        }
+        Err(error) => VerificationResult {
+            path: relative_path.to_string(),
+            expected_hash: expected_artifacts
+                .get(relative_path)
+                .map(|expected| expected.hash.clone())
+                .unwrap_or_default(),
+            actual_hash: None,
+            passed: false,
+            error: Some(error),
+        },
+    }
+}
+
+fn read_pack_file_no_symlinks(pack_path: &Path, relative_path: &str) -> Result<Vec<u8>, String> {
+    let target_path = resolve_pack_file_path_no_symlinks(pack_path, relative_path)?;
+    fs::read(&target_path).map_err(|error| {
+        format!(
+            "pack_artifact_unavailable: {}: {}",
+            target_path.display(),
+            error
+        )
+    })
+}
+
+fn resolve_pack_file_path_no_symlinks(
+    pack_path: &Path,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    reject_pack_symlink_component(pack_path)?;
+    let mut target_path = pack_path.to_path_buf();
+    for component in Path::new(relative_path).components() {
+        let Component::Normal(segment) = component else {
+            return Err(format!("invalid pack member path: {relative_path}"));
+        };
+        target_path.push(segment);
+        reject_pack_symlink_component(&target_path)?;
+    }
+    Ok(target_path)
+}
+
+fn reject_pack_symlink_component(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(format!("pack_symlink_refused: {}", path.display()))
+        }
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!(
+            "pack_artifact_not_found: {}: {}",
+            path.display(),
+            error
+        )),
+    }
+}
+
+fn is_safe_pack_member_path(path: &str) -> bool {
+    if path.trim().is_empty() {
+        return false;
+    }
+    Path::new(path)
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
 }
 
 /// Create env.json content.
@@ -598,12 +802,28 @@ fn create_env_json(include_vars: bool, timestamp: &str) -> String {
 }
 
 /// Create manifest.json content.
-fn create_manifest_json(name: &str, version: &str, timestamp: &str) -> String {
+fn create_manifest_json(
+    name: &str,
+    version: &str,
+    timestamp: &str,
+    artifacts: &[CapturedFile],
+) -> String {
+    let artifacts = artifacts
+        .iter()
+        .map(|artifact| {
+            json!({
+                "path": artifact.path.as_str(),
+                "hash": artifact.hash.as_str(),
+                "size_bytes": artifact.size_bytes,
+                "required": true
+            })
+        })
+        .collect::<Vec<_>>();
     let manifest = json!({
         "schema": REPRO_MANIFEST_SCHEMA_V1,
         "name": name,
         "version": version,
-        "artifacts": [],
+        "artifacts": artifacts,
         "created_at": timestamp
     });
 
@@ -659,10 +879,11 @@ mod tests {
 
     #[test]
     fn capture_dry_run_does_not_create_files() -> TestResult {
-        let temp_dir =
-            std::env::temp_dir().join(format!("ee_repro_capture_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+        let temp_dir = tempfile::Builder::new()
+            .prefix("ee_repro_capture_")
+            .tempdir()
+            .map(tempfile::TempDir::keep)
+            .map_err(|e| e.to_string())?;
 
         let options = CaptureOptions {
             source: temp_dir.clone(),
@@ -683,7 +904,6 @@ mod tests {
             "manifest.json should not exist in dry run",
         )?;
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
         Ok(())
     }
 
