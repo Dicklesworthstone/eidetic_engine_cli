@@ -118,7 +118,7 @@ fn seed_fixture(workspace_path: &Path, candidate_count: usize) -> CurateFixture 
             target_memory_id: target_memory_id.clone(),
             proposed_content: Some(format!("Proposed curated content #{index}.")),
             proposed_confidence: Some(0.73),
-            proposed_trust_class: Some("medium".to_owned()),
+            proposed_trust_class: Some("agent_assertion".to_owned()),
             source_type: "agent_inference".to_owned(),
             source_id: Some(format!("sess_{index:08}")),
             reason: "benchmark-seed".to_owned(),
