@@ -19,7 +19,7 @@
 #
 # Environment:
 #   EE_BINARY      Override path to ee binary (default: target/debug/ee)
-#   EE_KEEP_TEMP   If set, preserve temp workspace on exit
+#   EE_KEEP_TEMP   Deprecated; temp workspace is always preserved
 #   EE_VERBOSE     If set, show command output during tests
 
 set -euo pipefail
@@ -77,21 +77,27 @@ log_error() {
     echo "[ERROR] $*" >&2
 }
 
+now_ms() {
+    local value
+    value=$(date +%s%3N 2>/dev/null || true)
+    if [[ "${value}" =~ ^[0-9]+$ ]]; then
+        echo "${value}"
+    else
+        echo "$(date +%s)000"
+    fi
+}
+
 elapsed_ms() {
     local start="$1"
     local end
-    end=$(date +%s%3N 2>/dev/null || date +%s)000
+    end=$(now_ms)
     echo $((end - start))
 }
 
 cleanup() {
     local exit_code=$?
     if [[ -n "${TEST_WORKSPACE}" && -d "${TEST_WORKSPACE}" ]]; then
-        if [[ -z "${EE_KEEP_TEMP:-}" ]]; then
-            rm -rf "${TEST_WORKSPACE}"
-        else
-            log_info "Preserved test workspace: ${TEST_WORKSPACE}"
-        fi
+        log_info "Preserved test workspace: ${TEST_WORKSPACE}"
     fi
     exit ${exit_code}
 }
@@ -152,7 +158,7 @@ run_ee() {
     local stdout_file="${ARTIFACTS_DIR}/${scenario}_${step}_stdout.txt"
     local stderr_file="${ARTIFACTS_DIR}/${scenario}_${step}_stderr.txt"
     local step_start
-    step_start=$(date +%s%3N 2>/dev/null || echo "0")
+    step_start=$(now_ms)
 
     local exit_code=0
 
@@ -417,7 +423,7 @@ $(printf '  %s\n' "${SCENARIOS[@]}")
 
 Environment variables:
   EE_BINARY      Path to ee binary (default: target/debug/ee)
-  EE_KEEP_TEMP   If set, preserve temp workspace on exit
+  EE_KEEP_TEMP   Deprecated; temp workspace is always preserved
   EE_VERBOSE     If set, show command output during tests
 
 Exit codes:
@@ -487,7 +493,7 @@ main() {
     # Setup
     check_binary
     setup_workspace
-    START_TIME=$(date +%s%3N 2>/dev/null || echo "0")
+    START_TIME=$(now_ms)
 
     log_info "Running ${#scenarios_to_run[@]} scenario(s): ${scenarios_to_run[*]}"
     echo ""

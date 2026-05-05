@@ -52,29 +52,24 @@ if [[ ! -f "${MANIFEST}" ]]; then
     exit 1
 fi
 
-METADATA_FILE=$(mktemp -t ee-forbidden-deps.XXXXXX.json)
-ERR_FILE=$(mktemp -t ee-forbidden-deps.XXXXXX.err)
-trap 'rm -f "${METADATA_FILE}" "${ERR_FILE}"' EXIT
-
-if ! cargo metadata --format-version=1 --manifest-path "${MANIFEST}" >"${METADATA_FILE}" 2>"${ERR_FILE}"; then
-    echo "error: cargo metadata failed:" >&2
-    cat "${ERR_FILE}" >&2
-    exit 3
-fi
-
 FORBIDDEN_LIST=$(printf '%s\n' "${FORBIDDEN[@]}")
 
-HITS=$(METADATA_FILE="${METADATA_FILE}" FORBIDDEN_LIST="${FORBIDDEN_LIST}" python3 <<'PY'
-import json, os
+if ! HITS=$(cargo metadata --format-version=1 --manifest-path "${MANIFEST}" |
+    FORBIDDEN_LIST="${FORBIDDEN_LIST}" python3 -c '
+import json
+import os
+import sys
 
-with open(os.environ["METADATA_FILE"], encoding="utf-8") as fh:
-    data = json.load(fh)
+data = json.load(sys.stdin)
 forbidden = {line.strip() for line in os.environ["FORBIDDEN_LIST"].splitlines() if line.strip()}
 hits = sorted({pkg["name"] for pkg in data.get("packages", []) if pkg.get("name") in forbidden})
 for name in hits:
     print(name)
-PY
-)
+'
+); then
+    echo "error: cargo metadata or dependency scan failed" >&2
+    exit 3
+fi
 
 if [[ -n "${HITS}" ]]; then
     echo "error: forbidden dependencies present in the resolved tree:" >&2

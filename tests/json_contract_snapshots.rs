@@ -1,10 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
-use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+use ee::db::{
+    CreateMemoryInput, CreatePackItemInput, CreatePackRecordInput, CreateWorkspaceInput,
+    DbConnection,
+};
 use ee::models::WorkspaceId;
 use insta::assert_json_snapshot;
 use serde_json::Value;
@@ -14,7 +16,6 @@ type TestResult = Result<(), String>;
 const MEMORY_ID: &str = "mem_00000000000000000000000001";
 const PACK_ID: &str = "pack_00000000000000000000000001";
 const QUERY: &str = "format before release";
-const FIXTURE_TIMESTAMP: &str = "2026-04-29T12:00:00+00:00";
 
 #[derive(Debug)]
 struct JsonContractFixture {
@@ -60,13 +61,11 @@ impl JsonContractFixture {
 }
 
 fn unique_artifact_dir(prefix: &str) -> Result<PathBuf, String> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("clock moved backwards: {error}"))?
-        .as_nanos();
-    Ok(std::env::temp_dir()
-        .join("ee-insta-golden-artifacts")
-        .join(format!("{prefix}-{}-{now}", std::process::id())))
+    tempfile::Builder::new()
+        .prefix(&format!("{prefix}-"))
+        .tempdir()
+        .map(tempfile::TempDir::keep)
+        .map_err(|error| format!("failed to create {prefix} artifact directory: {error}"))
 }
 
 fn seed_workspace(workspace: &Path, database: &Path) -> TestResult {
@@ -114,24 +113,36 @@ fn seed_workspace(workspace: &Path, database: &Path) -> TestResult {
         )
         .map_err(|error| error.to_string())?;
     connection
-        .execute_raw(&format!(
-            "UPDATE workspaces SET created_at = '{FIXTURE_TIMESTAMP}', updated_at = '{FIXTURE_TIMESTAMP}' WHERE id = '{workspace_id}'"
-        ))
-        .map_err(|error| error.to_string())?;
-    connection
-        .execute_raw(&format!(
-            "UPDATE memories SET created_at = '{FIXTURE_TIMESTAMP}', updated_at = '{FIXTURE_TIMESTAMP}', provenance_chain_hash = 'blake3:fixture-memory-hash' WHERE id = '{MEMORY_ID}'"
-        ))
-        .map_err(|error| error.to_string())?;
-    connection
-        .execute_raw(&format!(
-            "INSERT INTO pack_records (id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, created_at, created_by) VALUES ('{PACK_ID}', '{workspace_id}', '{QUERY}', 'compact', 4000, 8, 1, 0, 'blake3:fixture-pack-hash', NULL, '2026-04-29T12:01:00+00:00', 'golden-test')"
-        ))
-        .map_err(|error| error.to_string())?;
-    connection
-        .execute_raw(&format!(
-            "INSERT INTO pack_items (pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key, provenance_json, trust_class, trust_subclass) VALUES ('{PACK_ID}', '{MEMORY_ID}', 1, 'procedural_rules', 8, 0.91, 0.8, 'Selected because the memory matches release-formatting work.', 'procedural:rule:cargo', '{{\"schema\":\"ee.pack_item.provenance.v1\",\"entries\":[{{\"uri\":\"file://AGENTS.md#L164-173\",\"trustClass\":\"human_explicit\",\"trustSubclass\":\"project-rule\"}}]}}', 'human_explicit', 'project-rule')"
-        ))
+        .insert_pack_record(
+            PACK_ID,
+            &CreatePackRecordInput {
+                workspace_id: workspace_id.clone(),
+                query: QUERY.to_string(),
+                profile: "compact".to_string(),
+                max_tokens: 4000,
+                used_tokens: 8,
+                item_count: 1,
+                omitted_count: 0,
+                pack_hash: "blake3:fixture-pack-hash".to_string(),
+                degraded_json: None,
+                created_by: Some("golden-test".to_string()),
+            },
+            &[CreatePackItemInput {
+                pack_id: PACK_ID.to_string(),
+                memory_id: MEMORY_ID.to_string(),
+                rank: 1,
+                section: "procedural_rules".to_string(),
+                estimated_tokens: 8,
+                relevance: 0.91,
+                utility: 0.8,
+                why: "Selected because the memory matches release-formatting work.".to_string(),
+                diversity_key: Some("procedural:rule:cargo".to_string()),
+                provenance_json: r#"{"schema":"ee.pack_item.provenance.v1","entries":[{"uri":"file://AGENTS.md#L164-173","trustClass":"human_explicit","trustSubclass":"project-rule"}]}"#.to_string(),
+                trust_class: "human_explicit".to_string(),
+                trust_subclass: Some("project-rule".to_string()),
+            }],
+            &[],
+        )
         .map_err(|error| error.to_string())?;
     connection.close().map_err(|error| error.to_string())
 }
@@ -143,7 +154,9 @@ fn stable_workspace_id(workspace: &Path) -> String {
     let hash =
         blake3::hash(format!("workspace:{}", canonical_workspace.to_string_lossy()).as_bytes());
     let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    for (target, source) in bytes.iter_mut().zip(hash.as_bytes().iter()) {
+        *target = *source;
+    }
     WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
 }
 

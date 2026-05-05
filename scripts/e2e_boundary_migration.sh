@@ -59,7 +59,7 @@ require_tool() {
 }
 
 show_help() {
-    sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 list_scenarios() {
