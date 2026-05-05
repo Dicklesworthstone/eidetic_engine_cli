@@ -132,6 +132,7 @@ mod tests {
     use ee::db::{
         CreateCurationCandidateInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
     };
+    use ee::models::WorkspaceId;
     use std::path::Path;
     use std::process::{Command, Output};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -201,6 +202,15 @@ mod tests {
             haystack.contains(needle),
             format!("{context}: expected to contain {needle:?}, got {haystack:?}"),
         )
+    }
+
+    fn compute_stable_workspace_id(path: &Path) -> String {
+        let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
+        let mut bytes = [0_u8; 16];
+        for (target, source) in bytes.iter_mut().zip(hash.as_bytes().iter().copied()) {
+            *target = source;
+        }
+        WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
     }
 
     fn assert_agent_stdout_golden(args: &[&str], name: &str, expect_success: bool) -> TestResult {
@@ -1167,15 +1177,17 @@ mod tests {
             )
         })?;
 
+        // Compute workspace_id using the same algorithm as stable_workspace_id.
+        let workspace_id = compute_stable_workspace_id(&workspace);
+
         // Set up database with migrations.
-        let connection =
-            DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
 
-        // Insert workspace.
+        // Insert workspace with the correct stable ID.
         connection
             .insert_workspace(
-                "wsp_curatetest0000000000000001",
+                &workspace_id,
                 &CreateWorkspaceInput {
                     path: workspace.to_string_lossy().into_owned(),
                     name: Some("curate-dry-run-test".to_string()),
@@ -1188,7 +1200,7 @@ mod tests {
             .insert_memory(
                 "mem_00000000000000curatedry001",
                 &CreateMemoryInput {
-                    workspace_id: "wsp_curatetest0000000000000001".to_string(),
+                    workspace_id: workspace_id.clone(),
                     level: "procedural".to_string(),
                     kind: "guideline".to_string(),
                     content: "Original memory content for curation test.".to_string(),
@@ -1210,7 +1222,7 @@ mod tests {
             .insert_curation_candidate(
                 "curate_00000000000000000drytest01",
                 &CreateCurationCandidateInput {
-                    workspace_id: "wsp_curatetest0000000000000001".to_string(),
+                    workspace_id: workspace_id.clone(),
                     candidate_type: "promote".to_string(),
                     target_memory_id: "mem_00000000000000curatedry001".to_string(),
                     proposed_content: None,
@@ -1276,8 +1288,15 @@ mod tests {
         )?;
         ensure_equal(
             &json["data"]["command"],
-            &serde_json::json!("curate"),
+            &serde_json::json!("curate accept"),
             "curate accept command",
+        )?;
+
+        // Verify key fields match the expected curate review response structure.
+        ensure_equal(
+            &json["data"]["candidateId"],
+            &serde_json::json!("curate_00000000000000000drytest01"),
+            "curate accept candidate id",
         )?;
 
         // Verify dry-run indicator is present.
@@ -1287,34 +1306,29 @@ mod tests {
             "curate accept dry-run flag",
         )?;
 
-        // Verify candidate ID is returned.
+        // Verify mutation.persisted is false (confirming dry-run did not persist).
         ensure_equal(
-            &json["data"]["candidateId"],
-            &serde_json::json!("curate_00000000000000000drytest01"),
-            "curate accept candidate id",
+            &json["data"]["mutation"]["persisted"],
+            &serde_json::json!(false),
+            "curate accept mutation.persisted",
         )?;
 
-        // Verify action is recorded.
+        // Verify mutation shows what would change.
         ensure_equal(
-            &json["data"]["action"],
-            &serde_json::json!("accept"),
-            "curate accept action",
+            &json["data"]["mutation"]["fromStatus"],
+            &serde_json::json!("pending"),
+            "curate accept mutation.fromStatus",
         )?;
-
-        // Verify preview shows what would change.
-        ensure(
-            json["data"]["preview"].is_object(),
-            "curate accept preview must be an object",
+        ensure_equal(
+            &json["data"]["mutation"]["toStatus"],
+            &serde_json::json!("approved"),
+            "curate accept mutation.toStatus",
         )?;
 
         // Verify NO mutation occurred: re-open database and check candidate status.
-        let connection =
-            DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         let candidate = connection
-            .get_curation_candidate(
-                "wsp_curatetest0000000000000001",
-                "curate_00000000000000000drytest01",
-            )
+            .get_curation_candidate(&workspace_id, "curate_00000000000000000drytest01")
             .map_err(|error| format!("failed to get candidate: {error}"))?
             .ok_or_else(|| "candidate not found".to_string())?;
 
