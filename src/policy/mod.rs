@@ -1082,7 +1082,7 @@ mod tests {
                 |(prefix, suffix, suffix_context)| {
                     let raw = format!("EESECRET{suffix}");
                     SecretRedactionCase {
-                        input: format!("{prefix}{{\"nested\":{{\"api_key\":\"{raw}\"}}}}{suffix_context}"),
+                        input: format!("{prefix} nested(api_key={raw}) {suffix_context}"),
                         raw_values: vec![raw],
                         expected_reasons: vec!["api_key"],
                     }
