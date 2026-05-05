@@ -5,8 +5,8 @@ use std::fmt;
 use serde::Serialize;
 
 use crate::models::{
-    ContextProfile, ContextProfileName, ContextProfileSection, ContextProfileSectionMix, MemoryId,
-    ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass, UnitScore,
+    ContextProfile, ContextProfileName, ContextProfileSection, ContextProfileSectionMix,
+    ERROR_SCHEMA_V1, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass, UnitScore,
 };
 
 pub const SUBSYSTEM: &str = "pack";
@@ -31,6 +31,34 @@ pub const FACILITY_LOCATION_EPSILON: f32 = 0.000_001;
 /// score higher if the texts genuinely overlap).
 pub const FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR: f32 = 0.85;
 pub const PACK_ITEM_PROVENANCE_SCHEMA_V1: &str = "ee.pack_item.provenance.v1";
+
+fn serialize_pack_json_or_error<T>(
+    value: &T,
+    type_name: &str,
+    expected_schema: Option<&str>,
+) -> String
+where
+    T: Serialize,
+{
+    match serde_json::to_string(value) {
+        Ok(json) => json,
+        Err(error) => serde_json::json!({
+            "schema": ERROR_SCHEMA_V1,
+            "error": {
+                "code": "serialization_failed",
+                "message": format!("Failed to serialize {type_name} as JSON."),
+                "severity": "high",
+                "repair": "Fix the pack serializer; refusing to emit an empty object.",
+                "details": {
+                    "type": type_name,
+                    "expectedSchema": expected_schema,
+                    "serializerError": error.to_string(),
+                }
+            }
+        })
+        .to_string(),
+    }
+}
 
 /// Conservative characters-per-token ratio for heuristic estimation.
 /// Uses 3.5 instead of 4.0 to bias toward overestimation.
@@ -2158,7 +2186,11 @@ impl RateDistortionReport {
                 .collect(),
         };
 
-        serde_json::to_string(&json_repr).unwrap_or_else(|_| "{}".to_owned())
+        serialize_pack_json_or_error(
+            &json_repr,
+            "RateDistortionReport",
+            Some(RATE_DISTORTION_SCHEMA_V1),
+        )
     }
 
     #[must_use]
@@ -2260,7 +2292,7 @@ impl SectionBudgetReport {
             utilization_percent: (self.utilization_percent() * 100.0).round() / 100.0,
         };
 
-        serde_json::to_string(&json_repr).unwrap_or_else(|_| "{}".to_owned())
+        serialize_pack_json_or_error(&json_repr, "SectionBudgetReport", None)
     }
 }
 
@@ -2296,6 +2328,49 @@ mod tests {
     use crate::testing::ensure_contains;
 
     type TestResult = Result<(), String>;
+
+    struct FailingSerialize;
+
+    impl serde::Serialize for FailingSerialize {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom(
+                "intentional serialization failure",
+            ))
+        }
+    }
+
+    #[test]
+    fn serialize_pack_json_or_error_reports_failure_shape() -> TestResult {
+        let json = super::serialize_pack_json_or_error(
+            &FailingSerialize,
+            "FailingPackReport",
+            Some(super::RATE_DISTORTION_SCHEMA_V1),
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            parsed["schema"].as_str(),
+            Some(crate::models::ERROR_SCHEMA_V1)
+        );
+        assert_eq!(
+            parsed["error"]["code"].as_str(),
+            Some("serialization_failed")
+        );
+        assert_eq!(
+            parsed["error"]["details"]["type"].as_str(),
+            Some("FailingPackReport")
+        );
+        assert_eq!(
+            parsed["error"]["details"]["expectedSchema"].as_str(),
+            Some(super::RATE_DISTORTION_SCHEMA_V1)
+        );
+        assert_ne!(json, "{}");
+        Ok(())
+    }
 
     fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
         if condition {

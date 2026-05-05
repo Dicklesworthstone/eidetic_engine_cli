@@ -1,31 +1,31 @@
 {
+  "schema": "ee.pack.rate_distortion.v1",
   "budgetTokens": 4000,
+  "usedTokens": 3200,
+  "slackTokens": 800,
+  "rate": 0.8,
   "distortion": 0.3333,
   "efficiency": 0.8,
-  "includedCandidates": 10,
   "omittedCandidates": 5,
+  "includedCandidates": 10,
   "qualityScore": 0.6667,
-  "rate": 0.8,
-  "schema": "ee.pack.rate_distortion.v1",
+  "utilizationPercent": 80.0,
   "sections": [
     {
-      "candidateCount": 4,
       "name": "procedural_rules",
       "quotaTokens": 1200,
-      "slackTokens": 200,
       "usedTokens": 1000,
+      "slackTokens": 200,
+      "candidateCount": 4,
       "utilizationPercent": 83.33
     },
     {
-      "candidateCount": 3,
       "name": "evidence",
       "quotaTokens": 800,
-      "slackTokens": 200,
       "usedTokens": 600,
+      "slackTokens": 200,
+      "candidateCount": 3,
       "utilizationPercent": 75.0
     }
-  ],
-  "slackTokens": 800,
-  "usedTokens": 3200,
-  "utilizationPercent": 80.0
+  ]
 }
