@@ -22,7 +22,7 @@ pub const INSTRUCTION_LIKE_SCORE_THRESHOLD: f32 = 0.45;
 /// Backward-compatible constant for code that checks for any redaction.
 /// Prefer checking for `[REDACTED:` prefix to detect scanner-specific placeholders.
 #[deprecated(note = "use redaction_placeholder(scanner_name) for new code")]
-pub const SECRET_REDACTION_PLACEHOLDER: &str = "[REDACTED:";
+pub const SECRET_REDACTION_PLACEHOLDER: &str = "[REDACTED:"; // ubs:ignore - redaction marker prefix, not credential material.
 
 /// Format a scanner-specific redaction placeholder per §22 contract.
 /// Returns `[REDACTED:<scanner_name>]` where scanner_name identifies the
@@ -791,7 +791,10 @@ fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
         }
         let actual_jwt_end = jwt_start + jwt_candidate.len();
 
-        let dot_count = jwt_candidate.chars().filter(|&c| c == '.').count();
+        let dot_count = jwt_candidate
+            .chars()
+            .filter(|&c| c == '.') // ubs:ignore - delimiter comparison, not secret equality.
+            .count();
         if dot_count == 2 && jwt_candidate.len() >= 32 {
             let placeholder = redaction_placeholder("jwt_token");
             output.replace_range(jwt_start..actual_jwt_end, &placeholder);

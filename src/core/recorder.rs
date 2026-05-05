@@ -1524,12 +1524,15 @@ pub fn list_links_from_records(
     let mut filtered = links
         .iter()
         .filter(|l| {
-            options.run_id.as_ref().is_none_or(|r| &l.run_id == r)
-                && options.link_type.is_none_or(|t| l.link_type == t)
+            options
+                .run_id
+                .as_ref()
+                .is_none_or(|r| &l.run_id == r) // ubs:ignore - public recorder run ID filter, not credential comparison.
+                && options.link_type.is_none_or(|t| l.link_type == t) // ubs:ignore - public enum filter, not credential comparison.
                 && options
                     .artifact_id
                     .as_ref()
-                    .is_none_or(|a| &l.artifact_id == a)
+                    .is_none_or(|a| &l.artifact_id == a) // ubs:ignore - public artifact ID filter, not credential comparison.
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -2384,7 +2387,9 @@ mod tests {
         assert_eq!(report.links.len(), 2);
         assert_eq!(report.links[0].link_id, "link_early");
         assert_eq!(report.links[1].link_id, "link_late");
-        assert!(report.links.iter().all(|link| link.run_id == "run_sample"));
+        assert!(
+            report.links.iter().all(|link| link.run_id == "run_sample") // ubs:ignore - test fixture run ID assertion, not credential comparison.
+        );
         assert!(
             report
                 .links
