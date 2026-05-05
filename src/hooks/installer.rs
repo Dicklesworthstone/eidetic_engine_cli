@@ -318,14 +318,26 @@ fn get_ee_binary_path() -> Result<PathBuf, DomainError> {
 }
 
 fn ensure_hook_dir_is_not_symlink(hook_dir: &Path) -> Result<(), DomainError> {
-    match std::fs::symlink_metadata(hook_dir) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(DomainError::PolicyDenied {
-            message: format!(
+    if let Some(symlink_path) = first_existing_symlink_component(hook_dir)? {
+        let message = if symlink_path == hook_dir {
+            format!(
                 "Refusing to write hooks into '{}': hook directory is a symlink",
                 hook_dir.display()
-            ),
+            )
+        } else {
+            format!(
+                "Refusing to write hooks into '{}': hook directory path traverses symlink '{}'",
+                hook_dir.display(),
+                symlink_path.display()
+            )
+        };
+        return Err(DomainError::PolicyDenied {
+            message,
             repair: Some("Pass the real hook directory path instead of a symlink.".to_owned()),
-        }),
+        });
+    }
+
+    match std::fs::symlink_metadata(hook_dir) {
         Ok(_) => Ok(()),
         Err(error)
             if matches!(
@@ -345,6 +357,38 @@ fn ensure_hook_dir_is_not_symlink(hook_dir: &Path) -> Result<(), DomainError> {
             ),
         }),
     }
+}
+
+fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Failed to inspect hook directory component '{}': {error}",
+                        current.display()
+                    ),
+                    repair: Some(
+                        "Choose a readable hook directory or re-run with corrected permissions."
+                            .to_owned(),
+                    ),
+                });
+            }
+        }
+    }
+    Ok(None)
 }
 
 #[derive(Debug)]
@@ -1061,6 +1105,50 @@ mod tests {
         assert!(
             !real_hook_dir.join("pre-task").exists(),
             "symlinked hook directory target must not receive a hook"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_hook_directory_parent_is_rejected_before_writing() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let real_root = temp.path().join("real-root");
+        fs::create_dir_all(&real_root).map_err(|e| e.to_string())?;
+
+        let linked_root = temp.path().join("linked-root");
+        symlink(&real_root, &linked_root).map_err(|e| e.to_string())?;
+        let requested_hook_dir = linked_root.join("hooks");
+
+        let options = HookInstallOptions {
+            hook_dir: requested_hook_dir,
+            hooks: vec![HookType::PreTask],
+            dry_run: false,
+            preserve_existing: false,
+            force: false,
+        };
+
+        let error = match install_hooks(&options) {
+            Ok(_) => {
+                return Err(
+                    "install should reject hook directory beneath a symlinked parent".to_owned(),
+                );
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            error.message().contains("path traverses symlink"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            !real_root.join("hooks/pre-task").exists(),
+            "symlinked hook directory parent must not receive a hook"
         );
 
         Ok(())
