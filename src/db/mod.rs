@@ -9772,7 +9772,11 @@ mod tests {
 
         // First apply should succeed with Applied outcome.
         let first = connection.apply_migration(&migration, "2026-05-04T12:00:00Z")?;
-        ensure_equal(&first, &ApplyOutcome::Applied, "first apply should return Applied")?;
+        ensure_equal(
+            &first,
+            &ApplyOutcome::Applied,
+            "first apply should return Applied",
+        )?;
         ensure(
             table_exists(&connection, "idempotent_marker")?,
             "migration DDL should have created the table",
@@ -9786,7 +9790,11 @@ mod tests {
         // process applied the migration before we acquired the write lock) should return
         // AlreadyApplied without error.
         let second = connection.apply_migration(&migration, "2026-05-04T12:00:01Z")?;
-        ensure_equal(&second, &ApplyOutcome::AlreadyApplied, "second apply should return AlreadyApplied")?;
+        ensure_equal(
+            &second,
+            &ApplyOutcome::AlreadyApplied,
+            "second apply should return AlreadyApplied",
+        )?;
 
         // Table should still exist and migration should still be recorded exactly once.
         ensure(
@@ -9794,7 +9802,11 @@ mod tests {
             "table should still exist after idempotent reapply",
         )?;
         let migrations = connection.applied_migrations()?;
-        ensure_equal(&migrations.len(), &1, "exactly one migration record should exist")?;
+        ensure_equal(
+            &migrations.len(),
+            &1,
+            "exactly one migration record should exist",
+        )?;
         ensure_equal(
             &migrations[0].applied_at(),
             &"2026-05-04T12:00:00Z",
