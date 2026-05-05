@@ -16,6 +16,7 @@ use crate::models::{
     DomainError, ProcedureExportFormat, ProcedureStatus, ProcedureVerificationStatus,
     SKILL_CAPSULE_SCHEMA_V1, SkillCapsuleInstallMode,
 };
+use crate::output::markdown;
 
 /// Schema for procedure propose report.
 pub const PROCEDURE_PROPOSE_REPORT_SCHEMA_V1: &str = "ee.procedure.propose_report.v1";
@@ -494,22 +495,47 @@ fn render_export_content(
 fn render_procedure_markdown(snapshot: &ProcedureExportSnapshot, exported_at: &str) -> String {
     let procedure = &snapshot.procedure;
     let mut out = String::with_capacity(1024);
-    out.push_str(&format!("# {}\n\n", procedure.title));
-    out.push_str(&format!("{}\n\n", procedure.summary));
+    out.push_str(&format!(
+        "# {}\n\n",
+        markdown::escape_heading(&procedure.title)
+    ));
+    out.push_str(&format!(
+        "{}\n\n",
+        markdown::escape_text(&procedure.summary)
+    ));
     out.push_str("## Procedure\n\n");
-    out.push_str(&format!("- ID: `{}`\n", procedure.procedure_id));
-    out.push_str(&format!("- Status: `{}`\n", procedure.status));
-    out.push_str(&format!("- Generated: `{exported_at}`\n"));
+    out.push_str(&format!(
+        "- ID: {}\n",
+        markdown::inline_code(&procedure.procedure_id)
+    ));
+    out.push_str(&format!(
+        "- Status: {}\n",
+        markdown::inline_code(&procedure.status)
+    ));
+    out.push_str(&format!(
+        "- Generated: {}\n",
+        markdown::inline_code(exported_at)
+    ));
     out.push_str("- Redaction: `not_required`\n\n");
 
     out.push_str("## Steps\n\n");
     for step in &snapshot.steps {
-        out.push_str(&format!("{}. **{}**\n", step.sequence, step.title));
-        out.push_str(&format!("   {}\n", step.instruction));
+        out.push_str(&format!(
+            "{}. **{}**\n",
+            step.sequence,
+            markdown::escape_text(&step.title)
+        ));
+        out.push_str(&format!(
+            "   {}\n",
+            markdown::escape_text(&step.instruction)
+        ));
         if let Some(command) = &step.command_hint {
-            out.push_str(&format!("   Command: `{command}`\n"));
+            out.push_str(&format!("   Command: {}\n", markdown::inline_code(command)));
         }
-        out.push_str(&format!("   Required: `{}`\n\n", step.required));
+        out.push_str(&format!(
+            "   Required: {}\n\n",
+            markdown::inline_code(&step.required.to_string())
+        ));
     }
 
     push_markdown_provenance(&mut out, procedure);
@@ -564,7 +590,7 @@ fn render_skill_capsule(
         "description: {}\n",
         yaml_string(&format!(
             "Render-only procedure capsule for {}",
-            procedure.title
+            markdown::escape_text(&procedure.title)
         ))
     ));
     body.push_str(&format!("schema: \"{}\"\n", SKILL_CAPSULE_SCHEMA_V1));
@@ -579,8 +605,14 @@ fn render_skill_capsule(
         yaml_string(SkillCapsuleInstallMode::RenderOnly.as_str())
     ));
     body.push_str("---\n\n");
-    body.push_str(&format!("# {}\n\n", procedure.title));
-    body.push_str(&format!("{}\n\n", procedure.summary));
+    body.push_str(&format!(
+        "# {}\n\n",
+        markdown::escape_heading(&procedure.title)
+    ));
+    body.push_str(&format!(
+        "{}\n\n",
+        markdown::escape_text(&procedure.summary)
+    ));
     body.push_str("## Safety\n\n");
     body.push_str("- This capsule is render-only and is not installed automatically.\n");
     body.push_str(
@@ -589,10 +621,17 @@ fn render_skill_capsule(
     body.push_str(&format!("- Generated: `{exported_at}`\n\n"));
     body.push_str("## Procedure Steps\n\n");
     for step in &snapshot.steps {
-        body.push_str(&format!("{}. **{}**\n", step.sequence, step.title));
-        body.push_str(&format!("   {}\n", step.instruction));
+        body.push_str(&format!(
+            "{}. **{}**\n",
+            step.sequence,
+            markdown::escape_text(&step.title)
+        ));
+        body.push_str(&format!(
+            "   {}\n",
+            markdown::escape_text(&step.instruction)
+        ));
         if let Some(command) = &step.command_hint {
-            body.push_str(&format!("   Command: `{command}`\n"));
+            body.push_str(&format!("   Command: {}\n", markdown::inline_code(command)));
         }
         body.push('\n');
     }
@@ -627,11 +666,11 @@ fn push_markdown_provenance(out: &mut String, procedure: &ProcedureDetail) {
     out.push_str("## Provenance\n\n");
     out.push_str("Source runs:\n");
     for run_id in &procedure.source_run_ids {
-        out.push_str(&format!("- `{run_id}`\n"));
+        out.push_str(&format!("- {}\n", markdown::inline_code(run_id)));
     }
     out.push_str("\nEvidence IDs:\n");
     for evidence_id in &procedure.evidence_ids {
-        out.push_str(&format!("- `{evidence_id}`\n"));
+        out.push_str(&format!("- {}\n", markdown::inline_code(evidence_id)));
     }
     out.push('\n');
 }
@@ -1951,6 +1990,76 @@ mod tests {
         assert!(report.content.contains("## Steps"));
         assert!(report.content.contains("## Provenance"));
         assert!(report.content_hash.starts_with("blake3:"));
+        Ok(())
+    }
+
+    #[test]
+    fn export_markdown_and_skill_capsule_escape_adversarial_content() -> TestResult {
+        let mut record = procedure_record("candidate");
+        record.procedure.title =
+            "Stored [title-link](javascript:alert(1)) <strong>html</strong>".to_owned();
+        record.procedure.summary =
+            "Summary with [summary-link](javascript:alert(2)) <script>bad()</script>".to_owned();
+        record.procedure.source_run_ids =
+            vec!["run`1 [source-link](javascript:alert(3))".to_owned()];
+        record.steps[0].title = "Prepare `unsafe` [step-link](javascript:alert(4))".to_owned();
+        record.steps[0].instruction =
+            "Do not break out:\n```\n# injected\n```\n<iframe src=x>".to_owned();
+        record.steps[0].command_hint = Some("echo `safe`\n--flag".to_owned());
+
+        let markdown_options = ProcedureExportOptions {
+            procedure_id: "proc_test".to_owned(),
+            format: "markdown".to_owned(),
+            ..Default::default()
+        };
+        let markdown_report = export_procedure_from_records(&markdown_options, &[record.clone()])
+            .map_err(|e| e.message())?;
+
+        assert!(markdown_report.content.contains(
+            "# Stored \\[title\\-link\\]\\(javascript:alert\\(1\\)\\) &lt;strong&gt;html&lt;/strong&gt;"
+        ));
+        assert!(markdown_report.content.contains(
+            "Summary with \\[summary\\-link\\]\\(javascript:alert\\(2\\)\\) &lt;script&gt;bad\\(\\)&lt;/script&gt;"
+        ));
+        assert!(
+            markdown_report
+                .content
+                .contains("Prepare \\`unsafe\\` \\[step\\-link\\]\\(javascript:alert\\(4\\)\\)")
+        );
+        assert!(markdown_report.content.contains("\\`\\`\\`"));
+        assert!(
+            markdown_report
+                .content
+                .contains("Command: ``echo `safe` --flag``")
+        );
+        assert!(
+            !markdown_report.content.contains("[title-link](javascript")
+                && !markdown_report
+                    .content
+                    .contains("[summary-link](javascript")
+                && !markdown_report.content.contains("[step-link](javascript")
+                && !markdown_report.content.contains("<script>bad()</script>")
+                && !markdown_report.content.contains("<iframe src=x>")
+        );
+
+        let capsule_options = ProcedureExportOptions {
+            procedure_id: "proc_test".to_owned(),
+            format: "skill-capsule".to_owned(),
+            ..Default::default()
+        };
+        let capsule_report =
+            export_procedure_from_records(&capsule_options, &[record]).map_err(|e| e.message())?;
+
+        assert!(
+            capsule_report
+                .content
+                .contains("\\[title\\-link\\]\\(javascript:alert\\(1\\)\\)")
+        );
+        assert!(
+            !capsule_report.content.contains("[title-link](javascript")
+                && !capsule_report.content.contains("[step-link](javascript")
+                && !capsule_report.content.contains("<iframe src=x>")
+        );
         Ok(())
     }
 
