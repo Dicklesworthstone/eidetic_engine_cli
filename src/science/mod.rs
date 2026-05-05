@@ -1697,6 +1697,7 @@ mod tests {
                         level: "procedural".to_string(),
                         kind: "rule".to_string(),
                         content: content.to_string(),
+                        workflow_id: None,
                         confidence: 0.9,
                         utility: 0.8,
                         importance: 0.7,

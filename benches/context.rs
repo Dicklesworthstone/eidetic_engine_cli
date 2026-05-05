@@ -65,6 +65,7 @@ fn seed_database(temp_dir: &Path, memory_count: usize) -> std::path::PathBuf {
             workspace_path: &workspace_path,
             database_path: Some(&db_path),
             content: &content,
+            workflow_id: None,
             level: "procedural",
             kind: "rule",
             tags: Some(&format!("bench,{topic}")),

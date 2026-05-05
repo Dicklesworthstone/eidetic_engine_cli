@@ -136,6 +136,7 @@ fn seed_database(workspace_path: &Path, count: usize) -> PathBuf {
             level: "semantic".to_owned(),
             kind: "fact".to_owned(),
             content,
+            workflow_id: None,
             confidence: 0.7,
             utility: 0.5,
             importance: 0.5,

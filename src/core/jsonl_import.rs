@@ -809,6 +809,7 @@ fn prepare_memory(
             level: level.as_str().to_owned(),
             kind: kind.as_str().to_owned(),
             content: content.as_str().to_owned(),
+            workflow_id: None,
             confidence,
             utility,
             importance,

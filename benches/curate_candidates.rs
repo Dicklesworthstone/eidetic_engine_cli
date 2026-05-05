@@ -84,6 +84,7 @@ fn seed_fixture(workspace_path: &Path, candidate_count: usize) -> CurateFixture 
         workspace_path: &workspace_path,
         database_path: Some(&db_path),
         content: "Curate benchmark target memory.",
+        workflow_id: None,
         level: "episodic",
         kind: "fact",
         tags: Some("bench,curate,target"),

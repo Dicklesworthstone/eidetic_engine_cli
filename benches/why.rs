@@ -93,6 +93,7 @@ fn seed_fixture(memory_count: usize) -> Fixture {
             content: &format!(
                 "Seed memory {index}: benchmark fixture for ee why latency and retrieval explainability."
             ),
+            workflow_id: None,
             level: "semantic",
             kind: "fact",
             tags: Some("bench,why"),

@@ -1675,6 +1675,7 @@ mod tests {
                     level: "procedural".to_owned(),
                     kind: "rule".to_owned(),
                     content: "Authorization header should be redacted".to_owned(),
+                    workflow_id: None,
                     confidence: 0.8,
                     utility: 0.6,
                     importance: 0.7,

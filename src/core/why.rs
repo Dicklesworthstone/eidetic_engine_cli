@@ -26,6 +26,8 @@ pub struct StorageExplanation {
     pub trust_subclass: Option<String>,
     /// Original provenance URI.
     pub provenance_uri: Option<String>,
+    /// Optional workflow lifecycle group.
+    pub workflow_id: Option<String>,
     /// When the memory was created.
     pub created_at: String,
     /// RFC3339 timestamp when this memory becomes applicable.
@@ -419,6 +421,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
         trust_class: memory.trust_class.clone(),
         trust_subclass: memory.trust_subclass.clone(),
         provenance_uri: memory.provenance_uri.clone(),
+        workflow_id: memory.workflow_id.clone(),
         created_at: memory.created_at.clone(),
         valid_from: validity.valid_from,
         valid_to: validity.valid_to,
@@ -762,6 +765,7 @@ mod tests {
                 trust_class: "human_explicit".to_string(),
                 trust_subclass: None,
                 provenance_uri: None,
+                workflow_id: None,
                 created_at: "2026-04-29T12:00:00Z".to_string(),
                 valid_from: None,
                 valid_to: None,
@@ -1051,7 +1055,7 @@ mod tests {
             report
                 .rationale_traces
                 .iter()
-                .any(|trace| trace.visibility == "private_rejected"),
+                .any(|trace| trace.visibility.as_str().eq("private_rejected")),
             false,
             "private rejected summaries are filtered at report boundary",
         )?;

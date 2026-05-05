@@ -100,6 +100,7 @@ fn seed_workspace(workspace: &Path, database: &Path) -> TestResult {
                 level: "procedural".to_string(),
                 kind: "rule".to_string(),
                 content: "Run cargo fmt --check before release.".to_string(),
+                workflow_id: None,
                 confidence: 0.92,
                 utility: 0.8,
                 importance: 0.7,

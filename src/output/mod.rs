@@ -1,6 +1,8 @@
 use std::env;
 use std::io::IsTerminal;
 
+use serde::Serialize;
+
 use crate::core::agent_detect::{AgentInventoryReport, InstalledAgentDetectionReport};
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
@@ -3360,6 +3362,7 @@ fn render_memory_fields(b: &mut JsonBuilder, details: &MemoryDetails) {
     b.field_str("level", &mem.level);
     b.field_str("kind", &mem.kind);
     b.field_str("content", &mem.content);
+    field_optional_str(b, "workflow_id", mem.workflow_id.as_deref());
     b.field_raw("confidence", &format!("{:.4}", mem.confidence));
     b.field_raw("utility", &format!("{:.4}", mem.utility));
     b.field_raw("importance", &format!("{:.4}", mem.importance));
@@ -3406,6 +3409,9 @@ pub fn render_memory_show_human(report: &MemoryShowReport) -> String {
     output.push_str(&format!("  Level: {}\n", mem.level));
     output.push_str(&format!("  Kind: {}\n", mem.kind));
     output.push_str(&format!("  Content:\n    {}\n", mem.content));
+    if let Some(ref workflow_id) = mem.workflow_id {
+        output.push_str(&format!("  Workflow: {workflow_id}\n"));
+    }
     output.push_str(&format!(
         "  Scores: confidence={:.2}, utility={:.2}, importance={:.2}\n",
         mem.confidence, mem.utility, mem.importance
@@ -3915,8 +3921,7 @@ pub fn render_version_toon(report: &VersionReport) -> String {
 /// Render `ee install check` as JSON (`ee.response.v1` envelope).
 #[must_use]
 pub fn render_install_check_json(report: &InstallCheckReport) -> String {
-    let raw = serde_json::to_string(report).unwrap_or_else(|_| "{}".to_owned());
-    ResponseEnvelope::success().data_raw(&raw).finish()
+    render_serialized_report_response(report, "InstallCheckReport")
 }
 
 #[must_use]
@@ -3946,8 +3951,39 @@ pub fn render_install_check_toon(report: &InstallCheckReport) -> String {
 /// Render install/update dry-run plans as JSON (`ee.response.v1` envelope).
 #[must_use]
 pub fn render_install_plan_json(report: &InstallPlanReport) -> String {
-    let raw = serde_json::to_string(report).unwrap_or_else(|_| "{}".to_owned());
-    ResponseEnvelope::success().data_raw(&raw).finish()
+    render_serialized_report_response(report, "InstallPlanReport")
+}
+
+fn render_serialized_report_response<T>(report: &T, report_name: &str) -> String
+where
+    T: Serialize,
+{
+    match serde_json::to_string(report) {
+        Ok(raw) => ResponseEnvelope::success().data_raw(&raw).finish(),
+        Err(error) => serialization_failure_error_json(report_name, &error),
+    }
+}
+
+fn serialization_failure_error_json(report_name: &str, error: &serde_json::Error) -> String {
+    let mut envelope = JsonBuilder::with_capacity(384);
+    envelope.field_str("schema", ERROR_SCHEMA_V1);
+    envelope.field_object("error", |obj| {
+        obj.field_str("code", "serialization_failed");
+        obj.field_str(
+            "message",
+            &format!("Failed to serialize {report_name} as JSON."),
+        );
+        obj.field_str("severity", "high");
+        obj.field_str(
+            "repair",
+            "Fix the report serializer; refusing to emit an empty object.",
+        );
+        obj.field_object("details", |details| {
+            details.field_str("report", report_name);
+            details.field_str("serializerError", &error.to_string());
+        });
+    });
+    envelope.finish()
 }
 
 #[must_use]
@@ -8987,6 +9023,41 @@ mod tests {
     };
 
     type TestResult = Result<(), String>;
+
+    struct FailingSerialize;
+
+    impl serde::Serialize for FailingSerialize {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom(
+                "intentional serialization failure",
+            ))
+        }
+    }
+
+    #[test]
+    fn serialized_report_response_reports_serializer_failures() -> TestResult {
+        let json = super::render_serialized_report_response(&FailingSerialize, "FailingReport");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        assert_eq!(parsed["schema"].as_str(), Some(ERROR_SCHEMA_V1));
+        assert_eq!(
+            parsed["error"]["code"].as_str(),
+            Some("serialization_failed")
+        );
+        assert_eq!(
+            parsed["error"]["details"]["report"].as_str(),
+            Some("FailingReport")
+        );
+        assert!(
+            !json.contains("\"data\":{}"),
+            "serialization failure must not be hidden as empty data"
+        );
+        Ok(())
+    }
 
     fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
         if condition {

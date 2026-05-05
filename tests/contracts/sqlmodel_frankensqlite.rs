@@ -59,6 +59,7 @@ fn test_memory_input() -> CreateMemoryInput {
         level: "working".to_string(),
         kind: "note".to_string(),
         content: "Gate 2 test memory content".to_string(),
+        workflow_id: None,
         confidence: 0.9,
         utility: 0.7,
         importance: 0.5,

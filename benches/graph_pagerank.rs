@@ -81,6 +81,7 @@ fn seed_database(workspace_path: &Path, link_count: usize) -> PathBuf {
             workspace_path,
             database_path: Some(&db_path),
             content: &content,
+            workflow_id: None,
             level: "semantic",
             kind: "fact",
             tags: Some("bench,graph,pagerank,seed"),

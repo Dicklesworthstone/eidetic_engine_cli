@@ -1753,6 +1753,7 @@ mod tests {
                     level: "procedural".to_string(),
                     kind: "rule".to_string(),
                     content: "Run cargo fmt --check before release.".to_string(),
+                    workflow_id: None,
                     confidence: 0.8,
                     utility: 0.7,
                     importance: 0.6,

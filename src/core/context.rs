@@ -803,7 +803,7 @@ fn candidate_selection_why(
     let (source_reference, utility_field) = match artifact_id {
         Some(artifact_id) => (
             format!(
-                "source=registered_artifact artifact_id={artifact_id} search_source={search_source}"
+                "source=registered_artifact artifact_id={artifact_id} search_source={search_source}; linked via registered artifact"
             ),
             "linked_memory.utility",
         ),
@@ -1540,6 +1540,7 @@ mod tests {
                     level: "procedural".to_string(),
                     kind: "rule".to_string(),
                     content: "Run cargo fmt before release.".to_string(),
+                    workflow_id: None,
                     confidence: 0.9,
                     utility: 0.8,
                     importance: 0.7,

@@ -108,6 +108,7 @@ fn why_fixture() -> WhyReport {
             trust_class: "human_explicit".to_string(),
             trust_subclass: Some("release_rule".to_string()),
             provenance_uri: Some("cass://session-gate11#L40-L44".to_string()),
+            workflow_id: None,
             created_at: "2026-01-02T03:04:05Z".to_string(),
             valid_from: None,
             valid_to: None,

@@ -1899,6 +1899,7 @@ mod tests {
                     level: "procedural".to_owned(),
                     kind: "rule".to_owned(),
                     content: "Run cargo fmt --check before release.".to_owned(),
+                    workflow_id: None,
                     confidence: 0.9,
                     utility: 0.5,
                     importance: 0.5,

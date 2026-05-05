@@ -101,6 +101,7 @@ fn add_memory(
                 level: "procedural".to_owned(),
                 kind: "rule".to_owned(),
                 content: content.to_owned(),
+                workflow_id: None,
                 confidence,
                 utility,
                 importance: 0.5,

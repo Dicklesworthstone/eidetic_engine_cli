@@ -188,6 +188,7 @@ fn memory_input(
         level: level.to_owned(),
         kind: kind.to_owned(),
         content: content.to_owned(),
+        workflow_id: None,
         confidence,
         utility,
         importance,

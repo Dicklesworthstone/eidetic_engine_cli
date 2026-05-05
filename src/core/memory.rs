@@ -40,6 +40,8 @@ pub struct RememberMemoryOptions<'a> {
     pub database_path: Option<&'a Path>,
     /// Memory content.
     pub content: &'a str,
+    /// Optional workflow lifecycle group.
+    pub workflow_id: Option<&'a str>,
     /// Memory level.
     pub level: &'a str,
     /// Memory kind.
@@ -73,6 +75,8 @@ pub struct RememberMemoryReport {
     pub database_path: PathBuf,
     /// Canonical memory content.
     pub content: String,
+    /// Optional workflow lifecycle group.
+    pub workflow_id: Option<String>,
     /// Canonical memory level.
     pub level: MemoryLevel,
     /// Canonical memory kind.
@@ -115,6 +119,36 @@ pub struct RememberMemoryReport {
     pub suggested_link_degradations: Vec<RememberSuggestedLinkDegradation>,
     /// Stable redaction/policy status for the accepted content.
     pub redaction_status: String,
+}
+
+/// Options for closing a workflow lifecycle group.
+#[derive(Clone, Debug)]
+pub struct WorkflowCloseOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Workflow lifecycle group to close.
+    pub workflow_id: &'a str,
+}
+
+/// Result of closing a workflow lifecycle group.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkflowCloseReport {
+    /// Package version for stable output.
+    pub version: &'static str,
+    /// Canonical workspace ID.
+    pub workspace_id: String,
+    /// Canonical workflow lifecycle group.
+    pub workflow_id: String,
+    /// Number of working memories promoted to episodic.
+    pub promoted_count: u32,
+    /// Number of working memories expired instead of promoted.
+    pub expired_count: u32,
+    /// Promoted memory IDs in deterministic order.
+    pub promoted_memory_ids: Vec<String>,
+    /// Audit IDs created for promoted memories.
+    pub audit_ids: Vec<String>,
 }
 
 /// Stable schema name for remember-time staged link suggestions.
@@ -176,6 +210,7 @@ pub fn remember_memory(
             workspace_path: prepared.workspace_path,
             database_path: prepared.database_path,
             content: prepared.content,
+            workflow_id: prepared.workflow_id,
             level: prepared.level,
             kind: prepared.kind,
             confidence: prepared.confidence,
@@ -224,6 +259,7 @@ pub fn remember_memory(
         level: prepared.level.as_str().to_owned(),
         kind: prepared.kind.as_str().to_owned(),
         content: prepared.content.clone(),
+        workflow_id: prepared.workflow_id.clone(),
         confidence: prepared.confidence,
         utility: UnitScore::neutral().into_inner(),
         importance: UnitScore::neutral().into_inner(),
@@ -313,6 +349,7 @@ pub fn remember_memory(
         workspace_path: prepared.workspace_path,
         database_path: prepared.database_path,
         content: prepared.content,
+        workflow_id: prepared.workflow_id,
         level: prepared.level,
         kind: prepared.kind,
         confidence: prepared.confidence,
@@ -337,6 +374,63 @@ pub fn remember_memory(
     })
 }
 
+/// Close a workflow and promote eligible working memories to episodic.
+pub fn close_workflow(
+    options: &WorkflowCloseOptions<'_>,
+) -> Result<WorkflowCloseReport, DomainError> {
+    let workspace_path = resolve_workspace_path(options.workspace_path, false)?;
+    let database_path = options
+        .database_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    let workflow_id = parse_workflow_id(Some(options.workflow_id))?
+        .ok_or_else(|| remember_usage_error("workflow id cannot be empty".to_owned()))?;
+    let workspace_id = stable_workspace_id(&workspace_path);
+    let closed_at = Utc::now().to_rfc3339();
+
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee init --workspace .".to_string()),
+        })?;
+    connection.migrate().map_err(|error| DomainError::Storage {
+        message: format!("Failed to migrate database: {error}"),
+        repair: Some("ee doctor".to_string()),
+    })?;
+
+    let promotions = connection
+        .promote_workflow_working_memories_audited(
+            &workspace_id,
+            &workflow_id,
+            "ee workflow close",
+            &closed_at,
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to close workflow: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+
+    let promoted_count = capped_u32(promotions.len());
+    let promoted_memory_ids = promotions
+        .iter()
+        .map(|promotion| promotion.memory_id.clone())
+        .collect();
+    let audit_ids = promotions
+        .into_iter()
+        .map(|promotion| promotion.audit_id)
+        .collect();
+
+    Ok(WorkflowCloseReport {
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id,
+        workflow_id,
+        promoted_count,
+        expired_count: 0,
+        promoted_memory_ids,
+        audit_ids,
+    })
+}
+
 fn remember_index_status(report: &IndexProcessingJobReport) -> String {
     match report.outcome.as_str() {
         "completed" | "completed_no_documents" => "indexed".to_owned(),
@@ -353,6 +447,7 @@ struct PreparedRememberMemory {
     workspace_path: PathBuf,
     database_path: PathBuf,
     content: String,
+    workflow_id: Option<String>,
     level: MemoryLevel,
     kind: MemoryKind,
     confidence: f32,
@@ -377,6 +472,7 @@ fn prepare_remember_memory(
         .as_str()
         .to_owned();
     validate_remember_policy(&content)?;
+    let workflow_id = parse_workflow_id(options.workflow_id)?;
     let level = MemoryLevel::from_str(options.level)
         .map_err(|error| remember_usage_error(error.to_string()))?;
     let kind = MemoryKind::from_str(options.kind)
@@ -401,6 +497,7 @@ fn prepare_remember_memory(
         workspace_path,
         database_path,
         content,
+        workflow_id,
         level,
         kind,
         confidence,
@@ -556,6 +653,24 @@ fn parse_tags(tags: Option<&str>) -> Result<Vec<String>, DomainError> {
     Ok(unique.into_iter().collect())
 }
 
+fn parse_workflow_id(workflow_id: Option<&str>) -> Result<Option<String>, DomainError> {
+    let Some(raw) = workflow_id else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(remember_usage_error(
+            "workflow id cannot be empty".to_owned(),
+        ));
+    }
+    if trimmed.len() > 128 {
+        return Err(remember_usage_error(
+            "workflow id must be at most 128 bytes".to_owned(),
+        ));
+    }
+    Ok(Some(trimmed.to_owned()))
+}
+
 const REMEMBER_SECRET_PATTERNS: &[&str] = &[
     "password",
     "secret",
@@ -697,6 +812,7 @@ fn remember_audit_details(memory_id: &str, input: &CreateMemoryInput) -> String 
         "trustClass": input.trust_class,
         "trustSubclass": input.trust_subclass,
         "provenanceUri": input.provenance_uri,
+        "workflowId": input.workflow_id,
         "tagCount": input.tags.len(),
     })
     .to_string()
@@ -840,6 +956,10 @@ fn co_tag_confidence(matched_tag_count: usize) -> f32 {
 
 fn usize_count_to_f32(value: usize) -> f32 {
     f32::from(u16::try_from(value).unwrap_or(u16::MAX))
+}
+
+fn capped_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 fn remember_usage_error(message: String) -> DomainError {
@@ -1964,6 +2084,7 @@ mod tests {
             workspace_path: temp.path(),
             database_path: None,
             content,
+            workflow_id: None,
             level: "procedural",
             kind: "rule",
             tags: Some("release,checks"),
@@ -2013,6 +2134,7 @@ mod tests {
             workspace_path: temp.path(),
             database_path: None,
             content: "  Run cargo fmt before release.  ",
+            workflow_id: None,
             level: "procedural",
             kind: "rule",
             tags: Some("Release,cli,release"),
@@ -2098,6 +2220,7 @@ mod tests {
             workspace_path: temp.path(),
             database_path: None,
             content: "Store release checks as durable memory.",
+            workflow_id: None,
             level: "procedural",
             kind: "rule",
             tags: Some("release,checks"),
@@ -2227,6 +2350,7 @@ mod tests {
             workspace_path: temp.path(),
             database_path: None,
             content: "Temporal memories retain their explicit applicability window.",
+            workflow_id: None,
             level: "semantic",
             kind: "fact",
             tags: Some("temporal,validity"),
@@ -2285,6 +2409,7 @@ mod tests {
             workspace_path: temp.path(),
             database_path: None,
             content: "Temporal windows must parse.",
+            workflow_id: None,
             level: "semantic",
             kind: "fact",
             tags: None,
@@ -2306,6 +2431,7 @@ mod tests {
             workspace_path: temp.path(),
             database_path: None,
             content: "Temporal windows must be ordered.",
+            workflow_id: None,
             level: "semantic",
             kind: "fact",
             tags: None,
@@ -2328,6 +2454,7 @@ mod tests {
             workspace_path: temp.path(),
             database_path: None,
             content: "Instant validity windows are accepted at the boundary.",
+            workflow_id: None,
             level: "semantic",
             kind: "fact",
             tags: None,
@@ -2354,6 +2481,7 @@ mod tests {
             workspace_path: temp.path(),
             database_path: None,
             content: "Release checks include cargo fmt.",
+            workflow_id: None,
             level: "procedural",
             kind: "rule",
             tags: Some("release,checks"),
@@ -2368,6 +2496,7 @@ mod tests {
             workspace_path: temp.path(),
             database_path: None,
             content: "Release docs mention supported targets.",
+            workflow_id: None,
             level: "semantic",
             kind: "fact",
             tags: Some("release,docs"),
@@ -2382,6 +2511,7 @@ mod tests {
             workspace_path: temp.path(),
             database_path: None,
             content: "Before release, run checks and record evidence.",
+            workflow_id: None,
             level: "procedural",
             kind: "rule",
             tags: Some("checks,release"),
@@ -2502,6 +2632,7 @@ mod tests {
             workspace_path: temp.path(),
             database_path: None,
             content: &secret_like_content,
+            workflow_id: None,
             level: "procedural",
             kind: "rule",
             tags: None,

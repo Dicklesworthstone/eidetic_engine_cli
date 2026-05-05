@@ -1794,6 +1794,7 @@ mod tests {
             level: "semantic".to_owned(),
             kind: "fact".to_owned(),
             content: format!("test memory {id}"),
+            workflow_id: None,
             confidence,
             utility: 0.5,
             importance: 0.5,

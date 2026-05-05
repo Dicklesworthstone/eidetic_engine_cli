@@ -1755,6 +1755,7 @@ mod tests {
             level: "procedural".to_string(),
             kind: "rule".to_string(),
             content: "Always run cargo fmt before commit.".to_string(),
+            workflow_id: None,
             confidence: 0.9,
             utility: 0.7,
             importance: 0.8,
