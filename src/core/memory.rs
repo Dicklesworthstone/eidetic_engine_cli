@@ -2830,7 +2830,10 @@ mod tests {
             "second auto-link status",
         )?;
         ensure(second.auto_links.len(), 1, "report auto-link count")?;
-        let reported = &second.auto_links[0];
+        let reported = second
+            .auto_links
+            .first()
+            .ok_or_else(|| "report auto-link missing".to_string())?;
         ensure(
             reported.target_memory_id.clone(),
             first.memory_id.to_string(),
@@ -2846,7 +2849,9 @@ mod tests {
             .list_all_memory_links(None)
             .map_err(|error| error.to_string())?;
         ensure(links.len(), 1, "memory_links row count")?;
-        let link = &links[0];
+        let link = links
+            .first()
+            .ok_or_else(|| "stored auto-link missing".to_string())?;
         ensure(link.id.clone(), reported.link_id.clone(), "stored link id")?;
         ensure(
             link.src_memory_id.clone(),

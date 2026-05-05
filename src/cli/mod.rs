@@ -20462,6 +20462,121 @@ mod tests {
     }
 
     #[test]
+    fn remember_workflow_auto_link_json_surfaces_link_and_opt_out() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().to_string_lossy().into_owned();
+        let workflow_id = "wf-auto-link-json";
+
+        let (init_exit, _init_stdout, init_stderr) =
+            invoke(&["ee", "--workspace", &workspace, "init", "--json"]);
+        ensure_equal(&init_exit, &ProcessExitCode::Success, "init exit")?;
+        ensure(init_stderr.is_empty(), "init json stderr clean")?;
+
+        let (first_exit, first_stdout, first_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "remember",
+            "First memory in the JSON auto-link workflow.",
+            "--level",
+            "working",
+            "--kind",
+            "fact",
+            "--workflow",
+            workflow_id,
+            "--json",
+        ]);
+        ensure_equal(&first_exit, &ProcessExitCode::Success, "first exit")?;
+        ensure(first_stderr.is_empty(), "first json stderr clean")?;
+        let first: serde_json::Value =
+            serde_json::from_str(&first_stdout).map_err(|error| error.to_string())?;
+        let first_memory_id = first["data"]["memory_id"]
+            .as_str()
+            .ok_or_else(|| "first remember output missing memory_id".to_string())?;
+
+        let (second_exit, second_stdout, second_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "remember",
+            "Second memory should auto-link to the workflow.",
+            "--level",
+            "working",
+            "--kind",
+            "fact",
+            "--workflow",
+            workflow_id,
+            "--json",
+        ]);
+        ensure_equal(&second_exit, &ProcessExitCode::Success, "second exit")?;
+        ensure(second_stderr.is_empty(), "second json stderr clean")?;
+        let second: serde_json::Value =
+            serde_json::from_str(&second_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &second["data"]["auto_link_status"],
+            &serde_json::json!("linked"),
+            "auto-link status",
+        )?;
+        let auto_links = second["data"]["auto_links"]
+            .as_array()
+            .ok_or_else(|| "auto_links should be an array".to_string())?;
+        ensure_equal(&auto_links.len(), &1, "auto-link count")?;
+        let auto_link = auto_links
+            .first()
+            .ok_or_else(|| "auto_links should include the created link".to_string())?;
+        ensure_equal(
+            &auto_link["target_memory_id"],
+            &serde_json::json!(first_memory_id),
+            "auto-link target",
+        )?;
+        ensure_equal(
+            &auto_link["relation"],
+            &serde_json::json!("related"),
+            "auto-link relation",
+        )?;
+        ensure_equal(
+            &auto_link["source"],
+            &serde_json::json!("auto"),
+            "auto-link source",
+        )?;
+        ensure_equal(
+            &auto_link["weight"],
+            &serde_json::json!(0.5),
+            "auto-link weight",
+        )?;
+
+        let (third_exit, third_stdout, third_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "remember",
+            "Third memory opts out of workflow auto-linking.",
+            "--level",
+            "working",
+            "--kind",
+            "fact",
+            "--workflow",
+            workflow_id,
+            "--no-auto-link",
+            "--json",
+        ]);
+        ensure_equal(&third_exit, &ProcessExitCode::Success, "third exit")?;
+        ensure(third_stderr.is_empty(), "third json stderr clean")?;
+        let third: serde_json::Value =
+            serde_json::from_str(&third_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &third["data"]["auto_link_status"],
+            &serde_json::json!("disabled"),
+            "disabled status",
+        )?;
+        ensure_equal(
+            &third["data"]["auto_links"],
+            &serde_json::json!([]),
+            "disabled auto-links",
+        )
+    }
+
+    #[test]
     fn workflow_close_command_accepts_workflow_id() -> TestResult {
         let parsed = Cli::try_parse_from(["ee", "workflow", "close", "wf-release-001"])
             .map_err(|error| format!("failed to parse workflow close: {:?}", error.kind()))?;
