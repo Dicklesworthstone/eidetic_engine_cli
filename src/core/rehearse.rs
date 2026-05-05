@@ -1062,6 +1062,9 @@ fn collect_snapshot(
         }
         let metadata = fs::symlink_metadata(&path)
             .map_err(|error| storage_error("read rehearsal workspace metadata", error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(rehearsal_symlink_error(&path));
+        }
         if metadata.is_dir() {
             collect_snapshot(root, &path, skip_root, snapshot)?;
         } else if metadata.is_file() {
@@ -1125,6 +1128,9 @@ fn copy_workspace_inner(
         let destination_path = destination_root.join(relative);
         let metadata = fs::symlink_metadata(&source_path)
             .map_err(|error| storage_error("read rehearsal source metadata", error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(rehearsal_symlink_error(&source_path));
+        }
         if metadata.is_dir() {
             fs::create_dir_all(&destination_path)
                 .map_err(|error| storage_error("create rehearsal sandbox directory", error))?;
@@ -1136,30 +1142,22 @@ fn copy_workspace_inner(
             }
             fs::copy(&source_path, &destination_path)
                 .map_err(|error| storage_error("copy rehearsal source file", error))?;
-        } else if metadata.file_type().is_symlink() {
-            copy_symlink(&source_path, &destination_path)?;
         }
     }
     Ok(())
 }
 
-fn copy_symlink(source: &Path, destination: &Path) -> Result<(), DomainError> {
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| storage_error("create rehearsal symlink parent", error))?;
+fn rehearsal_symlink_error(path: &Path) -> DomainError {
+    DomainError::PolicyDenied {
+        message: format!(
+            "Rehearsal workspace path '{}' is a symbolic link; sandbox copies do not preserve symlinks.",
+            path.display()
+        ),
+        repair: Some(
+            "Replace symlinked workspace entries with regular files or directories before rehearsal"
+                .to_string(),
+        ),
     }
-    let target =
-        fs::read_link(source).map_err(|error| storage_error("read rehearsal symlink", error))?;
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(target, destination)
-            .map_err(|error| storage_error("copy rehearsal symlink", error))?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (target, destination);
-    }
-    Ok(())
 }
 
 fn should_skip_entry(name: &str) -> bool {
@@ -1600,6 +1598,62 @@ mod tests {
         assert_eq!(report.changed_artifacts, vec!["state.txt".to_string()]);
         assert_eq!(report.observed_effects.len(), 1);
         assert!(report.degradation_codes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_rejects_symlinked_workspace_entries_before_sandbox_copy() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = kept_temp_dir("ee-rehearse-run-symlink-source")?;
+        let outside = kept_temp_dir("ee-rehearse-run-symlink-target")?;
+        let out = kept_temp_dir("ee-rehearse-run-symlink-out")?;
+        std::os::unix::fs::symlink(&outside, workspace.join(".ee"))
+            .map_err(|error| error.to_string())?;
+
+        let script = out.join("fake-ee.sh");
+        let mut file = fs::File::create(&script).map_err(|error| error.to_string())?;
+        file.write_all(
+            b"#!/bin/sh\nwhile [ \"$1\" != \"--workspace\" ]; do shift; done\nws=\"$2\"\necho escaped > \"$ws/.ee/escaped.txt\"\nexit 0\n",
+        )
+        .map_err(|error| error.to_string())?;
+        drop(file);
+        let mut perms = fs::metadata(&script)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).map_err(|error| error.to_string())?;
+
+        let options = RehearseRunOptions {
+            workspace,
+            output_dir: Some(out),
+            ee_binary: Some(script),
+            commands: vec![CommandSpec {
+                id: "cmd_1".to_string(),
+                command: "status".to_string(),
+                args: vec!["--json".to_string()],
+                expected_effect: "read_only".to_string(),
+                stop_on_failure: true,
+                idempotency_key: None,
+            }],
+            ..Default::default()
+        };
+
+        let error = match run_rehearsal(&options) {
+            Ok(report) => {
+                return Err(format!(
+                    "symlinked workspace entry was accepted: {report:?}"
+                ));
+            }
+            Err(error) => error,
+        };
+        assert!(matches!(error, DomainError::PolicyDenied { .. }));
+        assert!(error.message().contains("symbolic link"));
+        assert!(
+            !outside.join("escaped.txt").exists(),
+            "rehearsal must not mutate symlink targets outside the sandbox"
+        );
         Ok(())
     }
 
