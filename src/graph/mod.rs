@@ -4162,7 +4162,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_feature_enrichment_uses_persisted_snapshot_scores() {
+    fn graph_feature_enrichment_uses_persisted_snapshot_scores() -> TestResult {
         let snapshot = StoredGraphSnapshot {
             id: "gsnap_0000000000000000000000999".to_owned(),
             workspace_id: WORKSPACE_ID.to_owned(),
@@ -4220,9 +4220,11 @@ mod tests {
         assert_eq!(report.source.kind, "graph_snapshot");
         assert_eq!(report.source.workspace_id.as_deref(), Some(WORKSPACE_ID));
         assert_eq!(report.source.graph_type.as_deref(), Some("memory_links"));
-        let Some(source_snapshot) = report.source.snapshot.as_ref() else {
-            panic!("snapshot witness should be included");
-        };
+        let source_snapshot = report
+            .source
+            .snapshot
+            .as_ref()
+            .ok_or_else(|| "snapshot witness should be included".to_owned())?;
         assert_eq!(source_snapshot.id, snapshot.id);
         assert_eq!(source_snapshot.snapshot_version, 7);
         assert_eq!(source_snapshot.source_generation, 42);
@@ -4234,6 +4236,7 @@ mod tests {
         assert_eq!(json["source"]["kind"], "graph_snapshot");
         assert_eq!(json["source"]["snapshot"]["id"], snapshot.id);
         assert_eq!(json["source"]["snapshot"]["sourceGeneration"], 42);
+        Ok(())
     }
 
     #[test]
