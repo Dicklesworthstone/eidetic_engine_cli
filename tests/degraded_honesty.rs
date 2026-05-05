@@ -137,9 +137,10 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "graph"
     } else if args.iter().any(|arg| arg == "memory") {
         "memory, remember"
-    } else if args.iter().any(|arg| arg == "curate") {
-        "curate"
-    } else if args.iter().any(|arg| arg == "rule") {
+    } else if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "curate" | "rule"))
+    {
         "curate"
     } else if args.iter().any(|arg| arg == "status") {
         "capabilities, check, health, status"

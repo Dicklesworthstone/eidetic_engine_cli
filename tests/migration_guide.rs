@@ -85,12 +85,13 @@ fn migration_guide_documents_command_families() {
     let mut missing = Vec::new();
     for family in REQUIRED_COMMAND_FAMILIES {
         // Look for the command family in headers or code blocks
+        let mut chars = family.chars();
+        let title = chars.next().map_or_else(String::new, |first| {
+            first.to_uppercase().to_string() + chars.as_str()
+        });
         let patterns = [
             format!("`{}`", family),
-            format!(
-                "### {}",
-                family.chars().next().unwrap().to_uppercase().to_string() + &family[1..]
-            ),
+            format!("### {}", title),
             format!("`{} ", family),
         ];
         let found = patterns

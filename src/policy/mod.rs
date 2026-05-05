@@ -1076,7 +1076,11 @@ mod tests {
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"anthropic_api_key"));
-        assert!(report.content.contains(&redaction_placeholder("anthropic_api_key")));
+        assert!(
+            report
+                .content
+                .contains(&redaction_placeholder("anthropic_api_key"))
+        );
         assert!(!report.content.contains(token));
     }
 
@@ -1136,7 +1140,11 @@ mod tests {
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"bearer_token"));
-        assert!(report.content.contains(&redaction_placeholder("bearer_token")));
+        assert!(
+            report
+                .content
+                .contains(&redaction_placeholder("bearer_token"))
+        );
         assert!(!report.content.contains(jwt));
     }
 

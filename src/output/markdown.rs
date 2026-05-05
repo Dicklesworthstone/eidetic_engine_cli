@@ -100,7 +100,7 @@ mod tests {
     fn inline_code_uses_delimiter_longer_than_embedded_backticks() {
         let rendered = inline_code("run `cmd` then ```stop```");
 
-        assert_eq!(rendered, "````run `cmd` then ```stop```````");
+        assert_eq!(rendered, "```` run `cmd` then ```stop``` ````");
     }
 
     #[test]
