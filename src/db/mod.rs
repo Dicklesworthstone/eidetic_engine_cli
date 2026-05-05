@@ -125,6 +125,14 @@ pub struct DbConnection {
 
 impl DbConnection {
     pub fn open(config: DatabaseConfig) -> Result<Self> {
+        if matches!(config.location(), DatabaseLocation::File(_)) {
+            return retry_file_database_open(|| Self::open_once(config.clone()));
+        }
+
+        Self::open_once(config)
+    }
+
+    fn open_once(config: DatabaseConfig) -> Result<Self> {
         let inner = match (&config.location, config.mode) {
             (DatabaseLocation::Memory, DatabaseOpenMode::ReadWrite) => {
                 FrankenConnection::open_memory()
@@ -582,6 +590,91 @@ fn enable_foreign_key_enforcement(inner: &FrankenConnection) -> Result<()> {
     inner
         .execute_raw("PRAGMA foreign_keys = ON")
         .map_err(|source| DbError::sqlmodel(DbOperation::EnableForeignKeys, source))
+}
+
+const FILE_DATABASE_OPEN_MAX_ATTEMPTS: usize = 8;
+
+fn retry_file_database_open<T>(mut open_once: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut last_retryable_error = None;
+
+    for attempt in 0..FILE_DATABASE_OPEN_MAX_ATTEMPTS {
+        match open_once() {
+            Ok(connection) => return Ok(connection),
+            Err(error) if database_open_error_is_retryable(&error) => {
+                last_retryable_error = Some(error);
+                if attempt + 1 < FILE_DATABASE_OPEN_MAX_ATTEMPTS {
+                    std::thread::sleep(advisory_lock_retry_delay(attempt));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    match last_retryable_error {
+        Some(error) => Err(error),
+        None => Err(DbError::MalformedRow {
+            operation: DbOperation::OpenReadWrite,
+            message: "file database open retry loop exhausted without a retryable error"
+                .to_string(),
+        }),
+    }
+}
+
+fn database_open_error_is_retryable(error: &DbError) -> bool {
+    let DbError::SqlModel { operation, source } = error else {
+        return false;
+    };
+
+    if !matches!(
+        operation,
+        DbOperation::OpenReadWrite | DbOperation::OpenSchemaOnly | DbOperation::EnableForeignKeys
+    ) {
+        return false;
+    }
+
+    sqlmodel_error_is_transient_sqlite_contention(source.as_ref())
+}
+
+fn sqlmodel_error_is_transient_sqlite_contention(error: &sqlmodel_core::Error) -> bool {
+    match error {
+        sqlmodel_core::Error::Connection(connection) => {
+            matches!(
+                connection.kind,
+                sqlmodel_core::error::ConnectionErrorKind::Connect
+            ) && sqlite_contention_message_is_retryable(&connection.message)
+        }
+        sqlmodel_core::Error::Query(query) => match query.kind {
+            sqlmodel_core::error::QueryErrorKind::Deadlock
+            | sqlmodel_core::error::QueryErrorKind::Serialization => true,
+            sqlmodel_core::error::QueryErrorKind::Database => {
+                sqlite_contention_message_is_retryable(&query.message)
+            }
+            sqlmodel_core::error::QueryErrorKind::Syntax
+            | sqlmodel_core::error::QueryErrorKind::Constraint
+            | sqlmodel_core::error::QueryErrorKind::NotFound
+            | sqlmodel_core::error::QueryErrorKind::Permission
+            | sqlmodel_core::error::QueryErrorKind::DataTruncation
+            | sqlmodel_core::error::QueryErrorKind::Timeout
+            | sqlmodel_core::error::QueryErrorKind::Cancelled => false,
+        },
+        sqlmodel_core::Error::Type(_)
+        | sqlmodel_core::Error::Transaction(_)
+        | sqlmodel_core::Error::Protocol(_)
+        | sqlmodel_core::Error::Pool(_)
+        | sqlmodel_core::Error::Schema(_)
+        | sqlmodel_core::Error::Config(_)
+        | sqlmodel_core::Error::Validation(_)
+        | sqlmodel_core::Error::Io(_)
+        | sqlmodel_core::Error::Timeout
+        | sqlmodel_core::Error::Cancelled
+        | sqlmodel_core::Error::Serde(_)
+        | sqlmodel_core::Error::Custom(_) => false,
+    }
+}
+
+fn sqlite_contention_message_is_retryable(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("database is busy") || message.contains("snapshot conflict")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8514,8 +8607,7 @@ fn advisory_lock_error_is_retryable(error: &DbError) -> bool {
         | sqlmodel_core::error::QueryErrorKind::Deadlock
         | sqlmodel_core::error::QueryErrorKind::Serialization => true,
         sqlmodel_core::error::QueryErrorKind::Database => {
-            query.message.contains("database is busy")
-                || query.message.contains("snapshot conflict")
+            sqlite_contention_message_is_retryable(&query.message)
         }
         sqlmodel_core::error::QueryErrorKind::Syntax
         | sqlmodel_core::error::QueryErrorKind::NotFound
@@ -9746,6 +9838,40 @@ mod tests {
         }
     }
 
+    fn sqlmodel_connection_error(
+        kind: sqlmodel_core::error::ConnectionErrorKind,
+        message: &str,
+    ) -> sqlmodel_core::Error {
+        sqlmodel_core::Error::Connection(sqlmodel_core::error::ConnectionError {
+            kind,
+            message: message.to_string(),
+            source: None,
+        })
+    }
+
+    fn sqlmodel_query_error(
+        kind: sqlmodel_core::error::QueryErrorKind,
+        message: &str,
+    ) -> sqlmodel_core::Error {
+        sqlmodel_core::Error::Query(sqlmodel_core::error::QueryError {
+            kind,
+            sql: None,
+            sqlstate: None,
+            message: message.to_string(),
+            detail: None,
+            hint: None,
+            position: None,
+            source: None,
+        })
+    }
+
+    fn read_write_open_error(message: &str) -> DbError {
+        DbError::sqlmodel(
+            DbOperation::OpenReadWrite,
+            sqlmodel_connection_error(sqlmodel_core::error::ConnectionErrorKind::Connect, message),
+        )
+    }
+
     fn table_exists(
         connection: &DbConnection,
         table_name: &str,
@@ -9874,6 +10000,106 @@ mod tests {
             matches!(result, Err(DbError::InvalidMode { .. })),
             "schema-only memory connection must return InvalidMode",
         )
+    }
+
+    #[test]
+    fn file_database_open_retry_predicate_only_accepts_transient_contention() -> TestResult {
+        let busy_open = read_write_open_error("database is busy (recovery in progress)");
+        ensure(
+            super::database_open_error_is_retryable(&busy_open),
+            "read-write open should retry transient busy",
+        )?;
+
+        let snapshot_open = DbError::sqlmodel(
+            DbOperation::OpenSchemaOnly,
+            sqlmodel_connection_error(
+                sqlmodel_core::error::ConnectionErrorKind::Connect,
+                "database is busy (snapshot conflict on pages: 4)",
+            ),
+        );
+        ensure(
+            super::database_open_error_is_retryable(&snapshot_open),
+            "schema-only open should retry snapshot contention",
+        )?;
+
+        let foreign_key_busy = DbError::sqlmodel(
+            DbOperation::EnableForeignKeys,
+            sqlmodel_query_error(
+                sqlmodel_core::error::QueryErrorKind::Database,
+                "database is busy",
+            ),
+        );
+        ensure(
+            super::database_open_error_is_retryable(&foreign_key_busy),
+            "open-time foreign-key PRAGMA should retry transient busy",
+        )?;
+
+        let permanent_open = read_write_open_error("unable to open database file");
+        ensure(
+            !super::database_open_error_is_retryable(&permanent_open),
+            "permanent open errors must not retry",
+        )?;
+
+        let busy_query = DbError::sqlmodel(
+            DbOperation::Query,
+            sqlmodel_query_error(
+                sqlmodel_core::error::QueryErrorKind::Database,
+                "database is busy",
+            ),
+        );
+        ensure(
+            !super::database_open_error_is_retryable(&busy_query),
+            "non-open operations use their own retry policy",
+        )?;
+
+        let constraint = DbError::sqlmodel(
+            DbOperation::EnableForeignKeys,
+            sqlmodel_query_error(
+                sqlmodel_core::error::QueryErrorKind::Constraint,
+                "constraint failed",
+            ),
+        );
+        ensure(
+            !super::database_open_error_is_retryable(&constraint),
+            "constraint errors are not open contention",
+        )
+    }
+
+    #[test]
+    fn file_database_open_retry_succeeds_after_transient_busy() -> TestResult {
+        let mut attempts = 0;
+        let value = super::retry_file_database_open(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(read_write_open_error("database is busy"))
+            } else {
+                Ok(attempts)
+            }
+        })?;
+
+        ensure_equal(&value, &3, "retry value")?;
+        ensure_equal(&attempts, &3, "retry attempts")
+    }
+
+    #[test]
+    fn file_database_open_retry_stops_on_permanent_error() -> TestResult {
+        let mut attempts = 0;
+        let result: super::Result<usize> = super::retry_file_database_open(|| {
+            attempts += 1;
+            Err(read_write_open_error("unable to open database file"))
+        });
+
+        ensure(
+            matches!(
+                result,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::OpenReadWrite,
+                    ..
+                })
+            ),
+            "permanent open error should surface unchanged",
+        )?;
+        ensure_equal(&attempts, &1, "permanent error attempts")
     }
 
     #[test]
