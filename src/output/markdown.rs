@@ -12,7 +12,7 @@ pub(crate) fn escape_text(input: &str) -> String {
             '>' => output.push_str("&gt;"),
             '\\' => output.push_str("\\\\"),
             '`' | '*' | '_' | '{' | '}' | '[' | ']' | '(' | ')' | '#' | '+' | '-' | '.' | '!'
-            | '|' => {
+            | '|' | '~' => {
                 output.push('\\');
                 output.push(ch);
             }
@@ -87,6 +87,13 @@ mod tests {
             escaped,
             "\\[x\\]\\(javascript:alert\\(1\\)\\) \\`code\\` &lt;script&gt;"
         );
+    }
+
+    #[test]
+    fn escape_text_neutralizes_strikethrough_markers() {
+        let escaped = escape_text("keep ~~do not strike~~ visible");
+
+        assert_eq!(escaped, "keep \\~\\~do not strike\\~\\~ visible");
     }
 
     #[test]
