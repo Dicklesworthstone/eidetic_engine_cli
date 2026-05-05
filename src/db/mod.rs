@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use chrono::Utc;
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use sqlmodel_core::{IsolationLevel, Row, Value};
 use sqlmodel_frankensqlite::FrankenConnection;
@@ -2363,6 +2363,27 @@ CREATE INDEX idx_recorder_events_chain ON recorder_events(chain_status);
     "blake3:v027_recorder_store_2026_05_04",
 );
 
+/// V028: Add advisory locks table for cooperative concurrent writers.
+pub const V028_ADVISORY_LOCKS: Migration = Migration::new(
+    28,
+    "advisory_locks",
+    r#"
+CREATE TABLE IF NOT EXISTS ee_advisory_locks (
+    resource_key TEXT PRIMARY KEY NOT NULL,
+    resource_type TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    holder_id TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    expires_at TEXT,
+    reason TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ee_advisory_locks_holder ON ee_advisory_locks(holder_id);
+CREATE INDEX IF NOT EXISTS idx_ee_advisory_locks_expiry ON ee_advisory_locks(expires_at);
+"#,
+    "blake3:v028_advisory_locks_2026_05_05",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -2392,6 +2413,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V025_RATIONALE_TRACES,
     V026_PACK_ITEM_CONTEXT_SIGNALS,
     V027_RECORDER_STORE,
+    V028_ADVISORY_LOCKS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -8082,9 +8104,49 @@ pub struct AdvisoryLock {
 impl AdvisoryLock {
     pub fn is_expired(&self, now: &str) -> bool {
         match &self.expires_at {
-            Some(expiry) => expiry.as_str() < now,
+            Some(expiry) => advisory_lock_is_expired(expiry, now),
             None => false,
         }
+    }
+}
+
+fn advisory_lock_timestamp(instant: DateTime<Utc>) -> String {
+    instant.to_rfc3339_opts(SecondsFormat::Nanos, true)
+}
+
+fn advisory_lock_is_expired(expires_at: &str, now: &str) -> bool {
+    match (
+        DateTime::parse_from_rfc3339(expires_at),
+        DateTime::parse_from_rfc3339(now),
+    ) {
+        (Ok(expires_at), Ok(now)) => expires_at < now,
+        _ => expires_at < now,
+    }
+}
+
+fn advisory_lock_error_is_retryable(error: &DbError) -> bool {
+    let DbError::SqlModel { source, .. } = error else {
+        return false;
+    };
+
+    let sqlmodel_core::Error::Query(query) = source.as_ref() else {
+        return false;
+    };
+
+    match query.kind {
+        sqlmodel_core::error::QueryErrorKind::Constraint
+        | sqlmodel_core::error::QueryErrorKind::Deadlock
+        | sqlmodel_core::error::QueryErrorKind::Serialization => true,
+        sqlmodel_core::error::QueryErrorKind::Database => {
+            query.message.contains("database is busy")
+                || query.message.contains("snapshot conflict")
+        }
+        sqlmodel_core::error::QueryErrorKind::Syntax
+        | sqlmodel_core::error::QueryErrorKind::NotFound
+        | sqlmodel_core::error::QueryErrorKind::Permission
+        | sqlmodel_core::error::QueryErrorKind::DataTruncation
+        | sqlmodel_core::error::QueryErrorKind::Timeout
+        | sqlmodel_core::error::QueryErrorKind::Cancelled => false,
     }
 }
 
@@ -8173,11 +8235,38 @@ impl DbConnection {
         ttl_secs: Option<u64>,
         reason: Option<&str>,
     ) -> Result<AcquireLockResult> {
+        const MAX_ATTEMPTS: usize = 8;
+
+        for attempt in 0..MAX_ATTEMPTS {
+            match self.try_acquire_advisory_lock(lock_id, holder_id, ttl_secs, reason) {
+                Ok(result) => return Ok(result),
+                Err(error)
+                    if attempt + 1 < MAX_ATTEMPTS && advisory_lock_error_is_retryable(&error) =>
+                {
+                    std::thread::yield_now();
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        unreachable!("advisory lock retry loop returns on every branch")
+    }
+
+    fn try_acquire_advisory_lock(
+        &self,
+        lock_id: &AdvisoryLockId,
+        holder_id: &str,
+        ttl_secs: Option<u64>,
+        reason: Option<&str>,
+    ) -> Result<AcquireLockResult> {
         let now_instant = Utc::now();
-        let now = now_instant.to_rfc3339();
+        let now = advisory_lock_timestamp(now_instant);
         let ttl = ttl_secs.unwrap_or(concurrent_writer_contract::DEFAULT_LOCK_TTL_SECS);
         let expires_at = if ttl > 0 {
-            Some((now_instant + chrono::Duration::seconds(ttl as i64)).to_rfc3339())
+            Some(advisory_lock_timestamp(
+                now_instant + chrono::Duration::seconds(ttl as i64),
+            ))
         } else {
             None
         };
@@ -8229,7 +8318,7 @@ impl DbConnection {
             let existing_acquired = required_text(row, 1, DbOperation::Query, "acquired_at")?;
             let existing_expiry = optional_text(row, 2)?;
 
-            let is_expired = existing_expiry.is_some_and(|exp| exp < now);
+            let is_expired = existing_expiry.is_some_and(|exp| advisory_lock_is_expired(exp, now));
 
             if !is_expired {
                 return Ok(AcquireLockResult::AlreadyHeld {
@@ -8315,19 +8404,28 @@ impl DbConnection {
 
     /// Check if a lock is held (by anyone).
     pub fn is_lock_held(&self, lock_id: &AdvisoryLockId) -> Result<Option<AdvisoryLock>> {
-        let resource_key = lock_id.canonical_key();
-        let now = Utc::now().to_rfc3339();
+        let now = advisory_lock_timestamp(Utc::now());
 
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT resource_type, resource_id, holder_id, acquired_at, expires_at, reason FROM ee_advisory_locks WHERE resource_key = ?1",
-            &[Value::Text(resource_key)],
+            "SELECT resource_type, resource_id, holder_id, acquired_at, expires_at, reason
+             FROM ee_advisory_locks
+             WHERE resource_type = ?1 AND resource_id = ?2
+             ORDER BY acquired_at DESC
+             LIMIT 1",
+            &[
+                Value::Text(lock_id.resource_type().to_string()),
+                Value::Text(lock_id.resource_id().to_string()),
+            ],
         )?;
 
         if let Some(row) = rows.first() {
             let expires_at = optional_text(row, 4)?.map(str::to_string);
 
-            if expires_at.as_ref().is_some_and(|exp| exp < &now) {
+            if expires_at
+                .as_deref()
+                .is_some_and(|exp| advisory_lock_is_expired(exp, now.as_str()))
+            {
                 return Ok(None);
             }
 
@@ -8370,13 +8468,31 @@ impl DbConnection {
 
     /// Clean up all expired locks.
     pub fn cleanup_expired_locks(&self) -> Result<u64> {
-        let now = Utc::now().to_rfc3339();
+        let now = advisory_lock_timestamp(Utc::now());
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT resource_key, expires_at FROM ee_advisory_locks WHERE expires_at IS NOT NULL",
+            &[],
+        )?;
 
-        self.execute_for(
-            DbOperation::Execute,
-            "DELETE FROM ee_advisory_locks WHERE expires_at IS NOT NULL AND expires_at < ?1",
-            &[Value::Text(now)],
-        )
+        let mut deleted = 0_u64;
+        for row in rows {
+            let resource_key = required_text(&row, 0, DbOperation::Query, "resource_key")?;
+            let expires_at = required_text(&row, 1, DbOperation::Query, "expires_at")?;
+
+            if advisory_lock_is_expired(expires_at, now.as_str()) {
+                deleted += self.execute_for(
+                    DbOperation::Execute,
+                    "DELETE FROM ee_advisory_locks WHERE resource_key = ?1 AND expires_at = ?2",
+                    &[
+                        Value::Text(resource_key.to_string()),
+                        Value::Text(expires_at.to_string()),
+                    ],
+                )?;
+            }
+        }
+
+        Ok(deleted)
     }
 
     // =========================================================================
@@ -9668,6 +9784,10 @@ mod tests {
         ensure(
             table_names.contains(&"tripwire_check_events"),
             "tripwire_check_events table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"ee_advisory_locks"),
+            "ee_advisory_locks table must exist",
         )?;
 
         connection.close()?;
@@ -14884,6 +15004,24 @@ mod tests {
 
         connection.close()?;
         Ok(())
+    }
+
+    #[test]
+    fn advisory_lock_expiry_comparison_parses_rfc3339_variants() -> TestResult {
+        ensure(
+            !super::advisory_lock_is_expired(
+                "2026-05-05T03:00:00+00:00",
+                "2026-05-05T02:59:59.999999999Z",
+            ),
+            "whole-second +00:00 expiry should remain active before nanosecond Z now",
+        )?;
+        ensure(
+            super::advisory_lock_is_expired(
+                "2026-05-05T02:59:59.999999999Z",
+                "2026-05-05T03:00:00+00:00",
+            ),
+            "nanosecond Z expiry should be expired after whole-second +00:00 now",
+        )
     }
 
     #[test]
