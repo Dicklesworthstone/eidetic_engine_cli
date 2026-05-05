@@ -1,11 +1,12 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ee::cass::{
-    CassAgent, CassClient, CassContract, CassSearchResponse, CassTimestamp, REQUIRED_API_VERSION,
-    REQUIRED_CONTRACT_VERSION,
+    CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassAgent, CassClient, CassContract, CassExitClass,
+    CassInvocation, CassOutcome, CassSearchResponse, CassTimestamp, REQUIRED_API_VERSION,
+    REQUIRED_CONTRACT_VERSION, STABLE_ENV_OVERRIDES,
 };
 use serde_json::{Map, Value};
 
@@ -16,6 +17,7 @@ const REQUIRED_FEATURES: &[&str] = &[
     "api_version_command",
     "expand_command",
     "field_selection",
+    "introspect_command",
     "json_output",
     "request_id",
     "robot_meta",
@@ -24,6 +26,104 @@ const REQUIRED_FEATURES: &[&str] = &[
     "view_command",
 ];
 const REQUIRED_CONNECTORS: &[&str] = &["claude_code", "codex"];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequirementLevel {
+    Must,
+    Should,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ContractRequirement {
+    id: &'static str,
+    section: &'static str,
+    level: RequirementLevel,
+    description: &'static str,
+    tested_by: &'static [&'static str],
+}
+
+const CASS_ROBOT_REQUIREMENTS: &[ContractRequirement] = &[
+    ContractRequirement {
+        id: "CASS-API-001",
+        section: "api-version",
+        level: RequirementLevel::Must,
+        description: "api-version JSON declares the API and contract versions ee requires",
+        tested_by: &[
+            "cass_v1_capabilities_declare_the_robot_surfaces_ee_consumes",
+            "unknown_cass_schema_versions_fail_with_adapter_schema_mismatch",
+        ],
+    },
+    ContractRequirement {
+        id: "CASS-CAP-001",
+        section: "capabilities",
+        level: RequirementLevel::Must,
+        description: "capabilities JSON advertises every command and flag surface ee consumes",
+        tested_by: &["cass_v1_capabilities_declare_the_robot_surfaces_ee_consumes"],
+    },
+    ContractRequirement {
+        id: "CASS-CAP-002",
+        section: "capabilities",
+        level: RequirementLevel::Should,
+        description: "fixture connectors include the harness agents used by ee tests",
+        tested_by: &["cass_v1_capabilities_declare_the_robot_surfaces_ee_consumes"],
+    },
+    ContractRequirement {
+        id: "CASS-SEARCH-001",
+        section: "search",
+        level: RequirementLevel::Must,
+        description: "search root, hit, and robot-meta field sets match the schema snapshot",
+        tested_by: &["cass_search_robot_fixture_conforms_to_schema_snapshot_and_parser"],
+    },
+    ContractRequirement {
+        id: "CASS-SEARCH-002",
+        section: "search",
+        level: RequirementLevel::Must,
+        description: "search parser maps provenance, ranking, freshness, timeout, and token fields",
+        tested_by: &["cass_search_robot_fixture_conforms_to_schema_snapshot_and_parser"],
+    },
+    ContractRequirement {
+        id: "CASS-SEARCH-003",
+        section: "search",
+        level: RequirementLevel::Must,
+        description: "undocumented search fields fail loudly instead of being silently dropped",
+        tested_by: &["cass_search_parser_rejects_contract_surprises"],
+    },
+    ContractRequirement {
+        id: "CASS-SEARCH-004",
+        section: "search",
+        level: RequirementLevel::Must,
+        description: "request IDs and mirrored budget fields stay consistent across root and meta",
+        tested_by: &["cass_search_robot_fixture_conforms_to_schema_snapshot_and_parser"],
+    },
+    ContractRequirement {
+        id: "CASS-VIEW-001",
+        section: "view-expand",
+        level: RequirementLevel::Should,
+        description: "view and expand fixtures keep the robot vocabulary ee links as evidence",
+        tested_by: &["cass_search_view_and_expand_fixtures_match_robot_vocabulary"],
+    },
+    ContractRequirement {
+        id: "CASS-SESS-001",
+        section: "sessions",
+        level: RequirementLevel::Should,
+        description: "sessions fixture stays tiny, deterministic, and idempotency-ready",
+        tested_by: &["tiny_fixture_session_set_is_idempotency_ready"],
+    },
+    ContractRequirement {
+        id: "CASS-INV-001",
+        section: "invocations",
+        level: RequirementLevel::Must,
+        description: "all cass subprocess invocations are noninteractive, budgeted, and reapable",
+        tested_by: &["cass_invocations_are_noninteractive_budgeted_and_reapable"],
+    },
+    ContractRequirement {
+        id: "CASS-STREAM-001",
+        section: "stdout-stderr",
+        level: RequirementLevel::Must,
+        description: "stdout data and stderr diagnostics preserve success/degraded/failure classes",
+        tested_by: &["cass_outcome_stream_contract_preserves_degraded_data"],
+    },
+];
 
 fn repo_path(relative: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -128,6 +228,83 @@ fn ensure_args(invocation_args: &[std::ffi::OsString], expected: &[&str]) -> Tes
     ensure(
         actual == expected,
         format!("expected args {expected:?}, got {actual:?}"),
+    )
+}
+
+fn ensure_env_overrides(invocation: &CassInvocation) -> TestResult {
+    let actual: Result<Vec<(&str, &str)>, String> = invocation
+        .env_overrides()
+        .iter()
+        .map(|(key, value)| {
+            let key = key
+                .to_str()
+                .ok_or_else(|| format!("non-UTF-8 env key: {key:?}"))?;
+            let value = value
+                .to_str()
+                .ok_or_else(|| format!("non-UTF-8 env value for {key}: {value:?}"))?;
+            Ok((key, value))
+        })
+        .collect();
+    ensure(
+        actual? == STABLE_ENV_OVERRIDES,
+        "cass invocations must carry the stable noninteractive env overrides",
+    )
+}
+
+fn ensure_search_rejects(value: &Value, message: &str) -> TestResult {
+    let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    ensure(
+        CassSearchResponse::from_robot_json(&bytes).is_err(),
+        message,
+    )
+}
+
+#[test]
+fn cass_robot_contract_coverage_matrix_has_no_unknown_gaps() -> TestResult {
+    let mut ids = BTreeSet::new();
+    let mut missing_tests = Vec::new();
+    let mut section_counts: BTreeMap<&str, (u32, u32)> = BTreeMap::new();
+    let mut covered = 0_u32;
+
+    for requirement in CASS_ROBOT_REQUIREMENTS {
+        ensure(
+            ids.insert(requirement.id),
+            format!(
+                "duplicate CASS conformance requirement `{}`",
+                requirement.id
+            ),
+        )?;
+        ensure(
+            !requirement.description.trim().is_empty(),
+            format!("{} must describe the CASS contract clause", requirement.id),
+        )?;
+        let counts = section_counts.entry(requirement.section).or_default();
+        match requirement.level {
+            RequirementLevel::Must => counts.0 += 1,
+            RequirementLevel::Should => counts.1 += 1,
+        }
+        if requirement.tested_by.is_empty() {
+            missing_tests.push(requirement.id);
+        } else {
+            covered += 1;
+        }
+    }
+
+    ensure(
+        missing_tests.is_empty(),
+        format!("untested CASS conformance requirements: {missing_tests:?}"),
+    )?;
+    ensure(
+        section_counts
+            .values()
+            .all(|(must_count, should_count)| *must_count + *should_count > 0),
+        "each CASS conformance section must contain at least one MUST or SHOULD clause",
+    )?;
+    ensure(
+        covered
+            == u32::try_from(CASS_ROBOT_REQUIREMENTS.len())
+                .map_err(|error| format!("requirement count overflowed: {error}"))?,
+        "all CASS conformance requirements must be covered by named tests",
     )
 }
 
@@ -372,8 +549,20 @@ fn cass_search_robot_fixture_conforms_to_schema_snapshot_and_parser() -> TestRes
         parsed.meta.request_id.as_deref() == Some("ee-gate6-search-001"),
         "parsed meta request_id",
     )?;
+    ensure(
+        parsed.meta.request_id.as_deref() == parsed.request_id.as_deref(),
+        "root and meta request_id must match for audit correlation",
+    )?;
     ensure(parsed.meta.next_cursor.is_none(), "parsed next_cursor")?;
     ensure(!parsed.meta.hits_clamped, "parsed meta hits_clamped")?;
+    ensure(
+        parsed.meta.hits_clamped == parsed.hits_clamped,
+        "root and meta hits_clamped must match",
+    )?;
+    ensure(
+        parsed.meta.max_tokens == parsed.max_tokens,
+        "root and meta max_tokens must match",
+    )?;
     ensure(
         parsed.meta.state.get("status").and_then(Value::as_str) == Some("fixture"),
         "parsed meta state",
@@ -427,13 +616,7 @@ fn cass_search_parser_rejects_contract_surprises() -> TestResult {
         .as_object_mut()
         .ok_or_else(|| "root fixture must be an object".to_string())?
         .insert("surprise".to_string(), Value::Bool(true));
-    ensure(
-        CassSearchResponse::from_robot_json(
-            &serde_json::to_vec(&root_extra).map_err(|error| error.to_string())?,
-        )
-        .is_err(),
-        "undocumented root field must be rejected",
-    )?;
+    ensure_search_rejects(&root_extra, "undocumented root field must be rejected")?;
 
     let mut hit_extra = search.clone();
     let hit = hit_extra
@@ -443,26 +626,59 @@ fn cass_search_parser_rejects_contract_surprises() -> TestResult {
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "search fixture must contain a hit object".to_string())?;
     hit.insert("surprise".to_string(), Value::Bool(true));
-    ensure(
-        CassSearchResponse::from_robot_json(
-            &serde_json::to_vec(&hit_extra).map_err(|error| error.to_string())?,
-        )
-        .is_err(),
-        "undocumented hit field must be rejected",
+    ensure_search_rejects(&hit_extra, "undocumented hit field must be rejected")?;
+
+    let mut aggregation_extra = search.clone();
+    let bucket = aggregation_extra
+        .get_mut("aggregations")
+        .and_then(Value::as_object_mut)
+        .and_then(|aggregations| aggregations.get_mut("agent"))
+        .and_then(Value::as_array_mut)
+        .and_then(|buckets| buckets.first_mut())
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "search fixture must contain an aggregation bucket".to_string())?;
+    bucket.insert("surprise".to_string(), Value::Bool(true));
+    ensure_search_rejects(
+        &aggregation_extra,
+        "undocumented aggregation bucket field must be rejected",
     )?;
 
-    let mut meta_extra = search;
+    let mut meta_extra = search.clone();
     let meta = meta_extra
         .get_mut("_meta")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "search fixture must contain _meta object".to_string())?;
     meta.insert("surprise".to_string(), Value::Bool(true));
-    ensure(
-        CassSearchResponse::from_robot_json(
-            &serde_json::to_vec(&meta_extra).map_err(|error| error.to_string())?,
-        )
-        .is_err(),
-        "undocumented _meta field must be rejected",
+    ensure_search_rejects(&meta_extra, "undocumented _meta field must be rejected")?;
+
+    let mut cache_stats_extra = search.clone();
+    let cache_stats = cache_stats_extra
+        .pointer_mut("/_meta/cache_stats")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "search fixture must contain _meta.cache_stats object".to_string())?;
+    cache_stats.insert("surprise".to_string(), Value::Bool(true));
+    ensure_search_rejects(
+        &cache_stats_extra,
+        "undocumented cache_stats field must be rejected",
+    )?;
+
+    let mut timing_extra = search.clone();
+    let timing = timing_extra
+        .pointer_mut("/_meta/timing")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "search fixture must contain _meta.timing object".to_string())?;
+    timing.insert("surprise".to_string(), Value::Bool(true));
+    ensure_search_rejects(&timing_extra, "undocumented timing field must be rejected")?;
+
+    let mut freshness_extra = search;
+    let index_freshness = freshness_extra
+        .pointer_mut("/_meta/index_freshness")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "search fixture must contain _meta.index_freshness object".to_string())?;
+    index_freshness.insert("surprise".to_string(), Value::Bool(true));
+    ensure_search_rejects(
+        &freshness_extra,
+        "undocumented index_freshness field must be rejected",
     )
 }
 
@@ -554,6 +770,45 @@ fn cass_search_view_and_expand_fixtures_match_robot_vocabulary() -> TestResult {
 }
 
 #[test]
+fn cass_outcome_stream_contract_preserves_degraded_data() -> TestResult {
+    let invocation = CassInvocation::new("cass", ["search", "format before release", "--robot"]);
+    let degraded = CassOutcome::synthetic(
+        invocation.clone(),
+        br#"{"hits":[]}"#.to_vec(),
+        br#"{"error":{"kind":"semantic_index_unavailable"}}"#.to_vec(),
+        Some(CASS_EXIT_DEGRADED),
+    );
+    ensure(
+        degraded.class() == CassExitClass::Degraded,
+        "nonzero cass exit with JSON stdout must be degraded, not failure",
+    )?;
+    ensure(!degraded.stdout_is_empty(), "degraded stdout is data")?;
+    ensure(!degraded.stderr_is_empty(), "degraded stderr is diagnostic")?;
+
+    let success = CassOutcome::synthetic(
+        invocation.clone(),
+        br#"{"hits":[]}"#.to_vec(),
+        Vec::new(),
+        Some(CASS_EXIT_OK),
+    );
+    ensure(
+        success.class() == CassExitClass::Success,
+        "zero cass exit with JSON stdout must be success",
+    )?;
+    ensure(
+        success.stderr_is_empty(),
+        "success stderr stays diagnostic-only",
+    )?;
+
+    let failure = CassOutcome::synthetic(invocation, Vec::new(), b"boom\n".to_vec(), Some(2));
+    ensure(
+        failure.class() == CassExitClass::Failure,
+        "nonzero cass exit without stdout has no usable payload",
+    )?;
+    ensure(failure.stdout_is_empty(), "failure stdout is empty")
+}
+
+#[test]
 fn cass_invocations_are_noninteractive_budgeted_and_reapable() -> TestResult {
     let client = CassClient::new_default().with_timeout(Duration::from_secs(30));
     let preflight = client.preflight_invocations();
@@ -564,8 +819,15 @@ fn cass_invocations_are_noninteractive_budgeted_and_reapable() -> TestResult {
     let capabilities = preflight
         .get(1)
         .ok_or_else(|| "missing capabilities preflight invocation".to_string())?;
+    let introspect = preflight
+        .get(2)
+        .ok_or_else(|| "missing introspect preflight invocation".to_string())?;
     ensure_args(api_version.args(), &["api-version", "--json"])?;
     ensure_args(capabilities.args(), &["capabilities", "--json"])?;
+    ensure_args(introspect.args(), &["introspect", "--json"])?;
+    ensure_env_overrides(api_version)?;
+    ensure_env_overrides(capabilities)?;
+    ensure_env_overrides(introspect)?;
 
     let search = client.search_invocation("format before release", "ee-gate6-search-001", 2, 200);
     ensure_args(
@@ -591,6 +853,7 @@ fn cass_invocations_are_noninteractive_budgeted_and_reapable() -> TestResult {
         search.timeout() == Some(Duration::from_secs(30)),
         "search timeout",
     )?;
+    ensure_env_overrides(&search)?;
 
     let view = client.view_invocation("/workspace/session-a.jsonl", 42, 1);
     ensure_args(
@@ -610,6 +873,7 @@ fn cass_invocations_are_noninteractive_budgeted_and_reapable() -> TestResult {
         view.timeout() == Some(Duration::from_secs(30)),
         "view timeout",
     )?;
+    ensure_env_overrides(&view)?;
 
     let expand = client.expand_invocation("/workspace/session-a.jsonl", 42, 1);
     ensure_args(
@@ -628,7 +892,8 @@ fn cass_invocations_are_noninteractive_budgeted_and_reapable() -> TestResult {
     ensure(
         expand.timeout() == Some(Duration::from_secs(30)),
         "expand timeout",
-    )
+    )?;
+    ensure_env_overrides(&expand)
 }
 
 #[test]
@@ -664,5 +929,6 @@ fn tiny_fixture_session_set_is_idempotency_ready() -> TestResult {
             "--limit",
             "1",
         ],
-    )
+    )?;
+    ensure_env_overrides(&invocation)
 }
