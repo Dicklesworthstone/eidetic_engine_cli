@@ -283,6 +283,48 @@ fn get_ee_binary_path() -> Result<PathBuf, DomainError> {
     })
 }
 
+fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result<(), DomainError> {
+    std::fs::create_dir_all(hook_dir).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to create hook directory '{}': {error}",
+            hook_dir.display()
+        ),
+        repair: Some(
+            "Choose a writable hook directory or re-run with corrected permissions.".to_owned(),
+        ),
+    })?;
+
+    std::fs::write(target_path, content).map_err(|error| DomainError::Storage {
+        message: format!("Failed to write hook '{}': {error}", target_path.display()),
+        repair: Some(
+            "Choose a writable hook directory or re-run with corrected permissions.".to_owned(),
+        ),
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(target_path).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to read hook metadata '{}': {error}",
+                target_path.display()
+            ),
+            repair: Some("Check hook file permissions and re-run hook installation.".to_owned()),
+        })?;
+        let mut perms = metadata.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(target_path, perms).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to mark hook executable '{}': {error}",
+                target_path.display()
+            ),
+            repair: Some("Check hook file permissions and re-run hook installation.".to_owned()),
+        })?;
+    }
+
+    Ok(())
+}
+
 /// Install hooks according to options.
 ///
 /// # Security
@@ -315,17 +357,7 @@ pub fn install_hooks(options: &HookInstallOptions) -> Result<HookInstallReport, 
 
         if !options.dry_run && action.is_mutating() {
             let content = generate_hook_content(*hook_type, &ee_binary_path);
-            std::fs::create_dir_all(&options.hook_dir).ok();
-            std::fs::write(&target_path, content).ok();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(metadata) = std::fs::metadata(&target_path) {
-                    let mut perms = metadata.permissions();
-                    perms.set_mode(0o755);
-                    std::fs::set_permissions(&target_path, perms).ok();
-                }
-            }
+            write_hook_file(&options.hook_dir, &target_path, &content)?;
         }
 
         match action {
@@ -651,6 +683,31 @@ mod tests {
         assert!(
             content2.contains("'\\''"),
             "single quote in path must be escaped, got:\n{content2}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn install_reports_filesystem_errors_instead_of_counting_success() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let not_a_directory = temp.path().join("not-a-directory");
+        fs::write(&not_a_directory, "file blocks directory creation").map_err(|e| e.to_string())?;
+        let options = HookInstallOptions {
+            hook_dir: not_a_directory,
+            hooks: vec![HookType::PreTask],
+            dry_run: false,
+            preserve_existing: false,
+            force: false,
+        };
+
+        let error =
+            install_hooks(&options).expect_err("install should fail when hook_dir is a file");
+        assert_eq!(error.code(), "storage");
+        assert!(
+            error.message().contains("Failed to create hook directory"),
+            "unexpected error: {}",
+            error.message()
         );
 
         Ok(())
