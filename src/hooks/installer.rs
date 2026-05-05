@@ -190,13 +190,22 @@ fn check_existing_hook(path: &Path) -> ExistingHookStatus {
 
 /// Determine the action to take for a hook.
 fn determine_action(
+    path: &Path,
     existing: ExistingHookStatus,
     preserve_existing: bool,
     force: bool,
+    desired_content: &str,
 ) -> (HookAction, &'static str) {
     match existing {
         ExistingHookStatus::NotFound => (HookAction::Install, "No existing hook"),
-        ExistingHookStatus::ManagedByEe => (HookAction::Update, "Updating ee-managed hook"),
+        ExistingHookStatus::ManagedByEe => match std::fs::read_to_string(path) {
+            Ok(current_content) if current_content == desired_content => {
+                (HookAction::NoChange, "ee-managed hook already up to date")
+            }
+            Ok(_) => (HookAction::Update, "Updating ee-managed hook"),
+            Err(_) if force => (HookAction::Update, "Force overwriting unreadable hook"),
+            Err(_) => (HookAction::Skip, "Hook exists but is unreadable"),
+        },
         ExistingHookStatus::External => {
             if force {
                 (HookAction::Update, "Force overwriting external hook")
@@ -232,7 +241,7 @@ fn generate_hook_content(hook_type: HookType, ee_binary_path: &Path) -> String {
         r#"#!/bin/sh
 {marker}
 # Hook type: {hook_type}
-# Installed by ee at: {timestamp}
+# Installed by ee
 # Binary path captured at install time (absolute, not PATH-resolved)
 #
 # This hook is managed by ee. Manual edits may be overwritten.
@@ -242,7 +251,6 @@ fn generate_hook_content(hook_type: HookType, ee_binary_path: &Path) -> String {
 "#,
         marker = EE_HOOK_MARKER,
         hook_type = hook_type.as_str(),
-        timestamp = Utc::now().to_rfc3339(),
         ee_path = quoted_path,
     )
 }
@@ -344,8 +352,15 @@ pub fn install_hooks(options: &HookInstallOptions) -> Result<HookInstallReport, 
 
     for hook_type in &options.hooks {
         let target_path = options.hook_dir.join(hook_type.filename());
+        let content = generate_hook_content(*hook_type, &ee_binary_path);
         let existing = check_existing_hook(&target_path);
-        let (action, reason) = determine_action(existing, options.preserve_existing, options.force);
+        let (action, reason) = determine_action(
+            &target_path,
+            existing,
+            options.preserve_existing,
+            options.force,
+            &content,
+        );
 
         plan.push(HookInstallPlanItem {
             hook_type: hook_type.as_str().to_owned(),
@@ -356,7 +371,6 @@ pub fn install_hooks(options: &HookInstallOptions) -> Result<HookInstallReport, 
         });
 
         if !options.dry_run && action.is_mutating() {
-            let content = generate_hook_content(*hook_type, &ee_binary_path);
             write_hook_file(&options.hook_dir, &target_path, &content)?;
         }
 
@@ -532,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn idempotent_reinstall_updates_managed_hook() -> TestResult {
+    fn idempotent_reinstall_reports_no_change_for_current_managed_hook() -> TestResult {
         let temp = TempDir::new().map_err(|e| e.to_string())?;
         let options = HookInstallOptions {
             hook_dir: temp.path().to_path_buf(),
@@ -545,9 +559,41 @@ mod tests {
         let report1 = install_hooks(&options).map_err(|e| e.message())?;
         assert_eq!(report1.installed_count, 1);
 
+        let hook_path = temp.path().join("pre-commit");
+        let installed_content = fs::read_to_string(&hook_path).map_err(|e| e.to_string())?;
         let report2 = install_hooks(&options).map_err(|e| e.message())?;
-        assert_eq!(report2.updated_count, 1);
+        assert_eq!(report2.no_change_count, 1);
+        assert!(report2.idempotent);
+        assert_eq!(report2.updated_count, 0);
         assert_eq!(report2.installed_count, 0);
+        let reinstalled_content = fs::read_to_string(&hook_path).map_err(|e| e.to_string())?;
+        assert_eq!(reinstalled_content, installed_content);
+        Ok(())
+    }
+
+    #[test]
+    fn changed_managed_hook_is_updated_on_reinstall() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_path = temp.path().join("pre-commit");
+        fs::write(
+            &hook_path,
+            format!("{EE_HOOK_MARKER}\n'/tmp/stale-ee' hooks run pre_commit \"$@\"\n"),
+        )
+        .map_err(|e| e.to_string())?;
+        let options = HookInstallOptions {
+            hook_dir: temp.path().to_path_buf(),
+            hooks: vec![HookType::PreCommit],
+            dry_run: false,
+            preserve_existing: true,
+            force: false,
+        };
+
+        let report = install_hooks(&options).map_err(|e| e.message())?;
+        assert_eq!(report.updated_count, 1);
+        assert_eq!(report.no_change_count, 0);
+        let content = fs::read_to_string(&hook_path).map_err(|e| e.to_string())?;
+        assert!(!content.contains("stale-ee"));
+        assert!(content.contains("hooks run pre_commit"));
         Ok(())
     }
 
