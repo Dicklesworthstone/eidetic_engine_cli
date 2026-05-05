@@ -597,12 +597,13 @@ fn cass_invocations_are_noninteractive_budgeted_and_reapable() -> TestResult {
         view.args(),
         &[
             "view",
-            "/workspace/session-a.jsonl",
             "-n",
             "42",
             "-C",
             "1",
             "--json",
+            "--",
+            "/workspace/session-a.jsonl",
         ],
     )?;
     ensure(
@@ -615,12 +616,13 @@ fn cass_invocations_are_noninteractive_budgeted_and_reapable() -> TestResult {
         expand.args(),
         &[
             "expand",
-            "/workspace/session-a.jsonl",
             "-n",
             "42",
             "-C",
             "1",
             "--json",
+            "--",
+            "/workspace/session-a.jsonl",
         ],
     )?;
     ensure(

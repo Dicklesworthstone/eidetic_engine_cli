@@ -8,7 +8,7 @@ use std::str::FromStr;
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 
-use crate::cass::{CassClient, CassImportOptions, import_cass_sessions};
+use crate::cass::{CassClient, CassImportOptions, discover_import_binary, import_cass_sessions};
 use crate::core::VersionReport;
 use crate::core::agent_detect::{
     AgentDetectOptions, AgentSourcesOptions, AgentStatusOptions, build_agent_sources_report,
@@ -6748,7 +6748,18 @@ where
         include_spans: !args.no_spans,
     };
 
-    match import_cass_sessions(&CassClient::new_default(), &options) {
+    let cass_client = match discover_import_binary(None).map(CassClient::from_discovered) {
+        Ok(client) => client,
+        Err(error) => {
+            let domain_error = DomainError::Import {
+                message: error.to_string(),
+                repair: error.repair_hint().map(str::to_string),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    match import_cass_sessions(&cass_client, &options) {
         Ok(report) => match cli.renderer() {
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &report.human_summary())

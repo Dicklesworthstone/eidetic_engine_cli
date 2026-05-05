@@ -22,7 +22,10 @@
 //! Future work plugs a JSON parser and a contract cache in behind the
 //! types defined here.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -138,6 +141,146 @@ pub fn discover_with_override(
     Err(CassError::BinaryNotFound {
         binary: PathBuf::from(DEFAULT_BINARY),
     })
+}
+
+/// Discover the CASS binary for production import execution without
+/// trusting the caller's inherited `$PATH`.
+///
+/// Priority order:
+/// 1. `EE_CASS_BINARY`, if set, as an absolute executable path
+/// 2. explicit config override, if it is not the built-in `cass` default
+/// 3. known installation locations
+///
+/// # Errors
+///
+/// Returns [`CassError::BinaryNotFound`] when no trusted location contains
+/// `cass`, or [`CassError::InvalidBinary`] when an explicit override is not an
+/// absolute, executable `cass` file.
+pub fn discover_import_binary(
+    config_override: Option<&Path>,
+) -> Result<DiscoveredBinary, CassError> {
+    let env_override = std::env::var_os("EE_CASS_BINARY");
+    discover_import_binary_from_sources(
+        env_override.as_deref(),
+        config_override,
+        &trusted_cass_locations(),
+    )
+}
+
+fn discover_import_binary_from_sources(
+    env_override: Option<&OsStr>,
+    config_override: Option<&Path>,
+    trusted_locations: &[PathBuf],
+) -> Result<DiscoveredBinary, CassError> {
+    if let Some(env_path) = env_override {
+        let path = PathBuf::from(env_path);
+        return validate_import_binary(&path, DiscoverySource::EnvVar);
+    }
+
+    if let Some(override_path) = config_override {
+        if override_path != Path::new(DEFAULT_BINARY) {
+            return validate_import_binary(override_path, DiscoverySource::Config);
+        }
+    }
+
+    for candidate in trusted_locations {
+        if candidate.is_file() {
+            return validate_import_binary(candidate, DiscoverySource::Path);
+        }
+    }
+
+    Err(CassError::BinaryNotFound {
+        binary: PathBuf::from(DEFAULT_BINARY),
+    })
+}
+
+fn trusted_cass_locations() -> Vec<PathBuf> {
+    let mut locations = vec![
+        PathBuf::from("/usr/local/bin/cass"),
+        PathBuf::from("/usr/bin/cass"),
+        PathBuf::from("/opt/homebrew/bin/cass"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        locations.push(PathBuf::from(home).join(".local/bin/cass"));
+    }
+    locations
+}
+
+fn validate_import_binary(
+    path: &Path,
+    source: DiscoverySource,
+) -> Result<DiscoveredBinary, CassError> {
+    if !path.is_absolute() {
+        return Err(CassError::InvalidBinary {
+            binary: path.to_path_buf(),
+            reason: "CASS import binary must be configured as an absolute path".to_string(),
+        });
+    }
+    if path.file_name() != Some(OsStr::new(DEFAULT_BINARY)) {
+        return Err(CassError::InvalidBinary {
+            binary: path.to_path_buf(),
+            reason: "CASS import binary file name must be `cass`".to_string(),
+        });
+    }
+    validate_import_binary_metadata(path)?;
+    Ok(DiscoveredBinary::new(canonicalize_path(path)?, source))
+}
+
+#[cfg(unix)]
+fn validate_import_binary_metadata(path: &Path) -> Result<(), CassError> {
+    let metadata = fs::metadata(path).map_err(|error| CassError::InvalidBinary {
+        binary: path.to_path_buf(),
+        reason: format!("CASS import binary metadata is unavailable: {error}"),
+    })?;
+    if !metadata.is_file() {
+        return Err(CassError::InvalidBinary {
+            binary: path.to_path_buf(),
+            reason: "CASS import binary path is not a file".to_string(),
+        });
+    }
+    let mode = metadata.permissions().mode();
+    if mode & 0o111 == 0 {
+        return Err(CassError::InvalidBinary {
+            binary: path.to_path_buf(),
+            reason: "CASS import binary is not executable".to_string(),
+        });
+    }
+    if mode & 0o022 != 0 {
+        return Err(CassError::InvalidBinary {
+            binary: path.to_path_buf(),
+            reason: "CASS import binary must not be writable by group or other".to_string(),
+        });
+    }
+    if let Some(parent) = path.parent() {
+        let parent_metadata = fs::metadata(parent).map_err(|error| CassError::InvalidBinary {
+            binary: path.to_path_buf(),
+            reason: format!("CASS import binary parent metadata is unavailable: {error}"),
+        })?;
+        if parent_metadata.permissions().mode() & 0o002 != 0 {
+            return Err(CassError::InvalidBinary {
+                binary: path.to_path_buf(),
+                reason: "CASS import binary parent directory must not be writable by other"
+                    .to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_import_binary_metadata(path: &Path) -> Result<(), CassError> {
+    let metadata = fs::metadata(path).map_err(|error| CassError::InvalidBinary {
+        binary: path.to_path_buf(),
+        reason: format!("CASS import binary metadata is unavailable: {error}"),
+    })?;
+    if metadata.is_file() {
+        Ok(())
+    } else {
+        Err(CassError::InvalidBinary {
+            binary: path.to_path_buf(),
+            reason: "CASS import binary path is not a file".to_string(),
+        })
+    }
 }
 
 /// Search `$PATH` for the named binary and return the first match.
@@ -341,29 +484,31 @@ impl CassClient {
         ])
     }
 
-    /// Build a `cass view <path> -n <line> -C <context> --json` invocation.
+    /// Build a `cass view -n <line> -C <context> --json -- <path>` invocation.
     pub fn view_invocation(&self, source_path: &str, line: u32, context: u32) -> CassInvocation {
         self.invocation([
             "view".to_owned(),
-            source_path.to_owned(),
             "-n".to_owned(),
             line.to_string(),
             "-C".to_owned(),
             context.to_string(),
             "--json".to_owned(),
+            "--".to_owned(),
+            source_path.to_owned(),
         ])
     }
 
-    /// Build a `cass expand <path> -n <line> -C <context> --json` invocation.
+    /// Build a `cass expand -n <line> -C <context> --json -- <path>` invocation.
     pub fn expand_invocation(&self, source_path: &str, line: u32, context: u32) -> CassInvocation {
         self.invocation([
             "expand".to_owned(),
-            source_path.to_owned(),
             "-n".to_owned(),
             line.to_string(),
             "-C".to_owned(),
             context.to_string(),
             "--json".to_owned(),
+            "--".to_owned(),
+            source_path.to_owned(),
         ])
     }
 
@@ -392,14 +537,46 @@ impl Default for CassClient {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    #[cfg(unix)]
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    #[cfg(unix)]
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
         CassClient, DEFAULT_BINARY, DiscoveredBinary, DiscoverySource, STABLE_ENV_OVERRIDES,
-        discover, discover_with_override,
+        discover, discover_import_binary_from_sources, discover_with_override,
     };
 
     type TestResult = Result<(), String>;
+
+    #[cfg(unix)]
+    fn unique_test_dir(prefix: &str) -> TestResultWith<PathBuf> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("clock moved backwards: {error}"))?
+            .as_nanos();
+        Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("ee-cass-client-tests")
+            .join(format!("{prefix}-{}-{now}", std::process::id())))
+    }
+
+    #[cfg(unix)]
+    type TestResultWith<T> = Result<T, String>;
+
+    #[cfg(unix)]
+    fn write_test_cass_binary(path: &Path, mode: u32) -> TestResult {
+        fs::write(path, "#!/bin/sh\nprintf '{\"ok\":true}\\n'\n")
+            .map_err(|error| error.to_string())?;
+        let mut permissions = fs::metadata(path)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(mode);
+        fs::set_permissions(path, permissions).map_err(|error| error.to_string())
+    }
 
     #[test]
     fn new_default_uses_path_resolution() {
@@ -537,6 +714,70 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn import_discovery_ignores_inherited_path_only_cass() -> TestResult {
+        let dir = unique_test_dir("path-ignored")?;
+        let fake_dir = dir.join("fake-path");
+        fs::create_dir_all(&fake_dir).map_err(|error| error.to_string())?;
+        write_test_cass_binary(&fake_dir.join(DEFAULT_BINARY), 0o755)?;
+
+        let result = discover_import_binary_from_sources(None, None, &[]);
+        let error = match result {
+            Ok(discovered) => {
+                return Err(format!(
+                    "inherited PATH must not produce import binary; got {}",
+                    discovered.path.display()
+                ));
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind_str(), "binary_not_found");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_discovery_accepts_explicit_absolute_env_binary() -> TestResult {
+        let dir = unique_test_dir("env-binary")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join(DEFAULT_BINARY);
+        write_test_cass_binary(&binary, 0o755)?;
+
+        let discovered = discover_import_binary_from_sources(Some(binary.as_os_str()), None, &[])
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(discovered.source, DiscoverySource::EnvVar);
+        assert_eq!(
+            discovered.path,
+            binary.canonicalize().map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_discovery_rejects_group_or_world_writable_binary() -> TestResult {
+        let dir = unique_test_dir("writable-binary")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join(DEFAULT_BINARY);
+        write_test_cass_binary(&binary, 0o777)?;
+
+        let result = discover_import_binary_from_sources(Some(binary.as_os_str()), None, &[]);
+        let error = match result {
+            Ok(_) => return Err("world-writable cass binary should be rejected".to_string()),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind_str(), "invalid_binary");
+        assert!(
+            error.to_string().contains("writable by group or other"),
+            "unexpected error: {error}",
+        );
+        Ok(())
+    }
+
     #[test]
     fn from_discovered_creates_client_with_absolute_path() {
         let discovered = DiscoveredBinary::new(
@@ -562,12 +803,13 @@ mod tests {
             view.args(),
             [
                 "view",
-                "/work/session.jsonl",
                 "-n",
                 "42",
                 "-C",
                 "4",
-                "--json"
+                "--json",
+                "--",
+                "/work/session.jsonl"
             ]
         );
 
@@ -576,14 +818,41 @@ mod tests {
             expand.args(),
             [
                 "expand",
-                "/work/session.jsonl",
                 "-n",
                 "42",
                 "-C",
                 "3",
-                "--json"
+                "--json",
+                "--",
+                "/work/session.jsonl"
             ]
         );
         Ok(())
+    }
+
+    #[test]
+    fn view_and_expand_invocations_separate_malicious_prefix_paths() {
+        let client = CassClient::new_default();
+
+        let view = client.view_invocation("--config=/tmp/evil", 42, 4);
+        assert_eq!(
+            view.args(),
+            [
+                "view",
+                "-n",
+                "42",
+                "-C",
+                "4",
+                "--json",
+                "--",
+                "--config=/tmp/evil"
+            ]
+        );
+
+        let expand = client.expand_invocation("-n", 42, 4);
+        assert_eq!(
+            expand.args(),
+            ["expand", "-n", "42", "-C", "4", "--json", "--", "-n"]
+        );
     }
 }

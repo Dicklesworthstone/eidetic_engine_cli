@@ -113,7 +113,7 @@ impl CassError {
     pub fn repair_hint(&self) -> Option<&str> {
         match self {
             Self::InvalidBinary { .. } => {
-                Some("use the allowlisted cass executable; explicit path discovery lands in EE-101")
+                Some("set EE_CASS_BINARY or [cass.binary] to an absolute trusted cass executable")
             }
             Self::BinaryNotFound { .. } => Some("install cass or set [cass.binary] in config"),
             Self::ContractMismatch { .. } => Some("upgrade cass to a compatible contract version"),

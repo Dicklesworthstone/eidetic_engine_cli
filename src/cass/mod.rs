@@ -40,7 +40,7 @@ pub mod session;
 
 pub use client::{
     CassClient, DEFAULT_BINARY, DiscoveredBinary, DiscoverySource, STABLE_ENV_OVERRIDES, discover,
-    discover_with_override,
+    discover_import_binary, discover_with_override,
 };
 pub use contract::{
     CassContract, REQUIRED_API_VERSION, REQUIRED_CAPABILITIES, REQUIRED_CONTRACT_VERSION,
@@ -74,7 +74,8 @@ mod tests {
         CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassClient, CassContract, CassError, CassExitClass,
         CassInvocation, CassOutcome, DEFAULT_BINARY, DiscoveredBinary, DiscoverySource,
         REQUIRED_API_VERSION, REQUIRED_CAPABILITIES, REQUIRED_CONTRACT_VERSION,
-        STABLE_ENV_OVERRIDES, discover, discover_with_override, subsystem_name,
+        STABLE_ENV_OVERRIDES, discover, discover_import_binary, discover_with_override,
+        subsystem_name,
     };
     use std::path::Path;
 
@@ -104,6 +105,7 @@ mod tests {
             DiscoverySource::Path,
         );
         let _ = discover;
+        let _ = discover_import_binary;
         let _ = discover_with_override;
 
         let client: CassClient = CassClient::new_default();

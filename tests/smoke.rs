@@ -1181,6 +1181,10 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         ("EE_WORKSPACE_REGISTRY", registry_env),
         ("PATH", path),
         (
+            "EE_CASS_BINARY",
+            OsString::from(cass_binary.to_string_lossy().into_owned()),
+        ),
+        (
             "EE_FAKE_CASS_SESSION",
             OsString::from(cass_session_arg.clone()),
         ),
@@ -2680,6 +2684,10 @@ fn import_cass_json_uses_cass_robot_contract_and_is_idempotent() -> TestResult {
     let path = path_with_fake_cass(&fake_bin_dir)?;
     let envs = [
         ("PATH", path),
+        (
+            "EE_CASS_BINARY",
+            OsString::from(cass_binary.to_string_lossy().into_owned()),
+        ),
         ("EE_FAKE_CASS_SESSION", OsString::from(session_arg.clone())),
         (
             "EE_FAKE_CASS_WORKSPACE",

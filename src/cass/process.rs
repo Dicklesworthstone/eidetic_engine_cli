@@ -194,7 +194,7 @@ impl CassInvocation {
     pub fn run(&self) -> Result<CassOutcome, CassError> {
         self.ensure_allowlisted_binary()?;
         let started = Instant::now();
-        let mut command = self.command_for_spawn()?;
+        let mut command = self.command_for_spawn();
         command.args(&self.args);
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
@@ -282,28 +282,12 @@ impl CassInvocation {
         }
     }
 
-    fn command_for_spawn(&self) -> Result<Command, CassError> {
-        let mut command = Command::new(ALLOWLISTED_CASS_EXECUTABLE);
+    fn command_for_spawn(&self) -> Command {
         if self.binary == Path::new(ALLOWLISTED_CASS_EXECUTABLE) {
-            return Ok(command);
+            return Command::new(ALLOWLISTED_CASS_EXECUTABLE);
         }
 
-        let parent = self
-            .binary
-            .parent()
-            .ok_or_else(|| CassError::InvalidBinary {
-                binary: self.binary.clone(),
-                reason: "absolute CASS binary must have a parent directory".to_string(),
-            })?;
-        let mut path_entries = vec![parent.to_path_buf()];
-        if let Some(existing_path) = std::env::var_os("PATH") {
-            path_entries.extend(std::env::split_paths(&existing_path));
-        }
-        let path = std::env::join_paths(path_entries).map_err(|error| CassError::Io {
-            message: format!("failed to construct PATH for CASS binary: {error}"),
-        })?;
-        command.env("PATH", path);
-        Ok(command)
+        Command::new(&self.binary)
     }
 
     fn ensure_allowlisted_binary(&self) -> Result<(), CassError> {
@@ -633,6 +617,51 @@ mod tests {
         assert_eq!(outcome.invocation().binary(), binary.as_path());
         assert_eq!(outcome.exit_code(), Some(CASS_EXIT_OK));
         assert_eq!(outcome.stdout_utf8_lossy(), "{\"ok\":true}\n");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_absolute_binary_ignores_path_env_override() -> Result<(), String> {
+        let dir = unique_test_dir("absolute-ignores-path")?;
+        let trusted_dir = dir.join("trusted");
+        let malicious_dir = dir.join("malicious");
+        fs::create_dir_all(&trusted_dir).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&malicious_dir).map_err(|error| error.to_string())?;
+        let trusted_binary = trusted_dir.join("cass");
+        let marker = dir.join("malicious-ran");
+        fs::write(
+            &trusted_binary,
+            "#!/bin/sh\nprintf '{\"trusted\":true}\\n'\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            malicious_dir.join("cass"),
+            format!(
+                "#!/bin/sh\nprintf malicious > '{}'\nprintf '{{\"trusted\":false}}\\n'\n",
+                marker.display()
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        for binary in [&trusted_binary, &malicious_dir.join("cass")] {
+            let mut permissions = fs::metadata(binary)
+                .map_err(|error| error.to_string())?
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(binary, permissions).map_err(|error| error.to_string())?;
+        }
+
+        let inv = CassInvocation::new(trusted_binary.clone(), ["health", "--json"])
+            .with_env("PATH", malicious_dir.as_os_str());
+        let outcome = inv.run().map_err(|error| error.to_string())?;
+
+        assert_eq!(outcome.invocation().binary(), trusted_binary.as_path());
+        assert_eq!(outcome.exit_code(), Some(CASS_EXIT_OK));
+        assert_eq!(outcome.stdout_utf8_lossy(), "{\"trusted\":true}\n");
+        assert!(
+            !marker.exists(),
+            "absolute cass invocation must not execute PATH override binary",
+        );
         Ok(())
     }
 }

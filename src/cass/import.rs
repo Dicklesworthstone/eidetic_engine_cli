@@ -400,6 +400,7 @@ fn parse_sessions_json(input: &[u8]) -> Result<Vec<CassSessionInfo>, CassImportE
     let mut parsed = Vec::with_capacity(sessions.len());
     for item in sessions {
         let path = required_string(item, "path", "sessions")?;
+        validate_reported_session_path(&path)?;
         let mut session = CassSessionInfo::new(path.clone());
         if let Some(agent) = item.get("agent").and_then(JsonValue::as_str) {
             session.agent = agent.parse().unwrap_or(CassAgent::Unknown);
@@ -434,6 +435,28 @@ fn parse_sessions_json(input: &[u8]) -> Result<Vec<CassSessionInfo>, CassImportE
         parsed.push(session);
     }
     Ok(parsed)
+}
+
+fn validate_reported_session_path(path: &str) -> Result<(), CassImportError> {
+    if path.trim() != path {
+        return Err(CassImportError::InvalidJson {
+            source: "sessions",
+            message: "session path has leading or trailing whitespace".to_string(),
+        });
+    }
+    if path.starts_with('-') {
+        return Err(CassImportError::InvalidJson {
+            source: "sessions",
+            message: "session path must not begin with '-'".to_string(),
+        });
+    }
+    if path.contains('\0') {
+        return Err(CassImportError::InvalidJson {
+            source: "sessions",
+            message: "session path must not contain NUL bytes".to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -881,6 +904,33 @@ mod tests {
         )?;
         ensure_equal(&first.message_count, &Some(12), "message_count")?;
         ensure(first.content_hash.is_some(), "content hash filled")
+    }
+
+    #[test]
+    fn parse_sessions_rejects_malicious_prefix_paths() -> TestResult {
+        for path in ["--config=/tmp/evil", "-n", "  --hidden"] {
+            let input = format!(
+                r#"{{
+                  "sessions": [
+                    {{
+                      "path": {path:?},
+                      "workspace": "/tmp/project",
+                      "agent": "codex"
+                    }}
+                  ]
+                }}"#
+            );
+
+            let error = match parse_sessions_json(input.as_bytes()) {
+                Ok(_) => return Err(format!("malicious session path {path:?} should fail")),
+                Err(error) => error.to_string(),
+            };
+            ensure(
+                error.contains("session path"),
+                format!("error for {path:?} should mention session path, got {error}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
