@@ -361,6 +361,189 @@ esac
     fs::set_permissions(path, permissions).map_err(|error| error.to_string())
 }
 
+#[cfg(unix)]
+fn real_cass_binary_path() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("EE_CASS_BINARY") {
+        let path = PathBuf::from(path);
+        ensure(
+            path.is_absolute(),
+            format!("EE_CASS_BINARY must be absolute for no-mock CASS e2e: {path:?}"),
+        )?;
+        ensure(
+            path.file_name().and_then(|name| name.to_str()) == Some("cass"),
+            format!("EE_CASS_BINARY must point to a real cass executable: {path:?}"),
+        )?;
+        ensure(path.is_file(), format!("cass binary not found: {path:?}"))?;
+        return path.canonicalize().map_err(|error| error.to_string());
+    }
+
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join("cass");
+            if candidate.is_file() {
+                return candidate.canonicalize().map_err(|error| error.to_string());
+            }
+        }
+    }
+
+    Err("real cass binary not found on PATH".to_string())
+}
+
+#[cfg(unix)]
+fn path_with_binary_parent(binary: &Path) -> Result<OsString, String> {
+    let parent = binary
+        .parent()
+        .ok_or_else(|| format!("cass binary has no parent directory: {binary:?}"))?;
+    let mut entries = vec![parent.to_path_buf()];
+    if let Some(existing) = std::env::var_os("PATH") {
+        entries.extend(std::env::split_paths(&existing));
+    }
+    std::env::join_paths(entries).map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+fn write_real_codex_cass_session(codex_home: &Path, workspace: &Path) -> Result<PathBuf, String> {
+    let sessions_dir = codex_home
+        .join("sessions")
+        .join("2026")
+        .join("05")
+        .join("05");
+    fs::create_dir_all(&sessions_dir).map_err(|error| error.to_string())?;
+    let session_path = sessions_dir.join("rollout-lp4p7-cass-retrieval.jsonl");
+    let workspace_path = workspace.display().to_string();
+    let records = [
+        serde_json::json!({
+            "timestamp": "2026-05-05T03:34:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "lp4p7-real-cass",
+                "cwd": workspace_path,
+                "cli_version": "0.42.0"
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-05-05T03:34:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "lp4p7 cass retrieval evidence alpha"
+                    }
+                ]
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-05-05T03:34:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "lp4p7 imported evidence should be retrievable with provenance"
+                    }
+                ]
+            }
+        }),
+    ];
+    let mut jsonl = String::new();
+    for record in records {
+        jsonl.push_str(&serde_json::to_string(&record).map_err(|error| error.to_string())?);
+        jsonl.push('\n');
+    }
+    fs::write(&session_path, jsonl).map_err(|error| error.to_string())?;
+    Ok(session_path)
+}
+
+#[cfg(unix)]
+struct LoggedExternalRun {
+    output: Output,
+    dossier_dir: PathBuf,
+}
+
+#[cfg(unix)]
+fn run_external_logged(
+    scenario: &str,
+    args: &[OsString],
+    cwd: &Path,
+    envs: &[(&str, OsString)],
+) -> Result<LoggedExternalRun, String> {
+    let dossier_dir = unique_e2e_dossier_dir(scenario)?;
+    fs::create_dir_all(&dossier_dir).map_err(|error| error.to_string())?;
+    let command_text = std::iter::once("cass".to_string())
+        .chain(args.iter().map(|arg| arg.to_string_lossy().into_owned()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    fs::write(dossier_dir.join("command.txt"), format!("{command_text}\n"))
+        .map_err(|error| error.to_string())?;
+    fs::write(dossier_dir.join("cwd.txt"), format!("{}\n", cwd.display()))
+        .map_err(|error| error.to_string())?;
+    write_json_artifact(
+        &dossier_dir.join("env.sanitized.json"),
+        &serde_json::json!({
+            "overrides": sanitized_env_overrides(envs),
+            "sensitiveEnvOmitted": true,
+            "toolchain": "real-cass"
+        }),
+    )?;
+
+    let mut command = Command::new("cass");
+    command.current_dir(cwd).args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to run {command_text}: {error}"))?;
+    fs::write(dossier_dir.join("stdout"), &output.stdout).map_err(|error| error.to_string())?;
+    fs::write(dossier_dir.join("stderr"), &output.stderr).map_err(|error| error.to_string())?;
+    fs::write(
+        dossier_dir.join("exit-code.txt"),
+        format!("{:?}\n", output.status.code()),
+    )
+    .map_err(|error| error.to_string())?;
+    write_json_artifact(
+        &dossier_dir.join("stdout.schema.json"),
+        &serde_json::json!({
+            "parseStatus": if serde_json::from_slice::<serde_json::Value>(&output.stdout).is_ok() {
+                "parsed"
+            } else {
+                "not_json"
+            },
+            "stdoutPath": dossier_dir.join("stdout").display().to_string(),
+            "stderrPath": dossier_dir.join("stderr").display().to_string()
+        }),
+    )?;
+
+    Ok(LoggedExternalRun {
+        output,
+        dossier_dir,
+    })
+}
+
+#[cfg(unix)]
+fn parse_logged_external_json(
+    run: &LoggedExternalRun,
+    context: &str,
+) -> Result<serde_json::Value, String> {
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let stderr = String::from_utf8_lossy(&run.output.stderr);
+    ensure(
+        run.output.status.success(),
+        format!("{context} should succeed; stdout: {stdout}; stderr: {stderr}"),
+    )?;
+    ensure(
+        run.output.stderr.is_empty(),
+        format!("{context} stderr must be empty"),
+    )?;
+    serde_json::from_slice(&run.output.stdout)
+        .map_err(|error| format!("{context} stdout must be JSON: {error}"))
+}
+
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
         Ok(())
@@ -2880,6 +3063,399 @@ fn import_cass_json_uses_cass_robot_contract_and_is_idempotent() -> TestResult {
         "second cursor complete",
     )?;
     second_connection.close().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestResult {
+    let root = unique_artifact_dir("lp4p7-cass-real")?;
+    let workspace = root.join("workspace");
+    let home = root.join("home");
+    let codex_home = root.join("codex-home");
+    let cass_data_dir = root.join("cass-data");
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&home).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&codex_home).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&cass_data_dir).map_err(|error| error.to_string())?;
+
+    let cass_binary = real_cass_binary_path()?;
+    let cass_path = path_with_binary_parent(&cass_binary)?;
+    let session_path = write_real_codex_cass_session(&codex_home, &workspace)?;
+    let database = workspace.join(".ee").join("ee.db");
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let database_arg = database.to_string_lossy().into_owned();
+    let session_arg = session_path.to_string_lossy().into_owned();
+    let cass_data_arg = cass_data_dir.to_string_lossy().into_owned();
+    let query = "lp4p7 cass retrieval evidence alpha";
+    let assistant_evidence = "lp4p7 imported evidence should be retrievable with provenance";
+    let envs = [
+        ("HOME", home.as_os_str().to_owned()),
+        ("CODEX_HOME", codex_home.as_os_str().to_owned()),
+        ("CASS_DATA_DIR", cass_data_dir.as_os_str().to_owned()),
+        ("CASS_IGNORE_SOURCES_CONFIG", OsString::from("1")),
+        ("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", OsString::from("1")),
+        ("CASS_INDEX_NO_PROGRESS_EVENTS", OsString::from("1")),
+        ("NO_COLOR", OsString::from("1")),
+        ("EE_CASS_BINARY", cass_binary.as_os_str().to_owned()),
+        ("PATH", cass_path),
+    ];
+
+    let cass_index_args = [
+        OsString::from("index"),
+        OsString::from("--full"),
+        OsString::from("--data-dir"),
+        OsString::from(cass_data_arg.clone()),
+        OsString::from("--json"),
+    ];
+    let cass_index =
+        run_external_logged("lp4p7-cass-real-index", &cass_index_args, &workspace, &envs)?;
+    ensure(
+        cass_index.dossier_dir.join("stdout").exists(),
+        "cass index stdout artifact should exist",
+    )?;
+    let cass_index_json = parse_logged_external_json(&cass_index, "real cass index")?;
+    ensure_equal(
+        &cass_index_json["success"],
+        &serde_json::json!(true),
+        "cass index success",
+    )?;
+    ensure_equal(
+        &cass_index_json["conversations"],
+        &serde_json::json!(1),
+        "cass indexed conversation count",
+    )?;
+    ensure_equal(
+        &cass_index_json["messages"],
+        &serde_json::json!(2),
+        "cass indexed message count",
+    )?;
+
+    let cass_doctor_args = [
+        OsString::from("doctor"),
+        OsString::from("--data-dir"),
+        OsString::from(cass_data_arg.clone()),
+        OsString::from("--json"),
+        OsString::from("--fix"),
+    ];
+    let cass_doctor = run_external_logged(
+        "lp4p7-cass-real-doctor",
+        &cass_doctor_args,
+        &workspace,
+        &envs,
+    )?;
+    if cass_doctor.output.status.success() {
+        let cass_doctor_json = parse_logged_external_json(&cass_doctor, "real cass doctor")?;
+        ensure_equal(
+            &cass_doctor_json["healthy"],
+            &serde_json::json!(true),
+            "cass doctor health after safe fix",
+        )?;
+        ensure_equal(
+            &cass_doctor_json["failures"],
+            &serde_json::json!(0),
+            "cass doctor failures",
+        )?;
+    } else {
+        let doctor_stderr = String::from_utf8_lossy(&cass_doctor.output.stderr);
+        ensure(
+            doctor_stderr.contains("\"error\"") && doctor_stderr.contains("doctor"),
+            format!("unsupported cass doctor should return robot JSON error: {doctor_stderr}"),
+        )?;
+        write_json_artifact(
+            &cass_doctor.dossier_dir.join("typed-degradation.json"),
+            &serde_json::json!({
+                "code": "cass_doctor_unavailable",
+                "severity": "low",
+                "message": "Installed CASS lacks doctor --fix; continuing against raw CASS sessions contract.",
+                "stderrPath": cass_doctor.dossier_dir.join("stderr").display().to_string()
+            }),
+        )?;
+    }
+
+    let import_args = [
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "import",
+        "cass",
+        "--database",
+        database_arg.as_str(),
+        "--limit",
+        "1",
+    ];
+    let cass_sessions_args = [
+        OsString::from("sessions"),
+        OsString::from("--workspace"),
+        OsString::from(workspace_arg.clone()),
+        OsString::from("--json"),
+        OsString::from("--limit"),
+        OsString::from("5"),
+    ];
+    let cass_sessions = run_external_logged(
+        "lp4p7-cass-real-sessions",
+        &cass_sessions_args,
+        &workspace,
+        &envs,
+    )?;
+    if !cass_sessions.output.status.success() {
+        let sessions_stderr = String::from_utf8_lossy(&cass_sessions.output.stderr);
+        ensure(
+            sessions_stderr.contains("\"error\""),
+            format!("cass sessions failure should be robot JSON: {sessions_stderr}"),
+        )?;
+        write_json_artifact(
+            &cass_sessions.dossier_dir.join("typed-degradation.json"),
+            &serde_json::json!({
+                "code": "cass_sessions_degraded",
+                "severity": "medium",
+                "message": "Real CASS sessions could not read the isolated index.",
+                "stderrPath": cass_sessions.dossier_dir.join("stderr").display().to_string()
+            }),
+        )?;
+        let import_run = run_ee_logged_with_env(
+            "lp4p7-cass-real-import-degraded",
+            &import_args,
+            &workspace,
+            None,
+            "lp4p7.real_cass.import_degraded",
+            "ee.response.v1",
+            None,
+            &envs,
+        )?;
+        ensure(
+            !import_run.output.status.success(),
+            "ee import cass should fail when real CASS sessions cannot satisfy its robot contract",
+        )?;
+        ensure(
+            import_run.dossier_dir.join("first-failure.md").exists(),
+            "degraded import should retain first-failure artifact",
+        )?;
+        return Ok(());
+    }
+    let cass_sessions_json = parse_logged_external_json(&cass_sessions, "real cass sessions")?;
+    ensure_equal(
+        &cass_sessions_json["sessions"][0]["path"],
+        &serde_json::json!(session_arg),
+        "cass session source path",
+    )?;
+    ensure_equal(
+        &cass_sessions_json["sessions"][0]["workspace"],
+        &serde_json::json!(workspace_arg),
+        "cass session workspace",
+    )?;
+    ensure_equal(
+        &cass_sessions_json["sessions"][0]["agent"],
+        &serde_json::json!("codex"),
+        "cass session agent",
+    )?;
+    ensure_equal(
+        &cass_sessions_json["sessions"][0]["title"],
+        &serde_json::json!(query),
+        "cass session title",
+    )?;
+
+    let import_run = run_ee_logged_with_env(
+        "lp4p7-cass-real-import",
+        &import_args,
+        &workspace,
+        None,
+        "lp4p7.real_cass.import",
+        "ee.response.v1",
+        None,
+        &envs,
+    )?;
+    let import_json = parse_logged_response(&import_run, "ee import cass real robot output")?;
+    ensure_equal(
+        &import_json["data"]["status"],
+        &serde_json::json!("completed"),
+        "import status",
+    )?;
+    ensure_equal(
+        &import_json["data"]["sessionsImported"],
+        &serde_json::json!(1),
+        "imported session count",
+    )?;
+    ensure(
+        import_json["data"]["spansImported"].as_u64().unwrap_or(0) >= 3,
+        "real CASS view evidence spans should be imported",
+    )?;
+    ensure_equal(
+        &import_json["data"]["sessions"][0]["sourcePath"],
+        &serde_json::json!(session_arg),
+        "import report source path",
+    )?;
+    ensure(database.exists(), "import should create a real database")?;
+
+    let connection =
+        DbConnection::open(DatabaseConfig::file(database.clone())).map_err(|e| e.to_string())?;
+    let workspaces = connection.list_workspaces().map_err(|e| e.to_string())?;
+    ensure_equal(&workspaces.len(), &1usize, "stored workspace count")?;
+    ensure_equal(&workspaces[0].path, &workspace_arg, "stored workspace path")?;
+    let sessions = connection
+        .list_sessions(&workspaces[0].id)
+        .map_err(|e| e.to_string())?;
+    ensure_equal(&sessions.len(), &1usize, "stored session count")?;
+    ensure_equal(
+        &sessions[0].source_path,
+        &Some(session_arg.clone()),
+        "stored session source path",
+    )?;
+    ensure_equal(
+        &sessions[0].agent_name,
+        &Some("codex".to_string()),
+        "stored session agent",
+    )?;
+    ensure_equal(&sessions[0].message_count, &2, "stored message count")?;
+    let spans = connection
+        .list_evidence_spans_for_session(&sessions[0].id)
+        .map_err(|e| e.to_string())?;
+    ensure(
+        spans.len() >= 3,
+        format!(
+            "expected at least 3 imported evidence spans, got {}",
+            spans.len()
+        ),
+    )?;
+    let span_text = spans
+        .iter()
+        .map(|span| span.excerpt.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    ensure_contains(&span_text, query, "stored evidence user phrase")?;
+    ensure_contains(
+        &span_text,
+        assistant_evidence,
+        "stored evidence assistant phrase",
+    )?;
+    ensure(
+        spans.iter().all(|span| {
+            span.cass_span_id.starts_with(session_arg.as_str()) && !span.content_hash.is_empty()
+        }),
+        "evidence spans must retain CASS source IDs and content hashes",
+    )?;
+    let stored_session_id = sessions[0].id.clone();
+    connection.close().map_err(|e| e.to_string())?;
+
+    let rebuild_args = [
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "index",
+        "rebuild",
+        "--database",
+        database_arg.as_str(),
+    ];
+    let rebuild_run = run_ee_logged_with_env(
+        "lp4p7-cass-real-index-rebuild",
+        &rebuild_args,
+        &workspace,
+        None,
+        "lp4p7.real_cass.index_rebuild",
+        "ee.response.v1",
+        None,
+        &envs,
+    )?;
+    let rebuild_json = parse_logged_response(&rebuild_run, "ee index rebuild after cass import")?;
+    ensure_equal(
+        &rebuild_json["data"]["sessionsIndexed"],
+        &serde_json::json!(1),
+        "sessions indexed",
+    )?;
+
+    let search_args = [
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "search",
+        "--database",
+        database_arg.as_str(),
+        "--explain",
+        query,
+    ];
+    let search_run = run_ee_logged_with_env(
+        "lp4p7-cass-real-search",
+        &search_args,
+        &workspace,
+        None,
+        "lp4p7.real_cass.search",
+        "ee.response.v1",
+        None,
+        &envs,
+    )?;
+    let search_json = parse_logged_response(&search_run, "ee search imported cass evidence")?;
+    let search_results = search_json["data"]["results"]
+        .as_array()
+        .ok_or("search results must be an array")?;
+    ensure(
+        !search_results.is_empty(),
+        "search should retrieve imported CASS session",
+    )?;
+    ensure(
+        search_results.iter().any(|result| {
+            result["docId"] == serde_json::json!(stored_session_id)
+                && result["explanation"]["factors"]
+                    .as_array()
+                    .is_some_and(|factors| !factors.is_empty())
+        }),
+        "search result should point back to the stored session and include score explanation",
+    )?;
+
+    let context_args = [
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "context",
+        "--database",
+        database_arg.as_str(),
+        "--max-tokens",
+        "1000",
+        query,
+    ];
+    let context_run = run_ee_logged_with_env(
+        "lp4p7-cass-real-context",
+        &context_args,
+        &workspace,
+        None,
+        "lp4p7.real_cass.context",
+        "ee.response.v1",
+        None,
+        &envs,
+    )?;
+    let context_json = parse_logged_response(&context_run, "ee context imported cass evidence")?;
+    let context_items = context_json
+        .pointer("/data/pack/items")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("context pack items must be an array")?;
+    if context_items.is_empty() {
+        let degraded = context_json["data"]["degraded"]
+            .as_array()
+            .ok_or("empty context pack must include typed degradation")?;
+        ensure(
+            degraded.iter().any(|entry| {
+                entry["code"] == serde_json::json!("context_candidate_skipped")
+                    && entry.get("repair").is_some()
+            }),
+            "context must honestly report skipped CASS search candidates",
+        )?;
+        ensure(
+            context_run
+                .dossier_dir
+                .join("degradation-report.json")
+                .exists(),
+            "context degradation artifact should exist",
+        )?;
+    } else {
+        let provenance_entries = context_json
+            .pointer("/data/pack/provenanceFooter/entries")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("non-empty context pack must include provenance footer entries")?;
+        ensure(
+            !provenance_entries.is_empty(),
+            "retrieved context items must include provenance",
+        )?;
+    }
+
     Ok(())
 }
 

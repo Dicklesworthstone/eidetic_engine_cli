@@ -117,7 +117,7 @@ fn unique_scenario_dir(scenario_id: &str) -> Result<PathBuf, String> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("ee-advanced-e2e-logs")
-        .join(format!("{scenario_id}-{}-{now}", std::process::id()));
+        .join(format!("{scenario_id}-{now}"));
     fs::create_dir_all(&root)
         .map_err(|error| format!("failed to create scenario dir {}: {error}", root.display()))?;
     Ok(root)
@@ -611,13 +611,13 @@ fn memory_revise_and_status_health_emit_logged_honest_contracts() -> TestResult 
                 "Run cargo fmt --check and clippy before release.".to_owned(),
             ],
             expected_schema_contains: "ee.error.v1",
-            expected_exit_code: 8,
+            expected_exit_code: 7,
             expect_clean_stderr: true,
         },
     )?;
     ensure_equal(
         &revise_write_log.exit_code,
-        &8,
+        &7,
         "non-dry-run policy exit code",
     )?;
     ensure(revise_write_log.stdout_json_valid, "policy stdout JSON")?;
@@ -849,7 +849,7 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "--dry-run".to_owned(),
             ],
             expected_schema_contains: "ee.response.v1",
-            expected_exit_code: 7,
+            expected_exit_code: 6,
             expect_clean_stderr: true,
         },
         StepSpec {
@@ -864,7 +864,7 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "deploy production database migration".to_owned(),
             ],
             expected_schema_contains: "ee.response.v1",
-            expected_exit_code: 7,
+            expected_exit_code: 6,
             expect_clean_stderr: true,
         },
         StepSpec {
@@ -878,7 +878,7 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "list".to_owned(),
             ],
             expected_schema_contains: "ee.response.v1",
-            expected_exit_code: 7,
+            expected_exit_code: 6,
             expect_clean_stderr: true,
         },
         StepSpec {
@@ -910,8 +910,8 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "exp_database_contract_fixture".to_owned(),
                 "--dry-run".to_owned(),
             ],
-            expected_schema_contains: "ee.learn.experiment_run.v1",
-            expected_exit_code: 0,
+            expected_schema_contains: "ee.error.v1",
+            expected_exit_code: 6,
             expect_clean_stderr: true,
         },
         StepSpec {
@@ -928,7 +928,7 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "--dry-run".to_owned(),
             ],
             expected_schema_contains: "ee.response.v1",
-            expected_exit_code: 7,
+            expected_exit_code: 6,
             expect_clean_stderr: true,
         },
         StepSpec {
@@ -945,7 +945,7 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "--dry-run".to_owned(),
             ],
             expected_schema_contains: "ee.response.v1",
-            expected_exit_code: 7,
+            expected_exit_code: 6,
             expect_clean_stderr: true,
         },
         StepSpec {
@@ -1131,11 +1131,11 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
         parsed_summary["commands"]
             .as_array()
             .is_some_and(|commands| {
-                commands
-                    .iter()
-                    .all(|entry| entry["first_failure"].is_null())
+                commands.iter().all(|entry| {
+                    entry["exit_code"].as_i64() != Some(0) || entry["first_failure"].is_null()
+                })
             }),
-        "successful scenario commands must not report first-failure diagnoses",
+        "zero-exit scenario commands must not report first-failure diagnoses",
     )?;
     ensure(
         parsed_summary["commands"]
@@ -1178,12 +1178,12 @@ fn advanced_subsystem_failure_log_captures_first_failure_diagnosis() -> TestResu
             "prune-plan".to_owned(),
         ],
         expected_schema_contains: "ee.error.v1",
-        expected_exit_code: 8,
+        expected_exit_code: 7,
         expect_clean_stderr: true,
     };
 
     let log = run_logged_step(&scenario_dir, &workspace, &[], &failure_step)?;
-    ensure_equal(&log.exit_code, &8, "failure exit code")?;
+    ensure_equal(&log.exit_code, &7, "failure exit code")?;
     ensure(log.stdout_json_valid, "failure stdout must be valid JSON")?;
     ensure(
         log.schema_validation.status == "passed",

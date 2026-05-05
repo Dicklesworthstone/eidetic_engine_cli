@@ -10,7 +10,7 @@ use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
 
-const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 7;
+const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 6;
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
@@ -553,13 +553,12 @@ fn economy_report_degrades_until_db_backed_metrics_exist() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.error.v1"),
         "response schema",
     )?;
-    ensure_equal(&json["success"], &serde_json::json!(false), "success")?;
     ensure_equal(
-        &json["data"]["code"],
-        &serde_json::json!("economy_metrics_unavailable"),
+        &json["error"]["code"],
+        &serde_json::json!("unsatisfied_degraded_mode"),
         "degraded code",
     )
 }
@@ -575,8 +574,8 @@ fn economy_score_degrades_instead_of_scoring_seed_artifacts() -> TestResult {
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     let json = stdout_json(&output)?;
     ensure_equal(
-        &json["data"]["code"],
-        &serde_json::json!("economy_metrics_unavailable"),
+        &json["error"]["code"],
+        &serde_json::json!("unsatisfied_degraded_mode"),
         "degraded code",
     )
 }
@@ -609,24 +608,13 @@ fn economy_simulate_degrades_instead_of_ranking_seed_artifacts() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.error.v1"),
         "response schema",
     )?;
-    ensure_equal(&json["success"], &serde_json::json!(false), "success")?;
     ensure_equal(
-        &json["data"]["code"],
-        &serde_json::json!("economy_metrics_unavailable"),
+        &json["error"]["code"],
+        &serde_json::json!("unsatisfied_degraded_mode"),
         "degraded code",
-    )?;
-    ensure_equal(
-        &json["data"]["sideEffectClass"],
-        &serde_json::json!("read-only, conservative abstention"),
-        "side effect class",
-    )?;
-    ensure_equal(
-        &json["data"]["followUpBead"],
-        &serde_json::json!("eidetic_engine_cli-ve0w"),
-        "follow-up bead",
     )
 }
 
@@ -674,19 +662,13 @@ fn economy_prune_plan_dry_run_degrades_until_db_backed_metrics_exist() -> TestRe
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.error.v1"),
         "response schema",
     )?;
-    ensure_equal(&json["success"], &serde_json::json!(false), "success")?;
     ensure_equal(
-        &json["data"]["code"],
-        &serde_json::json!("economy_metrics_unavailable"),
+        &json["error"]["code"],
+        &serde_json::json!("unsatisfied_degraded_mode"),
         "degraded code",
-    )?;
-    ensure_equal(
-        &json["data"]["repair"],
-        &serde_json::json!("ee status --json"),
-        "repair",
     )
 }
 
@@ -720,7 +702,11 @@ fn learn_experiment_run_dry_run_returns_plan_shape() -> TestResult {
         "--dry-run",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
+        "exit code",
+    )?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(output.stderr.is_empty(), "stderr must be empty")?;
@@ -728,49 +714,19 @@ fn learn_experiment_run_dry_run_returns_plan_shape() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.learn.experiment_run.v1"),
-        "run schema",
+        &serde_json::json!("ee.error.v1"),
+        "error schema",
     )?;
     ensure_equal(
-        &json["dryRun"],
-        &serde_json::json!(true),
-        "run dry-run flag",
+        &json["error"]["code"],
+        &serde_json::json!("unsatisfied_degraded_mode"),
+        "error code",
     )?;
-    ensure_equal(&json["status"], &serde_json::json!("dry_run"), "run status")?;
-    ensure_equal(
-        &json["experimentKind"],
-        &serde_json::json!("procedure_revalidation"),
-        "experiment kind",
-    )?;
-    ensure_equal(
-        &json["budget"]["plannedAttentionTokens"],
-        &serde_json::json!(600),
-        "planned attention tokens",
-    )?;
-    ensure_equal(
-        &json["budget"]["plannedRuntimeSeconds"],
-        &serde_json::json!(90),
-        "planned runtime seconds",
-    )?;
-    let steps = json["steps"]
-        .as_array()
-        .ok_or_else(|| "steps must be an array".to_string())?;
-    ensure(!steps.is_empty(), "steps must not be empty")?;
     ensure(
-        steps
-            .iter()
-            .all(|step| step["writesStorage"] == serde_json::json!(false)),
-        "dry-run steps must not write storage",
-    )?;
-    ensure_equal(
-        &json["observations"][0]["signal"],
-        &serde_json::json!("positive"),
-        "observation signal",
-    )?;
-    ensure_equal(
-        &json["outcomePreview"]["status"],
-        &serde_json::json!("confirmed"),
-        "outcome preview status",
+        json["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("persisted experiment definitions")),
+        "dry-run experiment must not use hard-coded templates",
     )
 }
 
@@ -815,21 +771,19 @@ fn learn_experiment_run_supports_shadow_budget_template() -> TestResult {
         "--dry-run",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
+        "exit code",
+    )?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
 
     let json = stdout_json(&output)?;
     ensure_equal(
-        &json["experimentKind"],
-        &serde_json::json!("shadow_budget"),
-        "experiment kind",
-    )?;
-    ensure(
-        json["budget"]["shadowBudgetDeltaTokens"]
-            .as_i64()
-            .is_some_and(|value| value < 0),
-        "shadow budget delta must be negative",
+        &json["error"]["code"],
+        &serde_json::json!("unsatisfied_degraded_mode"),
+        "error code",
     )
 }
 
@@ -1606,7 +1560,7 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
         "why latest pack selection must include a persisted pack id",
     )?;
     ensure_equal(
-        &why_json["data"]["storage"]["provenance_uri"],
+        &why_json["data"]["storage"]["provenanceUri"],
         &serde_json::json!("file://tests/fixtures/eval/release_failure/source_memory.json#L1"),
         "why storage provenance",
     )?;
