@@ -1019,6 +1019,7 @@ dependencies = [
  "fnx-runtime",
  "franken-agent-detection",
  "frankensearch",
+ "getrandom 0.3.4",
  "insta",
  "proptest",
  "regex-lite",

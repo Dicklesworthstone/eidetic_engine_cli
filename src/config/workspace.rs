@@ -436,8 +436,11 @@ fn create_installation_salt(salt_path: &Path) -> Result<Vec<u8>, Canonicalizatio
         })?;
     }
 
-    // Generate 32 bytes of random salt
-    let salt: [u8; 32] = rand_salt();
+    // Generate 32 bytes of OS-backed random salt.
+    let salt = rand_salt().map_err(|source| CanonicalizationError::SaltCreateFailure {
+        path: salt_path.to_path_buf(),
+        source,
+    })?;
 
     // Write with mode 0600 (owner read/write only)
     let mut options = fs::OpenOptions::new();
@@ -461,25 +464,11 @@ fn create_installation_salt(salt_path: &Path) -> Result<Vec<u8>, Canonicalizatio
     Ok(salt.to_vec())
 }
 
-fn rand_salt() -> [u8; 32] {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    // Simple entropy source: combine process ID, time, and a counter
-    let pid = std::process::id();
-    let time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-
-    let mut seed = [0u8; 32];
-    let pid_bytes = pid.to_le_bytes();
-    let time_bytes = time.to_le_bytes();
-
-    seed[..4].copy_from_slice(&pid_bytes);
-    seed[4..20].copy_from_slice(&time_bytes);
-
-    // Hash to spread entropy
-    *blake3::hash(&seed).as_bytes()
+fn rand_salt() -> io::Result<[u8; 32]> {
+    let mut salt = [0_u8; 32];
+    getrandom::fill(&mut salt)
+        .map_err(|error| io::Error::other(format!("OS randomness unavailable: {error}")))?;
+    Ok(salt)
 }
 
 /// A successfully-discovered workspace.
@@ -1598,6 +1587,7 @@ mod tests {
 
     use super::{
         CanonicalizationError, PlatformCaseHandling, SymlinkPolicy, canonicalize_workspace_path,
+        rand_salt,
     };
 
     #[test]
@@ -1710,6 +1700,17 @@ mod tests {
             .map_err(|e| e.to_string())?;
 
         assert_ne!(result1.salted_hash, result2.salted_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn generated_installation_salts_use_fresh_os_randomness() -> TestResult {
+        let first = rand_salt().map_err(|error| error.to_string())?;
+        let second = rand_salt().map_err(|error| error.to_string())?;
+
+        assert_ne!(first, [0_u8; 32]);
+        assert_ne!(second, [0_u8; 32]);
+        assert_ne!(first, second);
         Ok(())
     }
 
