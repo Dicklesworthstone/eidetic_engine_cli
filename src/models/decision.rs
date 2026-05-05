@@ -337,7 +337,8 @@ impl DecisionRecordBuilder {
         }
     }
 
-    /// Build a `DecisionRecord`, requiring `outcome` to be set explicitly.
+    /// Build a `DecisionRecord`, requiring `outcome` to be set explicitly and
+    /// contain at least one non-whitespace character.
     ///
     /// `decided_at` is still auto-filled with the current UTC timestamp when
     /// not supplied; the timestamp is determinable from context (the build
@@ -345,7 +346,7 @@ impl DecisionRecordBuilder {
     /// audit field that callers must commit to.
     pub fn try_build(self) -> Result<DecisionRecord, DecisionBuildError> {
         let outcome = match self.outcome {
-            Some(value) if !value.is_empty() => value,
+            Some(value) if !value.trim().is_empty() => value,
             Some(_) => return Err(DecisionBuildError::EmptyOutcome),
             None => return Err(DecisionBuildError::MissingOutcome),
         };
@@ -364,7 +365,7 @@ impl DecisionRecordBuilder {
 }
 
 fn now_rfc3339() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+    Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
 
 /// Errors returned by [`DecisionRecordBuilder::try_build`].
@@ -372,7 +373,7 @@ fn now_rfc3339() -> String {
 pub enum DecisionBuildError {
     /// `outcome` was never set on the builder.
     MissingOutcome,
-    /// `outcome` was set but to an empty string.
+    /// `outcome` was set but to an empty or whitespace-only string.
     EmptyOutcome,
 }
 
@@ -545,10 +546,38 @@ mod tests {
                 record.decided_at
             ));
         }
-        // Sanity-check the format roughly matches RFC3339 (e.g. 2026-05-05T04:08:25Z).
-        if !record.decided_at.ends_with('Z') || record.decided_at.len() < 20 {
+        // Sanity-check the format roughly matches RFC3339 (e.g. 2026-05-05T04:08:25.123456789Z).
+        if !record.decided_at.ends_with('Z') || record.decided_at.len() < 30 {
             return Err(format!(
                 "auto-filled decided_at should be RFC3339 with Z suffix; got {:?}",
+                record.decided_at
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn build_autofills_decided_at_with_nanosecond_precision() -> TestResult {
+        let record = DecisionRecord::builder()
+            .plane(DecisionPlane::Curation)
+            .outcome("archive")
+            .build();
+
+        chrono::DateTime::parse_from_rfc3339(&record.decided_at)
+            .map_err(|error| error.to_string())?;
+        let Some(fraction) = record
+            .decided_at
+            .strip_suffix('Z')
+            .and_then(|value| value.rsplit_once('.').map(|(_, fraction)| fraction))
+        else {
+            return Err(format!(
+                "auto-filled decided_at should include nanoseconds; got {:?}",
+                record.decided_at
+            ));
+        };
+        if fraction.len() != 9 || !fraction.chars().all(|ch| ch.is_ascii_digit()) {
+            return Err(format!(
+                "auto-filled decided_at should have 9 fractional digits; got {:?}",
                 record.decided_at
             ));
         }
@@ -591,6 +620,19 @@ mod tests {
             result,
             Err(DecisionBuildError::EmptyOutcome),
             "try_build with empty outcome must fail",
+        )
+    }
+
+    #[test]
+    fn try_build_rejects_whitespace_only_outcome() -> TestResult {
+        let result = DecisionRecord::builder()
+            .plane(DecisionPlane::Curation)
+            .outcome("   ")
+            .try_build();
+        ensure(
+            result,
+            Err(DecisionBuildError::EmptyOutcome),
+            "try_build with whitespace-only outcome must fail",
         )
     }
 
