@@ -4791,6 +4791,50 @@ Then update src/policy/mod.rs on main."
     }
 
     #[test]
+    fn protected_rule_to_json_escapes_special_chars() -> TestResult {
+        // Regression test for EE-ymic: memory_id, protected_at, and protected_by
+        // were inlined into the output via format!() with no JSON-string escaping,
+        // so any quote/backslash/control char in those fields produced invalid JSON.
+        let mut status = ProtectedRuleStatus::new("mem_quote\"and\\back")
+            .with_protection("2026-04-30T12:00:00Z\nleak", "admin\u{1f680}rocket\"end");
+        status.helpful_count = 7;
+        status.harmful_count = 3;
+
+        let json = status.to_json();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        assert_eq!(parsed["schema"].as_str(), Some(PROTECTED_RULE_SCHEMA_V1));
+        assert_eq!(parsed["memoryId"].as_str(), Some("mem_quote\"and\\back"));
+        assert_eq!(parsed["protected"].as_bool(), Some(true));
+        assert_eq!(parsed["helpfulCount"].as_u64(), Some(7));
+        assert_eq!(parsed["harmfulCount"].as_u64(), Some(3));
+        assert_eq!(
+            parsed["protectedAt"].as_str(),
+            Some("2026-04-30T12:00:00Z\nleak")
+        );
+        assert_eq!(
+            parsed["protectedBy"].as_str(),
+            Some("admin\u{1f680}rocket\"end")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn protected_rule_to_json_omits_optional_fields_when_unset() -> TestResult {
+        let status = ProtectedRuleStatus::new("mem_basic");
+        let json = status.to_json();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        assert_eq!(parsed["memoryId"].as_str(), Some("mem_basic"));
+        assert_eq!(parsed["protected"].as_bool(), Some(false));
+        assert!(parsed.get("protectedAt").is_none());
+        assert!(parsed.get("protectedBy").is_none());
+        Ok(())
+    }
+
+    #[test]
     fn quarantine_reason_as_str() {
         assert_eq!(
             QuarantineReason::RateLimitExceeded.as_str(),
@@ -4871,7 +4915,7 @@ Then update src/policy/mod.rs on main."
     }
 
     #[test]
-    fn feedback_health_summary_to_json_round_trips_via_serde() {
+    fn feedback_health_summary_to_json_round_trips_via_serde() -> TestResult {
         // The output of to_json must be valid JSON regardless of the values
         // stored in the optional timestamp strings. This pins the contract
         // so a future revert to format!() interpolation breaks visibly.
@@ -4884,14 +4928,15 @@ Then update src/policy/mod.rs on main."
         };
         let json = summary.to_json();
         let parsed: serde_json::Value =
-            serde_json::from_str(&json).expect("empty summary must produce valid JSON");
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
         assert!(parsed.is_object());
         assert!(parsed.get("lastInversionAt").is_none());
         assert!(parsed.get("lastQuarantineAt").is_none());
+        Ok(())
     }
 
     #[test]
-    fn feedback_health_summary_to_json_escapes_special_characters() {
+    fn feedback_health_summary_to_json_escapes_special_characters() -> TestResult {
         // Although the production callers fill the timestamp fields via
         // chrono RFC3339, the fields are publicly mutable; if a future
         // refactor ever stuffs a path or freeform note into them, the
@@ -4912,7 +4957,7 @@ Then update src/policy/mod.rs on main."
         // assert "is valid JSON" without depending on a specific escape
         // representation (e.g.  vs literal control byte).
         let parsed: serde_json::Value =
-            serde_json::from_str(&json).expect("special characters must not break JSON validity");
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
         assert_eq!(
             parsed["lastInversionAt"],
             serde_json::Value::String(weird.to_owned())
@@ -4932,6 +4977,7 @@ Then update src/policy/mod.rs on main."
             !json.contains('\n'),
             "raw newline must be JSON-escaped, got: {json}"
         );
+        Ok(())
     }
 
     // ========================================================================
