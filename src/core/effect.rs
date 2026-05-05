@@ -268,6 +268,27 @@ impl CommandMutationContract {
     }
 
     #[must_use]
+    pub const fn supervised_jobs(
+        idempotency_key: &'static str,
+        recovery_behavior: &'static str,
+    ) -> Self {
+        Self {
+            side_effect_class: SideEffectClass::SupervisedJobs,
+            transaction_scope: Some("supervised steward job ledger"),
+            idempotency_key: Some(idempotency_key),
+            audit_surface: Some("audit_log"),
+            db_generation_effect: "advances only when the configured job applies durable changes",
+            index_generation_effect: "unchanged unless the steward job explicitly processes index work",
+            dry_run_behavior: Some(
+                "runs handler planning and reports candidate changes without committing job mutations",
+            ),
+            recovery_behavior,
+            no_overwrite_behavior: None,
+            degraded_code: None,
+        }
+    }
+
+    #[must_use]
     pub fn declares_no_source_mutation(&self) -> bool {
         matches!(
             self.db_generation_effect,
@@ -415,6 +436,22 @@ impl CommandRuntimeContract {
             cancellation_points: &["before_start", "before_child_spawn", "child_outcome"],
             partial_progress_policy: "supervised jobs must record child failure or cancellation before reporting completion",
             outcome_mapping: "degraded, cancelled, budget_exhausted, or supervised_child_failed",
+        }
+    }
+
+    #[must_use]
+    pub const fn supervised_jobs() -> Self {
+        Self {
+            runtime_class: RuntimeClass::Supervised,
+            default_budget_ms: Some(300_000),
+            cancellation_points: &[
+                "before_start",
+                "before_job_schedule",
+                "before_handler",
+                "handler_outcome",
+            ],
+            partial_progress_policy: "supervised jobs report skipped, failed, cancelled, or applied handler work in the runner result",
+            outcome_mapping: "success, skipped, failed, cancelled, budget_exhausted, or supervised_child_failed",
         }
     }
 
@@ -654,6 +691,33 @@ impl CommandEffect {
         }
     }
 
+    /// Create a supervised maintenance-job effect entry.
+    #[must_use]
+    pub fn supervised_job(
+        command_path: &'static str,
+        db_tables: Vec<&'static str>,
+        description: &'static str,
+    ) -> Self {
+        Self {
+            command_path,
+            default_effect: EffectClass::DurableMemoryWrite,
+            dry_run_effect: Some(EffectClass::ReadOnly),
+            idempotency: IdempotencyClass::DryRunAvailable,
+            write_surfaces: WriteSurfaces {
+                db_tables,
+                derived_paths: Vec::new(),
+                workspace_files: Vec::new(),
+            },
+            mutation_contract: CommandMutationContract::supervised_jobs(
+                "workspace id plus job type plus unapplied feedback set",
+                "job result reports failed/skipped/cancelled work; durable changes are limited to handler-owned audited updates",
+            ),
+            runtime_contract: CommandRuntimeContract::supervised_jobs(),
+            requires_audit: true,
+            description,
+        }
+    }
+
     /// Override the default runtime contract for a specific command path.
     #[must_use]
     pub const fn with_runtime_contract(mut self, runtime_contract: CommandRuntimeContract) -> Self {
@@ -692,6 +756,11 @@ impl EffectManifest {
 
         // Derived artifact write commands
         for entry in Self::derived_write_commands() {
+            entries.insert(entry.command_path, entry);
+        }
+
+        // Supervised steward jobs
+        for entry in Self::supervised_job_commands() {
             entries.insert(entry.command_path, entry);
         }
 
@@ -887,7 +956,19 @@ impl EffectManifest {
             CommandEffect::degraded_unavailable(
                 "daemon",
                 "daemon_jobs_unavailable",
-                "Daemon abstains until steward jobs run real handlers",
+                "Daemon background and non-decay foreground jobs abstain; foreground decay_sweep has a separate supervised-job entry",
+            )
+            .with_runtime_contract(CommandRuntimeContract::supervised_unavailable()),
+            CommandEffect::degraded_unavailable(
+                "daemon background",
+                "daemon_jobs_unavailable",
+                "Background daemon scheduling abstains until write-owner supervision exists",
+            )
+            .with_runtime_contract(CommandRuntimeContract::supervised_unavailable()),
+            CommandEffect::degraded_unavailable(
+                "daemon foreground non-decay",
+                "daemon_jobs_unavailable",
+                "Non-decay foreground daemon jobs abstain until real steward handlers are wired",
             )
             .with_runtime_contract(CommandRuntimeContract::supervised_unavailable()),
             CommandEffect::degraded_unavailable(
@@ -1136,6 +1217,14 @@ impl EffectManifest {
                 "Tripwire checks abstain until explicit event payload evaluation exists",
             ),
         ]
+    }
+
+    fn supervised_job_commands() -> Vec<CommandEffect> {
+        vec![CommandEffect::supervised_job(
+            "daemon foreground decay_sweep",
+            vec!["memories", "feedback_events", "audit_log"],
+            "Run the real score-decay steward handler in a bounded foreground daemon tick",
+        )]
     }
 
     fn append_only_write_commands() -> Vec<CommandEffect> {
@@ -1850,6 +1939,23 @@ mod tests {
             backup.map(|e| e.default_effect),
             Some(EffectClass::WorkspaceFileWrite),
             "backup create writes workspace files",
+        )?;
+
+        let decay_sweep = manifest.get("daemon foreground decay_sweep");
+        ensure(
+            decay_sweep.is_some(),
+            true,
+            "daemon foreground decay_sweep exists",
+        )?;
+        ensure(
+            decay_sweep.map(|e| e.mutation_contract.side_effect_class),
+            Some(SideEffectClass::SupervisedJobs),
+            "daemon decay sweep uses supervised job contract",
+        )?;
+        ensure(
+            decay_sweep.map(|e| e.runtime_contract.runtime_class),
+            Some(RuntimeClass::Supervised),
+            "daemon decay sweep runtime",
         )
     }
 

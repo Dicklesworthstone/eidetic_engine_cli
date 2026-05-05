@@ -3647,7 +3647,19 @@ mod tests {
         assert_eq!(result.outcome, RunOutcome::Skipped);
         assert!(!result.dry_run);
         assert_eq!(result.items_processed, Some(0));
-        Ok(())
+        let details = result
+            .details
+            .ok_or_else(|| "unwired job details missing".to_owned())?;
+        ensure(
+            details["schema"].as_str(),
+            Some("ee.steward.unwired_job.v1"),
+            "unwired details schema",
+        )?;
+        ensure(
+            details["jobType"].as_str(),
+            Some("health_check"),
+            "unwired job type",
+        )
     }
 
     #[test]
@@ -3663,7 +3675,14 @@ mod tests {
         assert_eq!(result.outcome, RunOutcome::Skipped);
         assert!(result.dry_run);
         assert_eq!(result.items_processed, Some(0));
-        Ok(())
+        let details = result
+            .details
+            .ok_or_else(|| "dry-run unwired job details missing".to_owned())?;
+        ensure(
+            details["schema"].as_str(),
+            Some("ee.steward.unwired_job.v1"),
+            "dry-run unwired details schema",
+        )
     }
 
     #[test]

@@ -242,6 +242,21 @@ impl CapabilitiesReport {
             CommandEntry::new("init", true, "Workspace initialization"),
             CommandEntry::new("index", true, "Search index management"),
             CommandEntry::new("curate", true, "Rule curation"),
+            CommandEntry::new(
+                "daemon foreground decay_sweep",
+                true,
+                "Bounded foreground score-decay steward job",
+            ),
+            CommandEntry::new(
+                "daemon background",
+                false,
+                "Background daemon scheduling is unavailable",
+            ),
+            CommandEntry::new(
+                "daemon foreground non-decay",
+                false,
+                "Non-decay steward jobs report unavailable until real handlers are wired",
+            ),
         ];
 
         let output_formats = vec![
@@ -365,6 +380,37 @@ mod tests {
             .find(|c| c.name == "capabilities")
             .expect("capabilities command must exist");
         ensure(cmd.available, true, "capabilities command is available")
+    }
+
+    #[test]
+    #[expect(clippy::expect_used)]
+    fn capabilities_report_marks_daemon_maintenance_posture() -> TestResult {
+        let report = CapabilitiesReport::gather();
+
+        let decay = report
+            .commands
+            .iter()
+            .find(|c| c.name == "daemon foreground decay_sweep")
+            .expect("daemon foreground decay_sweep command must exist");
+        ensure(decay.available, true, "decay sweep daemon job is available")?;
+
+        let background = report
+            .commands
+            .iter()
+            .find(|c| c.name == "daemon background")
+            .expect("daemon background command must exist");
+        ensure(background.available, false, "background daemon unavailable")?;
+
+        let non_decay = report
+            .commands
+            .iter()
+            .find(|c| c.name == "daemon foreground non-decay")
+            .expect("daemon foreground non-decay command must exist");
+        ensure(
+            non_decay.available,
+            false,
+            "non-decay daemon jobs unavailable",
+        )
     }
 
     #[test]
