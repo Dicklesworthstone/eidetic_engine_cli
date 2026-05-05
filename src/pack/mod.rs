@@ -2663,7 +2663,11 @@ mod tests {
         ensure_equal(&tokens, &2, "ZWJ family sequence character-heuristic")?;
 
         let word_tokens = estimate_tokens(family, TokenEstimationStrategy::WordHeuristic);
-        ensure_equal(&word_tokens, &2, "ZWJ family is a single word: ceil(1*1.3) = 2")
+        ensure_equal(
+            &word_tokens,
+            &2,
+            "ZWJ family is a single word: ceil(1*1.3) = 2",
+        )
     }
 
     #[test]
@@ -2679,7 +2683,10 @@ mod tests {
         // Arabic with explicit RTL marks should still be counted by codepoint
         let arabic_with_marks = "\u{202E}مرحبا\u{202C}";
         ensure(
-            estimate_tokens(arabic_with_marks, TokenEstimationStrategy::CharacterHeuristic) >= 1,
+            estimate_tokens(
+                arabic_with_marks,
+                TokenEstimationStrategy::CharacterHeuristic,
+            ) >= 1,
             "Arabic with directional marks should estimate >= 1 token",
         )
     }
@@ -2734,7 +2741,11 @@ mod tests {
         )?;
         // Word heuristic: BOM glues to "hello" (no whitespace) so still 1 word
         let with_word = estimate_tokens(with_bom, TokenEstimationStrategy::WordHeuristic);
-        ensure_equal(&with_word, &2, "BOM + word still counts as 1 word -> 2 tokens")
+        ensure_equal(
+            &with_word,
+            &2,
+            "BOM + word still counts as 1 word -> 2 tokens",
+        )
     }
 
     #[test]
@@ -2763,41 +2774,13 @@ mod tests {
         // exceed the budget under any of the Unicode flavours.
         let budget = TokenBudget::new(20).map_err(|error| format!("budget: {error:?}"))?;
 
-        let emoji = candidate_with_content(
-            1,
-            0.9,
-            0.8,
-            8,
-            "🦀🔥💻 build the release",
-        )?;
-        let cjk = candidate_with_content(
-            2,
-            0.8,
-            0.8,
-            8,
-            "中文字符 必须 也 计入 预算",
-        )?;
-        let zwj = candidate_with_content(
-            3,
-            0.7,
-            0.7,
-            6,
-            "family: 👨\u{200D}👩\u{200D}👧\u{200D}👦",
-        )?;
-        let rtl = candidate_with_content(
-            4,
-            0.6,
-            0.6,
-            6,
-            "shalom שלום and back to ascii",
-        )?;
-        let combining = candidate_with_content(
-            5,
-            0.5,
-            0.5,
-            6,
-            "cafe\u{0301} resume\u{0301} naïve",
-        )?;
+        let emoji = candidate_with_content(1, 0.9, 0.8, 8, "🦀🔥💻 build the release")?;
+        let cjk = candidate_with_content(2, 0.8, 0.8, 8, "中文字符 必须 也 计入 预算")?;
+        let zwj =
+            candidate_with_content(3, 0.7, 0.7, 6, "family: 👨\u{200D}👩\u{200D}👧\u{200D}👦")?;
+        let rtl = candidate_with_content(4, 0.6, 0.6, 6, "shalom שלום and back to ascii")?;
+        let combining =
+            candidate_with_content(5, 0.5, 0.5, 6, "cafe\u{0301} resume\u{0301} naïve")?;
 
         let draft = assemble_draft(
             "ship a Unicode-safe pack",
