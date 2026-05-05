@@ -10,7 +10,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use asupersync::lab::{LabConfig, LabRuntime};
@@ -135,7 +134,6 @@ struct ImportCassFixture {
     workspace_path: PathBuf,
     cass_client: CassClient,
     scale: ImportCassScale,
-    run_counter: AtomicUsize,
 }
 
 impl ImportCassFixture {
@@ -155,16 +153,15 @@ impl ImportCassFixture {
             workspace_path,
             cass_client,
             scale,
-            run_counter: AtomicUsize::new(0),
         })
     }
 
     fn measure_once(&self) -> Result<f64, String> {
-        let run_index = self.run_counter.fetch_add(1, Ordering::Relaxed);
-        let db_path = self
-            .workspace_path
-            .join(".ee")
-            .join(format!("ee_import_cass_bench_{run_index}.db"));
+        let db_dir = tempfile::Builder::new()
+            .prefix("ee-import-cass-db-")
+            .tempdir_in(self.workspace_path.join(".ee"))
+            .map_err(|error| format!("failed creating bench database tempdir: {error}"))?;
+        let db_path = db_dir.path().join("ee.db");
 
         let options = CassImportOptions {
             workspace_path: self.workspace_path.clone(),
@@ -181,7 +178,6 @@ impl ImportCassFixture {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         self.validate_report(&report)?;
-        cleanup_db_artifacts(&db_path);
 
         Ok(elapsed_ms)
     }
@@ -304,14 +300,6 @@ fn set_executable(path: &Path) -> Result<(), String> {
 #[cfg(not(unix))]
 fn set_executable(_path: &Path) -> Result<(), String> {
     Ok(())
-}
-
-fn cleanup_db_artifacts(db_path: &Path) {
-    let wal = PathBuf::from(format!("{}-wal", db_path.display()));
-    let shm = PathBuf::from(format!("{}-shm", db_path.display()));
-    let _ = fs::remove_file(db_path);
-    let _ = fs::remove_file(wal);
-    let _ = fs::remove_file(shm);
 }
 
 fn bind_lab_runtime() -> LabRuntime {

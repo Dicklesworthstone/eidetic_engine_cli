@@ -7,10 +7,8 @@
 //! - Status schema
 //! - Lock-contention behavior
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value as JsonValue;
 
@@ -31,15 +29,11 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
         .map_err(|e| format!("failed to run ee {}: {e}", args.join(" ")))
 }
 
-fn unique_workspace(prefix: &str) -> Result<PathBuf, String> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| format!("clock error: {e}"))?
-        .as_nanos();
-    Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("ee-gate-artifacts")
-        .join(format!("{prefix}-{}-{now}", std::process::id())))
+fn temp_workspace(prefix: &str) -> Result<tempfile::TempDir, String> {
+    tempfile::Builder::new()
+        .prefix(&format!("ee-gate-{prefix}-"))
+        .tempdir()
+        .map_err(|error| format!("failed to create workspace tempdir: {error}"))
 }
 
 fn workspace_arg(path: &Path) -> Result<String, String> {
@@ -65,8 +59,8 @@ fn parse_json_output(output: &Output, context: &str) -> Result<JsonValue, String
 
 #[test]
 fn m1_init_creates_workspace_database() -> TestResult {
-    let workspace = unique_workspace("m1-init")?;
-    fs::create_dir_all(&workspace).map_err(|e| format!("failed to create workspace: {e}"))?;
+    let tempdir = temp_workspace("m1-init")?;
+    let workspace = tempdir.path().to_path_buf();
 
     let output = run_ee(&["--workspace", &workspace_arg(&workspace)?, "--json", "init"])?;
     let json = parse_json_output(&output, "ee init")?;
@@ -82,14 +76,13 @@ fn m1_init_creates_workspace_database() -> TestResult {
         format!("database must exist at {}", db_path.display()),
     )?;
 
-    fs::remove_dir_all(&workspace).ok();
     Ok(())
 }
 
 #[test]
 fn m1_status_reports_workspace_state() -> TestResult {
-    let workspace = unique_workspace("m1-status")?;
-    fs::create_dir_all(&workspace).map_err(|e| format!("failed to create workspace: {e}"))?;
+    let tempdir = temp_workspace("m1-status")?;
+    let workspace = tempdir.path().to_path_buf();
 
     run_ee(&["--workspace", &workspace_arg(&workspace)?, "--json", "init"])?;
 
@@ -116,14 +109,13 @@ fn m1_status_reports_workspace_state() -> TestResult {
         "status data must include capabilities",
     )?;
 
-    fs::remove_dir_all(&workspace).ok();
     Ok(())
 }
 
 #[test]
 fn m1_health_returns_overall_verdict() -> TestResult {
-    let workspace = unique_workspace("m1-health")?;
-    fs::create_dir_all(&workspace).map_err(|e| format!("failed to create workspace: {e}"))?;
+    let tempdir = temp_workspace("m1-health")?;
+    let workspace = tempdir.path().to_path_buf();
 
     run_ee(&["--workspace", &workspace_arg(&workspace)?, "--json", "init"])?;
 
@@ -146,7 +138,6 @@ fn m1_health_returns_overall_verdict() -> TestResult {
         "health data must include verdict",
     )?;
 
-    fs::remove_dir_all(&workspace).ok();
     Ok(())
 }
 

@@ -85,7 +85,8 @@ fn write_repro_pack(pack_dir: &PathBuf) -> TestResult {
 
 #[test]
 fn gate14_replay_pack_verifies_required_files() -> TestResult {
-    let pack_dir = env::temp_dir().join(format!("ee_gate14_repro_pack_{}", std::process::id()));
+    let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let pack_dir = temp_dir.path().to_path_buf();
     write_repro_pack(&pack_dir)?;
 
     let report = replay_pack(&ReplayOptions {
@@ -110,10 +111,8 @@ fn gate14_replay_pack_verifies_required_files() -> TestResult {
 
 #[test]
 fn gate14_replay_pack_rejects_required_file_hash_mismatch() -> TestResult {
-    let pack_dir = env::temp_dir().join(format!(
-        "ee_gate14_repro_pack_hash_mismatch_{}",
-        std::process::id()
-    ));
+    let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let pack_dir = temp_dir.path().to_path_buf();
     write_repro_pack(&pack_dir)?;
     fs::write(pack_dir.join("env.json"), "tampered env payload\n")
         .map_err(|error| error.to_string())?;

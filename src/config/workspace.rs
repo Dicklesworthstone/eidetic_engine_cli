@@ -1095,9 +1095,6 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    use uuid::Uuid;
 
     use super::{
         WORKSPACE_ENV_VAR, WORKSPACE_MARKER, WorkspaceError, WorkspaceLocation,
@@ -1108,34 +1105,26 @@ mod tests {
 
     type TestResult = Result<(), String>;
 
-    /// Counter so two tests within the same process never share a
-    /// scratch directory even if `Uuid::now_v7` collides at the
-    /// millisecond boundary.
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    /// Tiny scratch-directory helper to keep tests hermetic without
-    /// adding a `tempfile` direct dependency.
+    /// Tiny scratch-directory helper to keep tests hermetic.
     struct ScratchDir {
-        root: PathBuf,
+        root: tempfile::TempDir,
     }
 
     impl ScratchDir {
         fn new(label: &str) -> Result<Self, String> {
-            let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-            let suffix = format!("ee-ws-{label}-{}-{id}", Uuid::now_v7().simple());
-            let root = std::env::temp_dir().join(suffix);
-            if let Err(error) = fs::create_dir_all(&root) {
-                return Err(format!("failed to create scratch dir at {root:?}: {error}"));
-            }
+            let root = tempfile::Builder::new()
+                .prefix(&format!("ee-ws-{label}-"))
+                .tempdir()
+                .map_err(|error| format!("failed to create scratch dir: {error}"))?;
             Ok(Self { root })
         }
 
         fn path(&self) -> &Path {
-            &self.root
+            self.root.path()
         }
 
         fn make_dir(&self, relative: &str) -> Result<PathBuf, String> {
-            let path = self.root.join(relative);
+            let path = self.root.path().join(relative);
             if let Err(error) = fs::create_dir_all(&path) {
                 return Err(format!("failed to create {path:?}: {error}"));
             }
@@ -1143,7 +1132,7 @@ mod tests {
         }
 
         fn make_file(&self, relative: &str, contents: &str) -> Result<PathBuf, String> {
-            let path = self.root.join(relative);
+            let path = self.root.path().join(relative);
             if let Some(parent) = path.parent() {
                 if let Err(error) = fs::create_dir_all(parent) {
                     return Err(format!("failed to create parent of {path:?}: {error}"));
@@ -1157,13 +1146,6 @@ mod tests {
                 return Err(format!("failed to write {path:?}: {error}"));
             }
             Ok(path)
-        }
-    }
-
-    impl Drop for ScratchDir {
-        fn drop(&mut self) {
-            // Best-effort cleanup; failures here are not test failures.
-            let _ = fs::remove_dir_all(&self.root);
         }
     }
 
