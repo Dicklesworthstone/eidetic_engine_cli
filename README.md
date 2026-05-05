@@ -286,9 +286,10 @@ ee remember --workspace . --level procedural --kind rule \
   --tags rust,testing \
   "Integration tests must hit a real Postgres instance, never a mock. See incident 2025-Q3."
 
-# 5. After a session, distill it
-ee review session <session-id> --propose
+# 5. After a session, review curation candidates
+# (ee review session --propose is not yet implemented; use ee curate)
 ee curate candidates --workspace .
+ee curate validate <candidate-id>
 ee curate apply <candidate-id>
 
 # 6. Search at any time
@@ -329,7 +330,7 @@ That's the core loop.
 
 | Command | Purpose |
 |---|---|
-| `ee review session <id> --propose` | Distill a session into proposed memories/rules |
+| `ee review session <id> --propose` | *(not yet implemented)* Distill a session into proposed memories/rules |
 | `ee curate candidates [--workspace .]` | List pending curation candidates |
 | `ee curate validate <id>` | Run validation (specificity, duplication, scope, evidence) |
 | `ee curate apply <id>` / `accept <id>` / `reject <id>` / `snooze <id>` / `merge <a> <b>` | Lifecycle transitions |
@@ -567,8 +568,8 @@ ee import cass --workspace . --limit 50 --dry-run --json
 # Real import (idempotent, resumable, ledger-tracked)
 ee import cass --workspace . --limit 50
 
-# Distill a single session into proposed memories
-ee review session 7f4e --propose
+# Review curation candidates (ee review session --propose not yet implemented)
+ee curate candidates --workspace .
 ```
 
 Required `cass` commands consumed (all with stable contracts):
