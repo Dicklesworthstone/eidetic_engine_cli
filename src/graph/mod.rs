@@ -5,6 +5,7 @@ use crate::db::{
     StoredGraphSnapshot, StoredMemoryLink,
 };
 use crate::models::{CapabilityStatus, GRAPH_MODULE_SCHEMA_V1, MemoryId};
+use sqlmodel_core::IsolationLevel;
 
 #[cfg(feature = "graph")]
 pub use fnx_algorithms::{
@@ -1221,13 +1222,75 @@ pub fn refresh_graph_snapshot(
 
     let metrics_json = graph_snapshot_metrics_json(&report.centrality, &links)?;
     let content_hash = graph_snapshot_content_hash(&metrics_json);
-    let snapshot_version = next_graph_snapshot_version(conn, workspace_id)?;
     let source_generation = u32::try_from(links.len()).map_err(|_| {
         format!(
             "Graph source link count {} exceeds supported snapshot generation range",
             links.len()
         )
     })?;
+    let persistence = GraphSnapshotPersistenceInput {
+        node_count: u32::try_from(report.centrality.node_count).map_err(|_| {
+            format!(
+                "Graph node count {} exceeds supported snapshot range",
+                report.centrality.node_count
+            )
+        })?,
+        edge_count: u32::try_from(report.centrality.edge_count).map_err(|_| {
+            format!(
+                "Graph edge count {} exceeds supported snapshot range",
+                report.centrality.edge_count
+            )
+        })?,
+        metrics_json,
+        content_hash,
+        source_generation,
+    };
+
+    report.snapshot = Some(persist_graph_snapshot(conn, workspace_id, persistence)?);
+    Ok(report)
+}
+
+struct GraphSnapshotPersistenceInput {
+    node_count: u32,
+    edge_count: u32,
+    metrics_json: String,
+    content_hash: String,
+    source_generation: u32,
+}
+
+fn persist_graph_snapshot(
+    conn: &DbConnection,
+    workspace_id: &str,
+    input: GraphSnapshotPersistenceInput,
+) -> Result<GraphRefreshSnapshot, String> {
+    conn.begin_transaction(IsolationLevel::RepeatableRead)
+        .map_err(|error| format!("Failed to begin graph snapshot transaction: {error}"))?;
+
+    let result = persist_graph_snapshot_in_transaction(conn, workspace_id, input);
+
+    match result {
+        Ok(snapshot) => match conn.commit() {
+            Ok(()) => Ok(snapshot),
+            Err(error) => {
+                let _ = conn.rollback();
+                Err(format!(
+                    "Failed to commit graph snapshot transaction: {error}"
+                ))
+            }
+        },
+        Err(error) => {
+            let _ = conn.rollback();
+            Err(error)
+        }
+    }
+}
+
+fn persist_graph_snapshot_in_transaction(
+    conn: &DbConnection,
+    workspace_id: &str,
+    input: GraphSnapshotPersistenceInput,
+) -> Result<GraphRefreshSnapshot, String> {
+    let snapshot_version = next_graph_snapshot_version(conn, workspace_id)?;
     let snapshot_id = generate_graph_snapshot_id();
 
     conn.insert_graph_snapshot(
@@ -1237,35 +1300,24 @@ pub fn refresh_graph_snapshot(
             snapshot_version,
             schema_version: GRAPH_EXPORT_SCHEMA_V1.to_owned(),
             graph_type: GraphSnapshotType::MemoryLinks,
-            node_count: u32::try_from(report.centrality.node_count).map_err(|_| {
-                format!(
-                    "Graph node count {} exceeds supported snapshot range",
-                    report.centrality.node_count
-                )
-            })?,
-            edge_count: u32::try_from(report.centrality.edge_count).map_err(|_| {
-                format!(
-                    "Graph edge count {} exceeds supported snapshot range",
-                    report.centrality.edge_count
-                )
-            })?,
-            metrics_json,
-            content_hash: content_hash.clone(),
-            source_generation,
+            node_count: input.node_count,
+            edge_count: input.edge_count,
+            metrics_json: input.metrics_json,
+            content_hash: input.content_hash.clone(),
+            source_generation: input.source_generation,
             expires_at: None,
         },
     )
     .map_err(|error| format!("Failed to persist graph snapshot: {error}"))?;
 
-    report.snapshot = Some(GraphRefreshSnapshot {
+    Ok(GraphRefreshSnapshot {
         id: snapshot_id,
         graph_type: GraphSnapshotType::MemoryLinks,
         snapshot_version,
-        source_generation,
-        content_hash,
+        source_generation: input.source_generation,
+        content_hash: input.content_hash,
         status: GraphSnapshotStatus::Valid,
-    });
-    Ok(report)
+    })
 }
 
 /// Refresh centrality metrics for all memories in the graph.
@@ -4430,6 +4482,59 @@ mod tests {
             },
         )?;
         assert_eq!(export.status, super::GraphExportStatus::Exported);
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn persist_graph_snapshot_allocates_next_version_inside_write_transaction() -> TestResult {
+        let connection = open_snapshot_db()?;
+        insert_graph_snapshot(
+            &connection,
+            "gsnap_0000000000000000000000121",
+            r#"{"nodes":[],"edges":[]}"#,
+        )?;
+
+        let snapshot = super::persist_graph_snapshot(
+            &connection,
+            WORKSPACE_ID,
+            super::GraphSnapshotPersistenceInput {
+                node_count: 2,
+                edge_count: 1,
+                metrics_json: serde_json::json!({
+                    "nodes": [{"id": "mem_a"}, {"id": "mem_b"}],
+                    "edges": [{"source": "mem_a", "target": "mem_b"}],
+                })
+                .to_string(),
+                content_hash: "blake3:transactional-graph-snapshot".to_owned(),
+                source_generation: 1,
+            },
+        )?;
+
+        assert_eq!(snapshot.snapshot_version, 2);
+        assert_eq!(snapshot.graph_type, GraphSnapshotType::MemoryLinks);
+        assert_eq!(snapshot.source_generation, 1);
+        assert_eq!(snapshot.content_hash, "blake3:transactional-graph-snapshot");
+
+        let latest = connection
+            .get_latest_graph_snapshot(WORKSPACE_ID, GraphSnapshotType::MemoryLinks)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "latest snapshot should exist".to_owned())?;
+        assert_eq!(latest.id, snapshot.id);
+        assert_eq!(latest.snapshot_version, 2);
+        assert_eq!(latest.node_count, 2);
+        assert_eq!(latest.edge_count, 1);
+
+        let snapshots = connection
+            .list_graph_snapshots(WORKSPACE_ID, Some(GraphSnapshotType::MemoryLinks), 10)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.snapshot_version)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
 
         connection.close().map_err(|error| error.to_string())
     }
