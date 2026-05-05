@@ -4143,6 +4143,106 @@ demos:
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn demo_verify_rejects_symlink_artifact_evidence() -> TestResult {
+    let workspace_root = unique_artifact_dir("demo-symlink-artifact-workspace")?;
+    let workspace = workspace_root.join("workspace");
+    let artifacts = workspace.join("artifacts");
+    fs::create_dir_all(&artifacts).map_err(|error| {
+        format!(
+            "failed to create artifacts dir {}: {error}",
+            artifacts.display()
+        )
+    })?;
+
+    let outside_artifact = workspace_root.join("outside.json");
+    let artifact_payload = b"{\"schema\":\"ee.response.v1\",\"success\":true}\n";
+    let artifact_hash = blake3::hash(artifact_payload).to_hex().to_string();
+    fs::write(&outside_artifact, artifact_payload)
+        .map_err(|error| format!("failed to write outside artifact: {error}"))?;
+    std::os::unix::fs::symlink(&outside_artifact, artifacts.join("stdout.json"))
+        .map_err(|error| format!("failed to create artifact symlink: {error}"))?;
+
+    fs::write(
+        workspace.join("demo.yaml"),
+        format!(
+            "\
+schema: ee.demo_file.v1
+version: 1
+demos:
+  - id: demo_00000000000000000000000001
+    title: symlink artifact evidence
+    description: symlinked artifacts must not verify outside evidence bytes
+    commands:
+      - command: \"ee status --json\"
+        expected_exit_code: 0
+        artifact_outputs:
+          - path: stdout.json
+            blake3_hash: {artifact_hash}
+            size_bytes: {}
+",
+            artifact_payload.len()
+        ),
+    )
+    .map_err(|error| format!("failed to write demo.yaml: {error}"))?;
+
+    let verify_result = run_ee_logged(
+        "demo-verify-symlink-artifact",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace.display().to_string(),
+            "--json".to_owned(),
+            "demo".to_owned(),
+            "verify".to_owned(),
+            "demo_00000000000000000000000001".to_owned(),
+        ],
+    )?;
+
+    ensure_equal(
+        &verify_result.exit_code,
+        &UNSATISFIED_DEGRADED_MODE_EXIT,
+        "demo verify symlink artifact exit code",
+    )?;
+    ensure_json_pointer(
+        &verify_result.parsed,
+        "/success",
+        json!(false),
+        "demo verify symlink artifact success",
+    )?;
+    ensure_json_pointer(
+        &verify_result.parsed,
+        "/data/failedArtifacts",
+        json!(1),
+        "demo verify symlink artifact failed artifact count",
+    )?;
+    ensure_json_pointer(
+        &verify_result.parsed,
+        "/data/failedDemos",
+        json!(1),
+        "demo verify symlink artifact failed demo count",
+    )?;
+    ensure_json_pointer(
+        &verify_result.parsed,
+        "/data/demos/0/artifactResults/0/exists",
+        json!(true),
+        "demo verify symlink artifact exists flag",
+    )?;
+    ensure_json_pointer(
+        &verify_result.parsed,
+        "/data/demos/0/artifactResults/0/verified",
+        json!(false),
+        "demo verify symlink artifact verified flag",
+    )?;
+    ensure_json_pointer(
+        &verify_result.parsed,
+        "/data/demos/0/artifactResults/0/error",
+        json!("artifact path traverses a symbolic link"),
+        "demo verify symlink artifact error",
+    )
+}
+
 #[test]
 fn successful_validity_claims_need_concrete_evidence_sources() -> TestResult {
     let outputs = [

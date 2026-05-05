@@ -14498,6 +14498,38 @@ fn verify_demo_artifact(
         };
     };
 
+    match demo_artifact_symlink_component(artifacts_dir, &artifact.path) {
+        Ok(Some(_)) => {
+            return DemoArtifactCheck {
+                json: serde_json::json!({
+                    "commandIndex": command_index,
+                    "path": artifact.path,
+                    "optional": artifact.optional,
+                    "exists": true,
+                    "verified": false,
+                    "error": "artifact path traverses a symbolic link",
+                }),
+                verified: false,
+                optional_missing: false,
+            };
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return DemoArtifactCheck {
+                json: serde_json::json!({
+                    "commandIndex": command_index,
+                    "path": artifact.path,
+                    "optional": artifact.optional,
+                    "exists": false,
+                    "verified": false,
+                    "error": format!("failed to inspect artifact path: {error}"),
+                }),
+                verified: false,
+                optional_missing: false,
+            };
+        }
+    }
+
     let metadata = match fs::metadata(&target_path) {
         Ok(metadata) => metadata,
         Err(error) if artifact.optional && error.kind() == io::ErrorKind::NotFound => {
@@ -14608,6 +14640,30 @@ fn demo_artifact_target_path(artifacts_dir: &Path, relative: &str) -> Option<Pat
         }
     }
     Some(target)
+}
+
+fn demo_artifact_symlink_component(root: &Path, relative: &str) -> io::Result<Option<PathBuf>> {
+    let mut current = root.to_path_buf();
+    for component in Path::new(relative).components() {
+        match component {
+            Component::Normal(segment) => {
+                current.push(segment);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        return Ok(Some(current));
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                    Err(error) => return Err(error),
+                }
+            }
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir => {
+                return Ok(Some(current));
+            }
+        }
+    }
+    Ok(None)
 }
 
 // ============================================================================
