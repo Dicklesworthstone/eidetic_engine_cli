@@ -19,6 +19,7 @@ use crate::models::{
 
 const TRUSTED_TAR_PATHS: &[&str] = &["/usr/bin/tar", "/bin/tar"];
 const TRUSTED_INSTALL_TOOL_PATH: &str = "/usr/bin:/bin";
+const EXTRACT_TEMP_PREFIX: &str = "ee-extract-";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct InstallCheckOptions {
@@ -291,7 +292,7 @@ pub fn plan_install(options: &InstallPlanOptions) -> InstallPlanReport {
                 }
             }
             Err(finding) => {
-                manifest_status = if finding.code == InstallFindingCode::ManifestMissing {
+                manifest_status = if matches!(finding.code, InstallFindingCode::ManifestMissing) {
                     "missing".to_owned()
                 } else {
                     "invalid".to_owned()
@@ -898,19 +899,16 @@ fn extract_binary_from_archive(
     archive_format: &str,
     install_path: &Path,
 ) -> Result<(), String> {
-    let temp_dir = env::temp_dir().join(format!("ee-extract-{}", std::process::id()));
-    fs::create_dir_all(&temp_dir).map_err(|e| format!("failed to create temp directory: {e}"))?;
+    let temp_dir = create_extract_temp_dir()?;
+    let temp_path = temp_dir.path();
 
     let result = match archive_format {
-        "tar.xz" | "tar+xz" => extract_tar_xz(archive_path, &temp_dir),
-        "tar.gz" | "tar+gzip" => extract_tar_gz(archive_path, &temp_dir),
+        "tar.xz" | "tar+xz" => extract_tar_xz(archive_path, temp_path),
+        "tar.gz" | "tar+gzip" => extract_tar_gz(archive_path, temp_path),
         _ => Err(format!("unsupported archive format: {archive_format}")),
     };
 
-    if let Err(error) = result {
-        let _ = fs::remove_dir_all(&temp_dir);
-        return Err(error);
-    }
+    result?;
 
     // Find the extracted binary (should be named 'ee' or 'ee.exe')
     let binary_name = install_path
@@ -918,14 +916,20 @@ fn extract_binary_from_archive(
         .and_then(|name| name.to_str())
         .unwrap_or("ee");
 
-    let extracted_binary = find_binary_in_dir(&temp_dir, binary_name)?;
+    let extracted_binary = find_binary_in_dir(temp_path, binary_name)?;
 
     // Move binary to install path
     fs::copy(&extracted_binary, install_path)
         .map_err(|e| format!("failed to copy binary to '{}': {e}", install_path.display()))?;
 
-    let _ = fs::remove_dir_all(&temp_dir);
     Ok(())
+}
+
+fn create_extract_temp_dir() -> Result<tempfile::TempDir, String> {
+    tempfile::Builder::new()
+        .prefix(EXTRACT_TEMP_PREFIX)
+        .tempdir()
+        .map_err(|error| format!("failed to create secure extraction temp directory: {error}"))
 }
 
 fn extract_tar_xz(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
@@ -1208,7 +1212,7 @@ mod tests {
             report
                 .findings
                 .iter()
-                .any(|finding| finding.code == InstallFindingCode::BinaryNotOnPath),
+                .any(|finding| matches!(finding.code, InstallFindingCode::BinaryNotOnPath)),
             "binary_not_on_path finding",
         )
     }
@@ -1228,7 +1232,7 @@ mod tests {
             report
                 .findings
                 .iter()
-                .any(|finding| finding.code == InstallFindingCode::OfflineNoManifest),
+                .any(|finding| matches!(finding.code, InstallFindingCode::OfflineNoManifest)),
             "offline_no_manifest finding",
         )
     }
@@ -1245,7 +1249,7 @@ mod tests {
         ensure(
             findings
                 .iter()
-                .any(|finding| finding.code == InstallFindingCode::NoArtifacts),
+                .any(|finding| matches!(finding.code, InstallFindingCode::NoArtifacts)),
             "no_artifacts finding",
         )
     }
@@ -1268,7 +1272,7 @@ mod tests {
         ensure(
             findings
                 .iter()
-                .any(|finding| finding.code == InstallFindingCode::DuplicateTarget),
+                .any(|finding| matches!(finding.code, InstallFindingCode::DuplicateTarget)),
             "duplicate_target finding",
         )
     }
@@ -1306,6 +1310,24 @@ mod tests {
     }
 
     #[test]
+    fn extract_temp_dir_is_unique_and_prefixed() -> TestResult {
+        let left = create_extract_temp_dir()?;
+        let right = create_extract_temp_dir()?;
+
+        ensure(
+            left.path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(EXTRACT_TEMP_PREFIX)),
+            "extract temp dir should use documented prefix",
+        )?;
+        ensure(
+            left.path() != right.path(),
+            "extract temp dirs should be unique",
+        )
+    }
+
+    #[test]
     fn install_plan_rejects_unforced_downgrade_pin() -> TestResult {
         let options = InstallPlanOptions {
             target_triple: Some("x86_64-unknown-linux-gnu".to_owned()),
@@ -1320,7 +1342,7 @@ mod tests {
             report
                 .findings
                 .iter()
-                .any(|finding| finding.code == InstallFindingCode::WouldDowngrade),
+                .any(|finding| matches!(finding.code, InstallFindingCode::WouldDowngrade)),
             "would_downgrade finding",
         )?;
         ensure_equal(report.status, InstallPlanStatus::Blocked, "status")
@@ -1348,7 +1370,7 @@ mod tests {
             report
                 .findings
                 .iter()
-                .any(|finding| finding.code == InstallFindingCode::InstallDirNotWritable),
+                .any(|finding| matches!(finding.code, InstallFindingCode::InstallDirNotWritable)),
             "install_dir_not_writable finding",
         )
     }
