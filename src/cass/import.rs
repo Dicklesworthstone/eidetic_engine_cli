@@ -9,7 +9,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use blake3;
-use chrono::Utc;
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
@@ -40,6 +40,8 @@ pub struct CassImportOptions {
     pub database_path: Option<PathBuf>,
     /// Maximum sessions to ask CASS to return.
     pub limit: u32,
+    /// Only import sessions whose start time is at or after this UTC cutoff.
+    pub since: Option<DateTime<Utc>>,
     /// If true, query CASS but do not create files or write the DB.
     pub dry_run: bool,
     /// If true, import first-window evidence spans through `cass view`.
@@ -54,6 +56,7 @@ impl CassImportOptions {
             workspace_path: workspace_path.into(),
             database_path: None,
             limit: 10,
+            since: None,
             dry_run: false,
             include_spans: true,
         }
@@ -100,6 +103,7 @@ pub struct CassImportReport {
     pub source_id: String,
     pub ledger_id: Option<String>,
     pub dry_run: bool,
+    pub since: Option<String>,
     pub sessions_discovered: u32,
     pub sessions_imported: u32,
     pub sessions_skipped: u32,
@@ -122,6 +126,7 @@ impl CassImportReport {
             "sourceId": self.source_id,
             "ledgerId": self.ledger_id,
             "dryRun": self.dry_run,
+            "since": self.since,
             "sessionsDiscovered": self.sessions_discovered,
             "sessionsImported": self.sessions_imported,
             "sessionsSkipped": self.sessions_skipped,
@@ -146,8 +151,12 @@ impl CassImportReport {
     #[must_use]
     pub fn human_summary(&self) -> String {
         let mode = if self.dry_run { "DRY RUN: " } else { "" };
+        let since = self
+            .since
+            .as_deref()
+            .map_or_else(String::new, |cutoff| format!(" since {cutoff}"));
         format!(
-            "{mode}CASS import {status}: {imported} imported, {skipped} skipped, {spans} spans, {index_jobs} index jobs from {discovered} discovered sessions\n",
+            "{mode}CASS import {status}{since}: {imported} imported, {skipped} skipped, {spans} spans, {index_jobs} index jobs from {discovered} discovered sessions\n",
             status = self.status,
             imported = self.sessions_imported,
             skipped = self.sessions_skipped,
@@ -171,6 +180,10 @@ pub enum CassImportError {
         source: &'static str,
         message: String,
     },
+    InvalidSince {
+        value: String,
+        message: String,
+    },
     Io {
         path: PathBuf,
         message: String,
@@ -186,6 +199,7 @@ impl CassImportError {
             Self::Cass(error) => error.repair_hint(),
             Self::CassCommand { .. } => Some("run cass health --json"),
             Self::InvalidJson { .. } => Some("run cass api-version --json and cass doctor --json"),
+            Self::InvalidSince { .. } => Some("use --since with a duration like 90d, 24h, or 7d3h"),
             Self::Io { .. } => Some("check workspace and database path permissions"),
             Self::Storage(_) => Some("ee init --workspace . --repair-plan"),
         }
@@ -206,6 +220,9 @@ impl fmt::Display for CassImportError {
             ),
             Self::InvalidJson { source, message } => {
                 write!(formatter, "invalid CASS {source} JSON: {message}")
+            }
+            Self::InvalidSince { value, message } => {
+                write!(formatter, "invalid --since value `{value}`: {message}")
             }
             Self::Io { path, message } => {
                 write!(formatter, "I/O error at {}: {message}", path.display())
@@ -240,11 +257,20 @@ pub fn import_cass_sessions(
     options: &CassImportOptions,
 ) -> Result<CassImportReport, CassImportError> {
     let workspace_path = normalize_path(&options.workspace_path);
-    let source_id = source_id(&workspace_path, options.limit);
-    let sessions = discover_sessions(client, &workspace_path, options.limit)?;
+    let since_cutoff = options.since.map(format_since_cutoff);
+    let source_id = source_id(&workspace_path, options.limit, since_cutoff.as_deref());
+    let sessions = filter_sessions_since(
+        discover_sessions(client, &workspace_path, options.limit)?,
+        options.since,
+    )?;
 
     if options.dry_run {
-        return Ok(dry_run_report(workspace_path, source_id, sessions));
+        return Ok(dry_run_report(
+            workspace_path,
+            source_id,
+            since_cutoff,
+            sessions,
+        ));
     }
 
     let database_path = database_path(options);
@@ -352,6 +378,7 @@ pub fn import_cass_sessions(
         source_id,
         ledger_id: Some(ledger_id),
         dry_run: false,
+        since: since_cutoff,
         sessions_discovered: cursor.sessions_discovered,
         sessions_imported: imported,
         sessions_skipped: skipped,
@@ -372,6 +399,67 @@ fn discover_sessions(
     let outcome = client.run(&invocation)?;
     ensure_successful_outcome(&outcome, "cass sessions")?;
     parse_sessions_json(outcome.stdout_bytes())
+}
+
+/// Parse an `ee import cass --since <duration>` value into a UTC cutoff.
+///
+/// Supported units are seconds, minutes, hours, days, and weeks. Adjacent
+/// units are allowed, so `7d3h` and `7d 3h` are equivalent.
+///
+/// # Errors
+///
+/// Returns [`CassImportError::InvalidSince`] when the value is empty, uses an
+/// unsupported unit, overflows the supported duration range, or would produce a
+/// cutoff outside Chrono's representable range.
+pub fn parse_import_since_duration(
+    value: &str,
+    now: DateTime<Utc>,
+) -> Result<DateTime<Utc>, CassImportError> {
+    let duration = parse_since_duration(value)?;
+    now.checked_sub_signed(duration)
+        .ok_or_else(|| CassImportError::InvalidSince {
+            value: value.to_string(),
+            message: "duration is too large".to_string(),
+        })
+}
+
+fn filter_sessions_since(
+    sessions: Vec<CassSessionInfo>,
+    since: Option<DateTime<Utc>>,
+) -> Result<Vec<CassSessionInfo>, CassImportError> {
+    let Some(cutoff) = since else {
+        return Ok(sessions);
+    };
+
+    let mut filtered = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        let Some(session_time) = session_time_for_since_filter(&session)? else {
+            continue;
+        };
+        if session_time >= cutoff {
+            filtered.push(session);
+        }
+    }
+    Ok(filtered)
+}
+
+fn session_time_for_since_filter(
+    session: &CassSessionInfo,
+) -> Result<Option<DateTime<Utc>>, CassImportError> {
+    let Some(raw_timestamp) = session
+        .started_at
+        .as_deref()
+        .or(session.ended_at.as_deref())
+    else {
+        return Ok(None);
+    };
+    let timestamp = DateTime::parse_from_rfc3339(raw_timestamp).map_err(|error| {
+        CassImportError::InvalidJson {
+            source: "sessions",
+            message: format!("invalid session timestamp `{raw_timestamp}`: {error}"),
+        }
+    })?;
+    Ok(Some(timestamp.with_timezone(&Utc)))
 }
 
 fn view_session_spans(
@@ -559,6 +647,7 @@ fn classify_line(content: &str) -> (CassSpanKind, Option<CassRole>) {
 fn dry_run_report(
     workspace_path: PathBuf,
     source_id: String,
+    since: Option<String>,
     sessions: Vec<CassSessionInfo>,
 ) -> CassImportReport {
     CassImportReport {
@@ -568,6 +657,7 @@ fn dry_run_report(
         source_id,
         ledger_id: None,
         dry_run: true,
+        since,
         sessions_discovered: saturating_len(sessions.len()),
         sessions_imported: 0,
         sessions_skipped: 0,
@@ -725,6 +815,7 @@ fn error_code(error: &CassImportError) -> &'static str {
         CassImportError::Cass(_) => "cass",
         CassImportError::CassCommand { .. } => "cass_command",
         CassImportError::InvalidJson { .. } => "invalid_json",
+        CassImportError::InvalidSince { .. } => "invalid_since",
         CassImportError::Io { .. } => "io",
         CassImportError::Storage(_) => "storage",
     }
@@ -828,11 +919,108 @@ fn normalize_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn source_id(workspace_path: &Path, limit: u32) -> String {
-    format!(
+fn source_id(workspace_path: &Path, limit: u32, since: Option<&str>) -> String {
+    let mut id = format!(
         "cass://sessions?workspace={}&limit={limit}",
         workspace_path.to_string_lossy()
-    )
+    );
+    if let Some(cutoff) = since {
+        id.push_str("&since=");
+        id.push_str(cutoff);
+    }
+    id
+}
+
+fn format_since_cutoff(since: DateTime<Utc>) -> String {
+    since.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn parse_since_duration(value: &str) -> Result<chrono::Duration, CassImportError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(invalid_since(value, "duration must not be empty"));
+    }
+
+    let bytes = trimmed.as_bytes();
+    let mut index = 0_usize;
+    let mut total_seconds = 0_u64;
+    while index < bytes.len() {
+        while byte_at(bytes, index).is_some_and(|byte| byte.is_ascii_whitespace()) {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            break;
+        }
+
+        let number_start = index;
+        while byte_at(bytes, index).is_some_and(|byte| byte.is_ascii_digit()) {
+            index += 1;
+        }
+        if number_start == index {
+            return Err(invalid_since(value, "expected a positive number"));
+        }
+        let amount_text = trimmed
+            .get(number_start..index)
+            .ok_or_else(|| invalid_since(value, "invalid duration number"))?;
+        let amount: u64 = amount_text
+            .parse()
+            .map_err(|_| invalid_since(value, "duration number is too large"))?;
+
+        while byte_at(bytes, index).is_some_and(|byte| byte.is_ascii_whitespace()) {
+            index += 1;
+        }
+        let unit_start = index;
+        while byte_at(bytes, index).is_some_and(|byte| byte.is_ascii_alphabetic()) {
+            index += 1;
+        }
+        if unit_start == index {
+            return Err(invalid_since(value, "missing duration unit"));
+        }
+
+        let unit = trimmed
+            .get(unit_start..index)
+            .ok_or_else(|| invalid_since(value, "invalid duration unit"))?
+            .to_ascii_lowercase();
+        let multiplier = since_unit_seconds(&unit)
+            .ok_or_else(|| invalid_since(value, "unsupported duration unit"))?;
+        let seconds = amount
+            .checked_mul(multiplier)
+            .ok_or_else(|| invalid_since(value, "duration is too large"))?;
+        total_seconds = total_seconds
+            .checked_add(seconds)
+            .ok_or_else(|| invalid_since(value, "duration is too large"))?;
+    }
+
+    if total_seconds == 0 {
+        return Err(invalid_since(value, "duration must be greater than zero"));
+    }
+
+    let total_seconds =
+        i64::try_from(total_seconds).map_err(|_| invalid_since(value, "duration is too large"))?;
+    chrono::Duration::try_seconds(total_seconds)
+        .ok_or_else(|| invalid_since(value, "duration is too large"))
+}
+
+fn byte_at(bytes: &[u8], index: usize) -> Option<u8> {
+    bytes.get(index).copied()
+}
+
+fn since_unit_seconds(unit: &str) -> Option<u64> {
+    match unit {
+        "s" | "sec" | "secs" | "second" | "seconds" => Some(1),
+        "m" | "min" | "mins" | "minute" | "minutes" => Some(60),
+        "h" | "hr" | "hrs" | "hour" | "hours" => Some(60 * 60),
+        "d" | "day" | "days" => Some(24 * 60 * 60),
+        "w" | "week" | "weeks" => Some(7 * 24 * 60 * 60),
+        _ => None,
+    }
+}
+
+fn invalid_since(value: &str, message: &str) -> CassImportError {
+    CassImportError::InvalidSince {
+        value: value.to_string(),
+        message: message.to_string(),
+    }
 }
 
 fn stable_workspace_id(path: &str) -> String {
@@ -1014,6 +1202,76 @@ mod tests {
     }
 
     #[test]
+    fn parse_import_since_duration_accepts_compound_windows() -> TestResult {
+        let now = DateTime::parse_from_rfc3339("2026-05-05T12:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+
+        let cutoff = parse_import_since_duration("7d3h", now).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &format_since_cutoff(cutoff),
+            &"2026-04-28T09:00:00Z".to_string(),
+            "compound cutoff",
+        )?;
+        let cutoff =
+            parse_import_since_duration("90 days", now).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &format_since_cutoff(cutoff),
+            &"2026-02-04T12:00:00Z".to_string(),
+            "spaced cutoff",
+        )
+    }
+
+    #[test]
+    fn parse_import_since_duration_rejects_invalid_windows() -> TestResult {
+        for value in ["", "0d", "90", "forever", "1month", "-7d"] {
+            let now = DateTime::parse_from_rfc3339("2026-05-05T12:00:00Z")
+                .map_err(|error| error.to_string())?
+                .with_timezone(&Utc);
+            let error = match parse_import_since_duration(value, now) {
+                Ok(_) => return Err(format!("since value {value:?} should fail")),
+                Err(error) => error.to_string(),
+            };
+            ensure(
+                error.contains("invalid --since value"),
+                format!("error for {value:?} should mention --since, got {error}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn since_filter_keeps_sessions_at_or_after_cutoff() -> TestResult {
+        let cutoff = DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+        let mut recent = CassSessionInfo::new("/tmp/recent.jsonl");
+        recent.started_at = Some("2026-04-30T00:00:00Z".to_string());
+        let mut old = CassSessionInfo::new("/tmp/old.jsonl");
+        old.started_at = Some("2026-03-01T00:00:00Z".to_string());
+        let mut modified_fallback = CassSessionInfo::new("/tmp/modified.jsonl");
+        modified_fallback.ended_at = Some("2026-04-02T00:00:00Z".to_string());
+        let missing_time = CassSessionInfo::new("/tmp/missing.jsonl");
+
+        let filtered = filter_sessions_since(
+            vec![recent, old, modified_fallback, missing_time],
+            Some(cutoff),
+        )
+        .map_err(|error| error.to_string())?;
+        let paths: Vec<&str> = filtered
+            .iter()
+            .map(|session| session.source_path.as_str())
+            .collect();
+
+        ensure_equal(
+            &paths,
+            &vec!["/tmp/recent.jsonl", "/tmp/modified.jsonl"],
+            "filtered sessions",
+        )
+    }
+
+    #[test]
     fn parse_sessions_rejects_malicious_prefix_paths() -> TestResult {
         for path in ["--config=/tmp/evil", "-n", "  --hidden"] {
             let input = format!(
@@ -1066,10 +1324,20 @@ mod tests {
     #[test]
     fn dry_run_report_has_no_side_effect_targets() -> TestResult {
         let sessions = vec![CassSessionInfo::new("/tmp/a.jsonl")];
-        let report = dry_run_report(PathBuf::from("/tmp/work"), "cass://x".to_string(), sessions);
+        let report = dry_run_report(
+            PathBuf::from("/tmp/work"),
+            "cass://x".to_string(),
+            Some("2026-04-01T00:00:00Z".to_string()),
+            sessions,
+        );
 
         ensure_equal(&report.dry_run, &true, "dry run")?;
         ensure_equal(&report.database_path, &None, "no database path")?;
+        ensure_equal(
+            &report.since.as_deref(),
+            &Some("2026-04-01T00:00:00Z"),
+            "since cutoff",
+        )?;
         ensure_equal(&report.sessions_discovered, &1, "discovered")?;
         ensure_equal(&report.index_jobs_queued, &0, "dry-run index jobs")?;
         ensure_equal(&report.index_required_action, &None, "dry-run index action")?;
@@ -1089,6 +1357,7 @@ mod tests {
             source_id: "cass://x".to_string(),
             ledger_id: Some("imp_abc".to_string()),
             dry_run: false,
+            since: Some("2026-04-01T00:00:00Z".to_string()),
             sessions_discovered: 1,
             sessions_imported: 1,
             sessions_skipped: 0,
@@ -1111,6 +1380,11 @@ mod tests {
         let json = report.data_json();
         ensure_equal(&json["command"], &json!("import cass"), "command")?;
         ensure_equal(&json["schema"], &json!("ee.import.cass.v1"), "schema")?;
+        ensure_equal(
+            &json["since"],
+            &json!("2026-04-01T00:00:00Z"),
+            "since cutoff",
+        )?;
         ensure_equal(&json["indexJobsQueued"], &json!(1), "index jobs")?;
         ensure_equal(
             &json["indexRequiredAction"],
@@ -1172,6 +1446,7 @@ mod tests {
             workspace_path: workspace_path.clone(),
             database_path: Some(database_path.clone()),
             limit: 1,
+            since: None,
             dry_run: false,
             include_spans: true,
         };
@@ -1260,6 +1535,7 @@ mod tests {
             workspace_path,
             database_path: None,
             limit: 1,
+            since: None,
             dry_run: true,
             include_spans: false,
         };
@@ -1291,6 +1567,7 @@ mod tests {
         let session_id = stable_session_id("/tmp/session.jsonl");
         let evidence_id = stable_evidence_id(&session_id, "span-1");
         let import_id = stable_import_id("cass://sessions?workspace=/tmp/work&limit=10");
+        let since_source_id = source_id(Path::new("/tmp/work"), 10, Some("2026-04-01T00:00:00Z"));
         let index_job_id = stable_search_index_job_id(&workspace_id, &session_id);
 
         ensure(
@@ -1308,6 +1585,10 @@ mod tests {
         ensure(
             import_id.starts_with("imp_") && import_id.len() == 30,
             "import id shape",
+        )?;
+        ensure(
+            since_source_id.ends_with("&since=2026-04-01T00:00:00Z"),
+            "source id includes since cutoff",
         )?;
         ensure(
             index_job_id.starts_with("sidx_") && index_job_id.len() == 31,

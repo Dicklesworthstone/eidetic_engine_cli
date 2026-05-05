@@ -170,6 +170,7 @@ impl ImportCassFixture {
             workspace_path: self.workspace_path.clone(),
             database_path: Some(db_path.clone()),
             limit: 10,
+            since: None,
             dry_run: false,
             include_spans: true,
         };

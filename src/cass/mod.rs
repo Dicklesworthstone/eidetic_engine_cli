@@ -49,7 +49,7 @@ pub use error::CassError;
 pub use health::{CassDbHealth, CassHealth, CassIndexHealth};
 pub use import::{
     CassImportError, CassImportOptions, CassImportReport, ImportSessionStatus, ImportedCassSession,
-    import_cass_sessions,
+    import_cass_sessions, parse_import_since_duration,
 };
 pub use process::{CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassExitClass, CassInvocation, CassOutcome};
 pub use session::{
