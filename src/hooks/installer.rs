@@ -70,6 +70,8 @@ pub enum ExistingHookStatus {
     External,
     /// Hook exists but is unreadable.
     Unreadable,
+    /// Path is a symlink (security risk: could point outside hook directory).
+    Symlink,
 }
 
 impl ExistingHookStatus {
@@ -80,6 +82,7 @@ impl ExistingHookStatus {
             Self::ManagedByEe => "managed_by_ee",
             Self::External => "external",
             Self::Unreadable => "unreadable",
+            Self::Symlink => "symlink",
         }
     }
 }
@@ -171,9 +174,28 @@ fn is_ee_managed_hook(content: &str) -> bool {
 }
 
 /// Get the status of an existing hook.
+///
+/// Uses `symlink_metadata` (lstat) to detect symlinks without following them.
+/// Symlinks are rejected as a security measure: a malicious symlink could
+/// point outside the hook directory, allowing arbitrary file overwrites.
 fn check_existing_hook(path: &Path) -> ExistingHookStatus {
-    if !path.exists() {
-        return ExistingHookStatus::NotFound;
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return ExistingHookStatus::Symlink;
+            }
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return ExistingHookStatus::NotFound;
+        }
+        Err(_) => {
+            return ExistingHookStatus::Unreadable;
+        }
     }
 
     match std::fs::read_to_string(path) {
@@ -225,6 +247,10 @@ fn determine_action(
                 (HookAction::Skip, "Hook exists but is unreadable")
             }
         }
+        ExistingHookStatus::Symlink => (
+            HookAction::Skip,
+            "Hook path is a symlink (security risk: remove symlink first)",
+        ),
     }
 }
 
@@ -291,7 +317,115 @@ fn get_ee_binary_path() -> Result<PathBuf, DomainError> {
     })
 }
 
+fn ensure_hook_dir_is_not_symlink(hook_dir: &Path) -> Result<(), DomainError> {
+    match std::fs::symlink_metadata(hook_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(DomainError::PolicyDenied {
+            message: format!(
+                "Refusing to write hooks into '{}': hook directory is a symlink",
+                hook_dir.display()
+            ),
+            repair: Some("Pass the real hook directory path instead of a symlink.".to_owned()),
+        }),
+        Ok(_) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect hook directory '{}': {error}",
+                hook_dir.display()
+            ),
+            repair: Some(
+                "Choose a readable hook directory or re-run with corrected permissions.".to_owned(),
+            ),
+        }),
+    }
+}
+
+#[derive(Debug)]
+struct PlannedHookWrite {
+    target_path: PathBuf,
+    content: String,
+}
+
+fn preflight_hook_target(target_path: &Path) -> Result<(), DomainError> {
+    match std::fs::symlink_metadata(target_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(DomainError::PolicyDenied {
+            message: format!(
+                "Refusing to write hook '{}': path is a symlink (could overwrite arbitrary target)",
+                target_path.display()
+            ),
+            repair: Some("Remove the symlink before installing hooks.".to_owned()),
+        }),
+        Ok(metadata) if metadata.is_dir() => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write hook '{}': path is a directory",
+                target_path.display()
+            ),
+            repair: Some("Remove or rename the directory before installing hooks.".to_owned()),
+        }),
+        Ok(metadata) if metadata.permissions().readonly() => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write hook '{}': path is read-only",
+                target_path.display()
+            ),
+            repair: Some(
+                "Choose a writable hook file or re-run with corrected permissions.".to_owned(),
+            ),
+        }),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect hook target '{}': {error}",
+                target_path.display()
+            ),
+            repair: Some(
+                "Choose a writable hook directory or re-run with corrected permissions.".to_owned(),
+            ),
+        }),
+    }
+}
+
+fn preflight_hook_writes(hook_dir: &Path, writes: &[PlannedHookWrite]) -> Result<(), DomainError> {
+    ensure_hook_dir_is_not_symlink(hook_dir)?;
+    std::fs::create_dir_all(hook_dir).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to create hook directory '{}': {error}",
+            hook_dir.display()
+        ),
+        repair: Some(
+            "Choose a writable hook directory or re-run with corrected permissions.".to_owned(),
+        ),
+    })?;
+
+    for write in writes {
+        preflight_hook_target(&write.target_path)?;
+    }
+
+    Ok(())
+}
+
 fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result<(), DomainError> {
+    ensure_hook_dir_is_not_symlink(hook_dir)?;
+
+    if let Ok(metadata) = std::fs::symlink_metadata(target_path) {
+        if metadata.file_type().is_symlink() {
+            return Err(DomainError::PolicyDenied {
+                message: format!(
+                    "Refusing to write hook '{}': path is a symlink (could overwrite arbitrary target)",
+                    target_path.display()
+                ),
+                repair: Some("Remove the symlink before installing hooks.".to_owned()),
+            });
+        }
+    }
+
     std::fs::create_dir_all(hook_dir).map_err(|error| DomainError::Storage {
         message: format!(
             "Failed to create hook directory '{}': {error}",
@@ -346,6 +480,7 @@ pub fn install_hooks(options: &HookInstallOptions) -> Result<HookInstallReport, 
     let mut updated_count = 0u32;
     let mut skipped_count = 0u32;
     let mut no_change_count = 0u32;
+    let mut writes = Vec::new();
 
     // Capture absolute binary path at install time to embed in hooks (security fix)
     let ee_binary_path = get_ee_binary_path()?;
@@ -370,8 +505,11 @@ pub fn install_hooks(options: &HookInstallOptions) -> Result<HookInstallReport, 
             reason: reason.to_owned(),
         });
 
-        if !options.dry_run && action.is_mutating() {
-            write_hook_file(&options.hook_dir, &target_path, &content)?;
+        if action.is_mutating() {
+            writes.push(PlannedHookWrite {
+                target_path,
+                content,
+            });
         }
 
         match action {
@@ -379,6 +517,13 @@ pub fn install_hooks(options: &HookInstallOptions) -> Result<HookInstallReport, 
             HookAction::Update => updated_count += 1,
             HookAction::Skip => skipped_count += 1,
             HookAction::NoChange => no_change_count += 1,
+        }
+    }
+
+    if !options.dry_run && !writes.is_empty() {
+        preflight_hook_writes(&options.hook_dir, &writes)?;
+        for write in &writes {
+            write_hook_file(&options.hook_dir, &write.target_path, &write.content)?;
         }
     }
 
@@ -479,7 +624,7 @@ pub fn check_hook_status(options: &HookStatusOptions) -> Result<HookStatusReport
             ExistingHookStatus::ManagedByEe => managed_count += 1,
             ExistingHookStatus::External => external_count += 1,
             ExistingHookStatus::NotFound => missing_count += 1,
-            ExistingHookStatus::Unreadable => external_count += 1,
+            ExistingHookStatus::Unreadable | ExistingHookStatus::Symlink => external_count += 1,
         }
     }
 
@@ -762,6 +907,43 @@ mod tests {
     }
 
     #[test]
+    fn install_preflights_all_mutating_targets_before_writing() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+        fs::create_dir(hook_dir.join("post-task")).map_err(|e| e.to_string())?;
+
+        let options = HookInstallOptions {
+            hook_dir: hook_dir.clone(),
+            hooks: vec![HookType::PreTask, HookType::PostTask],
+            dry_run: false,
+            preserve_existing: false,
+            force: true,
+        };
+
+        let error = match install_hooks(&options) {
+            Ok(_) => return Err("install should fail before writing any hook".to_string()),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "storage");
+        assert!(
+            error.message().contains("path is a directory"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            !hook_dir.join("pre-task").exists(),
+            "first hook must not be written when a later mutating target fails preflight"
+        );
+        assert!(
+            hook_dir.join("post-task").is_dir(),
+            "preflight must not alter the failing hook target"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn installed_hook_file_contains_absolute_path() -> TestResult {
         // Integration test: verify actual installed hook file embeds absolute path
         let temp = TempDir::new().map_err(|e| e.to_string())?;
@@ -795,6 +977,109 @@ mod tests {
             trimmed.starts_with("'/"),
             "hook invocation must start with single-quoted absolute path ('/..), got: {invocation_line}"
         );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_hook_target_is_rejected() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+
+        let target_file = temp.path().join("sensitive-file");
+        fs::write(&target_file, "original content").map_err(|e| e.to_string())?;
+
+        let hook_path = hook_dir.join("pre-task");
+        symlink(&target_file, &hook_path).map_err(|e| e.to_string())?;
+
+        let options = HookInstallOptions {
+            hook_dir: hook_dir.clone(),
+            hooks: vec![HookType::PreTask],
+            dry_run: false,
+            preserve_existing: false,
+            force: true,
+        };
+
+        let report = install_hooks(&options).map_err(|e| e.message())?;
+        assert_eq!(report.skipped_count, 1, "symlink hook should be skipped");
+
+        let plan_entry = report
+            .plan
+            .iter()
+            .find(|entry| entry.hook_type == HookType::PreTask.as_str())
+            .ok_or_else(|| "pre-task should be in plan".to_owned())?;
+        assert_eq!(
+            plan_entry.existing_status,
+            ExistingHookStatus::Symlink.as_str()
+        );
+        assert_eq!(plan_entry.action, HookAction::Skip.as_str());
+
+        let original_content = fs::read_to_string(&target_file).map_err(|e| e.to_string())?;
+        assert_eq!(
+            original_content, "original content",
+            "symlink target must not be modified"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_hook_directory_is_rejected_before_writing() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let real_hook_dir = temp.path().join("real-hooks");
+        fs::create_dir_all(&real_hook_dir).map_err(|e| e.to_string())?;
+
+        let linked_hook_dir = temp.path().join("linked-hooks");
+        symlink(&real_hook_dir, &linked_hook_dir).map_err(|e| e.to_string())?;
+
+        let options = HookInstallOptions {
+            hook_dir: linked_hook_dir,
+            hooks: vec![HookType::PreTask],
+            dry_run: false,
+            preserve_existing: false,
+            force: false,
+        };
+
+        let error = match install_hooks(&options) {
+            Ok(_) => return Err("install should reject symlinked hook directory".to_owned()),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            error.message().contains("hook directory is a symlink"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            !real_hook_dir.join("pre-task").exists(),
+            "symlinked hook directory target must not receive a hook"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_existing_hook_detects_symlink() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let target = temp.path().join("target");
+        fs::write(&target, "data").map_err(|e| e.to_string())?;
+
+        let link = temp.path().join("link");
+        symlink(&target, &link).map_err(|e| e.to_string())?;
+
+        let status = check_existing_hook(&link);
+        assert_eq!(status, ExistingHookStatus::Symlink);
 
         Ok(())
     }
