@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
+use std::fmt;
 use std::time::Duration;
 
 use crate::db::{
-    AcquireLockResult, AdvisoryLockId, CreateGraphSnapshotInput, DbConnection, GraphSnapshotStatus,
-    GraphSnapshotType, StoredGraphSnapshot, StoredMemoryLink,
+    AcquireLockResult, AdvisoryLockId, CreateGraphSnapshotInput, DbConnection, DbError,
+    GraphSnapshotStatus, GraphSnapshotType, StoredGraphSnapshot, StoredMemoryLink,
 };
 use crate::models::{CapabilityStatus, GRAPH_MODULE_SCHEMA_V1, MemoryId};
 use sqlmodel_core::IsolationLevel;
@@ -20,6 +22,155 @@ use fnx_runtime::{CgseValue, CompatibilityMode};
 pub const SUBSYSTEM: &str = "graph";
 pub const MODULE_CONTRACT: &str = GRAPH_MODULE_SCHEMA_V1;
 pub const REQUIRED_GRAPH_ENGINE: &str = "franken_networkx";
+
+pub type GraphResult<T> = std::result::Result<T, GraphError>;
+
+#[derive(Debug)]
+pub enum GraphError {
+    Storage {
+        operation: &'static str,
+        source: Box<DbError>,
+    },
+    Json {
+        operation: &'static str,
+        source: Box<serde_json::Error>,
+    },
+    GraphEngine {
+        operation: &'static str,
+        source: String,
+    },
+    NumericOverflow {
+        field: &'static str,
+        value: String,
+    },
+    SnapshotLockHeld {
+        workspace_id: String,
+        holder_id: String,
+        acquired_at: String,
+    },
+    SnapshotLockUnavailable {
+        workspace_id: String,
+    },
+    SnapshotVersionOverflow,
+    InvalidSnapshotMetrics {
+        reason: String,
+    },
+}
+
+impl GraphError {
+    fn storage(operation: &'static str, source: DbError) -> Self {
+        Self::Storage {
+            operation,
+            source: Box::new(source),
+        }
+    }
+
+    fn json(operation: &'static str, source: serde_json::Error) -> Self {
+        Self::Json {
+            operation,
+            source: Box::new(source),
+        }
+    }
+
+    fn numeric_overflow(field: &'static str, value: impl fmt::Display) -> Self {
+        Self::NumericOverflow {
+            field,
+            value: value.to_string(),
+        }
+    }
+
+    fn invalid_snapshot_metrics(reason: impl Into<String>) -> Self {
+        Self::InvalidSnapshotMetrics {
+            reason: reason.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Storage { .. } => "graph_storage",
+            Self::Json { .. } => "graph_json",
+            Self::GraphEngine { .. } => "graph_engine",
+            Self::NumericOverflow { .. } => "graph_numeric_overflow",
+            Self::SnapshotLockHeld { .. } => "graph_snapshot_lock_held",
+            Self::SnapshotLockUnavailable { .. } => "graph_snapshot_lock_unavailable",
+            Self::SnapshotVersionOverflow => "graph_snapshot_version_overflow",
+            Self::InvalidSnapshotMetrics { .. } => "graph_snapshot_metrics_invalid",
+        }
+    }
+
+    #[must_use]
+    pub const fn repair_hint(&self) -> &'static str {
+        match self {
+            Self::Storage { .. } => "Run `ee doctor --json` to inspect graph storage health.",
+            Self::Json { .. } | Self::InvalidSnapshotMetrics { .. } => {
+                "Run `ee graph centrality-refresh` to regenerate graph snapshot metrics."
+            }
+            Self::GraphEngine { .. } => {
+                "Validate memory link rows and rebuild the graph projection."
+            }
+            Self::NumericOverflow { .. } | Self::SnapshotVersionOverflow => {
+                "Archive old graph snapshots or reduce the graph snapshot input size."
+            }
+            Self::SnapshotLockHeld { .. } | Self::SnapshotLockUnavailable { .. } => {
+                "Retry after the current graph snapshot writer exits."
+            }
+        }
+    }
+}
+
+impl fmt::Display for GraphError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Storage { operation, source } => {
+                write!(f, "graph {operation} failed: {source}")
+            }
+            Self::Json { operation, source } => {
+                write!(f, "graph {operation} failed: {source}")
+            }
+            Self::GraphEngine { operation, source } => {
+                write!(f, "graph {operation} failed: {source}")
+            }
+            Self::NumericOverflow { field, value } => {
+                write!(
+                    f,
+                    "graph {field} value {value} exceeds supported numeric range"
+                )
+            }
+            Self::SnapshotLockHeld {
+                workspace_id,
+                holder_id,
+                acquired_at,
+            } => write!(
+                f,
+                "graph snapshot write lock for workspace {workspace_id} is held by {holder_id} since {acquired_at}"
+            ),
+            Self::SnapshotLockUnavailable { workspace_id } => write!(
+                f,
+                "graph snapshot write lock for workspace {workspace_id} could not be acquired"
+            ),
+            Self::SnapshotVersionOverflow => f.write_str("graph snapshot version overflowed"),
+            Self::InvalidSnapshotMetrics { reason } => {
+                write!(f, "graph snapshot metrics_json is invalid: {reason}")
+            }
+        }
+    }
+}
+
+impl Error for GraphError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Storage { source, .. } => Some(source.as_ref()),
+            Self::Json { source, .. } => Some(source.as_ref()),
+            Self::GraphEngine { .. }
+            | Self::NumericOverflow { .. }
+            | Self::SnapshotLockHeld { .. }
+            | Self::SnapshotLockUnavailable { .. }
+            | Self::SnapshotVersionOverflow
+            | Self::InvalidSnapshotMetrics { .. } => None,
+        }
+    }
+}
 
 #[cfg(feature = "graph")]
 static GRAPH_CAPABILITIES: [GraphCapability; 6] = [
@@ -807,15 +958,13 @@ pub struct ProjectionOptions {
 pub fn build_memory_graph(
     conn: &DbConnection,
     options: &ProjectionOptions,
-) -> Result<MemoryGraphProjection, String> {
+) -> GraphResult<MemoryGraphProjection> {
     let links = graph_projection_links(conn, options)?;
     build_memory_graph_from_links(&links)
 }
 
 #[cfg(feature = "graph")]
-fn build_memory_graph_from_links(
-    links: &[StoredMemoryLink],
-) -> Result<MemoryGraphProjection, String> {
+fn build_memory_graph_from_links(links: &[StoredMemoryLink]) -> GraphResult<MemoryGraphProjection> {
     use std::time::Instant;
 
     let start = Instant::now();
@@ -880,10 +1029,10 @@ fn build_memory_graph_from_links(
 fn graph_projection_links(
     conn: &DbConnection,
     options: &ProjectionOptions,
-) -> Result<Vec<StoredMemoryLink>, String> {
+) -> GraphResult<Vec<StoredMemoryLink>> {
     let links = conn
         .list_all_memory_links(options.link_limit)
-        .map_err(|e| format!("Failed to query memory links: {e}"))?;
+        .map_err(|error| GraphError::storage("query memory links", error))?;
     Ok(links
         .into_iter()
         .filter(|link| graph_link_matches_options(link, options))
@@ -906,11 +1055,12 @@ fn add_projection_edge(
     src_memory_id: &str,
     dst_memory_id: &str,
     attrs: AttrMap,
-) -> Result<(), String> {
+) -> GraphResult<()> {
     graph
         .add_edge_with_attrs(src_memory_id, dst_memory_id, attrs)
-        .map_err(|error| {
-            format!("Failed to add graph edge {src_memory_id}->{dst_memory_id}: {error}")
+        .map_err(|error| GraphError::GraphEngine {
+            operation: "add projection edge",
+            source: error.to_string(),
         })
 }
 
@@ -1212,7 +1362,7 @@ pub fn refresh_graph_snapshot(
     conn: &DbConnection,
     workspace_id: &str,
     options: &CentralityRefreshOptions,
-) -> Result<GraphRefreshJobReport, String> {
+) -> GraphResult<GraphRefreshJobReport> {
     let (centrality, links) = refresh_centrality_with_source_links(conn, options)?;
     let mut report = GraphRefreshJobReport {
         centrality,
@@ -1226,24 +1376,14 @@ pub fn refresh_graph_snapshot(
 
     let metrics_json = graph_snapshot_metrics_json(&report.centrality, &links)?;
     let content_hash = graph_snapshot_content_hash(&metrics_json);
-    let source_generation = u32::try_from(links.len()).map_err(|_| {
-        format!(
-            "Graph source link count {} exceeds supported snapshot generation range",
-            links.len()
-        )
-    })?;
+    let source_generation = u32::try_from(links.len())
+        .map_err(|_| GraphError::numeric_overflow("source link count", links.len()))?;
     let persistence = GraphSnapshotPersistenceInput {
         node_count: u32::try_from(report.centrality.node_count).map_err(|_| {
-            format!(
-                "Graph node count {} exceeds supported snapshot range",
-                report.centrality.node_count
-            )
+            GraphError::numeric_overflow("node count", report.centrality.node_count)
         })?,
         edge_count: u32::try_from(report.centrality.edge_count).map_err(|_| {
-            format!(
-                "Graph edge count {} exceeds supported snapshot range",
-                report.centrality.edge_count
-            )
+            GraphError::numeric_overflow("edge count", report.centrality.edge_count)
         })?,
         metrics_json,
         content_hash,
@@ -1286,11 +1426,11 @@ fn persist_graph_snapshot(
     conn: &DbConnection,
     workspace_id: &str,
     input: GraphSnapshotPersistenceInput,
-) -> Result<GraphRefreshSnapshot, String> {
+) -> GraphResult<GraphRefreshSnapshot> {
     let write_owner = acquire_graph_snapshot_write_owner(conn, workspace_id)?;
 
     conn.begin_transaction(IsolationLevel::RepeatableRead)
-        .map_err(|error| format!("Failed to begin graph snapshot transaction: {error}"))?;
+        .map_err(|error| GraphError::storage("begin graph snapshot transaction", error))?;
 
     let result = persist_graph_snapshot_in_transaction(conn, workspace_id, input, &write_owner);
 
@@ -1299,8 +1439,9 @@ fn persist_graph_snapshot(
             Ok(()) => Ok(snapshot),
             Err(error) => {
                 let _ = conn.rollback();
-                Err(format!(
-                    "Failed to commit graph snapshot transaction: {error}"
+                Err(GraphError::storage(
+                    "commit graph snapshot transaction",
+                    error,
                 ))
             }
         },
@@ -1314,7 +1455,7 @@ fn persist_graph_snapshot(
 fn acquire_graph_snapshot_write_owner<'a>(
     conn: &'a DbConnection,
     workspace_id: &str,
-) -> Result<GraphSnapshotWriteOwner<'a>, String> {
+) -> GraphResult<GraphSnapshotWriteOwner<'a>> {
     let lock_id = AdvisoryLockId::workspace(workspace_id);
     let holder_id = generate_graph_snapshot_holder_id();
     let mut last_conflict = None;
@@ -1342,26 +1483,29 @@ fn acquire_graph_snapshot_write_owner<'a>(
                 std::thread::sleep(graph_snapshot_write_lock_backoff(attempt));
             }
             Err(error) => {
-                last_error = Some(error.to_string());
+                last_error = Some(error);
                 std::thread::sleep(graph_snapshot_write_lock_backoff(attempt));
             }
         }
     }
 
     if let Some((holder_id, acquired_at)) = last_conflict {
-        return Err(format!(
-            "Graph snapshot write lock for workspace {workspace_id} is held by {holder_id} since {acquired_at}."
-        ));
+        return Err(GraphError::SnapshotLockHeld {
+            workspace_id: workspace_id.to_owned(),
+            holder_id,
+            acquired_at,
+        });
     }
     if let Some(error) = last_error {
-        return Err(format!(
-            "Failed to acquire graph snapshot write lock for workspace {workspace_id}: {error}"
+        return Err(GraphError::storage(
+            "acquire graph snapshot write lock",
+            error,
         ));
     }
 
-    Err(format!(
-        "Failed to acquire graph snapshot write lock for workspace {workspace_id}."
-    ))
+    Err(GraphError::SnapshotLockUnavailable {
+        workspace_id: workspace_id.to_owned(),
+    })
 }
 
 fn graph_snapshot_write_lock_backoff(attempt: usize) -> Duration {
@@ -1382,7 +1526,7 @@ fn persist_graph_snapshot_in_transaction(
     workspace_id: &str,
     input: GraphSnapshotPersistenceInput,
     _write_owner: &GraphSnapshotWriteOwner<'_>,
-) -> Result<GraphRefreshSnapshot, String> {
+) -> GraphResult<GraphRefreshSnapshot> {
     let snapshot_version = next_graph_snapshot_version(conn, workspace_id)?;
     let snapshot_id = generate_graph_snapshot_id();
 
@@ -1401,7 +1545,7 @@ fn persist_graph_snapshot_in_transaction(
             expires_at: None,
         },
     )
-    .map_err(|error| format!("Failed to persist graph snapshot: {error}"))?;
+    .map_err(|error| GraphError::storage("persist graph snapshot", error))?;
 
     Ok(GraphRefreshSnapshot {
         id: snapshot_id,
@@ -1421,7 +1565,7 @@ fn persist_graph_snapshot_in_transaction(
 pub fn refresh_centrality(
     conn: &DbConnection,
     options: &CentralityRefreshOptions,
-) -> Result<CentralityRefreshReport, String> {
+) -> GraphResult<CentralityRefreshReport> {
     let (centrality, _) = refresh_centrality_with_source_links(conn, options)?;
     Ok(centrality)
 }
@@ -1430,14 +1574,13 @@ pub fn refresh_centrality(
 fn refresh_centrality_with_source_links(
     conn: &DbConnection,
     options: &CentralityRefreshOptions,
-) -> Result<(CentralityRefreshReport, Vec<StoredMemoryLink>), String> {
+) -> GraphResult<(CentralityRefreshReport, Vec<StoredMemoryLink>)> {
     let projection_opts = ProjectionOptions {
         link_limit: options.link_limit,
         min_weight: options.min_weight,
         min_confidence: options.min_confidence,
     };
-    let links = graph_projection_links(conn, &projection_opts)
-        .map_err(|error| format!("Failed to query memory links for graph snapshot: {error}"))?;
+    let links = graph_projection_links(conn, &projection_opts)?;
     let centrality = refresh_centrality_from_links(&links, options.dry_run)?;
     Ok((centrality, links))
 }
@@ -1446,7 +1589,7 @@ fn refresh_centrality_with_source_links(
 fn refresh_centrality_from_links(
     links: &[StoredMemoryLink],
     dry_run: bool,
-) -> Result<CentralityRefreshReport, String> {
+) -> GraphResult<CentralityRefreshReport> {
     use std::time::Instant;
 
     let total_start = Instant::now();
@@ -1554,7 +1697,7 @@ fn refresh_centrality_from_links(
 pub fn refresh_centrality(
     _conn: &crate::db::DbConnection,
     options: &CentralityRefreshOptions,
-) -> Result<CentralityRefreshReport, String> {
+) -> GraphResult<CentralityRefreshReport> {
     let (centrality, _) = refresh_centrality_with_source_links(_conn, options)?;
     Ok(centrality)
 }
@@ -1563,7 +1706,7 @@ pub fn refresh_centrality(
 fn refresh_centrality_with_source_links(
     _conn: &crate::db::DbConnection,
     options: &CentralityRefreshOptions,
-) -> Result<(CentralityRefreshReport, Vec<StoredMemoryLink>), String> {
+) -> GraphResult<(CentralityRefreshReport, Vec<StoredMemoryLink>)> {
     Ok(CentralityRefreshReport {
         version: env!("CARGO_PKG_VERSION"),
         status: CentralityRefreshStatus::GraphFeatureDisabled,
@@ -1584,7 +1727,7 @@ fn refresh_centrality_with_source_links(
 fn graph_snapshot_metrics_json(
     centrality: &CentralityRefreshReport,
     links: &[StoredMemoryLink],
-) -> Result<String, String> {
+) -> GraphResult<String> {
     let scores_by_memory: BTreeMap<&str, &MemoryCentralityScore> = centrality
         .scores
         .iter()
@@ -1648,20 +1791,20 @@ fn graph_snapshot_metrics_json(
     });
 
     serde_json::to_string(&metrics)
-        .map_err(|error| format!("Failed to serialize graph snapshot metrics: {error}"))
+        .map_err(|error| GraphError::json("serialize graph snapshot metrics", error))
 }
 
 fn graph_snapshot_content_hash(metrics_json: &str) -> String {
     format!("blake3:{}", blake3::hash(metrics_json.as_bytes()).to_hex())
 }
 
-fn next_graph_snapshot_version(conn: &DbConnection, workspace_id: &str) -> Result<u32, String> {
+fn next_graph_snapshot_version(conn: &DbConnection, workspace_id: &str) -> GraphResult<u32> {
     let next = conn
         .get_latest_graph_snapshot(workspace_id, GraphSnapshotType::MemoryLinks)
-        .map_err(|error| format!("Failed to inspect latest graph snapshot: {error}"))?
+        .map_err(|error| GraphError::storage("inspect latest graph snapshot", error))?
         .map_or(1, |snapshot| snapshot.snapshot_version.saturating_add(1));
     if next == 0 {
-        return Err("Graph snapshot version overflowed".to_owned());
+        return Err(GraphError::SnapshotVersionOverflow);
     }
     Ok(next)
 }
@@ -1973,13 +2116,13 @@ pub fn enrich_graph_features_from_graph_snapshot(
 
     let centrality = match graph_snapshot_centrality_report(snapshot) {
         Ok(centrality) => centrality,
-        Err(message) => {
+        Err(error) => {
             return snapshot_graph_feature_unavailable_report(
                 source,
                 options,
                 "graph_snapshot_scores_unavailable",
                 "medium",
-                message,
+                error.to_string(),
                 "ee graph centrality-refresh",
             );
         }
@@ -2138,16 +2281,14 @@ fn snapshot_graph_feature_unavailable_report(
 
 fn graph_snapshot_centrality_report(
     snapshot: &StoredGraphSnapshot,
-) -> Result<CentralityRefreshReport, String> {
+) -> GraphResult<CentralityRefreshReport> {
     let value: serde_json::Value = serde_json::from_str(&snapshot.metrics_json)
-        .map_err(|error| format!("Graph snapshot metrics_json is not valid JSON: {error}"))?;
+        .map_err(|error| GraphError::json("parse graph snapshot metrics_json", error))?;
     let nodes = value
         .get("nodes")
         .or_else(|| value.pointer("/graph/nodes"))
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            "Graph snapshot metrics_json does not include centrality nodes.".to_owned()
-        })?;
+        .ok_or_else(|| GraphError::invalid_snapshot_metrics("missing centrality nodes"))?;
 
     let mut scores_by_memory = BTreeMap::new();
     for node in nodes {
@@ -2168,9 +2309,9 @@ fn graph_snapshot_centrality_report(
     }
 
     if scores_by_memory.is_empty() {
-        return Err(
-            "Graph snapshot metrics_json does not include memory centrality scores.".to_owned(),
-        );
+        return Err(GraphError::invalid_snapshot_metrics(
+            "missing memory centrality scores",
+        ));
     }
 
     let mut scores: Vec<_> = scores_by_memory.into_values().collect();
@@ -2520,12 +2661,12 @@ impl SnapshotValidationReport {
 pub fn validate_snapshot(
     conn: &crate::db::DbConnection,
     options: &SnapshotValidationOptions,
-) -> Result<SnapshotValidationReport, String> {
+) -> GraphResult<SnapshotValidationReport> {
     use crate::db::GraphSnapshotStatus;
 
     let snapshot = conn
         .get_latest_graph_snapshot(&options.workspace_id, options.graph_type)
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| GraphError::storage("inspect latest graph snapshot", error))?;
 
     let Some(snapshot) = snapshot else {
         return Ok(SnapshotValidationReport::not_found(options));
@@ -2596,7 +2737,7 @@ pub fn validate_snapshot(
 pub fn validate_snapshot(
     _conn: &crate::db::DbConnection,
     options: &SnapshotValidationOptions,
-) -> Result<SnapshotValidationReport, String> {
+) -> GraphResult<SnapshotValidationReport> {
     Ok(SnapshotValidationReport::not_found(options))
 }
 
@@ -2797,13 +2938,13 @@ struct ParsedGraphDocument {
 pub fn export_graph_snapshot(
     conn: &DbConnection,
     options: &GraphExportOptions,
-) -> Result<GraphExportReport, String> {
+) -> GraphResult<GraphExportReport> {
     let snapshot = if let Some(snapshot_id) = &options.snapshot_id {
         conn.get_graph_snapshot(snapshot_id)
-            .map_err(|error| error.to_string())?
+            .map_err(|error| GraphError::storage("query graph snapshot", error))?
     } else {
         conn.get_latest_graph_snapshot(&options.workspace_id, options.graph_type)
-            .map_err(|error| error.to_string())?
+            .map_err(|error| GraphError::storage("inspect latest graph snapshot", error))?
     };
 
     let Some(snapshot) = snapshot else {
@@ -2830,7 +2971,13 @@ pub fn export_graph_snapshot(
 
     let parsed = match parse_graph_snapshot_metrics(&snapshot.metrics_json) {
         Ok(parsed) => parsed,
-        Err(message) => return Ok(unsupported_snapshot_report(options, &snapshot, message)),
+        Err(error) => {
+            return Ok(unsupported_snapshot_report(
+                options,
+                &snapshot,
+                error.to_string(),
+            ));
+        }
     };
     let diagram = render_mermaid_graph(&parsed);
 
@@ -2936,9 +3083,9 @@ fn snapshot_metadata(snapshot: &StoredGraphSnapshot) -> GraphExportSnapshot {
     }
 }
 
-fn parse_graph_snapshot_metrics(metrics_json: &str) -> Result<ParsedGraphDocument, String> {
+fn parse_graph_snapshot_metrics(metrics_json: &str) -> GraphResult<ParsedGraphDocument> {
     let value: serde_json::Value = serde_json::from_str(metrics_json)
-        .map_err(|error| format!("Graph snapshot metrics_json is not valid JSON: {error}"))?;
+        .map_err(|error| GraphError::json("parse graph snapshot metrics_json", error))?;
 
     let node_values = value
         .get("nodes")
@@ -2967,12 +3114,12 @@ fn parse_graph_snapshot_metrics(metrics_json: &str) -> Result<ParsedGraphDocumen
                 edge,
                 &["source", "src", "from", "sourceMemoryId", "srcMemoryId"],
             )
-            .ok_or_else(|| "Graph snapshot edge is missing a source field.".to_owned())?;
+            .ok_or_else(|| GraphError::invalid_snapshot_metrics("edge missing source field"))?;
             let target = first_string(
                 edge,
                 &["target", "dst", "to", "targetMemoryId", "dstMemoryId"],
             )
-            .ok_or_else(|| "Graph snapshot edge is missing a target field.".to_owned())?;
+            .ok_or_else(|| GraphError::invalid_snapshot_metrics("edge missing target field"))?;
             let relation = first_string(edge, &["relation", "kind", "type"])
                 .unwrap_or_else(|| "related".to_owned());
             let label = first_string(edge, &["label", "title"]).unwrap_or_else(|| relation.clone());
@@ -3002,7 +3149,9 @@ fn parse_graph_snapshot_metrics(metrics_json: &str) -> Result<ParsedGraphDocumen
     }
 
     if nodes_by_id.is_empty() && edges.is_empty() {
-        return Err("Graph snapshot metrics_json does not include nodes or edges.".to_owned());
+        return Err(GraphError::invalid_snapshot_metrics(
+            "missing nodes or edges",
+        ));
     }
 
     edges.sort_by(|a, b| {
@@ -3295,10 +3444,10 @@ impl GraphNeighborhoodReport {
 pub fn graph_neighborhood(
     conn: &DbConnection,
     options: &GraphNeighborhoodOptions,
-) -> Result<GraphNeighborhoodReport, String> {
+) -> GraphResult<GraphNeighborhoodReport> {
     let links = conn
         .list_memory_links_for_memory(&options.memory_id, options.relation)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| GraphError::storage("query memory-link neighborhood", error))?;
 
     let mut edges: Vec<GraphNeighborhoodEdge> = links
         .iter()
@@ -3442,15 +3591,17 @@ fn compare_neighborhood_edges(
 mod tests {
     use crate::db::{
         AdvisoryLockId, CreateGraphSnapshotInput, CreateMemoryInput, CreateMemoryLinkInput,
-        CreateWorkspaceInput, DbConnection, GraphSnapshotStatus, GraphSnapshotType,
-        MemoryLinkRelation, MemoryLinkSource, StoredGraphSnapshot,
+        CreateWorkspaceInput, DbConnection, DbError, DbOperation, GraphSnapshotStatus,
+        GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource, StoredGraphSnapshot,
     };
     use proptest::prelude::*;
     use proptest::test_runner::Config as ProptestConfig;
+    use std::error::Error as _;
     use std::sync::{Arc, Barrier};
 
     use super::{
-        GraphCapabilityName, GraphSurface, REQUIRED_GRAPH_ENGINE, module_readiness, subsystem_name,
+        GraphCapabilityName, GraphError, GraphSurface, REQUIRED_GRAPH_ENGINE, module_readiness,
+        subsystem_name,
     };
     use crate::models::CapabilityStatus;
 
@@ -3460,6 +3611,118 @@ mod tests {
     const MEMORY_C: &str = "mem_00000000000000000000000013";
 
     type TestResult = Result<(), String>;
+
+    fn graph_result<T>(result: super::GraphResult<T>) -> Result<T, String> {
+        result.map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn graph_error_kind_strings_are_stable() -> TestResult {
+        let cases = [
+            (
+                GraphError::storage(
+                    "query memory links",
+                    DbError::MalformedRow {
+                        operation: DbOperation::Query,
+                        message: "bad row".to_owned(),
+                    },
+                ),
+                "graph_storage",
+            ),
+            (
+                GraphError::json("parse snapshot metrics", malformed_json_error()?),
+                "graph_json",
+            ),
+            (
+                GraphError::GraphEngine {
+                    operation: "add projection edge",
+                    source: "duplicate edge".to_owned(),
+                },
+                "graph_engine",
+            ),
+            (
+                GraphError::numeric_overflow("node count", usize::MAX),
+                "graph_numeric_overflow",
+            ),
+            (
+                GraphError::SnapshotLockHeld {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    holder_id: "holder".to_owned(),
+                    acquired_at: "2026-05-05T00:00:00Z".to_owned(),
+                },
+                "graph_snapshot_lock_held",
+            ),
+            (
+                GraphError::SnapshotLockUnavailable {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                },
+                "graph_snapshot_lock_unavailable",
+            ),
+            (
+                GraphError::SnapshotVersionOverflow,
+                "graph_snapshot_version_overflow",
+            ),
+            (
+                GraphError::invalid_snapshot_metrics("missing nodes"),
+                "graph_snapshot_metrics_invalid",
+            ),
+        ];
+
+        for (error, expected_kind) in cases {
+            assert_eq!(error.kind_str(), expected_kind);
+            assert!(!error.repair_hint().is_empty());
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn graph_error_preserves_storage_source() -> TestResult {
+        let error = GraphError::storage(
+            "query memory links",
+            DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "bad row".to_owned(),
+            },
+        );
+
+        let Some(source) = error.source() else {
+            return Err("storage cause should be preserved".to_owned());
+        };
+        assert!(source.to_string().contains("malformed row"));
+        assert!(
+            error
+                .to_string()
+                .contains("graph query memory links failed")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn graph_error_preserves_json_source() -> TestResult {
+        let parse_error = malformed_json_error()?;
+        let error = GraphError::json("parse graph snapshot metrics_json", parse_error);
+
+        let Some(source) = error.source() else {
+            return Err("json cause should be preserved".to_owned());
+        };
+        assert!(source.to_string().contains("EOF"));
+        assert!(
+            error
+                .to_string()
+                .contains("graph parse graph snapshot metrics_json failed")
+        );
+
+        Ok(())
+    }
+
+    fn malformed_json_error() -> Result<serde_json::Error, String> {
+        match serde_json::from_str::<serde_json::Value>("{") {
+            Ok(value) => Err(format!("malformed JSON unexpectedly parsed as {value:?}")),
+            Err(error) => Ok(error),
+        }
+    }
 
     fn autolink_memory(
         memory_id: &str,
@@ -4450,10 +4713,10 @@ mod tests {
             0.4,
         )?;
 
-        let report = super::graph_neighborhood(
+        let report = graph_result(super::graph_neighborhood(
             &connection,
             &super::GraphNeighborhoodOptions::new(MEMORY_A),
-        )?;
+        ))?;
 
         assert_eq!(report.status, super::GraphNeighborhoodStatus::Found);
         assert_eq!(report.nodes.len(), 3);
@@ -4530,7 +4793,7 @@ mod tests {
         options.relation = Some(MemoryLinkRelation::Supports);
         options.limit = Some(1);
 
-        let report = super::graph_neighborhood(&connection, &options)?;
+        let report = graph_result(super::graph_neighborhood(&connection, &options))?;
 
         assert_eq!(report.status, super::GraphNeighborhoodStatus::Found);
         assert!(report.limited);
@@ -4549,10 +4812,10 @@ mod tests {
     fn graph_neighborhood_reports_isolated_memory_without_mutation() -> TestResult {
         let connection = open_projection_db()?;
 
-        let report = super::graph_neighborhood(
+        let report = graph_result(super::graph_neighborhood(
             &connection,
             &super::GraphNeighborhoodOptions::new(MEMORY_A),
-        )?;
+        ))?;
 
         assert_eq!(report.status, super::GraphNeighborhoodStatus::Empty);
         assert_eq!(report.nodes.len(), 1);
@@ -4602,13 +4865,13 @@ mod tests {
             }"#,
         )?;
 
-        let report = super::export_graph_snapshot(
+        let report = graph_result(super::export_graph_snapshot(
             &connection,
             &super::GraphExportOptions {
                 workspace_id: WORKSPACE_ID.to_string(),
                 ..Default::default()
             },
-        )?;
+        ))?;
 
         assert_eq!(report.status, super::GraphExportStatus::Exported);
         assert_eq!(report.node_count, 3);
@@ -4631,13 +4894,13 @@ mod tests {
     fn export_graph_snapshot_reports_missing_snapshot_as_degraded() -> TestResult {
         let connection = open_snapshot_db()?;
 
-        let report = super::export_graph_snapshot(
+        let report = graph_result(super::export_graph_snapshot(
             &connection,
             &super::GraphExportOptions {
                 workspace_id: WORKSPACE_ID.to_string(),
                 ..Default::default()
             },
-        )?;
+        ))?;
 
         assert_eq!(report.status, super::GraphExportStatus::NoSnapshot);
         assert_eq!(report.degraded.len(), 1);
@@ -4652,8 +4915,10 @@ mod tests {
     fn refresh_centrality_with_empty_graph_returns_empty_status() -> TestResult {
         let connection = open_projection_db()?;
 
-        let report =
-            super::refresh_centrality(&connection, &super::CentralityRefreshOptions::default())?;
+        let report = graph_result(super::refresh_centrality(
+            &connection,
+            &super::CentralityRefreshOptions::default(),
+        ))?;
 
         assert_eq!(report.status, super::CentralityRefreshStatus::EmptyGraph);
         assert_eq!(report.node_count, 0);
@@ -4686,8 +4951,10 @@ mod tests {
             0.9,
         )?;
 
-        let report =
-            super::refresh_centrality(&connection, &super::CentralityRefreshOptions::default())?;
+        let report = graph_result(super::refresh_centrality(
+            &connection,
+            &super::CentralityRefreshOptions::default(),
+        ))?;
 
         assert_eq!(report.status, super::CentralityRefreshStatus::Refreshed);
         assert_eq!(report.node_count, 3);
@@ -4715,13 +4982,13 @@ mod tests {
             0.9,
         )?;
 
-        let report = super::refresh_centrality(
+        let report = graph_result(super::refresh_centrality(
             &connection,
             &super::CentralityRefreshOptions {
                 dry_run: true,
                 ..Default::default()
             },
-        )?;
+        ))?;
 
         assert_eq!(report.status, super::CentralityRefreshStatus::DryRun);
         assert!(report.dry_run);
@@ -4766,8 +5033,10 @@ mod tests {
             0.9,
         )?;
 
-        let report =
-            super::refresh_centrality(&connection, &super::CentralityRefreshOptions::default())?;
+        let report = graph_result(super::refresh_centrality(
+            &connection,
+            &super::CentralityRefreshOptions::default(),
+        ))?;
 
         assert!(!report.top_pagerank.is_empty());
         assert!(!report.top_betweenness.is_empty());
@@ -4809,8 +5078,10 @@ mod tests {
             0.9,
         )?;
 
-        let report =
-            super::refresh_centrality(&connection, &super::CentralityRefreshOptions::default())?;
+        let report = graph_result(super::refresh_centrality(
+            &connection,
+            &super::CentralityRefreshOptions::default(),
+        ))?;
 
         let summary = report.human_summary();
         assert!(summary.contains("Centrality refresh completed"));
@@ -4834,8 +5105,10 @@ mod tests {
             0.9,
         )?;
 
-        let report =
-            super::refresh_centrality(&connection, &super::CentralityRefreshOptions::default())?;
+        let report = graph_result(super::refresh_centrality(
+            &connection,
+            &super::CentralityRefreshOptions::default(),
+        ))?;
 
         let toon = report.toon_output();
         assert!(toon.starts_with("CENTRALITY_REFRESH|refreshed|2|1|"));
@@ -4857,8 +5130,10 @@ mod tests {
             0.9,
         )?;
 
-        let report =
-            super::refresh_centrality(&connection, &super::CentralityRefreshOptions::default())?;
+        let report = graph_result(super::refresh_centrality(
+            &connection,
+            &super::CentralityRefreshOptions::default(),
+        ))?;
 
         let json = report.data_json();
         assert_eq!(json["command"], "graph centrality refresh");
@@ -4896,11 +5171,11 @@ mod tests {
             0.9,
         )?;
 
-        let report = super::refresh_graph_snapshot(
+        let report = graph_result(super::refresh_graph_snapshot(
             &connection,
             WORKSPACE_ID,
             &super::CentralityRefreshOptions::default(),
-        )?;
+        ))?;
 
         assert_eq!(
             report.centrality.status,
@@ -4945,13 +5220,13 @@ mod tests {
             usize::try_from(stored.node_count).map_err(|error| error.to_string())?
         );
 
-        let export = super::export_graph_snapshot(
+        let export = graph_result(super::export_graph_snapshot(
             &connection,
             &super::GraphExportOptions {
                 workspace_id: WORKSPACE_ID.to_owned(),
                 ..Default::default()
             },
-        )?;
+        ))?;
         assert_eq!(export.status, super::GraphExportStatus::Exported);
 
         connection.close().map_err(|error| error.to_string())
@@ -4966,7 +5241,7 @@ mod tests {
             r#"{"nodes":[],"edges":[]}"#,
         )?;
 
-        let snapshot = super::persist_graph_snapshot(
+        let snapshot = graph_result(super::persist_graph_snapshot(
             &connection,
             WORKSPACE_ID,
             super::GraphSnapshotPersistenceInput {
@@ -4980,7 +5255,7 @@ mod tests {
                 content_hash: "blake3:transactional-graph-snapshot".to_owned(),
                 source_generation: 1,
             },
-        )?;
+        ))?;
 
         assert_eq!(snapshot.snapshot_version, 2);
         assert_eq!(snapshot.graph_type, GraphSnapshotType::MemoryLinks);
@@ -5037,7 +5312,7 @@ mod tests {
                         .map_err(|error| error.to_string())?;
                     barrier.wait();
                     let sequence = u32::try_from(index + 1).map_err(|error| error.to_string())?;
-                    let snapshot = super::persist_graph_snapshot(
+                    let snapshot = graph_result(super::persist_graph_snapshot(
                         &connection,
                         WORKSPACE_ID,
                         super::GraphSnapshotPersistenceInput {
@@ -5055,7 +5330,7 @@ mod tests {
                             content_hash: format!("blake3:linearizable-{index:02}"),
                             source_generation: sequence,
                         },
-                    )?;
+                    ))?;
                     connection.close().map_err(|error| error.to_string())?;
                     Ok(snapshot)
                 },
@@ -5134,14 +5409,14 @@ mod tests {
             0.9,
         )?;
 
-        let report = super::refresh_graph_snapshot(
+        let report = graph_result(super::refresh_graph_snapshot(
             &connection,
             WORKSPACE_ID,
             &super::CentralityRefreshOptions {
                 dry_run: true,
                 ..Default::default()
             },
-        )?;
+        ))?;
 
         assert_eq!(
             report.centrality.status,
@@ -5161,11 +5436,11 @@ mod tests {
     fn refresh_graph_snapshot_disabled_graph_does_not_persist_snapshot() -> TestResult {
         let connection = open_projection_db()?;
 
-        let report = super::refresh_graph_snapshot(
+        let report = graph_result(super::refresh_graph_snapshot(
             &connection,
             WORKSPACE_ID,
             &super::CentralityRefreshOptions::default(),
-        )?;
+        ))?;
 
         assert_eq!(
             report.centrality.status,

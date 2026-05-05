@@ -1054,7 +1054,7 @@ mod tests {
         // Inject the staged binary as a Path-source allowlist entry
         // (DiscoverySource::Path is what `discover_import_binary_from_sources`
         // uses for any element of `trusted_locations`).
-        let result = discover_import_binary_from_sources(None, None, &[binary.clone()]);
+        let result = discover_import_binary_from_sources(None, None, std::slice::from_ref(&binary));
         let error = match result {
             Ok(discovered) => {
                 return Err(format!(

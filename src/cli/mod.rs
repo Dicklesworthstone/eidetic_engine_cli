@@ -9377,7 +9377,7 @@ where
         },
         Err(error) => {
             let domain_error = DomainError::Graph {
-                message: error,
+                message: error.to_string(),
                 repair: Some("ee graph centrality-refresh --dry-run".to_string()),
             };
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
@@ -9650,7 +9650,7 @@ where
         Ok(report) => write_graph_export_report(cli, &report, stdout),
         Err(error) => {
             let domain_error = DomainError::Graph {
-                message: error,
+                message: error.to_string(),
                 repair: Some("ee graph centrality-refresh".to_string()),
             };
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
@@ -9853,7 +9853,7 @@ where
         },
         Err(error) => {
             let domain_error = DomainError::Graph {
-                message: error,
+                message: error.to_string(),
                 repair: Some("ee graph centrality-refresh".to_string()),
             };
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
