@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4e72b0feade81f209832ba1a81d7548dadf29bebd828ac2d81c35fc0adb40f8e # shrinks to redacted stripe_secret_key case
+cc d2e49bdb8394f5bd9b21fe65c272db3f42bfbc6ff95ab01094eefd57068d1d87 # shrinks to redacted password case
+cc 7072a3541fa458c35e6f21e73333638d95ea897042243bb582a504ca9f00d934 # shrinks to redacted api_key case
