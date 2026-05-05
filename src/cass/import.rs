@@ -18,8 +18,9 @@ use super::{
     ImportCursor,
 };
 use crate::db::{
-    CreateEvidenceSpanInput, CreateImportLedgerInput, CreateSessionInput, CreateWorkspaceInput,
-    DatabaseConfig, DbConnection, DbError, UpdateImportLedgerInput,
+    CreateEvidenceSpanInput, CreateImportLedgerInput, CreateSearchIndexJobInput,
+    CreateSessionInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, DbError,
+    SearchIndexJobType, UpdateImportLedgerInput,
 };
 use crate::models::{
     CASS_EVIDENCE_SPAN_SCHEMA_V1, CASS_SESSION_SCHEMA_V1, EvidenceId, IMPORT_CASS_SCHEMA_V1,
@@ -64,6 +65,7 @@ impl CassImportOptions {
 pub struct ImportedCassSession {
     pub source_path: String,
     pub session_id: Option<String>,
+    pub index_job_id: Option<String>,
     pub status: ImportSessionStatus,
     pub spans_imported: u32,
     pub message_count: Option<u32>,
@@ -102,6 +104,8 @@ pub struct CassImportReport {
     pub sessions_imported: u32,
     pub sessions_skipped: u32,
     pub spans_imported: u32,
+    pub index_jobs_queued: u32,
+    pub index_required_action: Option<String>,
     pub status: String,
     pub sessions: Vec<ImportedCassSession>,
 }
@@ -122,11 +126,14 @@ impl CassImportReport {
             "sessionsImported": self.sessions_imported,
             "sessionsSkipped": self.sessions_skipped,
             "spansImported": self.spans_imported,
+            "indexJobsQueued": self.index_jobs_queued,
+            "indexRequiredAction": self.index_required_action,
             "status": self.status,
             "sessions": self.sessions.iter().map(|session| {
                 json!({
                     "sourcePath": session.source_path,
                     "sessionId": session.session_id,
+                    "indexJobId": session.index_job_id,
                     "status": session.status.as_str(),
                     "spansImported": session.spans_imported,
                     "messageCount": session.message_count,
@@ -140,11 +147,12 @@ impl CassImportReport {
     pub fn human_summary(&self) -> String {
         let mode = if self.dry_run { "DRY RUN: " } else { "" };
         format!(
-            "{mode}CASS import {status}: {imported} imported, {skipped} skipped, {spans} spans from {discovered} discovered sessions\n",
+            "{mode}CASS import {status}: {imported} imported, {skipped} skipped, {spans} spans, {index_jobs} index jobs from {discovered} discovered sessions\n",
             status = self.status,
             imported = self.sessions_imported,
             skipped = self.sessions_skipped,
             spans = self.spans_imported,
+            index_jobs = self.index_jobs_queued,
             discovered = self.sessions_discovered,
         )
     }
@@ -251,6 +259,7 @@ pub fn import_cass_sessions(
     let mut imported = 0_u32;
     let mut skipped = 0_u32;
     let mut spans_imported = 0_u32;
+    let mut index_jobs_queued = 0_u32;
 
     let import_result: Result<(), CassImportError> = (|| {
         for session in sessions {
@@ -263,6 +272,7 @@ pub fn import_cass_sessions(
                 session_reports.push(ImportedCassSession {
                     source_path: session.source_path,
                     session_id: Some(existing.id),
+                    index_job_id: None,
                     status: ImportSessionStatus::Skipped,
                     spans_imported: 0,
                     message_count: session.message_count,
@@ -271,6 +281,7 @@ pub fn import_cass_sessions(
             }
 
             let session_id = stable_session_id(&session.source_path);
+            let index_job_id = stable_search_index_job_id(&workspace_id, &session_id);
             let spans = if options.include_spans {
                 view_session_spans(client, &session.source_path)?
             } else {
@@ -285,6 +296,10 @@ pub fn import_cass_sessions(
                         &evidence_input(&workspace_id, &session_id, span),
                     )?;
                 }
+                connection.insert_search_index_job(
+                    &index_job_id,
+                    &search_index_job_input(&workspace_id, &session_id),
+                )?;
                 Ok(())
             })?;
 
@@ -296,9 +311,11 @@ pub fn import_cass_sessions(
 
             cursor.record_imported(&session.source_path);
             imported = imported.saturating_add(1);
+            index_jobs_queued = index_jobs_queued.saturating_add(1);
             session_reports.push(ImportedCassSession {
                 source_path: session.source_path,
                 session_id: Some(session_id),
+                index_job_id: Some(index_job_id),
                 status: ImportSessionStatus::Imported,
                 spans_imported: session_spans,
                 message_count: session.message_count,
@@ -339,6 +356,8 @@ pub fn import_cass_sessions(
         sessions_imported: imported,
         sessions_skipped: skipped,
         spans_imported,
+        index_jobs_queued,
+        index_required_action: Some(index_required_action(&workspace_path, Some(&database_path))),
         status: "completed".to_string(),
         sessions: session_reports,
     })
@@ -553,17 +572,30 @@ fn dry_run_report(
         sessions_imported: 0,
         sessions_skipped: 0,
         spans_imported: 0,
+        index_jobs_queued: 0,
+        index_required_action: None,
         status: "dry_run".to_string(),
         sessions: sessions
             .into_iter()
             .map(|session| ImportedCassSession {
                 source_path: session.source_path,
                 session_id: None,
+                index_job_id: None,
                 status: ImportSessionStatus::WouldImport,
                 spans_imported: 0,
                 message_count: session.message_count,
             })
             .collect(),
+    }
+}
+
+fn search_index_job_input(workspace_id: &str, session_id: &str) -> CreateSearchIndexJobInput {
+    CreateSearchIndexJobInput {
+        workspace_id: workspace_id.to_string(),
+        job_type: SearchIndexJobType::SingleDocument,
+        document_source: Some("session".to_string()),
+        document_id: Some(session_id.to_string()),
+        documents_total: 1,
     }
 }
 
@@ -815,9 +847,25 @@ fn stable_evidence_id(session_id: &str, span_id: &str) -> String {
     EvidenceId::from_uuid(stable_uuid(&format!("evidence:{session_id}:{span_id}"))).to_string()
 }
 
+fn stable_search_index_job_id(workspace_id: &str, session_id: &str) -> String {
+    let hash = blake3_hex(&format!("search-index-job:{workspace_id}:{session_id}"));
+    format!("sidx_{}", &hash[..26])
+}
+
 fn stable_import_id(source_id: &str) -> String {
     let hash = blake3_hex(&format!("import:{source_id}"));
     format!("imp_{}", &hash[..26])
+}
+
+fn index_required_action(workspace_path: &Path, database_path: Option<&Path>) -> String {
+    let workspace = workspace_path.to_string_lossy();
+    let Some(database_path) = database_path else {
+        return format!("ee index rebuild --workspace {workspace}");
+    };
+    format!(
+        "ee index rebuild --workspace {workspace} --database {}",
+        database_path.to_string_lossy()
+    )
 }
 
 fn stable_uuid(input: &str) -> Uuid {
@@ -852,6 +900,13 @@ fn saturating_len(len: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
     use super::*;
 
     type TestResult = Result<(), String>;
@@ -873,6 +928,58 @@ mod tests {
         } else {
             Err(format!("{context}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    #[cfg(unix)]
+    type TestResultWith<T> = Result<T, String>;
+
+    #[cfg(unix)]
+    fn unique_test_dir(prefix: &str) -> TestResultWith<PathBuf> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("clock moved backwards: {error}"))?
+            .as_nanos();
+        let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+        Ok(target_dir
+            .join("ee-cass-import-tests")
+            .join(format!("{prefix}-{}-{now}", std::process::id())))
+    }
+
+    #[cfg(unix)]
+    fn write_fake_cass_binary(
+        path: &Path,
+        workspace_path: &Path,
+        session_path: &Path,
+    ) -> TestResult {
+        let sessions = json!({
+            "sessions": [{
+                "path": session_path.to_string_lossy(),
+                "workspace": workspace_path.to_string_lossy(),
+                "agent": "codex",
+                "modified": "2026-05-05T00:00:00Z",
+                "message_count": 1,
+                "token_count": 8
+            }]
+        });
+        let view = json!({
+            "path": session_path.to_string_lossy(),
+            "lines": [{
+                "line": 1,
+                "content": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"index me\"}}"
+            }]
+        });
+        let script = format!(
+            "#!/bin/sh\ncase \"$1\" in\n  sessions) printf '%s\\n' '{}';;\n  view) printf '%s\\n' '{}';;\n  *) printf 'unexpected cass command: %s\\n' \"$1\" >&2; exit 2;;\nesac\n",
+            sessions, view
+        );
+        fs::write(path, script).map_err(|error| error.to_string())?;
+        let mut permissions = fs::metadata(path)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).map_err(|error| error.to_string())
     }
 
     #[test]
@@ -964,6 +1071,8 @@ mod tests {
         ensure_equal(&report.dry_run, &true, "dry run")?;
         ensure_equal(&report.database_path, &None, "no database path")?;
         ensure_equal(&report.sessions_discovered, &1, "discovered")?;
+        ensure_equal(&report.index_jobs_queued, &0, "dry-run index jobs")?;
+        ensure_equal(&report.index_required_action, &None, "dry-run index action")?;
         ensure_equal(
             &report.sessions[0].status,
             &ImportSessionStatus::WouldImport,
@@ -984,10 +1093,15 @@ mod tests {
             sessions_imported: 1,
             sessions_skipped: 0,
             spans_imported: 2,
+            index_jobs_queued: 1,
+            index_required_action: Some(
+                "ee index rebuild --workspace /tmp/work --database /tmp/work/.ee/ee.db".to_string(),
+            ),
             status: "completed".to_string(),
             sessions: vec![ImportedCassSession {
                 source_path: "/tmp/a.jsonl".to_string(),
                 session_id: Some("sess_abc".to_string()),
+                index_job_id: Some("sidx_abc".to_string()),
                 status: ImportSessionStatus::Imported,
                 spans_imported: 2,
                 message_count: Some(3),
@@ -997,7 +1111,116 @@ mod tests {
         let json = report.data_json();
         ensure_equal(&json["command"], &json!("import cass"), "command")?;
         ensure_equal(&json["schema"], &json!("ee.import.cass.v1"), "schema")?;
-        ensure_equal(&json["sessions"][0]["status"], &json!("imported"), "status")
+        ensure_equal(&json["indexJobsQueued"], &json!(1), "index jobs")?;
+        ensure_equal(
+            &json["indexRequiredAction"],
+            &json!("ee index rebuild --workspace /tmp/work --database /tmp/work/.ee/ee.db"),
+            "index action",
+        )?;
+        ensure_equal(&json["sessions"][0]["status"], &json!("imported"), "status")?;
+        ensure_equal(
+            &json["sessions"][0]["indexJobId"],
+            &json!("sidx_abc"),
+            "session index job",
+        )
+    }
+
+    #[test]
+    fn search_index_job_input_targets_imported_session_document() -> TestResult {
+        let input = search_index_job_input("wsp_abc", "sess_abc");
+
+        ensure_equal(&input.workspace_id.as_str(), &"wsp_abc", "workspace")?;
+        ensure_equal(
+            &input.job_type,
+            &SearchIndexJobType::SingleDocument,
+            "job type",
+        )?;
+        ensure_equal(
+            &input.document_source.as_deref(),
+            &Some("session"),
+            "document source",
+        )?;
+        ensure_equal(
+            &input.document_id.as_deref(),
+            &Some("sess_abc"),
+            "document id",
+        )?;
+        ensure_equal(&input.documents_total, &1, "document count")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_persists_pending_session_index_job() -> TestResult {
+        let root = unique_test_dir("queue-index-job")?;
+        let bin_dir = root.join("bin");
+        let workspace_path = root.join("workspace");
+        let session_path = root.join("session.jsonl");
+        fs::create_dir_all(&bin_dir).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&workspace_path).map_err(|error| error.to_string())?;
+        fs::write(&session_path, "{}\n").map_err(|error| error.to_string())?;
+        let mut bin_permissions = fs::metadata(&bin_dir)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        bin_permissions.set_mode(0o755);
+        fs::set_permissions(&bin_dir, bin_permissions).map_err(|error| error.to_string())?;
+
+        let cass_binary = bin_dir.join("cass");
+        write_fake_cass_binary(&cass_binary, &workspace_path, &session_path)?;
+        let database_path = root.join("ee.db");
+        let client = CassClient::with_binary(cass_binary).with_timeout(Duration::from_secs(5));
+        let options = CassImportOptions {
+            workspace_path: workspace_path.clone(),
+            database_path: Some(database_path.clone()),
+            limit: 1,
+            dry_run: false,
+            include_spans: true,
+        };
+
+        let report = import_cass_sessions(&client, &options).map_err(|error| error.to_string())?;
+
+        ensure_equal(&report.sessions_imported, &1, "sessions imported")?;
+        ensure_equal(&report.spans_imported, &1, "spans imported")?;
+        ensure_equal(&report.index_jobs_queued, &1, "index jobs queued")?;
+        let imported_session = report
+            .sessions
+            .first()
+            .ok_or_else(|| "import report should include imported session".to_string())?;
+        let session_id = imported_session
+            .session_id
+            .as_deref()
+            .ok_or_else(|| "imported session should include id".to_string())?;
+        let index_job_id = imported_session
+            .index_job_id
+            .as_deref()
+            .ok_or_else(|| "imported session should include index job id".to_string())?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(
+            &workspace_path
+                .canonicalize()
+                .map_err(|error| error.to_string())?
+                .to_string_lossy(),
+        );
+        let jobs = connection
+            .list_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&jobs.len(), &1, "stored index jobs")?;
+        let job = jobs
+            .first()
+            .ok_or_else(|| "stored index job should exist".to_string())?;
+        ensure_equal(&job.id.as_str(), &index_job_id, "stored index job id")?;
+        ensure_equal(&job.status.as_str(), &"pending", "job status")?;
+        ensure_equal(
+            &job.document_source.as_deref(),
+            &Some("session"),
+            "job source",
+        )?;
+        ensure_equal(
+            &job.document_id.as_deref(),
+            &Some(session_id),
+            "job document",
+        )
     }
 
     #[test]
@@ -1006,6 +1229,7 @@ mod tests {
         let session_id = stable_session_id("/tmp/session.jsonl");
         let evidence_id = stable_evidence_id(&session_id, "span-1");
         let import_id = stable_import_id("cass://sessions?workspace=/tmp/work&limit=10");
+        let index_job_id = stable_search_index_job_id(&workspace_id, &session_id);
 
         ensure(
             workspace_id.starts_with("wsp_") && workspace_id.len() == 30,
@@ -1022,6 +1246,10 @@ mod tests {
         ensure(
             import_id.starts_with("imp_") && import_id.len() == 30,
             "import id shape",
+        )?;
+        ensure(
+            index_job_id.starts_with("sidx_") && index_job_id.len() == 31,
+            "search index job id shape",
         )
     }
 }
