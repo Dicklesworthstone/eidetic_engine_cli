@@ -691,6 +691,16 @@ fn redact_raw_api_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (Strin
         ("AKIA", "aws_access_key", 16),
         // AWS temporary credentials: ASIA...
         ("ASIA", "aws_access_key", 16),
+        // Stripe live secret keys: sk_live_...
+        ("sk_live_", "stripe_secret_key", 24),
+        // Stripe test secret keys: sk_test_...
+        ("sk_test_", "stripe_secret_key", 24),
+        // Stripe live restricted keys: rk_live_...
+        ("rk_live_", "stripe_restricted_key", 24),
+        // Stripe test restricted keys: rk_test_...
+        ("rk_test_", "stripe_restricted_key", 24),
+        // GCP API keys: AIza...
+        ("AIza", "gcp_api_key", 35),
     ];
 
     for &(prefix, code, min_suffix_len) in RAW_TOKEN_PATTERNS {
@@ -1120,6 +1130,31 @@ mod tests {
         assert!(report.redacted_reasons.contains(&"aws_access_key"));
         assert!(!report.content.contains(akia));
         assert!(!report.content.contains(asia));
+    }
+
+    #[test]
+    fn secret_redactor_masks_stripe_keys() {
+        let live = concat!("sk_", "live_", "eetest", "eetest", "eetest", "ee");
+        let test = concat!("sk_", "test_", "eetest", "eetest", "eetest", "ee");
+        let rk = concat!("rk_", "live_", "eetest", "eetest", "eetest", "ee");
+        let report = redact_secret_like_content(&format!("Stripe: {live}, {test}, {rk}."));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"stripe_secret_key"));
+        assert!(report.redacted_reasons.contains(&"stripe_restricted_key"));
+        assert!(!report.content.contains(live));
+        assert!(!report.content.contains(test));
+        assert!(!report.content.contains(rk));
+    }
+
+    #[test]
+    fn secret_redactor_masks_gcp_api_keys() {
+        let gcp = "AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe";
+        let report = redact_secret_like_content(&format!("GCP key: {gcp}."));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"gcp_api_key"));
+        assert!(!report.content.contains(gcp));
     }
 
     #[test]
