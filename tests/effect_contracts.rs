@@ -10,6 +10,12 @@ use std::path::Path;
 use std::process::Command;
 
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 161;
+const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
+    "daemon background",
+    "daemon foreground decay_sweep",
+    "daemon foreground non-decay",
+];
 
 type TestResult = Result<(), String>;
 
@@ -390,7 +396,11 @@ fn effect_manifest_covers_all_normalized_cli_command_paths() -> TestResult {
     use ee::core::effect::EffectManifest;
 
     let commands = command_paths_from_cli_extract_function()?;
-    ensure(commands.len(), 145, "normalized CLI command count")?;
+    ensure(
+        commands.len(),
+        NORMALIZED_CLI_COMMAND_COUNT,
+        "normalized CLI command count",
+    )?;
 
     let manifest = EffectManifest::build();
     let missing = commands
@@ -416,19 +426,23 @@ fn effect_manifest_has_no_undocumented_extra_cli_paths() -> TestResult {
 
     let commands = command_paths_from_cli_extract_function()?;
     let command_set = commands.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let allowed_manifest_only = MANIFEST_ONLY_OPTION_MODE_COMMANDS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
 
     let manifest = EffectManifest::build();
     let manifest_only = manifest
         .command_paths()
         .into_iter()
         .filter(|command| !command_set.contains(command))
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
 
-    if manifest_only.is_empty() {
+    if manifest_only == allowed_manifest_only {
         Ok(())
     } else {
         Err(format!(
-            "effect manifest has command paths not emitted by CLI normalization: {manifest_only:?}"
+            "effect manifest has unexpected command paths not emitted by CLI normalization: {manifest_only:?}"
         ))
     }
 }
