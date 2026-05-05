@@ -2013,7 +2013,9 @@ impl ManualRunner {
             .clone()
             .or_else(|| Some("ee-steward".to_owned()));
 
-        let report = match run_score_decay_job(&connection, &options) {
+        let mut preflight_options = options.clone();
+        preflight_options.dry_run = true;
+        let preflight_report = match run_score_decay_job(&connection, &preflight_options) {
             Ok(report) => report,
             Err(message) => {
                 return (
@@ -2029,25 +2031,55 @@ impl ManualRunner {
             }
         };
 
-        let scanned_count = usize_to_u64(report.scanned_count);
+        let scanned_count = usize_to_u64(preflight_report.scanned_count);
         budget.record(ResourceType::Items, scanned_count);
-        budget.record(ResourceType::TimeMs, millis_to_u64(started.elapsed()));
-        let details = report.data_json();
+        let preflight_elapsed_ms = millis_to_u64(started.elapsed());
+        budget.record(ResourceType::TimeMs, preflight_elapsed_ms);
 
-        if budget.should_cancel() {
+        if budget_cancels_before_decay_mutation(budget) {
             return (
                 RunOutcome::Cancelled,
                 Some(scanned_count),
-                Some("Budget exceeded".to_owned()),
-                Some(details),
+                Some("Budget exceeded before durable decay mutations".to_owned()),
+                Some(preflight_report.data_json()),
             );
         }
+
+        if options.dry_run {
+            return (
+                RunOutcome::Success,
+                Some(scanned_count),
+                None,
+                Some(preflight_report.data_json()),
+            );
+        }
+
+        let report = match run_score_decay_job(&connection, &options) {
+            Ok(report) => report,
+            Err(message) => {
+                return (
+                    RunOutcome::Failed,
+                    None,
+                    Some(message.clone()),
+                    Some(json!({
+                        "schema": "ee.steward.decay_sweep.error.v1",
+                        "code": "decay_sweep_handler_failed",
+                        "message": message,
+                    })),
+                );
+            }
+        };
+        let total_elapsed_ms = millis_to_u64(started.elapsed());
+        budget.record(
+            ResourceType::TimeMs,
+            total_elapsed_ms.saturating_sub(preflight_elapsed_ms),
+        );
 
         (
             RunOutcome::Success,
             Some(scanned_count),
             None,
-            Some(details),
+            Some(report.data_json()),
         )
     }
 
@@ -2177,6 +2209,14 @@ fn usize_to_u64(value: usize) -> u64 {
 
 fn millis_to_u64(elapsed: std::time::Duration) -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn budget_cancels_before_decay_mutation(budget: &JobBudgetState) -> bool {
+    budget.should_cancel()
+        || budget
+            .budgets
+            .iter()
+            .any(|limit| limit.on_exceed == BudgetExceedAction::Cancel && limit.limit == 0)
 }
 
 // ============================================================================
@@ -3584,6 +3624,89 @@ mod tests {
             true,
             "runner applied confidence decay",
         )
+    }
+
+    #[test]
+    fn manual_runner_decay_sweep_zero_budget_cancels_before_mutation() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        {
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            connection
+                .insert_workspace(
+                    SCORE_WORKSPACE_ID,
+                    &CreateWorkspaceInput {
+                        path: temp.path().to_string_lossy().into_owned(),
+                        name: Some("score-decay-zero-budget".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+            insert_score_feedback(
+                &connection,
+                "fb_runbudget00000000000000001",
+                SCORE_MEMORY_A,
+                "harmful",
+                1.0,
+            )?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_as_of("2099-01-01T00:00:00Z")
+            .with_time_limit(0)
+            .with_actor("zero-budget-test");
+        let mut runner = ManualRunner::new(opts);
+        let result = runner.run_job_type(JobType::DecaySweep, Some("zero budget".to_owned()));
+
+        ensure(result.job_type, JobType::DecaySweep, "job type")?;
+        ensure(result.outcome, RunOutcome::Cancelled, "zero-budget outcome")?;
+        ensure(result.items_processed, Some(1), "preflight scanned count")?;
+        ensure(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("before durable decay mutations")),
+            true,
+            "cancel reason",
+        )?;
+        let details = result
+            .details
+            .ok_or_else(|| "score decay preflight details missing".to_owned())?;
+        ensure(
+            details["summary"]["appliedCount"].as_u64(),
+            Some(0),
+            "preflight applied count",
+        )?;
+        ensure(
+            details["durableMutation"].as_bool(),
+            Some(false),
+            "preflight durable mutation",
+        )?;
+
+        let connection =
+            DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+        let memory = connection
+            .get_memory(SCORE_MEMORY_A)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory missing after zero-budget runner".to_owned())?;
+        ensure((memory.confidence - 0.8).abs() < 0.0001, true, "unchanged")?;
+        let events = connection
+            .list_feedback_events_for_target("memory", SCORE_MEMORY_A)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            events.iter().all(|event| event.applied_at.is_none()),
+            true,
+            "feedback remains unapplied",
+        )?;
+        let audit = connection
+            .list_audit_by_target("memory", SCORE_MEMORY_A, None)
+            .map_err(|error| error.to_string())?;
+        ensure(audit.is_empty(), true, "no score-decay audit rows")
     }
 
     // ========================================================================
