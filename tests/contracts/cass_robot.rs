@@ -85,8 +85,8 @@ const CASS_ROBOT_REQUIREMENTS: &[ContractRequirement] = &[
         id: "CASS-SEARCH-003",
         section: "search",
         level: RequirementLevel::Must,
-        description: "undocumented search fields fail loudly instead of being silently dropped",
-        tested_by: &["cass_search_parser_rejects_contract_surprises"],
+        description: "additive search fields remain forward-compatible while known-field type drift fails loudly",
+        tested_by: &["cass_search_parser_handles_contract_extensions"],
     },
     ContractRequirement {
         id: "CASS-SEARCH-004",
@@ -249,6 +249,13 @@ fn ensure_env_overrides(invocation: &CassInvocation) -> TestResult {
         actual? == STABLE_ENV_OVERRIDES,
         "cass invocations must carry the stable noninteractive env overrides",
     )
+}
+
+fn ensure_search_accepts(value: &Value, message: &str) -> TestResult {
+    let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    CassSearchResponse::from_robot_json(&bytes)
+        .map(|_| ())
+        .map_err(|error| format!("{message}: {error}"))
 }
 
 fn ensure_search_rejects(value: &Value, message: &str) -> TestResult {
@@ -608,7 +615,7 @@ fn cass_search_robot_fixture_conforms_to_schema_snapshot_and_parser() -> TestRes
 }
 
 #[test]
-fn cass_search_parser_rejects_contract_surprises() -> TestResult {
+fn cass_search_parser_handles_contract_extensions() -> TestResult {
     let search = fixture("search_robot.json")?;
 
     let mut root_extra = search.clone();
@@ -616,7 +623,7 @@ fn cass_search_parser_rejects_contract_surprises() -> TestResult {
         .as_object_mut()
         .ok_or_else(|| "root fixture must be an object".to_string())?
         .insert("surprise".to_string(), Value::Bool(true));
-    ensure_search_rejects(&root_extra, "undocumented root field must be rejected")?;
+    ensure_search_accepts(&root_extra, "additive root field must be tolerated")?;
 
     let mut hit_extra = search.clone();
     let hit = hit_extra
@@ -626,7 +633,7 @@ fn cass_search_parser_rejects_contract_surprises() -> TestResult {
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "search fixture must contain a hit object".to_string())?;
     hit.insert("surprise".to_string(), Value::Bool(true));
-    ensure_search_rejects(&hit_extra, "undocumented hit field must be rejected")?;
+    ensure_search_accepts(&hit_extra, "additive hit field must be tolerated")?;
 
     let mut aggregation_extra = search.clone();
     let bucket = aggregation_extra
@@ -638,9 +645,9 @@ fn cass_search_parser_rejects_contract_surprises() -> TestResult {
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "search fixture must contain an aggregation bucket".to_string())?;
     bucket.insert("surprise".to_string(), Value::Bool(true));
-    ensure_search_rejects(
+    ensure_search_accepts(
         &aggregation_extra,
-        "undocumented aggregation bucket field must be rejected",
+        "additive aggregation bucket field must be tolerated",
     )?;
 
     let mut meta_extra = search.clone();
@@ -649,7 +656,7 @@ fn cass_search_parser_rejects_contract_surprises() -> TestResult {
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "search fixture must contain _meta object".to_string())?;
     meta.insert("surprise".to_string(), Value::Bool(true));
-    ensure_search_rejects(&meta_extra, "undocumented _meta field must be rejected")?;
+    ensure_search_accepts(&meta_extra, "additive _meta field must be tolerated")?;
 
     let mut cache_stats_extra = search.clone();
     let cache_stats = cache_stats_extra
@@ -657,9 +664,9 @@ fn cass_search_parser_rejects_contract_surprises() -> TestResult {
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "search fixture must contain _meta.cache_stats object".to_string())?;
     cache_stats.insert("surprise".to_string(), Value::Bool(true));
-    ensure_search_rejects(
+    ensure_search_accepts(
         &cache_stats_extra,
-        "undocumented cache_stats field must be rejected",
+        "additive cache_stats field must be tolerated",
     )?;
 
     let mut timing_extra = search.clone();
@@ -668,7 +675,7 @@ fn cass_search_parser_rejects_contract_surprises() -> TestResult {
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "search fixture must contain _meta.timing object".to_string())?;
     timing.insert("surprise".to_string(), Value::Bool(true));
-    ensure_search_rejects(&timing_extra, "undocumented timing field must be rejected")?;
+    ensure_search_accepts(&timing_extra, "additive timing field must be tolerated")?;
 
     let mut freshness_extra = search;
     let index_freshness = freshness_extra
@@ -676,10 +683,20 @@ fn cass_search_parser_rejects_contract_surprises() -> TestResult {
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "search fixture must contain _meta.index_freshness object".to_string())?;
     index_freshness.insert("surprise".to_string(), Value::Bool(true));
-    ensure_search_rejects(
+    ensure_search_accepts(
         &freshness_extra,
-        "undocumented index_freshness field must be rejected",
-    )
+        "additive index_freshness field must be tolerated",
+    )?;
+
+    let mut type_drift = fixture("search_robot.json")?;
+    type_drift
+        .as_object_mut()
+        .ok_or_else(|| "root fixture must be an object".to_string())?
+        .insert(
+            "limit".to_string(),
+            Value::String("not-a-number".to_string()),
+        );
+    ensure_search_rejects(&type_drift, "known field type drift must still be rejected")
 }
 
 #[test]
