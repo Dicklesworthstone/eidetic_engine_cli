@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
-const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 7;
+const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 6;
 const SUCCESS_EXIT: i32 = 0;
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {

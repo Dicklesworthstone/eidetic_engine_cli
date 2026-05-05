@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
 
-const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 7;
+const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 6;
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {

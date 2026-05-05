@@ -244,7 +244,7 @@ fn science_status_json_matches_fixture() -> TestResult {
 #[test]
 fn eval_run_simple_json_reports_unavailable() -> TestResult {
     let payload =
-        parse_degraded_json_stdout(run_ee(&["--json", "eval", "run"])?, "ee --json eval run", 7)?;
+        parse_degraded_json_stdout(run_ee(&["--json", "eval", "run"])?, "ee --json eval run", 6)?;
     assert_eval_unavailable_payload(&payload, "eval run", "eval run unavailable")
 }
 
@@ -253,7 +253,7 @@ fn eval_run_science_json_reports_unavailable_without_metrics() -> TestResult {
     let payload = parse_degraded_json_stdout(
         run_ee(&["--json", "eval", "run", "--science"])?,
         "ee --json eval run --science",
-        7,
+        6,
     )?;
     assert_eval_unavailable_payload(&payload, "eval run", "eval run --science unavailable")
 }
@@ -263,7 +263,7 @@ fn eval_list_json_reports_unavailable() -> TestResult {
     let payload = parse_degraded_json_stdout(
         run_ee(&["--json", "eval", "list"])?,
         "ee --json eval list",
-        7,
+        6,
     )?;
     assert_eval_unavailable_payload(&payload, "eval list", "eval list unavailable")
 }
