@@ -2830,7 +2830,10 @@ fn duration_from_seconds(seconds: u64, field: &str) -> Result<chrono::Duration, 
         message: format!("Curation TTL {field} exceeds supported duration range."),
         repair: Some("Repair the curation_ttl_policies table.".to_owned()),
     })?;
-    Ok(chrono::Duration::seconds(seconds))
+    chrono::Duration::try_seconds(seconds).ok_or_else(|| DomainError::Storage {
+        message: format!("Curation TTL {field} exceeds supported duration range."),
+        repair: Some("Repair the curation_ttl_policies table.".to_owned()),
+    })
 }
 
 fn validation_issue(
@@ -2874,6 +2877,13 @@ fn validation_repair(error: &CandidateValidationError) -> &'static str {
         }
         CandidateValidationError::PromptInjectionFlagged { .. } => {
             "Quarantine the source evidence and recreate the candidate from trusted spans."
+        }
+        CandidateValidationError::InvalidTtlBaseTimestamp { .. } => {
+            "Use an RFC 3339 timestamp as the TTL base time."
+        }
+        CandidateValidationError::TtlSecondsOutOfRange { .. }
+        | CandidateValidationError::TtlExpiryOutOfRange { .. } => {
+            "Use a TTL that fits within the supported timestamp range."
         }
         CandidateValidationError::InvalidStatusTransition { .. } => {
             "Refresh the queue and validate an eligible candidate."
@@ -3598,6 +3608,20 @@ mod tests {
     type TestResult = Result<(), String>;
 
     #[test]
+    fn duration_from_seconds_rejects_values_outside_chrono_range() -> TestResult {
+        let error = match super::duration_from_seconds(u64::MAX, "threshold_seconds") {
+            Ok(_) => return Err("out-of-range TTL should be rejected".to_owned()),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.message(),
+            "Curation TTL threshold_seconds exceeds supported duration range."
+        );
+        Ok(())
+    }
+
+    #[test]
     fn candidate_summary_marks_pending_as_validate_before_apply() {
         let stored = StoredCurationCandidate {
             id: "curate_00000000000000000000000000".to_owned(),
@@ -3664,6 +3688,7 @@ mod tests {
                     level: "procedural".to_owned(),
                     kind: "rule".to_owned(),
                     content: "Run cargo fmt --check before release.".to_owned(),
+                    workflow_id: None,
                     confidence: 0.7,
                     utility: 0.6,
                     importance: 0.5,
@@ -3770,6 +3795,7 @@ mod tests {
                     level: "procedural".to_owned(),
                     kind: "rule".to_owned(),
                     content: "Review queue sort/group fixture.".to_owned(),
+                    workflow_id: None,
                     confidence: 0.7,
                     utility: 0.6,
                     importance: 0.5,
@@ -4587,6 +4613,7 @@ mod tests {
                     level: "procedural".to_owned(),
                     kind: "rule".to_owned(),
                     content: "Run cargo fmt --check before release.".to_owned(),
+                    workflow_id: None,
                     confidence: 0.7,
                     utility: 0.6,
                     importance: 0.5,

@@ -14,6 +14,8 @@ use std::str::FromStr;
 use chrono::{DateTime, Duration};
 use serde::Serialize;
 
+use crate::models::ERROR_SCHEMA_V1;
+
 pub const SUBSYSTEM: &str = "curate";
 pub const DEFAULT_SPECIFICITY_MIN: f32 = 0.45;
 pub const CANDIDATE_TOO_GENERIC_CODE: &str = "candidate_too_generic";
@@ -68,6 +70,34 @@ const FILE_EXTENSIONS: &[&str] = &[
 const FILE_PREFIXES: &[&str] = &[
     "/", "./", "../", ".beads/", ".github/", "crates/", "docs/", "src/", "target/", "tests/",
 ];
+
+fn serialize_curate_json_or_error<T>(
+    value: &T,
+    type_name: &str,
+    expected_schema: Option<&str>,
+) -> String
+where
+    T: Serialize,
+{
+    match serde_json::to_string(value) {
+        Ok(json) => json,
+        Err(error) => serde_json::json!({
+            "schema": ERROR_SCHEMA_V1,
+            "error": {
+                "code": "serialization_failed",
+                "message": format!("Failed to serialize {type_name} as JSON."),
+                "severity": "high",
+                "repair": "Fix the curation serializer; refusing to emit an empty object.",
+                "details": {
+                    "type": type_name,
+                    "expectedSchema": expected_schema,
+                    "serializerError": error.to_string(),
+                }
+            }
+        })
+        .to_string(),
+    }
+}
 
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
@@ -496,6 +526,17 @@ pub enum CandidateValidationError {
         field: &'static str,
         rejected_reasons: Vec<&'static str>,
     },
+    InvalidTtlBaseTimestamp {
+        value: String,
+        reason: String,
+    },
+    TtlSecondsOutOfRange {
+        value: String,
+    },
+    TtlExpiryOutOfRange {
+        now: String,
+        ttl_seconds: String,
+    },
     InvalidStatusTransition {
         from: CandidateStatus,
         to: CandidateStatus,
@@ -571,6 +612,18 @@ impl fmt::Display for CandidateValidationError {
                     rejected_reasons.join(", ")
                 )
             }
+            Self::InvalidTtlBaseTimestamp { value, reason } => {
+                write!(f, "invalid TTL base timestamp `{value}`: {reason}")
+            }
+            Self::TtlSecondsOutOfRange { value } => {
+                write!(f, "TTL seconds `{value}` exceeds supported duration range")
+            }
+            Self::TtlExpiryOutOfRange { now, ttl_seconds } => {
+                write!(
+                    f,
+                    "TTL expiry for base timestamp `{now}` plus `{ttl_seconds}` seconds is out of range"
+                )
+            }
             Self::InvalidStatusTransition { from, to } => {
                 write!(f, "cannot transition from {from} to {to}")
             }
@@ -602,6 +655,9 @@ impl CandidateValidationError {
             Self::ContentForbiddenForType { .. } => "content_forbidden_for_type",
             Self::CandidateTooGeneric { .. } => CANDIDATE_TOO_GENERIC_CODE,
             Self::PromptInjectionFlagged { .. } => "candidate_prompt_injection_flagged",
+            Self::InvalidTtlBaseTimestamp { .. } => "invalid_ttl_base_timestamp",
+            Self::TtlSecondsOutOfRange { .. } => "ttl_seconds_out_of_range",
+            Self::TtlExpiryOutOfRange { .. } => "ttl_expiry_out_of_range",
             Self::InvalidStatusTransition { .. } => "invalid_status_transition",
             Self::CandidateExpired => "candidate_expired",
             Self::CandidateAlreadyTerminal { .. } => "candidate_already_terminal",
@@ -631,14 +687,14 @@ impl CandidateStatus {
     #[must_use]
     pub const fn can_transition_to(self, target: Self) -> bool {
         match (self, target) {
+            // Same non-terminal state is always allowed (no-op).
+            (Self::Pending, Self::Pending) | (Self::Approved, Self::Approved) => true,
             // From pending: can go to approved, rejected, or expired
             (Self::Pending, Self::Approved | Self::Rejected | Self::Expired) => true,
             // From approved: can go to applied or rejected
             (Self::Approved, Self::Applied | Self::Rejected) => true,
             // Terminal states cannot transition
             (Self::Rejected | Self::Expired | Self::Applied, _) => false,
-            // Same state is always allowed (no-op)
-            (from, to) if from as u8 == to as u8 => true,
             _ => false,
         }
     }
@@ -782,13 +838,19 @@ impl ReviewQueueState {
 
     #[must_use]
     pub const fn can_transition_to(self, target: Self) -> bool {
-        if self as u8 == target as u8 {
-            return true;
-        }
-        if self.is_terminal() {
-            return false;
-        }
         match self {
+            Self::New if matches!(target, Self::New) => true,
+            Self::NeedsEvidence if matches!(target, Self::NeedsEvidence) => true,
+            Self::NeedsScope if matches!(target, Self::NeedsScope) => true,
+            Self::Duplicate if matches!(target, Self::Duplicate) => true,
+            Self::Snoozed if matches!(target, Self::Snoozed) => true,
+            Self::Accepted if matches!(target, Self::Accepted) => true,
+            Self::Rejected if matches!(target, Self::Rejected) => true,
+            Self::Merged if matches!(target, Self::Merged) => true,
+            Self::Superseded if matches!(target, Self::Superseded) => true,
+            Self::Expired if matches!(target, Self::Expired) => true,
+            Self::Applied if matches!(target, Self::Applied) => true,
+            _ if self.is_terminal() => false,
             Self::New | Self::NeedsEvidence | Self::NeedsScope | Self::Duplicate => matches!(
                 target,
                 Self::NeedsEvidence
@@ -1227,7 +1289,7 @@ pub fn check_duplicate_rule_with_config(
     let mut scope_filtered_count = 0usize;
     for rule in existing_rules {
         if duplicate_rule_scope_key(&rule.scope, rule.scope_pattern.as_deref())
-            != proposed_scope_key
+            .ne(&proposed_scope_key)
         {
             scope_filtered_count += 1;
             continue;
@@ -1377,10 +1439,10 @@ fn specificity_rejected_reasons(
     if rule_text.trim().is_empty() {
         push_reason(&mut reasons, "empty_input");
     }
-    if scoring_token_count == 0 {
+    if scoring_token_count.eq(&0) {
         push_reason(&mut reasons, "no_concrete_tokens_found");
     }
-    if scoring_token_count == 0 && !generic_tokens.is_empty() {
+    if scoring_token_count.eq(&0) && !generic_tokens.is_empty() {
         push_reason(&mut reasons, "all_tokens_generic");
     }
     if !signals.has_specificity_signal() {
@@ -1416,14 +1478,87 @@ fn collect_specificity_tokens(input: &str) -> Vec<SpecificityToken> {
 }
 
 fn collect_inline_code_tokens(input: &str, tokens: &mut Vec<SpecificityToken>) {
-    for (index, segment) in input.split('`').enumerate() {
-        if index % 2 == 1 && !segment.trim().is_empty() {
-            let trimmed = segment.trim();
-            if looks_like_command(trimmed) {
-                push_command_specificity_token(tokens, trimmed);
-            }
+    let mut search_start = 0;
+    while let Some((opening_start, delimiter_len)) =
+        find_unescaped_backtick_run(input, search_start)
+    {
+        let code_start = opening_start + delimiter_len;
+        let (code_end, next_search_start) =
+            match find_closing_backtick_run(input, code_start, delimiter_len) {
+                Some(closing_start) => (closing_start, closing_start + delimiter_len),
+                None => {
+                    let line_end = input
+                        .get(code_start..)
+                        .and_then(|rest| rest.find('\n').map(|offset| code_start + offset))
+                        .unwrap_or(input.len());
+                    let Some(remainder) = input.get(code_start..line_end) else {
+                        search_start = code_start;
+                        continue;
+                    };
+                    if !remainder.contains("[REDACTED:") {
+                        search_start = code_start;
+                        continue;
+                    }
+                    (line_end, line_end)
+                }
+            };
+
+        let Some(segment) = input.get(code_start..code_end) else {
+            search_start = next_search_start;
+            continue;
+        };
+        let trimmed = segment.trim();
+        if !trimmed.is_empty() && looks_like_command(trimmed) {
+            push_command_specificity_token(tokens, trimmed);
         }
+        search_start = next_search_start;
     }
+}
+
+fn find_unescaped_backtick_run(input: &str, start: usize) -> Option<(usize, usize)> {
+    let mut search_start = start;
+    while search_start < input.len() {
+        let relative = input.get(search_start..)?.find('`')?;
+        let delimiter_start = search_start + relative;
+        if is_escaped_backtick(input, delimiter_start) {
+            search_start = delimiter_start + 1;
+            continue;
+        }
+        return Some((delimiter_start, backtick_run_len(input, delimiter_start)));
+    }
+    None
+}
+
+fn find_closing_backtick_run(input: &str, start: usize, delimiter_len: usize) -> Option<usize> {
+    let mut search_start = start;
+    while search_start < input.len() {
+        let (delimiter_start, candidate_len) = find_unescaped_backtick_run(input, search_start)?;
+        if candidate_len == delimiter_len {
+            return Some(delimiter_start);
+        }
+        search_start = delimiter_start + candidate_len;
+    }
+    None
+}
+
+fn backtick_run_len(input: &str, start: usize) -> usize {
+    let bytes = input.as_bytes();
+    let mut len = 0;
+    while bytes.get(start + len).is_some_and(|byte| *byte == b'`') {
+        len += 1;
+    }
+    len
+}
+
+fn is_escaped_backtick(input: &str, backtick_index: usize) -> bool {
+    let mut index = backtick_index;
+    let mut backslash_count = 0;
+    let bytes = input.as_bytes();
+    while index > 0 && bytes.get(index - 1).is_some_and(|byte| *byte == b'\\') {
+        backslash_count += 1;
+        index -= 1;
+    }
+    backslash_count % 2 == 1
 }
 
 fn collect_fenced_command_tokens(input: &str, tokens: &mut Vec<SpecificityToken>) {
@@ -1453,7 +1588,7 @@ fn collect_lexical_concrete_tokens(lexical_tokens: &[String], tokens: &mut Vec<S
             push_specificity_token(tokens, SpecificityTokenKind::FilePath, token);
         }
         if looks_like_error_code(token)
-            || (lower == "code"
+            || (lower.as_str().eq("code")
                 && index
                     .checked_sub(1)
                     .and_then(|previous| lexical_tokens.get(previous))
@@ -1500,25 +1635,25 @@ fn structural_signals(
         has_command_block: input.contains("```"),
         has_inline_command: tokens
             .iter()
-            .any(|token| token.kind == SpecificityTokenKind::Command),
+            .any(|token| matches!(token.kind, SpecificityTokenKind::Command)),
         has_file_path: tokens
             .iter()
-            .any(|token| token.kind == SpecificityTokenKind::FilePath),
+            .any(|token| matches!(token.kind, SpecificityTokenKind::FilePath)),
         has_error_code: tokens
             .iter()
-            .any(|token| token.kind == SpecificityTokenKind::ErrorCode),
+            .any(|token| matches!(token.kind, SpecificityTokenKind::ErrorCode)),
         has_metric_threshold: tokens
             .iter()
-            .any(|token| token.kind == SpecificityTokenKind::MetricThreshold),
+            .any(|token| matches!(token.kind, SpecificityTokenKind::MetricThreshold)),
         has_branch_or_tag: tokens
             .iter()
-            .any(|token| token.kind == SpecificityTokenKind::BranchOrTag),
+            .any(|token| matches!(token.kind, SpecificityTokenKind::BranchOrTag)),
         has_provenance_uri: tokens
             .iter()
-            .any(|token| token.kind == SpecificityTokenKind::ProvenanceUri),
+            .any(|token| matches!(token.kind, SpecificityTokenKind::ProvenanceUri)),
         has_technology_name: tokens
             .iter()
-            .any(|token| token.kind == SpecificityTokenKind::TechnologyName),
+            .any(|token| matches!(token.kind, SpecificityTokenKind::TechnologyName)),
         has_instruction_like_content,
     }
 }
@@ -1660,7 +1795,7 @@ fn looks_like_file_path(token: &str) -> bool {
         .iter()
         .any(|extension| lower.ends_with(extension));
     (has_prefix && (token.contains('/') || has_extension))
-        || (has_extension && token.chars().any(|ch| ch == '/' || ch == '.'))
+        || (has_extension && token.chars().any(|ch| matches!(ch, '/' | '.')))
 }
 
 fn looks_like_error_code(token: &str) -> bool {
@@ -1698,7 +1833,7 @@ fn is_metric_unit(token: &str) -> bool {
 
 fn looks_like_branch_or_tag(token: &str) -> bool {
     let lower = token.to_ascii_lowercase();
-    lower == "main"
+    lower.as_str().eq("main")
         || lower.starts_with("release/")
         || lower.strip_prefix('v').is_some_and(|version| {
             version.split('.').count() >= 2
@@ -1756,7 +1891,7 @@ fn normalize_rule_for_duplicate_check(content: &str) -> String {
         .map(|token| {
             token
                 .chars()
-                .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+                .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
                 .collect::<String>()
                 .to_ascii_lowercase()
         })
@@ -1983,12 +2118,35 @@ pub fn validate_candidate(
         });
     }
 
-    // Calculate TTL expiry as proper RFC3339 timestamp
-    let ttl_expires_at = input.ttl_seconds.and_then(|secs| {
-        let now = DateTime::parse_from_rfc3339(now_rfc3339).ok()?;
-        let duration = Duration::seconds(i64::try_from(secs).ok()?);
-        Some((now + duration).to_rfc3339())
-    });
+    // Calculate TTL expiry as proper RFC3339 timestamp.
+    let ttl_expires_at = match input.ttl_seconds {
+        Some(secs) => {
+            let now = DateTime::parse_from_rfc3339(now_rfc3339).map_err(|error| {
+                CandidateValidationError::InvalidTtlBaseTimestamp {
+                    value: now_rfc3339.to_owned(),
+                    reason: error.to_string(),
+                }
+            })?;
+            let ttl_seconds = i64::try_from(secs).map_err(|_| {
+                CandidateValidationError::TtlSecondsOutOfRange {
+                    value: secs.to_string(),
+                }
+            })?;
+            let duration = Duration::try_seconds(ttl_seconds).ok_or_else(|| {
+                CandidateValidationError::TtlSecondsOutOfRange {
+                    value: secs.to_string(),
+                }
+            })?;
+            let expires_at = now.checked_add_signed(duration).ok_or_else(|| {
+                CandidateValidationError::TtlExpiryOutOfRange {
+                    now: now_rfc3339.to_owned(),
+                    ttl_seconds: secs.to_string(),
+                }
+            })?;
+            Some(expires_at.to_rfc3339())
+        }
+        None => None,
+    };
 
     Ok(ValidatedCandidate {
         workspace_id: input.workspace_id.trim().to_string(),
@@ -2667,6 +2825,12 @@ impl CandidateType {
 pub const FEEDBACK_RATE_SCHEMA_V1: &str = "ee.curate.feedback_rate.v1";
 pub const FEEDBACK_QUARANTINE_SCHEMA_V1: &str = "ee.curate.feedback_quarantine.v1";
 pub const PROTECTED_RULE_SCHEMA_V1: &str = "ee.curate.protected_rule.v1";
+pub const TRAUMA_GUARD_SCHEMA_V1: &str = "ee.curate.trauma_guard.v1";
+
+/// Threshold for harmful feedback count to trigger trauma guard evaluation.
+pub const TRAUMA_GUARD_HARMFUL_THRESHOLD: u32 = 2;
+/// Trust score below which a rule is eligible for inversion.
+pub const TRAUMA_GUARD_TRUST_THRESHOLD: f32 = 0.3;
 
 /// Default rate limit: max harmful events per source per hour.
 pub const DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR: u32 = 5;
@@ -2697,25 +2861,14 @@ impl Default for FeedbackRateConfig {
 impl FeedbackRateConfig {
     #[must_use]
     pub fn to_json(&self) -> String {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct FeedbackRateConfigJson<'a> {
-            schema: &'a str,
-            harmful_per_source_per_hour: u32,
-            burst_window_seconds: u64,
-            require_source_diversity: bool,
-            min_distinct_sources: u32,
-        }
-
-        let json_value = FeedbackRateConfigJson {
-            schema: FEEDBACK_RATE_SCHEMA_V1,
-            harmful_per_source_per_hour: self.harmful_per_source_per_hour,
-            burst_window_seconds: self.harmful_burst_window_seconds,
-            require_source_diversity: self.require_source_diversity_for_inversion,
-            min_distinct_sources: self.min_distinct_sources_for_inversion,
-        };
-
-        serde_json::to_string(&json_value).expect("FeedbackRateConfig serialization is infallible")
+        serde_json::json!({
+            "schema": FEEDBACK_RATE_SCHEMA_V1,
+            "harmfulPerSourcePerHour": self.harmful_per_source_per_hour,
+            "burstWindowSeconds": self.harmful_burst_window_seconds,
+            "requireSourceDiversity": self.require_source_diversity_for_inversion,
+            "minDistinctSources": self.min_distinct_sources_for_inversion,
+        })
+        .to_string()
     }
 }
 
@@ -2792,7 +2945,11 @@ impl QuarantinedFeedback {
             session_id: self.session_id.as_deref(),
         };
 
-        serde_json::to_string(&json_repr).unwrap_or_else(|_| "{}".to_owned())
+        serialize_curate_json_or_error(
+            &json_repr,
+            "QuarantinedFeedback",
+            Some(FEEDBACK_QUARANTINE_SCHEMA_V1),
+        )
     }
 }
 
@@ -2907,7 +3064,234 @@ impl ProtectedRuleStatus {
             protected_by: self.protected_by.as_deref(),
         };
 
-        serde_json::to_string(&json_repr).unwrap_or_else(|_| "{}".to_owned())
+        serialize_curate_json_or_error(
+            &json_repr,
+            "ProtectedRuleStatus",
+            Some(PROTECTED_RULE_SCHEMA_V1),
+        )
+    }
+}
+
+// ============================================================================
+// Trauma Guard — Anti-Pattern Inversion (Plan §12.5, §18.3)
+// ============================================================================
+
+/// Decision outcome from trauma guard evaluation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TraumaGuardDecision {
+    /// Rule does not meet inversion criteria.
+    NoAction,
+    /// Rule should be inverted to an anti-pattern.
+    Invert,
+    /// Rule is protected and requires more harmful feedback to invert.
+    ProtectedNoAction,
+    /// Rule is protected but has enough harmful feedback to invert.
+    ProtectedInvert,
+}
+
+impl TraumaGuardDecision {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoAction => "no_action",
+            Self::Invert => "invert",
+            Self::ProtectedNoAction => "protected_no_action",
+            Self::ProtectedInvert => "protected_invert",
+        }
+    }
+
+    #[must_use]
+    pub const fn should_invert(self) -> bool {
+        matches!(self, Self::Invert | Self::ProtectedInvert)
+    }
+}
+
+/// Input for trauma guard evaluation.
+#[derive(Clone, Debug)]
+pub struct TraumaGuardInput {
+    pub rule_id: String,
+    pub harmful_count: u32,
+    pub helpful_count: u32,
+    pub trust_score: f32,
+    pub protected: bool,
+    pub current_maturity: String,
+}
+
+impl TraumaGuardInput {
+    #[must_use]
+    pub fn new(rule_id: impl Into<String>) -> Self {
+        Self {
+            rule_id: rule_id.into(),
+            harmful_count: 0,
+            helpful_count: 0,
+            trust_score: 0.5,
+            protected: false,
+            current_maturity: "candidate".to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_feedback(mut self, harmful: u32, helpful: u32) -> Self {
+        self.harmful_count = harmful;
+        self.helpful_count = helpful;
+        self
+    }
+
+    #[must_use]
+    pub fn with_trust_score(mut self, score: f32) -> Self {
+        self.trust_score = score;
+        self
+    }
+
+    #[must_use]
+    pub fn with_protected(mut self, protected: bool) -> Self {
+        self.protected = protected;
+        self
+    }
+
+    #[must_use]
+    pub fn with_maturity(mut self, maturity: impl Into<String>) -> Self {
+        self.current_maturity = maturity.into();
+        self
+    }
+}
+
+/// Full result of trauma guard evaluation.
+#[derive(Clone, Debug)]
+pub struct TraumaGuardEvaluation {
+    pub schema: &'static str,
+    pub rule_id: String,
+    pub decision: TraumaGuardDecision,
+    pub harmful_count: u32,
+    pub helpful_count: u32,
+    pub trust_score: f32,
+    pub protected: bool,
+    pub inversion_threshold: u32,
+    pub reason: String,
+}
+
+impl TraumaGuardEvaluation {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct TraumaGuardEvaluationJson<'a> {
+            schema: &'static str,
+            rule_id: &'a str,
+            decision: &'a str,
+            should_invert: bool,
+            harmful_count: u32,
+            helpful_count: u32,
+            trust_score: f32,
+            protected: bool,
+            inversion_threshold: u32,
+            reason: &'a str,
+        }
+
+        let json_repr = TraumaGuardEvaluationJson {
+            schema: self.schema,
+            rule_id: &self.rule_id,
+            decision: self.decision.as_str(),
+            should_invert: self.decision.should_invert(),
+            harmful_count: self.harmful_count,
+            helpful_count: self.helpful_count,
+            trust_score: self.trust_score,
+            protected: self.protected,
+            inversion_threshold: self.inversion_threshold,
+            reason: &self.reason,
+        };
+
+        serialize_curate_json_or_error(
+            &json_repr,
+            "TraumaGuardEvaluation",
+            Some(TRAUMA_GUARD_SCHEMA_V1),
+        )
+    }
+}
+
+/// Evaluate whether a procedural rule should be inverted to an anti-pattern.
+///
+/// Implements the trauma guard logic from Plan §12.5 and §18.3:
+/// - Inverts rules with `harmful_count >= 2 AND trust_score < 0.3`
+/// - Protected rules require additional harmful feedback based on helpful count
+///
+/// This function only evaluates the decision; actual inversion is performed
+/// by the maintenance pass (EE-9o18).
+#[must_use]
+pub fn evaluate_trauma_guard(input: &TraumaGuardInput) -> TraumaGuardEvaluation {
+    let protected_status = ProtectedRuleStatus {
+        memory_id: input.rule_id.clone(),
+        protected: input.protected,
+        protected_at: None,
+        protected_by: None,
+        helpful_count: input.helpful_count,
+        harmful_count: input.harmful_count,
+    };
+    let inversion_threshold = protected_status.inversion_threshold();
+
+    let meets_harmful_threshold = input.harmful_count >= TRAUMA_GUARD_HARMFUL_THRESHOLD;
+    let meets_trust_threshold = input.trust_score < TRAUMA_GUARD_TRUST_THRESHOLD;
+    let meets_protected_threshold = protected_status.allows_inversion();
+
+    let (decision, reason) = if !meets_harmful_threshold {
+        (
+            if input.protected {
+                TraumaGuardDecision::ProtectedNoAction
+            } else {
+                TraumaGuardDecision::NoAction
+            },
+            format!(
+                "Harmful count {} is below threshold {}",
+                input.harmful_count, TRAUMA_GUARD_HARMFUL_THRESHOLD
+            ),
+        )
+    } else if !meets_trust_threshold {
+        (
+            if input.protected {
+                TraumaGuardDecision::ProtectedNoAction
+            } else {
+                TraumaGuardDecision::NoAction
+            },
+            format!(
+                "Trust score {:.2} is above threshold {:.2}",
+                input.trust_score, TRAUMA_GUARD_TRUST_THRESHOLD
+            ),
+        )
+    } else if input.protected && !meets_protected_threshold {
+        (
+            TraumaGuardDecision::ProtectedNoAction,
+            format!(
+                "Protected rule requires {} harmful events (has {})",
+                inversion_threshold, input.harmful_count
+            ),
+        )
+    } else {
+        (
+            if input.protected {
+                TraumaGuardDecision::ProtectedInvert
+            } else {
+                TraumaGuardDecision::Invert
+            },
+            format!(
+                "Rule meets inversion criteria: harmful_count={} >= {}, trust_score={:.2} < {:.2}",
+                input.harmful_count,
+                TRAUMA_GUARD_HARMFUL_THRESHOLD,
+                input.trust_score,
+                TRAUMA_GUARD_TRUST_THRESHOLD
+            ),
+        )
+    };
+
+    TraumaGuardEvaluation {
+        schema: TRAUMA_GUARD_SCHEMA_V1,
+        rule_id: input.rule_id.clone(),
+        decision,
+        harmful_count: input.harmful_count,
+        helpful_count: input.helpful_count,
+        trust_score: input.trust_score,
+        protected: input.protected,
+        inversion_threshold,
+        reason,
     }
 }
 
@@ -2979,7 +3363,7 @@ impl FeedbackHealthSummary {
             last_quarantine_at: self.last_quarantine_at.as_deref(),
         };
 
-        serde_json::to_string(&json_repr).unwrap_or_else(|_| "{}".to_owned())
+        serialize_curate_json_or_error(&json_repr, "FeedbackHealthSummary", None)
     }
 }
 
@@ -3409,18 +3793,62 @@ mod tests {
         DUPLICATE_RULE_CHECK_SCHEMA_V1, DUPLICATE_RULE_EXACT_CODE,
         DUPLICATE_RULE_INSUFFICIENT_SIGNAL_CODE, DUPLICATE_RULE_NEAR_CODE,
         DuplicateRuleCheckConfig, DuplicateRuleDecision, DuplicateRuleMatchKind,
-        DuplicateRuleRecord, ParseCandidateSourceError, ParseCandidateStatusError,
-        ParseCandidateTypeError, ParseReviewQueueStateError, QuarantineReason,
-        QuarantinedFeedback, REVIEW_QUEUE_INVALID_TRANSITION_CODE,
-        REVIEW_QUEUE_STATE_SCHEMA_V1, ReviewQueueState, SpecificityPlatform, SpecificityReport,
-        SpecificityTokenKind, candidate_embedding_text, check_duplicate_rule,
-        check_duplicate_rule_with_config, specificity_score, subsystem_name, validate_candidate,
-        validate_review_queue_transition, validate_status_transition,
+        DuplicateRuleRecord, FEEDBACK_RATE_SCHEMA_V1, FeedbackRateConfig,
+        ParseCandidateSourceError, ParseCandidateStatusError, ParseCandidateTypeError,
+        ParseReviewQueueStateError, QuarantineReason, QuarantinedFeedback,
+        REVIEW_QUEUE_INVALID_TRANSITION_CODE, REVIEW_QUEUE_STATE_SCHEMA_V1, ReviewQueueState,
+        SpecificityPlatform, SpecificityReport, SpecificityTokenKind, TRAUMA_GUARD_SCHEMA_V1,
+        TraumaGuardDecision, TraumaGuardInput, candidate_embedding_text, check_duplicate_rule,
+        check_duplicate_rule_with_config, evaluate_trauma_guard, specificity_score, subsystem_name,
+        validate_candidate, validate_review_queue_transition, validate_status_transition,
     };
+
+    struct FailingSerialize;
+
+    impl serde::Serialize for FailingSerialize {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom(
+                "intentional serialization failure",
+            ))
+        }
+    }
 
     #[test]
     fn subsystem_name_is_stable() {
         assert_eq!(subsystem_name(), "curate");
+    }
+
+    #[test]
+    fn serialize_curate_json_or_error_reports_failure_shape() -> Result<(), String> {
+        let json = super::serialize_curate_json_or_error(
+            &FailingSerialize,
+            "FailingCurateReport",
+            Some(FEEDBACK_RATE_SCHEMA_V1),
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            parsed["schema"].as_str(),
+            Some(crate::models::ERROR_SCHEMA_V1)
+        );
+        assert_eq!(
+            parsed["error"]["code"].as_str(),
+            Some("serialization_failed")
+        );
+        assert_eq!(
+            parsed["error"]["details"]["type"].as_str(),
+            Some("FailingCurateReport")
+        );
+        assert_eq!(
+            parsed["error"]["details"]["expectedSchema"].as_str(),
+            Some(FEEDBACK_RATE_SCHEMA_V1)
+        );
+        assert_ne!(json, "{}");
+        Ok(())
     }
 
     #[test]
@@ -3507,12 +3935,12 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
 
         assert!(report.passes_threshold, "{report:?}");
         assert_eq!(report.redacted_concrete_tokens.len(), 1);
-        assert!(
-            report
-                .redacted_concrete_tokens
-                .iter()
-                .any(|token| token.value == concat!("REDACTED:", "api", "_", "key"))
-        );
+        assert!(report.redacted_concrete_tokens.iter().any(|token| {
+            token
+                .value
+                .as_str()
+                .eq(concat!("REDACTED:", "api", "_", "key"))
+        }));
         assert!(
             report
                 .concrete_tokens
@@ -3537,7 +3965,7 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
             report
                 .concrete_tokens
                 .iter()
-                .any(|token| token.kind == SpecificityTokenKind::Command
+                .any(|token| matches!(token.kind, SpecificityTokenKind::Command)
                     && token.value.contains("[REDACTED:")),
             "{report:?}"
         );
@@ -3545,8 +3973,62 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
             report
                 .redacted_concrete_tokens
                 .iter()
-                .any(|token| token.value == concat!("REDACTED:", "api", "_", "key")),
+                .any(|token| token
+                    .value
+                    .as_str()
+                    .eq(concat!("REDACTED:", "api", "_", "key"))),
             "{report:?}"
+        );
+    }
+
+    #[test]
+    fn collect_inline_code_tokens_ignores_escaped_backtick_delimiters() {
+        let mut tokens = Vec::new();
+
+        super::collect_inline_code_tokens(
+            r"Treat \`cargo fmt --check\` as literal text, not inline code.",
+            &mut tokens,
+        );
+
+        assert!(tokens.is_empty(), "{tokens:?}");
+    }
+
+    #[test]
+    fn collect_inline_code_tokens_handles_nested_backticks_in_longer_span() {
+        let mut tokens = Vec::new();
+
+        super::collect_inline_code_tokens(
+            "Run ``cargo test `policy::tests` --lib`` before editing src/curate/mod.rs.",
+            &mut tokens,
+        );
+
+        assert!(
+            tokens.iter().any(|token| {
+                matches!(token.kind, SpecificityTokenKind::Command)
+                    && token.value.as_str().eq("cargo test `policy::tests` --lib")
+            }),
+            "{tokens:?}"
+        );
+    }
+
+    #[test]
+    fn collect_inline_code_tokens_ignores_escaped_closing_backticks() {
+        let mut tokens = Vec::new();
+
+        super::collect_inline_code_tokens(
+            r"Run `cargo test \`policy::tests\` --lib` before editing src/curate/mod.rs.",
+            &mut tokens,
+        );
+
+        assert!(
+            tokens.iter().any(|token| {
+                matches!(token.kind, SpecificityTokenKind::Command)
+                    && token
+                        .value
+                        .as_str()
+                        .eq(r"cargo test \`policy::tests\` --lib")
+            }),
+            "{tokens:?}"
         );
     }
 
@@ -3569,7 +4051,7 @@ Then update src/policy/mod.rs on main."
             report
                 .concrete_tokens
                 .iter()
-                .any(|token| token.kind == SpecificityTokenKind::Command
+                .any(|token| matches!(token.kind, SpecificityTokenKind::Command)
                     && token.value.contains("[REDACTED:")),
             "{report:?}"
         );
@@ -3577,7 +4059,7 @@ Then update src/policy/mod.rs on main."
             report
                 .redacted_concrete_tokens
                 .iter()
-                .any(|token| token.value == "REDACTED:pem_block"),
+                .any(|token| token.value.as_str().eq("REDACTED:pem_block")),
             "{report:?}"
         );
     }
@@ -4098,6 +4580,44 @@ Then update src/policy/mod.rs on main."
             .ok_or_else(|| "large TTL should produce an expiry timestamp".to_owned())?;
         DateTime::parse_from_rfc3339(&ttl).map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    #[test]
+    fn validate_candidate_ttl_rejects_invalid_base_timestamp() {
+        let input = valid_input();
+        let result = validate_candidate(input, "not-rfc3339");
+
+        assert!(matches!(
+            result,
+            Err(CandidateValidationError::InvalidTtlBaseTimestamp { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_candidate_ttl_rejects_seconds_out_of_duration_range() {
+        let mut input = valid_input();
+        input.ttl_seconds = Some(u64::MAX);
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
+
+        assert!(matches!(
+            result,
+            Err(CandidateValidationError::TtlSecondsOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_candidate_ttl_rejects_expiry_timestamp_overflow() {
+        let mut input = valid_input();
+        input.ttl_seconds = Some(8_000_000_000_000);
+        let result = validate_candidate(input, "9999-12-31T23:59:59Z");
+
+        assert!(
+            matches!(
+                result,
+                Err(CandidateValidationError::TtlExpiryOutOfRange { .. })
+            ),
+            "expected TTL expiry overflow, got {result:?}"
+        );
     }
 
     #[test]
@@ -4706,8 +5226,8 @@ Then update src/policy/mod.rs on main."
 
     use super::{
         DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
-        FEEDBACK_RATE_SCHEMA_V1, FeedbackCheckResult, FeedbackHealthSummary, FeedbackRateConfig,
-        FeedbackRateState, PROTECTED_RULE_SCHEMA_V1, ProtectedRuleStatus,
+        FeedbackCheckResult, FeedbackHealthSummary, FeedbackRateState, PROTECTED_RULE_SCHEMA_V1,
+        ProtectedRuleStatus,
     };
 
     #[test]
@@ -4846,6 +5366,111 @@ Then update src/policy/mod.rs on main."
         assert!(parsed.get("protectedAt").is_none());
         assert!(parsed.get("protectedBy").is_none());
         Ok(())
+    }
+
+    // ========================================================================
+    // Trauma Guard Tests
+    // ========================================================================
+
+    #[test]
+    fn trauma_guard_no_action_below_harmful_threshold() {
+        let input = TraumaGuardInput::new("rule_test")
+            .with_feedback(1, 0) // harmful=1, below threshold
+            .with_trust_score(0.1); // low trust
+
+        let eval = evaluate_trauma_guard(&input);
+        assert_eq!(eval.decision, TraumaGuardDecision::NoAction);
+        assert!(!eval.decision.should_invert());
+        assert!(eval.reason.contains("below threshold"));
+    }
+
+    #[test]
+    fn trauma_guard_no_action_above_trust_threshold() {
+        let input = TraumaGuardInput::new("rule_test")
+            .with_feedback(5, 0) // high harmful count
+            .with_trust_score(0.5); // trust above 0.3
+
+        let eval = evaluate_trauma_guard(&input);
+        assert_eq!(eval.decision, TraumaGuardDecision::NoAction);
+        assert!(!eval.decision.should_invert());
+        assert!(eval.reason.contains("above threshold"));
+    }
+
+    #[test]
+    fn trauma_guard_inverts_when_criteria_met() {
+        let input = TraumaGuardInput::new("rule_test")
+            .with_feedback(2, 0) // harmful >= 2
+            .with_trust_score(0.2); // trust < 0.3
+
+        let eval = evaluate_trauma_guard(&input);
+        assert_eq!(eval.decision, TraumaGuardDecision::Invert);
+        assert!(eval.decision.should_invert());
+        assert!(eval.reason.contains("meets inversion criteria"));
+    }
+
+    #[test]
+    fn trauma_guard_protected_rule_requires_higher_threshold() {
+        // Protected rule with helpful_count=3: threshold = max(2, 3*2+1) = 7
+        let input = TraumaGuardInput::new("rule_test")
+            .with_feedback(3, 3) // harmful=3, helpful=3
+            .with_trust_score(0.1)
+            .with_protected(true);
+
+        let eval = evaluate_trauma_guard(&input);
+        assert_eq!(eval.decision, TraumaGuardDecision::ProtectedNoAction);
+        assert!(!eval.decision.should_invert());
+        assert_eq!(eval.inversion_threshold, 7);
+        assert!(eval.reason.contains("requires 7 harmful events"));
+    }
+
+    #[test]
+    fn trauma_guard_protected_rule_inverts_at_threshold() {
+        // Protected rule with helpful_count=3: threshold = 7
+        let input = TraumaGuardInput::new("rule_test")
+            .with_feedback(7, 3) // harmful=7, meets threshold
+            .with_trust_score(0.1)
+            .with_protected(true);
+
+        let eval = evaluate_trauma_guard(&input);
+        assert_eq!(eval.decision, TraumaGuardDecision::ProtectedInvert);
+        assert!(eval.decision.should_invert());
+    }
+
+    #[test]
+    fn trauma_guard_to_json_includes_schema() -> TestResult {
+        let input = TraumaGuardInput::new("rule_json_test")
+            .with_feedback(3, 1)
+            .with_trust_score(0.25)
+            .with_protected(false);
+
+        let eval = evaluate_trauma_guard(&input);
+        let json = eval.to_json();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        assert_eq!(parsed["schema"].as_str(), Some(TRAUMA_GUARD_SCHEMA_V1));
+        assert_eq!(parsed["ruleId"].as_str(), Some("rule_json_test"));
+        assert_eq!(parsed["decision"].as_str(), Some("invert"));
+        assert_eq!(parsed["shouldInvert"].as_bool(), Some(true));
+        assert_eq!(parsed["harmfulCount"].as_u64(), Some(3));
+        assert_eq!(parsed["helpfulCount"].as_u64(), Some(1));
+        assert!(parsed["trustScore"].as_f64().is_some());
+        assert_eq!(parsed["protected"].as_bool(), Some(false));
+        Ok(())
+    }
+
+    #[test]
+    fn trauma_guard_decision_as_str() {
+        assert_eq!(TraumaGuardDecision::NoAction.as_str(), "no_action");
+        assert_eq!(TraumaGuardDecision::Invert.as_str(), "invert");
+        assert_eq!(
+            TraumaGuardDecision::ProtectedNoAction.as_str(),
+            "protected_no_action"
+        );
+        assert_eq!(
+            TraumaGuardDecision::ProtectedInvert.as_str(),
+            "protected_invert"
+        );
     }
 
     #[test]
@@ -5293,14 +5918,7 @@ Then update src/policy/mod.rs on main."
                     proposed_confidence,
                     proposed_trust_class,
                 ),
-                (
-                    source_type,
-                    source_id,
-                    reason,
-                    confidence,
-                    status,
-                    review_state,
-                ),
+                (source_type, source_id, reason, confidence, status, review_state),
             )| OwnedEmbeddingFields {
                 id,
                 candidate_type,
@@ -5370,8 +5988,17 @@ Then update src/policy/mod.rs on main."
             fields in embedding_fields_strategy(),
         ) {
             let text = candidate_embedding_text(&fields.as_view());
-            let indices = label_indices(&text)
-                .expect("every emitted line must start with a known label");
+            let indices = match label_indices(&text) {
+                Some(indices) => indices,
+                None => {
+                    prop_assert!(
+                        false,
+                        "every emitted line must start with a known label: {:?}",
+                        text,
+                    );
+                    Vec::new()
+                }
+            };
             for window in indices.windows(2) {
                 prop_assert!(
                     window[0] < window[1],
@@ -5471,6 +6098,60 @@ Then update src/policy/mod.rs on main."
                 diff_count,
                 1,
                 "exactly one line should differ when perturbing reason",
+            );
+        }
+
+        /// FeedbackRateConfig::to_json produces valid JSON for arbitrary config values.
+        #[test]
+        fn feedback_rate_config_to_json_is_valid_json(
+            harmful_per_source_per_hour in 0_u32..=u32::MAX,
+            harmful_burst_window_seconds in 0_u64..=u64::MAX,
+            require_source_diversity_for_inversion in proptest::bool::ANY,
+            min_distinct_sources_for_inversion in 0_u32..=u32::MAX,
+        ) {
+            let config = FeedbackRateConfig {
+                harmful_per_source_per_hour,
+                harmful_burst_window_seconds,
+                require_source_diversity_for_inversion,
+                min_distinct_sources_for_inversion,
+            };
+            let json = config.to_json();
+
+            let parsed: serde_json::Value = match serde_json::from_str(&json) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    prop_assert!(
+                        false,
+                        "to_json must produce valid JSON, got error {error}: {json}",
+                    );
+                    serde_json::Value::Null
+                }
+            };
+
+            prop_assert_eq!(
+                parsed.get("schema").and_then(|v| v.as_str()),
+                Some(FEEDBACK_RATE_SCHEMA_V1),
+                "schema field must match constant",
+            );
+            prop_assert_eq!(
+                parsed.get("harmfulPerSourcePerHour").and_then(|v| v.as_u64()),
+                Some(u64::from(harmful_per_source_per_hour)),
+                "harmfulPerSourcePerHour must match input",
+            );
+            prop_assert_eq!(
+                parsed.get("burstWindowSeconds").and_then(|v| v.as_u64()),
+                Some(harmful_burst_window_seconds),
+                "burstWindowSeconds must match input",
+            );
+            prop_assert_eq!(
+                parsed.get("requireSourceDiversity").and_then(|v| v.as_bool()),
+                Some(require_source_diversity_for_inversion),
+                "requireSourceDiversity must match input",
+            );
+            prop_assert_eq!(
+                parsed.get("minDistinctSources").and_then(|v| v.as_u64()),
+                Some(u64::from(min_distinct_sources_for_inversion)),
+                "minDistinctSources must match input",
             );
         }
     }
