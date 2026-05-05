@@ -1649,7 +1649,11 @@ fn raw_feedback_event_hash(
 }
 
 fn stable_short_hash(value: &str) -> String {
-    blake3::hash(value.as_bytes()).to_hex()[..16].to_owned()
+    blake3::hash(value.as_bytes())
+        .to_hex()
+        .chars()
+        .take(16)
+        .collect()
 }
 
 fn score_json_value(value: f32) -> serde_json::Value {
@@ -1664,7 +1668,9 @@ mod tests {
     use asupersync::Outcome;
     use asupersync::types::{CancelKind, CancelReason, PanicPayload, RegionId, Time};
 
-    use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection, feedback_scoring};
+    use crate::db::{
+        CreateMemoryInput, CreateSessionInput, CreateWorkspaceInput, DbConnection, feedback_scoring,
+    };
 
     use super::{
         CliCancelReason, CliOutcomeClass, CliOutcomeSummary, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
@@ -1702,6 +1708,7 @@ mod tests {
 
     const OUTCOME_TEST_WORKSPACE_ID: &str = "wsp_00000000000000000000000001";
     const OUTCOME_TEST_MEMORY_ID: &str = "mem_00000000000000000000000002";
+    const OUTCOME_TEST_SESSION_ID: &str = "sess_00000000000000000000000996";
 
     fn seed_outcome_database(
         prefix: &str,
@@ -1742,7 +1749,7 @@ mod tests {
             .insert_memory(
                 OUTCOME_TEST_MEMORY_ID,
                 &CreateMemoryInput {
-                    workspace_id,
+                    workspace_id: workspace_id.clone(),
                     level: "procedural".to_string(),
                     kind: "rule".to_string(),
                     content: "Run cargo fmt --check before release.".to_string(),
@@ -1755,6 +1762,24 @@ mod tests {
                     tags: vec!["cargo".to_string()],
                     valid_from: None,
                     valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_session(
+                OUTCOME_TEST_SESSION_ID,
+                &CreateSessionInput {
+                    workspace_id,
+                    cass_session_id: "cass-outcome-test-session".to_string(),
+                    source_path: Some("cass://outcome-test".to_string()),
+                    agent_name: Some("outcome-test".to_string()),
+                    model: None,
+                    started_at: Some("2026-04-30T12:00:00Z".to_string()),
+                    ended_at: None,
+                    message_count: 1,
+                    token_count: Some(42),
+                    content_hash: "blake3:outcome-test-session".to_string(),
+                    metadata_json: Some(r#"{"fixture":"outcome"}"#.to_string()),
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -2051,8 +2076,11 @@ mod tests {
             .list_audit_by_target("memory", OUTCOME_TEST_MEMORY_ID, None)
             .map_err(|error| error.to_string())?;
         ensure_equal(&audit.len(), &1_usize, "audit row count")?;
+        let audit_row = audit
+            .first()
+            .ok_or_else(|| "audit row missing after length check".to_string())?;
         ensure_equal(
-            &audit[0].action,
+            &audit_row.action,
             &crate::db::audit_actions::FEEDBACK_RECORD.to_string(),
             "audit action",
         )
@@ -2175,8 +2203,11 @@ mod tests {
             .list_feedback_quarantine(OUTCOME_TEST_WORKSPACE_ID, Some("pending"))
             .map_err(|error| error.to_string())?;
         ensure_equal(&quarantined.len(), &1_usize, "one quarantine row")?;
+        let quarantined_row = quarantined
+            .first()
+            .ok_or_else(|| "quarantine row missing after length check".to_string())?;
         ensure_equal(
-            &quarantined[0].raw_event_hash.starts_with("blake3:"),
+            &quarantined_row.raw_event_hash.starts_with("blake3:"),
             &true,
             "raw event hash is stored",
         )
@@ -2332,7 +2363,7 @@ mod tests {
             source_id: Some("reject-source".to_string()),
             reason: Some("Rejected payload must remain inspectable.".to_string()),
             evidence_json: Some(r#"{"kind":"reject-fixture"}"#.to_string()),
-            session_id: Some("sess_00000000000000000000000996".to_string()),
+            session_id: Some(OUTCOME_TEST_SESSION_ID.to_string()),
             event_id: Some(proposed_event_id.clone()),
             actor: Some("test".to_string()),
             dry_run: false,
@@ -2410,6 +2441,11 @@ mod tests {
             &rejected_row.released_feedback_event_id,
             &None,
             "no released feedback event",
+        )?;
+        ensure_equal(
+            &rejected_row.session_id,
+            &Some(OUTCOME_TEST_SESSION_ID.to_string()),
+            "rejected row retains session id",
         )
     }
 
