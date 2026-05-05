@@ -19,7 +19,18 @@ use crate::models::TrustClass;
 
 pub const SUBSYSTEM: &str = "policy";
 pub const INSTRUCTION_LIKE_SCORE_THRESHOLD: f32 = 0.45;
-pub const SECRET_REDACTION_PLACEHOLDER: &str = "***REDACTED***";
+/// Backward-compatible constant for code that checks for any redaction.
+/// Prefer checking for `[REDACTED:` prefix to detect scanner-specific placeholders.
+#[deprecated(note = "use redaction_placeholder(scanner_name) for new code")]
+pub const SECRET_REDACTION_PLACEHOLDER: &str = "[REDACTED:";
+
+/// Format a scanner-specific redaction placeholder per §22 contract.
+/// Returns `[REDACTED:<scanner_name>]` where scanner_name identifies the
+/// secret family that matched.
+#[must_use]
+pub fn redaction_placeholder(scanner_name: &str) -> String {
+    format!("[REDACTED:{scanner_name}]")
+}
 pub const TRUST_PROMOTION_EVIDENCE_REJECTED_CODE: &str = "trust_promotion_evidence_rejected";
 
 const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
@@ -507,10 +518,11 @@ fn redact_secret_key_values(input: &str, reasons: &mut Vec<&'static str>) -> (St
                 search_start = key_end;
                 continue;
             }
-            output.replace_range(value_start..value_end, SECRET_REDACTION_PLACEHOLDER);
+            let placeholder = redaction_placeholder(pattern.code);
+            output.replace_range(value_start..value_end, &placeholder);
             reasons.push(pattern.code);
             changed = true;
-            search_start = value_start + SECRET_REDACTION_PLACEHOLDER.len();
+            search_start = value_start + placeholder.len();
         }
     }
 
@@ -607,10 +619,11 @@ fn redact_url_passwords(input: &str, reasons: &mut Vec<&'static str>) -> (String
         };
         let value_start = scheme_marker + colon_relative + 1;
         if value_start < at_index {
-            output.replace_range(value_start..at_index, SECRET_REDACTION_PLACEHOLDER);
+            let placeholder = redaction_placeholder("url_password");
+            output.replace_range(value_start..at_index, &placeholder);
             reasons.push("url_password");
             changed = true;
-            search_start = value_start + SECRET_REDACTION_PLACEHOLDER.len();
+            search_start = value_start + placeholder.len();
         } else {
             search_start = at_index + 1;
         }
@@ -643,10 +656,11 @@ fn redact_pem_blocks(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
                         marker_start + relative_line_end
                     })
             });
-        output.replace_range(begin..end, SECRET_REDACTION_PLACEHOLDER);
+        let placeholder = redaction_placeholder("pem_block");
+        output.replace_range(begin..end, &placeholder);
         reasons.push("pem_block");
         changed = true;
-        search_start = begin + SECRET_REDACTION_PLACEHOLDER.len();
+        search_start = begin + placeholder.len();
     }
 
     (output, changed)
@@ -713,10 +727,11 @@ fn redact_raw_api_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (Strin
 
             let suffix_len = token_end - after_prefix;
             if suffix_len >= min_suffix_len {
-                output.replace_range(token_start..token_end, SECRET_REDACTION_PLACEHOLDER);
+                let placeholder = redaction_placeholder(code);
+                output.replace_range(token_start..token_end, &placeholder);
                 reasons.push(code);
                 changed = true;
-                search_start = token_start + SECRET_REDACTION_PLACEHOLDER.len();
+                search_start = token_start + placeholder.len();
             } else {
                 search_start = token_end;
             }
@@ -768,10 +783,11 @@ fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
 
         let dot_count = jwt_candidate.chars().filter(|&c| c == '.').count();
         if dot_count == 2 && jwt_candidate.len() >= 32 {
-            output.replace_range(jwt_start..actual_jwt_end, SECRET_REDACTION_PLACEHOLDER);
+            let placeholder = redaction_placeholder("jwt_token");
+            output.replace_range(jwt_start..actual_jwt_end, &placeholder);
             reasons.push("jwt_token");
             changed = true;
-            search_start = jwt_start + SECRET_REDACTION_PLACEHOLDER.len();
+            search_start = jwt_start + placeholder.len();
         } else {
             search_start = jwt_end;
         }
@@ -817,8 +833,8 @@ fn round_score(score: f32) -> f32 {
 mod tests {
     use super::{
         INSTRUCTION_LIKE_SCORE_THRESHOLD, InstructionRisk, InstructionSignalKind,
-        SECRET_REDACTION_PLACEHOLDER, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE,
-        detect_instruction_like_content, redact_secret_like_content, subsystem_name,
+        TRUST_PROMOTION_EVIDENCE_REJECTED_CODE, detect_instruction_like_content,
+        redact_secret_like_content, redaction_placeholder, subsystem_name,
         validate_trust_promotion_evidence,
     };
 
@@ -1021,7 +1037,7 @@ mod tests {
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"api_key"));
-        assert!(report.content.contains(SECRET_REDACTION_PLACEHOLDER));
+        assert!(report.content.contains(&redaction_placeholder("api_key")));
         assert!(!report.content.contains(raw_value));
     }
 
@@ -1049,7 +1065,7 @@ mod tests {
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"pem_block"));
-        assert!(report.content.contains(SECRET_REDACTION_PLACEHOLDER));
+        assert!(report.content.contains(&redaction_placeholder("pem_block")));
         assert!(!report.content.contains(raw_body));
     }
 
@@ -1060,7 +1076,7 @@ mod tests {
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"anthropic_api_key"));
-        assert!(report.content.contains(SECRET_REDACTION_PLACEHOLDER));
+        assert!(report.content.contains(&redaction_placeholder("anthropic_api_key")));
         assert!(!report.content.contains(token));
     }
 
@@ -1109,7 +1125,7 @@ mod tests {
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"jwt_token"));
-        assert!(report.content.contains(SECRET_REDACTION_PLACEHOLDER));
+        assert!(report.content.contains(&redaction_placeholder("jwt_token")));
         assert!(!report.content.contains(jwt));
     }
 
@@ -1120,7 +1136,7 @@ mod tests {
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"bearer_token"));
-        assert!(report.content.contains(SECRET_REDACTION_PLACEHOLDER));
+        assert!(report.content.contains(&redaction_placeholder("bearer_token")));
         assert!(!report.content.contains(jwt));
     }
 
