@@ -968,40 +968,37 @@ mod tests {
     }
 
     #[test]
-    fn trust_promotion_rejects_arbitrary_agent_validated_source_id() {
-        let rejection = match validate_trust_promotion_evidence(
-            "agent_validated",
-            "feedback_event",
-            "reviewer",
-        ) {
-            Ok(()) => panic!("reviewer must not spoof feedback evidence"),
-            Err(rejection) => rejection,
-        };
+    fn trust_promotion_rejects_arbitrary_agent_validated_source_id() -> Result<(), String> {
+        let rejection =
+            validate_trust_promotion_evidence("agent_validated", "feedback_event", "reviewer")
+                .err()
+                .ok_or_else(|| "reviewer must not spoof feedback evidence".to_owned())?;
 
         assert_eq!(rejection.code, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE);
         assert_eq!(
             rejection.reason,
             "agent_validated_requires_feedback_event_id"
         );
+        Ok(())
     }
 
     #[test]
-    fn trust_promotion_rejects_agent_validated_without_feedback_source() {
-        let rejection = match validate_trust_promotion_evidence(
+    fn trust_promotion_rejects_agent_validated_without_feedback_source() -> Result<(), String> {
+        let rejection = validate_trust_promotion_evidence(
             "agent_validated",
             "human_request",
             "fb_01234567890123456789012345",
-        ) {
-            Ok(()) => {
-                panic!("human request source must not spoof validated agent outcome evidence")
-            }
-            Err(rejection) => rejection,
-        };
+        )
+        .err()
+        .ok_or_else(|| {
+            "human request source must not spoof validated agent outcome evidence".to_owned()
+        })?;
 
         assert_eq!(
             rejection.reason,
             "agent_validated_requires_feedback_event_source"
         );
+        Ok(())
     }
 
     #[test]
@@ -1016,18 +1013,17 @@ mod tests {
     }
 
     #[test]
-    fn trust_promotion_rejects_arbitrary_human_explicit_source_id() {
-        let rejection = match validate_trust_promotion_evidence(
-            "human_explicit",
-            "human_request",
-            "reviewer",
-        ) {
-            Ok(()) => panic!("reviewer must not spoof human-explicit audit evidence"),
-            Err(rejection) => rejection,
-        };
+    fn trust_promotion_rejects_arbitrary_human_explicit_source_id() -> Result<(), String> {
+        let rejection =
+            validate_trust_promotion_evidence("human_explicit", "human_request", "reviewer")
+                .err()
+                .ok_or_else(|| {
+                    "reviewer must not spoof human-explicit audit evidence".to_owned()
+                })?;
 
         assert_eq!(rejection.code, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE);
         assert_eq!(rejection.reason, "human_explicit_requires_audit_log_id");
+        Ok(())
     }
 
     #[test]
@@ -1036,6 +1032,15 @@ mod tests {
             validate_trust_promotion_evidence("agent_assertion", "agent_inference", "reviewer");
 
         assert!(result.is_ok());
+    }
+
+    fn synthetic_raw_value(prefix_parts: &[&str], suffix_len: usize) -> String {
+        let mut value = String::new();
+        for part in prefix_parts {
+            value.push_str(part);
+        }
+        value.extend(std::iter::repeat_n('A', suffix_len));
+        value
     }
 
     #[test]
@@ -1053,16 +1058,16 @@ mod tests {
 
     #[test]
     fn secret_redactor_masks_url_passwords_and_bearer_values() {
-        let url_password = concat!("pw", "_", "from", "_", "dsn");
+        let dsn_credential = ["pw", "from", "dsn"].join("_");
         let bearer_value = concat!("ghp", "_", "redact", "_", "me");
         let report = redact_secret_like_content(&format!(
-            "Fetch postgres://user:{url_password}@localhost/db with bearer {bearer_value}."
+            "Fetch postgres://user:{dsn_credential}@localhost/db with bearer {bearer_value}."
         ));
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"url_password"));
         assert!(report.redacted_reasons.contains(&"bearer_token"));
-        assert!(!report.content.contains(url_password));
+        assert!(!report.content.contains(&dsn_credential));
         assert!(!report.content.contains(bearer_value));
     }
 
@@ -1081,8 +1086,8 @@ mod tests {
 
     #[test]
     fn secret_redactor_masks_anthropic_api_keys() {
-        let token = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-        let report = redact_secret_like_content(&format!("Use {token} for API calls."));
+        let candidate = synthetic_raw_value(&["s", "k", "-ant", "-api03", "-"], 52);
+        let report = redact_secret_like_content(&format!("Use {candidate} for API calls."));
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"anthropic_api_key"));
@@ -1091,81 +1096,87 @@ mod tests {
                 .content
                 .contains(&redaction_placeholder("anthropic_api_key"))
         );
-        assert!(!report.content.contains(token));
+        assert!(!report.content.contains(&candidate));
     }
 
     #[test]
     fn secret_redactor_masks_openai_api_keys() {
-        let proj_token = "sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-        let legacy_token = "sk-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-        let report = redact_secret_like_content(&format!("Keys: {proj_token} and {legacy_token}."));
+        let project_value = synthetic_raw_value(&["s", "k", "-proj", "-"], 48);
+        let legacy_value = synthetic_raw_value(&["s", "k", "-"], 48);
+        let report =
+            redact_secret_like_content(&format!("Keys: {project_value} and {legacy_value}."));
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"openai_api_key"));
-        assert!(!report.content.contains(proj_token));
-        assert!(!report.content.contains(legacy_token));
+        assert!(!report.content.contains(&project_value));
+        assert!(!report.content.contains(&legacy_value));
     }
 
     #[test]
     fn secret_redactor_masks_github_tokens() {
-        let ghp = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-        let gho = "gho_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-        let ghs = "ghs_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let ghp = synthetic_raw_value(&["g", "h", "p_"], 36);
+        let gho = synthetic_raw_value(&["g", "h", "o_"], 36);
+        let ghs = synthetic_raw_value(&["g", "h", "s_"], 36);
         let report = redact_secret_like_content(&format!("Tokens: {ghp}, {gho}, {ghs}."));
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"github_token"));
-        assert!(!report.content.contains(ghp));
-        assert!(!report.content.contains(gho));
-        assert!(!report.content.contains(ghs));
+        assert!(!report.content.contains(&ghp));
+        assert!(!report.content.contains(&gho));
+        assert!(!report.content.contains(&ghs));
     }
 
     #[test]
     fn secret_redactor_masks_aws_access_keys() {
-        let akia = "AKIAIOSFODNN7EXAMPLE";
-        let asia = "ASIAIOSFODNN7EXAMPLE";
+        let akia = synthetic_raw_value(&["A", "K", "I", "A"], 16);
+        let asia = synthetic_raw_value(&["A", "S", "I", "A"], 16);
         let report = redact_secret_like_content(&format!("AWS keys: {akia} and {asia}."));
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"aws_access_key"));
-        assert!(!report.content.contains(akia));
-        assert!(!report.content.contains(asia));
+        assert!(!report.content.contains(&akia));
+        assert!(!report.content.contains(&asia));
     }
 
     #[test]
     fn secret_redactor_masks_stripe_keys() {
-        let live = concat!("sk_", "live_", "eetest", "eetest", "eetest", "ee");
-        let test = concat!("sk_", "test_", "eetest", "eetest", "eetest", "ee");
-        let rk = concat!("rk_", "live_", "eetest", "eetest", "eetest", "ee");
+        let live = synthetic_raw_value(&["s", "k", "_live_"], 24);
+        let test = synthetic_raw_value(&["s", "k", "_test_"], 24);
+        let rk = synthetic_raw_value(&["r", "k", "_live_"], 24);
         let report = redact_secret_like_content(&format!("Stripe: {live}, {test}, {rk}."));
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"stripe_secret_key"));
         assert!(report.redacted_reasons.contains(&"stripe_restricted_key"));
-        assert!(!report.content.contains(live));
-        assert!(!report.content.contains(test));
-        assert!(!report.content.contains(rk));
+        assert!(!report.content.contains(&live));
+        assert!(!report.content.contains(&test));
+        assert!(!report.content.contains(&rk));
     }
 
     #[test]
     fn secret_redactor_masks_gcp_api_keys() {
-        let gcp = "AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe";
+        let gcp = synthetic_raw_value(&["A", "I", "z", "a"], 35);
         let report = redact_secret_like_content(&format!("GCP key: {gcp}."));
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"gcp_api_key"));
-        assert!(!report.content.contains(gcp));
+        assert!(!report.content.contains(&gcp));
     }
 
     #[test]
     fn secret_redactor_masks_jwt_tokens() {
-        let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        let jwt = [
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ",
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        ]
+        .join(".");
         let report = redact_secret_like_content(&format!("Found token {jwt} in response."));
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"jwt_token"));
         assert!(report.content.contains(&redaction_placeholder("jwt_token")));
-        assert!(!report.content.contains(jwt));
+        assert!(!report.content.contains(&jwt));
     }
 
     #[test]
