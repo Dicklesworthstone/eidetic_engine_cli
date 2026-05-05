@@ -19,6 +19,8 @@
 //! exercise downstream logic without spawning a process.
 
 use std::ffi::{OsStr, OsString};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -28,6 +30,21 @@ use super::error::CassError;
 
 const ALLOWLISTED_CASS_EXECUTABLE: &str = "cass";
 const TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CassSpawnTarget {
+    PathLookup,
+    Absolute(PathBuf),
+}
+
+impl CassSpawnTarget {
+    fn command(&self) -> Command {
+        match self {
+            Self::PathLookup => Command::new(ALLOWLISTED_CASS_EXECUTABLE),
+            Self::Absolute(executable) => Command::new(executable.as_os_str()),
+        }
+    }
+}
 
 /// Sentinel exit code reserved by `cass` for the "degraded but usable"
 /// state. The spike documents that a stale-index probe can exit `0`
@@ -192,9 +209,9 @@ impl CassInvocation {
     /// reports `NotFound`, or [`CassError::Io`] for any other spawn
     /// failure.
     pub fn run(&self) -> Result<CassOutcome, CassError> {
-        self.ensure_allowlisted_binary()?;
+        let spawn_target = self.validated_spawn_target()?;
         let started = Instant::now();
-        let mut command = self.command_for_spawn();
+        let mut command = spawn_target.command();
         command.args(&self.args);
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
@@ -282,35 +299,80 @@ impl CassInvocation {
         }
     }
 
-    fn command_for_spawn(&self) -> Command {
+    fn validated_spawn_target(&self) -> Result<CassSpawnTarget, CassError> {
         if self.binary == Path::new(ALLOWLISTED_CASS_EXECUTABLE) {
-            return Command::new(ALLOWLISTED_CASS_EXECUTABLE);
+            return Ok(CassSpawnTarget::PathLookup);
         }
 
-        Command::new(&self.binary)
-    }
-
-    fn ensure_allowlisted_binary(&self) -> Result<(), CassError> {
-        // Allow the default "cass" name (PATH lookup at spawn time)
-        if self.binary == Path::new(ALLOWLISTED_CASS_EXECUTABLE) {
-            return Ok(());
-        }
-
-        // Allow absolute paths from discovery (EE-101) - these are
-        // pre-validated by discover() or discover_with_override()
         if self.binary.is_absolute()
-            && self.binary.is_file()
             && self.binary.file_name() == Some(OsStr::new(ALLOWLISTED_CASS_EXECUTABLE))
         {
-            return Ok(());
+            validate_absolute_cass_binary(&self.binary)?;
+            return Ok(CassSpawnTarget::Absolute(self.binary.clone()));
         }
 
         Err(CassError::InvalidBinary {
             binary: self.binary.clone(),
-            reason: "EE-100 allowlist: binary must be 'cass' (PATH lookup) or an absolute path to a file named 'cass'"
+            reason: "EE-100 allowlist: binary must be 'cass' (PATH lookup) or a trusted absolute path to a file named 'cass'"
                 .to_string(),
         })
     }
+}
+
+fn validate_absolute_cass_binary(path: &Path) -> Result<(), CassError> {
+    let metadata = std::fs::metadata(path).map_err(|error| CassError::InvalidBinary {
+        binary: path.to_path_buf(),
+        reason: format!("CASS binary metadata is unavailable: {error}"),
+    })?;
+    if !metadata.is_file() {
+        return Err(CassError::InvalidBinary {
+            binary: path.to_path_buf(),
+            reason: "CASS binary path is not a file".to_string(),
+        });
+    }
+    validate_absolute_cass_binary_permissions(path, &metadata)
+}
+
+#[cfg(unix)]
+fn validate_absolute_cass_binary_permissions(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), CassError> {
+    let mode = metadata.permissions().mode();
+    if mode & 0o111 == 0 {
+        return Err(CassError::InvalidBinary {
+            binary: path.to_path_buf(),
+            reason: "CASS binary is not executable".to_string(),
+        });
+    }
+    if mode & 0o022 != 0 {
+        return Err(CassError::InvalidBinary {
+            binary: path.to_path_buf(),
+            reason: "CASS binary must not be writable by group or other".to_string(),
+        });
+    }
+    if let Some(parent) = path.parent() {
+        let parent_metadata =
+            std::fs::metadata(parent).map_err(|error| CassError::InvalidBinary {
+                binary: path.to_path_buf(),
+                reason: format!("CASS binary parent metadata is unavailable: {error}"),
+            })?;
+        if parent_metadata.permissions().mode() & 0o002 != 0 {
+            return Err(CassError::InvalidBinary {
+                binary: path.to_path_buf(),
+                reason: "CASS binary parent directory must not be writable by other".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_absolute_cass_binary_permissions(
+    _path: &Path,
+    _metadata: &std::fs::Metadata,
+) -> Result<(), CassError> {
+    Ok(())
 }
 
 /// Captured result of running a [`CassInvocation`].
@@ -471,8 +533,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map_err(|error| format!("clock moved backwards: {error}"))?
             .as_nanos();
-        Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
+        let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+        Ok(target_dir
             .join("ee-cass-process-tests")
             .join(format!("{prefix}-{}-{now}", std::process::id())))
     }
@@ -594,6 +658,31 @@ mod tests {
         };
         assert_eq!(error.kind_str(), "invalid_binary");
         assert!(error.to_string().contains("EE-100"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rejects_world_writable_absolute_binary_before_spawn() -> Result<(), String> {
+        let dir = unique_test_dir("writable-absolute-binary")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join("cass");
+        fs::write(&binary, "#!/bin/sh\nprintf '{\"ok\":true}\\n'\n")
+            .map_err(|error| error.to_string())?;
+        let mut permissions = fs::metadata(&binary)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o777);
+        fs::set_permissions(&binary, permissions).map_err(|error| error.to_string())?;
+
+        let inv = CassInvocation::new(binary, ["health", "--json"]);
+        let error = match inv.run() {
+            Ok(_) => return Err("world-writable cass binary should fail before spawn".to_string()),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind_str(), "invalid_binary");
+        assert!(error.to_string().contains("writable"));
         Ok(())
     }
 
