@@ -2697,14 +2697,25 @@ impl Default for FeedbackRateConfig {
 impl FeedbackRateConfig {
     #[must_use]
     pub fn to_json(&self) -> String {
-        format!(
-            "{{\"schema\":\"{}\",\"harmfulPerSourcePerHour\":{},\"burstWindowSeconds\":{},\"requireSourceDiversity\":{},\"minDistinctSources\":{}}}",
-            FEEDBACK_RATE_SCHEMA_V1,
-            self.harmful_per_source_per_hour,
-            self.harmful_burst_window_seconds,
-            self.require_source_diversity_for_inversion,
-            self.min_distinct_sources_for_inversion,
-        )
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FeedbackRateConfigJson<'a> {
+            schema: &'a str,
+            harmful_per_source_per_hour: u32,
+            burst_window_seconds: u64,
+            require_source_diversity: bool,
+            min_distinct_sources: u32,
+        }
+
+        let json_value = FeedbackRateConfigJson {
+            schema: FEEDBACK_RATE_SCHEMA_V1,
+            harmful_per_source_per_hour: self.harmful_per_source_per_hour,
+            burst_window_seconds: self.harmful_burst_window_seconds,
+            require_source_diversity: self.require_source_diversity_for_inversion,
+            min_distinct_sources: self.min_distinct_sources_for_inversion,
+        };
+
+        serde_json::to_string(&json_value).expect("FeedbackRateConfig serialization is infallible")
     }
 }
 
@@ -5412,11 +5423,14 @@ Then update src/policy/mod.rs on main."
         /// non-whitespace and don't contain newlines) changes exactly the
         /// line for that field; every other line stays identical. This
         /// guards against accidental coupling between fields in the
-        /// formatting pipeline.
+        /// formatting pipeline. The `new_reason` regex starts with an
+        /// alphanumeric on purpose: pure-whitespace values trim to empty
+        /// and cause the line to drop, which is correct behavior but
+        /// outside the scope of this localized-perturbation property.
         #[test]
         fn candidate_embedding_text_field_perturbation_is_localized(
             mut fields in embedding_fields_strategy(),
-            new_reason in "[a-zA-Z0-9 .,_-]{1,32}",
+            new_reason in "[a-zA-Z0-9_\\-][a-zA-Z0-9 .,_\\-]{0,31}",
         ) {
             // Force "reason" to a known non-empty inline-friendly value so
             // the line for it definitely appears in both runs.
