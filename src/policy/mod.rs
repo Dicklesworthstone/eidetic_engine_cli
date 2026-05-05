@@ -844,6 +844,9 @@ fn round_score(score: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+    use proptest::test_runner::Config as ProptestConfig;
+
     use super::{
         INSTRUCTION_LIKE_SCORE_THRESHOLD, InstructionRisk, InstructionSignalKind,
         TRUST_PROMOTION_EVIDENCE_REJECTED_CODE, detect_instruction_like_content,
@@ -1044,6 +1047,148 @@ mod tests {
         }
         value.extend(std::iter::repeat_n('A', suffix_len));
         value
+    }
+
+    #[derive(Clone, Debug)]
+    struct SecretRedactionCase {
+        input: String,
+        raw_values: Vec<String>,
+        expected_reasons: Vec<&'static str>,
+    }
+
+    fn edge_context_strategy(max_len: usize) -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            prop::sample::select(vec![
+                ' ', '\n', '\t', '"', '\'', '`', '{', '}', '[', ']', '(', ')', '<', '>', ':', ';',
+                '=', '/', '\\', '|', 'λ', '🚀', '東', '京', '💾', 'x', 'y', '0',
+            ]),
+            0..max_len,
+        )
+        .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn token_suffix_strategy(min_len: usize, max_len: usize) -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            prop::sample::select(vec!['Q', 'R', 'S', 'T', '1', '2', '3', '_', '-']),
+            min_len..max_len,
+        )
+        .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn edge_secret_case_strategy() -> impl Strategy<Value = SecretRedactionCase> {
+        let context = || edge_context_strategy(1_024);
+        prop_oneof![
+            (context(), token_suffix_strategy(1, 96), context()).prop_map(
+                |(prefix, suffix, suffix_context)| {
+                    let raw = format!("EESECRET{suffix}");
+                    SecretRedactionCase {
+                        input: format!("{prefix}{{\"nested\":{{\"api_key\":\"{raw}\"}}}}{suffix_context}"),
+                        raw_values: vec![raw],
+                        expected_reasons: vec!["api_key"],
+                    }
+                },
+            ),
+            (context(), token_suffix_strategy(1, 96), context()).prop_map(
+                |(prefix, suffix, suffix_context)| {
+                    let raw = format!("EESECRET{suffix}");
+                    SecretRedactionCase {
+                        input: format!("{prefix} password = {raw}\n{suffix_context}"),
+                        raw_values: vec![raw],
+                        expected_reasons: vec!["password"],
+                    }
+                },
+            ),
+            (context(), token_suffix_strategy(1, 96), context()).prop_map(
+                |(prefix, suffix, suffix_context)| {
+                    let raw = format!("EESECRET{suffix}");
+                    SecretRedactionCase {
+                        input: format!("{prefix}postgres://agent:{raw}@localhost/db{suffix_context}"),
+                        raw_values: vec![raw],
+                        expected_reasons: vec!["url_password"],
+                    }
+                },
+            ),
+            (context(), token_suffix_strategy(16, 96), context()).prop_map(
+                |(prefix, suffix, suffix_context)| {
+                    let raw = format!("EESECRET{suffix}");
+                    SecretRedactionCase {
+                        input: format!(
+                            "{prefix}-----BEGIN PRIVATE KEY-----\n{raw}\n-----END PRIVATE KEY-----\n{suffix_context}"
+                        ),
+                        raw_values: vec![raw],
+                        expected_reasons: vec!["pem_block"],
+                    }
+                },
+            ),
+            (context(), token_suffix_strategy(48, 80), context()).prop_map(
+                |(prefix, suffix, suffix_context)| {
+                    let raw = format!("sk-proj-{suffix}");
+                    SecretRedactionCase {
+                        input: format!("{prefix} {raw} {suffix_context}"),
+                        raw_values: vec![raw],
+                        expected_reasons: vec!["openai_api_key"],
+                    }
+                },
+            ),
+            (context(), token_suffix_strategy(24, 80), context()).prop_map(
+                |(prefix, suffix, suffix_context)| {
+                    let raw = format!("sk_live_{suffix}");
+                    SecretRedactionCase {
+                        input: format!("{prefix} {raw} {suffix_context}"),
+                        raw_values: vec![raw],
+                        expected_reasons: vec!["stripe_secret_key"],
+                    }
+                },
+            ),
+            (context(), token_suffix_strategy(18, 80), context()).prop_map(
+                |(prefix, suffix, suffix_context)| {
+                    let raw = format!("eyJ{suffix}.eyJ{suffix}.sig{suffix}");
+                    SecretRedactionCase {
+                        input: format!("{prefix} {raw} {suffix_context}"),
+                        raw_values: vec![raw],
+                        expected_reasons: vec!["jwt_token"],
+                    }
+                },
+            ),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn secret_redactor_handles_edge_case_secret_contexts(case in edge_secret_case_strategy()) {
+            let first = redact_secret_like_content(&case.input);
+            let second = redact_secret_like_content(&case.input);
+
+            prop_assert_eq!(&first, &second, "redaction must be deterministic");
+            prop_assert!(first.redacted, "secret-like input should be redacted: {:?}", case.input);
+            prop_assert!(
+                first.content.contains("[REDACTED:"),
+                "redacted output should include scanner-specific placeholders: {:?}",
+                first.content,
+            );
+
+            for raw in &case.raw_values {
+                prop_assert!(
+                    case.input.contains(raw),
+                    "test case must contain generated raw secret {raw:?}",
+                );
+                prop_assert!(
+                    !first.content.contains(raw),
+                    "redacted output leaked raw secret {raw:?} in {:?}",
+                    first.content,
+                );
+            }
+
+            for reason in &case.expected_reasons {
+                prop_assert!(
+                    first.redacted_reasons.contains(reason),
+                    "missing redaction reason {reason:?}; got {:?}",
+                    first.redacted_reasons,
+                );
+            }
+        }
     }
 
     #[test]
