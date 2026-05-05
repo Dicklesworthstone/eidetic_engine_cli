@@ -195,15 +195,32 @@ fn discover_import_binary_from_sources(
 }
 
 fn trusted_cass_locations() -> Vec<PathBuf> {
-    let mut locations = vec![
+    trusted_cass_locations_for_home(std::env::var_os("HOME").as_deref())
+}
+
+/// Returns the auto-discovery allowlist for the CASS import binary.
+///
+/// SECURITY (EE-3qgw): the previous implementation appended
+/// `$HOME/.local/bin/cass` to the allowlist. An attacker who controls
+/// HOME (e.g. via a hook or agent environment) could pre-stage a
+/// `cass` binary with `0755` permissions inside an attacker-owned
+/// directory and have `ee` silently execute it, bypassing the
+/// no-inherited-PATH contract. To eliminate this attack surface, HOME
+/// is intentionally ignored for auto-discovery: operators who install
+/// `cass` under `~/.local/bin` must opt in via `EE_CASS_BINARY` or the
+/// `[cass.binary]` config override, both of which require an explicit
+/// absolute path the operator has consciously trusted.
+///
+/// The `_home` argument is kept so call-sites (and the test suite)
+/// document the fact that HOME is observable but deliberately
+/// discarded — passing a hostile value here MUST NOT cause any
+/// HOME-derived path to appear in the result.
+fn trusted_cass_locations_for_home(_home: Option<&OsStr>) -> Vec<PathBuf> {
+    vec![
         PathBuf::from("/usr/local/bin/cass"),
         PathBuf::from("/usr/bin/cass"),
         PathBuf::from("/opt/homebrew/bin/cass"),
-    ];
-    if let Some(home) = std::env::var_os("HOME") {
-        locations.push(PathBuf::from(home).join(".local/bin/cass"));
-    }
-    locations
+    ]
 }
 
 fn validate_import_binary(
@@ -222,12 +239,12 @@ fn validate_import_binary(
             reason: "CASS import binary file name must be `cass`".to_string(),
         });
     }
-    validate_import_binary_metadata(path)?;
+    validate_import_binary_metadata(path, source)?;
     Ok(DiscoveredBinary::new(canonicalize_path(path)?, source))
 }
 
 #[cfg(unix)]
-fn validate_import_binary_metadata(path: &Path) -> Result<(), CassError> {
+fn validate_import_binary_metadata(path: &Path, source: DiscoverySource) -> Result<(), CassError> {
     let metadata = fs::metadata(path).map_err(|error| CassError::InvalidBinary {
         binary: path.to_path_buf(),
         reason: format!("CASS import binary metadata is unavailable: {error}"),
@@ -251,24 +268,77 @@ fn validate_import_binary_metadata(path: &Path) -> Result<(), CassError> {
             reason: "CASS import binary must not be writable by group or other".to_string(),
         });
     }
-    if let Some(parent) = path.parent() {
-        let parent_metadata = fs::metadata(parent).map_err(|error| CassError::InvalidBinary {
-            binary: path.to_path_buf(),
-            reason: format!("CASS import binary parent metadata is unavailable: {error}"),
-        })?;
-        if parent_metadata.permissions().mode() & 0o002 != 0 {
-            return Err(CassError::InvalidBinary {
-                binary: path.to_path_buf(),
-                reason: "CASS import binary parent directory must not be writable by other"
-                    .to_string(),
-            });
+    match source {
+        // Auto-discovery from the trusted allowlist (system bin dirs
+        // only, post EE-3qgw) walks the entire ancestor chain so a
+        // world- or group-writable parent anywhere up the tree
+        // disqualifies the candidate. The hardcoded allowlist entries
+        // (`/usr/local/bin`, `/usr/bin`, `/opt/homebrew/bin`) all
+        // satisfy this trivially on a sane system; the check is here
+        // to fail closed if an unexpected install layout slips in.
+        DiscoverySource::Path => validate_import_binary_ancestor_chain(path)?,
+        // Explicit operator opt-in (env var / config). The operator
+        // has chosen this absolute path on purpose; we still require
+        // the binary's direct parent to not be world-writable, but do
+        // not walk the full chain — operators routinely install into
+        // staging dirs whose ancestors (e.g. `/var/tmp`) are
+        // world-writable+sticky on shared CI hosts.
+        DiscoverySource::EnvVar | DiscoverySource::Config => {
+            if let Some(parent) = path.parent() {
+                let parent_metadata =
+                    fs::metadata(parent).map_err(|error| CassError::InvalidBinary {
+                        binary: path.to_path_buf(),
+                        reason: format!(
+                            "CASS import binary parent metadata is unavailable: {error}"
+                        ),
+                    })?;
+                if parent_metadata.permissions().mode() & 0o002 != 0 {
+                    return Err(CassError::InvalidBinary {
+                        binary: path.to_path_buf(),
+                        reason: "CASS import binary parent directory must not be writable by other"
+                            .to_string(),
+                    });
+                }
+            }
         }
     }
     Ok(())
 }
 
+/// Walk every ancestor of `path` (excluding `path` itself, including
+/// the filesystem root) and reject if any component is group- or
+/// world-writable. This is intentionally stricter than the per-parent
+/// check used for explicit env/config paths — see EE-3qgw — and
+/// applies only to the auto-discovery allowlist branch where the
+/// operator has not personally vouched for the location.
+#[cfg(unix)]
+fn validate_import_binary_ancestor_chain(path: &Path) -> Result<(), CassError> {
+    let mut current = path.parent();
+    while let Some(ancestor) = current {
+        let metadata = fs::metadata(ancestor).map_err(|error| CassError::InvalidBinary {
+            binary: path.to_path_buf(),
+            reason: format!(
+                "CASS import binary ancestor `{}` metadata is unavailable: {error}",
+                ancestor.display()
+            ),
+        })?;
+        let mode = metadata.permissions().mode();
+        if mode & 0o022 != 0 {
+            return Err(CassError::InvalidBinary {
+                binary: path.to_path_buf(),
+                reason: format!(
+                    "CASS import binary ancestor `{}` must not be writable by group or other",
+                    ancestor.display()
+                ),
+            });
+        }
+        current = ancestor.parent();
+    }
+    Ok(())
+}
+
 #[cfg(not(unix))]
-fn validate_import_binary_metadata(path: &Path) -> Result<(), CassError> {
+fn validate_import_binary_metadata(path: &Path, _source: DiscoverySource) -> Result<(), CassError> {
     let metadata = fs::metadata(path).map_err(|error| CassError::InvalidBinary {
         binary: path.to_path_buf(),
         reason: format!("CASS import binary metadata is unavailable: {error}"),
@@ -606,6 +676,7 @@ impl Default for CassClient {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     #[cfg(unix)]
     use std::fs;
     #[cfg(unix)]
@@ -617,6 +688,7 @@ mod tests {
     use super::{
         CassClient, DEFAULT_BINARY, DiscoveredBinary, DiscoverySource, STABLE_ENV_OVERRIDES,
         discover, discover_import_binary_from_sources, discover_with_override,
+        trusted_cass_locations_for_home,
     };
 
     type TestResult = Result<(), String>;
@@ -846,6 +918,198 @@ mod tests {
             error.to_string().contains("writable by group or other"),
             "unexpected error: {error}",
         );
+        Ok(())
+    }
+
+    /// Regression for EE-3qgw: `trusted_cass_locations_for_home` MUST
+    /// ignore the value of HOME. Even an absurd value must not produce
+    /// any HOME-derived candidate. This is the unit-level guarantee
+    /// the integration test below depends on.
+    #[test]
+    fn trusted_cass_locations_for_home_ignores_hostile_home_values() {
+        let cases: &[Option<&OsStr>] = &[
+            None,
+            Some(OsStr::new("")),
+            Some(OsStr::new("relative/path")),
+            Some(OsStr::new("/tmp/evil")),
+            Some(OsStr::new("/tmp/evil/.local/bin/cass/../..")),
+            Some(OsStr::new("/")),
+        ];
+        for home in cases {
+            let locations = trusted_cass_locations_for_home(*home);
+            assert_eq!(
+                locations,
+                vec![
+                    PathBuf::from("/usr/local/bin/cass"),
+                    PathBuf::from("/usr/bin/cass"),
+                    PathBuf::from("/opt/homebrew/bin/cass"),
+                ],
+                "trusted allowlist must not vary with HOME={home:?}",
+            );
+            for candidate in &locations {
+                assert!(
+                    candidate.starts_with("/usr/") || candidate.starts_with("/opt/"),
+                    "non-system-bin candidate leaked into allowlist: {}",
+                    candidate.display(),
+                );
+            }
+        }
+    }
+
+    /// Integration regression for EE-3qgw: simulate an attacker with
+    /// HOME=/tmp/evil who has staged `$HOME/.local/bin/cass` with
+    /// permissions that would have passed the previous direct-parent
+    /// check. The allowlist constructor MUST NOT pick it up, so
+    /// `discover_import_binary_from_sources` falls through to
+    /// `BinaryNotFound` rather than executing the staged payload.
+    #[cfg(unix)]
+    #[test]
+    fn import_discovery_rejects_attacker_controlled_home_staged_binary() -> TestResult {
+        let evil_home = unique_test_dir("evil-home")?;
+        let bin_dir = evil_home.join(".local").join("bin");
+        fs::create_dir_all(&bin_dir).map_err(|error| error.to_string())?;
+        let staged = bin_dir.join(DEFAULT_BINARY);
+        // Stage with the exact mode the attacker would use to defeat
+        // the existing `0o022 == 0` and direct-parent checks.
+        write_test_cass_binary(&staged, 0o755)?;
+        let mut bin_dir_perms = fs::metadata(&bin_dir)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        bin_dir_perms.set_mode(0o755);
+        fs::set_permissions(&bin_dir, bin_dir_perms).map_err(|error| error.to_string())?;
+
+        let trusted = trusted_cass_locations_for_home(Some(evil_home.as_os_str()));
+
+        for candidate in &trusted {
+            assert!(
+                !candidate.starts_with(&evil_home),
+                "trusted allowlist contained an attacker-staged path: {}",
+                candidate.display(),
+            );
+        }
+
+        let result = discover_import_binary_from_sources(None, None, &trusted);
+        match result {
+            // The system MAY have a real `cass` installed at one of
+            // the hardcoded allowlist locations; that's fine. What
+            // matters is that the discovered path is NEVER under the
+            // attacker-controlled `evil_home`.
+            Ok(discovered) => {
+                assert!(
+                    !discovered.path.starts_with(&evil_home),
+                    "discover returned attacker-staged binary {}",
+                    discovered.path.display(),
+                );
+                assert_eq!(discovered.source, DiscoverySource::Path);
+            }
+            Err(error) => {
+                assert_eq!(error.kind_str(), "binary_not_found");
+            }
+        }
+        Ok(())
+    }
+
+    /// Auto-discovery (`DiscoverySource::Path`) must reject a binary
+    /// whose ancestor chain contains a world-writable directory, even
+    /// when the binary itself and its direct parent look clean. This
+    /// closes the second half of EE-3qgw: the previous code only
+    /// checked the immediate parent, so a binary at
+    /// `/tmp/evil/safe-looking/cass` would slip through.
+    #[cfg(unix)]
+    #[test]
+    fn import_discovery_path_source_rejects_world_writable_ancestor() -> TestResult {
+        // /var/tmp is world-writable + sticky on every supported host
+        // we run on, so it serves as a stand-in for /tmp's hostile
+        // ancestor in the threat model.
+        let world_writable_root = PathBuf::from("/var/tmp");
+        let parent_meta = fs::metadata(&world_writable_root).map_err(|error| error.to_string())?;
+        if parent_meta.permissions().mode() & 0o002 == 0 {
+            // Defensive skip: if the host's /var/tmp is hardened to
+            // not be world-writable, this test's premise no longer
+            // holds and we'd be asserting a tautology. The unit test
+            // above still covers the HOME-removal half of the fix.
+            return Ok(());
+        }
+        let intermediate = world_writable_root.join(format!(
+            "ee-cass-3qgw-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos(),
+        ));
+        fs::create_dir_all(&intermediate).map_err(|error| error.to_string())?;
+        // Force the immediate parent to a permission set that would
+        // satisfy the old direct-parent check, so we are sure the
+        // rejection comes from the new ancestor walker.
+        let mut intermediate_perms = fs::metadata(&intermediate)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        intermediate_perms.set_mode(0o755);
+        fs::set_permissions(&intermediate, intermediate_perms)
+            .map_err(|error| error.to_string())?;
+        let binary = intermediate.join(DEFAULT_BINARY);
+        write_test_cass_binary(&binary, 0o755)?;
+
+        // Inject the staged binary as a Path-source allowlist entry
+        // (DiscoverySource::Path is what `discover_import_binary_from_sources`
+        // uses for any element of `trusted_locations`).
+        let result = discover_import_binary_from_sources(None, None, &[binary.clone()]);
+        let error = match result {
+            Ok(discovered) => {
+                return Err(format!(
+                    "world-writable ancestor must reject Path-source binary; got {}",
+                    discovered.path.display()
+                ));
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind_str(), "invalid_binary");
+        assert!(
+            error.to_string().contains("ancestor"),
+            "expected ancestor-chain rejection message, got: {error}",
+        );
+        Ok(())
+    }
+
+    /// The matched-pair: the same binary, when supplied via the
+    /// explicit env-var opt-in surface, must NOT trigger the
+    /// ancestor-chain rejection. Operators routinely install into
+    /// staging dirs whose ancestors are world-writable on shared CI
+    /// hosts, and the env/config branch is operator-trust by
+    /// definition.
+    #[cfg(unix)]
+    #[test]
+    fn import_discovery_env_source_tolerates_world_writable_ancestor() -> TestResult {
+        let world_writable_root = PathBuf::from("/var/tmp");
+        let parent_meta = fs::metadata(&world_writable_root).map_err(|error| error.to_string())?;
+        if parent_meta.permissions().mode() & 0o002 == 0 {
+            return Ok(());
+        }
+        let intermediate = world_writable_root.join(format!(
+            "ee-cass-3qgw-env-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos(),
+        ));
+        fs::create_dir_all(&intermediate).map_err(|error| error.to_string())?;
+        let mut intermediate_perms = fs::metadata(&intermediate)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        intermediate_perms.set_mode(0o755);
+        fs::set_permissions(&intermediate, intermediate_perms)
+            .map_err(|error| error.to_string())?;
+        let binary = intermediate.join(DEFAULT_BINARY);
+        write_test_cass_binary(&binary, 0o755)?;
+
+        let discovered = discover_import_binary_from_sources(Some(binary.as_os_str()), None, &[])
+            .map_err(|error| {
+            format!("env-source binary should be accepted by operator opt-in: {error}")
+        })?;
+        assert_eq!(discovered.source, DiscoverySource::EnvVar);
         Ok(())
     }
 
