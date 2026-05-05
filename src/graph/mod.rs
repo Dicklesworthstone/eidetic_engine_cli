@@ -1576,6 +1576,13 @@ fn acquire_graph_snapshot_write_owner<'a>(
     conn: &'a DbConnection,
     workspace_id: &str,
 ) -> GraphResult<GraphSnapshotWriteOwner<'a>> {
+    if let Err(error) = conn.ensure_advisory_locks_table() {
+        return Err(GraphError::storage(
+            "ensure graph snapshot lock table",
+            error,
+        ));
+    }
+
     let lock_id = AdvisoryLockId::workspace(workspace_id);
     let holder_id = generate_graph_snapshot_holder_id();
     let mut last_conflict = None;

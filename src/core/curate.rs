@@ -948,18 +948,28 @@ impl CurateCandidateSortMode {
 }
 
 fn parse_curate_candidate_sort_mode(raw: &str) -> Result<CurateCandidateSortMode, DomainError> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "review_state" | "review-state" | "state" | "queue" => {
-            Ok(CurateCandidateSortMode::ReviewState)
-        }
-        "created_at" | "created-at" | "created" | "time" => Ok(CurateCandidateSortMode::CreatedAt),
-        "confidence" | "score" => Ok(CurateCandidateSortMode::Confidence),
-        _ => Err(curate_usage_error(
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("review_state")
+        || trimmed.eq_ignore_ascii_case("review-state")
+        || trimmed.eq_ignore_ascii_case("state")
+        || trimmed.eq_ignore_ascii_case("queue")
+    {
+        Ok(CurateCandidateSortMode::ReviewState)
+    } else if trimmed.eq_ignore_ascii_case("created_at")
+        || trimmed.eq_ignore_ascii_case("created-at")
+        || trimmed.eq_ignore_ascii_case("created")
+        || trimmed.eq_ignore_ascii_case("time")
+    {
+        Ok(CurateCandidateSortMode::CreatedAt)
+    } else if trimmed.eq_ignore_ascii_case("confidence") || trimmed.eq_ignore_ascii_case("score") {
+        Ok(CurateCandidateSortMode::Confidence)
+    } else {
+        Err(curate_usage_error(
             format!(
                 "Unknown curate candidates sort mode `{raw}`; expected review_state, created_at, or confidence"
             ),
             "ee curate candidates --help",
-        )),
+        ))
     }
 }
 

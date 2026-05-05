@@ -36,6 +36,10 @@ fn acquire_index_publish_lock(
     workspace_id: &str,
     holder_id: &str,
 ) -> Result<(), IndexRebuildError> {
+    if let Err(error) = db.ensure_advisory_locks_table() {
+        return Err(IndexRebuildError::Database(error));
+    }
+
     let lock_id = AdvisoryLockId::index(workspace_id);
     match db.acquire_advisory_lock(
         &lock_id,

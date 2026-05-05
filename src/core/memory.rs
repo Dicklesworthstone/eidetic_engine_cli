@@ -1370,10 +1370,12 @@ impl MemoryListReport {
 const CONTENT_PREVIEW_LEN: usize = 80;
 
 fn truncate_content(content: &str) -> String {
-    if content.len() <= CONTENT_PREVIEW_LEN {
+    let char_count = content.chars().count();
+    if char_count <= CONTENT_PREVIEW_LEN {
         content.to_string()
     } else {
-        format!("{}...", &content[..CONTENT_PREVIEW_LEN])
+        let truncated: String = content.chars().take(CONTENT_PREVIEW_LEN).collect();
+        format!("{truncated}...")
     }
 }
 
@@ -2295,6 +2297,14 @@ mod tests {
         .map_err(|error| error.message())?;
 
         Ok((temp, created))
+    }
+
+    #[test]
+    fn truncate_content_handles_multibyte_boundary() -> TestResult {
+        let content = "é".repeat(CONTENT_PREVIEW_LEN + 1);
+        let expected = format!("{}...", "é".repeat(CONTENT_PREVIEW_LEN));
+
+        ensure(truncate_content(&content), expected, "multibyte preview")
     }
 
     #[test]

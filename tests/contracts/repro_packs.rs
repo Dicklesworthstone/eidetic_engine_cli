@@ -177,7 +177,8 @@ fn gate14_capture_pack_rejects_path_traversing_name() -> TestResult {
 
 #[test]
 fn gate14_minimize_pack_preserves_required_files_and_marks_optional_removal() -> TestResult {
-    let pack_dir = env::temp_dir().join(format!("ee_gate14_minimize_pack_{}", std::process::id()));
+    let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let pack_dir = temp_dir.path().to_path_buf();
     write_repro_pack(&pack_dir)?;
 
     let report = minimize_pack(&MinimizeOptions {

@@ -13,16 +13,30 @@
 //!
 //! Each test category uses real binary execution with no mocks.
 
+use ee::config::workspace::WORKSPACE_ENV_VAR;
+use ee::core::workspace::WORKSPACE_REGISTRY_ENV_VAR;
+use ee::db::DbConnection;
 use std::fmt::Debug;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    run_ee_with_env(args, &[])
+}
+
+fn run_ee_with_env(args: &[&str], envs: &[(&str, &Path)]) -> Result<Output, String> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    command
         .args(args)
+        .env_remove(WORKSPACE_ENV_VAR)
+        .env_remove(WORKSPACE_REGISTRY_ENV_VAR);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
@@ -393,6 +407,140 @@ fn exit_7_policy_denied_on_economy_prune_without_dry_run() -> TestResult {
 }
 
 // ============================================================================
+// Exit Code 2: Configuration Error
+// ============================================================================
+
+#[test]
+fn exit_2_config_error_on_invalid_workspace() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let missing_workspace = tempdir.path().join("missing-workspace");
+    let missing_workspace = missing_workspace.to_string_lossy().to_string();
+
+    let output = run_ee(&[
+        "--workspace",
+        &missing_workspace,
+        "workspace",
+        "alias",
+        "--as",
+        "missing",
+        "--dry-run",
+        "--json",
+    ])?;
+    persist_artifact("exit_2_config_invalid_workspace", &output);
+
+    ensure_equal(
+        &output.status.code(),
+        &Some(EXIT_CONFIG),
+        "invalid workspace exit code",
+    )
+}
+
+// ============================================================================
+// Exit Code 5: Import Error
+// ============================================================================
+
+#[test]
+fn exit_5_import_error_on_missing_file() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let missing_source = tempdir.path().join("missing-source.jsonl");
+    let missing_source = missing_source.to_string_lossy().to_string();
+
+    let output = run_ee(&["import", "jsonl", "--source", &missing_source, "--json"])?;
+    persist_artifact("exit_5_import_missing_file", &output);
+
+    ensure_equal(
+        &output.status.code(),
+        &Some(EXIT_IMPORT),
+        "import missing file exit code",
+    )
+}
+
+// ============================================================================
+// Exit Code 8: Migration Required
+// ============================================================================
+
+#[test]
+fn exit_8_migration_required_when_registry_needs_migration() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let registry_path = tempdir.path().join("registry.db");
+
+    let connection = DbConnection::open_file(&registry_path)
+        .map_err(|error| format!("failed to create registry database: {error}"))?;
+    connection
+        .ping()
+        .map_err(|error| format!("failed to initialize registry database: {error}"))?;
+
+    let envs = [(WORKSPACE_REGISTRY_ENV_VAR, registry_path.as_path())];
+    let output = run_ee_with_env(&["workspace", "list", "--json"], &envs)?;
+    persist_artifact("exit_8_registry_migration_required", &output);
+
+    ensure_equal(
+        &output.status.code(),
+        &Some(EXIT_MIGRATION),
+        "future migration exit code",
+    )
+}
+
+// ============================================================================
+// Exit Code 130: SIGINT
+// ============================================================================
+
+#[cfg(unix)]
+#[test]
+fn exit_130_sigint_terminates_gracefully() -> TestResult {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    // Create a named pipe so that ee import blocks waiting for data
+    let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let pipe_path = tempdir.path().join("pipe.jsonl");
+    let mkfifo = Command::new("mkfifo")
+        .arg("-m")
+        .arg("600")
+        .arg(&pipe_path)
+        .status()
+        .map_err(|e| format!("failed to run mkfifo: {e}"))?;
+    ensure(mkfifo.success(), "failed to create FIFO")?;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["import", "jsonl", "--source"])
+        .arg(&pipe_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    let kill = Command::new("kill")
+        .arg("-INT")
+        .arg(child.id().to_string())
+        .status()
+        .map_err(|e| format!("failed to send SIGINT: {e}"))?;
+    ensure(kill.success(), "failed to send SIGINT")?;
+
+    let start = Instant::now();
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let elapsed = start.elapsed();
+
+    ensure(
+        elapsed < Duration::from_secs(2),
+        "process must terminate quickly on SIGINT",
+    )?;
+
+    // The process should either exit with 130 or be terminated by signal 2 (SIGINT)
+    let is_sigint = status.code() == Some(130) || status.signal() == Some(2);
+    ensure(
+        is_sigint,
+        format!(
+            "expected SIGINT termination (code 130 or signal 2), got {:?}",
+            status
+        ),
+    )
+}
+
+// ============================================================================
 // JSON Error Schema Conformance
 // ============================================================================
 
@@ -484,6 +632,12 @@ fn exit_codes_are_deterministic() -> TestResult {
 
 #[test]
 fn all_exit_codes_are_in_documented_range() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let missing_workspace = tempdir.path().join("missing-workspace");
+    let missing_workspace = missing_workspace.to_string_lossy().to_string();
+    let missing_import = tempdir.path().join("missing-import.jsonl");
+    let missing_import = missing_import.to_string_lossy().to_string();
+
     let documented_codes = [
         EXIT_SUCCESS,
         EXIT_USAGE,
@@ -494,11 +648,34 @@ fn all_exit_codes_are_in_documented_range() -> TestResult {
         EXIT_DEGRADED,
         EXIT_POLICY_DENIED,
         EXIT_MIGRATION,
+        130, // SIGINT
     ];
 
     // Commands that should produce various exit codes
     let test_cases: Vec<(&str, Vec<&str>)> = vec![
         ("success", vec!["status", "--json"]),
+        ("usage", vec!["nonexistent-command"]),
+        (
+            "config",
+            vec![
+                "--workspace",
+                &missing_workspace,
+                "workspace",
+                "alias",
+                "--as",
+                "missing",
+                "--dry-run",
+                "--json",
+            ],
+        ),
+        (
+            "storage",
+            vec!["why", "mem_00000000000000000000000000", "--json"],
+        ),
+        (
+            "import",
+            vec!["import", "jsonl", "--source", &missing_import, "--json"],
+        ),
         (
             "degraded",
             vec![

@@ -62,6 +62,8 @@ pub struct InitOptions {
     pub force: bool,
     /// Allow workspace paths that traverse symlinks.
     pub allow_symlink: bool,
+    /// Skip generating AGENTS.md and CLAUDE.md boilerplate files.
+    pub skip_boilerplate: bool,
 }
 
 /// Report returned by the init command.
@@ -368,6 +370,62 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
         }
     }
 
+    if !options.skip_boilerplate && !options.repair_plan && !options.dry_run {
+        let agents_path = workspace.join("AGENTS.md");
+        if !agents_path.exists() {
+            match std::fs::write(&agents_path, AGENTS_MD_BOILERPLATE) {
+                Ok(()) => {
+                    actions.push(InitAction {
+                        action: "create_file",
+                        path: agents_path,
+                        status: "created",
+                    });
+                    any_created = true;
+                }
+                Err(_) => {
+                    actions.push(InitAction {
+                        action: "create_file",
+                        path: agents_path,
+                        status: "failed",
+                    });
+                }
+            }
+        } else {
+            actions.push(InitAction {
+                action: "check_file",
+                path: agents_path,
+                status: "exists",
+            });
+        }
+
+        let claude_path = workspace.join("CLAUDE.md");
+        if !claude_path.exists() {
+            match std::fs::write(&claude_path, CLAUDE_MD_BOILERPLATE) {
+                Ok(()) => {
+                    actions.push(InitAction {
+                        action: "create_file",
+                        path: claude_path,
+                        status: "created",
+                    });
+                    any_created = true;
+                }
+                Err(_) => {
+                    actions.push(InitAction {
+                        action: "create_file",
+                        path: claude_path,
+                        status: "failed",
+                    });
+                }
+            }
+        } else {
+            actions.push(InitAction {
+                action: "check_file",
+                path: claude_path,
+                status: "exists",
+            });
+        }
+    }
+
     let status = if any_created {
         InitStatus::Created
     } else if options.force {
@@ -396,6 +454,22 @@ fn initialize_database(database_path: &PathBuf) -> Result<(), String> {
         .map_err(|error| format!("failed to migrate database: {error}"))?;
     Ok(())
 }
+
+const AGENTS_MD_BOILERPLATE: &str = r#"# AGENTS.md
+
+Instructions for coding agents working in this workspace.
+
+- Read this file before making changes.
+- Preserve user work and avoid destructive filesystem or git commands unless explicitly authorized.
+- Run the project's formatting, linting, and test commands before committing changes.
+"#;
+
+const CLAUDE_MD_BOILERPLATE: &str = r#"# CLAUDE.md
+
+Agent notes for Claude-compatible tools.
+
+See AGENTS.md for the canonical workspace instructions.
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -455,13 +529,15 @@ mod tests {
 
     #[test]
     fn init_dry_run_does_not_create_files() -> TestResult {
-        let temp_dir = std::env::temp_dir().join(format!("ee_init_test_{}", std::process::id()));
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let workspace = temp_dir.path().to_path_buf();
         let options = InitOptions {
-            workspace_path: temp_dir.clone(),
+            workspace_path: workspace.clone(),
             dry_run: true,
             repair_plan: false,
             force: false,
             allow_symlink: false,
+            skip_boilerplate: true,
         };
 
         let report = init_workspace(&options);
@@ -469,7 +545,7 @@ mod tests {
         ensure(report.status, InitStatus::DryRun, "status is dry_run")?;
         ensure(report.dry_run, true, "dry_run flag is true")?;
         ensure(
-            temp_dir.join(".ee").exists(),
+            workspace.join(".ee").exists(),
             false,
             ".ee dir should not exist after dry run",
         )
@@ -477,51 +553,46 @@ mod tests {
 
     #[test]
     fn init_creates_ee_directory() -> TestResult {
-        let temp_dir =
-            std::env::temp_dir().join(format!("ee_init_create_test_{}", std::process::id()));
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let workspace = temp_dir.path().to_path_buf();
         let options = InitOptions {
-            workspace_path: temp_dir.clone(),
+            workspace_path: workspace.clone(),
             dry_run: false,
             repair_plan: false,
             force: false,
             allow_symlink: false,
+            skip_boilerplate: true,
         };
 
         let report = init_workspace(&options);
 
         ensure(report.status, InitStatus::Created, "status is created")?;
-        ensure(temp_dir.join(".ee").exists(), true, ".ee dir should exist")?;
+        ensure(workspace.join(".ee").exists(), true, ".ee dir should exist")?;
         ensure(
-            temp_dir.join(".ee").join("index").exists(),
+            workspace.join(".ee").join("index").exists(),
             true,
             "index dir should exist",
         )?;
         ensure(
-            temp_dir.join(".ee").join("ee.db").exists(),
+            workspace.join(".ee").join("ee.db").exists(),
             true,
             "database file should exist",
         )?;
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
         Ok(())
     }
 
     #[test]
     fn init_is_idempotent() -> TestResult {
-        let temp_dir =
-            std::env::temp_dir().join(format!("ee_init_idempotent_test_{}", std::process::id()));
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let workspace = temp_dir.path().to_path_buf();
         let options = InitOptions {
-            workspace_path: temp_dir.clone(),
+            workspace_path: workspace,
             dry_run: false,
             repair_plan: false,
             force: false,
             allow_symlink: false,
+            skip_boilerplate: true,
         };
 
         let first_report = init_workspace(&options);
@@ -538,7 +609,6 @@ mod tests {
             "second run is already_exists",
         )?;
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
         Ok(())
     }
 
@@ -595,17 +665,15 @@ mod tests {
 
     #[test]
     fn init_repair_plan_mode() -> TestResult {
-        let temp_dir =
-            std::env::temp_dir().join(format!("ee_init_repair_test_{}", std::process::id()));
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let workspace = temp_dir.path().to_path_buf();
         let options = InitOptions {
-            workspace_path: temp_dir.clone(),
+            workspace_path: workspace.clone(),
             dry_run: false,
             repair_plan: true,
             force: false,
             allow_symlink: false,
+            skip_boilerplate: true,
         };
 
         let report = init_workspace(&options);
@@ -616,7 +684,7 @@ mod tests {
             "status is repair_plan",
         )?;
         ensure(
-            temp_dir.join(".ee").exists(),
+            workspace.join(".ee").exists(),
             false,
             ".ee dir should not exist after repair_plan",
         )?;
@@ -626,35 +694,33 @@ mod tests {
             "repair_plan should have actions",
         )?;
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
         Ok(())
     }
 
     #[test]
     fn init_force_revalidates_existing() -> TestResult {
-        let temp_dir =
-            std::env::temp_dir().join(format!("ee_init_force_test_{}", std::process::id()));
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let workspace = temp_dir.path().to_path_buf();
 
         // First init to create workspace
         let options = InitOptions {
-            workspace_path: temp_dir.clone(),
+            workspace_path: workspace.clone(),
             dry_run: false,
             repair_plan: false,
             force: false,
             allow_symlink: false,
+            skip_boilerplate: true,
         };
         let _ = init_workspace(&options);
 
         // Second init with force
         let force_options = InitOptions {
-            workspace_path: temp_dir.clone(),
+            workspace_path: workspace,
             dry_run: false,
             repair_plan: false,
             force: true,
             allow_symlink: false,
+            skip_boilerplate: true,
         };
         let report = init_workspace(&force_options);
 
@@ -664,7 +730,62 @@ mod tests {
             "force on existing workspace returns revalidated",
         )?;
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
         Ok(())
+    }
+
+    #[test]
+    fn init_creates_agent_boilerplate_by_default() -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let workspace = temp_dir.path().to_path_buf();
+        let options = InitOptions {
+            workspace_path: workspace.clone(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: false,
+        };
+
+        let report = init_workspace(&options);
+
+        ensure(report.status, InitStatus::Created, "status is created")?;
+        ensure(
+            workspace.join("AGENTS.md").exists(),
+            true,
+            "AGENTS.md boilerplate should exist",
+        )?;
+        ensure(
+            workspace.join("CLAUDE.md").exists(),
+            true,
+            "CLAUDE.md boilerplate should exist",
+        )
+    }
+
+    #[test]
+    fn init_skip_boilerplate_omits_agent_files() -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let workspace = temp_dir.path().to_path_buf();
+        let options = InitOptions {
+            workspace_path: workspace.clone(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        };
+
+        let report = init_workspace(&options);
+
+        ensure(report.status, InitStatus::Created, "status is created")?;
+        ensure(
+            workspace.join("AGENTS.md").exists(),
+            false,
+            "AGENTS.md boilerplate should be skipped",
+        )?;
+        ensure(
+            workspace.join("CLAUDE.md").exists(),
+            false,
+            "CLAUDE.md boilerplate should be skipped",
+        )
     }
 }

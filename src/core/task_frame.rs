@@ -885,12 +885,12 @@ fn redact_url_passwords(input: &str) -> (String, bool) {
     let mut output = input.to_owned();
     let mut changed = false;
     let mut search_start = 0;
+    let mut lower = output.to_ascii_lowercase();
 
     loop {
-        if search_start >= output.len() {
+        if search_start >= lower.len() {
             break;
         }
-        let lower = output.to_ascii_lowercase();
         let Some(relative_scheme) = lower[search_start..].find("://") else {
             break;
         };
@@ -911,6 +911,7 @@ fn redact_url_passwords(input: &str) -> (String, bool) {
         let value_start = scheme_marker + colon_relative + 1;
         if value_start < at_index {
             output.replace_range(value_start..at_index, REDACTION_PLACEHOLDER);
+            lower = output.to_ascii_lowercase();
             changed = true;
             search_start = value_start + REDACTION_PLACEHOLDER.len();
         } else {

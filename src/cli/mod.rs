@@ -2867,6 +2867,10 @@ pub struct InitArgs {
     /// Allow workspace paths that traverse symlinks (default: deny).
     #[arg(long, action = ArgAction::SetTrue)]
     pub allow_symlink: bool,
+
+    /// Skip generating AGENTS.md and CLAUDE.md boilerplate files.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub skip_boilerplate: bool,
 }
 
 /// Workspace identity and alias commands.
@@ -4869,6 +4873,7 @@ where
                 repair_plan: args.repair_plan,
                 force: args.force,
                 allow_symlink: args.allow_symlink,
+                skip_boilerplate: args.skip_boilerplate,
             };
             let report = init_workspace(&options);
             match cli.renderer() {
@@ -16790,6 +16795,24 @@ mod tests {
             &(true, Some(Command::Status)),
             "--json after status parse",
         )
+    }
+
+    #[test]
+    fn parser_accepts_init_skip_boilerplate_flag() -> TestResult {
+        let parsed =
+            Cli::try_parse_from(["ee", "init", "--skip-boilerplate"]).map_err(|error| {
+                format!(
+                    "failed to parse init --skip-boilerplate: {:?}",
+                    error.kind()
+                )
+            })?;
+
+        match parsed.command {
+            Some(Command::Init(args)) => {
+                ensure_equal(&args.skip_boilerplate, &true, "skip boilerplate")
+            }
+            other => Err(format!("expected init command, got {other:?}")),
+        }
     }
 
     fn why_rationale_trace_fixture() -> WhyReport {

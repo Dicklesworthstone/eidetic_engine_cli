@@ -1155,21 +1155,23 @@ fn group_playbook_memories(
 
 fn extract_command_pattern(content: &str) -> Option<String> {
     let lower = content.to_ascii_lowercase();
-    const KNOWN_COMMAND_PATTERNS: &[&str] = &[
-        "cargo clippy --all-targets -- -D warnings",
-        "cargo clippy --all-targets -- -d warnings",
-        "cargo fmt --check",
-        "cargo check --all-targets",
-        "cargo test",
-        "bv --robot-triage",
-        "bv --robot-next",
-        "br ready --json",
-        "br sync --flush-only",
-        "ubs",
+    const KNOWN_COMMAND_PATTERNS: &[(&str, &str)] = &[
+        (
+            "cargo clippy --all-targets -- -d warnings",
+            "cargo clippy --all-targets -- -D warnings",
+        ),
+        ("cargo fmt --check", "cargo fmt --check"),
+        ("cargo check --all-targets", "cargo check --all-targets"),
+        ("cargo test", "cargo test"),
+        ("bv --robot-triage", "bv --robot-triage"),
+        ("bv --robot-next", "bv --robot-next"),
+        ("br ready --json", "br ready --json"),
+        ("br sync --flush-only", "br sync --flush-only"),
+        ("ubs", "ubs"),
     ];
-    for pattern in KNOWN_COMMAND_PATTERNS {
-        if lower.contains(&pattern.to_ascii_lowercase()) {
-            return Some((*pattern).to_owned());
+    for (lower_pattern, original_pattern) in KNOWN_COMMAND_PATTERNS {
+        if lower.contains(*lower_pattern) {
+            return Some((*original_pattern).to_owned());
         }
     }
 
