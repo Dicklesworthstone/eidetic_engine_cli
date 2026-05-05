@@ -2466,6 +2466,69 @@ mod tests {
     }
 
     #[test]
+    fn estimate_tokens_handles_unicode_characters() -> TestResult {
+        // Multi-byte UTF-8: each emoji is 1 char but 4 bytes
+        let emoji = "🦀🔥💻";
+        let emoji_tokens = estimate_tokens(emoji, TokenEstimationStrategy::CharacterHeuristic);
+        ensure(
+            emoji_tokens >= 1,
+            "emoji string should estimate at least 1 token",
+        )?;
+        // 3 emoji chars / 3.5 chars per token = ~1 token
+        ensure(
+            emoji_tokens <= 3,
+            "3 emoji should not overestimate drastically",
+        )?;
+
+        // CJK characters: each is 1 char but 3 bytes
+        let cjk = "你好世界";
+        let cjk_tokens = estimate_tokens(cjk, TokenEstimationStrategy::CharacterHeuristic);
+        ensure(
+            cjk_tokens >= 1,
+            "CJK string should estimate at least 1 token",
+        )?;
+        // 4 CJK chars / 3.5 = ~2 tokens
+        ensure(
+            cjk_tokens <= 4,
+            "4 CJK chars should not overestimate drastically",
+        )?;
+
+        // Mixed ASCII and Unicode
+        let mixed = "Hello 世界! 🦀";
+        let mixed_tokens = estimate_tokens(mixed, TokenEstimationStrategy::CharacterHeuristic);
+        ensure(
+            mixed_tokens >= 1,
+            "mixed content should estimate at least 1 token",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn estimate_tokens_unicode_is_deterministic() -> TestResult {
+        let unicode_content = "Ümläüts, émojis 🎉, and CJK 中文字符";
+        let first = estimate_tokens(unicode_content, TokenEstimationStrategy::CharacterHeuristic);
+        let second = estimate_tokens(unicode_content, TokenEstimationStrategy::CharacterHeuristic);
+        ensure_equal(&first, &second, "Unicode estimation must be deterministic")
+    }
+
+    #[test]
+    fn estimate_tokens_word_heuristic_handles_unicode_words() -> TestResult {
+        // Word heuristic should count whitespace-separated words regardless of script
+        let mixed_words = "Hello 世界 Bonjour мир";
+        let token_count = estimate_tokens(mixed_words, TokenEstimationStrategy::WordHeuristic);
+        // 4 words * 1.3 = 5.2, ceil = 6
+        ensure(
+            token_count >= 4,
+            "4 Unicode words should estimate at least 4 tokens",
+        )?;
+        ensure(
+            token_count <= 8,
+            "4 Unicode words should not overestimate beyond reason",
+        )
+    }
+
+    #[test]
     fn section_quota_unlimited_has_no_constraints() -> TestResult {
         let unlimited = SectionQuota::unlimited();
         ensure(
