@@ -138,6 +138,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     type TestResult = Result<(), String>;
+    const DOCTOR_GOLDEN_WORKSPACE: &str = "tests/fixtures";
 
     fn run_ee(args: &[&str]) -> Result<Output, String> {
         Command::new(env!("CARGO_BIN_EXE_ee"))
@@ -385,7 +386,11 @@ mod tests {
 
     #[test]
     fn agent_doctor_json_matches_golden() -> TestResult {
-        assert_agent_stdout_golden(&["doctor", "--json"], "doctor.json", true)
+        assert_agent_stdout_golden(
+            &["--workspace", DOCTOR_GOLDEN_WORKSPACE, "doctor", "--json"],
+            "doctor.json",
+            true,
+        )
     }
 
     #[test]

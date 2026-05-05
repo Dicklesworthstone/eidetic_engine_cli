@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
-const NORMALIZED_CLI_COMMAND_COUNT: usize = 161;
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 164;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",

@@ -513,6 +513,8 @@ mod tests {
     #[cfg(unix)]
     use std::fs;
     #[cfg(unix)]
+    use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     #[cfg(unix)]
@@ -539,6 +541,25 @@ mod tests {
         Ok(target_dir
             .join("ee-cass-process-tests")
             .join(format!("{prefix}-{}-{now}", std::process::id())))
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(path: &Path, contents: &str, mode: u32) -> Result<(), String> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| error.to_string())?;
+        file.write_all(contents.as_bytes())
+            .map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        drop(file);
+
+        let mut permissions = fs::metadata(path)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(mode);
+        fs::set_permissions(path, permissions).map_err(|error| error.to_string())
     }
 
     #[test]
@@ -632,12 +653,7 @@ mod tests {
         let dir = unique_test_dir("timeout-binary")?;
         fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
         let binary = dir.join("cass");
-        fs::write(&binary, "#!/bin/sh\nexec sleep 5\n").map_err(|error| error.to_string())?;
-        let mut permissions = fs::metadata(&binary)
-            .map_err(|error| error.to_string())?
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&binary, permissions).map_err(|error| error.to_string())?;
+        write_executable_script(&binary, "#!/bin/sh\nexec sleep 5\n", 0o755)?;
 
         let inv = CassInvocation::new(binary, ["health", "--json"])
             .with_timeout(Duration::from_millis(20));
@@ -667,13 +683,7 @@ mod tests {
         let dir = unique_test_dir("writable-absolute-binary")?;
         fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
         let binary = dir.join("cass");
-        fs::write(&binary, "#!/bin/sh\nprintf '{\"ok\":true}\\n'\n")
-            .map_err(|error| error.to_string())?;
-        let mut permissions = fs::metadata(&binary)
-            .map_err(|error| error.to_string())?
-            .permissions();
-        permissions.set_mode(0o777);
-        fs::set_permissions(&binary, permissions).map_err(|error| error.to_string())?;
+        write_executable_script(&binary, "#!/bin/sh\nprintf '{\"ok\":true}\\n'\n", 0o777)?;
 
         let inv = CassInvocation::new(binary, ["health", "--json"]);
         let error = match inv.run() {
@@ -692,13 +702,7 @@ mod tests {
         let dir = unique_test_dir("absolute-binary")?;
         fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
         let binary = dir.join("cass");
-        fs::write(&binary, "#!/bin/sh\nprintf '{\"ok\":true}\\n'\n")
-            .map_err(|error| error.to_string())?;
-        let mut permissions = fs::metadata(&binary)
-            .map_err(|error| error.to_string())?
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&binary, permissions).map_err(|error| error.to_string())?;
+        write_executable_script(&binary, "#!/bin/sh\nprintf '{\"ok\":true}\\n'\n", 0o755)?;
 
         let inv = CassInvocation::new(binary.clone(), ["health", "--json"]);
         let outcome = inv.run().map_err(|error| error.to_string())?;
@@ -719,26 +723,19 @@ mod tests {
         fs::create_dir_all(&malicious_dir).map_err(|error| error.to_string())?;
         let trusted_binary = trusted_dir.join("cass");
         let marker = dir.join("malicious-ran");
-        fs::write(
+        write_executable_script(
             &trusted_binary,
             "#!/bin/sh\nprintf '{\"trusted\":true}\\n'\n",
-        )
-        .map_err(|error| error.to_string())?;
-        fs::write(
-            malicious_dir.join("cass"),
-            format!(
+            0o755,
+        )?;
+        write_executable_script(
+            &malicious_dir.join("cass"),
+            &format!(
                 "#!/bin/sh\nprintf malicious > '{}'\nprintf '{{\"trusted\":false}}\\n'\n",
                 marker.display()
             ),
-        )
-        .map_err(|error| error.to_string())?;
-        for binary in [&trusted_binary, &malicious_dir.join("cass")] {
-            let mut permissions = fs::metadata(binary)
-                .map_err(|error| error.to_string())?
-                .permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(binary, permissions).map_err(|error| error.to_string())?;
-        }
+            0o755,
+        )?;
 
         let inv = CassInvocation::new(trusted_binary.clone(), ["health", "--json"])
             .with_env("PATH", malicious_dir.as_os_str());

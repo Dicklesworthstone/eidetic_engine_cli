@@ -9,12 +9,14 @@ data:
       severity: ok
       message: Asupersync runtime initialized successfully.
     - name: workspace
-      severity: ok
-      message: Workspace inspected at /data/projects/eidetic_engine_cli.
+      severity: warning
+      message: Selected workspace has no .ee state at tests/fixtures.
+      errorCode: EE-E004
+      repair: ee --workspace . <command>
     - name: database
       severity: warning
-      message: Database opened but schema migrations are pending.
-      errorCode: EE-E700
+      message: Database file not found at tests/fixtures/.ee/ee.db.
+      errorCode: EE-E200
       repair: ee init --workspace .
     - name: search_index
       severity: warning

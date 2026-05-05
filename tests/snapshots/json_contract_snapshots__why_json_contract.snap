@@ -15,6 +15,7 @@ expression: why
       "trustClass": "human_explicit",
       "trustSubclass": "project-rule",
       "provenanceUri": "file://AGENTS.md#L164-173",
+      "workflowId": null,
       "createdAt": "[TIMESTAMP]",
       "validFrom": null,
       "validTo": null,

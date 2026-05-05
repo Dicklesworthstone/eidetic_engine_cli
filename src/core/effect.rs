@@ -840,6 +840,7 @@ impl EffectManifest {
             CommandEffect::read_only("install check", "Inspect install posture"),
             CommandEffect::read_only("install plan", "Plan install without mutation"),
             CommandEffect::read_only("introspect", "Introspect ee metadata"),
+            CommandEffect::read_only("maintenance status", "Report maintenance job availability"),
             CommandEffect::read_only("mcp manifest", "Inspect optional MCP adapter manifest"),
             CommandEffect::read_only("memory history", "Show memory revision history"),
             CommandEffect::read_only("memory list", "List memories"),
@@ -1230,11 +1231,18 @@ impl EffectManifest {
     }
 
     fn supervised_job_commands() -> Vec<CommandEffect> {
-        vec![CommandEffect::supervised_job(
-            "daemon foreground decay_sweep",
-            vec!["memories", "feedback_events", "audit_log"],
-            "Run the real score-decay steward handler in a bounded foreground daemon tick",
-        )]
+        vec![
+            CommandEffect::supervised_job(
+                "daemon foreground decay_sweep",
+                vec!["memories", "feedback_events", "audit_log"],
+                "Run the real score-decay steward handler in a bounded foreground daemon tick",
+            ),
+            CommandEffect::supervised_job(
+                "maintenance run",
+                vec!["memories", "feedback_events", "audit_log"],
+                "Run an explicit bounded maintenance job through the steward backend",
+            ),
+        ]
     }
 
     fn append_only_write_commands() -> Vec<CommandEffect> {
@@ -1338,6 +1346,11 @@ impl EffectManifest {
                 "remember",
                 vec!["memories", "memory_tags", "audit_log"],
                 "Store a new memory",
+            ),
+            CommandEffect::durable_write(
+                "workflow close",
+                vec!["memories", "audit_log"],
+                "Promote eligible workflow working memories to episodic records",
             ),
             CommandEffect::durable_write(
                 "rule add",

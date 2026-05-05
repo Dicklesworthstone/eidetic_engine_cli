@@ -15,6 +15,8 @@ use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
+const DOCTOR_GOLDEN_WORKSPACE: &str = "tests/fixtures";
+
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
@@ -253,7 +255,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
         },
         ContractCase {
             name: "doctor_json",
-            args: &["doctor", "--json"],
+            args: &["--workspace", DOCTOR_GOLDEN_WORKSPACE, "doctor", "--json"],
             category: "doctor",
             golden_name: "doctor_json",
             format: ContractFormat::Json,
@@ -263,7 +265,13 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
         },
         ContractCase {
             name: "doctor_toon",
-            args: &["doctor", "--format", "toon"],
+            args: &[
+                "--workspace",
+                DOCTOR_GOLDEN_WORKSPACE,
+                "doctor",
+                "--format",
+                "toon",
+            ],
             category: "doctor",
             golden_name: "doctor_toon",
             format: ContractFormat::Toon,
@@ -711,7 +719,7 @@ fn check_toon_output_matches_golden() -> TestResult {
 
 #[test]
 fn doctor_json_output_matches_golden() -> TestResult {
-    let output = run_ee(&["doctor", "--json"])?;
+    let output = run_ee(&["--workspace", DOCTOR_GOLDEN_WORKSPACE, "doctor", "--json"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -733,7 +741,13 @@ fn doctor_json_output_matches_golden() -> TestResult {
 
 #[test]
 fn doctor_toon_output_matches_golden() -> TestResult {
-    let output = run_ee(&["doctor", "--format", "toon"])?;
+    let output = run_ee(&[
+        "--workspace",
+        DOCTOR_GOLDEN_WORKSPACE,
+        "doctor",
+        "--format",
+        "toon",
+    ])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
