@@ -4240,18 +4240,14 @@ mod tests {
             .after
             .as_ref()
             .ok_or_else(|| "content change after missing".to_owned())?;
-        assert!(after.contains(crate::policy::SECRET_REDACTION_PLACEHOLDER));
+        assert!(after.contains("[REDACTED:"));
         assert!(!after.contains(raw_value));
 
         let memory = connection
             .get_memory(&memory_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "memory missing after redacted apply".to_owned())?;
-        assert!(
-            memory
-                .content
-                .contains(crate::policy::SECRET_REDACTION_PLACEHOLDER)
-        );
+        assert!(memory.content.contains("[REDACTED:"));
         assert!(!memory.content.contains(raw_value));
         Ok(())
     }

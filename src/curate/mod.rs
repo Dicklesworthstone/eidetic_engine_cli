@@ -1453,8 +1453,10 @@ fn collect_lexical_concrete_tokens(lexical_tokens: &[String], tokens: &mut Vec<S
         }
         if looks_like_error_code(token)
             || (lower == "code"
-                && index > 0
-                && lexical_tokens[index - 1].eq_ignore_ascii_case("exit")
+                && index
+                    .checked_sub(1)
+                    .and_then(|previous| lexical_tokens.get(previous))
+                    .is_some_and(|previous| previous.eq_ignore_ascii_case("exit"))
                 && lexical_tokens
                     .get(index + 1)
                     .is_some_and(|next| next.chars().all(|ch| ch.is_ascii_digit())))
@@ -1612,25 +1614,34 @@ fn command_phrase(tokens: &[String], start: usize) -> String {
 }
 
 fn error_phrase(tokens: &[String], index: usize) -> String {
-    if index > 0
-        && tokens[index - 1].eq_ignore_ascii_case("exit")
-        && tokens[index].eq_ignore_ascii_case("code")
-        && tokens
-            .get(index + 1)
-            .is_some_and(|next| next.chars().all(|ch| ch.is_ascii_digit()))
+    let Some(token) = tokens.get(index) else {
+        return String::new();
+    };
+    let Some(next) = tokens.get(index + 1) else {
+        return token.clone();
+    };
+    if index
+        .checked_sub(1)
+        .and_then(|previous| tokens.get(previous))
+        .is_some_and(|previous| previous.eq_ignore_ascii_case("exit"))
+        && token.eq_ignore_ascii_case("code")
+        && next.chars().all(|ch| ch.is_ascii_digit())
     {
-        format!("exit code {}", tokens[index + 1])
+        format!("exit code {next}")
     } else {
-        tokens[index].clone()
+        token.clone()
     }
 }
 
 fn metric_phrase(tokens: &[String], index: usize) -> String {
+    let Some(token) = tokens.get(index) else {
+        return String::new();
+    };
     match tokens.get(index + 1) {
-        Some(next) if token_has_digit(&tokens[index]) && is_metric_unit(next) => {
-            format!("{} {}", tokens[index], next)
+        Some(next) if token_has_digit(token) && is_metric_unit(next) => {
+            format!("{token} {next}")
         }
-        _ => tokens[index].clone(),
+        _ => token.clone(),
     }
 }
 
@@ -1654,9 +1665,9 @@ fn looks_like_file_path(token: &str) -> bool {
 fn looks_like_error_code(token: &str) -> bool {
     let trimmed = trim_token(token).trim_end_matches(':');
     let upper = trimmed.to_ascii_uppercase();
-    if upper.len() >= 5
-        && upper.starts_with('E')
-        && upper[1..].chars().all(|ch| ch.is_ascii_digit())
+    if upper
+        .strip_prefix('E')
+        .is_some_and(|suffix| upper.len() >= 5 && suffix.chars().all(|ch| ch.is_ascii_digit()))
     {
         return true;
     }
@@ -1688,11 +1699,12 @@ fn looks_like_branch_or_tag(token: &str) -> bool {
     let lower = token.to_ascii_lowercase();
     lower == "main"
         || lower.starts_with("release/")
-        || (lower.starts_with('v')
-            && lower[1..].split('.').count() >= 2
-            && lower[1..].split('.').all(|segment| {
-                !segment.is_empty() && segment.chars().all(|ch| ch.is_ascii_digit())
-            }))
+        || lower.strip_prefix('v').is_some_and(|version| {
+            version.split('.').count() >= 2
+                && version.split('.').all(|segment| {
+                    !segment.is_empty() && segment.chars().all(|ch| ch.is_ascii_digit())
+                })
+        })
 }
 
 fn looks_like_provenance_uri(token: &str) -> bool {
@@ -3433,6 +3445,17 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
     }
 
     #[test]
+    fn specificity_phrase_helpers_tolerate_out_of_range_indexes() {
+        let exit_tokens = vec!["exit".to_string(), "code".to_string(), "8".to_string()];
+        assert_eq!(super::error_phrase(&exit_tokens, 1), "exit code 8");
+        assert_eq!(super::error_phrase(&exit_tokens, 99), "");
+
+        let metric_tokens = vec!["250".to_string(), "ms".to_string()];
+        assert_eq!(super::metric_phrase(&metric_tokens, 0), "250 ms");
+        assert_eq!(super::metric_phrase(&metric_tokens, 99), "");
+    }
+
+    #[test]
     fn specificity_score_redacts_sensitive_concrete_tokens() {
         let key_name = concat!("OPENAI", "_", "API", "_", "KEY");
         let key_value = concat!("sk", "-", "test");
@@ -3474,9 +3497,7 @@ Then inspect src/db/mod.rs for E0308, keep p99 under 250ms, and land on main fro
                 .concrete_tokens
                 .iter()
                 .any(|token| token.kind == SpecificityTokenKind::Command
-                    && token
-                        .value
-                        .contains(crate::policy::SECRET_REDACTION_PLACEHOLDER)),
+                    && token.value.contains("[REDACTED:")),
             "{report:?}"
         );
         assert!(
@@ -3508,9 +3529,7 @@ Then update src/policy/mod.rs on main."
                 .concrete_tokens
                 .iter()
                 .any(|token| token.kind == SpecificityTokenKind::Command
-                    && token
-                        .value
-                        .contains(crate::policy::SECRET_REDACTION_PLACEHOLDER)),
+                    && token.value.contains("[REDACTED:")),
             "{report:?}"
         );
         assert!(
@@ -3625,13 +3644,14 @@ Then update src/policy/mod.rs on main."
     }
 
     #[test]
-    fn candidate_type_round_trip_for_every_variant() {
+    fn candidate_type_round_trip_for_every_variant() -> TestResult {
         for ct in CandidateType::all() {
             let rendered = ct.to_string();
             let parsed = CandidateType::from_str(&rendered)
-                .unwrap_or_else(|e| panic!("candidate type {ct:?} failed to round-trip: {e}"));
+                .map_err(|error| format!("candidate type {ct:?} failed to round-trip: {error}"))?;
             assert_eq!(parsed, ct);
         }
+        Ok(())
     }
 
     #[test]
@@ -3641,13 +3661,15 @@ Then update src/policy/mod.rs on main."
     }
 
     #[test]
-    fn candidate_source_round_trip_for_every_variant() {
+    fn candidate_source_round_trip_for_every_variant() -> TestResult {
         for cs in CandidateSource::all() {
             let rendered = cs.to_string();
-            let parsed = CandidateSource::from_str(&rendered)
-                .unwrap_or_else(|e| panic!("candidate source {cs:?} failed to round-trip: {e}"));
+            let parsed = CandidateSource::from_str(&rendered).map_err(|error| {
+                format!("candidate source {cs:?} failed to round-trip: {error}")
+            })?;
             assert_eq!(parsed, cs);
         }
+        Ok(())
     }
 
     #[test]
@@ -3657,13 +3679,15 @@ Then update src/policy/mod.rs on main."
     }
 
     #[test]
-    fn candidate_status_round_trip_for_every_variant() {
+    fn candidate_status_round_trip_for_every_variant() -> TestResult {
         for cs in CandidateStatus::all() {
             let rendered = cs.to_string();
-            let parsed = CandidateStatus::from_str(&rendered)
-                .unwrap_or_else(|e| panic!("candidate status {cs:?} failed to round-trip: {e}"));
+            let parsed = CandidateStatus::from_str(&rendered).map_err(|error| {
+                format!("candidate status {cs:?} failed to round-trip: {error}")
+            })?;
             assert_eq!(parsed, cs);
         }
+        Ok(())
     }
 
     #[test]
@@ -3690,13 +3714,14 @@ Then update src/policy/mod.rs on main."
     }
 
     #[test]
-    fn review_queue_state_round_trip_for_every_variant() {
+    fn review_queue_state_round_trip_for_every_variant() -> TestResult {
         for state in ReviewQueueState::all() {
             let rendered = state.to_string();
             let parsed = ReviewQueueState::from_str(&rendered)
-                .unwrap_or_else(|error| panic!("state {state:?} failed round trip: {error}"));
+                .map_err(|error| format!("state {state:?} failed round trip: {error}"))?;
             assert_eq!(parsed, state);
         }
+        Ok(())
     }
 
     #[test]
@@ -3788,15 +3813,16 @@ Then update src/policy/mod.rs on main."
     }
 
     #[test]
-    fn review_queue_state_rejects_terminal_source_transitions() {
+    fn review_queue_state_rejects_terminal_source_transitions() -> TestResult {
         let result =
             validate_review_queue_transition(ReviewQueueState::Rejected, ReviewQueueState::New);
         match result {
-            Ok(()) => panic!("rejected candidates must be terminal"),
+            Ok(()) => Err("rejected candidates must be terminal".to_string()),
             Err(error) => {
                 assert_eq!(error.code(), REVIEW_QUEUE_INVALID_TRANSITION_CODE);
                 assert_eq!(error.from, ReviewQueueState::Rejected);
                 assert_eq!(error.to, ReviewQueueState::New);
+                Ok(())
             }
         }
     }
@@ -3964,29 +3990,33 @@ Then update src/policy/mod.rs on main."
     }
 
     #[test]
-    #[allow(clippy::unwrap_used)]
-    fn validate_candidate_accepts_valid_input() {
+    fn validate_candidate_accepts_valid_input() -> TestResult {
         let input = valid_input();
         let result = validate_candidate(input, "2026-04-29T12:00:00Z");
         assert!(result.is_ok());
-        let validated = result.unwrap();
+        let validated = result.map_err(|error| format!("{error:?}"))?;
         assert_eq!(validated.workspace_id, "ws_123");
         assert_eq!(validated.confidence, 0.75);
         assert!(validated.ttl_expires_at.is_some());
+        Ok(())
     }
 
     #[test]
-    #[allow(clippy::unwrap_used)]
-    fn validate_candidate_ttl_is_rfc3339_parseable() {
+    fn validate_candidate_ttl_is_rfc3339_parseable() -> TestResult {
         let input = valid_input();
-        let result = validate_candidate(input, "2026-04-29T12:00:00Z").unwrap();
-        let ttl = result.ttl_expires_at.unwrap();
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z")
+            .map_err(|error| format!("{error:?}"))?;
+        let ttl = result
+            .ttl_expires_at
+            .ok_or_else(|| "TTL missing from validated candidate".to_string())?;
         // Must be parseable as RFC3339
-        let parsed = DateTime::parse_from_rfc3339(&ttl);
-        assert!(parsed.is_ok(), "TTL must be valid RFC3339: {ttl}");
+        let parsed = DateTime::parse_from_rfc3339(&ttl)
+            .map_err(|error| format!("TTL must be valid RFC3339: {ttl}: {error}"))?;
         // Should be 1 hour (3600s) after now
-        let expected = DateTime::parse_from_rfc3339("2026-04-29T13:00:00Z").unwrap();
-        assert_eq!(parsed.unwrap(), expected);
+        let expected = DateTime::parse_from_rfc3339("2026-04-29T13:00:00Z")
+            .map_err(|error| error.to_string())?;
+        assert_eq!(parsed, expected);
+        Ok(())
     }
 
     #[test]
@@ -4222,7 +4252,7 @@ Then update src/policy/mod.rs on main."
     }
 
     #[test]
-    fn validate_candidate_rejects_generic_proposed_content() {
+    fn validate_candidate_rejects_generic_proposed_content() -> TestResult {
         let mut input = valid_input();
         input.candidate_type = CandidateType::Consolidate;
         input.proposed_content = Some("Always write good code.".to_string());
@@ -4235,34 +4265,30 @@ Then update src/policy/mod.rs on main."
             }) => {
                 assert!(rejected_reasons.contains(&CANDIDATE_TOO_GENERIC_CODE));
                 assert!(rejected_reasons.contains(&"below_specificity_threshold"));
+                Ok(())
             }
-            other => panic!("expected generic rejection, got {other:?}"),
+            other => Err(format!("expected generic rejection, got {other:?}")),
         }
     }
 
     #[test]
-    fn validate_candidate_accepts_specific_proposed_content() {
+    fn validate_candidate_accepts_specific_proposed_content() -> TestResult {
         let mut input = valid_input();
         input.candidate_type = CandidateType::Consolidate;
         input.proposed_content =
             Some("Run `cargo fmt --check` before editing src/curate/mod.rs on main.".to_string());
 
-        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
-
-        match result {
-            Ok(candidate) => {
-                let Some(report) = candidate.specificity_report else {
-                    panic!("expected specificity report");
-                };
-                assert!(report.passes_threshold, "{report:?}");
-            }
-            Err(error) => panic!("specific candidate should pass: {error:?}"),
-        }
+        let candidate = validate_candidate(input, "2026-04-29T12:00:00Z")
+            .map_err(|error| format!("specific candidate should pass: {error:?}"))?;
+        let report = candidate
+            .specificity_report
+            .ok_or_else(|| "expected specificity report".to_string())?;
+        assert!(report.passes_threshold, "{report:?}");
+        Ok(())
     }
 
     #[test]
-    #[allow(clippy::unwrap_used)]
-    fn validate_candidate_redacts_secret_like_proposed_content() {
+    fn validate_candidate_redacts_secret_like_proposed_content() -> TestResult {
         let mut input = valid_input();
         input.candidate_type = CandidateType::Consolidate;
         let raw_value = concat!("sk", "_", "curate", "_", "123");
@@ -4271,31 +4297,34 @@ Then update src/policy/mod.rs on main."
             "Run `cargo test` before updating src/curate/mod.rs with {secret_label}={raw_value}."
         ));
 
-        let candidate = validate_candidate(input, "2026-04-29T12:00:00Z").unwrap();
-        let content = candidate.proposed_content.unwrap();
+        let candidate = validate_candidate(input, "2026-04-29T12:00:00Z")
+            .map_err(|error| format!("{error:?}"))?;
+        let content = candidate
+            .proposed_content
+            .ok_or_else(|| "redacted proposed content missing".to_string())?;
 
-        assert!(content.contains(crate::policy::SECRET_REDACTION_PLACEHOLDER));
+        assert!(content.contains("[REDACTED:"));
         assert!(!content.contains(raw_value));
-        let report = candidate.specificity_report.unwrap();
+        let report = candidate
+            .specificity_report
+            .ok_or_else(|| "specificity report missing".to_string())?;
         assert!(report.passes_threshold, "{report:?}");
         assert!(!report.redacted_concrete_tokens.is_empty());
+        Ok(())
     }
 
     #[test]
-    #[allow(clippy::unwrap_used)]
-    fn validate_candidate_redacts_secret_like_reason() {
+    fn validate_candidate_redacts_secret_like_reason() -> TestResult {
         let mut input = valid_input();
         let raw_value = concat!("ghp", "_", "curate", "_", "456");
         input.reason = format!("Captured during review with token: {raw_value}.");
 
-        let candidate = validate_candidate(input, "2026-04-29T12:00:00Z").unwrap();
+        let candidate = validate_candidate(input, "2026-04-29T12:00:00Z")
+            .map_err(|error| format!("{error:?}"))?;
 
-        assert!(
-            candidate
-                .reason
-                .contains(crate::policy::SECRET_REDACTION_PLACEHOLDER)
-        );
+        assert!(candidate.reason.contains("[REDACTED:"));
         assert!(!candidate.reason.contains(raw_value));
+        Ok(())
     }
 
     #[test]
