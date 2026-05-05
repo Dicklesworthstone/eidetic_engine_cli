@@ -613,6 +613,7 @@ impl RecorderImportPlanReport {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecorderImportErrorCode {
+    DryRunRequired,
     InvalidInputJson,
     InvalidSourceType,
     InvalidSourceShape,
@@ -624,6 +625,7 @@ impl RecorderImportErrorCode {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::DryRunRequired => "recorder_import_dry_run_required",
             Self::InvalidInputJson => "recorder_import_invalid_json",
             Self::InvalidSourceType => "recorder_import_invalid_source_type",
             Self::InvalidSourceShape => "recorder_import_invalid_source_shape",

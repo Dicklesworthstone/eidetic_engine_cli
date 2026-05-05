@@ -8548,6 +8548,18 @@ where
     W: Write,
     E: Write,
 {
+    if !args.dry_run {
+        let error = crate::core::recorder::RecorderImportError {
+            code: crate::core::recorder::RecorderImportErrorCode::DryRunRequired,
+            message: "Recorder import requires --dry-run until the CLI wires non-dry-run imports to the persisted recorder store.".to_owned(),
+            repair: "Use ee recorder import --source-id <source> --dry-run --json.".to_owned(),
+            details: Box::new(serde_json::json!({
+                "dryRun": false,
+            })),
+        };
+        return write_recorder_import_error(cli.wants_json(), stdout, stderr, &error);
+    }
+
     let source_type = match args.source_type.parse::<crate::models::ImportSourceType>() {
         Ok(source_type) => source_type,
         Err(_) => {
