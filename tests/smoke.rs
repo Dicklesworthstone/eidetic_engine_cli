@@ -3393,7 +3393,10 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
     )?;
     ensure(
         search_results.iter().any(|result| {
-            result["docId"] == serde_json::json!(stored_session_id)
+            result
+                .get("docId")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|doc_id| doc_id.eq(stored_session_id.as_str()))
                 && result["explanation"]["factors"]
                     .as_array()
                     .is_some_and(|factors| !factors.is_empty())
