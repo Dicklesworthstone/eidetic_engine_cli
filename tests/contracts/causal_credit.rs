@@ -39,6 +39,22 @@ fn ensure_field_eq(
     )
 }
 
+fn ensure_degradation_code(payload: &JsonValue, expected_code: &str, context: &str) -> TestResult {
+    let degradations = payload
+        .get("degradations")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| format!("{context}: missing degradations"))?;
+    ensure(
+        degradations.iter().any(|entry| {
+            entry
+                .get("code")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|code| code == expected_code)
+        }),
+        format!("{context}: missing degradation code `{expected_code}`"),
+    )
+}
+
 fn repo_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -118,8 +134,8 @@ fn causal_trace_json_matches_gate22_fixture() -> TestResult {
             .with_agent_id("agent_fixture_001"),
     );
     ensure(
-        !report.chains.is_empty(),
-        "trace should include causal chains",
+        report.chains.is_empty(),
+        "trace must not synthesize causal chains from fixture IDs",
     )?;
     let payload = report.data_json();
     ensure_field_eq(
@@ -127,6 +143,11 @@ fn causal_trace_json_matches_gate22_fixture() -> TestResult {
         "schema",
         json!(CAUSAL_TRACE_SCHEMA_V1),
         "trace schema",
+    )?;
+    ensure_degradation_code(
+        &payload,
+        "causal_evidence_unavailable",
+        "causal trace fixture",
     )?;
     assert_fixture_json("trace", &payload)
 }
@@ -183,8 +204,8 @@ fn causal_compare_fixture_matches_gate22_snapshot() -> TestResult {
             .with_method("replay"),
     );
     ensure(
-        !report.comparisons.is_empty(),
-        "compare should produce at least one source comparison",
+        report.comparisons.is_empty(),
+        "compare must not synthesize source comparisons from fixture IDs",
     )?;
     let payload = report.data_json();
     ensure_field_eq(
@@ -192,6 +213,11 @@ fn causal_compare_fixture_matches_gate22_snapshot() -> TestResult {
         "schema",
         json!(CAUSAL_COMPARE_SCHEMA_V1),
         "compare schema",
+    )?;
+    ensure_degradation_code(
+        &payload,
+        "causal_comparison_evidence_unavailable",
+        "causal compare fixture",
     )?;
     assert_fixture_json("compare_fixture", &payload)
 }
@@ -221,6 +247,13 @@ fn causal_promote_plan_dry_run_matches_fixture() -> TestResult {
             .all(|plan| plan.status == PromotionPlanStatus::DryRunReady),
         "dry-run plans must remain dry_run_ready",
     )?;
+    ensure(
+        report
+            .plans
+            .iter()
+            .all(|plan| plan.action == PromotionAction::Hold),
+        "dry-run plans must hold without supported causal evidence",
+    )?;
 
     let payload = report.data_json();
     ensure_field_eq(
@@ -246,6 +279,11 @@ fn causal_promote_plan_dry_run_matches_fixture() -> TestResult {
         "silentMutation",
         json!(false),
         "silent mutation guard",
+    )?;
+    ensure_degradation_code(
+        &payload,
+        "causal_sample_underpowered",
+        "promote-plan dry-run",
     )?;
     assert_fixture_json("promote_plan_dry_run", &payload)
 }
@@ -322,8 +360,8 @@ fn causal_audit_confounded_matches_fixture_and_no_mutation_policy() -> TestResul
         report
             .plans
             .iter()
-            .all(|plan| !plan.blocking_confounder_ids.is_empty()),
-        "demotion plan should carry blocking confounder evidence",
+            .all(|plan| plan.blocking_confounder_ids.is_empty()),
+        "confounder IDs must not be fabricated without persisted evidence",
     )?;
 
     let payload = json!({
@@ -359,5 +397,10 @@ fn causal_audit_confounded_matches_fixture_and_no_mutation_policy() -> TestResul
         "recommendations": report.recommendations.data_json(),
         "mutationGuard": "no_direct_apply",
     });
+    ensure_degradation_code(
+        &report.data_json(),
+        "causal_sample_underpowered",
+        "confounded audit",
+    )?;
     assert_fixture_json("audit_confounded", &payload)
 }

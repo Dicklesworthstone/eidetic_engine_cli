@@ -6,8 +6,8 @@
 
 use ee::core::causal::{
     CAUSAL_COMPARE_SCHEMA_V1, CAUSAL_ESTIMATE_SCHEMA_V1, CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
-    CompareOptions, ConfidenceState, EstimateOptions, PromotePlanOptions, TraceOptions,
-    compare_causal_evidence, estimate_causal_uplift, promote_causal_plan, trace_causal_chains,
+    CompareOptions, EstimateOptions, PromotePlanOptions, TraceOptions, compare_causal_evidence,
+    estimate_causal_uplift, promote_causal_plan, trace_causal_chains,
 };
 use ee::models::causal::CAUSAL_TRACE_SCHEMA_V1;
 use ee::models::{
@@ -18,7 +18,7 @@ use serde_json::Value as JsonValue;
 use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
-const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 7;
+const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 6;
 
 const CAUSAL_COMPARE_ALL_SOURCES_GOLDEN: &str =
     // EE-453: deterministic snapshot across replay, shadow, counterfactual, and experiment inputs.
@@ -147,6 +147,21 @@ fn assert_has_field(json: &JsonValue, field: &str, context: &str) -> TestResult 
     ensure(
         json.get(field).is_some(),
         format!("{context}: missing required field '{field}'"),
+    )
+}
+
+fn assert_degradation_code(json: &JsonValue, expected_code: &str, context: &str) -> TestResult {
+    let degradations = json
+        .get("degradations")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| format!("{context}: missing degradations"))?;
+    ensure(
+        degradations.iter().any(|item| {
+            item.get("code")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|code| code == expected_code)
+        }),
+        format!("{context}: missing degradation code {expected_code}"),
     )
 }
 
@@ -351,28 +366,20 @@ fn trace_report_summary_has_required_fields() -> TestResult {
 }
 
 #[test]
-fn trace_chain_has_required_fields() -> TestResult {
+fn trace_with_procedure_filter_abstains_without_evidence_ledger() -> TestResult {
     let options = TraceOptions::new().with_procedure_id("proc-001");
     let report = trace_causal_chains(&options);
+    let json = report.data_json();
 
     ensure(
-        !report.chains.is_empty(),
-        "expected at least one chain with procedure filter",
+        report.chains.is_empty(),
+        "trace must not synthesize causal chains from a procedure ID",
     )?;
-
-    let chain = &report.chains[0];
-    let json = chain.data_json();
-
-    assert_has_field(&json, "chainId", "chain")?;
-    assert_has_field(&json, "decisionTrace", "chain")?;
-    assert_has_field(&json, "exposures", "chain")?;
-    assert_has_field(&json, "recorderRunIds", "chain")?;
-    assert_has_field(&json, "contextPackIds", "chain")?;
-    assert_has_field(&json, "preflightIds", "chain")?;
-    assert_has_field(&json, "tripwireIds", "chain")?;
-    assert_has_field(&json, "procedureIds", "chain")?;
-
-    Ok(())
+    assert_degradation_code(
+        &json,
+        "causal_evidence_unavailable",
+        "procedure-filter trace",
+    )
 }
 
 #[test]
@@ -598,50 +605,43 @@ fn estimate_summary_has_required_fields() -> TestResult {
 }
 
 #[test]
-fn estimate_with_artifact_produces_result() -> TestResult {
+fn estimate_with_artifact_abstains_without_outcome_ledger() -> TestResult {
     let options = EstimateOptions::new()
         .with_artifact_id("memory-001")
         .with_decision_id("decision-001");
     let report = estimate_causal_uplift(&options);
+    let json = report.data_json();
 
-    ensure(!report.is_empty(), "should produce estimate with filters")?;
     ensure(
-        report.estimates[0].artifact_id == "memory-001",
-        "artifact_id should match",
+        report.is_empty(),
+        "estimate must not synthesize uplift without persisted outcomes",
     )?;
-
-    Ok(())
+    assert_degradation_code(&json, "causal_sample_underpowered", "artifact estimate")
 }
 
 #[test]
-fn estimate_evidence_tiers_are_conservative() -> TestResult {
-    let naive = EstimateOptions::new()
-        .with_artifact_id("art-001")
-        .with_method("naive");
-    let replay = EstimateOptions::new()
-        .with_artifact_id("art-001")
-        .with_method("replay");
-    let experiment = EstimateOptions::new()
-        .with_artifact_id("art-001")
-        .with_method("experiment");
+fn estimate_methods_all_abstain_without_evidence_ledgers() -> TestResult {
+    for method in ["naive", "replay", "experiment"] {
+        let options = EstimateOptions::new()
+            .with_artifact_id("art-001")
+            .with_method(method);
+        let report = estimate_causal_uplift(&options);
+        let json = report.data_json();
 
-    let naive_report = estimate_causal_uplift(&naive);
-    let replay_report = estimate_causal_uplift(&replay);
-    let exp_report = estimate_causal_uplift(&experiment);
-
-    ensure(
-        naive_report.estimates[0].confidence_state == ConfidenceState::Insufficient,
-        "naive method should have insufficient confidence",
-    )?;
-    ensure(
-        replay_report.estimates[0].confidence_state == ConfidenceState::Medium,
-        "replay method should have medium confidence",
-    )?;
-    ensure(
-        exp_report.estimates[0].confidence_state == ConfidenceState::High,
-        "experiment method should have high confidence",
-    )?;
-
+        ensure(
+            report.estimates.is_empty(),
+            format!("{method} method must not synthesize an estimate"),
+        )?;
+        ensure(
+            report.method_used == method,
+            format!("{method} method should be tracked in the report"),
+        )?;
+        assert_degradation_code(
+            &json,
+            "causal_sample_underpowered",
+            &format!("{method} estimate"),
+        )?;
+    }
     Ok(())
 }
 
@@ -670,13 +670,17 @@ fn estimate_includes_confounders_when_requested() -> TestResult {
         .with_artifact_id("art-001")
         .with_confounders();
     let report = estimate_causal_uplift(&options);
+    let json = report.data_json();
 
     ensure(
-        report.has_confounders(),
-        "should include confounders when requested",
+        !report.has_confounders(),
+        "confounders must come from persisted evidence, not generated placeholders",
     )?;
-
-    Ok(())
+    assert_degradation_code(
+        &json,
+        "causal_confounders_unavailable",
+        "confounder estimate",
+    )
 }
 
 #[test]
@@ -758,7 +762,7 @@ fn compare_without_sources_reports_degradation() -> TestResult {
 }
 
 #[test]
-fn compare_with_sources_records_verdicts() -> TestResult {
+fn compare_with_sources_abstains_without_comparison_ledgers() -> TestResult {
     let options = CompareOptions::new()
         .with_fixture_replay_id("fixture-001")
         .with_shadow_run_id("shadow-001")
@@ -772,19 +776,22 @@ fn compare_with_sources_records_verdicts() -> TestResult {
         .and_then(JsonValue::as_array)
         .ok_or("missing comparisons")?;
 
-    ensure(!comparisons.is_empty(), "comparisons should not be empty")?;
     ensure(
-        comparisons.iter().all(|item| item.get("verdict").is_some()),
-        "each comparison should include verdict",
+        comparisons.is_empty(),
+        "compare must not synthesize verdicts from source IDs",
     )?;
     ensure(
         json.get("summary")
             .and_then(|summary| summary.get("totalComparisons"))
             .and_then(JsonValue::as_u64)
-            == Some(4),
-        "summary should report four comparisons",
+            == Some(0),
+        "summary should report zero comparisons",
     )?;
-    Ok(())
+    assert_degradation_code(
+        &json,
+        "causal_comparison_evidence_unavailable",
+        "source comparison",
+    )
 }
 
 #[test]

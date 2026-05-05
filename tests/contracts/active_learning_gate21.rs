@@ -7,15 +7,15 @@
 use ee::core::learn::{
     AgendaItem, ExperimentBudget, ExperimentDecisionImpact, ExperimentProposal,
     ExperimentSafetyPlan, LEARN_AGENDA_SCHEMA_V1, LEARN_CLOSE_SCHEMA_V1,
-    LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1, LEARN_EXPERIMENT_RUN_SCHEMA_V1, LEARN_OBSERVE_SCHEMA_V1,
-    LEARN_UNCERTAINTY_SCHEMA_V1, LearnAgendaReport, LearnCloseOptions,
-    LearnExperimentProposalReport, LearnExperimentRunOptions, LearnObserveOptions,
-    LearnUncertaintyReport, UncertaintyItem, close_experiment, observe_experiment, run_experiment,
+    LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1, LEARN_OBSERVE_SCHEMA_V1, LEARN_UNCERTAINTY_SCHEMA_V1,
+    LearnAgendaReport, LearnCloseOptions, LearnExperimentProposalReport, LearnExperimentRunOptions,
+    LearnObserveOptions, LearnUncertaintyReport, UncertaintyItem, close_experiment,
+    observe_experiment, run_experiment,
 };
 use ee::models::{ExperimentOutcomeStatus, LearningObservationSignal};
 use ee::output::{
     render_learn_agenda_json, render_learn_close_json, render_learn_experiment_proposal_json,
-    render_learn_experiment_run_json, render_learn_observe_json, render_learn_uncertainty_json,
+    render_learn_observe_json, render_learn_uncertainty_json,
 };
 use serde_json::Value as JsonValue;
 use std::env;
@@ -245,17 +245,23 @@ fn proposal_fixture() -> Result<String, String> {
     Ok(render_learn_experiment_proposal_json(&report))
 }
 
-fn experiment_run_dry_run_fixture() -> Result<String, String> {
-    let mut report = run_experiment(&LearnExperimentRunOptions {
+fn experiment_run_dry_run_unavailable_message() -> Result<String, String> {
+    let error = match run_experiment(&LearnExperimentRunOptions {
         workspace: PathBuf::new(),
         experiment_id: "exp_database_contract_fixture".to_string(),
         max_attention_tokens: 800,
         max_runtime_seconds: 180,
         dry_run: true,
-    })
-    .map_err(|error| error.message())?;
-    report.generated_at = FIXED_TIME.to_string();
-    Ok(render_learn_experiment_run_json(&report))
+    }) {
+        Ok(_) => {
+            return Err(
+                "experiment run dry-run should abstain until a persisted registry exists"
+                    .to_string(),
+            );
+        }
+        Err(error) => error.message(),
+    };
+    Ok(error)
 }
 
 fn observe_negative_fixture() -> Result<String, String> {
@@ -391,28 +397,12 @@ fn gate21_experiment_proposal_json_matches_golden() -> TestResult {
 }
 
 #[test]
-fn gate21_experiment_run_dry_run_json_matches_golden() -> TestResult {
-    let rendered = experiment_run_dry_run_fixture()?;
-    let value: JsonValue =
-        serde_json::from_str(&rendered).map_err(|error| format!("experiment run JSON: {error}"))?;
-    ensure_json_equal(
-        value.get("schema"),
-        JsonValue::String(LEARN_EXPERIMENT_RUN_SCHEMA_V1.to_string()),
-        "experiment run schema",
-    )?;
-    ensure_json_equal(
-        value.get("dryRun"),
-        JsonValue::Bool(true),
-        "experiment run dryRun",
-    )?;
+fn gate21_experiment_run_dry_run_abstains_without_registry() -> TestResult {
+    let message = experiment_run_dry_run_unavailable_message()?;
     ensure(
-        value
-            .get("steps")
-            .and_then(JsonValue::as_array)
-            .is_some_and(|steps| !steps.is_empty()),
-        "experiment run steps must not be empty",
-    )?;
-    assert_json_golden("experiment_run_dry_run", &rendered)
+        message.contains("persisted experiment definitions"),
+        format!("experiment run should require persisted definitions, got {message}"),
+    )
 }
 
 #[test]
@@ -508,9 +498,9 @@ fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
         "--dry-run",
     ])?;
     ensure(
-        run.status.success(),
+        run.status.code() == Some(6),
         format!(
-            "learn experiment run dry-run should succeed, got {:?}",
+            "learn experiment run dry-run should report degraded unavailable exit 6, got {:?}",
             run.status.code()
         ),
     )?;
@@ -525,14 +515,20 @@ fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
         .map_err(|error| format!("learn experiment run stdout must be JSON: {error}"))?;
     ensure_json_equal(
         run_value.get("schema"),
-        JsonValue::String("ee.learn.experiment_run.v1".to_string()),
+        JsonValue::String("ee.error.v1".to_string()),
         "run schema",
     )?;
-    ensure_json_equal(run_value.get("dryRun"), JsonValue::Bool(true), "run dryRun")?;
     ensure_json_equal(
-        run_value.get("status"),
-        JsonValue::String("dry_run".to_string()),
-        "run status",
+        run_value.pointer("/error/code"),
+        JsonValue::String("unsatisfied_degraded_mode".to_string()),
+        "run degraded code",
+    )?;
+    ensure(
+        run_value
+            .pointer("/error/message")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|message| message.contains("persisted experiment definitions")),
+        "run degraded message must require persisted definitions",
     )?;
 
     let observe = run_ee(&[

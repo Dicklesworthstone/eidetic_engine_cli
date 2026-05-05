@@ -1,21 +1,7 @@
 {
   "schema": "ee.causal.estimate.v1",
   "command": "causal estimate",
-  "estimates": [
-    {
-      "estimateId": "est-mem_fixture_001-decision_fixture_001",
-      "artifactId": "mem_fixture_001",
-      "decisionId": "decision_fixture_001",
-      "method": "naive",
-      "uplift": 0.05,
-      "direction": "positive",
-      "confidence": 0.3,
-      "evidenceStrength": "exposure_only",
-      "confidenceState": "insufficient",
-      "sampleSize": 42,
-      "estimatedAt": "TIMESTAMP"
-    }
-  ],
+  "estimates": [],
   "assumptions": [
     {
       "code": "stable_unit",
@@ -33,32 +19,28 @@
       "impact": "Almost certainly violated; estimate is likely biased"
     }
   ],
-  "confounders": [
-    {
-      "confounderId": "conf-task-complexity-mem_fixture_001",
-      "kind": "task_complexity",
-      "description": "Task complexity correlates with both memory usage and success",
-      "severity": 0.6,
-      "mitigation": "Stratify by task difficulty or use matching"
-    },
-    {
-      "confounderId": "conf-agent-skill-mem_fixture_001",
-      "kind": "agent_capability",
-      "description": "More capable agents may both use memory more and succeed more",
-      "severity": 0.4,
-      "mitigation": "Include agent-level fixed effects"
-    }
-  ],
+  "confounders": [],
   "summary": {
-    "totalEstimates": 1,
+    "totalEstimates": 0,
     "totalAssumptions": 3,
-    "totalConfounders": 2,
+    "totalConfounders": 0,
     "methodUsed": "naive"
   },
   "filtersApplied": [
     "artifact_id=mem_fixture_001",
     "decision_id=decision_fixture_001"
   ],
-  "degradations": [],
+  "degradations": [
+    {
+      "code": "causal_sample_underpowered",
+      "message": "Sample size 0 with no observed baseline/outcome ledger; no causal estimate is actionable.",
+      "severity": "warning"
+    },
+    {
+      "code": "causal_confounders_unavailable",
+      "message": "No explicit confounder ledger rows were supplied; refusing to fabricate confounders.",
+      "severity": "warning"
+    }
+  ],
   "dryRun": false
 }

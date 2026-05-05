@@ -6,33 +6,33 @@
       "schema": "ee.causal.promotion_plan.v1",
       "planId": "plan-mem_fixture_001",
       "artifactId": "mem_fixture_001",
-      "action": "promote",
+      "action": "hold",
       "status": "dry_run_ready",
-      "evidenceStrength": "replay_supported",
+      "evidenceStrength": "exposure_only",
       "minimumUplift": 0.05,
-      "estimatedUplift": 0.1,
-      "requiredEvidenceIds": [
-        "evidence-mem_fixture_001"
-      ],
+      "estimatedUplift": 0.0,
+      "requiredEvidenceIds": [],
       "blockingConfounderIds": [],
       "dryRunFirst": true,
       "auditIds": [
-        "audit-promote-plan-mem_fixture_001"
+        "audit-review-only-mem_fixture_001"
       ],
       "createdAt": "TIMESTAMP"
     }
   ],
   "recommendations": {
     "revalidation": [
-      "Re-run `ee causal estimate --artifact-id mem_fixture_001 --method replay --json` before applying changes."
+      "Collect persisted exposure, baseline, outcome, and confounder evidence for `mem_fixture_001` before any causal estimate."
     ],
     "narrowerRouting": [
-      "Narrow routing scope for `mem_fixture_001` to higher-confidence task families."
+      "Review routing scope for `mem_fixture_001` manually; this report does not reroute memory."
     ],
     "experimentProposals": [
-      "Propose controlled experiment for `mem_fixture_001` with `ee learn experiment --artifact-id mem_fixture_001 --dry-run --json`."
+      "Design an explicit experiment for `mem_fixture_001` and persist treatment, baseline, outcome, and confounder evidence before re-running causal promotion review."
     ],
-    "reviewRecommendations": [],
+    "reviewRecommendations": [
+      "Route `mem_fixture_001` to review only; sample size 0 and `exposure_only` evidence are underpowered for promotion, demotion, or rerouting."
+    ],
     "safetyGuards": [
       "Safety-critical warnings remain pinned and are never randomized away for evidence collection."
     ]
@@ -40,42 +40,48 @@
   "downstreamEffects": {
     "schema": "ee.causal.downstream_effects.v1",
     "economyScore": {
-      "priorityDelta": 3,
-      "utilityDelta": 0.13,
-      "confidenceDelta": 0.1,
-      "reasoning": "Causal action `promote` with `replay_supported` evidence projects deterministic economy scoring movement."
+      "priorityDelta": 0,
+      "utilityDelta": 0.0,
+      "confidenceDelta": 0.0,
+      "reasoning": "No supported causal evidence is available; economy scoring remains unchanged."
     },
     "learningAgenda": {
-      "priorityDelta": 2,
-      "queueAction": "raise_priority",
-      "reasoning": "Uplift 0.100 and `replay_supported` evidence update learning agenda priority without mutating source evidence."
+      "priorityDelta": 0,
+      "queueAction": "review_only",
+      "reasoning": "Underpowered causal evidence opens only a review task and does not mutate learning priority."
     },
     "preflightRouting": {
-      "profile": "standard",
-      "confidenceGate": "medium",
-      "reasoning": "Promotion action `promote` maps to `standard` preflight profile under `medium` confidence gate."
+      "profile": "unchanged",
+      "confidenceGate": "low",
+      "reasoning": "No causal routing change is projected without persisted baseline/outcome evidence."
     },
     "procedureVerification": {
-      "status": "validated_by_uplift",
-      "requiresRevalidation": false,
-      "reasoning": "Procedure verification status tracks causal action `promote` while preserving raw evidence immutability."
+      "status": "evidence_required",
+      "requiresRevalidation": true,
+      "reasoning": "Procedure verification requires explicit causal evidence before status changes."
     },
     "audit": {
-      "mutationMode": "dry_run_projection",
+      "mutationMode": "dry_run_review_only",
       "rawEvidenceReplaced": false,
       "silentMutation": false
     }
   },
   "summary": {
     "totalPlans": 1,
-    "promoteCount": 1,
-    "holdCount": 0,
+    "promoteCount": 0,
+    "holdCount": 1,
     "demoteCount": 0,
     "methodUsed": "replay"
   },
   "filtersApplied": [
     "artifact_id=mem_fixture_001"
   ],
-  "degradations": [],
+  "degradations": [
+    {
+      "code": "causal_sample_underpowered",
+      "message": "causal promote-plan has sample size 0 with no observed baseline/outcome ledger; no causal effect is actionable.",
+      "severity": "warning"
+    }
+  ],
   "dryRun": true
 }
