@@ -733,6 +733,15 @@ pub fn list_backups(options: &BackupListOptions) -> Result<BackupListReport, Dom
 pub fn inspect_backup(options: &BackupInspectOptions) -> Result<BackupInspectReport, DomainError> {
     let backup_path = normalize_path(&options.backup_path);
     let manifest_path = backup_path.join(MANIFEST_FILE);
+    if backup_relative_path_has_symlink_component(&backup_path, Path::new(MANIFEST_FILE))? {
+        return Err(DomainError::Storage {
+            message: format!(
+                "backup manifest path '{}' traverses a symbolic link",
+                manifest_path.display()
+            ),
+            repair: Some("choose a self-contained backup directory".to_owned()),
+        });
+    }
     if !manifest_path.is_file() {
         return Err(DomainError::NotFound {
             resource: "backup manifest".to_owned(),
@@ -1162,26 +1171,106 @@ fn safe_artifact_path(
     artifact_path: &str,
     issues: &mut Vec<BackupVerificationIssue>,
 ) -> Option<PathBuf> {
+    let trimmed = artifact_path.trim();
     let relative = Path::new(artifact_path);
-    if artifact_path.trim().is_empty()
+    if trimmed.is_empty()
+        || trimmed != artifact_path
         || relative.is_absolute()
-        || relative.components().any(|component| {
-            matches!(
-                component,
-                Component::Prefix(_) | Component::RootDir | Component::ParentDir
-            )
-        })
+        || artifact_path
+            .chars()
+            .any(|ch| ch == '\\' || ch == ':' || ch.is_control())
     {
         issues.push(
             BackupVerificationIssue::error(
                 "artifact_path_outside_backup",
-                "backup artifact path is empty, absolute, or escapes the backup directory",
+                "backup artifact path is empty, absolute, nonportable, or escapes the backup directory",
             )
             .with_path(artifact_path.to_owned()),
         );
         return None;
     }
+
+    let mut has_normal_component = false;
+    for component in relative.components() {
+        match component {
+            Component::Normal(_) => has_normal_component = true,
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
+                issues.push(
+                    BackupVerificationIssue::error(
+                        "artifact_path_outside_backup",
+                        "backup artifact path is empty, absolute, nonportable, or escapes the backup directory",
+                    )
+                    .with_path(artifact_path.to_owned()),
+                );
+                return None;
+            }
+        }
+    }
+    if !has_normal_component {
+        issues.push(
+            BackupVerificationIssue::error(
+                "artifact_path_outside_backup",
+                "backup artifact path is empty, absolute, nonportable, or escapes the backup directory",
+            )
+            .with_path(artifact_path.to_owned()),
+        );
+        return None;
+    }
+
+    match backup_relative_path_has_symlink_component(backup_path, relative) {
+        Ok(true) => {
+            issues.push(
+                BackupVerificationIssue::error(
+                    "artifact_path_symlink",
+                    "backup artifact path traverses a symbolic link",
+                )
+                .with_path(artifact_path.to_owned()),
+            );
+            return None;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            issues.push(
+                BackupVerificationIssue::error("artifact_path_unreadable", error.message())
+                    .with_path(artifact_path.to_owned()),
+            );
+            return None;
+        }
+    }
+
     Some(backup_path.join(relative))
+}
+
+fn backup_relative_path_has_symlink_component(
+    root: &Path,
+    relative: &Path,
+) -> Result<bool, DomainError> {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            Component::Normal(segment) => {
+                current.push(segment);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                    Err(error) => {
+                        return Err(DomainError::Storage {
+                            message: format!(
+                                "failed to inspect backup path '{}': {error}",
+                                current.display()
+                            ),
+                            repair: Some("inspect filesystem permissions and retry".to_owned()),
+                        });
+                    }
+                }
+            }
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => return Ok(true),
+        }
+    }
+    Ok(false)
 }
 
 fn load_workspace(
@@ -1939,6 +2028,91 @@ mod tests {
                 .iter()
                 .any(|issue| issue.code == "artifact_hash_mismatch"),
             "verify detects hash mismatch",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_backup_rejects_symlink_manifest() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let backup_path = tempdir.path().join("backup");
+        fs::create_dir_all(&backup_path).map_err(|error| error.to_string())?;
+        let outside_manifest = tempdir.path().join("outside-manifest.json");
+        fs::write(
+            &outside_manifest,
+            serde_json::to_vec(&json!({
+                "schema": BACKUP_MANIFEST_SCHEMA_V1,
+                "backupId": "backup-test",
+                "artifacts": [],
+            }))
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_manifest, backup_path.join(MANIFEST_FILE))
+            .map_err(|error| error.to_string())?;
+
+        let result = inspect_backup(&BackupInspectOptions { backup_path });
+
+        match result {
+            Err(DomainError::Storage { message, repair }) => {
+                ensure(
+                    message.contains("symbolic link"),
+                    "symlink manifest should be rejected explicitly",
+                )?;
+                ensure_equal(
+                    repair.as_deref(),
+                    Some("choose a self-contained backup directory"),
+                    "symlink manifest repair",
+                )
+            }
+            other => Err(format!("expected storage error, got {other:?}")),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_backup_rejects_symlink_artifact_path() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let backup_path = tempdir.path().join("backup");
+        fs::create_dir_all(&backup_path).map_err(|error| error.to_string())?;
+        let outside_records = tempdir.path().join("outside-records.jsonl");
+        let records_payload = b"{\"schema\":\"ee.export.header.v1\"}\n";
+        fs::write(&outside_records, records_payload).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_records, backup_path.join(RECORDS_FILE))
+            .map_err(|error| error.to_string())?;
+        let manifest = json!({
+            "schema": BACKUP_MANIFEST_SCHEMA_V1,
+            "backupId": "backup-test",
+            "artifacts": [{
+                "path": RECORDS_FILE,
+                "kind": "jsonl_export",
+                "hash": hash_bytes(records_payload),
+                "sizeBytes": records_payload.len(),
+                "required": true,
+            }],
+        });
+        let manifest_bytes =
+            serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+        fs::write(backup_path.join(MANIFEST_FILE), manifest_bytes)
+            .map_err(|error| error.to_string())?;
+
+        let verified =
+            verify_backup(&BackupVerifyOptions { backup_path }).map_err(|error| error.message())?;
+
+        ensure_equal(
+            verified.status.as_str(),
+            "failed",
+            "symlink artifact verification status",
+        )?;
+        ensure(
+            verified.checked_artifacts.is_empty(),
+            "symlink artifact should not be hashed as backup evidence",
+        )?;
+        ensure(
+            verified.issues.iter().any(|issue| {
+                issue.code == "artifact_path_symlink" && issue.path.as_deref() == Some(RECORDS_FILE)
+            }),
+            "verify should report symlink artifact path",
         )
     }
 
