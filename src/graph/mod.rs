@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use crate::db::{
-    CreateGraphSnapshotInput, DbConnection, GraphSnapshotStatus, GraphSnapshotType,
-    StoredGraphSnapshot, StoredMemoryLink,
+    AcquireLockResult, AdvisoryLockId, CreateGraphSnapshotInput, DbConnection, GraphSnapshotStatus,
+    GraphSnapshotType, StoredGraphSnapshot, StoredMemoryLink,
 };
 use crate::models::{CapabilityStatus, GRAPH_MODULE_SCHEMA_V1, MemoryId};
 use sqlmodel_core::IsolationLevel;
@@ -933,6 +934,9 @@ pub fn compute_betweenness(projection: &MemoryGraphProjection) -> BetweennessCen
 
 /// Schema for centrality refresh response envelope.
 pub const CENTRALITY_REFRESH_SCHEMA_V1: &str = "ee.graph.centrality_refresh.v1";
+const GRAPH_SNAPSHOT_WRITE_LOCK_TTL_SECS: u64 = 300;
+const GRAPH_SNAPSHOT_WRITE_LOCK_ATTEMPTS: usize = 64;
+const GRAPH_SNAPSHOT_WRITE_LOCK_REASON: &str = "graph snapshot write";
 
 /// Status of a centrality refresh operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1258,15 +1262,31 @@ struct GraphSnapshotPersistenceInput {
     source_generation: u32,
 }
 
+struct GraphSnapshotWriteOwner<'a> {
+    conn: &'a DbConnection,
+    lock_id: AdvisoryLockId,
+    holder_id: String,
+}
+
+impl Drop for GraphSnapshotWriteOwner<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .conn
+            .release_advisory_lock(&self.lock_id, &self.holder_id);
+    }
+}
+
 fn persist_graph_snapshot(
     conn: &DbConnection,
     workspace_id: &str,
     input: GraphSnapshotPersistenceInput,
 ) -> Result<GraphRefreshSnapshot, String> {
+    let write_owner = acquire_graph_snapshot_write_owner(conn, workspace_id)?;
+
     conn.begin_transaction(IsolationLevel::RepeatableRead)
         .map_err(|error| format!("Failed to begin graph snapshot transaction: {error}"))?;
 
-    let result = persist_graph_snapshot_in_transaction(conn, workspace_id, input);
+    let result = persist_graph_snapshot_in_transaction(conn, workspace_id, input, &write_owner);
 
     match result {
         Ok(snapshot) => match conn.commit() {
@@ -1285,10 +1305,77 @@ fn persist_graph_snapshot(
     }
 }
 
+fn acquire_graph_snapshot_write_owner<'a>(
+    conn: &'a DbConnection,
+    workspace_id: &str,
+) -> Result<GraphSnapshotWriteOwner<'a>, String> {
+    let lock_id = AdvisoryLockId::workspace(workspace_id);
+    let holder_id = generate_graph_snapshot_holder_id();
+    let mut last_conflict = None;
+    let mut last_error = None;
+
+    for attempt in 0..GRAPH_SNAPSHOT_WRITE_LOCK_ATTEMPTS {
+        match conn.acquire_advisory_lock(
+            &lock_id,
+            &holder_id,
+            Some(GRAPH_SNAPSHOT_WRITE_LOCK_TTL_SECS),
+            Some(GRAPH_SNAPSHOT_WRITE_LOCK_REASON),
+        ) {
+            Ok(AcquireLockResult::Acquired(_)) | Ok(AcquireLockResult::Expired { .. }) => {
+                return Ok(GraphSnapshotWriteOwner {
+                    conn,
+                    lock_id,
+                    holder_id,
+                });
+            }
+            Ok(AcquireLockResult::AlreadyHeld {
+                holder_id,
+                acquired_at,
+            }) => {
+                last_conflict = Some((holder_id, acquired_at));
+                std::thread::sleep(graph_snapshot_write_lock_backoff(attempt));
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+                std::thread::sleep(graph_snapshot_write_lock_backoff(attempt));
+            }
+        }
+    }
+
+    if let Some((holder_id, acquired_at)) = last_conflict {
+        return Err(format!(
+            "Graph snapshot write lock for workspace {workspace_id} is held by {holder_id} since {acquired_at}."
+        ));
+    }
+    if let Some(error) = last_error {
+        return Err(format!(
+            "Failed to acquire graph snapshot write lock for workspace {workspace_id}: {error}"
+        ));
+    }
+
+    Err(format!(
+        "Failed to acquire graph snapshot write lock for workspace {workspace_id}."
+    ))
+}
+
+fn graph_snapshot_write_lock_backoff(attempt: usize) -> Duration {
+    let capped = u32::try_from(attempt.min(5)).unwrap_or(5);
+    Duration::from_millis(2_u64.saturating_mul(1_u64 << capped))
+}
+
+fn generate_graph_snapshot_holder_id() -> String {
+    format!(
+        "ee-graph-snapshot-{}-{}",
+        std::process::id(),
+        MemoryId::now()
+    )
+}
+
 fn persist_graph_snapshot_in_transaction(
     conn: &DbConnection,
     workspace_id: &str,
     input: GraphSnapshotPersistenceInput,
+    _write_owner: &GraphSnapshotWriteOwner<'_>,
 ) -> Result<GraphRefreshSnapshot, String> {
     let snapshot_version = next_graph_snapshot_version(conn, workspace_id)?;
     let snapshot_id = generate_graph_snapshot_id();
@@ -3348,10 +3435,13 @@ fn compare_neighborhood_edges(
 #[cfg(test)]
 mod tests {
     use crate::db::{
-        CreateGraphSnapshotInput, CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput,
-        DbConnection, GraphSnapshotStatus, GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource,
-        StoredGraphSnapshot,
+        AdvisoryLockId, CreateGraphSnapshotInput, CreateMemoryInput, CreateMemoryLinkInput,
+        CreateWorkspaceInput, DbConnection, GraphSnapshotStatus, GraphSnapshotType,
+        MemoryLinkRelation, MemoryLinkSource, StoredGraphSnapshot,
     };
+    use proptest::prelude::*;
+    use proptest::test_runner::Config as ProptestConfig;
+    use std::sync::{Arc, Barrier};
 
     use super::{
         GraphCapabilityName, GraphSurface, REQUIRED_GRAPH_ENGINE, module_readiness, subsystem_name,
@@ -3841,6 +3931,21 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
         Ok(connection)
+    }
+
+    fn create_snapshot_file_database(path: &std::path::Path) -> TestResult {
+        let connection = DbConnection::open_file(path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-graph-snapshot-linearizability".to_string(),
+                    name: Some("graph snapshot linearizability".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())
     }
 
     fn insert_graph_snapshot(
@@ -4894,6 +4999,116 @@ mod tests {
                 .map(|snapshot| snapshot.snapshot_version)
                 .collect::<Vec<_>>(),
             vec![2, 1]
+        );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(8))]
+
+        #[test]
+        fn graph_snapshot_writes_are_linearizable_under_concurrency(writer_count in 2usize..9) {
+            if let Err(error) = run_concurrent_graph_snapshot_writers(writer_count) {
+                return Err(TestCaseError::fail(error));
+            }
+        }
+    }
+
+    fn run_concurrent_graph_snapshot_writers(writer_count: usize) -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        create_snapshot_file_database(&database_path)?;
+
+        let barrier = Arc::new(Barrier::new(writer_count));
+        let mut handles = Vec::new();
+        for index in 0..writer_count {
+            let database_path = database_path.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(
+                move || -> Result<super::GraphRefreshSnapshot, String> {
+                    let connection = DbConnection::open_file(&database_path)
+                        .map_err(|error| error.to_string())?;
+                    barrier.wait();
+                    let sequence = u32::try_from(index + 1).map_err(|error| error.to_string())?;
+                    let snapshot = super::persist_graph_snapshot(
+                        &connection,
+                        WORKSPACE_ID,
+                        super::GraphSnapshotPersistenceInput {
+                            node_count: 1,
+                            edge_count: 0,
+                            metrics_json: serde_json::json!({
+                                "nodes": [{
+                                    "id": format!("mem_linearizable_{index:02}"),
+                                    "pagerank": 1.0,
+                                    "betweenness": 0.0,
+                                }],
+                                "edges": [],
+                            })
+                            .to_string(),
+                            content_hash: format!("blake3:linearizable-{index:02}"),
+                            source_generation: sequence,
+                        },
+                    )?;
+                    connection.close().map_err(|error| error.to_string())?;
+                    Ok(snapshot)
+                },
+            ));
+        }
+
+        let mut snapshots = Vec::new();
+        for handle in handles {
+            let snapshot = handle
+                .join()
+                .map_err(|_| "graph snapshot writer thread panicked".to_owned())??;
+            snapshots.push(snapshot);
+        }
+
+        snapshots.sort_by_key(|snapshot| snapshot.snapshot_version);
+        let versions: Vec<_> = snapshots
+            .iter()
+            .map(|snapshot| snapshot.snapshot_version)
+            .collect();
+        let expected_versions: Result<Vec<_>, _> = (1..=writer_count).map(u32::try_from).collect();
+        assert_eq!(
+            versions,
+            expected_versions.map_err(|error| error.to_string())?
+        );
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let stored = connection
+            .list_graph_snapshots(
+                WORKSPACE_ID,
+                Some(GraphSnapshotType::MemoryLinks),
+                u32::try_from(writer_count).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(stored.len(), writer_count);
+        assert_eq!(
+            stored.first().map(|snapshot| snapshot.snapshot_version),
+            versions.last().copied()
+        );
+
+        let mut source_generations: Vec<_> = stored
+            .iter()
+            .map(|snapshot| snapshot.source_generation)
+            .collect();
+        source_generations.sort_unstable();
+        let expected_generations: Result<Vec<_>, _> =
+            (1..=writer_count).map(u32::try_from).collect();
+        assert_eq!(
+            source_generations,
+            expected_generations.map_err(|error| error.to_string())?
+        );
+
+        let workspace_lock = AdvisoryLockId::workspace(WORKSPACE_ID);
+        assert!(
+            connection
+                .is_lock_held(&workspace_lock)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            "graph snapshot write lock should be released after all writers finish"
         );
 
         connection.close().map_err(|error| error.to_string())
