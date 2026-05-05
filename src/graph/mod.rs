@@ -1,13 +1,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
+#[cfg(any(feature = "graph", test))]
 use std::time::Duration;
 
+#[cfg(any(feature = "graph", test))]
+use crate::db::{AcquireLockResult, AdvisoryLockId, CreateGraphSnapshotInput};
 use crate::db::{
-    AcquireLockResult, AdvisoryLockId, CreateGraphSnapshotInput, DbConnection, DbError,
-    GraphSnapshotStatus, GraphSnapshotType, StoredGraphSnapshot, StoredMemoryLink,
+    DbConnection, DbError, GraphSnapshotStatus, GraphSnapshotType, StoredGraphSnapshot,
+    StoredMemoryLink,
 };
-use crate::models::{CapabilityStatus, GRAPH_MODULE_SCHEMA_V1, MemoryId};
+#[cfg(any(feature = "graph", test))]
+use crate::models::MemoryId;
+use crate::models::{CapabilityStatus, GRAPH_MODULE_SCHEMA_V1};
+#[cfg(any(feature = "graph", test))]
 use sqlmodel_core::IsolationLevel;
 
 #[cfg(feature = "graph")]
@@ -72,6 +78,7 @@ impl GraphError {
         }
     }
 
+    #[cfg(any(feature = "graph", test))]
     fn numeric_overflow(field: &'static str, value: impl fmt::Display) -> Self {
         Self::NumericOverflow {
             field,
@@ -1084,8 +1091,13 @@ pub fn compute_betweenness(projection: &MemoryGraphProjection) -> BetweennessCen
 
 /// Schema for centrality refresh response envelope.
 pub const CENTRALITY_REFRESH_SCHEMA_V1: &str = "ee.graph.centrality_refresh.v1";
+#[cfg(any(feature = "graph", test))]
 const GRAPH_SNAPSHOT_WRITE_LOCK_TTL_SECS: u64 = 300;
+#[cfg(all(not(test), feature = "graph"))]
 const GRAPH_SNAPSHOT_WRITE_LOCK_ATTEMPTS: usize = 128;
+#[cfg(test)]
+const GRAPH_SNAPSHOT_WRITE_LOCK_ATTEMPTS: usize = 16;
+#[cfg(any(feature = "graph", test))]
 const GRAPH_SNAPSHOT_WRITE_LOCK_REASON: &str = "graph snapshot write";
 
 /// Status of a centrality refresh operation.
@@ -1363,6 +1375,69 @@ pub fn refresh_graph_snapshot(
     workspace_id: &str,
     options: &CentralityRefreshOptions,
 ) -> GraphResult<GraphRefreshJobReport> {
+    #[cfg(not(feature = "graph"))]
+    {
+        let (centrality, _) = refresh_centrality_with_source_links(conn, options)?;
+        Ok(GraphRefreshJobReport {
+            centrality,
+            workspace_id: workspace_id.to_owned(),
+            snapshot: None,
+        })
+    }
+
+    #[cfg(feature = "graph")]
+    {
+        if options.dry_run {
+            let (centrality, _) = refresh_centrality_with_source_links(conn, options)?;
+            Ok(GraphRefreshJobReport {
+                centrality,
+                workspace_id: workspace_id.to_owned(),
+                snapshot: None,
+            })
+        } else {
+            refresh_graph_snapshot_locked(conn, workspace_id, options)
+        }
+    }
+}
+
+#[cfg(feature = "graph")]
+fn refresh_graph_snapshot_locked(
+    conn: &DbConnection,
+    workspace_id: &str,
+    options: &CentralityRefreshOptions,
+) -> GraphResult<GraphRefreshJobReport> {
+    let write_owner = acquire_graph_snapshot_write_owner(conn, workspace_id)?;
+
+    conn.begin_transaction(IsolationLevel::RepeatableRead)
+        .map_err(|error| GraphError::storage("begin graph snapshot refresh transaction", error))?;
+
+    let result = refresh_graph_snapshot_in_transaction(conn, workspace_id, options, &write_owner);
+
+    match result {
+        Ok(report) => match conn.commit() {
+            Ok(()) => Ok(report),
+            Err(error) => {
+                rollback_graph_snapshot_transaction(conn, "commit", &error);
+                Err(GraphError::storage(
+                    "commit graph snapshot refresh transaction",
+                    error,
+                ))
+            }
+        },
+        Err(error) => {
+            rollback_graph_snapshot_transaction(conn, "operation", &error);
+            Err(error)
+        }
+    }
+}
+
+#[cfg(feature = "graph")]
+fn refresh_graph_snapshot_in_transaction(
+    conn: &DbConnection,
+    workspace_id: &str,
+    options: &CentralityRefreshOptions,
+    write_owner: &GraphSnapshotWriteOwner<'_>,
+) -> GraphResult<GraphRefreshJobReport> {
     let (centrality, links) = refresh_centrality_with_source_links(conn, options)?;
     let mut report = GraphRefreshJobReport {
         centrality,
@@ -1370,30 +1445,41 @@ pub fn refresh_graph_snapshot(
         snapshot: None,
     };
 
-    if options.dry_run || report.centrality.status != CentralityRefreshStatus::Refreshed {
+    if report.centrality.status != CentralityRefreshStatus::Refreshed {
         return Ok(report);
     }
 
-    let metrics_json = graph_snapshot_metrics_json(&report.centrality, &links)?;
-    let content_hash = graph_snapshot_content_hash(&metrics_json);
-    let source_generation = u32::try_from(links.len())
-        .map_err(|_| GraphError::numeric_overflow("source link count", links.len()))?;
-    let persistence = GraphSnapshotPersistenceInput {
-        node_count: u32::try_from(report.centrality.node_count).map_err(|_| {
-            GraphError::numeric_overflow("node count", report.centrality.node_count)
-        })?,
-        edge_count: u32::try_from(report.centrality.edge_count).map_err(|_| {
-            GraphError::numeric_overflow("edge count", report.centrality.edge_count)
-        })?,
-        metrics_json,
-        content_hash,
-        source_generation,
-    };
-
-    report.snapshot = Some(persist_graph_snapshot(conn, workspace_id, persistence)?);
+    let persistence = graph_snapshot_persistence_input(&report.centrality, &links)?;
+    report.snapshot = Some(persist_graph_snapshot_in_transaction(
+        conn,
+        workspace_id,
+        persistence,
+        write_owner,
+    )?);
     Ok(report)
 }
 
+#[cfg(feature = "graph")]
+fn graph_snapshot_persistence_input(
+    centrality: &CentralityRefreshReport,
+    links: &[StoredMemoryLink],
+) -> GraphResult<GraphSnapshotPersistenceInput> {
+    let metrics_json = graph_snapshot_metrics_json(centrality, links)?;
+    let content_hash = graph_snapshot_content_hash(&metrics_json);
+    let source_generation = u32::try_from(links.len())
+        .map_err(|_| GraphError::numeric_overflow("source link count", links.len()))?;
+    Ok(GraphSnapshotPersistenceInput {
+        node_count: u32::try_from(centrality.node_count)
+            .map_err(|_| GraphError::numeric_overflow("node count", centrality.node_count))?,
+        edge_count: u32::try_from(centrality.edge_count)
+            .map_err(|_| GraphError::numeric_overflow("edge count", centrality.edge_count))?,
+        metrics_json,
+        content_hash,
+        source_generation,
+    })
+}
+
+#[cfg(any(feature = "graph", test))]
 struct GraphSnapshotPersistenceInput {
     node_count: u32,
     edge_count: u32,
@@ -1402,26 +1488,45 @@ struct GraphSnapshotPersistenceInput {
     source_generation: u32,
 }
 
+#[cfg(any(feature = "graph", test))]
 struct GraphSnapshotWriteOwner<'a> {
     conn: &'a DbConnection,
     lock_id: AdvisoryLockId,
     holder_id: String,
 }
 
+#[cfg(any(feature = "graph", test))]
 impl Drop for GraphSnapshotWriteOwner<'_> {
     fn drop(&mut self) {
+        let mut last_error = None;
         for attempt in 0..GRAPH_SNAPSHOT_WRITE_LOCK_ATTEMPTS {
             match self
                 .conn
                 .release_advisory_lock(&self.lock_id, &self.holder_id)
             {
                 Ok(_) => return,
-                Err(_) => std::thread::sleep(graph_snapshot_write_lock_backoff(attempt)),
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt + 1 < GRAPH_SNAPSHOT_WRITE_LOCK_ATTEMPTS {
+                        std::thread::sleep(graph_snapshot_write_lock_backoff(attempt));
+                    }
+                }
             }
+        }
+        if let Some(error) = last_error {
+            tracing::warn!(
+                target: "ee::graph",
+                resource_type = self.lock_id.resource_type(),
+                workspace_id = self.lock_id.resource_id(),
+                holder_id = self.holder_id.as_str(),
+                error = %error,
+                "graph snapshot write lock release failed after retries"
+            );
         }
     }
 }
 
+#[cfg(test)]
 fn persist_graph_snapshot(
     conn: &DbConnection,
     workspace_id: &str,
@@ -1438,7 +1543,7 @@ fn persist_graph_snapshot(
         Ok(snapshot) => match conn.commit() {
             Ok(()) => Ok(snapshot),
             Err(error) => {
-                let _ = conn.rollback();
+                rollback_graph_snapshot_transaction(conn, "commit", &error);
                 Err(GraphError::storage(
                     "commit graph snapshot transaction",
                     error,
@@ -1446,12 +1551,30 @@ fn persist_graph_snapshot(
             }
         },
         Err(error) => {
-            let _ = conn.rollback();
+            rollback_graph_snapshot_transaction(conn, "operation", &error);
             Err(error)
         }
     }
 }
 
+#[cfg(any(feature = "graph", test))]
+fn rollback_graph_snapshot_transaction<E: fmt::Display>(
+    conn: &DbConnection,
+    phase: &str,
+    original_error: &E,
+) {
+    if let Err(rollback_error) = conn.rollback() {
+        tracing::error!(
+            target: "ee::graph",
+            phase,
+            error = %original_error,
+            rollback_error = %rollback_error,
+            "graph snapshot transaction rollback failed"
+        );
+    }
+}
+
+#[cfg(any(feature = "graph", test))]
 fn acquire_graph_snapshot_write_owner<'a>(
     conn: &'a DbConnection,
     workspace_id: &str,
@@ -1508,11 +1631,13 @@ fn acquire_graph_snapshot_write_owner<'a>(
     })
 }
 
+#[cfg(any(feature = "graph", test))]
 fn graph_snapshot_write_lock_backoff(attempt: usize) -> Duration {
     let shift = attempt.min(6);
     Duration::from_millis(5_u64.saturating_mul(1_u64 << shift))
 }
 
+#[cfg(any(feature = "graph", test))]
 fn generate_graph_snapshot_holder_id() -> String {
     format!(
         "ee-graph-snapshot-{}-{}",
@@ -1521,6 +1646,7 @@ fn generate_graph_snapshot_holder_id() -> String {
     )
 }
 
+#[cfg(any(feature = "graph", test))]
 fn persist_graph_snapshot_in_transaction(
     conn: &DbConnection,
     workspace_id: &str,
@@ -1724,6 +1850,7 @@ fn refresh_centrality_with_source_links(
     .map(|centrality| (centrality, Vec::new()))
 }
 
+#[cfg(feature = "graph")]
 fn graph_snapshot_metrics_json(
     centrality: &CentralityRefreshReport,
     links: &[StoredMemoryLink],
@@ -1794,21 +1921,26 @@ fn graph_snapshot_metrics_json(
         .map_err(|error| GraphError::json("serialize graph snapshot metrics", error))
 }
 
+#[cfg(feature = "graph")]
 fn graph_snapshot_content_hash(metrics_json: &str) -> String {
     format!("blake3:{}", blake3::hash(metrics_json.as_bytes()).to_hex())
 }
 
+#[cfg(any(feature = "graph", test))]
 fn next_graph_snapshot_version(conn: &DbConnection, workspace_id: &str) -> GraphResult<u32> {
-    let next = conn
+    match conn
         .get_latest_graph_snapshot(workspace_id, GraphSnapshotType::MemoryLinks)
         .map_err(|error| GraphError::storage("inspect latest graph snapshot", error))?
-        .map_or(1, |snapshot| snapshot.snapshot_version.saturating_add(1));
-    if next == 0 {
-        return Err(GraphError::SnapshotVersionOverflow);
+    {
+        Some(snapshot) => snapshot
+            .snapshot_version
+            .checked_add(1)
+            .ok_or(GraphError::SnapshotVersionOverflow),
+        None => Ok(1),
     }
-    Ok(next)
 }
 
+#[cfg(any(feature = "graph", test))]
 fn generate_graph_snapshot_id() -> String {
     let memory_id = MemoryId::now().to_string();
     let payload = memory_id.trim_start_matches("mem_");
@@ -4144,6 +4276,7 @@ mod tests {
                     level: "semantic".to_string(),
                     kind: "fact".to_string(),
                     content: content.to_string(),
+                    workflow_id: None,
                     confidence: 0.8,
                     utility: 0.6,
                     importance: 0.5,
@@ -4222,12 +4355,21 @@ mod tests {
         id: &str,
         metrics_json: &str,
     ) -> TestResult {
+        insert_graph_snapshot_with_version(connection, id, metrics_json, 1)
+    }
+
+    fn insert_graph_snapshot_with_version(
+        connection: &DbConnection,
+        id: &str,
+        metrics_json: &str,
+        snapshot_version: u32,
+    ) -> TestResult {
         connection
             .insert_graph_snapshot(
                 id,
                 &CreateGraphSnapshotInput {
                     workspace_id: WORKSPACE_ID.to_string(),
-                    snapshot_version: 1,
+                    snapshot_version,
                     schema_version: super::GRAPH_EXPORT_SCHEMA_V1.to_string(),
                     graph_type: GraphSnapshotType::MemoryLinks,
                     node_count: 3,
@@ -4264,8 +4406,10 @@ mod tests {
             0.8,
         )?;
 
-        let projection =
-            super::build_memory_graph(&connection, &super::ProjectionOptions::default())?;
+        let projection = graph_result(super::build_memory_graph(
+            &connection,
+            &super::ProjectionOptions::default(),
+        ))?;
 
         assert_eq!(projection.node_count, 3);
         assert_eq!(projection.edge_count, 3);
@@ -4309,14 +4453,14 @@ mod tests {
             0.3,
         )?;
 
-        let projection = super::build_memory_graph(
+        let projection = graph_result(super::build_memory_graph(
             &connection,
             &super::ProjectionOptions {
                 link_limit: None,
                 min_weight: Some(0.5),
                 min_confidence: Some(0.8),
             },
-        )?;
+        ))?;
 
         assert_eq!(projection.node_count, 2);
         assert_eq!(projection.edge_count, 1);
@@ -4350,8 +4494,10 @@ mod tests {
             0.9,
         )?;
 
-        let projection =
-            super::build_memory_graph(&connection, &super::ProjectionOptions::default())?;
+        let projection = graph_result(super::build_memory_graph(
+            &connection,
+            &super::ProjectionOptions::default(),
+        ))?;
         let pagerank = super::compute_pagerank(&projection);
         let betweenness = super::compute_betweenness(&projection);
 
@@ -5232,6 +5378,38 @@ mod tests {
         connection.close().map_err(|error| error.to_string())
     }
 
+    #[cfg(feature = "graph")]
+    #[test]
+    fn refresh_graph_snapshot_acquires_write_lock_before_source_read() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+
+        let error = match super::refresh_graph_snapshot(
+            &connection,
+            WORKSPACE_ID,
+            &super::CentralityRefreshOptions::default(),
+        ) {
+            Ok(_) => return Err("refresh should stop before reading source links".to_string()),
+            Err(error) => error,
+        };
+
+        match error {
+            super::GraphError::Storage { operation, source } => {
+                assert_eq!(operation, "acquire graph snapshot write lock");
+                assert!(
+                    !source.to_string().contains("memory_links"),
+                    "source links were read before acquiring the snapshot write lock: {source}"
+                );
+            }
+            other => {
+                return Err(format!(
+                    "expected graph snapshot lock acquisition before source read, got {other}"
+                ));
+            }
+        }
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
     #[test]
     fn persist_graph_snapshot_allocates_next_version_inside_write_transaction() -> TestResult {
         let connection = open_snapshot_db()?;
@@ -5281,6 +5459,31 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![2, 1]
         );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn next_graph_snapshot_version_rejects_u32_overflow() -> TestResult {
+        let connection = open_snapshot_db()?;
+        insert_graph_snapshot_with_version(
+            &connection,
+            "gsnap_0000000000000000000000999",
+            r#"{"nodes":[],"edges":[]}"#,
+            u32::MAX,
+        )?;
+
+        match super::next_graph_snapshot_version(&connection, WORKSPACE_ID) {
+            Err(super::GraphError::SnapshotVersionOverflow) => {}
+            Ok(version) => {
+                return Err(format!(
+                    "expected snapshot version overflow, got version {version}"
+                ));
+            }
+            Err(error) => {
+                return Err(format!("expected snapshot version overflow, got {error}"));
+            }
+        }
 
         connection.close().map_err(|error| error.to_string())
     }
@@ -5542,7 +5745,7 @@ mod tests {
             ..Default::default()
         };
 
-        let report = super::validate_snapshot(&connection, &options)?;
+        let report = graph_result(super::validate_snapshot(&connection, &options))?;
 
         assert_eq!(report.result, super::SnapshotValidationResult::NotFound);
         assert!(!report.is_usable());
