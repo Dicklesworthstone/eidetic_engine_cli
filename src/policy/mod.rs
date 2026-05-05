@@ -458,13 +458,20 @@ pub fn redact_secret_like_content(content: &str) -> SecretRedactionReport {
         redact_url_passwords(&without_key_values, &mut reasons);
     let (without_pem_blocks, pem_block_redacted) =
         redact_pem_blocks(&without_url_passwords, &mut reasons);
+    let (without_raw_tokens, raw_token_redacted) =
+        redact_raw_api_tokens(&without_pem_blocks, &mut reasons);
+    let (without_jwt, jwt_redacted) = redact_jwt_tokens(&without_raw_tokens, &mut reasons);
 
     reasons.sort_unstable();
     reasons.dedup();
 
     SecretRedactionReport {
-        content: without_pem_blocks,
-        redacted: key_value_redacted || url_password_redacted || pem_block_redacted,
+        content: without_jwt,
+        redacted: key_value_redacted
+            || url_password_redacted
+            || pem_block_redacted
+            || raw_token_redacted
+            || jwt_redacted,
         redacted_reasons: reasons,
     }
 }
@@ -640,6 +647,134 @@ fn redact_pem_blocks(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
         reasons.push("pem_block");
         changed = true;
         search_start = begin + SECRET_REDACTION_PLACEHOLDER.len();
+    }
+
+    (output, changed)
+}
+
+fn redact_raw_api_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, bool) {
+    let mut output = input.to_owned();
+    let mut changed = false;
+
+    const RAW_TOKEN_PATTERNS: &[(&str, &str, usize)] = &[
+        // Anthropic API keys: sk-ant-api03-...
+        ("sk-ant-api03-", "anthropic_api_key", 40),
+        // OpenAI project keys: sk-proj-...
+        ("sk-proj-", "openai_api_key", 40),
+        // OpenAI legacy keys: sk-... (48 chars after prefix)
+        ("sk-", "openai_api_key", 48),
+        // GitHub personal access tokens: ghp_...
+        ("ghp_", "github_token", 36),
+        // GitHub OAuth tokens: gho_...
+        ("gho_", "github_token", 36),
+        // GitHub server-to-server tokens: ghs_...
+        ("ghs_", "github_token", 36),
+        // GitHub user-to-server tokens: ghu_...
+        ("ghu_", "github_token", 36),
+        // GitHub refresh tokens: ghr_...
+        ("ghr_", "github_token", 36),
+        // AWS access key IDs: AKIA...
+        ("AKIA", "aws_access_key", 16),
+        // AWS temporary credentials: ASIA...
+        ("ASIA", "aws_access_key", 16),
+    ];
+
+    for &(prefix, code, min_suffix_len) in RAW_TOKEN_PATTERNS {
+        let mut search_start = 0;
+        loop {
+            if search_start >= output.len() {
+                break;
+            }
+            let Some(relative) = output[search_start..].find(prefix) else {
+                break;
+            };
+            let token_start = search_start + relative;
+            let after_prefix = token_start + prefix.len();
+
+            if token_start > 0 {
+                if let Some(byte) = output.as_bytes().get(token_start - 1) {
+                    if byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-' {
+                        search_start = after_prefix;
+                        continue;
+                    }
+                }
+            }
+
+            let token_end = output[after_prefix..]
+                .char_indices()
+                .find_map(|(offset, ch)| {
+                    if !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-' {
+                        Some(after_prefix + offset)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(output.len());
+
+            let suffix_len = token_end - after_prefix;
+            if suffix_len >= min_suffix_len {
+                output.replace_range(token_start..token_end, SECRET_REDACTION_PLACEHOLDER);
+                reasons.push(code);
+                changed = true;
+                search_start = token_start + SECRET_REDACTION_PLACEHOLDER.len();
+            } else {
+                search_start = token_end;
+            }
+        }
+    }
+
+    (output, changed)
+}
+
+fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, bool) {
+    let mut output = input.to_owned();
+    let mut changed = false;
+    let mut search_start = 0;
+
+    loop {
+        if search_start >= output.len() {
+            break;
+        }
+        let Some(relative) = output[search_start..].find("eyJ") else {
+            break;
+        };
+        let jwt_start = search_start + relative;
+
+        if jwt_start > 0 {
+            if let Some(byte) = output.as_bytes().get(jwt_start - 1) {
+                if byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-' {
+                    search_start = jwt_start + 3;
+                    continue;
+                }
+            }
+        }
+
+        let jwt_end = output[jwt_start..]
+            .char_indices()
+            .find_map(|(offset, ch)| {
+                if !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-' && ch != '.' {
+                    Some(jwt_start + offset)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(output.len());
+
+        let mut jwt_candidate = &output[jwt_start..jwt_end];
+        while jwt_candidate.ends_with('.') {
+            jwt_candidate = &jwt_candidate[..jwt_candidate.len() - 1];
+        }
+        let actual_jwt_end = jwt_start + jwt_candidate.len();
+
+        let dot_count = jwt_candidate.chars().filter(|&c| c == '.').count();
+        if dot_count == 2 && jwt_candidate.len() >= 32 {
+            output.replace_range(jwt_start..actual_jwt_end, SECRET_REDACTION_PLACEHOLDER);
+            reasons.push("jwt_token");
+            changed = true;
+            search_start = jwt_start + SECRET_REDACTION_PLACEHOLDER.len();
+        } else {
+            search_start = jwt_end;
+        }
     }
 
     (output, changed)
@@ -916,5 +1051,97 @@ mod tests {
         assert!(report.redacted_reasons.contains(&"pem_block"));
         assert!(report.content.contains(SECRET_REDACTION_PLACEHOLDER));
         assert!(!report.content.contains(raw_body));
+    }
+
+    #[test]
+    fn secret_redactor_masks_anthropic_api_keys() {
+        let token = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let report = redact_secret_like_content(&format!("Use {token} for API calls."));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"anthropic_api_key"));
+        assert!(report.content.contains(SECRET_REDACTION_PLACEHOLDER));
+        assert!(!report.content.contains(token));
+    }
+
+    #[test]
+    fn secret_redactor_masks_openai_api_keys() {
+        let proj_token = "sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let legacy_token = "sk-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let report = redact_secret_like_content(&format!("Keys: {proj_token} and {legacy_token}."));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"openai_api_key"));
+        assert!(!report.content.contains(proj_token));
+        assert!(!report.content.contains(legacy_token));
+    }
+
+    #[test]
+    fn secret_redactor_masks_github_tokens() {
+        let ghp = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let gho = "gho_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let ghs = "ghs_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let report = redact_secret_like_content(&format!("Tokens: {ghp}, {gho}, {ghs}."));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"github_token"));
+        assert!(!report.content.contains(ghp));
+        assert!(!report.content.contains(gho));
+        assert!(!report.content.contains(ghs));
+    }
+
+    #[test]
+    fn secret_redactor_masks_aws_access_keys() {
+        let akia = "AKIAIOSFODNN7EXAMPLE";
+        let asia = "ASIAIOSFODNN7EXAMPLE";
+        let report = redact_secret_like_content(&format!("AWS keys: {akia} and {asia}."));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"aws_access_key"));
+        assert!(!report.content.contains(akia));
+        assert!(!report.content.contains(asia));
+    }
+
+    #[test]
+    fn secret_redactor_masks_jwt_tokens() {
+        let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        let report = redact_secret_like_content(&format!("Found token {jwt} in response."));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"jwt_token"));
+        assert!(report.content.contains(SECRET_REDACTION_PLACEHOLDER));
+        assert!(!report.content.contains(jwt));
+    }
+
+    #[test]
+    fn secret_redactor_masks_jwt_after_bearer_keyword() {
+        let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.Rq8IjqberX03cRIZHg7v0Rq8IjqberX03cRIZHg7v0";
+        let report = redact_secret_like_content(&format!("Auth: Bearer {jwt}."));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"bearer_token"));
+        assert!(report.content.contains(SECRET_REDACTION_PLACEHOLDER));
+        assert!(!report.content.contains(jwt));
+    }
+
+    #[test]
+    fn secret_redactor_skips_short_tokens() {
+        let short_sk = "sk-abc";
+        let short_ghp = "ghp_short";
+        let report =
+            redact_secret_like_content(&format!("Short tokens: {short_sk} and {short_ghp}."));
+
+        assert!(!report.redacted);
+        assert!(report.content.contains(short_sk));
+        assert!(report.content.contains(short_ghp));
+    }
+
+    #[test]
+    fn secret_redactor_skips_non_jwt_eyj_prefix() {
+        let not_jwt = "eyJust some text without proper JWT structure";
+        let report = redact_secret_like_content(not_jwt);
+
+        assert!(!report.redacted);
+        assert!(report.content.contains(not_jwt));
     }
 }

@@ -761,6 +761,18 @@ fn prepare_memory(
             format!("memory `{}` has invalid content: {error}", memory.memory_id),
         )
     })?;
+    let redaction_report = crate::policy::redact_secret_like_content(content.as_str());
+    if redaction_report.redacted {
+        return Err(JsonlImportIssue::error(
+            None,
+            "memory_contains_secret",
+            format!(
+                "memory `{}` contains secrets ({}); redact before import",
+                memory.memory_id,
+                redaction_report.redacted_reasons.join(", ")
+            ),
+        ));
+    }
     let confidence = score_or_default(memory.confidence, trust_class.initial_confidence())
         .map_err(|message| {
             JsonlImportIssue::error(

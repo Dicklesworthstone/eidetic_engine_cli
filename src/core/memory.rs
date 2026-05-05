@@ -552,6 +552,19 @@ const REMEMBER_SECRET_PATTERNS: &[&str] = &[
 ];
 
 fn validate_remember_policy(content: &str) -> Result<(), DomainError> {
+    let redaction_report = crate::policy::redact_secret_like_content(content);
+    if redaction_report.redacted {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "Refusing to persist memory content that contains secrets: {}.",
+                redaction_report.redacted_reasons.join(", ")
+            ),
+            repair: Some(
+                "Redact the secret and run `ee remember` again with only durable evidence."
+                    .to_owned(),
+            ),
+        });
+    }
     let lowered = content.to_ascii_lowercase();
     if REMEMBER_SECRET_PATTERNS
         .iter()
