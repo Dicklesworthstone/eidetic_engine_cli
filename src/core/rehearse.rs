@@ -910,9 +910,12 @@ fn validate_command_spec(command: &CommandSpec) -> Option<NonRehearsableCommand>
             command: command.command.clone(),
             reason_code: "workspace_escape".to_string(),
             reason:
-                "Command arguments override workspace or database paths outside the sandbox boundary"
+                "Command arguments override workspace, database, index, or output paths outside the sandbox boundary"
                     .to_string(),
-            next_action: Some("Remove explicit --workspace/--database/--index-dir overrides".to_string()),
+            next_action: Some(
+                "Remove explicit --workspace/--database/--index-dir/--output overrides"
+                    .to_string(),
+            ),
         });
     }
     None
@@ -922,11 +925,20 @@ fn command_args_escape_sandbox(args: &[String]) -> bool {
     args.iter().any(|arg| {
         matches!(
             arg.as_str(),
-            "--workspace" | "--database" | "--index-dir" | "--out"
+            "--workspace"
+                | "--database"
+                | "--index-dir"
+                | "--out"
+                | "--output"
+                | "--output-dir"
+                | "-o"
         ) || arg.starts_with("--workspace=")
             || arg.starts_with("--database=")
             || arg.starts_with("--index-dir=")
             || arg.starts_with("--out=")
+            || arg.starts_with("--output=")
+            || arg.starts_with("--output-dir=")
+            || arg.starts_with("-o")
     })
 }
 
@@ -946,6 +958,69 @@ fn prepare_artifact_root(output_dir: Option<&Path>) -> Result<PathBuf, DomainErr
 
 fn canonicalize_existing(path: &Path) -> io::Result<PathBuf> {
     fs::canonicalize(path)
+}
+
+fn validate_rehearsal_runner(candidate: &Path) -> Result<PathBuf, DomainError> {
+    if !candidate.is_absolute() {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Rehearsal executor path '{}' is not absolute.",
+                candidate.display()
+            ),
+            repair: Some("Run ee rehearse from an installed ee binary".to_string()),
+        });
+    }
+
+    let runner = fs::canonicalize(candidate).map_err(|error| DomainError::Configuration {
+        message: format!(
+            "Failed to resolve rehearsal executor {}: {error}",
+            candidate.display()
+        ),
+        repair: Some("Run ee rehearse from an installed ee binary".to_string()),
+    })?;
+    let metadata = fs::metadata(&runner).map_err(|error| DomainError::Configuration {
+        message: format!(
+            "Failed to inspect rehearsal executor {}: {error}",
+            runner.display()
+        ),
+        repair: Some("Run ee rehearse from an installed ee binary".to_string()),
+    })?;
+    if !metadata.is_file() {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Rehearsal executor '{}' is not a regular file.",
+                runner.display()
+            ),
+            repair: Some("Run ee rehearse from an installed ee binary".to_string()),
+        });
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = metadata.permissions().mode();
+        if mode & 0o111 == 0 {
+            return Err(DomainError::Configuration {
+                message: format!(
+                    "Rehearsal executor '{}' is not executable.",
+                    runner.display()
+                ),
+                repair: Some("Run ee rehearse from an installed ee binary".to_string()),
+            });
+        }
+        if mode & 0o002 != 0 {
+            return Err(DomainError::Configuration {
+                message: format!(
+                    "Rehearsal executor '{}' must not be writable by other users.",
+                    runner.display()
+                ),
+                repair: Some("Use a trusted ee binary with non-writable permissions".to_string()),
+            });
+        }
+    }
+
+    Ok(runner)
 }
 
 fn snapshot_workspace(
@@ -1193,7 +1268,8 @@ fn execute_rehearsal_command(
             error_message: Some("No ee binary was supplied for sandbox execution".to_string()),
         });
     };
-    let output = Command::new(binary)
+    let trusted_runner = validate_rehearsal_runner(binary)?;
+    let output = Command::new(trusted_runner)
         .arg("--workspace")
         .arg(sandbox_path)
         .arg(&command.command)
@@ -1350,6 +1426,67 @@ mod tests {
         assert_eq!(report.non_rehearsable.len(), 1);
         assert_eq!(report.non_rehearsable[0].reason_code, "external_io");
         assert!(!report.can_proceed);
+        Ok(())
+    }
+
+    #[test]
+    fn command_args_escape_sandbox_rejects_output_path_overrides() {
+        for args in [
+            vec!["--output", "/tmp/procedure.md"],
+            vec!["--output=/tmp/procedure.md"],
+            vec!["--output-dir", "/tmp/out"],
+            vec!["--output-dir=/tmp/out"],
+            vec!["-o", "/tmp/procedure.md"],
+            vec!["-o/tmp/procedure.md"],
+        ] {
+            let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            assert!(
+                command_args_escape_sandbox(&args),
+                "expected {args:?} to escape the rehearsal sandbox"
+            );
+        }
+
+        let safe_args = vec![
+            "--json".to_string(),
+            "--format".to_string(),
+            "markdown".to_string(),
+        ];
+        assert!(!command_args_escape_sandbox(&safe_args));
+    }
+
+    #[test]
+    fn validate_rehearsal_runner_rejects_relative_path() -> TestResult {
+        let error = match validate_rehearsal_runner(Path::new("ee")) {
+            Ok(path) => return Err(format!("relative runner was accepted: {}", path.display())),
+            Err(error) => error,
+        };
+        assert!(error.message().contains("is not absolute"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_rehearsal_runner_rejects_writable_executable() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = kept_temp_dir("ee-rehearse-runner-perms")?;
+        let runner = dir.join("fake-ee.sh");
+        fs::write(&runner, "#!/bin/sh\nexit 0\n").map_err(|error| error.to_string())?;
+        let mut permissions = fs::metadata(&runner)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o777);
+        fs::set_permissions(&runner, permissions).map_err(|error| error.to_string())?;
+
+        let error = match validate_rehearsal_runner(&runner) {
+            Ok(path) => return Err(format!("writable runner was accepted: {}", path.display())),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .message()
+                .contains("must not be writable by other users")
+        );
         Ok(())
     }
 

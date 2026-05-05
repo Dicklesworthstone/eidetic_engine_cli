@@ -291,8 +291,10 @@ pub const RUNTIME_UNAVAILABLE: ErrorCode = ErrorCode {
 pub const CASS_NOT_FOUND: ErrorCode = ErrorCode {
     id: "EE-E506",
     category: ErrorCategory::UnsatisfiedDegradedMode,
-    description: "CASS binary not found in PATH",
-    default_repair: Some("Ensure cass is installed and in PATH"),
+    description: "CASS binary not found in trusted locations",
+    default_repair: Some(
+        "Install cass in a trusted system path or set EE_CASS_BINARY to an absolute trusted path",
+    ),
 };
 
 pub const CASS_DEGRADED: ErrorCode = ErrorCode {

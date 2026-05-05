@@ -1400,7 +1400,7 @@ fn check_cass() -> CheckResult {
         ),
         CapabilityStatus::Pending => CheckResult::warning(
             "cass",
-            "CASS binary not found in PATH.",
+            "CASS binary not found in trusted locations.",
             error_codes::CASS_NOT_FOUND,
         ),
         CapabilityStatus::Unimplemented => CheckResult::warning(

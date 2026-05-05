@@ -24,5 +24,7 @@ data:
       errorCode: EE-E300
       repair: ee index rebuild
     - name: cass
-      severity: ok
-      message: CASS binary discovered and accessible.
+      severity: warning
+      message: CASS binary not found in trusted locations.
+      errorCode: EE-E506
+      repair: Install cass in a trusted system path or set EE_CASS_BINARY to an absolute trusted path

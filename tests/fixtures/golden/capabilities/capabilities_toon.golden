@@ -8,7 +8,7 @@ data:
     storage,degraded,FrankenSQLite/SQLModel persistence
     search,degraded,Frankensearch hybrid retrieval
     graph,pending,FrankenNetworkX graph analytics
-    cass,ready,CASS session import adapter
+    cass,pending,CASS session import adapter
   features[7]{name,enabled,description}:
     fts5,true,FTS5 full-text search
     json,true,JSON extension support
@@ -88,7 +88,7 @@ data:
             tokens: -36
             compressionRatio: 0.9
   summary:
-    readySubsystems: 2
+    readySubsystems: 1
     totalSubsystems: 5
     enabledFeatures: 4
     totalFeatures: 7

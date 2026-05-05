@@ -571,11 +571,16 @@ fn workspace_database_path(workspace_path: &Path) -> PathBuf {
 
 #[must_use]
 pub fn probe_cass_capability() -> CapabilityStatus {
-    use std::process::Command;
-    match Command::new("cass").arg("--version").output() {
-        Ok(output) if output.status.success() => CapabilityStatus::Ready,
-        Ok(_) => CapabilityStatus::Degraded,
-        Err(_) => CapabilityStatus::Pending,
+    cass_discovery_to_capability(crate::cass::discover_import_binary(None))
+}
+
+fn cass_discovery_to_capability(
+    discovery: Result<crate::cass::DiscoveredBinary, crate::cass::CassError>,
+) -> CapabilityStatus {
+    match discovery {
+        Ok(_) => CapabilityStatus::Ready,
+        Err(crate::cass::CassError::BinaryNotFound { .. }) => CapabilityStatus::Pending,
+        Err(_) => CapabilityStatus::Degraded,
     }
 }
 
@@ -1846,6 +1851,26 @@ mod tests {
             "derived assets should be reported",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn cass_probe_maps_trusted_discovery_without_path_lookup_execution() -> TestResult {
+        let ready = cass_discovery_to_capability(Ok(crate::cass::DiscoveredBinary::new(
+            PathBuf::from("/usr/bin/cass"),
+            crate::cass::DiscoverySource::Path,
+        )));
+        ensure(ready, CapabilityStatus::Ready, "trusted cass discovery")?;
+
+        let pending = cass_discovery_to_capability(Err(crate::cass::CassError::BinaryNotFound {
+            binary: PathBuf::from("cass"),
+        }));
+        ensure(pending, CapabilityStatus::Pending, "missing cass binary")?;
+
+        let degraded = cass_discovery_to_capability(Err(crate::cass::CassError::InvalidBinary {
+            binary: PathBuf::from("cass"),
+            reason: "relative PATH lookup is not trusted".to_owned(),
+        }));
+        ensure(degraded, CapabilityStatus::Degraded, "invalid cass binary")
     }
 
     #[test]

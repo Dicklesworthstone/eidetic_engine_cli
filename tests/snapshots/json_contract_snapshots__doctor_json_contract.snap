@@ -4,12 +4,12 @@ expression: doctor
 ---
 {
   "schema": "ee.response.v1",
-  "success": true,
+  "success": false,
   "fields": "standard",
   "data": {
     "command": "doctor",
     "version": "0.1.0",
-    "healthy": true,
+    "healthy": false,
     "checks": [
       {
         "name": "runtime",
@@ -33,8 +33,8 @@ expression: doctor
       },
       {
         "name": "cass",
-        "severity": "ok",
-        "message": "CASS binary discovered and accessible."
+        "severity": "warning",
+        "message": "CASS binary not found in trusted locations."
       }
     ]
   }
