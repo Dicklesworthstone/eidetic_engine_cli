@@ -558,8 +558,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map_err(|error| format!("clock moved backwards: {error}"))?
             .as_nanos();
-        Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
+        let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+        Ok(target_dir
             .join("ee-cass-client-tests")
             .join(format!("{prefix}-{}-{now}", std::process::id())))
     }
