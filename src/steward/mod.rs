@@ -7,6 +7,7 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -1549,6 +1550,16 @@ pub struct RunnerOptions {
     pub time_limit_ms: Option<u64>,
     /// Maximum items to process (overrides job default).
     pub item_limit: Option<u64>,
+    /// Workspace path used to resolve the default database and workspace row.
+    pub workspace_path: Option<PathBuf>,
+    /// Explicit database path for maintenance handlers.
+    pub database_path: Option<PathBuf>,
+    /// Explicit workspace ID for handlers that need durable workspace scope.
+    pub workspace_id: Option<String>,
+    /// Deterministic timestamp used by maintenance handlers that support it.
+    pub as_of: Option<String>,
+    /// Actor recorded on durable maintenance audit rows.
+    pub actor: Option<String>,
     /// Whether to perform a dry run (report what would happen).
     pub dry_run: bool,
     /// Whether to continue on non-fatal errors.
@@ -1572,6 +1583,36 @@ impl RunnerOptions {
     #[must_use]
     pub fn with_item_limit(mut self, limit: u64) -> Self {
         self.item_limit = Some(limit);
+        self
+    }
+
+    #[must_use]
+    pub fn with_workspace_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.workspace_path = Some(path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_database_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.database_path = Some(path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_workspace_id(mut self, workspace_id: impl Into<String>) -> Self {
+        self.workspace_id = Some(workspace_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_as_of(mut self, as_of: impl Into<String>) -> Self {
+        self.as_of = Some(as_of.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_actor(mut self, actor: impl Into<String>) -> Self {
+        self.actor = Some(actor.into());
         self
     }
 
@@ -1605,6 +1646,8 @@ pub struct JobRunResult {
     pub error: Option<String>,
     /// Budget state at completion.
     pub budget_summary: Option<BudgetSummary>,
+    /// Real handler details, when a maintenance handler ran or abstained.
+    pub details: Option<JsonValue>,
     /// Whether this was a dry run.
     pub dry_run: bool,
 }
@@ -1631,6 +1674,9 @@ impl JobRunResult {
                 "violations": summary.violations.len(),
                 "warningCount": summary.warning_count,
             });
+        }
+        if let Some(ref details) = self.details {
+            obj["details"] = details.clone();
         }
 
         obj
@@ -1788,20 +1834,8 @@ impl ManualRunner {
                 items_processed: None,
                 error: Some("Job already completed".to_owned()),
                 budget_summary: None,
+                details: None,
                 dry_run: self.options.dry_run,
-            });
-        }
-
-        if self.options.dry_run {
-            return Some(JobRunResult {
-                job_id: job_id.to_owned(),
-                job_type,
-                outcome: RunOutcome::Success,
-                duration_ms: 0,
-                items_processed: Some(0),
-                error: None,
-                budget_summary: None,
-                dry_run: true,
             });
         }
 
@@ -1815,7 +1849,7 @@ impl ManualRunner {
             budget.add_budget(ResourceBudget::item_limit(item_limit));
         }
 
-        let (outcome, items, error) = self.execute_job_work(job_type, &mut budget);
+        let (outcome, items, error, details) = self.execute_job_work(job_type, &mut budget);
 
         let completion_time = chrono::Utc::now().to_rfc3339();
         let job = self.ledger.get_job_mut(job_id)?;
@@ -1841,7 +1875,8 @@ impl ManualRunner {
             items_processed: items,
             error,
             budget_summary: Some(budget.summary()),
-            dry_run: false,
+            details,
+            dry_run: self.options.dry_run,
         })
     }
 
@@ -1849,32 +1884,207 @@ impl ManualRunner {
         &self,
         job_type: JobType,
         budget: &mut JobBudgetState,
-    ) -> (RunOutcome, Option<u64>, Option<String>) {
-        let simulated_items: u64 = match job_type {
-            JobType::IndexRebuild => 100,
-            JobType::DecaySweep => 50,
-            JobType::CurationReview => 10,
-            JobType::HealthCheck => 1,
-            JobType::StorageCompact => 1,
-            JobType::CentralityRefresh => 25,
-            JobType::IntegrityCheck => 75,
-            JobType::BackupExport => 1,
-            JobType::GarbageCollection => 30,
-            JobType::Custom => 5,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        match job_type {
+            JobType::DecaySweep => self.execute_decay_sweep(budget),
+            _ => {
+                let message = format!(
+                    "No real maintenance handler is wired for {} yet.",
+                    job_type.as_str()
+                );
+                (
+                    RunOutcome::Skipped,
+                    Some(0),
+                    Some(message.clone()),
+                    Some(json!({
+                        "schema": "ee.steward.unwired_job.v1",
+                        "jobType": job_type.as_str(),
+                        "outcome": "skipped",
+                        "message": message,
+                    })),
+                )
+            }
+        }
+    }
+
+    fn execute_decay_sweep(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let Some(database_path) = self.resolve_database_path() else {
+            let message =
+                "Decay sweep requires a database path or workspace path with .ee/ee.db".to_owned();
+            return (
+                RunOutcome::Failed,
+                None,
+                Some(message.clone()),
+                Some(json!({
+                    "schema": "ee.steward.decay_sweep.error.v1",
+                    "code": "decay_sweep_database_unresolved",
+                    "message": message,
+                    "repair": "ee init --workspace .",
+                })),
+            );
         };
 
-        budget.record(ResourceType::Items, simulated_items);
-        budget.record(ResourceType::TimeMs, 100);
+        let started = std::time::Instant::now();
+        let connection = match DbConnection::open_file(&database_path) {
+            Ok(connection) => connection,
+            Err(error) => {
+                let message = format!(
+                    "Failed to open maintenance database {}: {error}",
+                    database_path.display()
+                );
+                return (
+                    RunOutcome::Failed,
+                    None,
+                    Some(message.clone()),
+                    Some(json!({
+                        "schema": "ee.steward.decay_sweep.error.v1",
+                        "code": "decay_sweep_database_open_failed",
+                        "databasePath": database_path.display().to_string(),
+                        "message": message,
+                        "repair": "ee init --workspace .",
+                    })),
+                );
+            }
+        };
+        if let Err(error) = connection.migrate() {
+            let message = format!("Failed to migrate maintenance database: {error}");
+            return (
+                RunOutcome::Failed,
+                None,
+                Some(message.clone()),
+                Some(json!({
+                    "schema": "ee.steward.decay_sweep.error.v1",
+                    "code": "decay_sweep_migration_failed",
+                    "databasePath": database_path.display().to_string(),
+                    "message": message,
+                    "repair": "ee doctor --json",
+                })),
+            );
+        }
+
+        let workspace_id = match self.resolve_workspace_id(&connection) {
+            Ok(workspace_id) => workspace_id,
+            Err(message) => {
+                return (
+                    RunOutcome::Failed,
+                    None,
+                    Some(message.clone()),
+                    Some(json!({
+                        "schema": "ee.steward.decay_sweep.error.v1",
+                        "code": "decay_sweep_workspace_unresolved",
+                        "databasePath": database_path.display().to_string(),
+                        "message": message,
+                        "repair": "ee remember --workspace . --json",
+                    })),
+                );
+            }
+        };
+
+        let item_limit = match self.options.item_limit {
+            Some(limit) => match u32::try_from(limit) {
+                Ok(limit) => Some(limit),
+                Err(_) => {
+                    let message = "Decay sweep item limit exceeds u32".to_owned();
+                    return (
+                        RunOutcome::Failed,
+                        None,
+                        Some(message.clone()),
+                        Some(json!({
+                            "schema": "ee.steward.decay_sweep.error.v1",
+                            "code": "decay_sweep_item_limit_too_large",
+                            "message": message,
+                        })),
+                    );
+                }
+            },
+            None => None,
+        };
+
+        let mut options = ScoreDecayJobOptions::new(workspace_id);
+        options.as_of = self.options.as_of.clone();
+        options.item_limit = item_limit;
+        options.dry_run = self.options.dry_run;
+        options.actor = self
+            .options
+            .actor
+            .clone()
+            .or_else(|| Some("ee-steward".to_owned()));
+
+        let report = match run_score_decay_job(&connection, &options) {
+            Ok(report) => report,
+            Err(message) => {
+                return (
+                    RunOutcome::Failed,
+                    None,
+                    Some(message.clone()),
+                    Some(json!({
+                        "schema": "ee.steward.decay_sweep.error.v1",
+                        "code": "decay_sweep_handler_failed",
+                        "message": message,
+                    })),
+                );
+            }
+        };
+
+        let scanned_count = usize_to_u64(report.scanned_count);
+        budget.record(ResourceType::Items, scanned_count);
+        budget.record(ResourceType::TimeMs, millis_to_u64(started.elapsed()));
+        let details = report.data_json();
 
         if budget.should_cancel() {
             return (
                 RunOutcome::Cancelled,
-                Some(simulated_items),
+                Some(scanned_count),
                 Some("Budget exceeded".to_owned()),
+                Some(details),
             );
         }
 
-        (RunOutcome::Success, Some(simulated_items), None)
+        (
+            RunOutcome::Success,
+            Some(scanned_count),
+            None,
+            Some(details),
+        )
+    }
+
+    fn resolve_database_path(&self) -> Option<PathBuf> {
+        self.options.database_path.clone().or_else(|| {
+            self.options.workspace_path.as_ref().map(|workspace| {
+                normalize_runner_workspace_path(workspace)
+                    .join(".ee")
+                    .join("ee.db")
+            })
+        })
+    }
+
+    fn resolve_workspace_id(&self, connection: &DbConnection) -> Result<String, String> {
+        if let Some(workspace_id) = self.options.workspace_id.as_ref() {
+            return Ok(workspace_id.clone());
+        }
+
+        if let Some(workspace_path) = self.options.workspace_path.as_ref() {
+            let workspace_path = normalize_runner_workspace_path(workspace_path);
+            let path = workspace_path.to_string_lossy().into_owned();
+            let workspace = connection
+                .get_workspace_by_path(&path)
+                .map_err(|error| format!("Failed to query workspace path {path}: {error}"))?;
+            if let Some(workspace) = workspace {
+                return Ok(workspace.id);
+            }
+        }
+
+        let workspaces = connection
+            .list_workspaces()
+            .map_err(|error| format!("Failed to list workspaces: {error}"))?;
+        if workspaces.len() == 1 {
+            return Ok(workspaces[0].id.clone());
+        }
+
+        Err("Could not resolve a unique workspace row for decay sweep".to_owned())
     }
 
     /// Run all pending jobs in priority order.
@@ -1944,9 +2154,29 @@ impl ManualRunner {
             items_processed: None,
             error: Some("Failed to execute job".to_owned()),
             budget_summary: None,
+            details: None,
             dry_run: self.options.dry_run,
         })
     }
+}
+
+fn normalize_runner_workspace_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    absolute.canonicalize().unwrap_or(absolute)
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn millis_to_u64(elapsed: std::time::Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
 // ============================================================================
@@ -1981,7 +2211,7 @@ impl DaemonForegroundOptions {
             tick_limit: DEFAULT_DAEMON_FOREGROUND_TICK_LIMIT,
             interval_ms: DEFAULT_DAEMON_FOREGROUND_INTERVAL_MS,
             dry_run: false,
-            job_types: vec![JobType::HealthCheck],
+            job_types: vec![JobType::DecaySweep],
             runner_options: RunnerOptions::new(),
         }
     }
@@ -2135,6 +2365,9 @@ pub fn run_daemon_foreground(
         let tick_started_at = chrono::Utc::now().to_rfc3339();
         let mut runner_options = options.runner_options.clone();
         runner_options.dry_run = options.dry_run;
+        if runner_options.workspace_path.is_none() {
+            runner_options.workspace_path = Some(PathBuf::from(&options.workspace));
+        }
         let mut runner = ManualRunner::new(runner_options);
 
         for job_type in &options.job_types {
@@ -3106,6 +3339,11 @@ mod tests {
         assert!(!opts.continue_on_error);
         assert!(opts.time_limit_ms.is_none());
         assert!(opts.item_limit.is_none());
+        assert!(opts.workspace_path.is_none());
+        assert!(opts.database_path.is_none());
+        assert!(opts.workspace_id.is_none());
+        assert!(opts.as_of.is_none());
+        assert!(opts.actor.is_none());
     }
 
     #[test]
@@ -3114,12 +3352,25 @@ mod tests {
             .with_dry_run(true)
             .with_verbose(true)
             .with_time_limit(5000)
-            .with_item_limit(100);
+            .with_item_limit(100)
+            .with_workspace_path("/tmp/ee-runner")
+            .with_database_path("/tmp/ee-runner/.ee/ee.db")
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_as_of("2099-01-01T00:00:00Z")
+            .with_actor("runner-test");
 
         assert!(opts.dry_run);
         assert!(opts.verbose);
         assert_eq!(opts.time_limit_ms, Some(5000));
         assert_eq!(opts.item_limit, Some(100));
+        assert_eq!(opts.workspace_path, Some(PathBuf::from("/tmp/ee-runner")));
+        assert_eq!(
+            opts.database_path,
+            Some(PathBuf::from("/tmp/ee-runner/.ee/ee.db"))
+        );
+        assert_eq!(opts.workspace_id, Some(SCORE_WORKSPACE_ID.to_owned()));
+        assert_eq!(opts.as_of, Some("2099-01-01T00:00:00Z".to_owned()));
+        assert_eq!(opts.actor, Some("runner-test".to_owned()));
     }
 
     // ========================================================================
@@ -3269,6 +3520,72 @@ mod tests {
         )
     }
 
+    #[test]
+    fn manual_runner_decay_sweep_uses_real_score_decay_handler() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        {
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            connection
+                .insert_workspace(
+                    SCORE_WORKSPACE_ID,
+                    &CreateWorkspaceInput {
+                        path: temp.path().to_string_lossy().into_owned(),
+                        name: Some("score-decay-runner".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+            insert_score_feedback(
+                &connection,
+                "fb_runreal0000000000000000001",
+                SCORE_MEMORY_A,
+                "harmful",
+                1.0,
+            )?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_as_of("2099-01-01T00:00:00Z")
+            .with_actor("manual-runner-test");
+        let mut runner = ManualRunner::new(opts);
+        let result = runner.run_job_type(JobType::DecaySweep, Some("manual test".to_owned()));
+
+        assert_eq!(result.job_type, JobType::DecaySweep);
+        assert_eq!(result.outcome, RunOutcome::Success);
+        assert_eq!(result.items_processed, Some(1));
+        let details = result
+            .details
+            .ok_or_else(|| "score decay runner details missing".to_owned())?;
+        ensure(
+            details["schema"].as_str(),
+            Some(SCORE_DECAY_JOB_SCHEMA_V1),
+            "details schema",
+        )?;
+        ensure(
+            details["summary"]["appliedCount"].as_u64(),
+            Some(1),
+            "applied count",
+        )?;
+
+        let connection =
+            DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+        let memory = connection
+            .get_memory(SCORE_MEMORY_A)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory missing after runner".to_owned())?;
+        ensure(
+            memory.confidence < 0.8,
+            true,
+            "runner applied confidence decay",
+        )
+    }
+
     // ========================================================================
     // EE-207: Foreground Daemon Tests
     // ========================================================================
@@ -3287,8 +3604,9 @@ mod tests {
         ensure(report.daemonized, false, "daemonized")?;
         ensure(report.ticks.len(), 1, "tick count")?;
         ensure(report.jobs_run(), 1, "jobs run")?;
-        ensure(report.succeeded_count(), 1, "succeeded")?;
+        ensure(report.succeeded_count(), 0, "succeeded")?;
         ensure(report.failed_count(), 0, "failed")?;
+        ensure(report.skipped_count(), 1, "skipped")?;
         let json = report.data_json();
         ensure(
             json["summary"]["tickCount"].as_u64(),
@@ -3326,8 +3644,9 @@ mod tests {
         assert!(result.is_some());
 
         let result = result.ok_or_else(|| "manual runner result missing".to_string())?;
-        assert_eq!(result.outcome, RunOutcome::Success);
+        assert_eq!(result.outcome, RunOutcome::Skipped);
         assert!(!result.dry_run);
+        assert_eq!(result.items_processed, Some(0));
         Ok(())
     }
 
@@ -3336,14 +3655,14 @@ mod tests {
         let opts = RunnerOptions::new().with_dry_run(true);
         let mut runner = ManualRunner::new(opts);
 
-        let job_id = runner.schedule(JobType::DecaySweep, JobPriority::High, None);
+        let job_id = runner.schedule(JobType::HealthCheck, JobPriority::High, None);
         let result = runner
             .run_job(&job_id, "2026-04-30T12:00:00Z")
             .ok_or_else(|| "manual runner dry-run result missing".to_string())?;
 
-        assert_eq!(result.outcome, RunOutcome::Success);
+        assert_eq!(result.outcome, RunOutcome::Skipped);
         assert!(result.dry_run);
-        assert_eq!(result.duration_ms, 0);
+        assert_eq!(result.items_processed, Some(0));
         Ok(())
     }
 
@@ -3353,13 +3672,14 @@ mod tests {
         let mut runner = ManualRunner::new(opts);
 
         runner.schedule(JobType::HealthCheck, JobPriority::Low, None);
-        runner.schedule(JobType::DecaySweep, JobPriority::High, None);
+        runner.schedule(JobType::IntegrityCheck, JobPriority::High, None);
 
         let report = runner.run_pending();
 
         assert_eq!(report.results.len(), 2);
-        assert_eq!(report.succeeded, 2);
+        assert_eq!(report.succeeded, 0);
         assert_eq!(report.failed, 0);
+        assert_eq!(report.skipped, 2);
         assert!(!report.was_cancelled);
     }
 
@@ -3371,7 +3691,7 @@ mod tests {
         let result = runner.run_job_type(JobType::IntegrityCheck, Some("manual test".to_owned()));
 
         assert_eq!(result.job_type, JobType::IntegrityCheck);
-        assert_eq!(result.outcome, RunOutcome::Success);
+        assert_eq!(result.outcome, RunOutcome::Skipped);
     }
 
     #[test]
@@ -3384,6 +3704,7 @@ mod tests {
             items_processed: Some(1),
             error: None,
             budget_summary: None,
+            details: Some(json!({"schema": "test.details.v1"})),
             dry_run: false,
         };
 
@@ -3391,6 +3712,7 @@ mod tests {
         assert_eq!(json["jobId"], "job-test");
         assert_eq!(json["outcome"], "success");
         assert_eq!(json["durationMs"], 42);
+        assert_eq!(json["details"]["schema"], "test.details.v1");
     }
 
     #[test]
@@ -3449,6 +3771,7 @@ mod tests {
                 items_processed: Some(1),
                 error: None,
                 budget_summary: None,
+                details: None,
                 dry_run: false,
             }],
             total_duration_ms: 10,

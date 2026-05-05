@@ -14229,12 +14229,99 @@ where
     W: Write,
     E: Write,
 {
-    let command = if args.foreground {
-        "daemon foreground"
+    if !args.foreground {
+        return write_daemon_unavailable(cli, "daemon", stdout, stderr);
+    }
+
+    let job_types = if args.jobs.is_empty() {
+        vec![JobType::DecaySweep]
     } else {
-        "daemon"
+        args.jobs.clone()
     };
-    write_daemon_unavailable(cli, command, stdout, stderr)
+
+    if job_types
+        .iter()
+        .any(|job_type| *job_type != JobType::DecaySweep)
+    {
+        return write_daemon_unavailable(cli, "daemon foreground", stdout, stderr);
+    }
+
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let mut runner_options = crate::steward::RunnerOptions::new()
+        .with_workspace_path(workspace_path.clone())
+        .with_actor("ee-daemon");
+    if let Some(time_limit_ms) = args.time_limit_ms {
+        runner_options.time_limit_ms = Some(time_limit_ms);
+    }
+    if let Some(item_limit) = args.item_limit {
+        runner_options.item_limit = Some(item_limit);
+    }
+
+    let mut options =
+        crate::steward::DaemonForegroundOptions::new(workspace_path.to_string_lossy().into_owned());
+    options.tick_limit = if args.once { 1 } else { args.max_ticks };
+    options.interval_ms = args.interval_ms;
+    options.dry_run = args.dry_run;
+    options.job_types = job_types;
+    options.runner_options = runner_options;
+
+    match crate::steward::run_daemon_foreground(&options) {
+        Ok(report) => write_daemon_report(cli, &report, stdout),
+        Err(message) => {
+            let error = DomainError::Configuration {
+                message,
+                repair: Some("ee daemon --foreground --once --job decay_sweep --json".to_owned()),
+            };
+            write_domain_error(&error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn write_daemon_report<W>(
+    cli: &Cli,
+    report: &crate::steward::DaemonForegroundReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let success = report.failed_count() == 0;
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": success,
+        "data": report.data_json(),
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let exit = write_stdout(stdout, &report.human_summary());
+            if exit != ProcessExitCode::Success {
+                return exit;
+            }
+        }
+        output::Renderer::Toon => {
+            let rendered = output::render_toon_from_json(&response.to_string());
+            let exit = write_stdout(stdout, &(rendered + "\n"));
+            if exit != ProcessExitCode::Success {
+                return exit;
+            }
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let exit = write_stdout(stdout, &(response.to_string() + "\n"));
+            if exit != ProcessExitCode::Success {
+                return exit;
+            }
+        }
+    }
+
+    if success {
+        ProcessExitCode::Success
+    } else {
+        ProcessExitCode::UnsatisfiedDegradedMode
+    }
 }
 
 // ============================================================================
