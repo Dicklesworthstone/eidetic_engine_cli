@@ -8,7 +8,10 @@ use std::str::FromStr;
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 
-use crate::cass::{CassClient, CassImportOptions, discover_import_binary, import_cass_sessions};
+use crate::cass::{
+    CassClient, CassImportOptions, discover_import_binary, import_cass_sessions,
+    parse_import_since_duration,
+};
 use crate::core::VersionReport;
 use crate::core::agent_detect::{
     AgentDetectOptions, AgentSourcesOptions, AgentStatusOptions, build_agent_sources_report,
@@ -75,8 +78,9 @@ use crate::core::learn::{
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
     GetMemoryOptions, ListMemoriesOptions, MemoryReviseReport, RememberMemoryOptions,
-    RememberMemoryReport, ReviseMemoryOptions, ReviseReason, get_memory_details, list_memories,
-    remember_memory, revise_memory,
+    RememberMemoryReport, ReviseMemoryOptions, ReviseReason, WorkflowCloseOptions,
+    WorkflowCloseReport, close_workflow, get_memory_details, list_memories, remember_memory,
+    revise_memory,
 };
 use crate::core::outcome::{
     DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
@@ -413,6 +417,9 @@ pub enum Command {
     /// Resolve and manage workspace identities and aliases.
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
+    /// Manage memory workflow lifecycle groups.
+    #[command(subcommand)]
+    Workflow(WorkflowCommand),
     /// Explain why a memory was stored, retrieved, or selected.
     Why(WhyArgs),
 }
@@ -2782,6 +2789,25 @@ pub struct WorkspaceAliasArgs {
     pub dry_run: bool,
 }
 
+/// Memory workflow lifecycle commands.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum WorkflowCommand {
+    /// Close a workflow and promote eligible working memories.
+    Close(WorkflowCloseArgs),
+}
+
+/// Arguments for `ee workflow close`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct WorkflowCloseArgs {
+    /// Workflow lifecycle group to close.
+    #[arg(value_name = "WORKFLOW_ID")]
+    pub workflow_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
 /// Arguments for the remember command.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct RememberArgs {
@@ -2800,6 +2826,10 @@ pub struct RememberArgs {
     /// Tags to apply (comma-separated).
     #[arg(long, short = 't')]
     pub tags: Option<String>,
+
+    /// Workflow lifecycle group for working memories.
+    #[arg(long, value_name = "ID")]
+    pub workflow: Option<String>,
 
     /// Confidence score (0.0 to 1.0).
     #[arg(long, default_value = "0.8")]
@@ -3297,6 +3327,10 @@ pub struct CassImportArgs {
     /// Maximum sessions to import from CASS.
     #[arg(long, default_value_t = 10)]
     pub limit: u32,
+
+    /// Only import sessions started within this duration window; combines with --limit.
+    #[arg(long, value_name = "DURATION")]
+    pub since: Option<String>,
 
     /// Database path to write. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -4780,6 +4814,9 @@ where
         }
         Some(Command::Memory(MemoryCommand::Revise(ref args))) => {
             handle_memory_revise(&cli, args, stdout, stderr)
+        }
+        Some(Command::Workflow(WorkflowCommand::Close(ref args))) => {
+            handle_workflow_close(&cli, args, stdout, stderr)
         }
         Some(Command::Index(IndexCommand::Rebuild(ref args))) => {
             handle_index_rebuild(&cli, args, stdout, stderr)
@@ -6740,10 +6777,24 @@ where
     E: Write,
 {
     let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let since = match args.since.as_deref() {
+        Some(value) => match parse_import_since_duration(value, chrono::Utc::now()) {
+            Ok(cutoff) => Some(cutoff),
+            Err(error) => {
+                let domain_error = DomainError::Import {
+                    message: error.to_string(),
+                    repair: error.repair_hint().map(str::to_string),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        },
+        None => None,
+    };
     let options = CassImportOptions {
         workspace_path,
         database_path: args.database.clone(),
         limit: args.limit,
+        since,
         dry_run: args.dry_run,
         include_spans: !args.no_spans,
     };
@@ -10150,6 +10201,52 @@ where
     }
 }
 
+fn handle_workflow_close<W, E>(
+    cli: &Cli,
+    args: &WorkflowCloseArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    match close_workflow(&WorkflowCloseOptions {
+        workspace_path: &workspace,
+        database_path: Some(&database_path),
+        workflow_id: &args.workflow_id,
+    }) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_output())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn parse_memory_revise_confidence(raw: Option<&str>) -> Result<Option<f32>, DomainError> {
     match raw {
         Some(value) => match value.parse::<f32>() {
@@ -11477,6 +11574,9 @@ fn format_why_human(report: &crate::core::why::WhyReport) -> String {
         if let Some(ref uri) = storage.provenance_uri {
             output.push_str(&format!("  Provenance: {uri}\n"));
         }
+        if let Some(ref workflow_id) = storage.workflow_id {
+            output.push_str(&format!("  Workflow: {workflow_id}\n"));
+        }
         output.push_str(&format!("  Created: {}\n", storage.created_at));
         output.push_str(&format!(
             "  Validity: {} ({})\n",
@@ -11634,6 +11734,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "trustClass": s.trust_class,
             "trustSubclass": s.trust_subclass,
             "provenanceUri": s.provenance_uri,
+            "workflowId": s.workflow_id,
             "createdAt": s.created_at,
             "validFrom": s.valid_from,
             "validTo": s.valid_to,
@@ -11881,6 +11982,9 @@ impl RememberMemoryReport {
         if let Some(audit_id) = &self.audit_id {
             output.push_str(&format!("  Audit: {audit_id}\n"));
         }
+        if let Some(workflow_id) = &self.workflow_id {
+            output.push_str(&format!("  Workflow: {workflow_id}\n"));
+        }
         if let Some(index_job_id) = &self.index_job_id {
             output.push_str(&format!("  Index job: {index_job_id}\n"));
         }
@@ -11924,6 +12028,9 @@ impl RememberMemoryReport {
         let valid_to_json = self.valid_to.as_ref().map_or("null".to_string(), |s| {
             format!("\"{}\"", escape_json_string(s))
         });
+        let workflow_id_json = self.workflow_id.as_ref().map_or("null".to_string(), |s| {
+            format!("\"{}\"", escape_json_string(s))
+        });
         let provenance_uri_json = self.source.as_ref().map_or(String::new(), |s| {
             format!(",\"provenance_uri\":\"{}\"", escape_json_string(s))
         });
@@ -11943,12 +12050,13 @@ impl RememberMemoryReport {
         let suggested_link_degradations_json = self.suggested_link_degradations_json();
 
         let mut json = format!(
-            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"redaction_status":"{}"}}"#,
+            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"redaction_status":"{}"}}"#,
             self.version,
             self.memory_id,
             escape_json_string(&self.workspace_id),
             escape_json_string(&self.database_path.display().to_string()),
             escape_json_string(&self.content),
+            workflow_id_json,
             self.level.as_str(),
             self.kind.as_str(),
             self.confidence,
@@ -12028,12 +12136,60 @@ impl RememberMemoryReport {
     }
 }
 
+impl WorkflowCloseReport {
+    #[must_use]
+    pub fn human_output(&self) -> String {
+        format!(
+            "Closed workflow: {}\n  Workspace: {}\n  Promoted: {}\n  Expired: {}\n",
+            self.workflow_id, self.workspace_id, self.promoted_count, self.expired_count
+        )
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        format!(
+            "WORKFLOW_CLOSED|{}|promoted={}|expired={}",
+            self.workflow_id, self.promoted_count, self.expired_count
+        )
+    }
+
+    #[must_use]
+    pub fn json_output(&self) -> String {
+        use crate::output::escape_json_string;
+
+        let promoted_memory_ids = self
+            .promoted_memory_ids
+            .iter()
+            .map(|id| format!("\"{}\"", escape_json_string(id)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let audit_ids = self
+            .audit_ids
+            .iter()
+            .map(|id| format!("\"{}\"", escape_json_string(id)))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        format!(
+            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"workflow close","version":"{}","workspace_id":"{}","workflow_id":"{}","promoted_count":{},"expired_count":{},"promoted_memory_ids":[{}],"audit_ids":[{}]}}}}"#,
+            self.version,
+            escape_json_string(&self.workspace_id),
+            escape_json_string(&self.workflow_id),
+            self.promoted_count,
+            self.expired_count,
+            promoted_memory_ids,
+            audit_ids
+        )
+    }
+}
+
 fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberMemoryReport, DomainError> {
     let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
     remember_memory(&RememberMemoryOptions {
         workspace_path: &workspace_path,
         database_path: None,
         content: &args.content,
+        workflow_id: args.workflow.as_deref(),
         level: &args.level,
         kind: &args.kind,
         tags: args.tags.as_deref(),
@@ -15294,6 +15450,9 @@ impl NormalizedInvocation {
                     WorkspaceCommand::List(_) => "workspace list".to_string(),
                     WorkspaceCommand::Alias(_) => "workspace alias".to_string(),
                 },
+                Command::Workflow(workflow) => match workflow {
+                    WorkflowCommand::Close(_) => "workflow close".to_string(),
+                },
                 Command::Tripwire(tw) => match tw {
                     TripwireCommand::List(_) => "tripwire list".to_string(),
                     TripwireCommand::Check(_) => "tripwire check".to_string(),
@@ -15943,7 +16102,7 @@ mod tests {
         Command, CurateCommand, DiagCommand, EconomyCommand, FieldsLevel, FocusCommand,
         GraphCommand, ImportCommand, LearnCommand, LearnExperimentCommand, MemoryCommand,
         OutcomeQuarantineCommand, OutputFormat, RuleCommand, ShadowMode, SituationCommand,
-        TaskFrameCommand, TaskFrameSubgoalCommand, run,
+        TaskFrameCommand, TaskFrameSubgoalCommand, WorkflowCommand, run,
     };
     use crate::core::search::{
         ScoreExplanation, ScoreFactor, ScoreSource, SearchHit, SearchReport, SearchStatus,
@@ -16143,6 +16302,7 @@ mod tests {
                 trust_class: "human_explicit".to_string(),
                 trust_subclass: Some("project_rule".to_string()),
                 provenance_uri: Some("file://AGENTS.md#L42".to_string()),
+                workflow_id: Some("wf_release".to_string()),
                 created_at: "2026-05-04T12:00:00Z".to_string(),
                 valid_from: Some("2026-05-04T00:00:00Z".to_string()),
                 valid_to: None,
@@ -19056,6 +19216,30 @@ mod tests {
     // ========================================================================
 
     #[test]
+    fn parser_accepts_cass_import_since_window() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "import",
+            "cass",
+            "--since",
+            "7d3h",
+            "--limit",
+            "25",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse import cass: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Import(ImportCommand::Cass(args))) => {
+                ensure_equal(&args.since.as_deref(), &Some("7d3h"), "cass since")?;
+                ensure_equal(&args.limit, &25, "cass limit")?;
+                ensure_equal(&args.dry_run, &true, "cass dry-run flag")
+            }
+            other => Err(format!("expected Import::Cass, got {other:?}")),
+        }
+    }
+
+    #[test]
     fn parser_accepts_jsonl_import_dry_run() -> TestResult {
         let parsed = Cli::try_parse_from([
             "ee",
@@ -20109,6 +20293,203 @@ mod tests {
             }
             _ => Err("expected Remember command".to_string()),
         }
+    }
+
+    #[test]
+    fn remember_command_accepts_workflow_flag() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "remember",
+            "Capture a working memory.",
+            "--workflow",
+            "wf-release-001",
+        ])
+        .map_err(|error| format!("failed to parse remember workflow: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Remember(ref args)) => ensure_equal(
+                &args.workflow,
+                &Some("wf-release-001".to_string()),
+                "workflow id",
+            ),
+            _ => Err("expected Remember command".to_string()),
+        }
+    }
+
+    #[test]
+    fn remember_workflow_id_surfaces_in_show_and_why_json() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().to_string_lossy().into_owned();
+        let workflow_id = "wf-release-001";
+
+        let (init_exit, _init_stdout, init_stderr) =
+            invoke(&["ee", "--workspace", &workspace, "init", "--json"]);
+        ensure_equal(&init_exit, &ProcessExitCode::Success, "init exit")?;
+        ensure(init_stderr.is_empty(), "init json stderr clean")?;
+
+        let (remember_exit, remember_stdout, remember_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "remember",
+            "Track release verification while it is still in progress.",
+            "--level",
+            "working",
+            "--kind",
+            "fact",
+            "--workflow",
+            workflow_id,
+            "--json",
+        ]);
+        ensure_equal(&remember_exit, &ProcessExitCode::Success, "remember exit")?;
+        ensure(remember_stderr.is_empty(), "remember json stderr clean")?;
+        let remembered: serde_json::Value =
+            serde_json::from_str(&remember_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &remembered["data"]["workflow_id"],
+            &serde_json::json!(workflow_id),
+            "remember workflow_id",
+        )?;
+        let memory_id = remembered["data"]["memory_id"]
+            .as_str()
+            .ok_or_else(|| "remember output missing memory_id".to_string())?;
+
+        let (show_exit, show_stdout, show_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "memory",
+            "show",
+            memory_id,
+            "--json",
+        ]);
+        ensure_equal(&show_exit, &ProcessExitCode::Success, "memory show exit")?;
+        ensure(show_stderr.is_empty(), "memory show json stderr clean")?;
+        let shown: serde_json::Value =
+            serde_json::from_str(&show_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &shown["data"]["memory"]["workflow_id"],
+            &serde_json::json!(workflow_id),
+            "memory show workflow_id",
+        )?;
+
+        let (why_exit, why_stdout, why_stderr) =
+            invoke(&["ee", "--workspace", &workspace, "why", memory_id, "--json"]);
+        ensure_equal(&why_exit, &ProcessExitCode::Success, "why exit")?;
+        ensure(why_stderr.is_empty(), "why json stderr clean")?;
+        let why: serde_json::Value =
+            serde_json::from_str(&why_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &why["data"]["storage"]["workflowId"],
+            &serde_json::json!(workflow_id),
+            "why workflowId",
+        )
+    }
+
+    #[test]
+    fn workflow_close_command_accepts_workflow_id() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "workflow", "close", "wf-release-001"])
+            .map_err(|error| format!("failed to parse workflow close: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Workflow(WorkflowCommand::Close(ref args))) => ensure_equal(
+                &args.workflow_id,
+                &"wf-release-001".to_string(),
+                "workflow id",
+            ),
+            other => Err(format!("expected Workflow::Close, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn workflow_close_promotes_working_memory_to_episodic_json() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().to_string_lossy().into_owned();
+        let workflow_id = "wf-release-close-001";
+
+        let (init_exit, _init_stdout, init_stderr) =
+            invoke(&["ee", "--workspace", &workspace, "init", "--json"]);
+        ensure_equal(&init_exit, &ProcessExitCode::Success, "init exit")?;
+        ensure(init_stderr.is_empty(), "init json stderr clean")?;
+
+        let (remember_exit, remember_stdout, remember_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "remember",
+            "Promote this working memory when its workflow closes.",
+            "--level",
+            "working",
+            "--kind",
+            "fact",
+            "--workflow",
+            workflow_id,
+            "--json",
+        ]);
+        ensure_equal(&remember_exit, &ProcessExitCode::Success, "remember exit")?;
+        ensure(remember_stderr.is_empty(), "remember json stderr clean")?;
+        let remembered: serde_json::Value =
+            serde_json::from_str(&remember_stdout).map_err(|error| error.to_string())?;
+        let memory_id = remembered["data"]["memory_id"]
+            .as_str()
+            .ok_or_else(|| "remember output missing memory_id".to_string())?;
+
+        let (close_exit, close_stdout, close_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "workflow",
+            "close",
+            workflow_id,
+            "--json",
+        ]);
+        ensure_equal(
+            &close_exit,
+            &ProcessExitCode::Success,
+            "workflow close exit",
+        )?;
+        ensure(close_stderr.is_empty(), "workflow close json stderr clean")?;
+        let closed: serde_json::Value =
+            serde_json::from_str(&close_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &closed["data"]["promoted_count"],
+            &serde_json::json!(1),
+            "promoted count",
+        )?;
+        ensure_equal(
+            &closed["data"]["expired_count"],
+            &serde_json::json!(0),
+            "expired count",
+        )?;
+        ensure_equal(
+            &closed["data"]["promoted_memory_ids"],
+            &serde_json::json!([memory_id]),
+            "promoted ids",
+        )?;
+        ensure_equal(
+            &closed["data"]["audit_ids"].as_array().map(Vec::len),
+            &Some(1),
+            "audit id count",
+        )?;
+
+        let (show_exit, show_stdout, show_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "memory",
+            "show",
+            memory_id,
+            "--json",
+        ]);
+        ensure_equal(&show_exit, &ProcessExitCode::Success, "memory show exit")?;
+        ensure(show_stderr.is_empty(), "memory show json stderr clean")?;
+        let shown: serde_json::Value =
+            serde_json::from_str(&show_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &shown["data"]["memory"]["level"],
+            &serde_json::json!("episodic"),
+            "promoted level",
+        )
     }
 
     #[test]
