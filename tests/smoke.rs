@@ -3358,7 +3358,7 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
     )?;
     let rebuild_json = parse_logged_response(&rebuild_run, "ee index rebuild after cass import")?;
     ensure_equal(
-        &rebuild_json["data"]["sessionsIndexed"],
+        &rebuild_json["data"]["sessions_indexed"],
         &serde_json::json!(1),
         "sessions indexed",
     )?;

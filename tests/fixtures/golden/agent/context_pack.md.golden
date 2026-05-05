@@ -6,22 +6,22 @@
 
 **Status:** `clear`
 
-Packed memories are from high-trust classes; still verify provenance before acting.
+Packed memories are from high\-trust classes; still verify provenance before acting\.
 
 ## procedural_rules
 
-### 1. mem_00000000000000000000000001 (11 tokens)
+### 1. mem\_00000000000000000000000001 (11 tokens)
 
 ```
 Run cargo fmt --check before release.
 ```
 
-**Why:** Selected for query `format before release` from semantic_fast search result with score 0.4082 and utility 0.8000.
+**Why:** Deterministic retrieval explanation for query \`format before release\`: source=memory search\_source=semantic\_fast; score\_components=\[relevance=unit\_score\(search\_hit\.score\) with search\_hit\.score=0\.4082, utility=unit\_score\(memory\.utility\) with memory\.utility=0\.8000\]; formula=unit\_score\(field\)=clamp\(field, 0\.0, 1\.0\) for finite fields, otherwise 0\.0; inputs are stored memory/link fields and the explicit search hit, not agent reasoning\.
 
 **Trust:** `human_explicit` / `authoritative`
 
 **Provenance:**
-- file://AGENTS.md#L164-173 (file)
+- `file://AGENTS.md#L164-173` (file)
 
 ---
 

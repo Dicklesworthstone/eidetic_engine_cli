@@ -5,10 +5,10 @@ data:
   version: 0.1.0
   subsystems[5]{name,status,description}:
     runtime,ready,Asupersync async runtime
-    storage,unimplemented,FrankenSQLite/SQLModel persistence
-    search,unimplemented,Frankensearch hybrid retrieval
-    graph,unimplemented,FrankenNetworkX graph analytics
-    cass,degraded,CASS session import adapter
+    storage,degraded,FrankenSQLite/SQLModel persistence
+    search,degraded,Frankensearch hybrid retrieval
+    graph,pending,FrankenNetworkX graph analytics
+    cass,ready,CASS session import adapter
   features[7]{name,enabled,description}:
     fts5,true,FTS5 full-text search
     json,true,JSON extension support
@@ -17,7 +17,7 @@ data:
     lexical-bm25,true,BM25 lexical scoring
     mcp,false,MCP server adapter
     serve,false,HTTP serve adapter
-  commands[17]{name,available,description}:
+  commands[20]{name,available,description}:
     capabilities,true,Report feature availability
     check,true,Quick posture summary
     doctor,true,Health checks
@@ -29,12 +29,15 @@ data:
     schema,true,Schema registry
     status,true,Subsystem readiness
     version,true,Version info
-    context,false,Context packing
-    search,false,Memory search
-    why,false,Explainability
-    init,false,Workspace initialization
-    index,false,Search index management
-    curate,false,Rule curation
+    context,true,Context packing
+    search,true,Memory search
+    why,true,Explainability
+    init,true,Workspace initialization
+    index,true,Search index management
+    curate,true,Rule curation
+    daemon foreground decay_sweep,true,Bounded foreground score-decay steward job
+    daemon background,false,Background daemon scheduling is unavailable
+    daemon foreground non-decay,false,Non-decay steward jobs report unavailable until real handlers are wired
   output:
     formats[7]{name,available,machineReadable,description}:
       json,true,true,Canonical stable response envelope
@@ -62,32 +65,32 @@ data:
         diagnostic:
           schema: ee.output_size_diagnostic.v1
           json:
-            bytes: 2359
-            estimatedTokens: 74
+            bytes: 3189
+            estimatedTokens: 134
           toon:
-            bytes: 2269
-            estimatedTokens: 238
+            bytes: 3033
+            estimatedTokens: 330
           savings:
-            bytes: 90
-            tokens: -164
-            compressionRatio: 0.962
+            bytes: 156
+            tokens: -196
+            compressionRatio: 0.951
       - command: health
         diagnostic:
           schema: ee.output_size_diagnostic.v1
           json:
-            bytes: 492
-            estimatedTokens: 14
+            bytes: 532
+            estimatedTokens: 22
           toon:
-            bytes: 439
-            estimatedTokens: 50
+            bytes: 479
+            estimatedTokens: 58
           savings:
             bytes: 53
             tokens: -36
-            compressionRatio: 0.892
+            compressionRatio: 0.9
   summary:
-    readySubsystems: 1
+    readySubsystems: 2
     totalSubsystems: 5
     enabledFeatures: 4
     totalFeatures: 7
-    availableCommands: 11
-    totalCommands: 17
+    availableCommands: 18
+    totalCommands: 20

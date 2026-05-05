@@ -18,7 +18,7 @@
     },
     "pack": {
       "query": "format before release",
-      "hash": "blake3:9f86e424d01a1080b8e91b3417a53c5e80a8749d6cbc8cb66d2a5752ceb625b6",
+      "hash": "blake3:604f4371c9ff98acf6654ea6a33c049e3504b4f8e6e97d7a5c6dca4f8753b1b8",
       "budget": {
         "maxTokens": 4000,
         "usedTokens": 11
@@ -145,7 +145,7 @@
               "note": "Memory mem_00000000000000000000000001 selected for context pack"
             }
           ],
-          "why": "Selected for query `format before release` from semantic_fast search result with score 0.4082 and utility 0.8000.",
+          "why": "Deterministic retrieval explanation for query `format before release`: source=memory search_source=semantic_fast; score_components=[relevance=unit_score(search_hit.score) with search_hit.score=0.4082, utility=unit_score(memory.utility) with memory.utility=0.8000]; formula=unit_score(field)=clamp(field, 0.0, 1.0) for finite fields, otherwise 0.0; inputs are stored memory/link fields and the explicit search hit, not agent reasoning.",
           "diversityKey": "procedural:rule:cargo"
         }
       ],
