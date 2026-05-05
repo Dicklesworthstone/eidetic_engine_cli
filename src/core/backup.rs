@@ -1567,17 +1567,48 @@ fn ensure_backup_directory(backup_root: &Path, backup_path: &Path) -> Result<(),
 }
 
 fn ensure_side_path_is_isolated(side_path: &Path) -> Result<(), DomainError> {
-    if side_path.exists() && !side_path.is_dir() {
-        return Err(DomainError::Storage {
-            message: format!(
-                "side path '{}' exists but is not a directory",
+    if let Some(symlink_path) = first_existing_symlink_component(side_path)? {
+        let message = if symlink_path == side_path {
+            format!(
+                "side path '{}' is a symbolic link; restore requires an isolated real directory",
                 side_path.display()
-            ),
-            repair: Some("choose a directory path for --side-path".to_owned()),
+            )
+        } else {
+            format!(
+                "side path '{}' traverses symbolic link '{}'; restore requires an isolated real directory",
+                side_path.display(),
+                symlink_path.display()
+            )
+        };
+        return Err(DomainError::PolicyDenied {
+            message,
+            repair: Some("choose a real, non-symlink directory for --side-path".to_owned()),
         });
     }
-    if !side_path.exists() {
-        return Ok(());
+
+    match fs::symlink_metadata(side_path) {
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "side path '{}' exists but is not a directory",
+                    side_path.display()
+                ),
+                repair: Some("choose a directory path for --side-path".to_owned()),
+            });
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "failed to inspect side path '{}': {error}",
+                    side_path.display()
+                ),
+                repair: Some(
+                    "inspect filesystem permissions or choose another --side-path".to_owned(),
+                ),
+            });
+        }
     }
 
     let mut entries = fs::read_dir(side_path).map_err(|error| DomainError::Storage {
@@ -1597,6 +1628,37 @@ fn ensure_side_path_is_isolated(side_path: &Path) -> Result<(), DomainError> {
         });
     }
     Ok(())
+}
+
+fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "failed to inspect side path component '{}': {error}",
+                        current.display()
+                    ),
+                    repair: Some(
+                        "inspect filesystem permissions or choose another --side-path".to_owned(),
+                    ),
+                });
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), DomainError> {
@@ -2252,6 +2314,49 @@ mod tests {
             ),
             other => Err(format!("expected storage error, got {other:?}")),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_backup_rejects_symlinked_side_path_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let out = workspace.join("backups");
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("restore-symlink-parent".to_owned()),
+            redaction_level: RedactionLevel::None,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let real_root = tempdir.path().join("real-side-root");
+        fs::create_dir_all(&real_root).map_err(|error| error.to_string())?;
+        let linked_root = tempdir.path().join("linked-side-root");
+        symlink(&real_root, &linked_root).map_err(|error| error.to_string())?;
+        let side_path = linked_root.join("restore-side-path");
+
+        let result = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path,
+            dry_run: false,
+        });
+
+        match result {
+            Err(DomainError::PolicyDenied { message, .. }) => ensure(
+                message.contains("traverses symbolic link"),
+                "symlinked side path parent is rejected",
+            )?,
+            other => return Err(format!("expected policy denied error, got {other:?}")),
+        }
+        ensure(
+            !real_root.join("restore-side-path").exists(),
+            "restore must not write through a symlinked side-path parent",
+        )
     }
 
     #[test]
