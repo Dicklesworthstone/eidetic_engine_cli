@@ -311,6 +311,9 @@ pub enum Command {
     Daemon(DaemonArgs),
     /// Run health checks on workspace and subsystems.
     Doctor(DoctorArgs),
+    /// Run explicit maintenance jobs without a daemon.
+    #[command(subcommand)]
+    Maintenance(MaintenanceCommand),
     /// Memory economics: utility scores, attention budgets, maintenance debt.
     #[command(subcommand)]
     Economy(EconomyCommand),
@@ -877,6 +880,96 @@ pub struct DaemonArgs {
     /// Override per-job item budget.
     #[arg(long, value_name = "N")]
     pub item_limit: Option<u64>,
+}
+
+/// Memory maintenance commands.
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum MaintenanceCommand {
+    /// Run a bounded maintenance job now.
+    Run(MaintenanceRunArgs),
+    /// Report maintenance job availability.
+    Status(MaintenanceStatusArgs),
+}
+
+/// Arguments for `ee maintenance run`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct MaintenanceRunArgs {
+    /// Maintenance job to run.
+    #[arg(long = "job", default_value = "memory.decay", value_name = "JOB", value_parser = parse_maintenance_job)]
+    pub job: MaintenanceJob,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Report planned work without mutating memory scores.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Override per-job time budget in milliseconds.
+    #[arg(long, value_name = "MS")]
+    pub time_limit_ms: Option<u64>,
+
+    /// Override per-job item budget.
+    #[arg(long, value_name = "N")]
+    pub item_limit: Option<u64>,
+}
+
+/// Arguments for `ee maintenance status`.
+#[derive(Clone, Debug, Default, Parser, PartialEq)]
+pub struct MaintenanceStatusArgs {}
+
+/// User-facing maintenance job selector.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MaintenanceJob {
+    /// Run implemented memory confidence decay.
+    MemoryDecay,
+    /// Rule score recomputation is not wired yet.
+    RuleScore,
+    /// Trauma guard inversion is not wired yet.
+    TraumaGuard,
+    /// Run all requested plan jobs, reporting unavailable jobs explicitly.
+    All,
+}
+
+impl MaintenanceJob {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MemoryDecay => "memory.decay",
+            Self::RuleScore => "rule.score",
+            Self::TraumaGuard => "trauma_guard",
+            Self::All => "all",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &[
+            Self::MemoryDecay,
+            Self::RuleScore,
+            Self::TraumaGuard,
+            Self::All,
+        ]
+    }
+}
+
+fn parse_maintenance_job(raw: &str) -> Result<MaintenanceJob, String> {
+    match raw {
+        "memory.decay" | "decay_sweep" => Ok(MaintenanceJob::MemoryDecay),
+        "rule.score" => Ok(MaintenanceJob::RuleScore),
+        "trauma_guard" => Ok(MaintenanceJob::TraumaGuard),
+        "all" => Ok(MaintenanceJob::All),
+        _ => Err(format!(
+            "unknown maintenance job `{}`; expected one of {}",
+            raw,
+            MaintenanceJob::all()
+                .iter()
+                .map(|job| job.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }
 
 fn parse_steward_job_type(raw: &str) -> Result<JobType, String> {
@@ -4524,6 +4617,10 @@ where
             DemoCommand::Verify(args) => handle_demo_verify(&cli, args, stdout, stderr),
         },
         Some(Command::Daemon(ref args)) => handle_daemon(&cli, args, stdout, stderr),
+        Some(Command::Maintenance(ref maintenance_cmd)) => match maintenance_cmd {
+            MaintenanceCommand::Run(args) => handle_maintenance_run(&cli, args, stdout),
+            MaintenanceCommand::Status(args) => handle_maintenance_status(&cli, args, stdout),
+        },
         Some(Command::Context(ref args)) => handle_context(&cli, args, stdout, stderr),
         Some(Command::Diag(ref diag_cmd)) => match diag_cmd {
             DiagCommand::Claims(args) => handle_diag_claims(&cli, args, stdout),
@@ -14584,6 +14681,245 @@ where
     }
 }
 
+const MAINTENANCE_RUN_SCHEMA_V1: &str = "ee.maintenance.run.v1";
+const MAINTENANCE_STATUS_SCHEMA_V1: &str = "ee.maintenance.status.v1";
+const MAINTENANCE_JOB_UNAVAILABLE_CODE: &str = "maintenance_job_unavailable";
+
+fn handle_maintenance_run<W>(
+    cli: &Cli,
+    args: &MaintenanceRunArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let mut runner_options = crate::steward::RunnerOptions::new()
+        .with_workspace_path(workspace_path.clone())
+        .with_actor("ee-maintenance")
+        .with_dry_run(args.dry_run);
+    if let Some(database) = &args.database {
+        runner_options = runner_options.with_database_path(database.clone());
+    }
+    if let Some(time_limit_ms) = args.time_limit_ms {
+        runner_options = runner_options.with_time_limit(time_limit_ms);
+    }
+    if let Some(item_limit) = args.item_limit {
+        runner_options = runner_options.with_item_limit(item_limit);
+    }
+
+    let mut runner = crate::steward::ManualRunner::new(runner_options);
+    let mut results = Vec::new();
+    let mut degraded = Vec::new();
+
+    for job in maintenance_jobs_to_run(args.job) {
+        match job {
+            MaintenanceJob::MemoryDecay => {
+                let result = runner.run_job_type(
+                    JobType::DecaySweep,
+                    Some("maintenance run --job memory.decay".to_owned()),
+                );
+                results.push(result.data_json());
+                if !matches!(result.outcome, crate::steward::RunOutcome::Success) {
+                    degraded.push(serde_json::json!({
+                        "code": "maintenance_memory_decay_failed",
+                        "severity": "medium",
+                        "message": result
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "memory.decay did not complete successfully".to_owned()),
+                        "repair": "ee init --workspace . && ee maintenance run --job memory.decay --json",
+                    }));
+                }
+            }
+            MaintenanceJob::RuleScore | MaintenanceJob::TraumaGuard => {
+                let unavailable = maintenance_unavailable_job_json(job);
+                let unavailable_message = unavailable["message"].clone();
+                degraded.push(unavailable.clone());
+                results.push(serde_json::json!({
+                    "jobType": job.as_str(),
+                    "outcome": "skipped",
+                    "dryRun": true,
+                    "error": unavailable_message,
+                    "details": unavailable,
+                }));
+            }
+            MaintenanceJob::All => {}
+        }
+    }
+
+    let success = degraded.is_empty();
+    let durable_mutation = results.iter().any(|result| {
+        result["details"]["durableMutation"]
+            .as_bool()
+            .unwrap_or(false)
+    });
+    let succeeded = results
+        .iter()
+        .filter(|result| result["outcome"].as_str() == Some("success"))
+        .count();
+    let skipped = results
+        .iter()
+        .filter(|result| result["outcome"].as_str() == Some("skipped"))
+        .count();
+    let failed = results
+        .iter()
+        .filter(|result| {
+            matches!(
+                result["outcome"].as_str(),
+                Some("failed") | Some("cancelled") | Some("timed_out")
+            )
+        })
+        .count();
+    let data = serde_json::json!({
+        "schema": MAINTENANCE_RUN_SCHEMA_V1,
+        "command": "maintenance run",
+        "requestedJob": args.job.as_str(),
+        "workspace": workspace_path.display().to_string(),
+        "dryRun": args.dry_run,
+        "durableMutation": durable_mutation,
+        "summary": {
+            "total": results.len(),
+            "succeeded": succeeded,
+            "skipped": skipped,
+            "failed": failed,
+        },
+        "results": results,
+        "degraded": degraded,
+    });
+    write_maintenance_response(cli, stdout, success, data)
+}
+
+fn handle_maintenance_status<W>(
+    cli: &Cli,
+    _args: &MaintenanceStatusArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let data = serde_json::json!({
+        "schema": MAINTENANCE_STATUS_SCHEMA_V1,
+        "command": "maintenance status",
+        "jobs": [
+            {
+                "name": "memory.decay",
+                "aliases": ["decay_sweep"],
+                "available": true,
+                "stewardJobType": JobType::DecaySweep.as_str(),
+                "description": "Run the existing steward score-decay sweep over active memories."
+            },
+            {
+                "name": "rule.score",
+                "aliases": [],
+                "available": false,
+                "code": MAINTENANCE_JOB_UNAVAILABLE_CODE,
+                "description": "Rule-score recomputation is not wired yet."
+            },
+            {
+                "name": "trauma_guard",
+                "aliases": [],
+                "available": false,
+                "code": MAINTENANCE_JOB_UNAVAILABLE_CODE,
+                "description": "Trauma-guard inversion is not wired yet."
+            },
+            {
+                "name": "all",
+                "aliases": [],
+                "available": false,
+                "code": "maintenance_all_partially_available",
+                "description": "Runs memory.decay and reports unavailable planned jobs explicitly."
+            }
+        ],
+        "next": "ee maintenance run --job memory.decay --json"
+    });
+    write_maintenance_response(cli, stdout, true, data)
+}
+
+fn maintenance_jobs_to_run(job: MaintenanceJob) -> Vec<MaintenanceJob> {
+    match job {
+        MaintenanceJob::All => vec![
+            MaintenanceJob::MemoryDecay,
+            MaintenanceJob::RuleScore,
+            MaintenanceJob::TraumaGuard,
+        ],
+        other => vec![other],
+    }
+}
+
+fn maintenance_unavailable_job_json(job: MaintenanceJob) -> serde_json::Value {
+    serde_json::json!({
+        "code": MAINTENANCE_JOB_UNAVAILABLE_CODE,
+        "severity": "medium",
+        "job": job.as_str(),
+        "message": format!("Maintenance job `{}` is not wired yet.", job.as_str()),
+        "repair": "Use `ee maintenance status --json` to inspect available jobs.",
+    })
+}
+
+fn write_maintenance_response<W>(
+    cli: &Cli,
+    stdout: &mut W,
+    success: bool,
+    data: serde_json::Value,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": success,
+        "data": data,
+    });
+
+    let exit = match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_maintenance_human(&response))
+        }
+        output::Renderer::Toon => {
+            let rendered = output::render_toon_from_json(&response.to_string());
+            write_stdout(stdout, &(rendered + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    };
+    if exit != ProcessExitCode::Success {
+        return exit;
+    }
+
+    if success {
+        ProcessExitCode::Success
+    } else {
+        ProcessExitCode::UnsatisfiedDegradedMode
+    }
+}
+
+fn render_maintenance_human(response: &serde_json::Value) -> String {
+    let data = &response["data"];
+    let command = data["command"].as_str().unwrap_or("maintenance");
+    let success = response["success"].as_bool().unwrap_or(false);
+    let mut output = format!(
+        "{}: {}\n",
+        command,
+        if success { "completed" } else { "degraded" }
+    );
+    if let Some(summary) = data.get("summary") {
+        output.push_str(&format!(
+            "  Total: {}\n  Succeeded: {}\n  Skipped: {}\n  Failed: {}\n",
+            summary["total"].as_u64().unwrap_or(0),
+            summary["succeeded"].as_u64().unwrap_or(0),
+            summary["skipped"].as_u64().unwrap_or(0),
+            summary["failed"].as_u64().unwrap_or(0)
+        ));
+    }
+    if let Some(next) = data["next"].as_str() {
+        output.push_str(&format!("  Next: {next}\n"));
+    }
+    output
+}
+
 // ============================================================================
 // EE-ARTIFACT-REGISTRY-001: Narrow Coding Artifact Registry
 // ============================================================================
@@ -15123,6 +15459,7 @@ const COMMAND_NAMES: &[&str] = &[
     "introspect",
     "lab",
     "learn",
+    "maintenance",
     "memory",
     "mcp",
     "model",
@@ -15200,6 +15537,7 @@ const LEARN_SUBCOMMANDS: &[&str] = &[
     "summary",
 ];
 const LEARN_EXPERIMENT_SUBCOMMANDS: &[&str] = &["propose", "run"];
+const MAINTENANCE_SUBCOMMANDS: &[&str] = &["run", "status"];
 const MEMORY_SUBCOMMANDS: &[&str] = &["list", "show", "history"];
 const MCP_SUBCOMMANDS: &[&str] = &["manifest"];
 const MODEL_SUBCOMMANDS: &[&str] = &["status", "list"];
@@ -15315,6 +15653,10 @@ impl NormalizedInvocation {
                     DemoCommand::Verify(_) => "demo verify".to_string(),
                 },
                 Command::Daemon(_) => "daemon".to_string(),
+                Command::Maintenance(maintenance) => match maintenance {
+                    MaintenanceCommand::Run(_) => "maintenance run".to_string(),
+                    MaintenanceCommand::Status(_) => "maintenance status".to_string(),
+                },
                 Command::Context(_) => "context".to_string(),
                 Command::Curate(curate) => match curate {
                     CurateCommand::Candidates(_) => "curate candidates".to_string(),
@@ -15612,6 +15954,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "lab" => Some(LAB_SUBCOMMANDS),
         "learn" => Some(LEARN_SUBCOMMANDS),
         "learn experiment" => Some(LEARN_EXPERIMENT_SUBCOMMANDS),
+        "maintenance" => Some(MAINTENANCE_SUBCOMMANDS),
         "memory" => Some(MEMORY_SUBCOMMANDS),
         "mcp" => Some(MCP_SUBCOMMANDS),
         "model" => Some(MODEL_SUBCOMMANDS),
@@ -16155,9 +16498,10 @@ mod tests {
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli,
         Command, CurateCommand, DiagCommand, EconomyCommand, FieldsLevel, FocusCommand,
-        GraphCommand, ImportCommand, LearnCommand, LearnExperimentCommand, MemoryCommand,
-        OutcomeQuarantineCommand, OutputFormat, RuleCommand, ShadowMode, SituationCommand,
-        TaskFrameCommand, TaskFrameSubgoalCommand, WorkflowCommand, run,
+        GraphCommand, ImportCommand, LearnCommand, LearnExperimentCommand, MaintenanceCommand,
+        MaintenanceJob, MemoryCommand, OutcomeQuarantineCommand, OutputFormat, RuleCommand,
+        ShadowMode, SituationCommand, TaskFrameCommand, TaskFrameSubgoalCommand, WorkflowCommand,
+        run,
     };
     use crate::core::search::{
         ScoreExplanation, ScoreFactor, ScoreSource, SearchHit, SearchReport, SearchStatus,
@@ -19127,6 +19471,120 @@ mod tests {
         )?;
         ensure_contains(&stdout, "\"repair\":\"ee status --json\"", "repair")?;
         ensure(stderr.is_empty(), "daemon json error stderr empty")
+    }
+
+    #[test]
+    fn maintenance_run_command_accepts_memory_decay_job() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "maintenance",
+            "run",
+            "--job",
+            "memory.decay",
+            "--dry-run",
+            "--item-limit",
+            "10",
+        ])
+        .map_err(|error| format!("failed to parse maintenance run: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Maintenance(MaintenanceCommand::Run(args))) => {
+                ensure_equal(&args.job, &MaintenanceJob::MemoryDecay, "job")?;
+                ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(&args.item_limit, &Some(10), "item limit")
+            }
+            other => Err(format!("expected maintenance run command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn maintenance_status_json_lists_memory_decay_and_unavailable_jobs() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "maintenance", "status", "--json"]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "maintenance status exit")?;
+        ensure(stderr.is_empty(), "maintenance status stderr empty")?;
+        ensure_contains(
+            &stdout,
+            "\"schema\":\"ee.maintenance.status.v1\"",
+            "maintenance status schema",
+        )?;
+        ensure_contains(&stdout, "\"name\":\"memory.decay\"", "memory decay job")?;
+        ensure_contains(&stdout, "\"available\":true", "available job")?;
+        ensure_contains(&stdout, "\"name\":\"rule.score\"", "rule score job")?;
+        ensure_contains(
+            &stdout,
+            "\"code\":\"maintenance_job_unavailable\"",
+            "unavailable job code",
+        )
+    }
+
+    #[test]
+    fn maintenance_run_memory_decay_json_uses_steward_handler() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().to_string_lossy().into_owned();
+
+        let (init_exit, _init_stdout, init_stderr) =
+            invoke(&["ee", "--workspace", &workspace, "init", "--json"]);
+        ensure_equal(&init_exit, &ProcessExitCode::Success, "init exit")?;
+        ensure(init_stderr.is_empty(), "init json stderr clean")?;
+
+        let (remember_exit, _remember_stdout, remember_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "remember",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "Run cargo fmt --check before release.",
+            "--json",
+        ]);
+        ensure_equal(&remember_exit, &ProcessExitCode::Success, "remember exit")?;
+        ensure(remember_stderr.is_empty(), "remember json stderr clean")?;
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "maintenance",
+            "run",
+            "--job",
+            "memory.decay",
+            "--dry-run",
+            "--json",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "maintenance run exit")?;
+        ensure(stderr.is_empty(), "maintenance run stderr empty")?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &parsed["data"]["schema"],
+            &serde_json::json!("ee.maintenance.run.v1"),
+            "maintenance run schema",
+        )?;
+        ensure_equal(
+            &parsed["data"]["requestedJob"],
+            &serde_json::json!("memory.decay"),
+            "requested job",
+        )?;
+        let results = parsed["data"]["results"]
+            .as_array()
+            .ok_or_else(|| "results array missing".to_owned())?;
+        let result = results
+            .first()
+            .ok_or_else(|| "maintenance result missing".to_owned())?;
+        ensure_equal(
+            &result["jobType"],
+            &serde_json::json!("decay_sweep"),
+            "steward job type",
+        )?;
+        ensure_equal(
+            &result["details"]["schema"],
+            &serde_json::json!("ee.steward.score_decay.v1"),
+            "steward handler schema",
+        )
     }
 
     #[test]

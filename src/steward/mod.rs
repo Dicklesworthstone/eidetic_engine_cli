@@ -2143,6 +2143,7 @@ impl ManualRunner {
             if let Some(workspace) = workspace {
                 return Ok(workspace.id);
             }
+            return Ok(stable_runner_workspace_id(&workspace_path));
         }
 
         let workspaces = connection
@@ -2237,6 +2238,13 @@ fn normalize_runner_workspace_path(path: &Path) -> PathBuf {
             .join(path)
     };
     absolute.canonicalize().unwrap_or(absolute)
+}
+
+fn stable_runner_workspace_id(path: &Path) -> String {
+    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
 }
 
 fn usize_to_u64(value: usize) -> u64 {
@@ -3489,6 +3497,42 @@ mod tests {
         assert_eq!(opts.workspace_id, Some(SCORE_WORKSPACE_ID.to_owned()));
         assert_eq!(opts.as_of, Some("2099-01-01T00:00:00Z".to_owned()));
         assert_eq!(opts.actor, Some("runner-test".to_owned()));
+    }
+
+    #[test]
+    fn decay_sweep_empty_workspace_path_is_successful_noop() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = tempdir.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or_else(|| "database parent missing".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let options = RunnerOptions::new()
+            .with_workspace_path(tempdir.path())
+            .with_database_path(&database_path)
+            .with_dry_run(true);
+        let mut runner = ManualRunner::new(options);
+        let result = runner.run_job_type(JobType::DecaySweep, None);
+
+        ensure(result.outcome, RunOutcome::Success, "outcome")?;
+        ensure(result.items_processed, Some(0), "items processed")?;
+        ensure(result.error, None, "error")?;
+        ensure(
+            result
+                .details
+                .as_ref()
+                .and_then(|details| details["schema"].as_str())
+                .unwrap_or_default(),
+            SCORE_DECAY_JOB_SCHEMA_V1,
+            "details schema",
+        )
     }
 
     // ========================================================================
