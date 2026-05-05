@@ -421,6 +421,40 @@ impl CassClient {
         inv
     }
 
+    /// Build an import-only invocation after proving the binary is an
+    /// absolute, validated `cass` executable.
+    ///
+    /// Import reads arbitrary session content and may run from agent hooks, so
+    /// it must never fall back to inherited `$PATH` lookup. Callers should
+    /// construct import clients with [`discover_import_binary`] plus
+    /// [`Self::from_discovered`].
+    pub(crate) fn import_invocation<I, S>(&self, args: I) -> Result<CassInvocation, CassError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        let binary = self.validated_import_binary()?;
+        let mut inv = CassInvocation::new(binary, args).with_timeout(self.subprocess_timeout);
+        for (key, value) in STABLE_ENV_OVERRIDES {
+            inv = inv.with_env(*key, *value);
+        }
+        for (key, value) in &self.extra_env {
+            inv = inv.with_env(key.clone(), value.clone());
+        }
+        Ok(inv)
+    }
+
+    fn validated_import_binary(&self) -> Result<PathBuf, CassError> {
+        if self.binary == Path::new(DEFAULT_BINARY) {
+            return Err(CassError::InvalidBinary {
+                binary: self.binary.clone(),
+                reason: "CASS import requires an absolute discovered binary; inherited PATH lookup is not allowed"
+                    .to_string(),
+            });
+        }
+        validate_import_binary(&self.binary, DiscoverySource::Config).map(|binary| binary.path)
+    }
+
     /// Build the invocations the preflight bead (the slice that lands
     /// after EE-100) will run. Returning a vec of intent here lets us
     /// unit-test the exact arg list `ee` will hand to `cass` without
@@ -484,9 +518,44 @@ impl CassClient {
         ])
     }
 
+    /// Build an import-safe `cass sessions --json` invocation.
+    pub(crate) fn import_sessions_invocation(
+        &self,
+        workspace_path: &Path,
+        limit: u32,
+    ) -> Result<CassInvocation, CassError> {
+        self.import_invocation([
+            "sessions".to_owned(),
+            "--workspace".to_owned(),
+            workspace_path.to_string_lossy().into_owned(),
+            "--json".to_owned(),
+            "--limit".to_owned(),
+            limit.to_string(),
+        ])
+    }
+
     /// Build a `cass view -n <line> -C <context> --json -- <path>` invocation.
     pub fn view_invocation(&self, source_path: &str, line: u32, context: u32) -> CassInvocation {
         self.invocation([
+            "view".to_owned(),
+            "-n".to_owned(),
+            line.to_string(),
+            "-C".to_owned(),
+            context.to_string(),
+            "--json".to_owned(),
+            "--".to_owned(),
+            source_path.to_owned(),
+        ])
+    }
+
+    /// Build an import-safe `cass view -n <line> -C <context> --json -- <path>` invocation.
+    pub(crate) fn import_view_invocation(
+        &self,
+        source_path: &str,
+        line: u32,
+        context: u32,
+    ) -> Result<CassInvocation, CassError> {
+        self.import_invocation([
             "view".to_owned(),
             "-n".to_owned(),
             line.to_string(),

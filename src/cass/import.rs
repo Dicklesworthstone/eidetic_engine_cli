@@ -368,7 +368,7 @@ fn discover_sessions(
     workspace_path: &Path,
     limit: u32,
 ) -> Result<Vec<CassSessionInfo>, CassImportError> {
-    let invocation = client.sessions_invocation(workspace_path, limit);
+    let invocation = client.import_sessions_invocation(workspace_path, limit)?;
     let outcome = client.run(&invocation)?;
     ensure_successful_outcome(&outcome, "cass sessions")?;
     parse_sessions_json(outcome.stdout_bytes())
@@ -378,7 +378,7 @@ fn view_session_spans(
     client: &CassClient,
     source_path: &str,
 ) -> Result<Vec<CassViewSpanForImport>, CassImportError> {
-    let invocation = client.view_invocation(source_path, 1, DEFAULT_VIEW_CONTEXT);
+    let invocation = client.import_view_invocation(source_path, 1, DEFAULT_VIEW_CONTEXT)?;
     let outcome = client.run(&invocation)?;
     ensure_successful_outcome(&outcome, "cass view")?;
     parse_view_json(outcome.stdout_bytes(), source_path)
@@ -1221,6 +1221,68 @@ mod tests {
             &Some(session_id),
             "job document",
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_rejects_path_hijack_default_binary_before_spawn() -> TestResult {
+        let root = unique_test_dir("path-hijack")?;
+        let fake_dir = root.join("evil");
+        let workspace_path = root.join("workspace");
+        let marker = root.join("fake-cass-ran");
+        fs::create_dir_all(&fake_dir).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&workspace_path).map_err(|error| error.to_string())?;
+        let fake_cass = fake_dir.join("cass");
+        fs::write(
+            &fake_cass,
+            format!(
+                "#!/bin/sh\nprintf ran > '{}'\nprintf '{{\"sessions\":[]}}\\n'\n",
+                marker.display()
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut permissions = fs::metadata(&fake_cass)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_cass, permissions).map_err(|error| error.to_string())?;
+
+        let mut path_entries = vec![fake_dir];
+        if let Some(existing_path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&existing_path));
+        }
+        let hijacked_path =
+            std::env::join_paths(path_entries).map_err(|error| error.to_string())?;
+        let client = CassClient::new_default()
+            .with_extra_env("PATH", hijacked_path)
+            .with_timeout(Duration::from_secs(5));
+        let options = CassImportOptions {
+            workspace_path,
+            database_path: None,
+            limit: 1,
+            dry_run: true,
+            include_spans: false,
+        };
+
+        let error = match import_cass_sessions(&client, &options) {
+            Ok(_) => return Err("PATH hijack import should fail before spawning cass".to_string()),
+            Err(error) => error,
+        };
+        let cass_error = match error {
+            CassImportError::Cass(error) => error,
+            other => {
+                return Err(format!(
+                    "PATH hijack should fail as CassError, got {other:?}",
+                ));
+            }
+        };
+
+        ensure_equal(&cass_error.kind_str(), &"invalid_binary", "error kind")?;
+        ensure(
+            cass_error.to_string().contains("PATH lookup"),
+            format!("error should mention PATH lookup, got {cass_error}"),
+        )?;
+        ensure(!marker.exists(), "fake cass from PATH must not execute")
     }
 
     #[test]
