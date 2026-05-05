@@ -1404,6 +1404,38 @@ mod tests {
         assert_golden("pack", "rate_distortion_report.json", &pretty)
     }
 
+    #[test]
+    fn section_budget_report_to_json_golden() -> TestResult {
+        use ee::pack::SectionBudgetReport;
+
+        let section =
+            SectionBudgetReport::new("test \"quoted\" name", 1000, 750).with_candidates(3);
+        let json = section.to_json();
+
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        ensure(
+            value["name"].as_str() == Some("test \"quoted\" name"),
+            "section JSON must properly escape quotes in name",
+        )?;
+        ensure(
+            value["quotaTokens"].as_u64() == Some(1000),
+            "section JSON quotaTokens must be 1000",
+        )?;
+        ensure(
+            value["usedTokens"].as_u64() == Some(750),
+            "section JSON usedTokens must be 750",
+        )?;
+        ensure(
+            value["slackTokens"].as_u64() == Some(250),
+            "section JSON slackTokens must be 250",
+        )?;
+
+        let pretty =
+            serde_json::to_string_pretty(&value).map_err(|error| error.to_string())? + "\n";
+        assert_golden("pack", "section_budget_report.json", &pretty)
+    }
+
     fn normalize_context_pack_json(json: &str) -> String {
         let mut value: serde_json::Value = match serde_json::from_str(json) {
             Ok(v) => v,

@@ -2240,15 +2240,27 @@ impl SectionBudgetReport {
 
     #[must_use]
     pub fn to_json(&self) -> String {
-        format!(
-            "{{\"name\":\"{}\",\"quotaTokens\":{},\"usedTokens\":{},\"slackTokens\":{},\"candidateCount\":{},\"utilizationPercent\":{:.2}}}",
-            self.name,
-            self.quota_tokens,
-            self.used_tokens,
-            self.slack(),
-            self.candidate_count,
-            self.utilization_percent(),
-        )
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SectionJson<'a> {
+            name: &'a str,
+            quota_tokens: u32,
+            used_tokens: u32,
+            slack_tokens: u32,
+            candidate_count: u32,
+            utilization_percent: f64,
+        }
+
+        let json_repr = SectionJson {
+            name: &self.name,
+            quota_tokens: self.quota_tokens,
+            used_tokens: self.used_tokens,
+            slack_tokens: self.slack(),
+            candidate_count: self.candidate_count,
+            utilization_percent: (self.utilization_percent() * 100.0).round() / 100.0,
+        };
+
+        serde_json::to_string(&json_repr).unwrap_or_else(|_| "{}".to_owned())
     }
 }
 
@@ -2267,6 +2279,7 @@ pub fn compute_rate_distortion(
 mod tests {
     use std::str::FromStr;
 
+    use proptest::prelude::*;
     use uuid::Uuid;
 
     use super::{
@@ -2309,6 +2322,38 @@ mod tests {
         } else {
             Err(format!("{context}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn section_name_tail_strategy() -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            prop::sample::select(vec![
+                '"',
+                '\\',
+                '\n',
+                '\r',
+                '\t',
+                '\u{03bb}',
+                '\u{1f680}',
+                '\u{6771}',
+                '\u{4eac}',
+                'a',
+                'z',
+                '0',
+                '9',
+                ' ',
+            ]),
+            0..48,
+        )
+        .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn weird_section_name_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            section_name_tail_strategy().prop_map(|tail| format!("quote\"section{tail}")),
+            section_name_tail_strategy().prop_map(|tail| format!("line\nsection{tail}")),
+            section_name_tail_strategy()
+                .prop_map(|tail| { format!("unicode:\u{03bb}\u{1f680}\u{6771}\u{4eac}{tail}") }),
+        ]
     }
 
     fn memory_id(seed: u128) -> MemoryId {
@@ -4345,6 +4390,30 @@ mod tests {
         ensure_contains(&json, "\"usedTokens\":600", "used")?;
         ensure_contains(&json, "\"slackTokens\":200", "slack")?;
         ensure_contains(&json, "\"candidateCount\":5", "candidates")
+    }
+
+    proptest! {
+        #[test]
+        fn section_budget_report_to_json_escapes_weird_section_names(
+            name in weird_section_name_strategy(),
+        ) {
+            let section = SectionBudgetReport::new(name.clone(), 800, 600).with_candidates(5);
+            let json = section.to_json();
+            let expected_name = serde_json::to_string(&name)
+                .map_err(|error| TestCaseError::fail(format!("failed to serialize expected name: {error}")))?;
+            let parsed: serde_json::Value = serde_json::from_str(&json)
+                .map_err(|error| TestCaseError::fail(format!("section JSON must parse: {error}; json={json:?}")))?;
+
+            prop_assert!(
+                json.contains(&format!("\"name\":{expected_name}")),
+                "section JSON should contain escaped name {expected_name}, got {json}",
+            );
+            prop_assert_eq!(parsed["name"].as_str(), Some(name.as_str()));
+            prop_assert_eq!(parsed["quotaTokens"].as_u64(), Some(800));
+            prop_assert_eq!(parsed["usedTokens"].as_u64(), Some(600));
+            prop_assert_eq!(parsed["slackTokens"].as_u64(), Some(200));
+            prop_assert_eq!(parsed["candidateCount"].as_u64(), Some(5));
+        }
     }
 
     #[test]

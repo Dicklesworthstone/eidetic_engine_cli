@@ -1,0 +1,8 @@
+{
+  "name": "test \"quoted\" name",
+  "quotaTokens": 1000,
+  "usedTokens": 750,
+  "slackTokens": 250,
+  "candidateCount": 3,
+  "utilizationPercent": 75.0
+}
