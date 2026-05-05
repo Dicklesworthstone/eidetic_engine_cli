@@ -1367,7 +1367,6 @@ mod tests {
                 stop_on_failure: true,
                 idempotency_key: None,
             }],
-            ..Default::default()
         };
 
         let report = plan_rehearsal(&options).map_err(|e| e.message())?;

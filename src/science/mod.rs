@@ -862,13 +862,12 @@ fn collect_numeric_metrics(
     metrics: &mut BTreeMap<String, f64>,
 ) {
     match value {
-        serde_json::Value::Number(number) => {
-            if !is_volatile_metric_path(path) {
-                if let Some(value) = number.as_f64().filter(|value| value.is_finite()) {
-                    metrics.insert(path.to_string(), value);
-                }
+        serde_json::Value::Number(number) if !is_volatile_metric_path(path) => {
+            if let Some(value) = number.as_f64().filter(|value| value.is_finite()) {
+                metrics.insert(path.to_string(), value);
             }
         }
+        serde_json::Value::Number(_) => {}
         serde_json::Value::Object(map) => {
             for (key, value) in map {
                 let metric_path = if path.is_empty() {

@@ -1448,7 +1448,7 @@ mod tests {
         let temp_dir = env::temp_dir().join("ee-checksum-test");
         let _ = fs::create_dir_all(&temp_dir);
         let test_file = temp_dir.join("test.bin");
-        fs::write(&test_file, b"hello world").expect("write test file");
+        fs::write(&test_file, b"hello world").map_err(|error| error.to_string())?;
 
         let expected = blake3::hash(b"hello world").to_hex().to_string();
         ensure(
@@ -1475,7 +1475,7 @@ mod tests {
         let temp_dir = env::temp_dir().join("ee-sha256-test");
         let _ = fs::create_dir_all(&temp_dir);
         let test_file = temp_dir.join("test.bin");
-        fs::write(&test_file, b"hello world").expect("write test file");
+        fs::write(&test_file, b"hello world").map_err(|error| error.to_string())?;
 
         let mut hasher = Sha256::new();
         hasher.update(b"hello world");

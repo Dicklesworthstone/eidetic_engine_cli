@@ -3990,37 +3990,43 @@ Then update src/policy/mod.rs on main."
     }
 
     #[test]
-    fn validate_candidate_ttl_none_when_no_ttl_seconds() {
+    fn validate_candidate_ttl_none_when_no_ttl_seconds() -> TestResult {
         let mut input = valid_input();
         input.ttl_seconds = None;
-        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
-        assert!(result.is_ok());
-        assert!(result.unwrap().ttl_expires_at.is_none());
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z")
+            .map_err(|error| format!("{error:?}"))?;
+        assert!(result.ttl_expires_at.is_none());
+        Ok(())
     }
 
     #[test]
-    fn validate_candidate_ttl_handles_zero_seconds() {
+    fn validate_candidate_ttl_handles_zero_seconds() -> TestResult {
         let mut input = valid_input();
         input.ttl_seconds = Some(0);
-        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
-        assert!(result.is_ok());
-        let ttl = result.unwrap().ttl_expires_at.unwrap();
-        let parsed = DateTime::parse_from_rfc3339(&ttl);
-        assert!(parsed.is_ok(), "Zero TTL must still be valid RFC3339");
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z")
+            .map_err(|error| format!("{error:?}"))?;
+        let ttl = result
+            .ttl_expires_at
+            .ok_or_else(|| "zero TTL should produce an expiry timestamp".to_owned())?;
+        let parsed = DateTime::parse_from_rfc3339(&ttl).map_err(|error| error.to_string())?;
         // Zero seconds means expires at now
-        let expected = DateTime::parse_from_rfc3339("2026-04-29T12:00:00Z").unwrap();
-        assert_eq!(parsed.unwrap(), expected);
+        let expected = DateTime::parse_from_rfc3339("2026-04-29T12:00:00Z")
+            .map_err(|error| error.to_string())?;
+        assert_eq!(parsed, expected);
+        Ok(())
     }
 
     #[test]
-    fn validate_candidate_ttl_handles_large_seconds() {
+    fn validate_candidate_ttl_handles_large_seconds() -> TestResult {
         let mut input = valid_input();
         input.ttl_seconds = Some(86400 * 365); // 1 year in seconds
-        let result = validate_candidate(input, "2026-04-29T12:00:00Z");
-        assert!(result.is_ok());
-        let ttl = result.unwrap().ttl_expires_at.unwrap();
-        let parsed = DateTime::parse_from_rfc3339(&ttl);
-        assert!(parsed.is_ok(), "Large TTL must be valid RFC3339: {ttl}");
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z")
+            .map_err(|error| format!("{error:?}"))?;
+        let ttl = result
+            .ttl_expires_at
+            .ok_or_else(|| "large TTL should produce an expiry timestamp".to_owned())?;
+        DateTime::parse_from_rfc3339(&ttl).map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     #[test]

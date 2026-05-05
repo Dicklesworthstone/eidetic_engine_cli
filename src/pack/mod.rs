@@ -1889,7 +1889,7 @@ fn candidate_similarity(candidate: &PackCandidate, selected: &CandidateSignature
     {
         // Boost content similarity when diversity keys match, but cap below 1.0
         // unless content actually overlaps significantly
-        return content_similarity.max(0.5).min(0.95);
+        return content_similarity.clamp(0.5, 0.95);
     }
 
     content_similarity
@@ -3413,12 +3413,12 @@ mod tests {
         // Matching diversity_key with different content should NOT return 1.0
         ensure(
             similarity < 1.0,
-            &format!("similarity should be < 1.0 for different content, got {similarity}"),
+            format!("similarity should be < 1.0 for different content, got {similarity}"),
         )?;
         // Should return boosted content overlap (around 0.5 since there's some word overlap)
         ensure(
             similarity >= 0.5,
-            &format!("similarity should be >= 0.5 for matching diversity_key, got {similarity}"),
+            format!("similarity should be >= 0.5 for matching diversity_key, got {similarity}"),
         )
     }
 
