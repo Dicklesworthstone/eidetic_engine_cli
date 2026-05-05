@@ -1363,6 +1363,47 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn rate_distortion_report_to_json_golden() -> TestResult {
+        use ee::pack::{RateDistortionReport, SectionBudgetReport};
+
+        let mut report = RateDistortionReport::new(4000, 3200).with_candidates(10, 5);
+        report.add_section(
+            SectionBudgetReport::new("procedural_rules", 1200, 1000).with_candidates(4),
+        );
+        report.add_section(SectionBudgetReport::new("evidence", 800, 600).with_candidates(3));
+        let json = report.to_json();
+
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        ensure(
+            value["schema"].as_str().is_some(),
+            "rate distortion JSON must have schema field",
+        )?;
+        ensure(
+            value["budgetTokens"].as_u64() == Some(4000),
+            "rate distortion JSON budgetTokens must be 4000",
+        )?;
+        ensure(
+            value["usedTokens"].as_u64() == Some(3200),
+            "rate distortion JSON usedTokens must be 3200",
+        )?;
+        ensure(
+            value["slackTokens"].as_u64() == Some(800),
+            "rate distortion JSON slackTokens must be 800",
+        )?;
+        ensure(
+            value["sections"]
+                .as_array()
+                .map_or(false, |arr| arr.len() == 2),
+            "rate distortion JSON must have 2 sections",
+        )?;
+
+        let pretty =
+            serde_json::to_string_pretty(&value).map_err(|error| error.to_string())? + "\n";
+        assert_golden("pack", "rate_distortion_report.json", &pretty)
+    }
+
     fn normalize_context_pack_json(json: &str) -> String {
         let mut value: serde_json::Value = match serde_json::from_str(json) {
             Ok(v) => v,

@@ -2,6 +2,8 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt;
 
+use serde::Serialize;
+
 use crate::models::{
     ContextProfile, ContextProfileName, ContextProfileSection, ContextProfileSectionMix, MemoryId,
     ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass, UnitScore,
@@ -15,6 +17,19 @@ pub const DEFAULT_MMR_RELEVANCE_WEIGHT: f32 = 0.75;
 pub const FACILITY_LOCATION_RELEVANCE_WEIGHT: f32 = 0.70;
 pub const FACILITY_LOCATION_UTILITY_WEIGHT: f32 = 0.30;
 pub const FACILITY_LOCATION_EPSILON: f32 = 0.000_001;
+
+/// Similarity floor applied when two candidates share the same `diversity_key`
+/// during facility-location selection.
+///
+/// Two candidates tagged with the same coarse diversity bucket (e.g. both
+/// labelled `formatting`) are treated as substantially redundant: at 0.85 they
+/// score above the typical Jaccard content-overlap of unrelated text but below
+/// the 1.0 floor reserved for an exact memory_id or normalized-content match.
+/// This biases the greedy facility-location picker toward broader bucket
+/// coverage without claiming the two candidates are duplicates outright (in
+/// which case the regular content-overlap calculation can still pull the
+/// score higher if the texts genuinely overlap).
+pub const FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR: f32 = 0.85;
 pub const PACK_ITEM_PROVENANCE_SCHEMA_V1: &str = "ee.pack_item.provenance.v1";
 
 /// Conservative characters-per-token ratio for heuristic estimation.
@@ -1805,6 +1820,19 @@ fn facility_candidate_weight(candidate: &PackCandidate) -> f32 {
         + (FACILITY_LOCATION_UTILITY_WEIGHT * candidate.utility.into_inner())
 }
 
+/// Similarity used by the facility-location picker to decide whether
+/// `candidate` is redundant with an already-selected signature.
+///
+/// Returns `1.0` for an exact memory_id or normalized-content match, then
+/// falls back to the larger of:
+/// - [`FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR`] when both sides
+///   advertise the same `diversity_key` bucket, and
+/// - the Jaccard content overlap from [`content_overlap_similarity`].
+///
+/// The function intentionally does *not* combine the two signals: matching
+/// only the diversity_key is a coarse bucket hint, not evidence of literal
+/// duplication, so the Jaccard signal is allowed to override the floor when
+/// the texts genuinely overlap.
 fn facility_similarity(candidate: &PackCandidate, selected: &CandidateSignature) -> f32 {
     if candidate.memory_id == selected.memory_id {
         return 1.0;
@@ -1817,7 +1845,7 @@ fn facility_similarity(candidate: &PackCandidate, selected: &CandidateSignature)
     if let Some(diversity_key) = &candidate.diversity_key
         && selected.diversity_key.as_ref() == Some(diversity_key)
     {
-        similarity = similarity.max(0.85);
+        similarity = similarity.max(FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR);
     }
     similarity.max(content_overlap_similarity(
         &candidate.content,
@@ -2076,30 +2104,61 @@ impl RateDistortionReport {
 
     #[must_use]
     pub fn to_json(&self) -> String {
-        let mut sections_json = String::from("[");
-        for (i, section) in self.sections.iter().enumerate() {
-            if i > 0 {
-                sections_json.push(',');
-            }
-            sections_json.push_str(&section.to_json());
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RateDistortionJson<'a> {
+            schema: &'static str,
+            budget_tokens: u32,
+            used_tokens: u32,
+            slack_tokens: u32,
+            rate: f64,
+            distortion: f64,
+            efficiency: f64,
+            omitted_candidates: u32,
+            included_candidates: u32,
+            quality_score: f64,
+            utilization_percent: f64,
+            sections: Vec<SectionBudgetJson<'a>>,
         }
-        sections_json.push(']');
 
-        format!(
-            "{{\"schema\":\"{}\",\"budgetTokens\":{},\"usedTokens\":{},\"slackTokens\":{},\"rate\":{:.4},\"distortion\":{:.4},\"efficiency\":{:.4},\"omittedCandidates\":{},\"includedCandidates\":{},\"qualityScore\":{:.4},\"utilizationPercent\":{:.2},\"sections\":{}}}",
-            RATE_DISTORTION_SCHEMA_V1,
-            self.budget_tokens,
-            self.used_tokens,
-            self.slack(),
-            self.rate,
-            self.distortion,
-            self.efficiency,
-            self.omitted_candidates,
-            self.included_candidates,
-            self.quality_score,
-            self.utilization_percent(),
-            sections_json,
-        )
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SectionBudgetJson<'a> {
+            name: &'a str,
+            quota_tokens: u32,
+            used_tokens: u32,
+            slack_tokens: u32,
+            candidate_count: u32,
+            utilization_percent: f64,
+        }
+
+        let json_repr = RateDistortionJson {
+            schema: RATE_DISTORTION_SCHEMA_V1,
+            budget_tokens: self.budget_tokens,
+            used_tokens: self.used_tokens,
+            slack_tokens: self.slack(),
+            rate: (self.rate * 10000.0).round() / 10000.0,
+            distortion: (self.distortion * 10000.0).round() / 10000.0,
+            efficiency: (self.efficiency * 10000.0).round() / 10000.0,
+            omitted_candidates: self.omitted_candidates,
+            included_candidates: self.included_candidates,
+            quality_score: (self.quality_score * 10000.0).round() / 10000.0,
+            utilization_percent: (self.utilization_percent() * 100.0).round() / 100.0,
+            sections: self
+                .sections
+                .iter()
+                .map(|section| SectionBudgetJson {
+                    name: &section.name,
+                    quota_tokens: section.quota_tokens,
+                    used_tokens: section.used_tokens,
+                    slack_tokens: section.slack(),
+                    candidate_count: section.candidate_count,
+                    utilization_percent: (section.utilization_percent() * 100.0).round() / 100.0,
+                })
+                .collect(),
+        };
+
+        serde_json::to_string(&json_repr).unwrap_or_else(|_| "{}".to_owned())
     }
 
     #[must_use]
@@ -2213,11 +2272,12 @@ mod tests {
     use super::{
         CONTEXT_COMMAND, CandidateSignature, ContextPackProfile, ContextRequest,
         ContextRequestInput, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
-        DEFAULT_CHARS_PER_TOKEN, PackCandidate, PackCandidateInput, PackOmissionReason,
-        PackProvenance, PackSection, PackSelectionObjective, PackTrustSignal, PackValidationError,
-        SectionQuota, SectionQuotas, TokenBudget, TokenEstimationStrategy, assemble_draft,
-        assemble_draft_with_profile, candidate_similarity, estimate_tokens,
-        estimate_tokens_default, pack_item_provenance_json, subsystem_name,
+        DEFAULT_CHARS_PER_TOKEN, FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR, PackCandidate,
+        PackCandidateInput, PackOmissionReason, PackProvenance, PackSection,
+        PackSelectionObjective, PackTrustSignal, PackValidationError, SectionQuota, SectionQuotas,
+        TokenBudget, TokenEstimationStrategy, assemble_draft, assemble_draft_with_profile,
+        candidate_similarity, estimate_tokens, estimate_tokens_default, facility_similarity,
+        pack_item_provenance_json, subsystem_name,
     };
     use crate::models::{ContextProfile, MemoryId, ProvenanceUri, TrustClass, UnitScore};
     use crate::testing::ensure_contains;
@@ -3482,6 +3542,58 @@ mod tests {
         ensure(
             similarity >= 0.5,
             format!("similarity should be >= 0.5 for matching diversity_key, got {similarity}"),
+        )
+    }
+
+    #[test]
+    fn facility_similarity_diversity_key_floor_constant_value() -> TestResult {
+        // Pin the public constant. The greedy facility-location picker depends
+        // on this value to dampen diversity-key collisions; if it ever drifts
+        // we want a single failing assertion to surface that intentional
+        // change instead of silently shifting the selection mix.
+        ensure(
+            (FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR - 0.85).abs() < f32::EPSILON,
+            format!(
+                "diversity_key floor must be 0.85, got {FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR}"
+            ),
+        )
+    }
+
+    #[test]
+    fn facility_similarity_applies_diversity_key_floor() -> TestResult {
+        // Disjoint texts -> Jaccard overlap is 0; the diversity_key match
+        // must lift the result to exactly the documented floor.
+        let first = candidate_with_content(1, 1.0, 0.5, 10, "alpha bravo charlie")?
+            .with_diversity_key("bucket-a");
+        let unrelated = candidate_with_content(2, 0.9, 0.5, 10, "delta echo foxtrot")?
+            .with_diversity_key("bucket-a");
+
+        let first_sig = CandidateSignature::from(&first);
+        let similarity = facility_similarity(&unrelated, &first_sig);
+
+        ensure(
+            (similarity - FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR).abs() < f32::EPSILON,
+            format!(
+                "matching diversity_key with disjoint content should land on the {FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR} floor, got {similarity}"
+            ),
+        )
+    }
+
+    #[test]
+    fn facility_similarity_ignores_floor_without_diversity_key_match() -> TestResult {
+        // Different (or absent) diversity_key buckets must skip the floor and
+        // fall back to plain Jaccard overlap. With disjoint texts that is 0.
+        let first = candidate_with_content(1, 1.0, 0.5, 10, "alpha bravo charlie")?
+            .with_diversity_key("bucket-a");
+        let other = candidate_with_content(2, 0.9, 0.5, 10, "delta echo foxtrot")?
+            .with_diversity_key("bucket-b");
+
+        let first_sig = CandidateSignature::from(&first);
+        let similarity = facility_similarity(&other, &first_sig);
+
+        ensure(
+            similarity < FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR,
+            format!("non-matching diversity_keys must not trigger the floor, got {similarity}"),
         )
     }
 
