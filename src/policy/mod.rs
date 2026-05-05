@@ -514,7 +514,7 @@ fn redact_secret_key_values(input: &str, reasons: &mut Vec<&'static str>) -> (St
                 search_start = key_end;
                 continue;
             };
-            if value_start == value_end {
+            if value_start >= value_end {
                 search_start = key_end;
                 continue;
             }
@@ -563,10 +563,7 @@ fn secret_value_range(
     if matches!(quote, Some(b'"' | b'\'')) {
         let quote = quote?;
         let value_start = cursor + 1;
-        let value_end = input[value_start..]
-            .bytes()
-            .position(|byte| byte == quote)
-            .map_or(input.len(), |relative| value_start + relative);
+        let value_end = quoted_secret_value_end(input, value_start, quote);
         return Some((value_start, value_end));
     }
 
@@ -581,6 +578,24 @@ fn secret_value_range(
         })
         .unwrap_or(input.len());
     Some((cursor, value_end))
+}
+
+fn quoted_secret_value_end(input: &str, value_start: usize, quote: u8) -> usize {
+    let mut escaped = false;
+    for (relative, byte) in input[value_start..].bytes().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if byte == b'\\' {
+            escaped = true;
+            continue;
+        }
+        if byte == quote {
+            return value_start + relative;
+        }
+    }
+    input.len()
 }
 
 fn skip_ascii_spaces(input: &str, mut cursor: usize) -> usize {
@@ -1075,6 +1090,14 @@ mod tests {
         .prop_map(|chars| chars.into_iter().collect())
     }
 
+    fn quoted_secret_fragment_strategy() -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            prop::sample::select(vec!['Q', 'R', 'S', 'T', '1', '2', '3', '_', '-']),
+            8..48,
+        )
+        .prop_map(|chars| chars.into_iter().collect())
+    }
+
     fn edge_secret_case_strategy() -> impl Strategy<Value = SecretRedactionCase> {
         let context = || edge_context_strategy(1_024);
         prop_oneof![
@@ -1153,6 +1176,30 @@ mod tests {
         ]
     }
 
+    fn escaped_quote_secret_case_strategy() -> impl Strategy<Value = SecretRedactionCase> {
+        (
+            edge_context_strategy(256),
+            prop::sample::select(vec![
+                ('"', "api_key", "api_key"),
+                ('\'', "password", "password"),
+            ]),
+            quoted_secret_fragment_strategy(),
+            quoted_secret_fragment_strategy(),
+            quoted_secret_fragment_strategy(),
+            edge_context_strategy(256),
+        )
+            .prop_map(
+                |(prefix, (quote, key_name, reason), left, middle, right, suffix)| {
+                    let raw = format!("{left}\\{quote}{middle}\\\\\\{quote}{right}");
+                    SecretRedactionCase {
+                        input: format!("{prefix} {key_name} = {quote}{raw}{quote}; {suffix}"),
+                        raw_values: vec![left, middle, right, raw],
+                        expected_reasons: vec![reason],
+                    }
+                },
+            )
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(128))]
 
@@ -1177,6 +1224,42 @@ mod tests {
                 prop_assert!(
                     !first.content.contains(raw),
                     "redacted output leaked raw secret {raw:?} in {:?}",
+                    first.content,
+                );
+            }
+
+            for reason in &case.expected_reasons {
+                prop_assert!(
+                    first.redacted_reasons.contains(reason),
+                    "missing redaction reason {reason:?}; got {:?}",
+                    first.redacted_reasons,
+                );
+            }
+        }
+
+        #[test]
+        fn secret_redactor_handles_escaped_quotes_inside_quoted_secrets(
+            case in escaped_quote_secret_case_strategy(),
+        ) {
+            let first = redact_secret_like_content(&case.input);
+            let second = redact_secret_like_content(&case.input);
+
+            prop_assert_eq!(&first, &second, "redaction must be deterministic");
+            prop_assert!(first.redacted, "quoted secret-like input should be redacted: {:?}", case.input);
+            prop_assert!(
+                first.content.contains("[REDACTED:"),
+                "redacted output should include scanner-specific placeholders: {:?}",
+                first.content,
+            );
+
+            for raw in &case.raw_values {
+                prop_assert!(
+                    case.input.contains(raw),
+                    "test case must contain generated raw secret fragment {raw:?}",
+                );
+                prop_assert!(
+                    !first.content.contains(raw),
+                    "redacted output leaked escaped-quote secret fragment {raw:?} in {:?}",
                     first.content,
                 );
             }
