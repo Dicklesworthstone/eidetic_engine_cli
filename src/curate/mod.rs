@@ -3389,6 +3389,8 @@ mod tests {
     use std::str::FromStr;
 
     use chrono::DateTime;
+    use proptest::prelude::*;
+    use proptest::test_runner::Config as ProptestConfig;
 
     use super::{
         CANDIDATE_TOO_GENERIC_CODE, CandidateInput, CandidateSource, CandidateStatus,
@@ -5250,7 +5252,9 @@ Then update src/policy/mod.rs on main."
     }
 
     fn embedding_fields_strategy() -> impl Strategy<Value = OwnedEmbeddingFields> {
-        (
+        // proptest's `Strategy` impl on tuples maxes out at 10 elements, so
+        // the 13 fields are split into two sub-tuples and joined.
+        let head = (
             embedding_string_strategy(),
             embedding_string_strategy(),
             embedding_string_strategy(),
@@ -5258,44 +5262,50 @@ Then update src/policy/mod.rs on main."
             embedding_optional_string_strategy(),
             embedding_optional_f32_strategy(),
             embedding_optional_string_strategy(),
+        );
+        let tail = (
             embedding_string_strategy(),
             embedding_optional_string_strategy(),
             embedding_string_strategy(),
             0.0f32..=1.0f32,
             embedding_string_strategy(),
             embedding_string_strategy(),
+        );
+        (head, tail).prop_map(
+            |(
+                (
+                    id,
+                    candidate_type,
+                    target_memory_id,
+                    target_memory_content,
+                    proposed_content,
+                    proposed_confidence,
+                    proposed_trust_class,
+                ),
+                (
+                    source_type,
+                    source_id,
+                    reason,
+                    confidence,
+                    status,
+                    review_state,
+                ),
+            )| OwnedEmbeddingFields {
+                id,
+                candidate_type,
+                target_memory_id,
+                target_memory_content,
+                proposed_content,
+                proposed_confidence,
+                proposed_trust_class,
+                source_type,
+                source_id,
+                reason,
+                confidence,
+                status,
+                review_state,
+            },
         )
-            .prop_map(
-                |(
-                    id,
-                    candidate_type,
-                    target_memory_id,
-                    target_memory_content,
-                    proposed_content,
-                    proposed_confidence,
-                    proposed_trust_class,
-                    source_type,
-                    source_id,
-                    reason,
-                    confidence,
-                    status,
-                    review_state,
-                )| OwnedEmbeddingFields {
-                    id,
-                    candidate_type,
-                    target_memory_id,
-                    target_memory_content,
-                    proposed_content,
-                    proposed_confidence,
-                    proposed_trust_class,
-                    source_type,
-                    source_id,
-                    reason,
-                    confidence,
-                    status,
-                    review_state,
-                },
-            )
     }
 
     /// Fixed projection order that matches the implementation. Tests assert
@@ -5430,6 +5440,7 @@ Then update src/policy/mod.rs on main."
             );
 
             let mut diff_count = 0;
+            let expected_after_reason_line = format!("Reason: {new_reason}");
             for (before_line, after_line) in baseline_lines.iter().zip(after_lines.iter()) {
                 if before_line != after_line {
                     diff_count += 1;
@@ -5439,7 +5450,7 @@ Then update src/policy/mod.rs on main."
                         before_line,
                         after_line,
                     );
-                    prop_assert_eq!(after_line, &format!("Reason: {new_reason}").as_str());
+                    prop_assert_eq!(*after_line, expected_after_reason_line.as_str());
                 }
             }
             prop_assert_eq!(
