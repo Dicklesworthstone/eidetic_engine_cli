@@ -9435,24 +9435,6 @@ where
         }
     };
 
-    let centrality_options = crate::graph::CentralityRefreshOptions {
-        dry_run: args.dry_run,
-        min_weight: args.min_weight,
-        min_confidence: args.min_confidence,
-        link_limit: args.link_limit,
-    };
-
-    let centrality = match crate::graph::refresh_centrality(&conn, &centrality_options) {
-        Ok(centrality) => centrality,
-        Err(error) => {
-            let domain_error = DomainError::Graph {
-                message: error,
-                repair: Some("ee graph centrality-refresh --dry-run".to_string()),
-            };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-        }
-    };
-
     let mut enrichment_options = crate::graph::GraphFeatureEnrichmentOptions::default();
     if let Some(max_features) = args.max_features {
         enrichment_options.max_features = max_features;
@@ -9464,7 +9446,48 @@ where
         enrichment_options.max_selection_boost = max_selection_boost;
     }
 
-    let report = crate::graph::enrich_graph_features(&centrality, &enrichment_options);
+    let report = if args.dry_run {
+        let centrality = crate::graph::CentralityRefreshReport {
+            version: env!("CARGO_PKG_VERSION"),
+            status: crate::graph::CentralityRefreshStatus::DryRun,
+            dry_run: true,
+            node_count: 0,
+            edge_count: 0,
+            projection_ms: 0.0,
+            pagerank_ms: 0.0,
+            betweenness_ms: 0.0,
+            total_ms: 0.0,
+            scores: Vec::new(),
+            top_pagerank: Vec::new(),
+            top_betweenness: Vec::new(),
+        };
+        crate::graph::enrich_graph_features(&centrality, &enrichment_options)
+    } else {
+        let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
+            Ok(workspace_id) => workspace_id,
+            Err(domain_error) => {
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        let snapshot = match conn
+            .get_latest_graph_snapshot(&workspace_id, crate::db::GraphSnapshotType::MemoryLinks)
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let domain_error = DomainError::Storage {
+                    message: format!("Failed to query graph snapshot: {error}"),
+                    repair: Some("ee graph centrality-refresh".to_string()),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        crate::graph::enrich_graph_features_from_graph_snapshot(
+            snapshot.as_ref(),
+            &workspace_id,
+            crate::db::GraphSnapshotType::MemoryLinks,
+            &enrichment_options,
+        )
+    };
 
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
@@ -17232,15 +17255,21 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .to_owned();
-        if cfg!(feature = "graph") {
-            ensure_equal(&degraded_code, &"empty_graph".to_string(), "degraded code")?;
-        } else {
-            ensure_equal(
-                &degraded_code,
-                &"graph_feature_disabled".to_string(),
-                "degraded code",
-            )?;
-        }
+        ensure_equal(
+            &degraded_code,
+            &"graph_snapshot_missing".to_string(),
+            "degraded code",
+        )?;
+        ensure_equal(
+            &value["data"]["source"]["kind"],
+            &serde_json::json!("graph_snapshot"),
+            "source kind",
+        )?;
+        ensure_equal(
+            &value["data"]["source"]["snapshot"],
+            &serde_json::Value::Null,
+            "missing snapshot witness",
+        )?;
         Ok(())
     }
 

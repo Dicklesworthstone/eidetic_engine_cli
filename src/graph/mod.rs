@@ -1671,6 +1671,27 @@ pub struct GraphFeatureEnrichmentDegradation {
     pub repair: String,
 }
 
+/// Pinned source metadata for graph feature enrichment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphFeatureEnrichmentSource {
+    pub kind: &'static str,
+    pub workspace_id: Option<String>,
+    pub graph_type: Option<String>,
+    pub snapshot: Option<GraphFeatureEnrichmentSnapshot>,
+}
+
+/// Snapshot witness used to prove enrichment came from persisted graph state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphFeatureEnrichmentSnapshot {
+    pub id: String,
+    pub schema_version: String,
+    pub snapshot_version: u32,
+    pub source_generation: u32,
+    pub status: String,
+    pub content_hash: String,
+    pub created_at: String,
+}
+
 /// Report from graph feature enrichment.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GraphFeatureEnrichmentReport {
@@ -1678,6 +1699,7 @@ pub struct GraphFeatureEnrichmentReport {
     pub version: &'static str,
     pub status: GraphFeatureEnrichmentStatus,
     pub source_status: CentralityRefreshStatus,
+    pub source: GraphFeatureEnrichmentSource,
     pub limited: bool,
     pub max_features: usize,
     pub max_selection_boost: f64,
@@ -1742,6 +1764,17 @@ impl GraphFeatureEnrichmentReport {
                 })
             })
             .collect();
+        let snapshot = self.source.snapshot.as_ref().map(|snapshot| {
+            serde_json::json!({
+                "id": snapshot.id,
+                "schemaVersion": snapshot.schema_version,
+                "snapshotVersion": snapshot.snapshot_version,
+                "sourceGeneration": snapshot.source_generation,
+                "status": snapshot.status,
+                "contentHash": snapshot.content_hash,
+                "createdAt": snapshot.created_at,
+            })
+        });
 
         serde_json::json!({
             "schema": self.schema,
@@ -1749,6 +1782,12 @@ impl GraphFeatureEnrichmentReport {
             "version": self.version,
             "status": self.status.as_str(),
             "sourceStatus": self.source_status.as_str(),
+            "source": {
+                "kind": self.source.kind,
+                "workspaceId": self.source.workspace_id,
+                "graphType": self.source.graph_type,
+                "snapshot": snapshot,
+            },
             "limited": self.limited,
             "maxFeatures": self.max_features,
             "maxSelectionBoost": score_json(self.max_selection_boost),
@@ -1771,8 +1810,100 @@ pub fn enrich_graph_features(
     centrality: &CentralityRefreshReport,
     options: &GraphFeatureEnrichmentOptions,
 ) -> GraphFeatureEnrichmentReport {
+    enrich_graph_features_with_source(
+        centrality,
+        options,
+        GraphFeatureEnrichmentSource {
+            kind: "live_centrality",
+            workspace_id: None,
+            graph_type: None,
+            snapshot: None,
+        },
+    )
+}
+
+/// Enrich memory records from a persisted graph snapshot.
+///
+/// This keeps feature enrichment pinned to the graph state persisted by
+/// `ee graph centrality-refresh`, so concurrent memory-link changes cannot
+/// alter the feature report after snapshot export.
+#[must_use]
+pub fn enrich_graph_features_from_graph_snapshot(
+    snapshot: Option<&StoredGraphSnapshot>,
+    workspace_id: &str,
+    graph_type: GraphSnapshotType,
+    options: &GraphFeatureEnrichmentOptions,
+) -> GraphFeatureEnrichmentReport {
+    let source = graph_feature_snapshot_source(workspace_id, graph_type, snapshot);
+    let Some(snapshot) = snapshot else {
+        return snapshot_graph_feature_unavailable_report(
+            source,
+            options,
+            "graph_snapshot_missing",
+            "medium",
+            "No persisted graph snapshot exists for feature enrichment.",
+            "ee graph centrality-refresh",
+        );
+    };
+
+    if snapshot.graph_type != graph_type
+        || matches!(
+            snapshot.status,
+            GraphSnapshotStatus::Invalid | GraphSnapshotStatus::Archived
+        )
+    {
+        return snapshot_graph_feature_unavailable_report(
+            source,
+            options,
+            "graph_snapshot_unusable",
+            "medium",
+            format!(
+                "Graph snapshot {} has graph type {} and status {}.",
+                snapshot.id,
+                snapshot.graph_type.as_str(),
+                snapshot.status.as_str()
+            ),
+            "ee graph centrality-refresh",
+        );
+    }
+
+    let mut degraded = Vec::new();
+    if snapshot.status == GraphSnapshotStatus::Stale {
+        degraded.push(GraphFeatureEnrichmentDegradation {
+            code: "graph_snapshot_stale",
+            severity: "medium",
+            message: "Graph snapshot is marked stale; enrichment may lag source memory links."
+                .to_owned(),
+            repair: "ee graph centrality-refresh".to_owned(),
+        });
+    }
+
+    let centrality = match graph_snapshot_centrality_report(snapshot) {
+        Ok(centrality) => centrality,
+        Err(message) => {
+            return snapshot_graph_feature_unavailable_report(
+                source,
+                options,
+                "graph_snapshot_scores_unavailable",
+                "medium",
+                message,
+                "ee graph centrality-refresh",
+            );
+        }
+    };
+
+    let mut report = enrich_graph_features_with_source(&centrality, options, source);
+    report.degraded.extend(degraded);
+    report
+}
+
+fn enrich_graph_features_with_source(
+    centrality: &CentralityRefreshReport,
+    options: &GraphFeatureEnrichmentOptions,
+    source: GraphFeatureEnrichmentSource,
+) -> GraphFeatureEnrichmentReport {
     if centrality.status != CentralityRefreshStatus::Refreshed {
-        return unavailable_graph_feature_report(centrality.status, options);
+        return unavailable_graph_feature_report(centrality.status, options, source);
     }
 
     let pagerank_max = max_finite_score(centrality.scores.iter().map(|score| score.pagerank));
@@ -1808,6 +1939,7 @@ pub fn enrich_graph_features(
             GraphFeatureEnrichmentStatus::Enriched
         },
         source_status: centrality.status,
+        source,
         limited: features.len() < original_count,
         max_features: options.max_features,
         max_selection_boost: bounded_selection_boost_cap(options.max_selection_boost),
@@ -1819,6 +1951,7 @@ pub fn enrich_graph_features(
 fn unavailable_graph_feature_report(
     source_status: CentralityRefreshStatus,
     options: &GraphFeatureEnrichmentOptions,
+    source: GraphFeatureEnrichmentSource,
 ) -> GraphFeatureEnrichmentReport {
     let (code, message, repair) = match source_status {
         CentralityRefreshStatus::GraphFeatureDisabled => (
@@ -1848,6 +1981,7 @@ fn unavailable_graph_feature_report(
         version: env!("CARGO_PKG_VERSION"),
         status: GraphFeatureEnrichmentStatus::ScoresUnavailable,
         source_status,
+        source,
         limited: false,
         max_features: options.max_features,
         max_selection_boost: bounded_selection_boost_cap(options.max_selection_boost),
@@ -1859,6 +1993,129 @@ fn unavailable_graph_feature_report(
             repair: repair.to_owned(),
         }],
     }
+}
+
+fn graph_feature_snapshot_source(
+    workspace_id: &str,
+    graph_type: GraphSnapshotType,
+    snapshot: Option<&StoredGraphSnapshot>,
+) -> GraphFeatureEnrichmentSource {
+    GraphFeatureEnrichmentSource {
+        kind: "graph_snapshot",
+        workspace_id: Some(workspace_id.to_owned()),
+        graph_type: Some(graph_type.as_str().to_owned()),
+        snapshot: snapshot.map(|snapshot| GraphFeatureEnrichmentSnapshot {
+            id: snapshot.id.clone(),
+            schema_version: snapshot.schema_version.clone(),
+            snapshot_version: snapshot.snapshot_version,
+            source_generation: snapshot.source_generation,
+            status: snapshot.status.as_str().to_owned(),
+            content_hash: snapshot.content_hash.clone(),
+            created_at: snapshot.created_at.clone(),
+        }),
+    }
+}
+
+fn snapshot_graph_feature_unavailable_report(
+    source: GraphFeatureEnrichmentSource,
+    options: &GraphFeatureEnrichmentOptions,
+    code: &'static str,
+    severity: &'static str,
+    message: impl Into<String>,
+    repair: impl Into<String>,
+) -> GraphFeatureEnrichmentReport {
+    GraphFeatureEnrichmentReport {
+        schema: GRAPH_FEATURE_ENRICHMENT_SCHEMA_V1,
+        version: env!("CARGO_PKG_VERSION"),
+        status: GraphFeatureEnrichmentStatus::ScoresUnavailable,
+        source_status: CentralityRefreshStatus::EmptyGraph,
+        source,
+        limited: false,
+        max_features: options.max_features,
+        max_selection_boost: bounded_selection_boost_cap(options.max_selection_boost),
+        features: Vec::new(),
+        degraded: vec![GraphFeatureEnrichmentDegradation {
+            code,
+            severity,
+            message: message.into(),
+            repair: repair.into(),
+        }],
+    }
+}
+
+fn graph_snapshot_centrality_report(
+    snapshot: &StoredGraphSnapshot,
+) -> Result<CentralityRefreshReport, String> {
+    let value: serde_json::Value = serde_json::from_str(&snapshot.metrics_json)
+        .map_err(|error| format!("Graph snapshot metrics_json is not valid JSON: {error}"))?;
+    let nodes = value
+        .get("nodes")
+        .or_else(|| value.pointer("/graph/nodes"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            "Graph snapshot metrics_json does not include centrality nodes.".to_owned()
+        })?;
+
+    let mut scores_by_memory = BTreeMap::new();
+    for node in nodes {
+        let Some(memory_id) = first_string(node, &["memoryId", "id", "nodeId"]) else {
+            continue;
+        };
+        let pagerank = first_number(node, &["pagerank", "pageRank"]).unwrap_or(0.0);
+        let betweenness =
+            first_number(node, &["betweenness", "betweennessCentrality"]).unwrap_or(0.0);
+        scores_by_memory.insert(
+            memory_id.clone(),
+            MemoryCentralityScore {
+                memory_id,
+                pagerank,
+                betweenness,
+            },
+        );
+    }
+
+    if scores_by_memory.is_empty() {
+        return Err(
+            "Graph snapshot metrics_json does not include memory centrality scores.".to_owned(),
+        );
+    }
+
+    let mut scores: Vec<_> = scores_by_memory.into_values().collect();
+    scores.sort_by(|left, right| {
+        right
+            .pagerank
+            .total_cmp(&left.pagerank)
+            .then_with(|| right.betweenness.total_cmp(&left.betweenness))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+
+    let mut top_pagerank = scores.clone();
+    top_pagerank.truncate(10);
+
+    let mut top_betweenness = scores.clone();
+    top_betweenness.sort_by(|left, right| {
+        right
+            .betweenness
+            .total_cmp(&left.betweenness)
+            .then_with(|| right.pagerank.total_cmp(&left.pagerank))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    top_betweenness.truncate(10);
+
+    Ok(CentralityRefreshReport {
+        version: env!("CARGO_PKG_VERSION"),
+        status: CentralityRefreshStatus::Refreshed,
+        dry_run: false,
+        node_count: snapshot.node_count as usize,
+        edge_count: snapshot.edge_count as usize,
+        projection_ms: 0.0,
+        pagerank_ms: 0.0,
+        betweenness_ms: 0.0,
+        total_ms: 0.0,
+        scores,
+        top_pagerank,
+        top_betweenness,
+    })
 }
 
 fn enriched_feature_for_score(
@@ -2681,6 +2938,12 @@ fn first_bool(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
         .find_map(serde_json::Value::as_bool)
 }
 
+fn first_number(value: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .filter_map(|key| value.get(*key))
+        .find_map(serde_json::Value::as_f64)
+}
+
 fn render_mermaid_graph(document: &ParsedGraphDocument) -> String {
     let mut node_names = BTreeMap::new();
     let mut output = String::from("flowchart TD\n");
@@ -3086,7 +3349,8 @@ fn compare_neighborhood_edges(
 mod tests {
     use crate::db::{
         CreateGraphSnapshotInput, CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput,
-        DbConnection, GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource,
+        DbConnection, GraphSnapshotStatus, GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource,
+        StoredGraphSnapshot,
     };
 
     use super::{
@@ -3894,6 +4158,99 @@ mod tests {
         );
         assert_eq!(report.degraded.len(), 1);
         assert_eq!(report.degraded[0].code, "centrality_dry_run");
+        assert!(report.features.is_empty());
+    }
+
+    #[test]
+    fn graph_feature_enrichment_uses_persisted_snapshot_scores() {
+        let snapshot = StoredGraphSnapshot {
+            id: "gsnap_0000000000000000000000999".to_owned(),
+            workspace_id: WORKSPACE_ID.to_owned(),
+            snapshot_version: 7,
+            schema_version: "ee.graph.snapshot.v1".to_owned(),
+            graph_type: GraphSnapshotType::MemoryLinks,
+            node_count: 3,
+            edge_count: 2,
+            metrics_json: serde_json::json!({
+                "nodes": [
+                    {
+                        "id": MEMORY_C,
+                        "memoryId": MEMORY_C,
+                        "pagerank": 0.2,
+                        "betweenness": 0.9,
+                    },
+                    {
+                        "id": MEMORY_A,
+                        "memoryId": MEMORY_A,
+                        "pagerank": 0.9,
+                        "betweenness": 0.1,
+                    },
+                    {
+                        "id": MEMORY_B,
+                        "memoryId": MEMORY_B,
+                        "pagerank": 0.5,
+                        "betweenness": 0.5,
+                    },
+                ],
+                "edges": [
+                    {"source": MEMORY_A, "target": MEMORY_B},
+                    {"source": MEMORY_B, "target": MEMORY_C},
+                ],
+            })
+            .to_string(),
+            content_hash: "blake3:snapshot-feature-source".to_owned(),
+            source_generation: 42,
+            created_at: "2026-05-05T00:00:00Z".to_owned(),
+            expires_at: None,
+            status: GraphSnapshotStatus::Valid,
+        };
+
+        let report = super::enrich_graph_features_from_graph_snapshot(
+            Some(&snapshot),
+            WORKSPACE_ID,
+            GraphSnapshotType::MemoryLinks,
+            &super::GraphFeatureEnrichmentOptions {
+                max_features: 2,
+                min_combined_score: 0.01,
+                max_selection_boost: 0.12,
+            },
+        );
+
+        assert_eq!(report.status, super::GraphFeatureEnrichmentStatus::Enriched);
+        assert_eq!(report.source.kind, "graph_snapshot");
+        assert_eq!(report.source.workspace_id.as_deref(), Some(WORKSPACE_ID));
+        assert_eq!(report.source.graph_type.as_deref(), Some("memory_links"));
+        let Some(source_snapshot) = report.source.snapshot.as_ref() else {
+            panic!("snapshot witness should be included");
+        };
+        assert_eq!(source_snapshot.id, snapshot.id);
+        assert_eq!(source_snapshot.snapshot_version, 7);
+        assert_eq!(source_snapshot.source_generation, 42);
+        assert_eq!(source_snapshot.content_hash, snapshot.content_hash);
+        assert_eq!(report.features.len(), 2);
+        assert_eq!(report.features[0].memory_id, MEMORY_A);
+
+        let json = report.data_json();
+        assert_eq!(json["source"]["kind"], "graph_snapshot");
+        assert_eq!(json["source"]["snapshot"]["id"], snapshot.id);
+        assert_eq!(json["source"]["snapshot"]["sourceGeneration"], 42);
+    }
+
+    #[test]
+    fn graph_feature_enrichment_requires_snapshot_for_cli_source() {
+        let report = super::enrich_graph_features_from_graph_snapshot(
+            None,
+            WORKSPACE_ID,
+            GraphSnapshotType::MemoryLinks,
+            &super::GraphFeatureEnrichmentOptions::default(),
+        );
+
+        assert_eq!(
+            report.status,
+            super::GraphFeatureEnrichmentStatus::ScoresUnavailable
+        );
+        assert_eq!(report.source.kind, "graph_snapshot");
+        assert_eq!(report.degraded[0].code, "graph_snapshot_missing");
         assert!(report.features.is_empty());
     }
 

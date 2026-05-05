@@ -1395,7 +1395,7 @@ mod tests {
         ensure(
             value["sections"]
                 .as_array()
-                .map_or(false, |arr| arr.len() == 2),
+                .is_some_and(|arr| arr.len() == 2),
             "rate distortion JSON must have 2 sections",
         )?;
 

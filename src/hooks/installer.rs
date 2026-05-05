@@ -701,8 +701,10 @@ mod tests {
             force: false,
         };
 
-        let error =
-            install_hooks(&options).expect_err("install should fail when hook_dir is a file");
+        let error = match install_hooks(&options) {
+            Ok(_) => return Err("install should fail when hook_dir is a file".to_string()),
+            Err(error) => error,
+        };
         assert_eq!(error.code(), "storage");
         assert!(
             error.message().contains("Failed to create hook directory"),
