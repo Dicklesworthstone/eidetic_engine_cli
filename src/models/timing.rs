@@ -64,6 +64,23 @@ impl TimingPhase {
 }
 
 /// Helper for measuring command execution timing with phase breakdowns.
+///
+/// Phases are demarcated by [`mark`](Self::mark) calls. Each `mark(name)` closes
+/// the current phase and labels the segment that just ended with `name`. The
+/// first phase starts implicitly at [`start`](Self::start), so a typical pattern
+/// is:
+///
+/// ```ignore
+/// let mut capture = TimingCapture::start();
+/// /* ... do gather work ... */
+/// capture.mark("gather");      // segment start..now is named "gather"
+/// /* ... do render work ... */
+/// capture.mark("render");      // segment previous-mark..now is named "render"
+/// let timing = capture.finish();
+/// ```
+///
+/// If any wall-clock time elapses between the last `mark` and `finish`, an
+/// extra trailing phase named `"finish"` is appended to account for it.
 #[derive(Debug)]
 pub struct TimingCapture {
     start: Instant,
@@ -80,12 +97,21 @@ impl TimingCapture {
         }
     }
 
-    /// Mark the start of a new phase.
+    /// Close the current phase and label the segment that just ended.
+    ///
+    /// The named segment runs from the previous `mark` (or [`start`](Self::start)
+    /// if this is the first call) to this call. Despite the name, this records
+    /// the *end* of a phase, not the start of the next one.
     pub fn mark(&mut self, phase_name: &'static str) {
         self.phases.push((Instant::now(), phase_name));
     }
 
     /// Finish capturing and produce timing data.
+    ///
+    /// Each registered `mark(name)` becomes a `TimingPhase` named `name` whose
+    /// duration is the elapsed time since the previous mark (or
+    /// [`start`](Self::start) for the first one). If any time elapses between
+    /// the final mark and this call, a trailing `"finish"` phase is appended.
     #[must_use]
     pub fn finish(self) -> DiagnosticTiming {
         let end = Instant::now();
@@ -95,7 +121,7 @@ impl TimingCapture {
             return DiagnosticTiming::elapsed_only(elapsed);
         }
 
-        let mut phases = Vec::with_capacity(self.phases.len());
+        let mut phases = Vec::with_capacity(self.phases.len() + 1);
         let mut prev = self.start;
 
         for (instant, name) in &self.phases {
@@ -104,12 +130,12 @@ impl TimingCapture {
             prev = *instant;
         }
 
-        // Add final phase from last mark to end
-        if let Some((last_instant, _)) = self.phases.last() {
-            let final_duration = end.duration_since(*last_instant);
-            if final_duration.as_nanos() > 0 {
-                phases.push(TimingPhase::new("finish", final_duration));
-            }
+        // Trailing segment from the last mark to `end`. We only include it
+        // when measurable time elapsed so a tightly-paired mark/finish pair
+        // doesn't pollute the breakdown with a zero-duration "finish" entry.
+        let final_duration = end.duration_since(prev);
+        if final_duration.as_nanos() > 0 {
+            phases.push(TimingPhase::new("finish", final_duration));
         }
 
         DiagnosticTiming::with_phases(elapsed, phases)
@@ -193,5 +219,25 @@ mod tests {
         let phase = TimingPhase::new("test", Duration::from_micros(1500));
         ensure(phase.name, "test", "phase name")?;
         ensure(phase.duration_ms, 1.5, "duration in ms")
+    }
+
+    #[test]
+    fn first_mark_labels_segment_from_start() -> TestResult {
+        // The first mark must label the segment from `start` (not the segment
+        // that comes after the mark). This pins the documented semantics so a
+        // future refactor can't silently flip the meaning of `mark`.
+        let mut capture = TimingCapture::start();
+        thread::sleep(Duration::from_millis(3));
+        capture.mark("gather");
+        let timing = capture.finish();
+
+        ensure(timing.phases[0].name, "gather", "first phase name")?;
+        if timing.phases[0].duration_ms < 2.0 {
+            return Err(format!(
+                "first phase should cover the pre-mark sleep, got {}ms",
+                timing.phases[0].duration_ms
+            ));
+        }
+        Ok(())
     }
 }
