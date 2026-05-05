@@ -12,6 +12,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use chrono::{DateTime, Duration};
+use serde::Serialize;
 
 pub const SUBSYSTEM: &str = "curate";
 pub const DEFAULT_SPECIFICITY_MIN: f32 = 0.45;
@@ -2755,22 +2756,32 @@ pub struct QuarantinedFeedback {
 impl QuarantinedFeedback {
     #[must_use]
     pub fn to_json(&self) -> String {
-        let session = self
-            .session_id
-            .as_ref()
-            .map(|s| format!(",\"sessionId\":\"{}\"", s))
-            .unwrap_or_default();
-        format!(
-            "{{\"schema\":\"{}\",\"id\":\"{}\",\"sourceId\":\"{}\",\"memoryId\":\"{}\",\"recordedAt\":\"{}\",\"reason\":\"{}\",\"rawEventHash\":\"{}\"{}}}",
-            FEEDBACK_QUARANTINE_SCHEMA_V1,
-            self.id,
-            self.source_id,
-            self.memory_id,
-            self.recorded_at,
-            self.reason.as_str(),
-            self.raw_event_hash,
-            session,
-        )
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct QuarantinedFeedbackJson<'a> {
+            schema: &'static str,
+            id: &'a str,
+            source_id: &'a str,
+            memory_id: &'a str,
+            recorded_at: &'a str,
+            reason: &'static str,
+            raw_event_hash: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            session_id: Option<&'a str>,
+        }
+
+        let json_repr = QuarantinedFeedbackJson {
+            schema: FEEDBACK_QUARANTINE_SCHEMA_V1,
+            id: &self.id,
+            source_id: &self.source_id,
+            memory_id: &self.memory_id,
+            recorded_at: &self.recorded_at,
+            reason: self.reason.as_str(),
+            raw_event_hash: &self.raw_event_hash,
+            session_id: self.session_id.as_deref(),
+        };
+
+        serde_json::to_string(&json_repr).unwrap_or_else(|_| "{}".to_owned())
     }
 }
 
@@ -3371,10 +3382,11 @@ mod tests {
         DUPLICATE_RULE_NEAR_CODE, DuplicateRuleCheckConfig, DuplicateRuleDecision,
         DuplicateRuleMatchKind, DuplicateRuleRecord, ParseCandidateSourceError,
         ParseCandidateStatusError, ParseCandidateTypeError, ParseReviewQueueStateError,
-        REVIEW_QUEUE_INVALID_TRANSITION_CODE, REVIEW_QUEUE_STATE_SCHEMA_V1, ReviewQueueState,
-        SpecificityPlatform, SpecificityReport, SpecificityTokenKind, check_duplicate_rule,
-        check_duplicate_rule_with_config, specificity_score, subsystem_name, validate_candidate,
-        validate_review_queue_transition, validate_status_transition,
+        QuarantineReason, QuarantinedFeedback, REVIEW_QUEUE_INVALID_TRANSITION_CODE,
+        REVIEW_QUEUE_STATE_SCHEMA_V1, ReviewQueueState, SpecificityPlatform, SpecificityReport,
+        SpecificityTokenKind, check_duplicate_rule, check_duplicate_rule_with_config,
+        specificity_score, subsystem_name, validate_candidate, validate_review_queue_transition,
+        validate_status_transition,
     };
 
     #[test]
@@ -4666,7 +4678,7 @@ Then update src/policy/mod.rs on main."
     use super::{
         DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
         FEEDBACK_RATE_SCHEMA_V1, FeedbackCheckResult, FeedbackHealthSummary, FeedbackRateConfig,
-        FeedbackRateState, PROTECTED_RULE_SCHEMA_V1, ProtectedRuleStatus, QuarantineReason,
+        FeedbackRateState, PROTECTED_RULE_SCHEMA_V1, ProtectedRuleStatus,
     };
 
     #[test]
@@ -4780,6 +4792,31 @@ Then update src/policy/mod.rs on main."
         assert_eq!(
             QuarantineReason::SuspiciousBurstPattern.as_str(),
             "suspicious_burst_pattern"
+        );
+    }
+
+    #[test]
+    fn quarantined_feedback_to_json_escapes_special_chars() {
+        let feedback = QuarantinedFeedback {
+            id: "qf_test\"quote".to_owned(),
+            source_id: "src_back\\slash".to_owned(),
+            memory_id: "mem_new\nline".to_owned(),
+            recorded_at: "2026-05-05T00:00:00Z".to_owned(),
+            reason: QuarantineReason::RateLimitExceeded,
+            raw_event_hash: "hash_tab\there".to_owned(),
+            session_id: Some("sess_unicode\u{1f680}rocket".to_owned()),
+        };
+        let json = feedback.to_json();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("must produce valid JSON");
+        assert_eq!(parsed["id"].as_str(), Some("qf_test\"quote"));
+        assert_eq!(parsed["sourceId"].as_str(), Some("src_back\\slash"));
+        assert_eq!(parsed["memoryId"].as_str(), Some("mem_new\nline"));
+        assert_eq!(parsed["rawEventHash"].as_str(), Some("hash_tab\there"));
+        assert_eq!(
+            parsed["sessionId"].as_str(),
+            Some("sess_unicode\u{1f680}rocket")
         );
     }
 
