@@ -129,7 +129,9 @@ fn normalize_json_for_comparison(json: &str) -> String {
 mod tests {
     use super::*;
     use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
-    use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+    use ee::db::{
+        CreateCurationCandidateInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
+    };
     use std::path::Path;
     use std::process::{Command, Output};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1146,6 +1148,195 @@ mod tests {
         ensure(
             !pack_item.why.is_empty(),
             "pack item why (selection rationale) must be populated",
+        )?;
+
+        connection.close().map_err(|error| error.to_string())?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn agent_curate_review_dry_run_returns_preview_without_mutation() -> TestResult {
+        let artifact_dir = unique_artifact_dir("curate-dry-run")?;
+        let workspace = artifact_dir.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        fs::create_dir_all(workspace.join(".ee")).map_err(|error| {
+            format!(
+                "failed to create workspace {}: {error}",
+                workspace.display()
+            )
+        })?;
+
+        // Set up database with migrations.
+        let connection =
+            DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+
+        // Insert workspace.
+        connection
+            .insert_workspace(
+                "wsp_curatetest0000000000000001",
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("curate-dry-run-test".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        // Insert a memory that the curation candidate targets.
+        connection
+            .insert_memory(
+                "mem_00000000000000curatedry001",
+                &CreateMemoryInput {
+                    workspace_id: "wsp_curatetest0000000000000001".to_string(),
+                    level: "procedural".to_string(),
+                    kind: "guideline".to_string(),
+                    content: "Original memory content for curation test.".to_string(),
+                    confidence: 0.6,
+                    utility: 0.7,
+                    importance: 0.5,
+                    provenance_uri: Some("file://test.md#L1-5".to_string()),
+                    trust_class: "agent_assertion".to_string(),
+                    trust_subclass: None,
+                    valid_from: None,
+                    valid_to: None,
+                    tags: vec!["curation-test".to_string()],
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        // Insert a curation candidate proposing a confidence boost.
+        connection
+            .insert_curation_candidate(
+                "curate_00000000000000000drytest01",
+                &CreateCurationCandidateInput {
+                    workspace_id: "wsp_curatetest0000000000000001".to_string(),
+                    candidate_type: "promote".to_string(),
+                    target_memory_id: "mem_00000000000000curatedry001".to_string(),
+                    proposed_content: None,
+                    proposed_confidence: Some(0.85),
+                    proposed_trust_class: Some("agent_validated".to_string()),
+                    source_type: "feedback_event".to_string(),
+                    source_id: Some("test-feedback-001".to_string()),
+                    reason: "Multiple positive signals indicate higher confidence warranted."
+                        .to_string(),
+                    confidence: 0.8,
+                    status: Some("pending".to_string()),
+                    created_at: Some("2026-04-30T10:00:00+00:00".to_string()),
+                    ttl_expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        connection.close().map_err(|error| error.to_string())?;
+
+        // Run curate accept with --dry-run to verify preview behavior.
+        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .arg("--json")
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("curate")
+            .arg("accept")
+            .arg("curate_00000000000000000drytest01")
+            .arg("--dry-run")
+            .arg("--database")
+            .arg(&database)
+            .output()
+            .map_err(|error| format!("failed to run ee curate accept --dry-run: {error}"))?;
+
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|error| format!("curate accept stdout not UTF-8: {error}"))?;
+        let stderr = String::from_utf8(output.stderr)
+            .map_err(|error| format!("curate accept stderr not UTF-8: {error}"))?;
+
+        ensure(
+            output.status.success(),
+            format!(
+                "curate accept --dry-run should succeed; exit={:?} stdout={stdout} stderr={stderr}",
+                output.status.code()
+            ),
+        )?;
+        ensure(
+            stderr.is_empty(),
+            format!("curate accept --dry-run stderr must be empty, got: {stderr:?}"),
+        )?;
+
+        // Parse JSON output and verify preview fields.
+        let json: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &json["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "curate accept schema",
+        )?;
+        ensure_equal(
+            &json["success"],
+            &serde_json::json!(true),
+            "curate accept success",
+        )?;
+        ensure_equal(
+            &json["data"]["command"],
+            &serde_json::json!("curate"),
+            "curate accept command",
+        )?;
+
+        // Verify dry-run indicator is present.
+        ensure_equal(
+            &json["data"]["dryRun"],
+            &serde_json::json!(true),
+            "curate accept dry-run flag",
+        )?;
+
+        // Verify candidate ID is returned.
+        ensure_equal(
+            &json["data"]["candidateId"],
+            &serde_json::json!("curate_00000000000000000drytest01"),
+            "curate accept candidate id",
+        )?;
+
+        // Verify action is recorded.
+        ensure_equal(
+            &json["data"]["action"],
+            &serde_json::json!("accept"),
+            "curate accept action",
+        )?;
+
+        // Verify preview shows what would change.
+        ensure(
+            json["data"]["preview"].is_object(),
+            "curate accept preview must be an object",
+        )?;
+
+        // Verify NO mutation occurred: re-open database and check candidate status.
+        let connection =
+            DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let candidate = connection
+            .get_curation_candidate(
+                "wsp_curatetest0000000000000001",
+                "curate_00000000000000000drytest01",
+            )
+            .map_err(|error| format!("failed to get candidate: {error}"))?
+            .ok_or_else(|| "candidate not found".to_string())?;
+
+        // Status should still be "pending", not "approved".
+        ensure_equal(
+            &candidate.status,
+            &"pending".to_string(),
+            "candidate status after dry-run",
+        )?;
+        // Review state should still be "new", not "accepted".
+        ensure_equal(
+            &candidate.review_state,
+            &"new".to_string(),
+            "candidate review_state after dry-run",
+        )?;
+        // reviewed_at should be None since no actual review happened.
+        ensure(
+            candidate.reviewed_at.is_none(),
+            format!(
+                "candidate reviewed_at should be None after dry-run, got: {:?}",
+                candidate.reviewed_at
+            ),
         )?;
 
         connection.close().map_err(|error| error.to_string())?;
