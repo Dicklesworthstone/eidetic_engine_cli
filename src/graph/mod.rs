@@ -935,7 +935,7 @@ pub fn compute_betweenness(projection: &MemoryGraphProjection) -> BetweennessCen
 /// Schema for centrality refresh response envelope.
 pub const CENTRALITY_REFRESH_SCHEMA_V1: &str = "ee.graph.centrality_refresh.v1";
 const GRAPH_SNAPSHOT_WRITE_LOCK_TTL_SECS: u64 = 300;
-const GRAPH_SNAPSHOT_WRITE_LOCK_ATTEMPTS: usize = 64;
+const GRAPH_SNAPSHOT_WRITE_LOCK_ATTEMPTS: usize = 128;
 const GRAPH_SNAPSHOT_WRITE_LOCK_REASON: &str = "graph snapshot write";
 
 /// Status of a centrality refresh operation.
@@ -1270,9 +1270,15 @@ struct GraphSnapshotWriteOwner<'a> {
 
 impl Drop for GraphSnapshotWriteOwner<'_> {
     fn drop(&mut self) {
-        let _ = self
-            .conn
-            .release_advisory_lock(&self.lock_id, &self.holder_id);
+        for attempt in 0..GRAPH_SNAPSHOT_WRITE_LOCK_ATTEMPTS {
+            match self
+                .conn
+                .release_advisory_lock(&self.lock_id, &self.holder_id)
+            {
+                Ok(_) => return,
+                Err(_) => std::thread::sleep(graph_snapshot_write_lock_backoff(attempt)),
+            }
+        }
     }
 }
 
@@ -1359,8 +1365,8 @@ fn acquire_graph_snapshot_write_owner<'a>(
 }
 
 fn graph_snapshot_write_lock_backoff(attempt: usize) -> Duration {
-    let capped = u32::try_from(attempt.min(5)).unwrap_or(5);
-    Duration::from_millis(2_u64.saturating_mul(1_u64 << capped))
+    let shift = attempt.min(6);
+    Duration::from_millis(5_u64.saturating_mul(1_u64 << shift))
 }
 
 fn generate_graph_snapshot_holder_id() -> String {
