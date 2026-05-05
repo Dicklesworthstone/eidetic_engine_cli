@@ -1773,18 +1773,29 @@ fn get_db_stats(db: &DbConnection) -> Result<(u32, u32, Option<u64>), DbError> {
         .and_then(|row| row.get(0).and_then(|v| v.as_i64()))
         .unwrap_or(0) as u32;
 
-    // Check for a generation marker in search_index_jobs or a dedicated table
-    let generation = db
-        .query(
-            "SELECT MAX(id) FROM search_index_jobs WHERE status = 'completed'",
-            &[],
-        )
+    let artifact_count = db
+        .query("SELECT COUNT(*) FROM artifacts", &[])
         .ok()
         .and_then(|rows| {
             rows.first()
                 .and_then(|row| row.get(0).and_then(|v| v.as_i64()))
         })
-        .map(|v| v as u64);
+        .unwrap_or(0) as u64;
+
+    let source_document_count = u64::from(memory_count) + u64::from(session_count) + artifact_count;
+
+    // Audit rows track audited updates; source document count covers fixtures and
+    // older repository writes that predate full audit coverage.
+    let audit_count = db
+        .query("SELECT COUNT(*) FROM audit_log", &[])
+        .ok()
+        .and_then(|rows| {
+            rows.first()
+                .and_then(|row| row.get(0).and_then(|v| v.as_i64()))
+        })
+        .unwrap_or(0) as u64;
+
+    let generation = Some(source_document_count.max(audit_count));
 
     Ok((memory_count, session_count, generation))
 }
@@ -1967,6 +1978,50 @@ mod tests {
         assert_eq!(json["artifacts_indexed"], 2);
         assert_eq!(json["documents_total"], 10);
         assert_eq!(json["dry_run"], false);
+    }
+
+    #[test]
+    fn db_stats_generation_tracks_source_documents_without_audit_rows() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_01234567890123456789012345",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-index-generation-test".to_owned(),
+                    name: Some("index generation test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_01234567890123456789012345",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Run cargo fmt --check before release.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec![],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let (_, _, generation) = get_db_stats(&connection).map_err(|error| error.to_string())?;
+        ensure(
+            generation == Some(1),
+            "source generation should include unaudited source documents",
+        )?;
+
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]

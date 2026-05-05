@@ -8711,6 +8711,8 @@ impl DbConnection {
         ttl_secs: Option<u64>,
         reason: Option<&str>,
     ) -> Result<AcquireLockResult> {
+        self.ensure_advisory_locks_table()?;
+
         const MAX_ATTEMPTS: usize = 8;
         let mut last_retryable_error = None;
 
@@ -8896,6 +8898,7 @@ impl DbConnection {
     /// Returns true if the lock was released, false if it was not held
     /// by this holder (or did not exist).
     pub fn release_advisory_lock(&self, lock_id: &AdvisoryLockId, holder_id: &str) -> Result<bool> {
+        self.ensure_advisory_locks_table()?;
         let rows_affected = self.execute_for(
             DbOperation::Execute,
             "DELETE FROM ee_advisory_locks WHERE resource_type = ?1 AND resource_id = ?2 AND holder_id = ?3",
@@ -8911,6 +8914,7 @@ impl DbConnection {
 
     /// Check if a lock is held (by anyone).
     pub fn is_lock_held(&self, lock_id: &AdvisoryLockId) -> Result<Option<AdvisoryLock>> {
+        self.ensure_advisory_locks_table()?;
         let now = advisory_lock_timestamp(Utc::now());
 
         let rows = self.query_for(
@@ -8948,6 +8952,7 @@ impl DbConnection {
 
     /// List all locks held by a specific holder.
     pub fn list_locks_by_holder(&self, holder_id: &str) -> Result<Vec<AdvisoryLock>> {
+        self.ensure_advisory_locks_table()?;
         let rows = self.query_for(
             DbOperation::Query,
             "SELECT resource_type, resource_id, holder_id, acquired_at, expires_at, reason FROM ee_advisory_locks WHERE holder_id = ?1",
@@ -8973,6 +8978,8 @@ impl DbConnection {
 
     /// Clean up all expired locks.
     pub fn cleanup_expired_locks(&self) -> Result<u64> {
+        self.ensure_advisory_locks_table()?;
+
         let now = advisory_lock_timestamp(Utc::now());
         let rows = self.query_for(
             DbOperation::Query,

@@ -403,23 +403,25 @@ impl Job {
             "createdAt": self.created_at,
         });
 
-        if let Some(ref started) = self.started_at {
-            obj["startedAt"] = json!(started);
-        }
-        if let Some(ref completed) = self.completed_at {
-            obj["completedAt"] = json!(completed);
-        }
-        if let Some(duration) = self.duration_ms {
-            obj["durationMs"] = json!(duration);
-        }
-        if let Some(ref error) = self.error {
-            obj["error"] = json!(error);
-        }
-        if let Some(ref context) = self.context {
-            obj["context"] = json!(context);
-        }
-        if let Some(items) = self.items_processed {
-            obj["itemsProcessed"] = json!(items);
+        if let Some(obj_map) = obj.as_object_mut() {
+            if let Some(ref started) = self.started_at {
+                obj_map.insert("startedAt".to_string(), json!(started));
+            }
+            if let Some(ref completed) = self.completed_at {
+                obj_map.insert("completedAt".to_string(), json!(completed));
+            }
+            if let Some(duration) = self.duration_ms {
+                obj_map.insert("durationMs".to_string(), json!(duration));
+            }
+            if let Some(ref error) = self.error {
+                obj_map.insert("error".to_string(), json!(error));
+            }
+            if let Some(ref context) = self.context {
+                obj_map.insert("context".to_string(), json!(context));
+            }
+            if let Some(items) = self.items_processed {
+                obj_map.insert("itemsProcessed".to_string(), json!(items));
+            }
         }
 
         obj
@@ -1672,20 +1674,25 @@ impl JobRunResult {
             "dryRun": self.dry_run,
         });
 
-        if let Some(items) = self.items_processed {
-            obj["itemsProcessed"] = json!(items);
-        }
-        if let Some(ref error) = self.error {
-            obj["error"] = json!(error);
-        }
-        if let Some(ref summary) = self.budget_summary {
-            obj["budgetUsed"] = json!({
-                "violations": summary.violations.len(),
-                "warningCount": summary.warning_count,
-            });
-        }
-        if let Some(ref details) = self.details {
-            obj["details"] = details.clone();
+        if let Some(obj_map) = obj.as_object_mut() {
+            if let Some(items) = self.items_processed {
+                obj_map.insert("itemsProcessed".to_string(), json!(items));
+            }
+            if let Some(ref error) = self.error {
+                obj_map.insert("error".to_string(), json!(error));
+            }
+            if let Some(ref summary) = self.budget_summary {
+                obj_map.insert(
+                    "budgetUsed".to_string(),
+                    json!({
+                        "violations": summary.violations.len(),
+                        "warningCount": summary.warning_count,
+                    }),
+                );
+            }
+            if let Some(ref details) = self.details {
+                obj_map.insert("details".to_string(), details.clone());
+            }
         }
 
         obj
@@ -2635,11 +2642,13 @@ impl JobDiagnostic {
             "severity": self.severity.as_str(),
             "message": self.message,
         });
-        if let Some(ref suggestion) = self.suggestion {
-            obj["suggestion"] = json!(suggestion);
-        }
-        if let Some(ref job_id) = self.job_id {
-            obj["jobId"] = json!(job_id);
+        if let Some(obj_map) = obj.as_object_mut() {
+            if let Some(ref suggestion) = self.suggestion {
+                obj_map.insert("suggestion".to_string(), json!(suggestion));
+            }
+            if let Some(ref job_id) = self.job_id {
+                obj_map.insert("jobId".to_string(), json!(job_id));
+            }
         }
         obj
     }

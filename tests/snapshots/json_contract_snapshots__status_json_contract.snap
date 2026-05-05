@@ -93,9 +93,9 @@ expression: status
       {
         "name": "search_index",
         "status": "current",
-        "sourceHighWatermark": null,
+        "sourceHighWatermark": 1,
         "assetHighWatermark": 1,
-        "highWatermarkLag": null,
+        "highWatermarkLag": 0,
         "path": ".ee/index"
       },
       {

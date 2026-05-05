@@ -1778,6 +1778,20 @@ fn select_facility_candidate_index(
     let remaining_budget = budget.max_tokens().saturating_sub(used_tokens);
     let mut best: Option<(usize, f32, f32)> = None;
 
+    let current_coverages: Vec<f32> = universe
+        .iter()
+        .map(|universe_candidate| {
+            if selected.is_empty() {
+                0.0
+            } else {
+                selected
+                    .iter()
+                    .map(|signature| facility_similarity(universe_candidate, signature))
+                    .fold(0.0_f32, f32::max)
+            }
+        })
+        .collect();
+
     for (candidate_index, candidate) in candidates.iter().enumerate() {
         if candidate.estimated_tokens > remaining_budget {
             continue;
@@ -1792,7 +1806,18 @@ fn select_facility_candidate_index(
             continue;
         }
 
-        let marginal_gain = facility_location_marginal_gain(candidate, selected, universe);
+        let candidate_signature = CandidateSignature::from(candidate);
+        let marginal_gain: f32 = universe
+            .iter()
+            .zip(current_coverages.iter())
+            .map(|(universe_candidate, &current_coverage)| {
+                let candidate_sim = facility_similarity(universe_candidate, &candidate_signature);
+                let new_coverage = current_coverage.max(candidate_sim);
+                let gain = new_coverage - current_coverage;
+                facility_candidate_weight(universe_candidate) * gain
+            })
+            .sum();
+
         let gain_ratio = marginal_gain / candidate.estimated_tokens as f32;
         match best {
             None => best = Some((candidate_index, marginal_gain, gain_ratio)),
@@ -1811,17 +1836,6 @@ fn select_facility_candidate_index(
     }
 
     best.map(|(candidate_index, marginal_gain, _)| (candidate_index, marginal_gain))
-}
-
-fn facility_location_marginal_gain(
-    candidate: &PackCandidate,
-    selected: &[CandidateSignature],
-    universe: &[PackCandidate],
-) -> f32 {
-    let current = facility_location_value(selected, universe);
-    let mut with_candidate = selected.to_vec();
-    with_candidate.push(CandidateSignature::from(candidate));
-    facility_location_value(&with_candidate, universe) - current
 }
 
 pub(crate) fn facility_location_value(

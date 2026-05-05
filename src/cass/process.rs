@@ -267,14 +267,34 @@ impl CassInvocation {
             }
         })?;
 
+        let mut stdout = child.stdout.take().ok_or_else(|| CassError::Io {
+            message: "cass subprocess stdout pipe was not available".to_owned(),
+        })?;
+        let mut stderr = child.stderr.take().ok_or_else(|| CassError::Io {
+            message: "cass subprocess stderr pipe was not available".to_owned(),
+        })?;
+
+        let stdout_thread = thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut stdout, &mut buf);
+            buf
+        });
+
+        let stderr_thread = thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut stderr, &mut buf);
+            buf
+        });
+
         loop {
-            if child.try_wait().map_err(CassError::from)?.is_some() {
-                let output = child.wait_with_output().map_err(CassError::from)?;
+            if let Some(status) = child.try_wait().map_err(CassError::from)? {
+                let stdout_bytes = stdout_thread.join().unwrap_or_default();
+                let stderr_bytes = stderr_thread.join().unwrap_or_default();
                 return Ok(CassOutcome::new(
                     self.clone(),
-                    output.stdout,
-                    output.stderr,
-                    output.status.code(),
+                    stdout_bytes,
+                    stderr_bytes,
+                    status.code(),
                     started.elapsed(),
                     false,
                 ));
@@ -283,12 +303,14 @@ impl CassInvocation {
             let elapsed = started.elapsed();
             if elapsed >= timeout {
                 let _ = child.kill();
-                let output = child.wait_with_output().map_err(CassError::from)?;
+                let status = child.wait().map_err(CassError::from)?;
+                let stdout_bytes = stdout_thread.join().unwrap_or_default();
+                let stderr_bytes = stderr_thread.join().unwrap_or_default();
                 return Ok(CassOutcome::new(
                     self.clone(),
-                    output.stdout,
-                    output.stderr,
-                    output.status.code(),
+                    stdout_bytes,
+                    stderr_bytes,
+                    status.code(),
                     started.elapsed(),
                     true,
                 ));

@@ -945,27 +945,40 @@ impl GoalPlan {
             "nextInspectionCommands": self.next_inspection_commands,
         });
 
-        if let Some(posture) = &self.task_frame_posture {
-            obj["taskFramePosture"] = posture.data_json();
-        }
+        if let Some(obj_map) = obj.as_object_mut() {
+            if let Some(posture) = &self.task_frame_posture {
+                obj_map.insert("taskFramePosture".to_string(), posture.data_json());
+            }
 
-        if include_alternatives && !self.rejected_alternatives.is_empty() {
-            obj["rejectedAlternatives"] = json!(
-                self.rejected_alternatives
-                    .iter()
-                    .map(RejectedAlternative::data_json)
-                    .collect::<Vec<_>>()
-            );
-        }
+            if include_alternatives && !self.rejected_alternatives.is_empty() {
+                obj_map.insert(
+                    "rejectedAlternatives".to_string(),
+                    json!(
+                        self.rejected_alternatives
+                            .iter()
+                            .map(RejectedAlternative::data_json)
+                            .collect::<Vec<_>>()
+                    ),
+                );
+            }
 
-        if !self.classification.alternatives.is_empty() {
-            obj["classification"]["alternatives"] = json!(
-                self.classification
-                    .alternatives
-                    .iter()
-                    .map(|c| c.as_str())
-                    .collect::<Vec<_>>()
-            );
+            if !self.classification.alternatives.is_empty() {
+                if let Some(class_map) = obj_map
+                    .get_mut("classification")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    class_map.insert(
+                        "alternatives".to_string(),
+                        json!(
+                            self.classification
+                                .alternatives
+                                .iter()
+                                .map(|c| c.as_str())
+                                .collect::<Vec<_>>()
+                        ),
+                    );
+                }
+            }
         }
 
         obj

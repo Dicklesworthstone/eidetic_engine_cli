@@ -493,8 +493,8 @@ fn redact_secret_key_values(input: &str, reasons: &mut Vec<&'static str>) -> (St
 
     for pattern in SECRET_KEY_PATTERNS {
         let mut search_start = 0;
+        let mut lower = output.to_ascii_lowercase();
         loop {
-            let lower = output.to_ascii_lowercase();
             if search_start >= lower.len() {
                 break;
             }
@@ -520,6 +520,7 @@ fn redact_secret_key_values(input: &str, reasons: &mut Vec<&'static str>) -> (St
             }
             let placeholder = redaction_placeholder(pattern.code);
             output.replace_range(value_start..value_end, &placeholder);
+            lower = output.to_ascii_lowercase();
             reasons.push(pattern.code);
             changed = true;
             search_start = value_start + placeholder.len();
@@ -609,12 +610,12 @@ fn redact_url_passwords(input: &str, reasons: &mut Vec<&'static str>) -> (String
     let mut output = input.to_owned();
     let mut changed = false;
     let mut search_start = 0;
+    let mut lower = output.to_ascii_lowercase();
 
     loop {
-        if search_start >= output.len() {
+        if search_start >= lower.len() {
             break;
         }
-        let lower = output.to_ascii_lowercase();
         let Some(relative_scheme) = lower[search_start..].find("://") else {
             break;
         };
@@ -636,6 +637,7 @@ fn redact_url_passwords(input: &str, reasons: &mut Vec<&'static str>) -> (String
         if value_start < at_index {
             let placeholder = redaction_placeholder("url_password");
             output.replace_range(value_start..at_index, &placeholder);
+            lower = output.to_ascii_lowercase();
             reasons.push("url_password");
             changed = true;
             search_start = value_start + placeholder.len();
@@ -651,9 +653,9 @@ fn redact_pem_blocks(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
     let mut output = input.to_owned();
     let mut changed = false;
     let mut search_start = 0;
+    let mut lower = output.to_ascii_lowercase();
 
     loop {
-        let lower = output.to_ascii_lowercase();
         if search_start >= lower.len() {
             break;
         }
@@ -673,6 +675,7 @@ fn redact_pem_blocks(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
             });
         let placeholder = redaction_placeholder("pem_block");
         output.replace_range(begin..end, &placeholder);
+        lower = output.to_ascii_lowercase();
         reasons.push("pem_block");
         changed = true;
         search_start = begin + placeholder.len();

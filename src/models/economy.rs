@@ -309,12 +309,17 @@ impl SituationAttentionProfile {
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "minimal" => Some(Self::Minimal),
-            "summary" => Some(Self::Summary),
-            "standard" => Some(Self::Standard),
-            "full" => Some(Self::Full),
-            _ => None,
+        let trimmed = value.trim();
+        if trimmed.eq_ignore_ascii_case("minimal") {
+            Some(Self::Minimal)
+        } else if trimmed.eq_ignore_ascii_case("summary") {
+            Some(Self::Summary)
+        } else if trimmed.eq_ignore_ascii_case("standard") {
+            Some(Self::Standard)
+        } else if trimmed.eq_ignore_ascii_case("full") {
+            Some(Self::Full)
+        } else {
+            None
         }
     }
 
@@ -1401,8 +1406,10 @@ impl EconomyRecommendation {
             "automatable": self.automatable,
         });
 
-        if let Some(ref cmd) = self.suggested_command {
-            obj["suggestedCommand"] = json!(cmd);
+        if let Some(obj_map) = obj.as_object_mut() {
+            if let Some(ref cmd) = self.suggested_command {
+                obj_map.insert("suggestedCommand".to_string(), json!(cmd));
+            }
         }
 
         obj

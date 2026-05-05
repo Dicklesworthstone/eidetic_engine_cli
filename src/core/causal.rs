@@ -159,11 +159,13 @@ impl CausalExposure {
             "artifactType": self.artifact_type,
             "exposedAt": self.exposed_at,
         });
-        if let Some(ref pack_id) = self.context_pack_id {
-            obj["contextPackId"] = json!(pack_id);
-        }
-        if let Some(ref run_id) = self.recorder_run_id {
-            obj["recorderRunId"] = json!(run_id);
+        if let Some(obj_map) = obj.as_object_mut() {
+            if let Some(ref pack_id) = self.context_pack_id {
+                obj_map.insert("contextPackId".to_string(), json!(pack_id));
+            }
+            if let Some(ref run_id) = self.recorder_run_id {
+                obj_map.insert("recorderRunId".to_string(), json!(run_id));
+            }
         }
         obj
     }

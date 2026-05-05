@@ -519,7 +519,7 @@ pub fn generate_autolink_candidates(
 
             let (src_memory_id, dst_memory_id) =
                 canonical_memory_pair(left.memory_id, right.memory_id);
-            if existing_pairs.contains(&(src_memory_id.to_owned(), dst_memory_id.to_owned())) {
+            if existing_pairs.contains(&(src_memory_id, dst_memory_id)) {
                 continue;
             }
 
@@ -606,7 +606,7 @@ pub fn generate_co_mention_candidates(
 
             let (src_memory_id, dst_memory_id) =
                 canonical_memory_pair(left.memory_id, right.memory_id);
-            if existing_pairs.contains(&(src_memory_id.to_owned(), dst_memory_id.to_owned())) {
+            if existing_pairs.contains(&(src_memory_id, dst_memory_id)) {
                 continue;
             }
 
@@ -758,17 +758,14 @@ fn entity_frequencies(memories: &[NormalizedCoMentionMemory<'_>]) -> BTreeMap<St
     counts
 }
 
-fn existing_relation_pairs(
-    existing_edges: &[AutolinkExistingEdge],
+fn existing_relation_pairs<'a>(
+    existing_edges: &'a [AutolinkExistingEdge],
     relation: &str,
-) -> BTreeSet<(String, String)> {
+) -> BTreeSet<(&'a str, &'a str)> {
     existing_edges
         .iter()
         .filter(|edge| edge.relation == relation)
-        .map(|edge| {
-            let (src, dst) = canonical_memory_pair(&edge.src_memory_id, &edge.dst_memory_id);
-            (src.to_owned(), dst.to_owned())
-        })
+        .map(|edge| canonical_memory_pair(&edge.src_memory_id, &edge.dst_memory_id))
         .collect()
 }
 

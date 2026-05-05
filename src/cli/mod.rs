@@ -11232,7 +11232,12 @@ where
             "details": {},
         });
         if let Some(repair) = &error.repair {
-            error_json["repair"] = serde_json::Value::String(repair.clone());
+            if let Some(error_map) = error_json.as_object_mut() {
+                error_map.insert(
+                    "repair".to_string(),
+                    serde_json::Value::String(repair.clone()),
+                );
+            }
         }
         let json = serde_json::json!({
             "schema": crate::models::ERROR_SCHEMA_V1,

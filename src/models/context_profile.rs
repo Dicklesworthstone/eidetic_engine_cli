@@ -140,13 +140,19 @@ impl ContextProfileSection {
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "procedural_rules" => Some(Self::ProceduralRules),
-            "decisions" => Some(Self::Decisions),
-            "failures" => Some(Self::Failures),
-            "evidence" => Some(Self::Evidence),
-            "artifacts" => Some(Self::Artifacts),
-            _ => None,
+        let trimmed = value.trim();
+        if trimmed.eq_ignore_ascii_case("procedural_rules") {
+            Some(Self::ProceduralRules)
+        } else if trimmed.eq_ignore_ascii_case("decisions") {
+            Some(Self::Decisions)
+        } else if trimmed.eq_ignore_ascii_case("failures") {
+            Some(Self::Failures)
+        } else if trimmed.eq_ignore_ascii_case("evidence") {
+            Some(Self::Evidence)
+        } else if trimmed.eq_ignore_ascii_case("artifacts") {
+            Some(Self::Artifacts)
+        } else {
+            None
         }
     }
 }

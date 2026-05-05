@@ -525,8 +525,11 @@ fn run_step(step: VerifyStep, workspace_path: &str) -> StepResult {
 pub fn should_gitignore(path: &Path) -> bool {
     let path_str = path.to_string_lossy();
     for rule in ARTIFACT_RULES {
-        if !rule.versioned && path_str.starts_with(rule.pattern.trim_end_matches('/')) {
-            return true;
+        if !rule.versioned {
+            let trimmed = rule.pattern.trim_end_matches('/');
+            if path_str == trimmed || path_str.starts_with(&format!("{trimmed}/")) {
+                return true;
+            }
         }
     }
     false

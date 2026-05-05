@@ -237,39 +237,44 @@ impl SearchReport {
                     "score": hit.score,
                     "source": hit.source.as_str(),
                 });
-                if let Some(fast) = hit.fast_score {
-                    obj["fastScore"] = serde_json::json!(fast);
-                }
-                if let Some(quality) = hit.quality_score {
-                    obj["qualityScore"] = serde_json::json!(quality);
-                }
-                if let Some(lexical) = hit.lexical_score {
-                    obj["lexicalScore"] = serde_json::json!(lexical);
-                }
-                if let Some(rerank) = hit.rerank_score {
-                    obj["rerankScore"] = serde_json::json!(rerank);
-                }
-                if let Some(ref meta) = hit.metadata {
-                    obj["metadata"] = meta.clone();
-                }
-                if let Some(ref explanation) = hit.explanation {
-                    let factors: Vec<serde_json::Value> = explanation
-                        .factors
-                        .iter()
-                        .map(|f| {
-                            serde_json::json!({
-                                "name": f.name,
-                                "value": f.value,
-                                "contribution": f.contribution,
-                                "sourceField": f.source_field,
-                                "formula": f.formula,
+                if let Some(obj_map) = obj.as_object_mut() {
+                    if let Some(fast) = hit.fast_score {
+                        obj_map.insert("fastScore".to_string(), serde_json::json!(fast));
+                    }
+                    if let Some(quality) = hit.quality_score {
+                        obj_map.insert("qualityScore".to_string(), serde_json::json!(quality));
+                    }
+                    if let Some(lexical) = hit.lexical_score {
+                        obj_map.insert("lexicalScore".to_string(), serde_json::json!(lexical));
+                    }
+                    if let Some(rerank) = hit.rerank_score {
+                        obj_map.insert("rerankScore".to_string(), serde_json::json!(rerank));
+                    }
+                    if let Some(ref meta) = hit.metadata {
+                        obj_map.insert("metadata".to_string(), meta.clone());
+                    }
+                    if let Some(ref explanation) = hit.explanation {
+                        let factors: Vec<serde_json::Value> = explanation
+                            .factors
+                            .iter()
+                            .map(|f| {
+                                serde_json::json!({
+                                    "name": f.name,
+                                    "value": f.value,
+                                    "contribution": f.contribution,
+                                    "sourceField": f.source_field,
+                                    "formula": f.formula,
+                                })
                             })
-                        })
-                        .collect();
-                    obj["explanation"] = serde_json::json!({
-                        "summary": explanation.summary,
-                        "factors": factors,
-                    });
+                            .collect();
+                        obj_map.insert(
+                            "explanation".to_string(),
+                            serde_json::json!({
+                                "summary": explanation.summary,
+                                "factors": factors,
+                            }),
+                        );
+                    }
                 }
                 obj
             })

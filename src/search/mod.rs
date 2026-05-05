@@ -1397,11 +1397,13 @@ impl IndexManifest {
             },
         });
 
-        if let Some(path) = &self.lexical_index_path {
-            value["lexical_index_path"] = serde_json::json!(path);
-        }
-        if let Some(path) = &self.vector_index_path {
-            value["vector_index_path"] = serde_json::json!(path);
+        if let Some(value_map) = value.as_object_mut() {
+            if let Some(path) = &self.lexical_index_path {
+                value_map.insert("lexical_index_path".to_string(), serde_json::json!(path));
+            }
+            if let Some(path) = &self.vector_index_path {
+                value_map.insert("vector_index_path".to_string(), serde_json::json!(path));
+            }
         }
 
         value

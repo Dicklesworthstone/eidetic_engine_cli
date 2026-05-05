@@ -918,10 +918,41 @@ pub fn execute_install_plan(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = fs::metadata(install_path) {
-            let mut permissions = metadata.permissions();
-            permissions.set_mode(0o755);
-            let _ = fs::set_permissions(install_path, permissions);
+        match fs::metadata(install_path) {
+            Ok(metadata) => {
+                let mut permissions = metadata.permissions();
+                permissions.set_mode(0o755);
+                if let Err(error) = fs::set_permissions(install_path, permissions) {
+                    if let Some(backup) = &backup_path {
+                        let _ = fs::rename(backup, install_path);
+                    }
+                    return InstallExecutionResult {
+                        success: false,
+                        artifact_verified: true,
+                        binary_installed: false,
+                        backup_path,
+                        error_message: Some(format!(
+                            "failed to set executable permissions on '{}': {error}",
+                            install_path.display()
+                        )),
+                    };
+                }
+            }
+            Err(error) => {
+                if let Some(backup) = &backup_path {
+                    let _ = fs::rename(backup, install_path);
+                }
+                return InstallExecutionResult {
+                    success: false,
+                    artifact_verified: true,
+                    binary_installed: false,
+                    backup_path,
+                    error_message: Some(format!(
+                        "failed to read metadata for '{}' to set permissions: {error}",
+                        install_path.display()
+                    )),
+                };
+            }
         }
     }
 
@@ -1754,9 +1785,8 @@ mod tests {
 
     #[test]
     fn verify_checksum_blake3_matches() -> TestResult {
-        let temp_dir = env::temp_dir().join("ee-checksum-test");
-        let _ = fs::create_dir_all(&temp_dir);
-        let test_file = temp_dir.join("test.bin");
+        let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let test_file = temp_dir.path().join("test.bin");
         fs::write(&test_file, b"hello world").map_err(|error| error.to_string())?;
 
         let expected = blake3::hash(b"hello world").to_hex().to_string();
@@ -1773,7 +1803,6 @@ mod tests {
             "blake3 checksum should not match wrong value",
         )?;
 
-        let _ = fs::remove_dir_all(&temp_dir);
         Ok(())
     }
 
@@ -1781,9 +1810,8 @@ mod tests {
     fn verify_checksum_sha256_matches() -> TestResult {
         use sha2::{Digest, Sha256};
 
-        let temp_dir = env::temp_dir().join("ee-sha256-test");
-        let _ = fs::create_dir_all(&temp_dir);
-        let test_file = temp_dir.join("test.bin");
+        let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let test_file = temp_dir.path().join("test.bin");
         fs::write(&test_file, b"hello world").map_err(|error| error.to_string())?;
 
         let mut hasher = Sha256::new();
@@ -1803,7 +1831,6 @@ mod tests {
             "sha256 checksum should not match wrong value",
         )?;
 
-        let _ = fs::remove_dir_all(&temp_dir);
         Ok(())
     }
 }

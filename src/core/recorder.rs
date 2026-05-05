@@ -80,11 +80,13 @@ impl RecorderStartReport {
             "startedAt": self.started_at,
             "dryRun": self.dry_run,
         });
-        if let Some(ref session_id) = self.session_id {
-            obj["sessionId"] = json!(session_id);
-        }
-        if let Some(ref workspace_id) = self.workspace_id {
-            obj["workspaceId"] = json!(workspace_id);
+        if let Some(obj_map) = obj.as_object_mut() {
+            if let Some(ref session_id) = self.session_id {
+                obj_map.insert("sessionId".to_string(), json!(session_id));
+            }
+            if let Some(ref workspace_id) = self.workspace_id {
+                obj_map.insert("workspaceId".to_string(), json!(workspace_id));
+            }
         }
         obj
     }
@@ -198,8 +200,10 @@ impl RecorderEventReport {
             "chainStatus": self.chain_status.as_str(),
             "dryRun": self.dry_run,
         });
-        if let Some(ref hash) = self.payload_hash {
-            obj["payloadHash"] = json!(hash);
+        if let Some(obj_map) = obj.as_object_mut() {
+            if let Some(ref hash) = self.payload_hash {
+                obj_map.insert("payloadHash".to_string(), json!(hash));
+            }
         }
         obj
     }
@@ -1057,8 +1061,10 @@ impl RecorderTailFollowEvent {
             "timestamp": self.timestamp,
             "redacted": self.redacted,
         });
-        if let Some(ref preview) = self.payload_preview {
-            obj["payloadPreview"] = json!(preview);
+        if let Some(obj_map) = obj.as_object_mut() {
+            if let Some(ref preview) = self.payload_preview {
+                obj_map.insert("payloadPreview".to_string(), json!(preview));
+            }
         }
         obj.to_string()
     }
@@ -1374,8 +1380,10 @@ impl RecorderLink {
             "artifactId": self.artifact_id,
             "createdAt": self.created_at,
         });
-        if let Some(ref meta) = self.metadata {
-            obj["metadata"] = json!(meta);
+        if let Some(obj_map) = obj.as_object_mut() {
+            if let Some(ref meta) = self.metadata {
+                obj_map.insert("metadata".to_string(), json!(meta));
+            }
         }
         obj
     }
