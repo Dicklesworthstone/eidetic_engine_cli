@@ -3,6 +3,8 @@
   "error": {
     "code": "usage",
     "message": "unknown connector(s): [\"not-a-real-agent\"]",
-    "repair": "ee agent detect --help"
+    "severity": "low",
+    "repair": "ee agent detect --help",
+    "details": {}
   }
 }

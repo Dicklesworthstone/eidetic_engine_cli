@@ -164,7 +164,7 @@ fn status_json_embeds_deferred_agent_inventory() -> TestResult {
     )?;
     ensure_json_equal(
         value.pointer("/data/curationHealth/status"),
-        JsonValue::String("not_inspected".to_string()),
+        JsonValue::String("unavailable".to_string()),
         "curation health status",
     )?;
     ensure(

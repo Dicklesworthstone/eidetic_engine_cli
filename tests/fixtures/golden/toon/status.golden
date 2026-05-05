@@ -4,10 +4,22 @@ fields: standard
 data:
   command: status
   version: 0.1.0
+  workspace:
+    source: explicit
+    root: /data/projects/eidetic_engine_cli
+    configDir: /data/projects/eidetic_engine_cli/.ee
+    markerPresent: true
+    canonicalRoot: /data/projects/eidetic_engine_cli
+    fingerprint: 25e38e130474e7f0292de2a3
+    scopeKind: repository
+    repositoryRoot: /data/projects/eidetic_engine_cli
+    repositoryFingerprint: "repo:25e38e130474e7f0292de2a3"
+    subprojectPath: null
+    diagnostics[0]:
   capabilities:
     runtime: ready
-    storage: pending
-    search: pending
+    storage: degraded
+    search: degraded
     agentDetection: ready
   runtime:
     engine: asupersync
@@ -30,7 +42,7 @@ data:
       provenanceScore: null
       tombstonePenalty: null
   curationHealth:
-    status: not_inspected
+    status: unavailable
     totalCount: 0
     pendingCount: 0
     acceptedCount: 0
@@ -46,16 +58,16 @@ data:
     meanReviewLatencyDays: null
     nextScheduledAt: null
   feedbackHealth:
-    status: not_inspected
+    status: unavailable
     harmfulPerSourcePerHour: 5
     harmfulBurstWindowSeconds: 3600
     perSourceHarmfulCounts[0]:
     quarantineQueueDepth: 0
     protectedRuleCount: 0
     lastInversionEvent: null
-    nextDeterministicAction: provide --workspace to inspect feedback health
+    nextDeterministicAction: run ee init --workspace .
   derivedAssets[2]{name,status,sourceHighWatermark,assetHighWatermark,highWatermarkLag,path}:
-    search_index,not_inspected,null,null,null,.ee/index
+    search_index,missing,null,null,null,.ee/index
     graph_snapshot,unimplemented,null,null,null,.ee/graph
   agentInventory:
     schema: ee.agent.status.v1
@@ -66,7 +78,9 @@ data:
       totalCount: 22
     inspectionCommand: ee agent status --json
     degraded[0]:
-  degraded[3]{code,severity,message}:
-    storage_not_inspected,low,Storage readiness was not inspected because no workspace was selected.
-    search_not_inspected,low,Search readiness was not inspected because no workspace was selected.
-    memory_health_unavailable,low,Memory health is unavailable without an explicit workspace.
+  degraded[5]{code,severity,message}:
+    storage_degraded,medium,Workspace storage exists but could not be opened or needs migration.
+    search_index_degraded,medium,"Search is compiled but the selected workspace index is missing, stale, corrupt, or unreadable."
+    memory_health_unavailable,medium,Memory health is unavailable because memory rows could not be read.
+    curation_health_unavailable,medium,Curation health is unavailable because candidate rows could not be read.
+    feedback_quarantine_unavailable,medium,Feedback quarantine rows could not be read.
