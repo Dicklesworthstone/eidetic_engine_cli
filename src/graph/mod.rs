@@ -806,27 +806,20 @@ pub fn build_memory_graph(
     conn: &DbConnection,
     options: &ProjectionOptions,
 ) -> Result<MemoryGraphProjection, String> {
+    let links = graph_projection_links(conn, options)?;
+    build_memory_graph_from_links(&links)
+}
+
+#[cfg(feature = "graph")]
+fn build_memory_graph_from_links(
+    links: &[StoredMemoryLink],
+) -> Result<MemoryGraphProjection, String> {
     use std::time::Instant;
 
     let start = Instant::now();
 
-    let links = conn
-        .list_all_memory_links(options.link_limit)
-        .map_err(|e| format!("Failed to query memory links: {e}"))?;
-
     let mut graph = DiGraph::new(CompatibilityMode::Strict);
-    for link in &links {
-        if let Some(min_w) = options.min_weight {
-            if link.weight < min_w {
-                continue;
-            }
-        }
-        if let Some(min_c) = options.min_confidence {
-            if link.confidence < min_c {
-                continue;
-            }
-        }
-
+    for link in links {
         let mut attrs = AttrMap::new();
         attrs.insert(
             "weight".to_string(),
@@ -879,6 +872,30 @@ pub fn build_memory_graph(
         edge_count,
         build_ms,
     })
+}
+
+#[cfg(feature = "graph")]
+fn graph_projection_links(
+    conn: &DbConnection,
+    options: &ProjectionOptions,
+) -> Result<Vec<StoredMemoryLink>, String> {
+    let links = conn
+        .list_all_memory_links(options.link_limit)
+        .map_err(|e| format!("Failed to query memory links: {e}"))?;
+    Ok(links
+        .into_iter()
+        .filter(|link| graph_link_matches_options(link, options))
+        .collect())
+}
+
+#[cfg(feature = "graph")]
+fn graph_link_matches_options(link: &StoredMemoryLink, options: &ProjectionOptions) -> bool {
+    options
+        .min_weight
+        .is_none_or(|min_weight| link.weight >= min_weight)
+        && options
+            .min_confidence
+            .is_none_or(|min_confidence| link.confidence >= min_confidence)
 }
 
 #[cfg(feature = "graph")]
@@ -1191,7 +1208,7 @@ pub fn refresh_graph_snapshot(
     workspace_id: &str,
     options: &CentralityRefreshOptions,
 ) -> Result<GraphRefreshJobReport, String> {
-    let centrality = refresh_centrality(conn, options)?;
+    let (centrality, links) = refresh_centrality_with_source_links(conn, options)?;
     let mut report = GraphRefreshJobReport {
         centrality,
         workspace_id: workspace_id.to_owned(),
@@ -1202,7 +1219,6 @@ pub fn refresh_graph_snapshot(
         return Ok(report);
     }
 
-    let links = graph_snapshot_links(conn, options)?;
     let metrics_json = graph_snapshot_metrics_json(&report.centrality, &links)?;
     let content_hash = graph_snapshot_content_hash(&metrics_json);
     let snapshot_version = next_graph_snapshot_version(conn, workspace_id)?;
@@ -1261,17 +1277,37 @@ pub fn refresh_centrality(
     conn: &DbConnection,
     options: &CentralityRefreshOptions,
 ) -> Result<CentralityRefreshReport, String> {
+    let (centrality, _) = refresh_centrality_with_source_links(conn, options)?;
+    Ok(centrality)
+}
+
+#[cfg(feature = "graph")]
+fn refresh_centrality_with_source_links(
+    conn: &DbConnection,
+    options: &CentralityRefreshOptions,
+) -> Result<(CentralityRefreshReport, Vec<StoredMemoryLink>), String> {
+    let projection_opts = ProjectionOptions {
+        link_limit: options.link_limit,
+        min_weight: options.min_weight,
+        min_confidence: options.min_confidence,
+    };
+    let links = graph_projection_links(conn, &projection_opts)
+        .map_err(|error| format!("Failed to query memory links for graph snapshot: {error}"))?;
+    let centrality = refresh_centrality_from_links(&links, options.dry_run)?;
+    Ok((centrality, links))
+}
+
+#[cfg(feature = "graph")]
+fn refresh_centrality_from_links(
+    links: &[StoredMemoryLink],
+    dry_run: bool,
+) -> Result<CentralityRefreshReport, String> {
     use std::time::Instant;
 
     let total_start = Instant::now();
 
-    if options.dry_run {
-        let projection_opts = ProjectionOptions {
-            link_limit: options.link_limit,
-            min_weight: options.min_weight,
-            min_confidence: options.min_confidence,
-        };
-        let projection = build_memory_graph(conn, &projection_opts)?;
+    if dry_run {
+        let projection = build_memory_graph_from_links(links)?;
         return Ok(CentralityRefreshReport {
             version: env!("CARGO_PKG_VERSION"),
             status: CentralityRefreshStatus::DryRun,
@@ -1288,12 +1324,7 @@ pub fn refresh_centrality(
         });
     }
 
-    let projection_opts = ProjectionOptions {
-        link_limit: options.link_limit,
-        min_weight: options.min_weight,
-        min_confidence: options.min_confidence,
-    };
-    let projection = build_memory_graph(conn, &projection_opts)?;
+    let projection = build_memory_graph_from_links(links)?;
 
     if projection.node_count == 0 {
         return Ok(CentralityRefreshReport {
@@ -1379,6 +1410,15 @@ pub fn refresh_centrality(
     _conn: &crate::db::DbConnection,
     options: &CentralityRefreshOptions,
 ) -> Result<CentralityRefreshReport, String> {
+    let (centrality, _) = refresh_centrality_with_source_links(_conn, options)?;
+    Ok(centrality)
+}
+
+#[cfg(not(feature = "graph"))]
+fn refresh_centrality_with_source_links(
+    _conn: &crate::db::DbConnection,
+    options: &CentralityRefreshOptions,
+) -> Result<(CentralityRefreshReport, Vec<StoredMemoryLink>), String> {
     Ok(CentralityRefreshReport {
         version: env!("CARGO_PKG_VERSION"),
         status: CentralityRefreshStatus::GraphFeatureDisabled,
@@ -1393,26 +1433,7 @@ pub fn refresh_centrality(
         top_pagerank: vec![],
         top_betweenness: vec![],
     })
-}
-
-fn graph_snapshot_links(
-    conn: &DbConnection,
-    options: &CentralityRefreshOptions,
-) -> Result<Vec<StoredMemoryLink>, String> {
-    let links = conn
-        .list_all_memory_links(options.link_limit)
-        .map_err(|error| format!("Failed to query memory links for graph snapshot: {error}"))?;
-    Ok(links
-        .into_iter()
-        .filter(|link| {
-            options
-                .min_weight
-                .is_none_or(|min_weight| link.weight >= min_weight)
-                && options
-                    .min_confidence
-                    .is_none_or(|min_confidence| link.confidence >= min_confidence)
-        })
-        .collect())
+    .map(|centrality| (centrality, Vec::new()))
 }
 
 fn graph_snapshot_metrics_json(
@@ -4381,6 +4402,25 @@ mod tests {
         assert_eq!(stored.status, crate::db::GraphSnapshotStatus::Valid);
         assert!(stored.metrics_json.contains("\"nodes\""));
         assert!(stored.metrics_json.contains("\"edges\""));
+        let metrics: serde_json::Value = serde_json::from_str(&stored.metrics_json)
+            .map_err(|error| format!("stored metrics JSON should parse: {error}"))?;
+        let metric_edges = metrics
+            .get("edges")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "stored metrics should include top-level edges".to_owned())?;
+        let metric_nodes = metrics
+            .get("nodes")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "stored metrics should include top-level nodes".to_owned())?;
+        assert_eq!(
+            metric_edges.len(),
+            usize::try_from(stored.source_generation).map_err(|error| error.to_string())?
+        );
+        assert_eq!(metric_edges.len(), 2);
+        assert_eq!(
+            metric_nodes.len(),
+            usize::try_from(stored.node_count).map_err(|error| error.to_string())?
+        );
 
         let export = super::export_graph_snapshot(
             &connection,
