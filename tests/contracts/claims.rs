@@ -61,14 +61,11 @@ fn assert_golden(name: &str, actual: &str) -> TestResult {
 }
 
 fn unique_claim_workspace(label: &str) -> Result<PathBuf, String> {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_nanos();
-    let path = env::temp_dir().join(format!("ee_claims_{label}_{nonce}"));
-    fs::create_dir_all(&path)
-        .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
-    Ok(path)
+    tempfile::Builder::new()
+        .prefix(&format!("ee_claims_{label}_"))
+        .tempdir()
+        .map(tempfile::TempDir::keep)
+        .map_err(|error| format!("failed to create temporary claim workspace: {error}"))
 }
 
 fn run_ee(args: &[String]) -> Result<std::process::Output, String> {
@@ -431,6 +428,79 @@ fn gate14_core_claim_verify_reports_hash_mismatch_from_real_manifest() -> TestRe
             .iter()
             .any(|error| error.contains("hash_mismatch")),
         "hash mismatch error is reported",
+    )
+}
+
+#[test]
+#[cfg(unix)]
+fn gate14_core_claim_verify_rejects_symlink_artifact_evidence() -> TestResult {
+    let fixture = write_real_claim_fixture("core_symlink_artifact", None, false)?;
+    let claim_artifacts_dir = fixture.workspace.join("artifacts").join(&fixture.claim_id);
+    let outside = unique_claim_workspace("core_symlink_artifact_outside")?;
+    let outside_payload = b"{\"ok\":true,\"source\":\"outside\"}\n";
+    let outside_payload_path = outside.join("outside.json");
+    fs::write(&outside_payload_path, outside_payload)
+        .map_err(|error| format!("failed to write outside artifact payload: {error}"))?;
+    std::os::unix::fs::symlink(
+        &outside_payload_path,
+        claim_artifacts_dir.join("linked.json"),
+    )
+    .map_err(|error| format!("failed to create artifact symlink: {error}"))?;
+
+    let manifest = serde_json::json!({
+        "schema": "ee.claim_manifest.v1",
+        "claimId": fixture.claim_id,
+        "verificationStatus": "passing",
+        "lastVerifiedAt": "2026-01-02T03:04:05Z",
+        "artifacts": [
+            {
+                "path": "linked.json",
+                "artifactType": "report",
+                "blake3Hash": blake3::hash(outside_payload).to_hex().to_string(),
+                "sizeBytes": outside_payload.len(),
+                "createdAt": "2026-01-02T03:04:05Z"
+            }
+        ]
+    });
+    fs::write(
+        claim_artifacts_dir.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("failed to write manifest.json: {error}"))?;
+
+    let verify = build_claim_verify_report(&ClaimVerifyOptions {
+        workspace_path: fixture.workspace,
+        claim_id: fixture.claim_id,
+        fail_fast: true,
+        ..Default::default()
+    })
+    .map_err(|error| error.to_string())?;
+
+    ensure(verify.verified_count == 0, "no verified claims")?;
+    ensure(verify.failed_count == 1, "one failed claim")?;
+    let result = verify
+        .results
+        .first()
+        .ok_or_else(|| "verification result should be present".to_string())?;
+    ensure(
+        result.status == ManifestVerificationStatus::Failing,
+        "symlink artifact is failing",
+    )?;
+    ensure(result.artifacts_checked == 1, "artifact was checked")?;
+    ensure(
+        result.artifacts_passed == 0,
+        "symlink artifact is not evidence",
+    )?;
+    ensure(
+        result.artifacts_failed == 1,
+        "symlink artifact failed verification",
+    )?;
+    ensure(
+        result
+            .errors
+            .iter()
+            .any(|error| error.contains("artifact_symlink_refused")),
+        "symlink artifact refusal is reported",
     )
 }
 

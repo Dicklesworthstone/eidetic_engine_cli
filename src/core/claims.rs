@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -612,8 +612,7 @@ fn verify_claim_artifacts(
     let mut artifacts_failed = 0usize;
 
     for artifact in &manifest.artifacts {
-        let artifact_path = claim_artifacts_dir.join(&artifact.path);
-        match fs::read(&artifact_path) {
+        match read_claim_artifact_bytes(&claim_artifacts_dir, &artifact.path) {
             Ok(bytes) => {
                 let actual_hash = blake3::hash(&bytes).to_hex().to_string();
                 let actual_size = bytes.len() as u64;
@@ -642,11 +641,7 @@ fn verify_claim_artifacts(
             }
             Err(error) => {
                 artifacts_failed += 1;
-                errors.push(format!(
-                    "artifact_not_found: {}: {}",
-                    artifact_path.display(),
-                    error
-                ));
+                errors.push(error);
             }
         }
     }
@@ -668,6 +663,42 @@ fn verify_claim_artifacts(
         },
         Some(manifest),
     )
+}
+
+fn read_claim_artifact_bytes(
+    claim_artifacts_dir: &Path,
+    relative_path: &str,
+) -> Result<Vec<u8>, String> {
+    let artifact_path =
+        resolve_claim_artifact_path_no_symlinks(claim_artifacts_dir, relative_path)?;
+    fs::read(&artifact_path)
+        .map_err(|error| format!("artifact_not_found: {}: {}", artifact_path.display(), error))
+}
+
+fn resolve_claim_artifact_path_no_symlinks(
+    claim_artifacts_dir: &Path,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    reject_symlink_component(claim_artifacts_dir)?;
+    let mut artifact_path = claim_artifacts_dir.to_path_buf();
+    for component in Path::new(relative_path).components() {
+        let Component::Normal(component) = component else {
+            return Err(format!("invalid_artifact_path: {relative_path}"));
+        };
+        artifact_path.push(component);
+        reject_symlink_component(&artifact_path)?;
+    }
+    Ok(artifact_path)
+}
+
+fn reject_symlink_component(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(format!("artifact_symlink_refused: {}", path.display()))
+        }
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!("artifact_not_found: {}: {}", path.display(), error)),
+    }
 }
 
 const fn posture_for_claim_status(status: ClaimStatus) -> ClaimPosture {
