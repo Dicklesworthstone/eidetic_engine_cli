@@ -706,8 +706,13 @@ mod tests {
         let source = value["data"]["results"][0]["source"]
             .as_str()
             .ok_or_else(|| "search result source must be a string".to_string())?;
+        let source_count_key = match source {
+            "semantic_fast" => "semanticFast",
+            "semantic_quality" => "semanticQuality",
+            other => other,
+        };
         ensure_equal(
-            &value["data"]["metrics"]["sourceCounts"][source],
+            &value["data"]["metrics"]["sourceCounts"][source_count_key],
             &serde_json::json!(1),
             "search metrics source count",
         )

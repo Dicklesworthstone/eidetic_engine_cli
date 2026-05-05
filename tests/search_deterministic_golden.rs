@@ -40,6 +40,36 @@ where
     }
 }
 
+fn ensure_json_number_close(
+    actual: &JsonValue,
+    expected: &JsonValue,
+    epsilon: f64,
+    context: &str,
+) -> TestResult {
+    let actual = actual
+        .as_f64()
+        .ok_or_else(|| format!("{context}: actual value is not numeric: {actual:?}"))?;
+    let expected = expected
+        .as_f64()
+        .ok_or_else(|| format!("{context}: expected value is not numeric: {expected:?}"))?;
+
+    if (actual - expected).abs() <= epsilon {
+        Ok(())
+    } else {
+        Err(format!(
+            "{context}: expected {expected} within {epsilon}, got {actual}"
+        ))
+    }
+}
+
+fn source_count_key(source: &str) -> &str {
+    match source {
+        "semantic_fast" => "semanticFast",
+        "semantic_quality" => "semanticQuality",
+        other => other,
+    }
+}
+
 fn target_root() -> PathBuf {
     env::var_os("CARGO_TARGET_TMPDIR")
         .or_else(|| env::var_os("CARGO_TARGET_DIR"))
@@ -415,6 +445,57 @@ fn assert_search_contract(value: &JsonValue) -> TestResult {
             format!("search result must include explanation factors: {result:?}"),
         )?;
     }
+
+    for pair in results.windows(2) {
+        let left_score = pair[0]["score"]
+            .as_f64()
+            .ok_or_else(|| "left search score must be numeric".to_owned())?;
+        let right_score = pair[1]["score"]
+            .as_f64()
+            .ok_or_else(|| "right search score must be numeric".to_owned())?;
+        ensure(
+            left_score >= right_score,
+            format!("search ranking must be non-increasing: {left_score} before {right_score}"),
+        )?;
+    }
+
+    let source_counts = &value["data"]["metrics"]["sourceCounts"];
+    let mut observed_semantic_fast = 0;
+    for result in results {
+        let source = result["source"]
+            .as_str()
+            .ok_or_else(|| "search result source must be a string".to_owned())?;
+        if source == "semantic_fast" {
+            observed_semantic_fast += 1;
+        }
+        ensure(
+            source_counts.get(source_count_key(source)).is_some(),
+            format!("sourceCounts must include camelCase key for {source}"),
+        )?;
+    }
+    ensure_equal(
+        &source_counts["semanticFast"],
+        &serde_json::json!(observed_semantic_fast),
+        "semantic fast source count",
+    )?;
+    ensure_json_number_close(
+        &value["data"]["metrics"]["scoreDistribution"]["top"],
+        &results[0]["score"],
+        0.000_001,
+        "score distribution top tracks first result",
+    )?;
+    ensure_json_number_close(
+        &value["data"]["metrics"]["scoreDistribution"]["max"],
+        &results[0]["score"],
+        0.000_001,
+        "score distribution max tracks first result",
+    )?;
+    ensure_json_number_close(
+        &value["data"]["metrics"]["scoreDistribution"]["min"],
+        &results[2]["score"],
+        0.000_001,
+        "score distribution min tracks last result",
+    )?;
 
     Ok(())
 }
