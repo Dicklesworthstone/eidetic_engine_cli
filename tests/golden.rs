@@ -970,6 +970,189 @@ mod tests {
         assert_golden("agent", "context_pack.md", &stdout)
     }
 
+    #[test]
+    fn agent_context_markdown_provenance_hash_stability_and_artifact_logging() -> TestResult {
+        let artifact_dir = unique_artifact_dir("context-md-provenance")?;
+        let workspace = artifact_dir.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        fs::create_dir_all(&workspace).map_err(|error| {
+            format!(
+                "failed to create workspace {}: {error}",
+                workspace.display()
+            )
+        })?;
+
+        seed_search_workspace(&workspace, &database)?;
+        build_search_index(&workspace, &database, &index_dir)?;
+
+        // Run context --json twice to verify pack hash stability (determinism).
+        let run_context_json = || {
+            Command::new(env!("CARGO_BIN_EXE_ee"))
+                .arg("--json")
+                .arg("--workspace")
+                .arg(&workspace)
+                .arg("context")
+                .arg("format before release")
+                .arg("--database")
+                .arg(&database)
+                .arg("--index-dir")
+                .arg(&index_dir)
+                .arg("--profile")
+                .arg("compact")
+                .arg("--max-tokens")
+                .arg("4000")
+                .output()
+        };
+
+        let output1 = run_context_json()
+            .map_err(|error| format!("first context --json run failed: {error}"))?;
+        ensure(
+            output1.status.success(),
+            format!(
+                "first context --json should succeed; stderr: {}",
+                String::from_utf8_lossy(&output1.stderr)
+            ),
+        )?;
+
+        let stdout1 = String::from_utf8(output1.stdout)
+            .map_err(|error| format!("first context stdout not UTF-8: {error}"))?;
+        let json1: serde_json::Value =
+            serde_json::from_str(&stdout1).map_err(|error| error.to_string())?;
+        let hash1 = json1["data"]["pack"]["hash"]
+            .as_str()
+            .ok_or_else(|| "first run missing pack hash".to_string())?;
+
+        let output2 = run_context_json()
+            .map_err(|error| format!("second context --json run failed: {error}"))?;
+        ensure(
+            output2.status.success(),
+            format!(
+                "second context --json should succeed; stderr: {}",
+                String::from_utf8_lossy(&output2.stderr)
+            ),
+        )?;
+
+        let stdout2 = String::from_utf8(output2.stdout)
+            .map_err(|error| format!("second context stdout not UTF-8: {error}"))?;
+        let json2: serde_json::Value =
+            serde_json::from_str(&stdout2).map_err(|error| error.to_string())?;
+        let hash2 = json2["data"]["pack"]["hash"]
+            .as_str()
+            .ok_or_else(|| "second run missing pack hash".to_string())?;
+
+        ensure_equal(&hash1, &hash2, "pack hash determinism")?;
+        ensure(
+            hash1.starts_with("blake3:"),
+            format!("pack hash must be blake3 prefixed, got: {hash1}"),
+        )?;
+
+        // Run context --format markdown and verify provenance elements.
+        let output_md = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .arg("--format")
+            .arg("markdown")
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("context")
+            .arg("format before release")
+            .arg("--database")
+            .arg(&database)
+            .arg("--index-dir")
+            .arg(&index_dir)
+            .arg("--profile")
+            .arg("compact")
+            .arg("--max-tokens")
+            .arg("4000")
+            .output()
+            .map_err(|error| format!("context --format markdown failed: {error}"))?;
+
+        let stdout_md = String::from_utf8(output_md.stdout)
+            .map_err(|error| format!("markdown stdout not UTF-8: {error}"))?;
+
+        ensure(
+            output_md.status.success(),
+            format!(
+                "context --format markdown should succeed; stderr: {}",
+                String::from_utf8_lossy(&output_md.stderr)
+            ),
+        )?;
+
+        // Verify markdown contains provenance section.
+        ensure_contains(&stdout_md, "**Provenance:**", "markdown provenance header")?;
+        ensure_contains(
+            &stdout_md,
+            "file://AGENTS.md",
+            "markdown provenance file reference",
+        )?;
+
+        // Verify selection rationale (the "Why:" section).
+        ensure_contains(
+            &stdout_md,
+            "**Why:**",
+            "markdown selection rationale header",
+        )?;
+        ensure_contains(
+            &stdout_md,
+            "Deterministic retrieval explanation",
+            "markdown selection rationale text",
+        )?;
+
+        // Verify trust class is documented.
+        ensure_contains(&stdout_md, "**Trust:**", "markdown trust header")?;
+        ensure_contains(&stdout_md, "human_explicit", "markdown trust class")?;
+
+        // Verify artifact logging: pack_records table should have entries.
+        // Use list_pack_records_for_memory which returns pack records that include the test memory.
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let pack_history = connection
+            .list_pack_records_for_memory("mem_00000000000000000000000001", 10)
+            .map_err(|error| format!("failed to list pack records: {error}"))?;
+        ensure(
+            !pack_history.is_empty(),
+            "pack_records should have entries for the test memory",
+        )?;
+
+        // Verify the pack record has expected fields.
+        let (pack_record, pack_item) = &pack_history[0];
+        ensure_equal(
+            &pack_record.query,
+            &"format before release".to_string(),
+            "pack record query",
+        )?;
+        ensure_equal(
+            &pack_record.profile,
+            &"compact".to_string(),
+            "pack record profile",
+        )?;
+        ensure(
+            pack_record.pack_hash.starts_with("blake3:"),
+            format!(
+                "pack record hash must be blake3 prefixed, got: {}",
+                pack_record.pack_hash
+            ),
+        )?;
+
+        // Verify pack item links memory correctly.
+        ensure_equal(
+            &pack_item.memory_id,
+            &"mem_00000000000000000000000001".to_string(),
+            "pack item memory id",
+        )?;
+        ensure_equal(
+            &pack_item.section,
+            &"procedural_rules".to_string(),
+            "pack item section",
+        )?;
+        ensure(
+            !pack_item.why.is_empty(),
+            "pack item why (selection rationale) must be populated",
+        )?;
+
+        connection.close().map_err(|error| error.to_string())?;
+
+        Ok(())
+    }
+
     fn normalize_context_pack_json(json: &str) -> String {
         let mut value: serde_json::Value = match serde_json::from_str(json) {
             Ok(v) => v,
