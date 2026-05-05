@@ -5,6 +5,7 @@ use crate::models::{
 };
 
 pub mod query;
+pub mod scoring;
 
 pub use frankensearch::core::types::IndexableDocument;
 pub use frankensearch::{
@@ -12,6 +13,10 @@ pub use frankensearch::{
     TwoTierIndex, TwoTierSearcher,
 };
 pub use query::{ParsedSearchQuery, SearchQueryClause, parse_search_query};
+pub use scoring::{
+    RetrievalMaturity, SearchScoreComponents, SearchScoringConfig, SearchScoringSignals,
+    final_score,
+};
 
 pub const SUBSYSTEM: &str = "search";
 pub const CANONICAL_DOCUMENT_SCHEMA: &str = SEARCH_DOCUMENT_SCHEMA_V1;
@@ -695,10 +700,10 @@ static SEARCH_CAPABILITIES: [SearchCapability; 8] = [
         SearchSurface::Evaluation,
         "Search JSON includes deterministic retrieval metrics.",
     ),
-    SearchCapability::pending(
+    SearchCapability::ready(
         SearchCapabilityName::ScoreExplanation,
         SearchSurface::Explanation,
-        "Wire Frankensearch score components into ee search/context/why output renderers.",
+        "Score explanation and deterministic retrieval multipliers are wired.",
     ),
 ];
 
@@ -770,19 +775,6 @@ impl SearchCapability {
             name,
             surface,
             status: CapabilityStatus::Ready,
-            repair,
-        }
-    }
-
-    const fn pending(
-        name: SearchCapabilityName,
-        surface: SearchSurface,
-        repair: &'static str,
-    ) -> Self {
-        Self {
-            name,
-            surface,
-            status: CapabilityStatus::Pending,
             repair,
         }
     }
@@ -1451,10 +1443,10 @@ mod tests {
     }
 
     #[test]
-    fn readiness_reports_pending_until_integration_lands() {
+    fn readiness_reports_ready_when_search_contract_is_wired() {
         let readiness = module_readiness();
 
-        assert_eq!(readiness.status(), CapabilityStatus::Pending);
+        assert_eq!(readiness.status(), CapabilityStatus::Ready);
         assert_eq!(
             readiness
                 .capabilities()
@@ -1462,7 +1454,7 @@ mod tests {
                 .map(|capability| capability.status()),
             Some(CapabilityStatus::Ready)
         );
-        assert_eq!(readiness.missing_capabilities().count(), 1);
+        assert_eq!(readiness.missing_capabilities().count(), 0);
     }
 
     #[test]
@@ -1512,22 +1504,27 @@ mod tests {
     }
 
     #[test]
-    fn missing_capabilities_keep_repair_metadata() {
+    fn score_explanation_capability_reports_repair_metadata() {
         let missing: Vec<_> = module_readiness().missing_capabilities().collect();
 
+        assert!(missing.is_empty());
+        let readiness = module_readiness();
+        let capability = readiness
+            .capabilities()
+            .iter()
+            .find(|capability| capability.name() == SearchCapabilityName::ScoreExplanation)
+            .copied();
         assert_eq!(
-            missing.first().map(|capability| capability.name()),
-            Some(SearchCapabilityName::ScoreExplanation)
-        );
-        assert_eq!(
-            missing.first().map(|capability| capability.surface()),
+            capability.map(|capability| capability.surface()),
             Some(SearchSurface::Explanation)
         );
-        assert!(
-            missing
-                .first()
-                .map(|capability| capability.repair().contains("score"))
-                .unwrap_or(false)
+        assert_eq!(
+            capability.map(|capability| capability.status()),
+            Some(CapabilityStatus::Ready)
+        );
+        assert_eq!(
+            capability.map(|capability| capability.repair().contains("Score explanation")),
+            Some(true)
         );
     }
 
