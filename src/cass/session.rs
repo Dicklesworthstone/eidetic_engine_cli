@@ -145,11 +145,15 @@ impl CassSessionInfo {
 
 /// Parsed response from `cass search --robot --robot-meta`.
 ///
-/// The field set mirrors CASS contract version 1. Unknown fields are rejected
-/// so contract drift fails loudly in the conformance harness instead of being
-/// silently dropped before retrieval provenance is built.
+/// The field set mirrors CASS contract version 1. Unknown fields are
+/// **silently ignored** so a newer CASS version that adds optional
+/// metadata can still be consumed by an older `ee` build — the documented
+/// forward-compat policy (see `docs/query-schema.md`). Any extras observed
+/// during [`Self::from_robot_json`] are emitted at `tracing::debug` so
+/// operators can see drift surface in the audit log without breaking
+/// retrieval. Schema-drift regressions are caught by the conformance
+/// harness, not by parser strictness.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CassSearchResponse {
     /// Original query text.
     pub query: String,
@@ -189,23 +193,72 @@ pub struct CassSearchResponse {
     pub timeout: Option<JsonValue>,
 }
 
+/// Top-level field names defined by CASS search contract v1.
+///
+/// Used by [`CassSearchResponse::from_robot_json`] to detect (and log)
+/// unknown extras under the forward-compat policy.
+const KNOWN_CASS_SEARCH_RESPONSE_FIELDS: &[&str] = &[
+    "query",
+    "limit",
+    "offset",
+    "count",
+    "total_matches",
+    "max_tokens",
+    "request_id",
+    "cursor",
+    "hits_clamped",
+    "hits",
+    "aggregations",
+    "_warning",
+    "_meta",
+    "suggestions",
+    "explanation",
+    "_timeout",
+];
+
 impl CassSearchResponse {
     /// Parse a `cass search --robot` JSON payload into the typed contract.
+    ///
+    /// Unknown top-level fields are accepted (and emitted at `tracing::debug`)
+    /// so newer CASS versions remain forward-compatible with older `ee`
+    /// builds. See the type-level docstring for the policy rationale.
     ///
     /// # Errors
     ///
     /// Returns [`CassError::InvalidStdoutJson`] when stdout is not valid JSON
-    /// or contains fields outside the documented CASS search contract.
+    /// or when a known field has an incompatible shape (wrong type).
     pub fn from_robot_json(input: &[u8]) -> Result<Self, CassError> {
-        serde_json::from_slice(input).map_err(|error| CassError::InvalidStdoutJson {
-            hint: format!("search robot JSON did not match documented CASS contract: {error}"),
-        })
+        let parsed: Self =
+            serde_json::from_slice(input).map_err(|error| CassError::InvalidStdoutJson {
+                hint: format!("search robot JSON did not match documented CASS contract: {error}"),
+            })?;
+
+        // Best-effort drift-detection: re-parse as a generic Value and report
+        // any top-level keys outside the documented contract at debug. We
+        // ignore parse failures here because they cannot occur on input that
+        // already deserialized successfully above.
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<JsonValue>(input) {
+            let unknown: Vec<&str> = map
+                .keys()
+                .map(String::as_str)
+                .filter(|key| !KNOWN_CASS_SEARCH_RESPONSE_FIELDS.contains(key))
+                .collect();
+            if !unknown.is_empty() {
+                tracing::debug!(
+                    target: "ee::cass",
+                    unknown_fields = ?unknown,
+                    "cass search response contained fields outside the documented contract; \
+                     ignoring under forward-compat policy"
+                );
+            }
+        }
+
+        Ok(parsed)
     }
 }
 
 /// One hit from `cass search --robot`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CassSearchHit {
     /// Session source path containing the hit.
     pub source_path: String,
@@ -250,7 +303,6 @@ pub enum CassTimestamp {
 
 /// One aggregation bucket from a CASS search response.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CassAggregationBucket {
     /// Bucket key.
     pub key: String,
@@ -260,7 +312,6 @@ pub struct CassAggregationBucket {
 
 /// Robot metadata from `cass search --robot-meta`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CassSearchMeta {
     /// Total elapsed time in milliseconds.
     pub elapsed_ms: u64,
@@ -309,7 +360,6 @@ pub struct CassSearchMeta {
 
 /// Search cache statistics from CASS robot metadata.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CassSearchCacheStats {
     /// Cache hits.
     pub hits: u64,
@@ -321,7 +371,6 @@ pub struct CassSearchCacheStats {
 
 /// Search timing breakdown from CASS robot metadata.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CassSearchTiming {
     /// Core search time.
     pub search_ms: u64,
@@ -333,7 +382,6 @@ pub struct CassSearchTiming {
 
 /// Index freshness subset embedded in CASS search metadata.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CassIndexFreshness {
     /// Whether the index exists.
     pub exists: bool,
@@ -902,7 +950,12 @@ mod tests {
     }
 
     #[test]
-    fn cass_search_response_rejects_undocumented_fields() -> TestResult {
+    fn cass_search_response_accepts_synthetic_future_fields_at_root() -> TestResult {
+        // Forward-compat policy: a CASS upgrade that adds optional metadata
+        // must not break parsing in older ee builds. The synthetic
+        // `surprise`, `next_protocol_version`, and `experimental_*` fields
+        // stand in for any future additions and must round-trip into the
+        // typed view without affecting the documented fields.
         let input = br#"{
           "query": "format before release",
           "limit": 1,
@@ -913,6 +966,8 @@ mod tests {
           "hits_clamped": false,
           "hits": [],
           "surprise": true,
+          "next_protocol_version": "v2.5",
+          "experimental_routing": {"shard": "alpha", "weight": 0.42},
           "_meta": {
             "elapsed_ms": 1,
             "search_mode": "lexical",
@@ -952,14 +1007,78 @@ mod tests {
           "_timeout": null
         }"#;
 
-        let error = match CassSearchResponse::from_robot_json(input) {
-            Ok(_) => return Err("undocumented root field must fail".to_string()),
-            Err(error) => error,
-        };
+        let parsed = CassSearchResponse::from_robot_json(input)
+            .map_err(|error| format!("undocumented future fields must NOT fail; got {error:?}"))?;
         ensure_equal(
-            &error.kind_str(),
-            &"invalid_stdout_json",
-            "error kind for drift",
+            &parsed.query.as_str(),
+            &"format before release",
+            "query echo",
+        )?;
+        ensure_equal(&parsed.limit, &1, "limit echo")?;
+        ensure_equal(
+            &parsed.meta.search_mode.as_deref(),
+            &Some("lexical"),
+            "meta search_mode echo",
+        )
+    }
+
+    #[test]
+    fn cass_search_response_accepts_synthetic_future_fields_in_nested_meta() -> TestResult {
+        // Forward-compat must reach into nested structs too: a future CASS
+        // could add fields to _meta, _meta.cache_stats, _meta.timing, or
+        // _meta.index_freshness. None of those should break parsing.
+        let input = br#"{
+          "query": "q",
+          "limit": 0,
+          "offset": 0,
+          "count": 0,
+          "total_matches": 0,
+          "cursor": null,
+          "hits_clamped": false,
+          "hits": [],
+          "_meta": {
+            "elapsed_ms": 1,
+            "wildcard_fallback": false,
+            "cache_stats": {
+              "hits": 0,
+              "misses": 0,
+              "shortfall": 0,
+              "future_eviction_count": 7
+            },
+            "timing": {
+              "search_ms": 1,
+              "rerank_ms": 0,
+              "other_ms": 0,
+              "telemetry_emit_ms": 12
+            },
+            "state": {},
+            "index_freshness": {
+              "exists": true,
+              "status": "fresh",
+              "fresh": true,
+              "stale": false,
+              "stale_threshold_seconds": 300,
+              "rebuilding": false,
+              "pending_sessions": 0,
+              "next_index_version": "v3.1"
+            },
+            "hits_clamped": false,
+            "vendor_tag": "cass-canary"
+          }
+        }"#;
+
+        let parsed = CassSearchResponse::from_robot_json(input)
+            .map_err(|error| format!("nested future fields must NOT fail; got {error:?}"))?;
+        ensure_equal(
+            &parsed.meta.cache_stats.misses,
+            &0,
+            "nested cache_stats parsed",
+        )?;
+        ensure_equal(&parsed.meta.timing.search_ms, &1, "nested timing parsed")?;
+        ensure_equal(
+            &parsed.meta.index_freshness.status.as_str(),
+            &"fresh",
+            "nested index_freshness parsed",
         )
     }
 
