@@ -7,8 +7,8 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
-use std::fs::File;
-use std::io::Read;
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
@@ -658,6 +658,7 @@ pub fn verify_release_manifest_json(
         .get("schema")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
+    // ubs:ignore - release manifest schema IDs are public contract strings, not secrets.
     if manifest_schema.as_deref() != Some(RELEASE_MANIFEST_SCHEMA_V1) {
         let code = if manifest_schema
             .as_deref()
@@ -860,6 +861,35 @@ fn verify_artifact_file(
     findings: &mut Vec<ReleaseVerificationFinding>,
 ) {
     let artifact_path = artifact_root.join(&artifact.file_name);
+    let relative_path = Path::new(&artifact.file_name);
+    match release_artifact_path_has_symlink_component(artifact_root, relative_path) {
+        Ok(true) => {
+            findings.push(ReleaseVerificationFinding::error(
+                ReleaseVerificationCode::UnsafeArtifactPath,
+                Some(artifact.artifact_id.clone()),
+                format!(
+                    "artifact file '{}' traverses a symbolic link",
+                    artifact.file_name
+                ),
+                "Use a regular archive file contained directly under the artifact root.",
+            ));
+            return;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            findings.push(ReleaseVerificationFinding::error(
+                ReleaseVerificationCode::MissingArtifact,
+                Some(artifact.artifact_id.clone()),
+                format!(
+                    "artifact file '{}' could not be inspected: {error}",
+                    artifact.file_name
+                ),
+                "Check artifact permissions and rerun verification.",
+            ));
+            return;
+        }
+    }
+
     let mut file = match File::open(&artifact_path) {
         Ok(file) => file,
         Err(_) => {
@@ -891,6 +921,7 @@ fn verify_artifact_file(
         ReleaseChecksumAlgorithm::Sha256 => sha256_hex(&bytes),
         ReleaseChecksumAlgorithm::Blake3 => blake3::hash(&bytes).to_hex().to_string(),
     };
+    // ubs:ignore - artifact checksums are public integrity digests, not authentication secrets.
     if actual != artifact.checksum.value {
         findings.push(ReleaseVerificationFinding::error(
             ReleaseVerificationCode::ChecksumMismatch,
@@ -899,6 +930,26 @@ fn verify_artifact_file(
             "Rebuild the archive or update the manifest checksum from trusted inputs.",
         ));
     }
+}
+
+fn release_artifact_path_has_symlink_component(root: &Path, relative: &Path) -> io::Result<bool> {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            Component::Normal(segment) => {
+                current.push(segment);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                    Err(error) => return Err(error),
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return Ok(true),
+        }
+    }
+    Ok(false)
 }
 
 fn is_safe_relative_path(path: &str) -> bool {
@@ -1060,6 +1111,43 @@ mod tests {
             }
             .is_well_formed(),
             "uppercase checksum rejected",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verification_rejects_symlink_artifact_file() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let artifact_root = tempdir.path().join("artifacts");
+        fs::create_dir_all(&artifact_root).map_err(|error| error.to_string())?;
+        let artifact_bytes = b"trusted archive bytes";
+        let outside_artifact = tempdir.path().join("outside.tar.xz");
+        fs::write(&outside_artifact, artifact_bytes).map_err(|error| error.to_string())?;
+        let artifact = ReleaseArtifact::from_bytes(
+            "0.1.0",
+            "commit-a",
+            "x86_64-unknown-linux-gnu",
+            artifact_bytes,
+        );
+        std::os::unix::fs::symlink(&outside_artifact, artifact_root.join(&artifact.file_name))
+            .map_err(|error| error.to_string())?;
+        let manifest = ReleaseManifest::new("0.1.0", "commit-a", vec![artifact]);
+
+        let report = manifest.verify(Some(&artifact_root));
+        let codes = finding_codes(&report);
+
+        ensure_equal(
+            report.status,
+            ReleaseVerificationStatus::Failed,
+            "symlink artifact status",
+        )?;
+        ensure(
+            codes.contains(&ReleaseVerificationCode::UnsafeArtifactPath),
+            "symlink artifact should be rejected before hashing",
+        )?;
+        ensure(
+            !codes.contains(&ReleaseVerificationCode::ChecksumMismatch),
+            "symlink target bytes must not be accepted as artifact evidence",
         )
     }
 

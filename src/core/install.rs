@@ -4,7 +4,8 @@ use std::cmp::Ordering;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::{Component, Path, PathBuf};
 
 use crate::core::build_info;
 use crate::models::{
@@ -252,6 +253,7 @@ pub fn plan_install(options: &InstallPlanOptions) -> InstallPlanReport {
                                 ReleaseVerificationCode::ChecksumMismatch
                                     | ReleaseVerificationCode::InvalidChecksum
                                     | ReleaseVerificationCode::MissingArtifact
+                                    | ReleaseVerificationCode::UnsafeArtifactPath
                             )
                         }) {
                             "failed".to_owned()
@@ -757,17 +759,83 @@ pub fn execute_install_plan(
         }
     };
 
-    let artifact_path = artifact_root.join(&artifact.file_name);
-    if !artifact_path.is_file() {
+    if !is_safe_release_artifact_path(&artifact.file_name) {
+        return InstallExecutionResult {
+            success: false,
+            artifact_verified: false,
+            binary_installed: false,
+            backup_path: None,
+            error_message: Some(format!("artifact path '{}' is unsafe", artifact.file_name)),
+        };
+    }
+
+    let artifact_relative_path = Path::new(&artifact.file_name);
+    match install_artifact_path_has_symlink_component(artifact_root, artifact_relative_path) {
+        Ok(true) => {
+            return InstallExecutionResult {
+                success: false,
+                artifact_verified: false,
+                binary_installed: false,
+                backup_path: None,
+                error_message: Some(format!(
+                    "artifact '{}' traverses a symbolic link",
+                    artifact.file_name
+                )),
+            };
+        }
+        Ok(false) => {}
+        Err(error) => {
+            return InstallExecutionResult {
+                success: false,
+                artifact_verified: false,
+                binary_installed: false,
+                backup_path: None,
+                error_message: Some(format!(
+                    "failed to inspect artifact '{}': {error}",
+                    artifact.file_name
+                )),
+            };
+        }
+    }
+
+    let artifact_path = artifact_root.join(artifact_relative_path);
+    let artifact_metadata = match fs::symlink_metadata(&artifact_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return InstallExecutionResult {
+                success: false,
+                artifact_verified: false,
+                binary_installed: false,
+                backup_path: None,
+                error_message: Some(format!(
+                    "artifact '{}' not found in artifact root '{}'",
+                    artifact.file_name,
+                    artifact_root.display()
+                )),
+            };
+        }
+        Err(error) => {
+            return InstallExecutionResult {
+                success: false,
+                artifact_verified: false,
+                binary_installed: false,
+                backup_path: None,
+                error_message: Some(format!(
+                    "failed to inspect artifact '{}': {error}",
+                    artifact.file_name
+                )),
+            };
+        }
+    };
+    if !artifact_metadata.is_file() {
         return InstallExecutionResult {
             success: false,
             artifact_verified: false,
             binary_installed: false,
             backup_path: None,
             error_message: Some(format!(
-                "artifact '{}' not found in artifact root '{}'",
-                artifact.file_name,
-                artifact_root.display()
+                "artifact '{}' is not a regular file",
+                artifact.file_name
             )),
         };
     }
@@ -902,9 +970,9 @@ fn extract_binary_from_archive(
     let temp_dir = create_extract_temp_dir()?;
     let temp_path = temp_dir.path();
 
-    let result = match archive_format {
-        "tar.xz" | "tar+xz" => extract_tar_xz(archive_path, temp_path),
-        "tar.gz" | "tar+gzip" => extract_tar_gz(archive_path, temp_path),
+    let result = match supported_archive_format(archive_format) {
+        Some(SupportedArchiveFormat::TarXz) => extract_tar_xz(archive_path, temp_path),
+        Some(SupportedArchiveFormat::TarGz) => extract_tar_gz(archive_path, temp_path),
         _ => Err(format!("unsupported archive format: {archive_format}")),
     };
 
@@ -923,6 +991,20 @@ fn extract_binary_from_archive(
         .map_err(|e| format!("failed to copy binary to '{}': {e}", install_path.display()))?;
 
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SupportedArchiveFormat {
+    TarXz,
+    TarGz,
+}
+
+fn supported_archive_format(archive_format: &str) -> Option<SupportedArchiveFormat> {
+    match archive_format {
+        "tar_xz" | "tar.xz" | "tar+xz" => Some(SupportedArchiveFormat::TarXz),
+        "tar_gz" | "tar.gz" | "tar+gzip" => Some(SupportedArchiveFormat::TarGz),
+        _ => None,
+    }
 }
 
 fn create_extract_temp_dir() -> Result<tempfile::TempDir, String> {
@@ -1105,14 +1187,14 @@ fn validate_trusted_executable_metadata(
 fn find_binary_in_dir(dir: &Path, binary_name: &str) -> Result<PathBuf, String> {
     // First try direct match
     let direct = dir.join(binary_name);
-    if direct.is_file() {
+    if is_regular_file_no_symlink(&direct)? {
         return Ok(direct);
     }
 
     // Search recursively (archives often have a top-level directory)
     for entry in walkdir_simple(dir, 3) {
         if let Some(name) = entry.file_name().and_then(|n| n.to_str()) {
-            if name == binary_name && entry.is_file() {
+            if name == binary_name && is_regular_file_no_symlink(&entry)? {
                 return Ok(entry);
             }
         }
@@ -1122,6 +1204,14 @@ fn find_binary_in_dir(dir: &Path, binary_name: &str) -> Result<PathBuf, String> 
         "binary '{}' not found in extracted archive",
         binary_name
     ))
+}
+
+fn is_regular_file_no_symlink(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(!metadata.file_type().is_symlink() && metadata.is_file()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("failed to inspect '{}': {error}", path.display())),
+    }
 }
 
 fn walkdir_simple(dir: &Path, max_depth: usize) -> Vec<PathBuf> {
@@ -1139,11 +1229,34 @@ fn walkdir_recurse(dir: &Path, depth: usize, max_depth: usize, result: &mut Vec<
     };
     for entry in entries.flatten() {
         let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
         result.push(path.clone());
-        if path.is_dir() {
+        if metadata.is_dir() {
             walkdir_recurse(&path, depth + 1, max_depth, result);
         }
     }
+}
+
+fn install_artifact_path_has_symlink_component(root: &Path, relative: &Path) -> io::Result<bool> {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            Component::Normal(segment) => {
+                current.push(segment);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                    Err(error) => return Err(error),
+                }
+            }
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => return Ok(true),
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -1169,6 +1282,44 @@ mod tests {
             Ok(())
         } else {
             Err(format!("{context}: expected {expected:?}, got {actual:?}"))
+        }
+    }
+
+    fn executable_plan_for_artifact(
+        artifact: InstallArtifactSelection,
+        install_path: &Path,
+    ) -> InstallPlanReport {
+        let install_dir = install_path.parent().unwrap_or_else(|| Path::new("/tmp"));
+        InstallPlanReport {
+            command: "update".to_owned(),
+            schema: UPDATE_PLAN_SCHEMA_V1.to_owned(),
+            version: "0.1.0".to_owned(),
+            operation: InstallOperation::Update,
+            dry_run: true,
+            status: InstallPlanStatus::Ready,
+            current_version: "0.1.0".to_owned(),
+            target_version: Some(artifact.release_version.clone()),
+            pinned_version: None,
+            target: InstallTarget {
+                target_triple: artifact.target_triple.clone(),
+                supported: true,
+                binary_name: "ee".to_owned(),
+                executable_name: "ee".to_owned(),
+                install_dir: normalize_path(install_dir),
+                install_path: normalize_path(install_path),
+            },
+            artifact: Some(artifact),
+            verification: InstallVerificationPlan {
+                manifest_status: "loaded".to_owned(),
+                checksum_status: "verified".to_owned(),
+                signature_status: "missing".to_owned(),
+                target_status: "matched".to_owned(),
+                overwrite_status: "new_file".to_owned(),
+            },
+            planned_operations: Vec::new(),
+            idempotency_key: "test".to_owned(),
+            rollback: "side_path_before_replace".to_owned(),
+            findings: Vec::new(),
         }
     }
 
@@ -1328,6 +1479,53 @@ mod tests {
     }
 
     #[test]
+    fn archive_format_aliases_cover_manifest_contract() -> TestResult {
+        ensure_equal(
+            supported_archive_format("tar_xz"),
+            Some(SupportedArchiveFormat::TarXz),
+            "manifest tar_xz alias",
+        )?;
+        ensure_equal(
+            supported_archive_format("tar.xz"),
+            Some(SupportedArchiveFormat::TarXz),
+            "file extension tar.xz alias",
+        )?;
+        ensure_equal(
+            supported_archive_format("tar_gz"),
+            Some(SupportedArchiveFormat::TarGz),
+            "manifest tar_gz alias",
+        )?;
+        ensure_equal(
+            supported_archive_format("zip"),
+            None,
+            "zip apply stays unsupported until a verifier is implemented",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extracted_binary_search_rejects_symlink_candidate() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_binary = tempdir.path().join("outside-ee");
+        fs::write(&outside_binary, b"outside binary").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_binary, tempdir.path().join("ee"))
+            .map_err(|error| error.to_string())?;
+
+        let result = find_binary_in_dir(tempdir.path(), "ee");
+
+        ensure(
+            result.is_err(),
+            "symlink binary candidate should be rejected",
+        )?;
+        ensure(
+            result
+                .err()
+                .is_some_and(|message| message.contains("not found")),
+            "symlink candidate should not be reported as a regular binary",
+        )
+    }
+
+    #[test]
     fn install_plan_rejects_unforced_downgrade_pin() -> TestResult {
         let options = InstallPlanOptions {
             target_triple: Some("x86_64-unknown-linux-gnu".to_owned()),
@@ -1462,6 +1660,95 @@ mod tests {
                 .as_ref()
                 .is_some_and(|msg| msg.contains("no artifact")),
             "error message should mention missing artifact",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_plan_rejects_symlink_artifact_root_file() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let artifact_root = tempdir.path().join("artifacts");
+        fs::create_dir_all(&artifact_root).map_err(|error| error.to_string())?;
+        let artifact_bytes = b"release archive bytes";
+        let outside_artifact = tempdir.path().join("outside.tar.xz");
+        fs::write(&outside_artifact, artifact_bytes).map_err(|error| error.to_string())?;
+        let artifact = crate::models::ReleaseArtifact::from_bytes(
+            "9.9.9",
+            "commit-a",
+            "x86_64-unknown-linux-gnu",
+            artifact_bytes,
+        );
+        std::os::unix::fs::symlink(&outside_artifact, artifact_root.join(&artifact.file_name))
+            .map_err(|error| error.to_string())?;
+        let manifest = ReleaseManifest::new("9.9.9", "commit-a", vec![artifact]);
+        let manifest_path = tempdir.path().join("manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = plan_install(&InstallPlanOptions {
+            manifest: Some(manifest_path),
+            artifact_root: Some(artifact_root),
+            install_dir: Some(tempdir.path().join("bin")),
+            target_triple: Some("x86_64-unknown-linux-gnu".to_owned()),
+            offline: true,
+            ..InstallPlanOptions::default()
+        });
+
+        ensure_equal(report.status, InstallPlanStatus::Blocked, "plan status")?;
+        ensure_equal(
+            report.verification.checksum_status.as_str(),
+            "failed",
+            "checksum status",
+        )?;
+        ensure(
+            report
+                .findings
+                .iter()
+                .any(|finding| matches!(finding.code, InstallFindingCode::UnsafeArtifact)),
+            "symlink artifact should map to unsafe artifact finding",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_install_plan_rejects_symlink_artifact_file() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let artifact_root = tempdir.path().join("artifacts");
+        fs::create_dir_all(&artifact_root).map_err(|error| error.to_string())?;
+        let artifact_name = "ee-x86_64-unknown-linux-gnu.tar.xz";
+        let artifact_bytes = b"not a real archive";
+        let outside_artifact = tempdir.path().join("outside.tar.xz");
+        fs::write(&outside_artifact, artifact_bytes).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_artifact, artifact_root.join(artifact_name))
+            .map_err(|error| error.to_string())?;
+        let artifact = InstallArtifactSelection {
+            artifact_id: "ee-9.9.9-x86_64-unknown-linux-gnu".to_owned(),
+            release_version: "9.9.9".to_owned(),
+            file_name: artifact_name.to_owned(),
+            target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+            archive_format: "tar_xz".to_owned(),
+            checksum_algorithm: "blake3".to_owned(),
+            checksum: blake3::hash(artifact_bytes).to_hex().to_string(),
+            signature: "missing".to_owned(),
+        };
+        let report = executable_plan_for_artifact(artifact, &tempdir.path().join("bin/ee"));
+
+        let result = execute_install_plan(&report, &artifact_root);
+
+        ensure(!result.success, "symlink artifact execute should fail")?;
+        ensure(
+            !result.artifact_verified,
+            "symlink target bytes must not count as verified artifact",
+        )?;
+        ensure(
+            result
+                .error_message
+                .as_ref()
+                .is_some_and(|message| message.contains("symbolic link")),
+            "execute error should report symlink artifact",
         )
     }
 
