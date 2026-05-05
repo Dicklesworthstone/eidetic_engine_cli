@@ -2426,6 +2426,15 @@ fn validate_applied_migration_records(records: &[MigrationRecord]) -> Result<()>
     Ok(())
 }
 
+/// Outcome of attempting to apply a single migration under a transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplyOutcome {
+    /// Migration was applied successfully.
+    Applied,
+    /// Migration was already present when re-checked under the transaction.
+    AlreadyApplied,
+}
+
 /// Result of applying migrations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationResult {
@@ -2449,6 +2458,12 @@ impl MigrationResult {
 
 impl DbConnection {
     /// Apply all pending migrations in version order.
+    ///
+    /// This is idempotent under concurrent execution: if two processes call
+    /// `migrate()` simultaneously, each migration is applied exactly once.
+    /// The outer `has_migration` check is a fast-path optimization; the true
+    /// idempotency guarantee comes from re-checking under the transaction in
+    /// `apply_migration`.
     pub fn migrate(&self) -> Result<MigrationResult> {
         self.ensure_migration_table()?;
         self.validate_applied_migrations()?;
@@ -2457,20 +2472,23 @@ impl DbConnection {
         let mut skipped = Vec::new();
 
         for migration in MIGRATIONS {
+            // Fast-path: skip if already applied (avoids transaction overhead).
             if self.has_migration(migration.version)? {
                 skipped.push(migration.version);
                 continue;
             }
 
             let now = Utc::now().to_rfc3339();
-            self.apply_migration(migration, &now)?;
-            applied.push(migration.version);
+            match self.apply_migration(migration, &now)? {
+                ApplyOutcome::Applied => applied.push(migration.version),
+                ApplyOutcome::AlreadyApplied => skipped.push(migration.version),
+            }
         }
 
         Ok(MigrationResult { applied, skipped })
     }
 
-    fn apply_migration(&self, migration: &Migration, applied_at: &str) -> Result<()> {
+    fn apply_migration(&self, migration: &Migration, applied_at: &str) -> Result<ApplyOutcome> {
         let record = MigrationRecord::new(
             migration.version,
             migration.name,
@@ -2479,6 +2497,22 @@ impl DbConnection {
         )?;
 
         self.begin_transaction(IsolationLevel::RepeatableRead)?;
+
+        // Re-check under the transaction to handle concurrent migration attempts.
+        // Another process may have applied this version between the outer check and
+        // acquiring the write lock.
+        match self.has_migration(migration.version) {
+            Ok(true) => {
+                let _ = self.commit();
+                return Ok(ApplyOutcome::AlreadyApplied);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                let _ = self.rollback();
+                return Err(e);
+            }
+        }
+
         let result = (|| {
             self.execute_raw_for(DbOperation::Execute, migration.sql)?;
             self.record_migration(&record)
@@ -2486,7 +2520,7 @@ impl DbConnection {
 
         match result {
             Ok(()) => match self.commit() {
-                Ok(()) => Ok(()),
+                Ok(()) => Ok(ApplyOutcome::Applied),
                 Err(error) => {
                     let _ = self.rollback();
                     Err(error)
