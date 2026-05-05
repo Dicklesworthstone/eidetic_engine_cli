@@ -265,15 +265,21 @@ fn shell_quote(path: &Path) -> String {
 /// Get the canonical absolute path of the current ee binary.
 /// Returns an error if the path cannot be determined or canonicalized.
 fn get_ee_binary_path() -> Result<PathBuf, DomainError> {
-    let exe = std::env::current_exe().map_err(|e| {
-        DomainError::internal(format!("Failed to determine ee binary path: {e}"))
+    let exe = std::env::current_exe().map_err(|e| DomainError::Configuration {
+        message: format!("Failed to determine ee binary path: {e}"),
+        repair: Some(
+            "Run hook installation from the ee binary you want hooks to invoke.".to_owned(),
+        ),
     })?;
     // Canonicalize to resolve symlinks and get absolute path
-    exe.canonicalize().map_err(|e| {
-        DomainError::internal(format!(
+    exe.canonicalize().map_err(|e| DomainError::Configuration {
+        message: format!(
             "Failed to canonicalize ee binary path '{}': {e}",
             exe.display()
-        ))
+        ),
+        repair: Some(
+            "Run hook installation from the ee binary you want hooks to invoke.".to_owned(),
+        ),
     })
 }
 
@@ -677,14 +683,12 @@ mod tests {
             })
             .ok_or("no hook invocation line found")?;
 
-        // The invocation must start with a quoted absolute path, not bare 'ee'
+        // The invocation must start with a single-quoted absolute path, not bare 'ee'
+        // Format: '/absolute/path/to/ee' hooks run ...
+        let trimmed = invocation_line.trim();
         assert!(
-            invocation_line.trim().starts_with("'"),
-            "hook invocation must start with quoted path, got: {invocation_line}"
-        );
-        assert!(
-            invocation_line.contains("/'"),
-            "hook must contain absolute path (with /), got: {invocation_line}"
+            trimmed.starts_with("'/"),
+            "hook invocation must start with single-quoted absolute path ('/..), got: {invocation_line}"
         );
 
         Ok(())
