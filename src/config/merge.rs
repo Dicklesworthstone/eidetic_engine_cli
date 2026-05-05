@@ -11,6 +11,8 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
 
+use serde::Serialize;
+
 use super::file::{
     CassConfig, ConfigFile, CurationConfig, FeedbackConfig, PackConfig, PrivacyConfig,
     RuntimeConfig, SearchConfig, SearchSpeed, StorageConfig, TrustConfig,
@@ -108,6 +110,246 @@ impl MergedConfig {
     pub const fn sources(&self) -> &BTreeMap<&'static str, ConfigValueSource> {
         &self.sources
     }
+
+    /// Generate a config show report with source attribution for each key.
+    #[must_use]
+    pub fn to_show_report(&self) -> ConfigShowReport {
+        let mut entries = Vec::new();
+
+        // Storage section
+        if let Some(ref path) = self.values.storage.database_path {
+            entries.push(ConfigShowEntry::new(
+                STORAGE_DATABASE_PATH_KEY,
+                path.display().to_string(),
+                self.source(STORAGE_DATABASE_PATH_KEY),
+            ));
+        }
+        if let Some(ref path) = self.values.storage.index_dir {
+            entries.push(ConfigShowEntry::new(
+                STORAGE_INDEX_DIR_KEY,
+                path.display().to_string(),
+                self.source(STORAGE_INDEX_DIR_KEY),
+            ));
+        }
+        if let Some(export) = self.values.storage.jsonl_export {
+            entries.push(ConfigShowEntry::new(
+                STORAGE_JSONL_EXPORT_KEY,
+                export.to_string(),
+                self.source(STORAGE_JSONL_EXPORT_KEY),
+            ));
+        }
+
+        // Runtime section
+        if let Some(daemon) = self.values.runtime.daemon {
+            entries.push(ConfigShowEntry::new(
+                RUNTIME_DAEMON_KEY,
+                daemon.to_string(),
+                self.source(RUNTIME_DAEMON_KEY),
+            ));
+        }
+        if let Some(budget) = self.values.runtime.job_budget_ms {
+            entries.push(ConfigShowEntry::new(
+                RUNTIME_JOB_BUDGET_MS_KEY,
+                budget.to_string(),
+                self.source(RUNTIME_JOB_BUDGET_MS_KEY),
+            ));
+        }
+        if let Some(batch) = self.values.runtime.import_batch_size {
+            entries.push(ConfigShowEntry::new(
+                RUNTIME_IMPORT_BATCH_SIZE_KEY,
+                batch.to_string(),
+                self.source(RUNTIME_IMPORT_BATCH_SIZE_KEY),
+            ));
+        }
+
+        // CASS section
+        if let Some(enabled) = self.values.cass.enabled {
+            entries.push(ConfigShowEntry::new(
+                CASS_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(CASS_ENABLED_KEY),
+            ));
+        }
+        if let Some(ref binary) = self.values.cass.binary {
+            entries.push(ConfigShowEntry::new(
+                CASS_BINARY_KEY,
+                binary.clone(),
+                self.source(CASS_BINARY_KEY),
+            ));
+        }
+        if let Some(ref since) = self.values.cass.since {
+            entries.push(ConfigShowEntry::new(
+                CASS_SINCE_KEY,
+                since.clone(),
+                self.source(CASS_SINCE_KEY),
+            ));
+        }
+
+        // Search section
+        if let Some(ref speed) = self.values.search.default_speed {
+            entries.push(ConfigShowEntry::new(
+                SEARCH_DEFAULT_SPEED_KEY,
+                speed.as_str().to_owned(),
+                self.source(SEARCH_DEFAULT_SPEED_KEY),
+            ));
+        }
+        if let Some(weight) = self.values.search.lexical_weight {
+            entries.push(ConfigShowEntry::new(
+                SEARCH_LEXICAL_WEIGHT_KEY,
+                weight.to_string(),
+                self.source(SEARCH_LEXICAL_WEIGHT_KEY),
+            ));
+        }
+        if let Some(weight) = self.values.search.semantic_weight {
+            entries.push(ConfigShowEntry::new(
+                SEARCH_SEMANTIC_WEIGHT_KEY,
+                weight.to_string(),
+                self.source(SEARCH_SEMANTIC_WEIGHT_KEY),
+            ));
+        }
+        if let Some(weight) = self.values.search.graph_weight {
+            entries.push(ConfigShowEntry::new(
+                SEARCH_GRAPH_WEIGHT_KEY,
+                weight.to_string(),
+                self.source(SEARCH_GRAPH_WEIGHT_KEY),
+            ));
+        }
+
+        // Pack section
+        if let Some(ref profile) = self.values.pack.default_profile {
+            entries.push(ConfigShowEntry::new(
+                PACK_DEFAULT_PROFILE_KEY,
+                profile.clone(),
+                self.source(PACK_DEFAULT_PROFILE_KEY),
+            ));
+        }
+        if let Some(ref format) = self.values.pack.default_format {
+            entries.push(ConfigShowEntry::new(
+                PACK_DEFAULT_FORMAT_KEY,
+                format.clone(),
+                self.source(PACK_DEFAULT_FORMAT_KEY),
+            ));
+        }
+        if let Some(tokens) = self.values.pack.default_max_tokens {
+            entries.push(ConfigShowEntry::new(
+                PACK_DEFAULT_MAX_TOKENS_KEY,
+                tokens.to_string(),
+                self.source(PACK_DEFAULT_MAX_TOKENS_KEY),
+            ));
+        }
+        if let Some(lambda) = self.values.pack.mmr_lambda {
+            entries.push(ConfigShowEntry::new(
+                PACK_MMR_LAMBDA_KEY,
+                lambda.to_string(),
+                self.source(PACK_MMR_LAMBDA_KEY),
+            ));
+        }
+        if let Some(pool) = self.values.pack.candidate_pool {
+            entries.push(ConfigShowEntry::new(
+                PACK_CANDIDATE_POOL_KEY,
+                pool.to_string(),
+                self.source(PACK_CANDIDATE_POOL_KEY),
+            ));
+        }
+
+        // Curation section
+        if let Some(sim) = self.values.curation.duplicate_similarity {
+            entries.push(ConfigShowEntry::new(
+                CURATION_DUPLICATE_SIMILARITY_KEY,
+                sim.to_string(),
+                self.source(CURATION_DUPLICATE_SIMILARITY_KEY),
+            ));
+        }
+        if let Some(weight) = self.values.curation.harmful_weight {
+            entries.push(ConfigShowEntry::new(
+                CURATION_HARMFUL_WEIGHT_KEY,
+                weight.to_string(),
+                self.source(CURATION_HARMFUL_WEIGHT_KEY),
+            ));
+        }
+        if let Some(days) = self.values.curation.decay_half_life_days {
+            entries.push(ConfigShowEntry::new(
+                CURATION_DECAY_HALF_LIFE_DAYS_KEY,
+                days.to_string(),
+                self.source(CURATION_DECAY_HALF_LIFE_DAYS_KEY),
+            ));
+        }
+
+        // Feedback section
+        if let Some(rate) = self.values.feedback.harmful_per_source_per_hour {
+            entries.push(ConfigShowEntry::new(
+                FEEDBACK_HARMFUL_PER_SOURCE_PER_HOUR_KEY,
+                rate.to_string(),
+                self.source(FEEDBACK_HARMFUL_PER_SOURCE_PER_HOUR_KEY),
+            ));
+        }
+        if let Some(window) = self.values.feedback.harmful_burst_window_seconds {
+            entries.push(ConfigShowEntry::new(
+                FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY,
+                window.to_string(),
+                self.source(FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY),
+            ));
+        }
+
+        // Privacy section
+        if let Some(redact) = self.values.privacy.redact_secrets {
+            entries.push(ConfigShowEntry::new(
+                PRIVACY_REDACT_SECRETS_KEY,
+                redact.to_string(),
+                self.source(PRIVACY_REDACT_SECRETS_KEY),
+            ));
+        }
+
+        // Trust section
+        if let Some(ref class) = self.values.trust.default_class {
+            entries.push(ConfigShowEntry::new(
+                TRUST_DEFAULT_CLASS_KEY,
+                class.clone(),
+                self.source(TRUST_DEFAULT_CLASS_KEY),
+            ));
+        }
+        if let Some(guard) = self.values.trust.prompt_injection_guard {
+            entries.push(ConfigShowEntry::new(
+                TRUST_PROMPT_INJECTION_GUARD_KEY,
+                guard.to_string(),
+                self.source(TRUST_PROMPT_INJECTION_GUARD_KEY),
+            ));
+        }
+
+        let entry_count = entries.len();
+        ConfigShowReport {
+            schema: "ee.config.show.v1",
+            entries,
+            entry_count,
+        }
+    }
+}
+
+/// A single config entry with source attribution.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ConfigShowEntry {
+    pub key: &'static str,
+    pub value: String,
+    pub source: &'static str,
+}
+
+impl ConfigShowEntry {
+    #[must_use]
+    pub fn new(key: &'static str, value: String, source: Option<ConfigValueSource>) -> Self {
+        Self {
+            key,
+            value,
+            source: source.map_or("unknown", ConfigValueSource::as_str),
+        }
+    }
+}
+
+/// Report showing merged config with source attribution for each key.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ConfigShowReport {
+    pub schema: &'static str,
+    pub entries: Vec<ConfigShowEntry>,
+    pub entry_count: usize,
 }
 
 /// Build the documented default config.
