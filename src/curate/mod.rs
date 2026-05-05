@@ -2870,27 +2870,33 @@ impl ProtectedRuleStatus {
 
     #[must_use]
     pub fn to_json(&self) -> String {
-        let protected_at = self
-            .protected_at
-            .as_ref()
-            .map(|t| format!(",\"protectedAt\":\"{}\"", t))
-            .unwrap_or_default();
-        let protected_by = self
-            .protected_by
-            .as_ref()
-            .map(|a| format!(",\"protectedBy\":\"{}\"", a))
-            .unwrap_or_default();
-        format!(
-            "{{\"schema\":\"{}\",\"memoryId\":\"{}\",\"protected\":{},\"helpfulCount\":{},\"harmfulCount\":{},\"inversionThreshold\":{}{}{}}}",
-            PROTECTED_RULE_SCHEMA_V1,
-            self.memory_id,
-            self.protected,
-            self.helpful_count,
-            self.harmful_count,
-            self.inversion_threshold(),
-            protected_at,
-            protected_by,
-        )
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ProtectedRuleStatusJson<'a> {
+            schema: &'static str,
+            memory_id: &'a str,
+            protected: bool,
+            helpful_count: u32,
+            harmful_count: u32,
+            inversion_threshold: u32,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            protected_at: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            protected_by: Option<&'a str>,
+        }
+
+        let json_repr = ProtectedRuleStatusJson {
+            schema: PROTECTED_RULE_SCHEMA_V1,
+            memory_id: &self.memory_id,
+            protected: self.protected,
+            helpful_count: self.helpful_count,
+            harmful_count: self.harmful_count,
+            inversion_threshold: self.inversion_threshold(),
+            protected_at: self.protected_at.as_deref(),
+            protected_by: self.protected_by.as_deref(),
+        };
+
+        serde_json::to_string(&json_repr).unwrap_or_else(|_| "{}".to_owned())
     }
 }
 
@@ -2936,24 +2942,33 @@ pub struct FeedbackHealthSummary {
 impl FeedbackHealthSummary {
     #[must_use]
     pub fn to_json(&self) -> String {
-        let last_inversion = self
-            .last_inversion_at
-            .as_ref()
-            .map(|t| format!(",\"lastInversionAt\":\"{}\"", t))
-            .unwrap_or_default();
-        let last_quarantine = self
-            .last_quarantine_at
-            .as_ref()
-            .map(|t| format!(",\"lastQuarantineAt\":\"{}\"", t))
-            .unwrap_or_default();
-        format!(
-            "{{\"quarantineQueueDepth\":{},\"protectedRuleCount\":{},\"sourcesAtLimit\":{}{}{}}}",
-            self.quarantine_queue_depth,
-            self.protected_rule_count,
-            self.sources_at_limit,
-            last_inversion,
-            last_quarantine,
-        )
+        // Serialize via serde_json so the timestamp strings are properly
+        // JSON-escaped. The previous format!() interpolation could emit
+        // malformed JSON if a caller ever stored a value containing `"`,
+        // `\`, or a control character — `last_*_at` is publicly mutable
+        // so we cannot rely on the chrono RFC3339 producer to be the only
+        // writer.
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FeedbackHealthSummaryJson<'a> {
+            quarantine_queue_depth: u32,
+            protected_rule_count: u32,
+            sources_at_limit: u32,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            last_inversion_at: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            last_quarantine_at: Option<&'a str>,
+        }
+
+        let json_repr = FeedbackHealthSummaryJson {
+            quarantine_queue_depth: self.quarantine_queue_depth,
+            protected_rule_count: self.protected_rule_count,
+            sources_at_limit: self.sources_at_limit,
+            last_inversion_at: self.last_inversion_at.as_deref(),
+            last_quarantine_at: self.last_quarantine_at.as_deref(),
+        };
+
+        serde_json::to_string(&json_repr).unwrap_or_else(|_| "{}".to_owned())
     }
 }
 
@@ -4796,7 +4811,7 @@ Then update src/policy/mod.rs on main."
     }
 
     #[test]
-    fn quarantined_feedback_to_json_escapes_special_chars() {
+    fn quarantined_feedback_to_json_escapes_special_chars() -> TestResult {
         let feedback = QuarantinedFeedback {
             id: "qf_test\"quote".to_owned(),
             source_id: "src_back\\slash".to_owned(),
@@ -4809,7 +4824,7 @@ Then update src/policy/mod.rs on main."
         let json = feedback.to_json();
 
         let parsed: serde_json::Value =
-            serde_json::from_str(&json).expect("must produce valid JSON");
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
         assert_eq!(parsed["id"].as_str(), Some("qf_test\"quote"));
         assert_eq!(parsed["sourceId"].as_str(), Some("src_back\\slash"));
         assert_eq!(parsed["memoryId"].as_str(), Some("mem_new\nline"));
@@ -4818,6 +4833,7 @@ Then update src/policy/mod.rs on main."
             parsed["sessionId"].as_str(),
             Some("sess_unicode\u{1f680}rocket")
         );
+        Ok(())
     }
 
     #[test]
@@ -4852,6 +4868,70 @@ Then update src/policy/mod.rs on main."
         assert!(json.contains("\"sourcesAtLimit\":1"));
         assert!(json.contains("\"lastInversionAt\":\"2026-04-30T10:00:00Z\""));
         assert!(!json.contains("lastQuarantineAt"));
+    }
+
+    #[test]
+    fn feedback_health_summary_to_json_round_trips_via_serde() {
+        // The output of to_json must be valid JSON regardless of the values
+        // stored in the optional timestamp strings. This pins the contract
+        // so a future revert to format!() interpolation breaks visibly.
+        let summary = FeedbackHealthSummary {
+            quarantine_queue_depth: 0,
+            protected_rule_count: 0,
+            sources_at_limit: 0,
+            last_inversion_at: None,
+            last_quarantine_at: None,
+        };
+        let json = summary.to_json();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("empty summary must produce valid JSON");
+        assert!(parsed.is_object());
+        assert!(parsed.get("lastInversionAt").is_none());
+        assert!(parsed.get("lastQuarantineAt").is_none());
+    }
+
+    #[test]
+    fn feedback_health_summary_to_json_escapes_special_characters() {
+        // Although the production callers fill the timestamp fields via
+        // chrono RFC3339, the fields are publicly mutable; if a future
+        // refactor ever stuffs a path or freeform note into them, the
+        // serializer must still emit valid JSON. Embed a quote, a
+        // backslash, a newline, and a tab to flush out any naive
+        // string interpolation.
+        let weird = "weird\"value\\with\nnewline\tand\u{0007}bell";
+        let summary = FeedbackHealthSummary {
+            quarantine_queue_depth: 1,
+            protected_rule_count: 2,
+            sources_at_limit: 3,
+            last_inversion_at: Some(weird.to_owned()),
+            last_quarantine_at: Some("2026-05-01T00:00:00Z".to_owned()),
+        };
+        let json = summary.to_json();
+
+        // Round-trip through serde_json: this is the only honest way to
+        // assert "is valid JSON" without depending on a specific escape
+        // representation (e.g.  vs literal control byte).
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("special characters must not break JSON validity");
+        assert_eq!(
+            parsed["lastInversionAt"],
+            serde_json::Value::String(weird.to_owned())
+        );
+        assert_eq!(
+            parsed["lastQuarantineAt"],
+            serde_json::Value::String("2026-05-01T00:00:00Z".to_owned())
+        );
+        assert_eq!(parsed["quarantineQueueDepth"], 1);
+        assert_eq!(parsed["protectedRuleCount"], 2);
+        assert_eq!(parsed["sourcesAtLimit"], 3);
+
+        // The raw quote, backslash, and newline must NOT appear unescaped
+        // in the output anywhere they could prematurely close the JSON
+        // string. We check the easy one — a bare unescaped newline byte.
+        assert!(
+            !json.contains('\n'),
+            "raw newline must be JSON-escaped, got: {json}"
+        );
     }
 
     // ========================================================================
