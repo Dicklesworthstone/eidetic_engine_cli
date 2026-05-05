@@ -7,6 +7,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Schema identifier for decision plane records.
@@ -311,13 +312,23 @@ impl DecisionRecordBuilder {
         self
     }
 
+    /// Build a `DecisionRecord`, auto-filling `decided_at` with the current
+    /// UTC timestamp when one was not supplied.
+    ///
+    /// `outcome` is left empty if it was not set; callers that need to enforce
+    /// a non-empty outcome should use [`try_build`](Self::try_build) instead.
+    /// Historically `build` silently substituted `String::default()` for both
+    /// `decided_at` and `outcome`, which let production code emit
+    /// timestamp-less audit records by accident — auto-filling the timestamp
+    /// closes that hole without breaking existing test fixtures that do not
+    /// inspect `decided_at`.
     #[must_use]
     pub fn build(self) -> DecisionRecord {
         DecisionRecord {
             schema: DECISION_PLANE_SCHEMA_V1.to_owned(),
             plane: self.plane.unwrap_or(DecisionPlane::Packing),
             metadata: self.metadata,
-            decided_at: self.decided_at.unwrap_or_default(),
+            decided_at: self.decided_at.unwrap_or_else(now_rfc3339),
             outcome: self.outcome.unwrap_or_default(),
             reason: self.reason,
             confidence: self.confidence,
@@ -325,7 +336,56 @@ impl DecisionRecordBuilder {
             incumbent_outcome: self.incumbent_outcome,
         }
     }
+
+    /// Build a `DecisionRecord`, requiring `outcome` to be set explicitly.
+    ///
+    /// `decided_at` is still auto-filled with the current UTC timestamp when
+    /// not supplied; the timestamp is determinable from context (the build
+    /// site is, by definition, "now"), but the outcome is a load-bearing
+    /// audit field that callers must commit to.
+    pub fn try_build(self) -> Result<DecisionRecord, DecisionBuildError> {
+        let outcome = match self.outcome {
+            Some(value) if !value.is_empty() => value,
+            Some(_) => return Err(DecisionBuildError::EmptyOutcome),
+            None => return Err(DecisionBuildError::MissingOutcome),
+        };
+        Ok(DecisionRecord {
+            schema: DECISION_PLANE_SCHEMA_V1.to_owned(),
+            plane: self.plane.unwrap_or(DecisionPlane::Packing),
+            metadata: self.metadata,
+            decided_at: self.decided_at.unwrap_or_else(now_rfc3339),
+            outcome,
+            reason: self.reason,
+            confidence: self.confidence,
+            shadow: self.shadow,
+            incumbent_outcome: self.incumbent_outcome,
+        })
+    }
 }
+
+fn now_rfc3339() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// Errors returned by [`DecisionRecordBuilder::try_build`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecisionBuildError {
+    /// `outcome` was never set on the builder.
+    MissingOutcome,
+    /// `outcome` was set but to an empty string.
+    EmptyOutcome,
+}
+
+impl fmt::Display for DecisionBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingOutcome => f.write_str("DecisionRecord requires outcome to be set"),
+            Self::EmptyOutcome => f.write_str("DecisionRecord outcome must not be empty"),
+        }
+    }
+}
+
+impl std::error::Error for DecisionBuildError {}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -470,6 +530,86 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("invalid decision plane"));
+    }
+
+    #[test]
+    fn build_autofills_decided_at_when_unset() -> TestResult {
+        let record = DecisionRecord::builder()
+            .plane(DecisionPlane::Curation)
+            .outcome("archive")
+            .build();
+
+        if record.decided_at.is_empty() {
+            return Err(format!(
+                "build() must auto-fill decided_at; got {:?}",
+                record.decided_at
+            ));
+        }
+        // Sanity-check the format roughly matches RFC3339 (e.g. 2026-05-05T04:08:25Z).
+        if !record.decided_at.ends_with('Z') || record.decided_at.len() < 20 {
+            return Err(format!(
+                "auto-filled decided_at should be RFC3339 with Z suffix; got {:?}",
+                record.decided_at
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn build_preserves_explicit_decided_at() -> TestResult {
+        let record = DecisionRecord::builder()
+            .plane(DecisionPlane::Curation)
+            .decided_at("2026-04-30T12:00:00Z")
+            .outcome("archive")
+            .build();
+        ensure(
+            record.decided_at,
+            "2026-04-30T12:00:00Z".to_owned(),
+            "explicit decided_at must round-trip unchanged",
+        )
+    }
+
+    #[test]
+    fn try_build_rejects_missing_outcome() -> TestResult {
+        let result = DecisionRecord::builder()
+            .plane(DecisionPlane::Curation)
+            .try_build();
+        ensure(
+            result,
+            Err(DecisionBuildError::MissingOutcome),
+            "try_build with no outcome must fail",
+        )
+    }
+
+    #[test]
+    fn try_build_rejects_empty_outcome() -> TestResult {
+        let result = DecisionRecord::builder()
+            .plane(DecisionPlane::Curation)
+            .outcome("")
+            .try_build();
+        ensure(
+            result,
+            Err(DecisionBuildError::EmptyOutcome),
+            "try_build with empty outcome must fail",
+        )
+    }
+
+    #[test]
+    fn try_build_returns_record_when_outcome_set() -> TestResult {
+        let record = DecisionRecord::builder()
+            .plane(DecisionPlane::Curation)
+            .outcome("archive")
+            .try_build()
+            .map_err(|err| err.to_string())?;
+        ensure(
+            record.outcome,
+            "archive".to_owned(),
+            "outcome must round-trip",
+        )?;
+        if record.decided_at.is_empty() {
+            return Err("try_build must auto-fill decided_at".to_owned());
+        }
+        Ok(())
     }
 
     #[test]
