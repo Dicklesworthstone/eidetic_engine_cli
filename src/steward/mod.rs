@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde_json::{Value as JsonValue, json};
@@ -1390,6 +1391,7 @@ fn score_decay_change_for_memory(
         feedback_total_count: feedback_counts.total_count(),
         feedback_event_ids: feedback_events
             .iter()
+            .filter(|event| score_decay_consumes_feedback_event(event))
             .map(|event| event.id.clone())
             .collect::<Vec<_>>(),
         applied: false,
@@ -1465,6 +1467,13 @@ fn feedback_counts_from_events(events: &[StoredFeedbackEvent]) -> FeedbackCounts
         }
     }
     counts
+}
+
+fn score_decay_consumes_feedback_event(event: &StoredFeedbackEvent) -> bool {
+    matches!(
+        event.signal.as_str(),
+        "negative" | "harmful" | "contradiction" | "inaccurate" | "stale" | "outdated"
+    )
 }
 
 fn score_decay_audit_details(change: &ScoreDecayMemoryChange, as_of: &str) -> String {
@@ -1928,7 +1937,32 @@ impl ManualRunner {
         };
 
         let started = std::time::Instant::now();
-        let connection = match DbConnection::open_file(&database_path) {
+        if self.options.dry_run && !database_path.exists() {
+            let message = format!(
+                "Dry-run decay sweep database does not exist: {}",
+                database_path.display()
+            );
+            return (
+                RunOutcome::Failed,
+                None,
+                Some(message.clone()),
+                Some(json!({
+                    "schema": "ee.steward.decay_sweep.error.v1",
+                    "code": "decay_sweep_database_missing",
+                    "databasePath": database_path.display().to_string(),
+                    "dryRun": true,
+                    "durableMutation": false,
+                    "message": message,
+                    "repair": "ee init --workspace .",
+                })),
+            );
+        }
+
+        let connection = match if self.options.dry_run {
+            DbConnection::open_schema_only(&database_path)
+        } else {
+            DbConnection::open_file(&database_path)
+        } {
             Ok(connection) => connection,
             Err(error) => {
                 let message = format!(
@@ -1949,20 +1983,22 @@ impl ManualRunner {
                 );
             }
         };
-        if let Err(error) = connection.migrate() {
-            let message = format!("Failed to migrate maintenance database: {error}");
-            return (
-                RunOutcome::Failed,
-                None,
-                Some(message.clone()),
-                Some(json!({
-                    "schema": "ee.steward.decay_sweep.error.v1",
-                    "code": "decay_sweep_migration_failed",
-                    "databasePath": database_path.display().to_string(),
-                    "message": message,
-                    "repair": "ee doctor --json",
-                })),
-            );
+        if !self.options.dry_run {
+            if let Err(error) = connection.migrate() {
+                let message = format!("Failed to migrate maintenance database: {error}");
+                return (
+                    RunOutcome::Failed,
+                    None,
+                    Some(message.clone()),
+                    Some(json!({
+                        "schema": "ee.steward.decay_sweep.error.v1",
+                        "code": "decay_sweep_migration_failed",
+                        "databasePath": database_path.display().to_string(),
+                        "message": message,
+                        "repair": "ee doctor --json",
+                    })),
+                );
+            }
         }
 
         let workspace_id = match self.resolve_workspace_id(&connection) {
@@ -2232,6 +2268,14 @@ pub const DEFAULT_DAEMON_FOREGROUND_TICK_LIMIT: u32 = 1;
 /// Default delay between foreground daemon ticks.
 pub const DEFAULT_DAEMON_FOREGROUND_INTERVAL_MS: u64 = 1_000;
 
+/// Maximum number of reports retained by a bounded foreground daemon run.
+pub const MAX_DAEMON_FOREGROUND_TICK_LIMIT: u32 = 1_000;
+
+/// Maximum delay between foreground daemon ticks.
+pub const MAX_DAEMON_FOREGROUND_INTERVAL_MS: u64 = 60_000;
+
+const DAEMON_FOREGROUND_SLEEP_SLICE_MS: u64 = 250;
+
 /// Options for running the optional daemon in the foreground.
 #[derive(Clone, Debug)]
 pub struct DaemonForegroundOptions {
@@ -2398,8 +2442,10 @@ pub fn run_daemon_foreground(
 ) -> Result<DaemonForegroundReport, String> {
     validate_daemon_foreground_options(options)?;
 
+    let tick_capacity = usize::try_from(options.tick_limit)
+        .map_err(|_| "Daemon foreground tick limit does not fit this platform".to_owned())?;
     let started_at = chrono::Utc::now().to_rfc3339();
-    let mut ticks = Vec::new();
+    let mut ticks = Vec::with_capacity(tick_capacity);
 
     for tick in 1..=options.tick_limit {
         let tick_started_at = chrono::Utc::now().to_rfc3339();
@@ -2426,8 +2472,8 @@ pub fn run_daemon_foreground(
             report,
         });
 
-        if tick < options.tick_limit && options.interval_ms > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(options.interval_ms));
+        if tick < options.tick_limit {
+            sleep_daemon_foreground_interval(options.interval_ms);
         }
     }
 
@@ -2455,10 +2501,41 @@ fn validate_daemon_foreground_options(options: &DaemonForegroundOptions) -> Resu
     if options.tick_limit == 0 {
         return Err("Daemon foreground tick limit must be at least one".to_owned());
     }
+    if options.tick_limit > MAX_DAEMON_FOREGROUND_TICK_LIMIT {
+        return Err(format!(
+            "Daemon foreground tick limit must be no greater than {MAX_DAEMON_FOREGROUND_TICK_LIMIT}"
+        ));
+    }
+    if options.interval_ms > MAX_DAEMON_FOREGROUND_INTERVAL_MS {
+        return Err(format!(
+            "Daemon foreground interval must be no greater than {MAX_DAEMON_FOREGROUND_INTERVAL_MS} ms"
+        ));
+    }
     if options.job_types.is_empty() {
         return Err("Daemon foreground mode requires at least one steward job type".to_owned());
     }
     Ok(())
+}
+
+fn sleep_daemon_foreground_interval(interval_ms: u64) {
+    if interval_ms == 0 {
+        return;
+    }
+
+    let interval = Duration::from_millis(interval_ms);
+    let Some(deadline) = Instant::now().checked_add(interval) else {
+        std::thread::sleep(interval);
+        return;
+    };
+    let sleep_slice = Duration::from_millis(DAEMON_FOREGROUND_SLEEP_SLICE_MS);
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        std::thread::sleep(deadline.saturating_duration_since(now).min(sleep_slice));
+    }
 }
 
 // ============================================================================
@@ -2891,6 +2968,7 @@ mod tests {
                     level: "procedural".to_owned(),
                     kind: "rule".to_owned(),
                     content: format!("score decay fixture {memory_id}"),
+                    workflow_id: None,
                     confidence,
                     utility: 0.5,
                     importance: 0.5,
@@ -3536,6 +3614,112 @@ mod tests {
     }
 
     #[test]
+    fn score_decay_job_keeps_helpful_and_neutral_feedback_pending() -> TestResult {
+        let connection = open_score_decay_db()?;
+        insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+        insert_score_feedback(
+            &connection,
+            "fb_decaymixed0000000000000001",
+            SCORE_MEMORY_A,
+            "harmful",
+            1.0,
+        )?;
+        insert_score_feedback(
+            &connection,
+            "fb_decaymixed0000000000000002",
+            SCORE_MEMORY_A,
+            "stale",
+            1.0,
+        )?;
+        insert_score_feedback(
+            &connection,
+            "fb_decaymixed0000000000000003",
+            SCORE_MEMORY_A,
+            "helpful",
+            1.0,
+        )?;
+        insert_score_feedback(
+            &connection,
+            "fb_decaymixed0000000000000004",
+            SCORE_MEMORY_A,
+            "neutral",
+            1.0,
+        )?;
+
+        let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+        options.as_of = Some("2099-01-01T00:00:00Z".to_owned());
+        let report = run_score_decay_job(&connection, &options)?;
+
+        ensure(report.changed_count, 1, "changed count")?;
+        ensure(report.applied_count, 1, "applied count")?;
+        ensure(
+            report.changes[0].feedback_total_count,
+            4,
+            "all pending feedback considered",
+        )?;
+        ensure(
+            report.changes[0]
+                .feedback_event_ids
+                .contains(&"fb_decaymixed0000000000000001".to_owned()),
+            true,
+            "harmful feedback consumed",
+        )?;
+        ensure(
+            report.changes[0]
+                .feedback_event_ids
+                .contains(&"fb_decaymixed0000000000000002".to_owned()),
+            true,
+            "stale feedback consumed",
+        )?;
+        ensure(
+            report.changes[0]
+                .feedback_event_ids
+                .contains(&"fb_decaymixed0000000000000003".to_owned()),
+            false,
+            "helpful feedback not consumed",
+        )?;
+        ensure(
+            report.changes[0]
+                .feedback_event_ids
+                .contains(&"fb_decaymixed0000000000000004".to_owned()),
+            false,
+            "neutral feedback not consumed",
+        )?;
+
+        let events = connection
+            .list_feedback_events_for_target("memory", SCORE_MEMORY_A)
+            .map_err(|error| error.to_string())?;
+        let event_applied = |event_id: &str| -> Result<bool, String> {
+            events
+                .iter()
+                .find(|event| event.id == event_id)
+                .map(|event| event.applied_at.is_some())
+                .ok_or_else(|| format!("feedback event missing: {event_id}"))
+        };
+
+        ensure(
+            event_applied("fb_decaymixed0000000000000001")?,
+            true,
+            "harmful feedback applied",
+        )?;
+        ensure(
+            event_applied("fb_decaymixed0000000000000002")?,
+            true,
+            "stale feedback applied",
+        )?;
+        ensure(
+            event_applied("fb_decaymixed0000000000000003")?,
+            false,
+            "helpful feedback remains pending",
+        )?;
+        ensure(
+            event_applied("fb_decaymixed0000000000000004")?,
+            false,
+            "neutral feedback remains pending",
+        )
+    }
+
+    #[test]
     fn score_decay_job_decays_stale_memory_without_feedback() -> TestResult {
         let connection = open_score_decay_db()?;
         insert_score_memory(&connection, SCORE_MEMORY_B, 0.6)?;
@@ -3709,6 +3893,47 @@ mod tests {
         ensure(audit.is_empty(), true, "no score-decay audit rows")
     }
 
+    #[test]
+    fn manual_runner_decay_sweep_dry_run_missing_db_does_not_create_file() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("missing-ee.db");
+        ensure(database_path.exists(), false, "database initially absent")?;
+
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_dry_run(true);
+        let mut runner = ManualRunner::new(opts);
+        let result =
+            runner.run_job_type(JobType::DecaySweep, Some("dry-run missing db".to_owned()));
+
+        ensure(result.job_type, JobType::DecaySweep, "job type")?;
+        ensure(
+            result.outcome,
+            RunOutcome::Failed,
+            "dry-run missing db outcome",
+        )?;
+        ensure(
+            database_path.exists(),
+            false,
+            "dry-run must not create db file",
+        )?;
+        let details = result
+            .details
+            .ok_or_else(|| "missing-db dry-run details missing".to_owned())?;
+        ensure(
+            details["code"].as_str(),
+            Some("decay_sweep_database_missing"),
+            "missing db code",
+        )?;
+        ensure(details["dryRun"].as_bool(), Some(true), "dry-run detail")?;
+        ensure(
+            details["durableMutation"].as_bool(),
+            Some(false),
+            "durable mutation detail",
+        )
+    }
+
     // ========================================================================
     // EE-207: Foreground Daemon Tests
     // ========================================================================
@@ -3753,6 +3978,45 @@ mod tests {
             true,
             "zero tick limit rejected",
         )
+    }
+
+    #[test]
+    fn daemon_foreground_accepts_configured_safety_limits() -> TestResult {
+        let mut options = DaemonForegroundOptions::new("/tmp/ee-daemon");
+        options.tick_limit = MAX_DAEMON_FOREGROUND_TICK_LIMIT;
+        options.interval_ms = MAX_DAEMON_FOREGROUND_INTERVAL_MS;
+
+        validate_daemon_foreground_options(&options)
+    }
+
+    #[test]
+    fn daemon_foreground_rejects_excessive_tick_limit() -> TestResult {
+        let mut options = DaemonForegroundOptions::new("/tmp/ee-daemon");
+        options.tick_limit = MAX_DAEMON_FOREGROUND_TICK_LIMIT + 1;
+
+        let Err(error) = run_daemon_foreground(&options) else {
+            return Err("excessive daemon tick limit accepted".to_owned());
+        };
+        if error.contains(&MAX_DAEMON_FOREGROUND_TICK_LIMIT.to_string()) {
+            Ok(())
+        } else {
+            Err(format!("tick limit error omitted configured cap: {error}"))
+        }
+    }
+
+    #[test]
+    fn daemon_foreground_rejects_excessive_interval() -> TestResult {
+        let mut options = DaemonForegroundOptions::new("/tmp/ee-daemon");
+        options.interval_ms = MAX_DAEMON_FOREGROUND_INTERVAL_MS + 1;
+
+        let Err(error) = run_daemon_foreground(&options) else {
+            return Err("excessive daemon interval accepted".to_owned());
+        };
+        if error.contains(&MAX_DAEMON_FOREGROUND_INTERVAL_MS.to_string()) {
+            Ok(())
+        } else {
+            Err(format!("interval error omitted configured cap: {error}"))
+        }
     }
 
     #[test]
