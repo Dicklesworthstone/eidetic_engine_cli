@@ -3392,16 +3392,17 @@ mod tests {
 
     use super::{
         CANDIDATE_TOO_GENERIC_CODE, CandidateInput, CandidateSource, CandidateStatus,
-        CandidateType, CandidateValidationError, DUPLICATE_RULE_CHECK_SCHEMA_V1,
-        DUPLICATE_RULE_EXACT_CODE, DUPLICATE_RULE_INSUFFICIENT_SIGNAL_CODE,
-        DUPLICATE_RULE_NEAR_CODE, DuplicateRuleCheckConfig, DuplicateRuleDecision,
-        DuplicateRuleMatchKind, DuplicateRuleRecord, ParseCandidateSourceError,
-        ParseCandidateStatusError, ParseCandidateTypeError, ParseReviewQueueStateError,
-        QuarantineReason, QuarantinedFeedback, REVIEW_QUEUE_INVALID_TRANSITION_CODE,
+        CandidateType, CandidateValidationError, CurationCandidateEmbeddingText,
+        DUPLICATE_RULE_CHECK_SCHEMA_V1, DUPLICATE_RULE_EXACT_CODE,
+        DUPLICATE_RULE_INSUFFICIENT_SIGNAL_CODE, DUPLICATE_RULE_NEAR_CODE,
+        DuplicateRuleCheckConfig, DuplicateRuleDecision, DuplicateRuleMatchKind,
+        DuplicateRuleRecord, ParseCandidateSourceError, ParseCandidateStatusError,
+        ParseCandidateTypeError, ParseReviewQueueStateError, QuarantineReason,
+        QuarantinedFeedback, REVIEW_QUEUE_INVALID_TRANSITION_CODE,
         REVIEW_QUEUE_STATE_SCHEMA_V1, ReviewQueueState, SpecificityPlatform, SpecificityReport,
-        SpecificityTokenKind, check_duplicate_rule, check_duplicate_rule_with_config,
-        specificity_score, subsystem_name, validate_candidate, validate_review_queue_transition,
-        validate_status_transition,
+        SpecificityTokenKind, candidate_embedding_text, check_duplicate_rule,
+        check_duplicate_rule_with_config, specificity_score, subsystem_name, validate_candidate,
+        validate_review_queue_transition, validate_status_transition,
     };
 
     #[test]
@@ -5175,5 +5176,340 @@ Then update src/policy/mod.rs on main."
 
         let decision = evaluate_abstain(0.9, None, Some(&calibrated), None, &config);
         assert!(!decision.should_abstain);
+    }
+
+    // ========================================================================
+    // EE-pezx: candidate_embedding_text determinism and stability
+    // ========================================================================
+
+    /// Owned mirror of `CurationCandidateEmbeddingText` so proptest can hold
+    /// generated `String`s and lend `&str` references for each invocation.
+    #[derive(Clone, Debug)]
+    struct OwnedEmbeddingFields {
+        id: String,
+        candidate_type: String,
+        target_memory_id: String,
+        target_memory_content: Option<String>,
+        proposed_content: Option<String>,
+        proposed_confidence: Option<f32>,
+        proposed_trust_class: Option<String>,
+        source_type: String,
+        source_id: Option<String>,
+        reason: String,
+        confidence: f32,
+        status: String,
+        review_state: String,
+    }
+
+    impl OwnedEmbeddingFields {
+        fn as_view(&self) -> CurationCandidateEmbeddingText<'_> {
+            CurationCandidateEmbeddingText {
+                id: &self.id,
+                candidate_type: &self.candidate_type,
+                target_memory_id: &self.target_memory_id,
+                target_memory_content: self.target_memory_content.as_deref(),
+                proposed_content: self.proposed_content.as_deref(),
+                proposed_confidence: self.proposed_confidence,
+                proposed_trust_class: self.proposed_trust_class.as_deref(),
+                source_type: &self.source_type,
+                source_id: self.source_id.as_deref(),
+                reason: &self.reason,
+                confidence: self.confidence,
+                status: &self.status,
+                review_state: &self.review_state,
+            }
+        }
+    }
+
+    /// Mixed strategy producing strings with ASCII, multibyte unicode,
+    /// whitespace runs, and the empty string. Capped length so test cases
+    /// stay reasonable but go well beyond what the function inlines as
+    /// labels, to exercise long-string handling.
+    fn embedding_string_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            1 => Just(String::new()),
+            1 => "[ \\t\\n\\r]{0,8}",
+            6 => "[\\PC&&[^\\n\\r]]{0,128}",
+            2 => "[\\PC&&[^\\n\\r]]{129,512}",
+            2 => "(?:[a-zA-Z0-9_./-]| |\u{00e9}|\u{4e2d}|\u{1f680}){0,64}",
+        ]
+    }
+
+    fn embedding_optional_string_strategy() -> impl Strategy<Value = Option<String>> {
+        prop_oneof![
+            1 => Just(None),
+            5 => embedding_string_strategy().prop_map(Some),
+        ]
+    }
+
+    fn embedding_optional_f32_strategy() -> impl Strategy<Value = Option<f32>> {
+        prop_oneof![
+            1 => Just(None),
+            5 => (0.0f32..=1.0f32).prop_map(Some),
+        ]
+    }
+
+    fn embedding_fields_strategy() -> impl Strategy<Value = OwnedEmbeddingFields> {
+        (
+            embedding_string_strategy(),
+            embedding_string_strategy(),
+            embedding_string_strategy(),
+            embedding_optional_string_strategy(),
+            embedding_optional_string_strategy(),
+            embedding_optional_f32_strategy(),
+            embedding_optional_string_strategy(),
+            embedding_string_strategy(),
+            embedding_optional_string_strategy(),
+            embedding_string_strategy(),
+            0.0f32..=1.0f32,
+            embedding_string_strategy(),
+            embedding_string_strategy(),
+        )
+            .prop_map(
+                |(
+                    id,
+                    candidate_type,
+                    target_memory_id,
+                    target_memory_content,
+                    proposed_content,
+                    proposed_confidence,
+                    proposed_trust_class,
+                    source_type,
+                    source_id,
+                    reason,
+                    confidence,
+                    status,
+                    review_state,
+                )| OwnedEmbeddingFields {
+                    id,
+                    candidate_type,
+                    target_memory_id,
+                    target_memory_content,
+                    proposed_content,
+                    proposed_confidence,
+                    proposed_trust_class,
+                    source_type,
+                    source_id,
+                    reason,
+                    confidence,
+                    status,
+                    review_state,
+                },
+            )
+    }
+
+    /// Fixed projection order that matches the implementation. Tests assert
+    /// any line that does appear lands in the same relative order across
+    /// any input perturbation.
+    const EMBEDDING_FIELD_ORDER: &[&str] = &[
+        "Curation candidate",
+        "Candidate type",
+        "Target memory",
+        "Target memory content",
+        "Proposed content",
+        "Proposed confidence",
+        "Proposed trust class",
+        "Source type",
+        "Source id",
+        "Reason",
+        "Confidence",
+        "Status",
+        "Review state",
+    ];
+
+    /// Returns the index of each present label in EMBEDDING_FIELD_ORDER, or
+    /// None if a line does not begin with one of the known labels.
+    fn label_indices(text: &str) -> Option<Vec<usize>> {
+        text.lines()
+            .map(|line| {
+                EMBEDDING_FIELD_ORDER
+                    .iter()
+                    .position(|label| line.starts_with(&format!("{label}:")))
+            })
+            .collect()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Same input must yield byte-equal output across repeated calls.
+        #[test]
+        fn candidate_embedding_text_is_deterministic(fields in embedding_fields_strategy()) {
+            let view = fields.as_view();
+            let first = candidate_embedding_text(&view);
+            let second = candidate_embedding_text(&view);
+            prop_assert_eq!(first, second);
+        }
+
+        /// Whatever lines do appear must appear in the canonical projection
+        /// order. This pins field ordering against accidental reshuffles
+        /// (e.g. swapping `push_embedding_line` calls in the body).
+        #[test]
+        fn candidate_embedding_text_preserves_field_order(
+            fields in embedding_fields_strategy(),
+        ) {
+            let text = candidate_embedding_text(&fields.as_view());
+            let indices = label_indices(&text)
+                .expect("every emitted line must start with a known label");
+            for window in indices.windows(2) {
+                prop_assert!(
+                    window[0] < window[1],
+                    "labels emitted out of order: {:?} in {:?}",
+                    indices,
+                    text,
+                );
+            }
+        }
+
+        /// Replacing any required string field with arbitrary whitespace
+        /// (spaces, tabs, newlines) drops that line entirely, because the
+        /// gating check is `value.trim().is_empty()`. This pins the
+        /// whitespace-normalization contract: pure-whitespace and the
+        /// empty string are interchangeable for required fields.
+        #[test]
+        fn candidate_embedding_text_treats_whitespace_required_field_as_empty(
+            fields in embedding_fields_strategy(),
+            ws in "[ \\t\\n\\r]{1,8}",
+        ) {
+            let mut empty = fields.clone();
+            empty.id = String::new();
+            let mut whitespace = fields.clone();
+            whitespace.id = ws;
+            prop_assert_eq!(
+                candidate_embedding_text(&empty.as_view()),
+                candidate_embedding_text(&whitespace.as_view()),
+            );
+        }
+
+        /// Same test for an optional string field. Some(whitespace) must be
+        /// equivalent to Some(empty) — both get gated out by the trim check.
+        #[test]
+        fn candidate_embedding_text_treats_whitespace_optional_field_as_empty(
+            fields in embedding_fields_strategy(),
+            ws in "[ \\t\\n\\r]{1,8}",
+        ) {
+            let mut empty = fields.clone();
+            empty.target_memory_content = Some(String::new());
+            let mut whitespace = fields.clone();
+            whitespace.target_memory_content = Some(ws);
+            prop_assert_eq!(
+                candidate_embedding_text(&empty.as_view()),
+                candidate_embedding_text(&whitespace.as_view()),
+            );
+        }
+
+        /// Perturbing one field's value (when both old and new are
+        /// non-whitespace and don't contain newlines) changes exactly the
+        /// line for that field; every other line stays identical. This
+        /// guards against accidental coupling between fields in the
+        /// formatting pipeline.
+        #[test]
+        fn candidate_embedding_text_field_perturbation_is_localized(
+            mut fields in embedding_fields_strategy(),
+            new_reason in "[a-zA-Z0-9 .,_-]{1,32}",
+        ) {
+            // Force "reason" to a known non-empty inline-friendly value so
+            // the line for it definitely appears in both runs.
+            fields.reason = "baseline reason".to_owned();
+            let baseline = candidate_embedding_text(&fields.as_view());
+
+            let mut perturbed = fields.clone();
+            perturbed.reason = new_reason.clone();
+            let after = candidate_embedding_text(&perturbed.as_view());
+
+            // Both outputs must contain a "Reason: " line in the same
+            // relative position.
+            let baseline_lines: Vec<&str> = baseline.lines().collect();
+            let after_lines: Vec<&str> = after.lines().collect();
+            prop_assert_eq!(
+                baseline_lines.len(),
+                after_lines.len(),
+                "perturbing reason must not change line count: baseline={:?} after={:?}",
+                baseline,
+                after,
+            );
+
+            let mut diff_count = 0;
+            for (before_line, after_line) in baseline_lines.iter().zip(after_lines.iter()) {
+                if before_line != after_line {
+                    diff_count += 1;
+                    prop_assert!(
+                        before_line.starts_with("Reason:") && after_line.starts_with("Reason:"),
+                        "only the Reason line should differ; got {:?} vs {:?}",
+                        before_line,
+                        after_line,
+                    );
+                    prop_assert_eq!(after_line, &format!("Reason: {new_reason}").as_str());
+                }
+            }
+            prop_assert_eq!(
+                diff_count,
+                1,
+                "exactly one line should differ when perturbing reason",
+            );
+        }
+    }
+
+    /// Fully-populated reference value pinning the exact byte layout of the
+    /// emitted projection. Acts as a guard against silent label renames or
+    /// reordering that the structural proptests above might miss.
+    #[test]
+    fn candidate_embedding_text_golden_full_projection() {
+        let fields = OwnedEmbeddingFields {
+            id: "cand_001".to_owned(),
+            candidate_type: "consolidate".to_owned(),
+            target_memory_id: "mem_target".to_owned(),
+            target_memory_content: Some("existing content".to_owned()),
+            proposed_content: Some("merged content".to_owned()),
+            proposed_confidence: Some(0.875),
+            proposed_trust_class: Some("validated".to_owned()),
+            source_type: "agent".to_owned(),
+            source_id: Some("agent_42".to_owned()),
+            reason: "duplicate evidence".to_owned(),
+            confidence: 0.5,
+            status: "pending".to_owned(),
+            review_state: "queued".to_owned(),
+        };
+        let expected = concat!(
+            "Curation candidate: cand_001\n",
+            "Candidate type: consolidate\n",
+            "Target memory: mem_target\n",
+            "Target memory content: existing content\n",
+            "Proposed content: merged content\n",
+            "Proposed confidence: 0.875\n",
+            "Proposed trust class: validated\n",
+            "Source type: agent\n",
+            "Source id: agent_42\n",
+            "Reason: duplicate evidence\n",
+            "Confidence: 0.500\n",
+            "Status: pending\n",
+            "Review state: queued",
+        );
+        assert_eq!(candidate_embedding_text(&fields.as_view()), expected);
+    }
+
+    /// Inputs that are entirely whitespace (or None) for every gated field
+    /// emit only the always-on numeric `Confidence:` line. This pins the
+    /// minimum-output shape so future refactors don't accidentally start
+    /// emitting empty `Label: ` lines.
+    #[test]
+    fn candidate_embedding_text_whitespace_only_inputs_emit_only_numeric_line() {
+        let fields = OwnedEmbeddingFields {
+            id: "   ".to_owned(),
+            candidate_type: "\n".to_owned(),
+            target_memory_id: "\t \r ".to_owned(),
+            target_memory_content: None,
+            proposed_content: Some("   ".to_owned()),
+            proposed_confidence: None,
+            proposed_trust_class: Some(String::new()),
+            source_type: " ".to_owned(),
+            source_id: None,
+            reason: "\t".to_owned(),
+            confidence: 0.25,
+            status: "  ".to_owned(),
+            review_state: "\n\n".to_owned(),
+        };
+        let text = candidate_embedding_text(&fields.as_view());
+        assert_eq!(text, "Confidence: 0.250");
     }
 }
