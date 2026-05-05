@@ -1030,6 +1030,7 @@ dependencies = [
  "sqlmodel-frankensqlite",
  "tempfile",
  "toml_edit",
+ "tracing",
  "tru",
  "uuid",
 ]

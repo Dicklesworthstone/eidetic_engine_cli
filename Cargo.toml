@@ -52,6 +52,7 @@ sqlmodel-frankensqlite = { version = "0.2.2", path = "/data/projects/sqlmodel_ru
 tempfile = { version = "3.27.0" }
 toon = { package = "tru", version = "0.2.2", path = "/data/projects/toon_rust", default-features = false }
 toml_edit = { version = "0.25.11", default-features = false, features = ["parse"] }
+tracing = { version = "0.1.44" }
 uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
