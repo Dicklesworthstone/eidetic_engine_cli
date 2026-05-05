@@ -366,6 +366,62 @@ fn certificate_verify_manifest_reports_explicit_failure_modes() -> TestResult {
 }
 
 #[test]
+#[cfg(unix)]
+fn certificate_verify_rejects_symlink_payload_evidence() -> TestResult {
+    let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let outside_payload = r#"{"packHash":"outside","selected":["mem_external"]}"#;
+    let outside_payload_path = outside.path().join("outside-payload.json");
+    fs::write(&outside_payload_path, outside_payload).map_err(|error| error.to_string())?;
+    std::os::unix::fs::symlink(
+        &outside_payload_path,
+        dir.path().join("linked-payload.json"),
+    )
+    .map_err(|error| format!("failed to create certificate payload symlink: {error}"))?;
+
+    let manifest = json!({
+        "schema": CERTIFICATE_MANIFEST_SCHEMA_V1,
+        "certificates": [
+            certificate_record(
+                "cert_pack_symlink_payload",
+                "valid",
+                "linked-payload.json",
+                &hash_payload(outside_payload),
+                CERTIFICATE_PAYLOAD_SCHEMA_V1,
+                Some("2999-01-01T00:00:00Z"),
+                true,
+            )
+        ]
+    });
+    let manifest_path = dir.path().join("certificates.json");
+    let manifest_json =
+        serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?;
+    fs::write(&manifest_path, manifest_json).map_err(|error| error.to_string())?;
+
+    let report = verify_certificate_with_options(
+        &CertificateLookupOptions::new("cert_pack_symlink_payload")
+            .with_manifest_path(&manifest_path),
+    );
+
+    ensure_equal(
+        &report.result,
+        &VerificationResult::HashMismatch,
+        "symlink payload must not verify from outside evidence",
+    )?;
+    ensure(
+        !report.hash_verified,
+        "symlink payload hash is not verified",
+    )?;
+    ensure(
+        report
+            .failure_codes
+            .iter()
+            .any(|code| code == "hash_mismatch"),
+        "symlink payload reports hash mismatch",
+    )
+}
+
+#[test]
 fn certificate_verify_json_degrades_until_manifest_store_exists() -> TestResult {
     let output = run_ee(&["certificate", "verify", "cert_pack_stale_schema", "--json"])?;
     ensure_equal(

@@ -8,6 +8,7 @@
 //! empty/not-found reports instead of sample records.
 
 use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
@@ -818,23 +819,45 @@ fn payload_hash_matches(
     let Some(payload_path) = record.payload_path.as_deref() else {
         return Ok(false);
     };
-    let Some(payload_path) = resolve_manifest_payload_path(manifest_dir, payload_path) else {
-        return Ok(false);
-    };
-    let payload = fs::read(payload_path)?;
+    let payload = read_manifest_payload(manifest_dir, payload_path)?;
     let actual = blake3::hash(&payload).to_hex().to_string();
     Ok(actual == record.certificate.payload_hash)
 }
 
-fn resolve_manifest_payload_path(manifest_dir: &Path, payload_path: &Path) -> Option<PathBuf> {
+fn read_manifest_payload(manifest_dir: &Path, payload_path: &Path) -> io::Result<Vec<u8>> {
+    let payload_path = resolve_manifest_payload_path_no_symlinks(manifest_dir, payload_path)?;
+    fs::read(payload_path)
+}
+
+fn resolve_manifest_payload_path_no_symlinks(
+    manifest_dir: &Path,
+    payload_path: &Path,
+) -> io::Result<PathBuf> {
+    reject_payload_symlink_component(manifest_dir)?;
     let mut resolved = manifest_dir.to_path_buf();
     for component in payload_path.components() {
         let Component::Normal(component) = component else {
-            return None;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unsafe certificate payloadPath",
+            ));
         };
         resolved.push(component);
+        reject_payload_symlink_component(&resolved)?;
     }
-    Some(resolved)
+    Ok(resolved)
+}
+
+fn reject_payload_symlink_component(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("certificate payload symlink refused: {}", path.display()),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn usize_to_u32(value: usize) -> u32 {
