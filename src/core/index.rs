@@ -897,6 +897,17 @@ pub fn process_index_jobs(
     })
 }
 
+pub(crate) fn process_index_job_for_connection(
+    db: &DbConnection,
+    job_id: &str,
+    index_dir: &Path,
+) -> Result<IndexProcessingJobReport, IndexRebuildError> {
+    let job = db.get_search_index_job(job_id)?.ok_or_else(|| {
+        IndexRebuildError::Index(format!("Search index job {job_id} was not found"))
+    })?;
+    process_one_index_job(db, &job, index_dir)
+}
+
 fn process_one_index_job(
     db: &DbConnection,
     job: &StoredSearchIndexJob,

@@ -4287,7 +4287,7 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
     )?;
     ensure_equal(
         &remember_json["data"]["index_status"],
-        &serde_json::json!("queued"),
+        &serde_json::json!("indexed"),
         "remember index status",
     )?;
     ensure_equal(
@@ -4346,27 +4346,6 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
         &show_json["data"]["memory"]["trust_class"],
         &serde_json::json!("human_explicit"),
         "remembered memory trust class",
-    )?;
-
-    let rebuild = run_ee(&[
-        "--workspace",
-        workspace_arg.as_str(),
-        "--json",
-        "index",
-        "rebuild",
-    ])?;
-    let rebuild_stderr = String::from_utf8_lossy(&rebuild.stderr);
-    ensure(
-        rebuild.status.success(),
-        format!("index rebuild should succeed; stderr: {rebuild_stderr}"),
-    )?;
-    ensure(rebuild.stderr.is_empty(), "index rebuild stderr clean")?;
-    let rebuild_json: serde_json::Value = serde_json::from_slice(&rebuild.stdout)
-        .map_err(|error| format!("index rebuild stdout must be JSON: {error}"))?;
-    ensure_equal(
-        &rebuild_json["data"]["memories_indexed"],
-        &serde_json::json!(1),
-        "index rebuild memory count",
     )?;
 
     let search = run_ee(&[

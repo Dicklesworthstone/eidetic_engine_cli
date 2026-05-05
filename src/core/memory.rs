@@ -10,6 +10,9 @@ use std::str::FromStr;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 
+use super::index::{
+    DEFAULT_INDEX_SUBDIR, IndexProcessingJobReport, process_index_job_for_connection,
+};
 use crate::db::{
     CreateAuditInput, CreateMemoryInput, CreateSearchIndexJobInput, CreateWorkspaceInput,
     DbConnection, SearchIndexJobType, StoredMemory, audit_actions, generate_audit_id,
@@ -157,7 +160,7 @@ pub struct RememberSuggestedLinkDegradation {
     pub repair: String,
 }
 
-/// Create a manual memory and enqueue a single-document index job.
+/// Create a manual memory and publish its single-document index job.
 ///
 /// Dry-run mode validates and returns the canonical record shape without
 /// opening or mutating storage.
@@ -292,6 +295,17 @@ pub fn remember_memory(
             ),
         };
 
+    let index_dir = prepared
+        .workspace_path
+        .join(".ee")
+        .join(DEFAULT_INDEX_SUBDIR);
+    let index_report = process_index_job_for_connection(&connection, &index_job_id, &index_dir)
+        .map_err(|error| DomainError::SearchIndex {
+            message: format!("Remembered memory but failed to publish search index: {error}"),
+            repair: Some("ee index rebuild --workspace .".to_owned()),
+        })?;
+    let index_status = remember_index_status(&index_report);
+
     Ok(RememberMemoryReport {
         version: env!("CARGO_PKG_VERSION"),
         memory_id: prepared.memory_id,
@@ -314,13 +328,22 @@ pub fn remember_memory(
         revision_group_id: None,
         audit_id: Some(audit_id),
         index_job_id: Some(index_job_id),
-        index_status: "queued".to_owned(),
+        index_status,
         effect_ids: Vec::new(),
         suggested_links,
         suggested_link_status,
         suggested_link_degradations,
         redaction_status: "checked".to_owned(),
     })
+}
+
+fn remember_index_status(report: &IndexProcessingJobReport) -> String {
+    match report.outcome.as_str() {
+        "completed" | "completed_no_documents" => "indexed".to_owned(),
+        "skipped" => "queued".to_owned(),
+        "failed" => "failed".to_owned(),
+        other => other.to_owned(),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2067,7 +2090,7 @@ mod tests {
     }
 
     #[test]
-    fn remember_memory_persists_memory_audit_and_index_job() -> TestResult {
+    fn remember_memory_persists_memory_audit_and_publishes_index_job() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
 
@@ -2096,7 +2119,7 @@ mod tests {
         )?;
         ensure(report.audit_id.is_some(), true, "audit id present")?;
         ensure(report.index_job_id.is_some(), true, "index job id present")?;
-        ensure(report.index_status, "queued".to_string(), "index status")?;
+        ensure(report.index_status, "indexed".to_string(), "index status")?;
         ensure(report.effect_ids.is_empty(), true, "effect ids empty")?;
         ensure(
             report.suggested_links.is_empty(),
@@ -2170,17 +2193,28 @@ mod tests {
             Some(report.memory_id.to_string()),
             "audit target",
         )?;
-        let jobs = connection
-            .list_search_index_jobs(
-                &report.workspace_id,
-                Some(crate::db::SearchIndexJobStatus::Pending),
-            )
-            .map_err(|error| error.to_string())?;
-        ensure(jobs.len(), 1, "pending index job count")?;
+        let job_id = report
+            .index_job_id
+            .as_ref()
+            .ok_or_else(|| "index job id missing".to_string())?;
+        let job = connection
+            .get_search_index_job(job_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "index job should be persisted".to_string())?;
+        ensure(job.status, "completed".to_string(), "index job status")?;
         ensure(
-            jobs[0].document_id.clone(),
+            job.document_id.clone(),
             Some(report.memory_id.to_string()),
             "index job document",
+        )?;
+        ensure(
+            temp.path()
+                .join(".ee")
+                .join("index")
+                .join("meta.json")
+                .is_file(),
+            true,
+            "index metadata published",
         )
     }
 
