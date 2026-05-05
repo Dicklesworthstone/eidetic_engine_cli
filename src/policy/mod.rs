@@ -767,21 +767,23 @@ fn redact_raw_api_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (Strin
 }
 
 fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, bool) {
-    let mut output = input.to_owned();
+    let mut output = String::new();
     let mut changed = false;
+    let mut emit_start = 0;
     let mut search_start = 0;
+    let placeholder = redaction_placeholder("jwt_token");
 
     loop {
-        if search_start >= output.len() {
+        if search_start >= input.len() {
             break;
         }
-        let Some(relative) = output[search_start..].find("eyJ") else {
+        let Some(relative) = input[search_start..].find("eyJ") else {
             break;
         };
         let jwt_start = search_start + relative;
 
         if jwt_start > 0 {
-            if let Some(byte) = output.as_bytes().get(jwt_start - 1) {
+            if let Some(byte) = input.as_bytes().get(jwt_start - 1) {
                 if byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-' {
                     search_start = jwt_start + 3;
                     continue;
@@ -789,7 +791,7 @@ fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
             }
         }
 
-        let jwt_end = output[jwt_start..]
+        let jwt_end = input[jwt_start..]
             .char_indices()
             .find_map(|(offset, ch)| {
                 if !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-' && ch != '.' {
@@ -798,30 +800,36 @@ fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
                     None
                 }
             })
-            .unwrap_or(output.len());
+            .unwrap_or(input.len());
 
-        let mut jwt_candidate = &output[jwt_start..jwt_end];
-        while jwt_candidate.ends_with('.') {
-            jwt_candidate = &jwt_candidate[..jwt_candidate.len() - 1];
-        }
+        let jwt_candidate = input[jwt_start..jwt_end].trim_end_matches('.');
         let actual_jwt_end = jwt_start + jwt_candidate.len();
 
         let dot_count = jwt_candidate
-            .chars()
-            .filter(|&c| c == '.') // ubs:ignore - delimiter comparison, not secret equality.
+            .bytes()
+            .filter(|&byte| byte == b'.') // ubs:ignore - delimiter comparison, not secret equality.
             .count();
         if dot_count == 2 && jwt_candidate.len() >= 32 {
-            let placeholder = redaction_placeholder("jwt_token");
-            output.replace_range(jwt_start..actual_jwt_end, &placeholder);
+            if !changed {
+                output = String::with_capacity(input.len());
+            }
+            output.push_str(&input[emit_start..jwt_start]);
+            output.push_str(&placeholder);
             reasons.push("jwt_token");
             changed = true;
-            search_start = jwt_start + placeholder.len();
+            emit_start = actual_jwt_end;
+            search_start = actual_jwt_end;
         } else {
             search_start = jwt_end;
         }
     }
 
-    (output, changed)
+    if changed {
+        output.push_str(&input[emit_start..]);
+        (output, true)
+    } else {
+        (input.to_owned(), false)
+    }
 }
 
 fn normalize_for_instruction_detection(content: &str) -> String {
@@ -861,6 +869,7 @@ fn round_score(score: f32) -> f32 {
 mod tests {
     use proptest::prelude::*;
     use proptest::test_runner::Config as ProptestConfig;
+    use std::fmt::Write as _;
 
     use super::{
         INSTRUCTION_LIKE_SCORE_THRESHOLD, InstructionRisk, InstructionSignalKind,
@@ -1062,6 +1071,12 @@ mod tests {
         }
         value.extend(std::iter::repeat_n('A', suffix_len));
         value
+    }
+
+    fn append_malformed_jwt_prefixes(input: &mut String, count: usize) {
+        for index in 0..count {
+            let _ = write!(input, "eyJnotjwt{index} ");
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -1406,6 +1421,38 @@ mod tests {
 
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"jwt_token"));
+        assert!(report.content.contains(&redaction_placeholder("jwt_token")));
+        assert!(!report.content.contains(&jwt));
+    }
+
+    #[test]
+    fn secret_redactor_preserves_many_malformed_jwt_prefixes() {
+        let mut input = String::new();
+        append_malformed_jwt_prefixes(&mut input, 512);
+
+        let report = redact_secret_like_content(&input);
+
+        assert!(!report.redacted);
+        assert_eq!(report.content, input);
+    }
+
+    #[test]
+    fn secret_redactor_masks_jwt_after_many_malformed_prefixes() {
+        let mut input = String::new();
+        append_malformed_jwt_prefixes(&mut input, 512);
+        let jwt = [
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+            "Rq8IjqberX03cRIZHg7v0Rq8IjqberX03cRIZHg7v0",
+        ]
+        .join(".");
+        input.push_str(&jwt);
+
+        let report = redact_secret_like_content(&input);
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"jwt_token"));
+        assert!(report.content.contains("eyJnotjwt0"));
         assert!(report.content.contains(&redaction_placeholder("jwt_token")));
         assert!(!report.content.contains(&jwt));
     }
