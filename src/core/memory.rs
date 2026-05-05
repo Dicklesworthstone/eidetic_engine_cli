@@ -14,8 +14,9 @@ use super::index::{
     DEFAULT_INDEX_SUBDIR, IndexProcessingJobReport, process_index_job_for_connection,
 };
 use crate::db::{
-    CreateAuditInput, CreateMemoryInput, CreateSearchIndexJobInput, CreateWorkspaceInput,
-    DbConnection, SearchIndexJobType, StoredMemory, audit_actions, generate_audit_id,
+    CreateAuditInput, CreateMemoryInput, CreateMemoryLinkInput, CreateSearchIndexJobInput,
+    CreateWorkspaceInput, DbConnection, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType,
+    StoredMemory, audit_actions, generate_audit_id,
 };
 use crate::models::{
     DomainError, MemoryContent, MemoryId, MemoryKind, MemoryLevel, ProvenanceUri, Tag, TrustClass,
@@ -58,6 +59,8 @@ pub struct RememberMemoryOptions<'a> {
     pub valid_to: Option<&'a str>,
     /// Validate and render the write without mutating storage.
     pub dry_run: bool,
+    /// Create bounded workflow-local auto-links after a successful write.
+    pub auto_link: bool,
 }
 
 /// Result of creating a manual memory.
@@ -119,6 +122,12 @@ pub struct RememberMemoryReport {
     pub suggested_link_degradations: Vec<RememberSuggestedLinkDegradation>,
     /// Stable redaction/policy status for the accepted content.
     pub redaction_status: String,
+    /// Durable auto-link rows created by remember-time workflow reinforcement.
+    pub auto_links: Vec<RememberAutoLink>,
+    /// Status of remember-time workflow auto-linking.
+    pub auto_link_status: String,
+    /// Non-fatal degradations encountered while creating workflow auto-links.
+    pub auto_link_degradations: Vec<RememberSuggestedLinkDegradation>,
 }
 
 /// Options for closing a workflow lifecycle group.
@@ -181,6 +190,23 @@ pub struct RememberSuggestedLink {
     pub next_action: String,
 }
 
+/// A durable remember-time auto-link created from workflow-local recency.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RememberAutoLink {
+    /// Link row ID.
+    pub link_id: String,
+    /// Existing memory linked to the newly remembered memory.
+    pub target_memory_id: String,
+    /// Stored relation used by the graph layer.
+    pub relation: String,
+    /// Link weight.
+    pub weight: f32,
+    /// Link source.
+    pub source: String,
+    /// Audit entry created for the link write.
+    pub audit_id: String,
+}
+
 /// Non-fatal remember suggestion degradation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RememberSuggestedLinkDegradation {
@@ -232,6 +258,9 @@ pub fn remember_memory(
             suggested_link_status: "dry_run_not_evaluated".to_owned(),
             suggested_link_degradations: Vec::new(),
             redaction_status: "checked".to_owned(),
+            auto_links: Vec::new(),
+            auto_link_status: "dry_run_not_evaluated".to_owned(),
+            auto_link_degradations: Vec::new(),
         });
     }
 
@@ -299,6 +328,37 @@ pub fn remember_memory(
             message: format!("Failed to store memory: {error}"),
             repair: Some("ee doctor".to_string()),
         })?;
+
+    let (auto_links, auto_link_status, auto_link_degradations) =
+        match create_auto_links_for_remember(
+            &connection,
+            &prepared.workspace_id,
+            &memory_id,
+            prepared.workflow_id.as_deref(),
+            options.auto_link,
+        ) {
+            Ok(auto_links) => {
+                let status = auto_link_status(
+                    prepared.workflow_id.as_deref(),
+                    options.auto_link,
+                    &auto_links,
+                );
+                (auto_links, status.to_owned(), Vec::new())
+            }
+            Err(error) => (
+                Vec::new(),
+                "degraded".to_owned(),
+                vec![RememberSuggestedLinkDegradation {
+                    code: "remember_auto_link_failed".to_owned(),
+                    severity: "low".to_owned(),
+                    message: format!(
+                        "Remembered the memory, but workflow auto-linking failed: {}",
+                        error.message()
+                    ),
+                    repair: "Run `ee doctor --json` and inspect memory link indexes.".to_owned(),
+                }],
+            ),
+        };
 
     let (suggested_links, suggested_link_status, suggested_link_degradations) =
         match suggest_links_for_remember(
@@ -371,6 +431,9 @@ pub fn remember_memory(
         suggested_link_status,
         suggested_link_degradations,
         redaction_status: "checked".to_owned(),
+        auto_links,
+        auto_link_status,
+        auto_link_degradations,
     })
 }
 
@@ -801,6 +864,12 @@ fn generate_search_index_job_id() -> String {
     format!("sidx_{payload}")
 }
 
+fn generate_memory_link_id() -> String {
+    let memory_id = MemoryId::now().to_string();
+    let payload = memory_id.trim_start_matches("mem_");
+    format!("link_{payload}")
+}
+
 fn remember_audit_details(memory_id: &str, input: &CreateMemoryInput) -> String {
     serde_json::json!({
         "schema": "ee.audit.memory_create.v1",
@@ -816,6 +885,134 @@ fn remember_audit_details(memory_id: &str, input: &CreateMemoryInput) -> String 
         "tagCount": input.tags.len(),
     })
     .to_string()
+}
+
+const REMEMBER_AUTO_LINK_LIMIT: u32 = 8;
+const REMEMBER_AUTO_LINK_WEIGHT: f32 = 0.5;
+
+fn create_auto_links_for_remember(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+    workflow_id: Option<&str>,
+    enabled: bool,
+) -> Result<Vec<RememberAutoLink>, DomainError> {
+    if !enabled {
+        return Ok(Vec::new());
+    }
+    let Some(workflow_id) = workflow_id else {
+        return Ok(Vec::new());
+    };
+
+    let candidates = connection
+        .list_recent_workflow_memories(
+            workspace_id,
+            workflow_id,
+            memory_id,
+            REMEMBER_AUTO_LINK_LIMIT,
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query workflow memories for auto-linking: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    let mut auto_links = Vec::new();
+
+    for candidate in candidates {
+        let exists = connection
+            .memory_link_exists_between(memory_id, &candidate.id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query existing memory links: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            })?;
+        if exists {
+            continue;
+        }
+
+        let link_id = generate_memory_link_id();
+        let audit_id = generate_audit_id();
+        let reinforced_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        let input = CreateMemoryLinkInput {
+            src_memory_id: memory_id.to_owned(),
+            dst_memory_id: candidate.id.clone(),
+            relation: MemoryLinkRelation::Related,
+            weight: REMEMBER_AUTO_LINK_WEIGHT,
+            confidence: REMEMBER_AUTO_LINK_WEIGHT,
+            directed: false,
+            evidence_count: 1,
+            last_reinforced_at: Some(reinforced_at),
+            source: MemoryLinkSource::Auto,
+            created_by: Some("ee remember".to_owned()),
+            metadata_json: Some(
+                serde_json::json!({
+                    "schema": "ee.memory_link.hebbian_auto.v1",
+                    "linkKind": "hebbian",
+                    "workflowId": workflow_id,
+                    "reason": "same_workflow_recent_memory",
+                })
+                .to_string(),
+            ),
+        };
+        let audit_details = serde_json::json!({
+            "schema": "ee.audit.memory_link_auto_create.v1",
+            "command": "ee remember",
+            "linkId": &link_id,
+            "srcMemoryId": memory_id,
+            "dstMemoryId": &candidate.id,
+            "workflowId": workflow_id,
+            "relation": input.relation.as_str(),
+            "source": input.source.as_str(),
+            "weight": input.weight,
+            "linkKind": "hebbian",
+        })
+        .to_string();
+
+        connection
+            .with_transaction(|| {
+                connection.insert_memory_link(&link_id, &input)?;
+                connection.insert_audit(
+                    &audit_id,
+                    &CreateAuditInput {
+                        workspace_id: Some(workspace_id.to_owned()),
+                        actor: Some("ee remember".to_owned()),
+                        action: audit_actions::MEMORY_LINK_CREATE.to_owned(),
+                        target_type: Some("memory_link".to_owned()),
+                        target_id: Some(link_id.clone()),
+                        details: Some(audit_details.clone()),
+                    },
+                )
+            })
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to create workflow auto-link: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            })?;
+
+        auto_links.push(RememberAutoLink {
+            link_id,
+            target_memory_id: candidate.id,
+            relation: input.relation.as_str().to_owned(),
+            weight: input.weight,
+            source: input.source.as_str().to_owned(),
+            audit_id,
+        });
+    }
+
+    Ok(auto_links)
+}
+
+fn auto_link_status(
+    workflow_id: Option<&str>,
+    enabled: bool,
+    auto_links: &[RememberAutoLink],
+) -> &'static str {
+    if !enabled {
+        "disabled"
+    } else if workflow_id.is_none() {
+        "no_workflow"
+    } else if auto_links.is_empty() {
+        "no_candidates"
+    } else {
+        "linked"
+    }
 }
 
 fn suggest_links_for_remember(
@@ -2093,6 +2290,7 @@ mod tests {
             valid_from: None,
             valid_to: None,
             dry_run: false,
+            auto_link: true,
         })
         .map_err(|error| error.message())?;
 
@@ -2143,6 +2341,7 @@ mod tests {
             valid_from: None,
             valid_to: None,
             dry_run: true,
+            auto_link: true,
         })
         .map_err(|error| error.message())?;
 
@@ -2229,6 +2428,7 @@ mod tests {
             valid_from: None,
             valid_to: None,
             dry_run: false,
+            auto_link: true,
         })
         .map_err(|error| error.message())?;
 
@@ -2359,6 +2559,7 @@ mod tests {
             valid_from: Some("2020-01-01T00:00:00+00:00"),
             valid_to: Some("2099-01-01T00:00:00Z"),
             dry_run: false,
+            auto_link: true,
         })
         .map_err(|error| error.message())?;
 
@@ -2418,6 +2619,7 @@ mod tests {
             valid_from: Some("not a timestamp"),
             valid_to: None,
             dry_run: true,
+            auto_link: true,
         });
         match malformed {
             Err(DomainError::Usage { message, .. }) => {
@@ -2440,6 +2642,7 @@ mod tests {
             valid_from: Some("2099-01-01T00:00:00Z"),
             valid_to: Some("2020-01-01T00:00:00Z"),
             dry_run: true,
+            auto_link: true,
         });
         match reversed {
             Err(DomainError::Usage { message, .. }) => {
@@ -2463,6 +2666,7 @@ mod tests {
             valid_from: Some("2050-01-01T00:00:00Z"),
             valid_to: Some("2050-01-01T00:00:00Z"),
             dry_run: true,
+            auto_link: true,
         })
         .map_err(|error| error.message())?;
         ensure(
@@ -2490,6 +2694,7 @@ mod tests {
             valid_from: None,
             valid_to: None,
             dry_run: false,
+            auto_link: true,
         })
         .map_err(|error| error.message())?;
         let second = remember_memory(&RememberMemoryOptions {
@@ -2505,6 +2710,7 @@ mod tests {
             valid_from: None,
             valid_to: None,
             dry_run: false,
+            auto_link: true,
         })
         .map_err(|error| error.message())?;
         let third = remember_memory(&RememberMemoryOptions {
@@ -2520,6 +2726,7 @@ mod tests {
             valid_from: None,
             valid_to: None,
             dry_run: false,
+            auto_link: true,
         })
         .map_err(|error| error.message())?;
 
@@ -2570,6 +2777,182 @@ mod tests {
             true,
             "suggestions must not create durable memory links",
         )
+    }
+
+    #[test]
+    fn remember_memory_auto_links_recent_workflow_memories() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        let workflow_id = "wf-auto-link";
+
+        let first = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "First working memory in the release workflow.",
+            workflow_id: Some(workflow_id),
+            level: "working",
+            kind: "fact",
+            tags: None,
+            confidence: 0.8,
+            source: None,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: true,
+        })
+        .map_err(|error| error.message())?;
+        ensure(
+            first.auto_link_status,
+            "no_candidates".to_string(),
+            "first auto-link status",
+        )?;
+
+        let second = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Second working memory should reinforce the same workflow.",
+            workflow_id: Some(workflow_id),
+            level: "working",
+            kind: "fact",
+            tags: None,
+            confidence: 0.8,
+            source: None,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: true,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            second.auto_link_status,
+            "linked".to_string(),
+            "second auto-link status",
+        )?;
+        ensure(second.auto_links.len(), 1, "report auto-link count")?;
+        let reported = &second.auto_links[0];
+        ensure(
+            reported.target_memory_id.clone(),
+            first.memory_id.to_string(),
+            "reported target",
+        )?;
+        ensure(reported.relation.clone(), "related".to_string(), "relation")?;
+        ensure(reported.source.clone(), "auto".to_string(), "source")?;
+        ensure(reported.weight, 0.5, "weight")?;
+
+        let connection = crate::db::DbConnection::open_file(&second.database_path)
+            .map_err(|error| error.to_string())?;
+        let links = connection
+            .list_all_memory_links(None)
+            .map_err(|error| error.to_string())?;
+        ensure(links.len(), 1, "memory_links row count")?;
+        let link = &links[0];
+        ensure(link.id.clone(), reported.link_id.clone(), "stored link id")?;
+        ensure(
+            link.src_memory_id.clone(),
+            second.memory_id.to_string(),
+            "stored source memory",
+        )?;
+        ensure(
+            link.dst_memory_id.clone(),
+            first.memory_id.to_string(),
+            "stored target memory",
+        )?;
+        ensure(
+            link.relation.clone(),
+            "related".to_string(),
+            "stored relation",
+        )?;
+        ensure(link.source.clone(), "auto".to_string(), "stored source")?;
+        ensure(link.weight, 0.5, "stored weight")?;
+        let metadata: serde_json::Value = serde_json::from_str(
+            link.metadata_json
+                .as_deref()
+                .ok_or_else(|| "link metadata missing".to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            metadata["linkKind"].clone(),
+            serde_json::json!("hebbian"),
+            "link kind metadata",
+        )?;
+        ensure(
+            metadata["workflowId"].clone(),
+            serde_json::json!(workflow_id),
+            "workflow metadata",
+        )?;
+        let audit = connection
+            .get_audit(&reported.audit_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "auto-link audit missing".to_string())?;
+        ensure(
+            audit.action,
+            "memory.link.create".to_string(),
+            "audit action",
+        )?;
+        ensure(
+            audit.target_id,
+            Some(reported.link_id.clone()),
+            "audit target",
+        )
+    }
+
+    #[test]
+    fn remember_memory_auto_link_can_be_disabled() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        let workflow_id = "wf-no-auto-link";
+
+        remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Existing working memory in a workflow.",
+            workflow_id: Some(workflow_id),
+            level: "working",
+            kind: "fact",
+            tags: None,
+            confidence: 0.8,
+            source: None,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: true,
+        })
+        .map_err(|error| error.message())?;
+
+        let second = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "This memory opts out of workflow auto-linking.",
+            workflow_id: Some(workflow_id),
+            level: "working",
+            kind: "fact",
+            tags: None,
+            confidence: 0.8,
+            source: None,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            second.auto_link_status,
+            "disabled".to_string(),
+            "auto-link disabled status",
+        )?;
+        ensure(
+            second.auto_links.is_empty(),
+            true,
+            "report has no auto-links",
+        )?;
+        let connection = crate::db::DbConnection::open_file(&second.database_path)
+            .map_err(|error| error.to_string())?;
+        let links = connection
+            .list_all_memory_links(None)
+            .map_err(|error| error.to_string())?;
+        ensure(links.is_empty(), true, "no durable links when disabled")
     }
 
     #[test]
@@ -2641,6 +3024,7 @@ mod tests {
             valid_from: None,
             valid_to: None,
             dry_run: false,
+            auto_link: true,
         });
 
         match result {

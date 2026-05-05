@@ -5401,6 +5401,27 @@ impl DbConnection {
         rows.iter().map(stored_memory_from_row).collect()
     }
 
+    /// List recent non-tombstoned memories in the same workflow, excluding one memory.
+    pub fn list_recent_workflow_memories(
+        &self,
+        workspace_id: &str,
+        workflow_id: &str,
+        exclude_memory_id: &str,
+        limit: u32,
+    ) -> Result<Vec<StoredMemory>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND workflow_id = ?2 AND id <> ?3 AND tombstoned_at IS NULL ORDER BY created_at DESC, id ASC LIMIT ?4",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(workflow_id.to_string()),
+                Value::Text(exclude_memory_id.to_string()),
+                Value::BigInt(i64::from(limit)),
+            ],
+        )?;
+        rows.iter().map(stored_memory_from_row).collect()
+    }
+
     /// Tombstone a memory (soft delete).
     pub fn tombstone_memory(&self, id: &str) -> Result<bool> {
         let now = Utc::now().to_rfc3339();
@@ -7513,6 +7534,23 @@ impl DbConnection {
 
         let rows = self.query_for(DbOperation::Query, &sql, &params)?;
         rows.iter().map(stored_memory_link_from_row).collect()
+    }
+
+    /// Return true when any link already connects the two memory IDs.
+    pub fn memory_link_exists_between(
+        &self,
+        left_memory_id: &str,
+        right_memory_id: &str,
+    ) -> Result<bool> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT 1 FROM memory_links WHERE (src_memory_id = ?1 AND dst_memory_id = ?2) OR (src_memory_id = ?2 AND dst_memory_id = ?1) LIMIT 1",
+            &[
+                Value::Text(left_memory_id.to_string()),
+                Value::Text(right_memory_id.to_string()),
+            ],
+        )?;
+        Ok(!rows.is_empty())
     }
 
     /// List all memory links for graph projection.

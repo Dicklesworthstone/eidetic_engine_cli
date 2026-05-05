@@ -58,6 +58,7 @@ fn seed_database(temp_dir: &Path, n: usize) -> std::path::PathBuf {
             valid_from: None,
             valid_to: None,
             dry_run: false,
+            auto_link: true,
         };
         remember_memory(&options).expect("seed memory");
     }
@@ -101,6 +102,7 @@ fn bench_remember(c: &mut Criterion) {
                     valid_from: None,
                     valid_to: None,
                     dry_run: false,
+                    auto_link: true,
                 };
                 remember_memory(&options).expect("remember");
             });
@@ -135,6 +137,7 @@ fn bench_remember_dry_run(c: &mut Criterion) {
                 valid_from: None,
                 valid_to: None,
                 dry_run: true,
+                auto_link: true,
             };
             remember_memory(&options).expect("dry_run remember");
         });

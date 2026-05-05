@@ -74,6 +74,7 @@ fn seed_database(temp_dir: &Path, memory_count: usize) -> std::path::PathBuf {
             valid_from: None,
             valid_to: None,
             dry_run: false,
+            auto_link: true,
         };
         remember_memory(&options).expect("seed memory");
     }

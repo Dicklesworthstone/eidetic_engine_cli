@@ -2831,6 +2831,10 @@ pub struct RememberArgs {
     #[arg(long, value_name = "ID")]
     pub workflow: Option<String>,
 
+    /// Disable bounded workflow-local auto-linking for this memory.
+    #[arg(long = "no-auto-link", action = ArgAction::SetTrue)]
+    pub no_auto_link: bool,
+
     /// Confidence score (0.0 to 1.0).
     #[arg(long, default_value = "0.8")]
     pub confidence: f32,
@@ -11985,6 +11989,9 @@ impl RememberMemoryReport {
         if let Some(workflow_id) = &self.workflow_id {
             output.push_str(&format!("  Workflow: {workflow_id}\n"));
         }
+        if !self.dry_run && !self.auto_links.is_empty() {
+            output.push_str(&format!("  Auto links: {}\n", self.auto_links.len()));
+        }
         if let Some(index_job_id) = &self.index_job_id {
             output.push_str(&format!("  Index job: {index_job_id}\n"));
         }
@@ -12048,9 +12055,11 @@ impl RememberMemoryReport {
             });
         let suggested_links_json = self.suggested_links_json();
         let suggested_link_degradations_json = self.suggested_link_degradations_json();
+        let auto_links_json = self.auto_links_json();
+        let auto_link_degradations_json = self.auto_link_degradations_json();
 
         let mut json = format!(
-            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"redaction_status":"{}"}}"#,
+            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"redaction_status":"{}"}}"#,
             self.version,
             self.memory_id,
             escape_json_string(&self.workspace_id),
@@ -12077,6 +12086,9 @@ impl RememberMemoryReport {
             suggested_links_json,
             escape_json_string(&self.suggested_link_status),
             suggested_link_degradations_json,
+            auto_links_json,
+            escape_json_string(&self.auto_link_status),
+            auto_link_degradations_json,
             escape_json_string(&self.redaction_status)
         );
         json.push('}');
@@ -12120,6 +12132,48 @@ impl RememberMemoryReport {
 
         let items = self
             .suggested_link_degradations
+            .iter()
+            .map(|degradation| {
+                format!(
+                    r#"{{"code":"{}","severity":"{}","message":"{}","repair":"{}"}}"#,
+                    escape_json_string(&degradation.code),
+                    escape_json_string(&degradation.severity),
+                    escape_json_string(&degradation.message),
+                    escape_json_string(&degradation.repair)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{items}]")
+    }
+
+    fn auto_links_json(&self) -> String {
+        use crate::output::escape_json_string;
+
+        let items = self
+            .auto_links
+            .iter()
+            .map(|link| {
+                format!(
+                    r#"{{"link_id":"{}","target_memory_id":"{}","relation":"{}","weight":{},"source":"{}","audit_id":"{}"}}"#,
+                    escape_json_string(&link.link_id),
+                    escape_json_string(&link.target_memory_id),
+                    escape_json_string(&link.relation),
+                    link.weight,
+                    escape_json_string(&link.source),
+                    escape_json_string(&link.audit_id)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{items}]")
+    }
+
+    fn auto_link_degradations_json(&self) -> String {
+        use crate::output::escape_json_string;
+
+        let items = self
+            .auto_link_degradations
             .iter()
             .map(|degradation| {
                 format!(
@@ -12198,6 +12252,7 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberMemoryRepor
         valid_from: args.valid_from.as_deref(),
         valid_to: args.valid_to.as_deref(),
         dry_run: args.dry_run,
+        auto_link: !args.no_auto_link,
     })
 }
 
@@ -20312,6 +20367,26 @@ mod tests {
                 &Some("wf-release-001".to_string()),
                 "workflow id",
             ),
+            _ => Err("expected Remember command".to_string()),
+        }
+    }
+
+    #[test]
+    fn remember_command_accepts_no_auto_link_flag() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "remember",
+            "Capture a working memory without workflow auto-links.",
+            "--workflow",
+            "wf-release-001",
+            "--no-auto-link",
+        ])
+        .map_err(|error| format!("failed to parse remember no-auto-link: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Remember(ref args)) => {
+                ensure_equal(&args.no_auto_link, &true, "no_auto_link flag")
+            }
             _ => Err("expected Remember command".to_string()),
         }
     }
