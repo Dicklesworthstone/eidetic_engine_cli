@@ -262,6 +262,14 @@ pub struct AutolinkMemoryInput {
     pub evidence_count: u32,
 }
 
+/// A memory-to-entity summary used by deterministic CoMention candidate generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoMentionMemoryInput {
+    pub memory_id: String,
+    pub entity_ids: Vec<String>,
+    pub evidence_count: u32,
+}
+
 /// An existing memory edge used to suppress duplicate autolink suggestions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AutolinkExistingEdge {
@@ -288,6 +296,24 @@ impl Default for AutolinkCandidateOptions {
     }
 }
 
+/// Options for entity co-mention autolink candidate generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoMentionCandidateOptions {
+    pub min_shared_entities: usize,
+    pub common_entity_max_count: u32,
+    pub max_candidates: Option<usize>,
+}
+
+impl Default for CoMentionCandidateOptions {
+    fn default() -> Self {
+        Self {
+            min_shared_entities: 1,
+            common_entity_max_count: 8,
+            max_candidates: None,
+        }
+    }
+}
+
 /// A dry-run candidate memory link proposed from explainable graph features.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AutolinkCandidate {
@@ -299,6 +325,7 @@ pub struct AutolinkCandidate {
     pub weight: f64,
     pub confidence: f64,
     pub shared_tags: Vec<String>,
+    pub shared_entities: Vec<String>,
     pub evidence_count: u32,
     pub metadata_json: String,
 }
@@ -321,7 +348,7 @@ pub fn generate_autolink_candidates(
     normalized_memories.sort_by(|left, right| left.memory_id.cmp(right.memory_id));
 
     let tag_counts = tag_frequencies(&normalized_memories);
-    let existing_pairs = existing_cotag_pairs(existing_edges);
+    let existing_pairs = existing_relation_pairs(existing_edges, "co_tag");
     let mut candidates = Vec::new();
 
     for (left_index, left) in normalized_memories.iter().enumerate() {
@@ -377,6 +404,102 @@ pub fn generate_autolink_candidates(
                 })
                 .to_string(),
                 shared_tags,
+                shared_entities: Vec::new(),
+            });
+        }
+    }
+
+    candidates.sort_by(compare_autolink_candidates);
+    if let Some(limit) = options.max_candidates {
+        candidates.truncate(limit);
+    }
+    candidates
+}
+
+/// Generate deterministic dry-run `co_mention` memory link candidates.
+///
+/// A CoMention candidate links two memories that reference the same normalized
+/// entity memory IDs. This is report-only; callers must persist accepted links
+/// through an audited graph maintenance path.
+#[must_use]
+pub fn generate_co_mention_candidates(
+    memories: &[CoMentionMemoryInput],
+    existing_edges: &[AutolinkExistingEdge],
+    options: &CoMentionCandidateOptions,
+) -> Vec<AutolinkCandidate> {
+    let mut normalized_memories: Vec<_> = memories
+        .iter()
+        .map(NormalizedCoMentionMemory::from_input)
+        .filter(|memory| !memory.entity_ids.is_empty())
+        .collect();
+    normalized_memories.sort_by(|left, right| left.memory_id.cmp(right.memory_id));
+
+    let entity_counts = entity_frequencies(&normalized_memories);
+    let existing_pairs = existing_relation_pairs(existing_edges, "co_mention");
+    let mut candidates = Vec::new();
+
+    for (left_index, left) in normalized_memories.iter().enumerate() {
+        for right in normalized_memories.iter().skip(left_index + 1) {
+            if left.memory_id == right.memory_id {
+                continue;
+            }
+
+            let (src_memory_id, dst_memory_id) =
+                canonical_memory_pair(left.memory_id, right.memory_id);
+            if existing_pairs.contains(&(src_memory_id.to_owned(), dst_memory_id.to_owned())) {
+                continue;
+            }
+
+            let shared_entities: Vec<String> = left
+                .entity_ids
+                .intersection(&right.entity_ids)
+                .cloned()
+                .collect();
+            if shared_entities.len() < options.min_shared_entities {
+                continue;
+            }
+
+            let common_entity_count = count_common_entities(
+                &shared_entities,
+                &entity_counts,
+                options.common_entity_max_count,
+            );
+            if common_entity_count == shared_entities.len() {
+                continue;
+            }
+
+            let specificity = entity_specificity(&shared_entities, &entity_counts);
+            let evidence_count = left.evidence_count.saturating_add(right.evidence_count);
+            let weight = co_mention_score(
+                shared_entities.len(),
+                specificity,
+                common_entity_count,
+                evidence_count,
+            );
+            let confidence = round_score((0.5 + weight * 0.45).clamp(0.0, 0.95));
+            let entity_frequency_metadata =
+                shared_entity_frequency_metadata(&shared_entities, &entity_counts);
+
+            candidates.push(AutolinkCandidate {
+                src_memory_id: src_memory_id.to_owned(),
+                dst_memory_id: dst_memory_id.to_owned(),
+                relation: "co_mention".to_owned(),
+                source: "auto".to_owned(),
+                directed: false,
+                weight,
+                confidence,
+                shared_tags: Vec::new(),
+                shared_entities: shared_entities.clone(),
+                evidence_count,
+                metadata_json: serde_json::json!({
+                    "strategy": "entity_co_mention",
+                    "dryRun": true,
+                    "sharedEntities": &shared_entities,
+                    "entityFrequencies": entity_frequency_metadata,
+                    "commonEntityMaxCount": options.common_entity_max_count,
+                    "commonEntityCount": common_entity_count,
+                })
+                .to_string(),
             });
         }
     }
@@ -409,6 +532,27 @@ impl<'a> NormalizedAutolinkMemory<'a> {
     }
 }
 
+#[derive(Clone, Debug)]
+struct NormalizedCoMentionMemory<'a> {
+    memory_id: &'a str,
+    entity_ids: BTreeSet<String>,
+    evidence_count: u32,
+}
+
+impl<'a> NormalizedCoMentionMemory<'a> {
+    fn from_input(input: &'a CoMentionMemoryInput) -> Self {
+        Self {
+            memory_id: input.memory_id.as_str(),
+            entity_ids: input
+                .entity_ids
+                .iter()
+                .filter_map(|entity_id| normalize_entity_id(entity_id))
+                .collect(),
+            evidence_count: input.evidence_count,
+        }
+    }
+}
+
 fn normalize_autolink_tag(tag: &str) -> Option<String> {
     let normalized = tag
         .trim()
@@ -423,6 +567,15 @@ fn normalize_autolink_tag(tag: &str) -> Option<String> {
     }
 }
 
+fn normalize_entity_id(entity_id: &str) -> Option<String> {
+    let normalized = entity_id.trim();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized.to_owned())
+    }
+}
+
 fn tag_frequencies(memories: &[NormalizedAutolinkMemory<'_>]) -> BTreeMap<String, u32> {
     let mut counts = BTreeMap::new();
     for memory in memories {
@@ -434,10 +587,24 @@ fn tag_frequencies(memories: &[NormalizedAutolinkMemory<'_>]) -> BTreeMap<String
     counts
 }
 
-fn existing_cotag_pairs(existing_edges: &[AutolinkExistingEdge]) -> BTreeSet<(String, String)> {
+fn entity_frequencies(memories: &[NormalizedCoMentionMemory<'_>]) -> BTreeMap<String, u32> {
+    let mut counts = BTreeMap::new();
+    for memory in memories {
+        for entity_id in &memory.entity_ids {
+            let count = counts.entry(entity_id.clone()).or_insert(0);
+            *count += 1;
+        }
+    }
+    counts
+}
+
+fn existing_relation_pairs(
+    existing_edges: &[AutolinkExistingEdge],
+    relation: &str,
+) -> BTreeSet<(String, String)> {
     existing_edges
         .iter()
-        .filter(|edge| edge.relation == "co_tag")
+        .filter(|edge| edge.relation == relation)
         .map(|edge| {
             let (src, dst) = canonical_memory_pair(&edge.src_memory_id, &edge.dst_memory_id);
             (src.to_owned(), dst.to_owned())
@@ -482,6 +649,22 @@ fn count_common_tags(
         .count()
 }
 
+fn count_common_entities(
+    shared_entities: &[String],
+    entity_counts: &BTreeMap<String, u32>,
+    common_entity_max_count: u32,
+) -> usize {
+    shared_entities
+        .iter()
+        .filter(|entity_id| {
+            entity_counts
+                .get(*entity_id)
+                .copied()
+                .is_some_and(|count| count > common_entity_max_count)
+        })
+        .count()
+}
+
 fn shared_tag_frequency_metadata(
     shared_tags: &[String],
     tag_counts: &BTreeMap<String, u32>,
@@ -490,6 +673,34 @@ fn shared_tag_frequency_metadata(
         .iter()
         .map(|tag| (tag.clone(), tag_counts.get(tag).copied().unwrap_or(0)))
         .collect()
+}
+
+fn shared_entity_frequency_metadata(
+    shared_entities: &[String],
+    entity_counts: &BTreeMap<String, u32>,
+) -> BTreeMap<String, u32> {
+    shared_entities
+        .iter()
+        .map(|entity_id| {
+            (
+                entity_id.clone(),
+                entity_counts.get(entity_id).copied().unwrap_or(0),
+            )
+        })
+        .collect()
+}
+
+fn entity_specificity(shared_entities: &[String], entity_counts: &BTreeMap<String, u32>) -> f64 {
+    shared_entities
+        .iter()
+        .map(|entity_id| {
+            entity_counts
+                .get(entity_id)
+                .copied()
+                .filter(|count| *count > 0)
+                .map_or(0.0, |count| 1.0 / f64::from(count))
+        })
+        .sum()
 }
 
 fn autolink_score(
@@ -504,6 +715,24 @@ fn autolink_score(
     let specificity_component = (specificity * 0.15).min(0.3);
     let evidence_component = (f64::from(evidence_count.min(10)) * 0.01).min(0.1);
     let common_penalty = f64::from(common_count) * 0.05;
+    round_score(
+        (shared_component + specificity_component + evidence_component - common_penalty)
+            .clamp(0.05, 0.99),
+    )
+}
+
+fn co_mention_score(
+    shared_entity_count: usize,
+    specificity: f64,
+    common_entity_count: usize,
+    evidence_count: u32,
+) -> f64 {
+    let shared_count = u32::try_from(shared_entity_count).unwrap_or(u32::MAX);
+    let common_count = u32::try_from(common_entity_count).unwrap_or(u32::MAX);
+    let shared_component = (f64::from(shared_count) * 0.35).min(0.7);
+    let specificity_component = (specificity * 0.15).min(0.2);
+    let evidence_component = (f64::from(evidence_count.min(10)) * 0.01).min(0.1);
+    let common_penalty = f64::from(common_count) * 0.08;
     round_score(
         (shared_component + specificity_component + evidence_component - common_penalty)
             .clamp(0.05, 0.99),
@@ -525,7 +754,14 @@ fn compare_autolink_candidates(
     right
         .weight
         .total_cmp(&left.weight)
-        .then_with(|| right.shared_tags.len().cmp(&left.shared_tags.len()))
+        .then_with(|| {
+            right
+                .shared_tags
+                .len()
+                .max(right.shared_entities.len())
+                .cmp(&left.shared_tags.len().max(left.shared_entities.len()))
+        })
+        .then_with(|| left.relation.cmp(&right.relation))
         .then_with(|| left.src_memory_id.cmp(&right.src_memory_id))
         .then_with(|| left.dst_memory_id.cmp(&right.dst_memory_id))
 }
@@ -2812,6 +3048,32 @@ mod tests {
         }
     }
 
+    fn co_mention_memory(
+        memory_id: &str,
+        entity_ids: &[&str],
+        evidence_count: u32,
+    ) -> super::CoMentionMemoryInput {
+        super::CoMentionMemoryInput {
+            memory_id: memory_id.to_owned(),
+            entity_ids: entity_ids
+                .iter()
+                .map(|entity_id| (*entity_id).to_owned())
+                .collect(),
+            evidence_count,
+        }
+    }
+
+    fn existing_co_mention(
+        src_memory_id: &str,
+        dst_memory_id: &str,
+    ) -> super::AutolinkExistingEdge {
+        super::AutolinkExistingEdge {
+            src_memory_id: src_memory_id.to_owned(),
+            dst_memory_id: dst_memory_id.to_owned(),
+            relation: "co_mention".to_owned(),
+        }
+    }
+
     #[test]
     fn subsystem_name_is_stable() {
         assert_eq!(subsystem_name(), "graph");
@@ -2981,6 +3243,102 @@ mod tests {
         let second = candidates
             .get(1)
             .ok_or_else(|| "second candidate should exist".to_owned())?;
+        assert_eq!(
+            (first.src_memory_id.as_str(), first.dst_memory_id.as_str()),
+            (MEMORY_A, MEMORY_B)
+        );
+        assert_eq!(
+            (second.src_memory_id.as_str(), second.dst_memory_id.as_str()),
+            (MEMORY_A, MEMORY_C)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn co_mention_candidates_link_shared_entity_memories() -> TestResult {
+        let candidates = super::generate_co_mention_candidates(
+            &[
+                co_mention_memory(MEMORY_A, &["mem_entity_rust", "mem_entity_cli"], 3),
+                co_mention_memory(MEMORY_B, &[" mem_entity_rust ", "mem_entity_graph"], 4),
+                co_mention_memory(MEMORY_C, &["mem_entity_storage"], 2),
+            ],
+            &[],
+            &super::CoMentionCandidateOptions::default(),
+        );
+
+        assert_eq!(candidates.len(), 1);
+        let candidate = candidates
+            .first()
+            .ok_or_else(|| "co-mention candidate should exist".to_owned())?;
+        assert_eq!(candidate.src_memory_id, MEMORY_A);
+        assert_eq!(candidate.dst_memory_id, MEMORY_B);
+        assert_eq!(candidate.relation, "co_mention");
+        assert_eq!(candidate.source, "auto");
+        assert!(!candidate.directed);
+        assert!(candidate.shared_tags.is_empty());
+        assert_eq!(candidate.shared_entities, vec!["mem_entity_rust"]);
+        assert!(candidate.metadata_json.contains("\"entity_co_mention\""));
+        assert!(candidate.metadata_json.contains("\"sharedEntities\""));
+        Ok(())
+    }
+
+    #[test]
+    fn co_mention_candidates_dedupe_existing_edges_symmetrically() {
+        let candidates = super::generate_co_mention_candidates(
+            &[
+                co_mention_memory(MEMORY_A, &["mem_entity_rust"], 1),
+                co_mention_memory(MEMORY_B, &["mem_entity_rust"], 1),
+            ],
+            &[existing_co_mention(MEMORY_B, MEMORY_A)],
+            &super::CoMentionCandidateOptions::default(),
+        );
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn co_mention_candidates_suppress_all_broad_entity_pairs() {
+        let candidates = super::generate_co_mention_candidates(
+            &[
+                co_mention_memory(MEMORY_A, &["mem_entity_everything"], 1),
+                co_mention_memory(MEMORY_B, &["mem_entity_everything"], 1),
+                co_mention_memory(MEMORY_C, &["mem_entity_everything"], 1),
+            ],
+            &[],
+            &super::CoMentionCandidateOptions {
+                common_entity_max_count: 2,
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            candidates.is_empty(),
+            "pairs supported only by broad entity mentions should be suppressed"
+        );
+    }
+
+    #[test]
+    fn co_mention_candidates_are_stably_ordered_and_limited() -> TestResult {
+        let candidates = super::generate_co_mention_candidates(
+            &[
+                co_mention_memory(MEMORY_C, &["mem_entity_rust", "mem_entity_cli"], 1),
+                co_mention_memory(MEMORY_A, &["mem_entity_rust", "mem_entity_cli"], 1),
+                co_mention_memory(MEMORY_B, &["mem_entity_rust", "mem_entity_cli"], 1),
+            ],
+            &[],
+            &super::CoMentionCandidateOptions {
+                max_candidates: Some(2),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(candidates.len(), 2);
+        let first = candidates
+            .first()
+            .ok_or_else(|| "first co-mention candidate should exist".to_owned())?;
+        let second = candidates
+            .get(1)
+            .ok_or_else(|| "second co-mention candidate should exist".to_owned())?;
         assert_eq!(
             (first.src_memory_id.as_str(), first.dst_memory_id.as_str()),
             (MEMORY_A, MEMORY_B)
