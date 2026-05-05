@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -247,7 +248,7 @@ impl DbConnection {
         let mut issues = Vec::new();
         for row in &rows {
             if let Some(msg) = row.get(0).and_then(|v| v.as_str()) {
-                if msg != "ok" {
+                if !text_matches(msg, "ok") {
                     issues.push(msg.to_string());
                 }
             }
@@ -672,7 +673,7 @@ impl MigrationTableColumn {
     fn from_pragma_row(row: &Row) -> Result<Self> {
         let name = required_text(row, 1, DbOperation::InspectMigrationTable, "name")?;
         let sql_type = required_text(row, 2, DbOperation::InspectMigrationTable, "type")?;
-        let not_null = required_i64(row, 3, DbOperation::InspectMigrationTable, "notnull")? != 0;
+        let not_null = required_sqlite_bool(row, 3, DbOperation::InspectMigrationTable, "notnull")?;
         let primary_key_position = required_i64(row, 5, DbOperation::InspectMigrationTable, "pk")?;
         let primary_key_position =
             u32::try_from(primary_key_position).map_err(|_| DbError::MalformedRow {
@@ -1071,6 +1072,23 @@ fn required_i64(row: &Row, index: usize, operation: DbOperation, column: &str) -
         })
 }
 
+fn sqlite_i64_is_truthy(value: i64) -> bool {
+    matches!(value, i64::MIN..=-1 | 1..=i64::MAX)
+}
+
+fn text_matches(left: &str, right: &str) -> bool {
+    matches!(left.cmp(right), std::cmp::Ordering::Equal)
+}
+
+fn required_sqlite_bool(
+    row: &Row,
+    index: usize,
+    operation: DbOperation,
+    column: &str,
+) -> Result<bool> {
+    required_i64(row, index, operation, column).map(sqlite_i64_is_truthy)
+}
+
 fn optional_i64(
     row: &Row,
     index: usize,
@@ -1140,28 +1158,29 @@ pub const fn subsystem_name() -> &'static str {
     SUBSYSTEM
 }
 
-/// A migration definition with version, name, SQL statements, and checksum.
+/// A migration definition with version, name, SQL statements, and checksum label.
 #[derive(Debug, Clone)]
 pub struct Migration {
     version: u32,
     name: &'static str,
     sql: &'static str,
-    checksum: &'static str,
+    checksum_label: &'static str,
 }
 
 impl Migration {
-    /// Construct a migration. Checksum is `blake3:<hex>` of the SQL text.
+    /// Construct a migration. The label is retained for human audit; applied
+    /// records store the computed `blake3:<hex>` checksum of the SQL text.
     pub const fn new(
         version: u32,
         name: &'static str,
         sql: &'static str,
-        checksum: &'static str,
+        checksum_label: &'static str,
     ) -> Self {
         Self {
             version,
             name,
             sql,
-            checksum,
+            checksum_label,
         }
     }
 
@@ -1177,9 +1196,17 @@ impl Migration {
         self.sql
     }
 
-    pub const fn checksum(&self) -> &'static str {
-        self.checksum
+    pub const fn checksum_label(&self) -> &'static str {
+        self.checksum_label
     }
+
+    pub fn checksum(&self) -> String {
+        migration_sql_checksum(self.sql)
+    }
+}
+
+fn migration_sql_checksum(sql: &str) -> String {
+    format!("blake3:{}", blake3::hash(sql.as_bytes()).to_hex())
 }
 
 /// V001: Initial schema — workspaces, agents, memories, memory_tags, audit_log.
@@ -2384,6 +2411,24 @@ CREATE INDEX IF NOT EXISTS idx_ee_advisory_locks_expiry ON ee_advisory_locks(exp
     "blake3:v028_advisory_locks_2026_05_05",
 );
 
+/// V029: Attach memories to optional workflow lifecycle groups.
+pub const V029_MEMORY_WORKFLOW_ID: Migration = Migration::new(
+    29,
+    "memory_workflow_id",
+    r#"
+ALTER TABLE memories
+    ADD COLUMN workflow_id TEXT CHECK (
+        workflow_id IS NULL
+        OR (length(trim(workflow_id)) > 0 AND length(workflow_id) <= 128)
+    );
+
+CREATE INDEX idx_memories_workspace_workflow
+    ON memories(workspace_id, workflow_id)
+    WHERE workflow_id IS NOT NULL;
+"#,
+    "blake3:v029_memory_workflow_id_2026_05_05",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -2414,6 +2459,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V026_PACK_ITEM_CONTEXT_SIGNALS,
     V027_RECORDER_STORE,
     V028_ADVISORY_LOCKS,
+    V029_MEMORY_WORKFLOW_ID,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -2434,12 +2480,15 @@ fn validate_applied_migration_records(records: &[MigrationRecord]) -> Result<()>
             });
         };
 
-        if record.name() != expected.name() || record.checksum() != expected.checksum() {
+        let expected_checksum = expected.checksum();
+        if !text_matches(record.name(), expected.name())
+            || !text_matches(record.checksum(), &expected_checksum)
+        {
             return Err(DbError::MigrationDrift {
                 version: record.version(),
                 expected_name: Some(expected.name().to_string()),
                 actual_name: record.name().to_string(),
-                expected_checksum: Some(expected.checksum().to_string()),
+                expected_checksum: Some(expected_checksum),
                 actual_checksum: record.checksum().to_string(),
             });
         }
@@ -2511,12 +2560,8 @@ impl DbConnection {
     }
 
     fn apply_migration(&self, migration: &Migration, applied_at: &str) -> Result<ApplyOutcome> {
-        let record = MigrationRecord::new(
-            migration.version,
-            migration.name,
-            migration.checksum,
-            applied_at,
-        )?;
+        let checksum = migration.checksum();
+        let record = MigrationRecord::new(migration.version, migration.name, checksum, applied_at)?;
 
         self.begin_transaction(IsolationLevel::RepeatableRead)?;
 
@@ -5122,9 +5167,9 @@ fn stored_tripwire_check_event_from_row(row: &Row) -> Result<StoredTripwireCheck
         condition_result: required_text(row, 6, DbOperation::Query, "condition_result")?
             .to_string(),
         check_result: required_text(row, 7, DbOperation::Query, "check_result")?.to_string(),
-        should_halt: required_i64(row, 8, DbOperation::Query, "should_halt")? == 1,
-        dry_run: required_i64(row, 9, DbOperation::Query, "dry_run")? == 1,
-        durable_mutation: required_i64(row, 10, DbOperation::Query, "durable_mutation")? == 1,
+        should_halt: required_sqlite_bool(row, 8, DbOperation::Query, "should_halt")?,
+        dry_run: required_sqlite_bool(row, 9, DbOperation::Query, "dry_run")?,
+        durable_mutation: required_sqlite_bool(row, 10, DbOperation::Query, "durable_mutation")?,
         mutation_posture: required_text(row, 11, DbOperation::Query, "mutation_posture")?
             .to_string(),
         details: optional_text(row, 12)?.map(str::to_string),
@@ -5139,6 +5184,7 @@ pub struct CreateMemoryInput {
     pub level: String,
     pub kind: String,
     pub content: String,
+    pub workflow_id: Option<String>,
     pub confidence: f32,
     pub utility: f32,
     pub importance: f32,
@@ -5158,6 +5204,7 @@ pub struct StoredMemory {
     pub level: String,
     pub kind: String,
     pub content: String,
+    pub workflow_id: Option<String>,
     pub confidence: f32,
     pub utility: f32,
     pub importance: f32,
@@ -5279,13 +5326,14 @@ impl DbConnection {
 
         self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, created_at, updated_at, valid_from, valid_to) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            "INSERT INTO memories (id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, created_at, updated_at, valid_from, valid_to) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             &[
                 Value::Text(id.to_string()),
                 Value::Text(input.workspace_id.clone()),
                 Value::Text(input.level.clone()),
                 Value::Text(input.kind.clone()),
                 Value::Text(input.content.clone()),
+                input.workflow_id.as_ref().map_or(Value::Null, |id| Value::Text(id.clone())),
                 Value::Float(input.confidence),
                 Value::Float(input.utility),
                 Value::Float(input.importance),
@@ -5315,9 +5363,11 @@ impl DbConnection {
 
     /// Get a memory by ID.
     pub fn get_memory(&self, id: &str) -> Result<Option<StoredMemory>> {
+        // ORDER BY/LIMIT keeps the result deterministic while avoiding a stale
+        // prepared indexed-equality fast path after same-connection updates.
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE id = ?1",
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE id = ?1 ORDER BY id ASC LIMIT 1",
             &[Value::Text(id.to_string())],
         )?;
 
@@ -5332,7 +5382,7 @@ impl DbConnection {
         include_tombstoned: bool,
     ) -> Result<Vec<StoredMemory>> {
         let mut sql = String::from(
-            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1",
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1",
         );
         let mut params: Vec<Value> = vec![Value::Text(workspace_id.to_string())];
 
@@ -5501,7 +5551,7 @@ impl DbConnection {
 
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 ORDER BY COALESCE(provenance_chain_hash, id) ASC, id ASC LIMIT ?2",
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 ORDER BY COALESCE(provenance_chain_hash, id) ASC, id ASC LIMIT ?2",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::BigInt(i64::from(sample_size)),
@@ -5516,7 +5566,9 @@ impl DbConnection {
         for memory in memories {
             let expected_hash = compute_memory_provenance_chain_hash(&memory);
             let status = match memory.provenance_chain_hash.as_deref() {
-                Some(stored_hash) if stored_hash == expected_hash => PROVENANCE_STATUS_VERIFIED,
+                Some(stored_hash) if text_matches(stored_hash, &expected_hash) => {
+                    PROVENANCE_STATUS_VERIFIED
+                }
                 Some(_) => PROVENANCE_STATUS_MISMATCH,
                 None => PROVENANCE_STATUS_MISSING,
             };
@@ -5632,34 +5684,35 @@ fn stored_memory_from_row(row: &Row) -> Result<StoredMemory> {
         level: required_text(row, 2, DbOperation::Query, "level")?.to_string(),
         kind: required_text(row, 3, DbOperation::Query, "kind")?.to_string(),
         content: required_text(row, 4, DbOperation::Query, "content")?.to_string(),
-        confidence: required_f64(row, 5, DbOperation::Query, "confidence")? as f32,
-        utility: required_f64(row, 6, DbOperation::Query, "utility")? as f32,
-        importance: required_f64(row, 7, DbOperation::Query, "importance")? as f32,
-        provenance_uri: optional_text(row, 8)?.map(str::to_string),
-        trust_class: required_text(row, 9, DbOperation::Query, "trust_class")?.to_string(),
-        trust_subclass: optional_text(row, 10)?.map(str::to_string),
-        provenance_chain_hash: optional_text(row, 11)?.map(str::to_string),
+        workflow_id: optional_text(row, 5)?.map(str::to_string),
+        confidence: required_f64(row, 6, DbOperation::Query, "confidence")? as f32,
+        utility: required_f64(row, 7, DbOperation::Query, "utility")? as f32,
+        importance: required_f64(row, 8, DbOperation::Query, "importance")? as f32,
+        provenance_uri: optional_text(row, 9)?.map(str::to_string),
+        trust_class: required_text(row, 10, DbOperation::Query, "trust_class")?.to_string(),
+        trust_subclass: optional_text(row, 11)?.map(str::to_string),
+        provenance_chain_hash: optional_text(row, 12)?.map(str::to_string),
         provenance_chain_hash_version: required_text(
             row,
-            12,
+            13,
             DbOperation::Query,
             "provenance_chain_hash_version",
         )?
         .to_string(),
         provenance_verification_status: required_text(
             row,
-            13,
+            14,
             DbOperation::Query,
             "provenance_verification_status",
         )?
         .to_string(),
-        provenance_verified_at: optional_text(row, 14)?.map(str::to_string),
-        provenance_verification_note: optional_text(row, 15)?.map(str::to_string),
-        created_at: required_text(row, 16, DbOperation::Query, "created_at")?.to_string(),
-        updated_at: required_text(row, 17, DbOperation::Query, "updated_at")?.to_string(),
-        tombstoned_at: optional_text(row, 18)?.map(str::to_string),
-        valid_from: optional_text(row, 19)?.map(str::to_string),
-        valid_to: optional_text(row, 20)?.map(str::to_string),
+        provenance_verified_at: optional_text(row, 15)?.map(str::to_string),
+        provenance_verification_note: optional_text(row, 16)?.map(str::to_string),
+        created_at: required_text(row, 17, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 18, DbOperation::Query, "updated_at")?.to_string(),
+        tombstoned_at: optional_text(row, 19)?.map(str::to_string),
+        valid_from: optional_text(row, 20)?.map(str::to_string),
+        valid_to: optional_text(row, 21)?.map(str::to_string),
     })
 }
 
@@ -5901,6 +5954,13 @@ pub struct ApplyMemoryScoreUpdateInput {
     pub feedback_event_ids: Vec<String>,
 }
 
+/// Audit details for one working memory promoted by workflow closure.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct WorkflowMemoryPromotion {
+    pub memory_id: String,
+    pub audit_id: String,
+}
+
 fn default_curation_ttl_policy_id_for_status(status: &str) -> &'static str {
     match status {
         "approved" => "curation.validated.default",
@@ -6074,7 +6134,9 @@ impl DbConnection {
         let Some(existing) = self.get_memory(memory_id)? else {
             return Ok(false);
         };
-        if existing.workspace_id != input.workspace_id || existing.tombstoned_at.is_some() {
+        if !text_matches(&existing.workspace_id, &input.workspace_id)
+            || existing.tombstoned_at.is_some()
+        {
             return Ok(false);
         }
 
@@ -6161,7 +6223,9 @@ impl DbConnection {
         let Some(existing) = self.get_memory(memory_id)? else {
             return Ok(None);
         };
-        if existing.workspace_id != input.workspace_id || existing.tombstoned_at.is_some() {
+        if !text_matches(&existing.workspace_id, &input.workspace_id)
+            || existing.tombstoned_at.is_some()
+        {
             return Ok(None);
         }
         if !score_fields_changed(&existing, input.confidence, input.utility, input.importance) {
@@ -6211,6 +6275,107 @@ impl DbConnection {
         )?;
 
         Ok(Some(audit_id))
+    }
+
+    /// Promote eligible working memories for a workflow and record per-memory audit entries.
+    pub fn promote_workflow_working_memories_audited(
+        &self,
+        workspace_id: &str,
+        workflow_id: &str,
+        actor: &str,
+        closed_at: &str,
+    ) -> Result<Vec<WorkflowMemoryPromotion>> {
+        self.begin()?;
+
+        match self.promote_workflow_working_memories_audited_inner(
+            workspace_id,
+            workflow_id,
+            actor,
+            closed_at,
+        ) {
+            Ok(promotions) => {
+                self.commit()?;
+                Ok(promotions)
+            }
+            Err(err) => {
+                let _ = self.rollback();
+                Err(err)
+            }
+        }
+    }
+
+    fn promote_workflow_working_memories_audited_inner(
+        &self,
+        workspace_id: &str,
+        workflow_id: &str,
+        actor: &str,
+        closed_at: &str,
+    ) -> Result<Vec<WorkflowMemoryPromotion>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND workflow_id = ?2 AND level = 'working' AND tombstoned_at IS NULL AND importance >= 0.5 ORDER BY id ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(workflow_id.to_string()),
+            ],
+        )?;
+        let memories = rows
+            .iter()
+            .map(stored_memory_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        let mut promotions = Vec::with_capacity(memories.len());
+
+        for memory in memories {
+            let mut updated = memory.clone();
+            updated.level = "episodic".to_string();
+            let provenance_chain_hash = compute_memory_provenance_chain_hash(&updated);
+            let affected = self.execute_for(
+                DbOperation::Execute,
+                "UPDATE memories SET level = 'episodic', updated_at = ?1, provenance_chain_hash = ?2, provenance_chain_hash_version = ?3, provenance_verification_status = ?4, provenance_verified_at = NULL, provenance_verification_note = NULL WHERE id = ?5 AND workspace_id = ?6 AND workflow_id = ?7 AND level = 'working' AND tombstoned_at IS NULL",
+                &[
+                    Value::Text(closed_at.to_string()),
+                    Value::Text(provenance_chain_hash),
+                    Value::Text(PROVENANCE_CHAIN_HASH_VERSION.to_string()),
+                    Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
+                    Value::Text(memory.id.clone()),
+                    Value::Text(workspace_id.to_string()),
+                    Value::Text(workflow_id.to_string()),
+                ],
+            )?;
+            if affected == 0 {
+                continue;
+            }
+
+            let audit_id = generate_audit_id();
+            self.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(workspace_id.to_string()),
+                    actor: Some(actor.to_string()),
+                    action: audit_actions::MEMORY_UPDATE.to_string(),
+                    target_type: Some("memory".to_string()),
+                    target_id: Some(memory.id.clone()),
+                    details: Some(
+                        serde_json::json!({
+                            "schema": "ee.audit.workflow_close_memory_promotion.v1",
+                            "command": "ee workflow close",
+                            "workflowId": workflow_id,
+                            "previousLevel": "working",
+                            "newLevel": "episodic",
+                            "closedAt": closed_at,
+                            "criteria": ["importance >= 0.5"],
+                        })
+                        .to_string(),
+                    ),
+                },
+            )?;
+            promotions.push(WorkflowMemoryPromotion {
+                memory_id: memory.id,
+                audit_id,
+            });
+        }
+
+        Ok(promotions)
     }
 
     /// Insert a procedural rule and its evidence/tag junction rows.
@@ -6446,8 +6611,12 @@ fn stored_curation_ttl_policy_from_row(row: &Row) -> Result<StoredCurationTtlPol
             DbOperation::Query,
             "requires_no_harmful_within_seconds",
         )?,
-        auto_promote_enabled: required_i64(row, 7, DbOperation::Query, "auto_promote_enabled")?
-            != 0,
+        auto_promote_enabled: required_sqlite_bool(
+            row,
+            7,
+            DbOperation::Query,
+            "auto_promote_enabled",
+        )?,
         created_at: required_text(row, 8, DbOperation::Query, "created_at")?.to_string(),
     })
 }
@@ -7377,7 +7546,7 @@ fn stored_memory_link_from_row(row: &Row) -> Result<StoredMemoryLink> {
         relation: required_text(row, 3, DbOperation::Query, "relation")?.to_string(),
         weight: required_f64(row, 4, DbOperation::Query, "weight")? as f32,
         confidence: required_f64(row, 5, DbOperation::Query, "confidence")? as f32,
-        directed: required_i64(row, 6, DbOperation::Query, "directed")? != 0,
+        directed: required_sqlite_bool(row, 6, DbOperation::Query, "directed")?,
         evidence_count,
         last_reinforced_at: optional_text(row, 8)?.map(str::to_string),
         source: required_text(row, 9, DbOperation::Query, "source")?.to_string(),
@@ -7849,7 +8018,7 @@ impl DbConnection {
 const RATIONALE_TRACE_SELECT_SQL_WITH_WHERE: &str = "SELECT trace_id, workspace_id, schema, kind, author, summary, posture, confidence_basis_points, visibility, redaction_status, evidence_uris_json, linked_memory_ids_json, linked_context_pack_ids_json, linked_recorder_run_ids_json, linked_recorder_event_ids_json, linked_causal_trace_ids_json, supersedes_trace_ids_json, contradicted_by_trace_ids_json, created_at FROM rationale_traces WHERE trace_id = ?1";
 
 fn normalized_rationale_trace(trace: &RationaleTrace) -> Result<RationaleTrace> {
-    if trace.schema != RATIONALE_TRACE_SCHEMA_V1 {
+    if !text_matches(trace.schema, RATIONALE_TRACE_SCHEMA_V1) {
         return Err(DbError::MalformedRow {
             operation: DbOperation::Execute,
             message: format!(
@@ -7988,7 +8157,7 @@ fn extend_rationale_trace_links(
 
 fn stored_rationale_trace_from_row(row: &Row) -> Result<StoredRationaleTrace> {
     let schema = required_text(row, 2, DbOperation::Query, "schema")?;
-    if schema != RATIONALE_TRACE_SCHEMA_V1 {
+    if !text_matches(schema, RATIONALE_TRACE_SCHEMA_V1) {
         return Err(DbError::MalformedRow {
             operation: DbOperation::Query,
             message: format!("rationale trace schema is unsupported: {schema}"),
@@ -8172,13 +8341,32 @@ fn advisory_lock_timestamp(instant: DateTime<Utc>) -> String {
 }
 
 fn advisory_lock_is_expired(expires_at: &str, now: &str) -> bool {
-    match (
-        DateTime::parse_from_rfc3339(expires_at),
-        DateTime::parse_from_rfc3339(now),
-    ) {
-        (Ok(expires_at), Ok(now)) => expires_at < now,
-        _ => expires_at < now,
-    }
+    let expires_at = match DateTime::parse_from_rfc3339(expires_at) {
+        Ok(timestamp) => timestamp,
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::db",
+                error = %error,
+                field = "expires_at",
+                "invalid advisory lock timestamp; treating lock as unexpired"
+            );
+            return false;
+        }
+    };
+    let now = match DateTime::parse_from_rfc3339(now) {
+        Ok(timestamp) => timestamp,
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::db",
+                error = %error,
+                field = "now",
+                "invalid advisory lock timestamp; treating lock as unexpired"
+            );
+            return false;
+        }
+    };
+
+    expires_at < now
 }
 
 fn advisory_lock_error_is_retryable(error: &DbError) -> bool {
@@ -8205,6 +8393,14 @@ fn advisory_lock_error_is_retryable(error: &DbError) -> bool {
         | sqlmodel_core::error::QueryErrorKind::Timeout
         | sqlmodel_core::error::QueryErrorKind::Cancelled => false,
     }
+}
+
+fn advisory_lock_retry_delay(attempt: usize) -> Duration {
+    const BASE_DELAY_MS: u64 = 1;
+    const MAX_DELAY_MS: u64 = 50;
+
+    let multiplier = 1_u64 << attempt.min(6);
+    Duration::from_millis(BASE_DELAY_MS.saturating_mul(multiplier).min(MAX_DELAY_MS))
 }
 
 /// Result of attempting to acquire an advisory lock.
@@ -8293,21 +8489,28 @@ impl DbConnection {
         reason: Option<&str>,
     ) -> Result<AcquireLockResult> {
         const MAX_ATTEMPTS: usize = 8;
+        let mut last_retryable_error = None;
 
         for attempt in 0..MAX_ATTEMPTS {
             match self.try_acquire_advisory_lock(lock_id, holder_id, ttl_secs, reason) {
                 Ok(result) => return Ok(result),
-                Err(error)
-                    if attempt + 1 < MAX_ATTEMPTS && advisory_lock_error_is_retryable(&error) =>
-                {
-                    std::thread::yield_now();
-                    continue;
+                Err(error) if advisory_lock_error_is_retryable(&error) => {
+                    last_retryable_error = Some(error);
+                    if attempt + 1 < MAX_ATTEMPTS {
+                        std::thread::sleep(advisory_lock_retry_delay(attempt));
+                    }
                 }
                 Err(error) => return Err(error),
             }
         }
 
-        unreachable!("advisory lock retry loop returns on every branch")
+        match last_retryable_error {
+            Some(error) => Err(error),
+            None => Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "advisory lock retry loop exhausted without a retryable error".to_string(),
+            }),
+        }
     }
 
     fn try_acquire_advisory_lock(
@@ -8344,14 +8547,26 @@ impl DbConnection {
             Ok(result) => match self.commit() {
                 Ok(()) => Ok(result),
                 Err(error) => {
-                    let _ = self.rollback();
+                    self.rollback_advisory_lock_transaction("commit", &error);
                     Err(error)
                 }
             },
             Err(error) => {
-                let _ = self.rollback();
+                self.rollback_advisory_lock_transaction("operation", &error);
                 Err(error)
             }
+        }
+    }
+
+    fn rollback_advisory_lock_transaction(&self, phase: &str, original_error: &DbError) {
+        if let Err(rollback_error) = self.rollback() {
+            tracing::error!(
+                target: "ee::db",
+                phase,
+                error = %original_error,
+                rollback_error = %rollback_error,
+                "advisory lock transaction rollback failed"
+            );
         }
     }
 
@@ -8366,14 +8581,21 @@ impl DbConnection {
     ) -> Result<AcquireLockResult> {
         let existing = self.query_for(
             DbOperation::Query,
-            "SELECT holder_id, acquired_at, expires_at FROM ee_advisory_locks WHERE resource_key = ?1",
-            &[Value::Text(resource_key.to_string())],
+            "SELECT resource_key, holder_id, acquired_at, expires_at
+             FROM ee_advisory_locks
+             WHERE resource_type = ?1 AND resource_id = ?2
+             ORDER BY acquired_at DESC, resource_key ASC",
+            &[
+                Value::Text(lock_id.resource_type().to_string()),
+                Value::Text(lock_id.resource_id().to_string()),
+            ],
         )?;
 
-        if let Some(row) = existing.first() {
-            let existing_holder = required_text(row, 0, DbOperation::Query, "holder_id")?;
-            let existing_acquired = required_text(row, 1, DbOperation::Query, "acquired_at")?;
-            let existing_expiry = optional_text(row, 2)?;
+        let mut previous_expired_holder = None;
+        for row in &existing {
+            let existing_holder = required_text(row, 1, DbOperation::Query, "holder_id")?;
+            let existing_acquired = required_text(row, 2, DbOperation::Query, "acquired_at")?;
+            let existing_expiry = optional_text(row, 3)?;
 
             let is_expired = existing_expiry.is_some_and(|exp| advisory_lock_is_expired(exp, now));
 
@@ -8383,14 +8605,20 @@ impl DbConnection {
                     acquired_at: existing_acquired.to_string(),
                 });
             }
+            if previous_expired_holder.is_none() {
+                previous_expired_holder = Some(existing_holder.to_string());
+            }
+        }
 
+        if let Some(previous_holder) = previous_expired_holder {
             self.execute_for(
                 DbOperation::Execute,
-                "DELETE FROM ee_advisory_locks WHERE resource_key = ?1",
-                &[Value::Text(resource_key.to_string())],
+                "DELETE FROM ee_advisory_locks WHERE resource_type = ?1 AND resource_id = ?2",
+                &[
+                    Value::Text(lock_id.resource_type().to_string()),
+                    Value::Text(lock_id.resource_id().to_string()),
+                ],
             )?;
-
-            let previous_holder = existing_holder.to_string();
 
             self.insert_advisory_lock_row(
                 lock_id,
@@ -8445,13 +8673,12 @@ impl DbConnection {
     /// Returns true if the lock was released, false if it was not held
     /// by this holder (or did not exist).
     pub fn release_advisory_lock(&self, lock_id: &AdvisoryLockId, holder_id: &str) -> Result<bool> {
-        let resource_key = lock_id.canonical_key();
-
         let rows_affected = self.execute_for(
             DbOperation::Execute,
-            "DELETE FROM ee_advisory_locks WHERE resource_key = ?1 AND holder_id = ?2",
+            "DELETE FROM ee_advisory_locks WHERE resource_type = ?1 AND resource_id = ?2 AND holder_id = ?3",
             &[
-                Value::Text(resource_key),
+                Value::Text(lock_id.resource_type().to_string()),
+                Value::Text(lock_id.resource_id().to_string()),
                 Value::Text(holder_id.to_string()),
             ],
         )?;
@@ -8468,34 +8695,32 @@ impl DbConnection {
             "SELECT resource_type, resource_id, holder_id, acquired_at, expires_at, reason
              FROM ee_advisory_locks
              WHERE resource_type = ?1 AND resource_id = ?2
-             ORDER BY acquired_at DESC
-             LIMIT 1",
+             ORDER BY acquired_at DESC, resource_key ASC",
             &[
                 Value::Text(lock_id.resource_type().to_string()),
                 Value::Text(lock_id.resource_id().to_string()),
             ],
         )?;
 
-        if let Some(row) = rows.first() {
-            let expires_at = optional_text(row, 4)?.map(str::to_string);
+        for row in rows {
+            let expires_at = optional_text(&row, 4)?.map(str::to_string);
 
             if expires_at
                 .as_deref()
                 .is_some_and(|exp| advisory_lock_is_expired(exp, now.as_str()))
             {
-                return Ok(None);
+                continue;
             }
 
-            Ok(Some(AdvisoryLock {
+            return Ok(Some(AdvisoryLock {
                 id: lock_id.clone(),
-                holder_id: required_text(row, 2, DbOperation::Query, "holder_id")?.to_string(),
-                acquired_at: required_text(row, 3, DbOperation::Query, "acquired_at")?.to_string(),
+                holder_id: required_text(&row, 2, DbOperation::Query, "holder_id")?.to_string(),
+                acquired_at: required_text(&row, 3, DbOperation::Query, "acquired_at")?.to_string(),
                 expires_at,
-                reason: optional_text(row, 5)?.map(str::to_string),
-            }))
-        } else {
-            Ok(None)
+                reason: optional_text(&row, 5)?.map(str::to_string),
+            }));
         }
+        Ok(None)
     }
 
     /// List all locks held by a specific holder.
@@ -9216,7 +9441,10 @@ fn stored_recorder_run_from_row(row: &Row) -> Result<StoredRecorderRun> {
         event_count: row.get(9).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
         redacted_count: row.get(10).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
         payload_bytes: row.get(11).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
-        chain_complete: row.get(12).and_then(|v| v.as_i64()).unwrap_or(1) != 0,
+        chain_complete: row
+            .get(12)
+            .and_then(|value| value.as_i64())
+            .is_none_or(sqlite_i64_is_truthy),
         created_at: required_text(row, 13, DbOperation::Query, "created_at")?.to_string(),
     })
 }
@@ -9250,6 +9478,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Barrier};
     use std::thread;
+    use std::time::Duration;
 
     use sqlmodel_core::{Row, Value};
 
@@ -9371,7 +9600,7 @@ mod tests {
                 )?;
                 ensure_equal(
                     &expected_checksum,
-                    &Some(super::V001_INIT_SCHEMA.checksum().to_string()),
+                    &Some(super::V001_INIT_SCHEMA.checksum()),
                     "drift expected checksum",
                 )?;
                 ensure_equal(
@@ -9695,6 +9924,27 @@ mod tests {
         ensure(
             !connection.needs_migration()?,
             "clean applied migrations should be current",
+        )?;
+
+        let records = connection.applied_migrations()?;
+        let first_record = records
+            .iter()
+            .find(|record| record.version().eq(&super::V001_INIT_SCHEMA.version()))
+            .ok_or_else(|| TestFailure::new("missing v001 migration record"))?;
+        let expected_checksum = super::V001_INIT_SCHEMA.checksum();
+        ensure_equal(
+            &first_record.checksum(),
+            &expected_checksum.as_str(),
+            "applied migration must store computed sql checksum",
+        )?;
+        ensure(
+            first_record.checksum().starts_with("blake3:"),
+            "computed migration checksum must use the blake3 prefix",
+        )?;
+        ensure_equal(
+            &first_record.checksum().len(),
+            &("blake3:".len() + 64),
+            "computed migration checksum must include a 64 char hex digest",
         )?;
 
         let second = connection.migrate()?;
@@ -10221,8 +10471,14 @@ mod tests {
         ensure_equal(&migration.name(), &"test_migration", "migration name")?;
         ensure_equal(&migration.sql(), &"SELECT 1", "migration sql")?;
         ensure_equal(
-            &migration.checksum(),
+            &migration.checksum_label(),
             &"blake3:abc123",
+            "migration checksum label",
+        )?;
+        let expected_checksum = super::migration_sql_checksum("SELECT 1");
+        ensure_equal(
+            &migration.checksum(),
+            &expected_checksum,
             "migration checksum",
         )?;
 
@@ -10886,7 +11142,8 @@ mod tests {
             error_code: None,
             error_message: None,
             started_at: Some("2026-04-29T20:00:00Z".to_string()),
-            completed_at: (status == "completed").then(|| "2026-04-29T20:05:00Z".to_string()),
+            completed_at: super::text_matches(status, "completed")
+                .then(|| "2026-04-29T20:05:00Z".to_string()),
             metadata_json: Some(r#"{"source":"cass","schema":"ee.import_ledger.v1"}"#.to_string()),
         }
     }
@@ -11056,6 +11313,7 @@ mod tests {
                 level: "episodic".to_string(),
                 kind: "cass_import".to_string(),
                 content: "Imported CASS evidence.".to_string(),
+                workflow_id: None,
                 confidence: 0.45,
                 utility: 0.5,
                 importance: 0.4,
@@ -11733,6 +11991,7 @@ mod tests {
             level: "procedural".to_string(),
             kind: "rule".to_string(),
             content: "Always run cargo fmt before commit.".to_string(),
+            workflow_id: Some("wf-release-001".to_string()),
             confidence: 0.9,
             utility: 0.7,
             importance: 0.8,
@@ -11762,6 +12021,11 @@ mod tests {
             &memory.content.as_str(),
             &"Always run cargo fmt before commit.",
             "content",
+        )?;
+        ensure_equal(
+            &memory.workflow_id,
+            &Some("wf-release-001".to_string()),
+            "workflow_id",
         )?;
         ensure(
             (memory.confidence - 0.9).abs() < 0.001,
@@ -11825,6 +12089,71 @@ mod tests {
     }
 
     #[test]
+    fn get_memory_reflects_score_update_after_prior_lookup() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let memory_id = "mem_scoreupdate000000000000001";
+        connection.insert_memory(
+            memory_id,
+            &super::CreateMemoryInput {
+                workspace_id: "wsp_01234567890123456789012345".to_string(),
+                level: "procedural".to_string(),
+                kind: "rule".to_string(),
+                content: "Prefer fresh row reads after score updates.".to_string(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.7,
+                importance: 0.8,
+                provenance_uri: Some("test://score-update".to_string()),
+                trust_class: "agent_validated".to_string(),
+                trust_subclass: None,
+                tags: vec![],
+                valid_from: None,
+                valid_to: None,
+            },
+        )?;
+
+        let before = connection
+            .get_memory(memory_id)?
+            .ok_or_else(|| TestFailure::new("memory missing before score update"))?;
+        ensure(
+            (before.confidence - 0.9).abs() < 0.001,
+            "precondition confidence must be ~0.9",
+        )?;
+
+        let audit_id = connection.apply_memory_score_update_audited(
+            memory_id,
+            &super::ApplyMemoryScoreUpdateInput {
+                workspace_id: "wsp_01234567890123456789012345".to_string(),
+                confidence: 0.4,
+                utility: 0.7,
+                importance: 0.8,
+                updated_at: "2026-05-05T00:00:00Z".to_string(),
+                actor: Some("db-test".to_string()),
+                details: "{\"schema\":\"ee.test.score_update.v1\"}".to_string(),
+                feedback_event_ids: vec![],
+            },
+        )?;
+        ensure(audit_id.is_some(), "score update should create audit")?;
+
+        let after = connection
+            .get_memory(memory_id)?
+            .ok_or_else(|| TestFailure::new("memory missing after score update"))?;
+        ensure(
+            (after.confidence - 0.4).abs() < 0.001,
+            format!(
+                "same-connection get_memory must return updated confidence, got {:.6}",
+                after.confidence
+            ),
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn provenance_chain_hash_is_deterministic_and_sensitive() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
@@ -11835,6 +12164,7 @@ mod tests {
             level: "procedural".to_string(),
             kind: "rule".to_string(),
             content: "Record source provenance for every imported rule.".to_string(),
+            workflow_id: None,
             confidence: 0.8,
             utility: 0.7,
             importance: 0.9,
@@ -11912,6 +12242,7 @@ mod tests {
                 level: "procedural".to_string(),
                 kind: "rule".to_string(),
                 content: content.to_string(),
+                workflow_id: None,
                 confidence: 0.8,
                 utility: 0.7,
                 importance: 0.9,
@@ -11998,6 +12329,7 @@ mod tests {
             level: "procedural".to_string(),
             kind: "rule".to_string(),
             content: "Rule content".to_string(),
+            workflow_id: None,
             confidence: 0.9,
             utility: 0.7,
             importance: 0.8,
@@ -12014,6 +12346,7 @@ mod tests {
             level: "semantic".to_string(),
             kind: "fact".to_string(),
             content: "Fact content".to_string(),
+            workflow_id: None,
             confidence: 0.8,
             utility: 0.6,
             importance: 0.5,
@@ -12067,6 +12400,7 @@ mod tests {
             level: "episodic".to_string(),
             kind: "decision".to_string(),
             content: "Decided to use Rust.".to_string(),
+            workflow_id: None,
             confidence: 1.0,
             utility: 0.5,
             importance: 0.9,
@@ -12112,6 +12446,7 @@ mod tests {
             level: "working".to_string(),
             kind: "command".to_string(),
             content: "cargo test".to_string(),
+            workflow_id: None,
             confidence: 0.5,
             utility: 0.5,
             importance: 0.5,
@@ -12865,6 +13200,7 @@ mod tests {
                 level: "procedural".to_string(),
                 kind: "rule".to_string(),
                 content: "Always run tests before commit.".to_string(),
+                workflow_id: None,
                 confidence: 0.9,
                 utility: 0.8,
                 importance: 0.7,
@@ -12925,6 +13261,7 @@ mod tests {
             level: "episodic".to_string(),
             kind: "observation".to_string(),
             content: "Build failed due to missing dependency.".to_string(),
+            workflow_id: None,
             confidence: 0.95,
             utility: 0.6,
             importance: 0.5,
@@ -13002,6 +13339,7 @@ mod tests {
             level: "procedural".to_string(),
             kind: "rule".to_string(),
             content: "Use descriptive variable names.".to_string(),
+            workflow_id: None,
             confidence: 0.85,
             utility: 0.7,
             importance: 0.6,
@@ -13526,6 +13864,7 @@ mod tests {
             level: "semantic".to_string(),
             kind: "fact".to_string(),
             content: content.to_string(),
+            workflow_id: None,
             confidence: 0.8,
             utility: 0.6,
             importance: 0.5,
@@ -13818,6 +14157,7 @@ mod tests {
             level: "semantic".to_string(),
             kind: "fact".to_string(),
             content: content.to_string(),
+            workflow_id: None,
             confidence: 0.8,
             utility: 0.6,
             importance: 0.5,
@@ -13960,6 +14300,7 @@ mod tests {
             level: "semantic".to_string(),
             kind: "fact".to_string(),
             content: "First memory".to_string(),
+            workflow_id: None,
             confidence: 0.8,
             utility: 0.6,
             importance: 0.5,
@@ -13975,6 +14316,7 @@ mod tests {
             level: "semantic".to_string(),
             kind: "fact".to_string(),
             content: "Second memory".to_string(),
+            workflow_id: None,
             confidence: 0.8,
             utility: 0.6,
             importance: 0.5,
@@ -14023,6 +14365,7 @@ mod tests {
             level: "semantic".to_string(),
             kind: "fact".to_string(),
             content: "Memory one".to_string(),
+            workflow_id: None,
             confidence: 0.8,
             utility: 0.6,
             importance: 0.5,
@@ -14038,6 +14381,7 @@ mod tests {
             level: "semantic".to_string(),
             kind: "fact".to_string(),
             content: "Memory two".to_string(),
+            workflow_id: None,
             confidence: 0.8,
             utility: 0.6,
             importance: 0.5,
@@ -14053,6 +14397,7 @@ mod tests {
             level: "semantic".to_string(),
             kind: "fact".to_string(),
             content: "Memory three".to_string(),
+            workflow_id: None,
             confidence: 0.8,
             utility: 0.6,
             importance: 0.5,
@@ -14094,6 +14439,7 @@ mod tests {
             level: "semantic".to_string(),
             kind: "fact".to_string(),
             content: "Tagged memory".to_string(),
+            workflow_id: None,
             confidence: 0.8,
             utility: 0.6,
             importance: 0.5,
@@ -14109,6 +14455,7 @@ mod tests {
             level: "semantic".to_string(),
             kind: "fact".to_string(),
             content: "Also tagged".to_string(),
+            workflow_id: None,
             confidence: 0.8,
             utility: 0.6,
             importance: 0.5,
@@ -14124,6 +14471,7 @@ mod tests {
             level: "semantic".to_string(),
             kind: "fact".to_string(),
             content: "Not tagged".to_string(),
+            workflow_id: None,
             confidence: 0.8,
             utility: 0.6,
             importance: 0.5,
@@ -14173,6 +14521,7 @@ mod tests {
             level: "semantic".to_string(),
             kind: "fact".to_string(),
             content: "Replaceable tags".to_string(),
+            workflow_id: None,
             confidence: 0.8,
             utility: 0.6,
             importance: 0.5,
@@ -14735,6 +15084,7 @@ mod tests {
             level: "procedural".to_string(),
             kind: "rule".to_string(),
             content: "Run cargo fmt before commit".to_string(),
+            workflow_id: None,
             confidence: 0.9,
             utility: 0.8,
             importance: 0.7,
@@ -14907,6 +15257,55 @@ mod tests {
     // EE-CONC-001: Advisory Lock and Concurrent-Writer Contract Tests
     // ========================================================================
 
+    fn insert_advisory_lock_fixture(
+        connection: &DbConnection,
+        lock_id: &super::AdvisoryLockId,
+        resource_key: &str,
+        holder_id: &str,
+        acquired_at: &str,
+        expires_at: Option<&str>,
+        reason: Option<&str>,
+    ) -> TestResult {
+        connection.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO ee_advisory_locks (resource_key, resource_type, resource_id, holder_id, acquired_at, expires_at, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            &[
+                Value::Text(resource_key.to_string()),
+                Value::Text(lock_id.resource_type().to_string()),
+                Value::Text(lock_id.resource_id().to_string()),
+                Value::Text(holder_id.to_string()),
+                Value::Text(acquired_at.to_string()),
+                expires_at.map_or(Value::Null, |value| Value::Text(value.to_string())),
+                reason.map_or(Value::Null, |value| Value::Text(value.to_string())),
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn advisory_lock_retry_delay_uses_capped_exponential_backoff() -> TestResult {
+        ensure_equal(
+            &super::advisory_lock_retry_delay(0),
+            &Duration::from_millis(1),
+            "first retry delay",
+        )?;
+        ensure_equal(
+            &super::advisory_lock_retry_delay(5),
+            &Duration::from_millis(32),
+            "sixth retry delay",
+        )?;
+        ensure_equal(
+            &super::advisory_lock_retry_delay(6),
+            &Duration::from_millis(50),
+            "delay cap",
+        )?;
+        ensure_equal(
+            &super::advisory_lock_retry_delay(100),
+            &Duration::from_millis(50),
+            "large attempt delay cap",
+        )
+    }
+
     #[test]
     fn advisory_lock_id_canonical_key_format() -> TestResult {
         let lock_id = super::AdvisoryLockId::new("workspace", "wsp_123");
@@ -15064,6 +15463,165 @@ mod tests {
     }
 
     #[test]
+    fn is_lock_held_skips_expired_newer_stale_rows() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_advisory_locks_table()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_stale_is_held");
+        insert_advisory_lock_fixture(
+            &connection,
+            &lock_id,
+            "legacy:workspace:wsp_stale_is_held:newer",
+            "agent_expired",
+            "2026-01-02T00:00:00.000000000Z",
+            Some("2026-01-02T00:01:00.000000000Z"),
+            Some("expired stale row"),
+        )?;
+        insert_advisory_lock_fixture(
+            &connection,
+            &lock_id,
+            "legacy:workspace:wsp_stale_is_held:older",
+            "agent_active",
+            "2026-01-01T00:00:00.000000000Z",
+            Some("2099-01-01T00:00:00.000000000Z"),
+            Some("active stale row"),
+        )?;
+
+        let held = connection
+            .is_lock_held(&lock_id)?
+            .ok_or_else(|| TestFailure::new("older active stale row should still be visible"))?;
+        ensure_equal(
+            &held.holder_id,
+            &"agent_active".to_string(),
+            "active logical holder",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn acquire_respects_unexpired_stale_canonical_key_row() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_advisory_locks_table()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_stale_active");
+        insert_advisory_lock_fixture(
+            &connection,
+            &lock_id,
+            "legacy:workspace:wsp_stale_active",
+            "agent_legacy",
+            "2026-01-01T00:00:00.000000000Z",
+            Some("2099-01-01T00:00:00.000000000Z"),
+            Some("legacy active row"),
+        )?;
+
+        let result = connection.acquire_advisory_lock(&lock_id, "agent_new", Some(300), None)?;
+        match result {
+            super::AcquireLockResult::AlreadyHeld { holder_id, .. } => {
+                ensure_equal(
+                    &holder_id,
+                    &"agent_legacy".to_string(),
+                    "stale active row remains authoritative",
+                )?;
+            }
+            _ => {
+                return Err(TestFailure::new(
+                    "stale active logical lock should block acquire",
+                ));
+            }
+        }
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn acquire_reaps_expired_stale_canonical_key_rows() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_advisory_locks_table()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_stale_expired");
+        insert_advisory_lock_fixture(
+            &connection,
+            &lock_id,
+            "legacy:workspace:wsp_stale_expired",
+            "agent_expired",
+            "2026-01-01T00:00:00.000000000Z",
+            Some("2026-01-01T00:01:00.000000000Z"),
+            Some("legacy expired row"),
+        )?;
+
+        let result = connection.acquire_advisory_lock(&lock_id, "agent_new", Some(300), None)?;
+        match result {
+            super::AcquireLockResult::Expired { previous_holder } => {
+                ensure_equal(
+                    &previous_holder,
+                    &"agent_expired".to_string(),
+                    "expired stale previous holder",
+                )?;
+            }
+            _ => return Err(TestFailure::new("expired stale row should be replaced")),
+        }
+
+        let rows = connection.query_for(
+            DbOperation::Query,
+            "SELECT resource_key, holder_id FROM ee_advisory_locks WHERE resource_type = ?1 AND resource_id = ?2",
+            &[
+                Value::Text(lock_id.resource_type().to_string()),
+                Value::Text(lock_id.resource_id().to_string()),
+            ],
+        )?;
+        ensure_equal(&rows.len(), &1_usize, "logical resource row count")?;
+        let row = rows
+            .first()
+            .ok_or_else(|| TestFailure::new("replacement row should exist"))?;
+        ensure_equal(
+            &super::required_text(row, 0, DbOperation::Query, "resource_key")?.to_string(),
+            &lock_id.canonical_key(),
+            "replacement uses current canonical key",
+        )?;
+        ensure_equal(
+            &super::required_text(row, 1, DbOperation::Query, "holder_id")?.to_string(),
+            &"agent_new".to_string(),
+            "replacement holder",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn release_advisory_lock_uses_logical_resource_identity() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_advisory_locks_table()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_stale_release");
+        insert_advisory_lock_fixture(
+            &connection,
+            &lock_id,
+            "legacy:workspace:wsp_stale_release",
+            "agent_legacy",
+            "2026-01-01T00:00:00.000000000Z",
+            Some("2099-01-01T00:00:00.000000000Z"),
+            Some("legacy active row"),
+        )?;
+
+        let released = connection.release_advisory_lock(&lock_id, "agent_legacy")?;
+        ensure(
+            released,
+            "logical release should delete stale canonical row",
+        )?;
+        ensure(
+            connection.is_lock_held(&lock_id)?.is_none(),
+            "lock should not be held after logical release",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn advisory_lock_expiry_comparison_parses_rfc3339_variants() -> TestResult {
         ensure(
             !super::advisory_lock_is_expired(
@@ -15078,6 +15636,18 @@ mod tests {
                 "2026-05-05T03:00:00+00:00",
             ),
             "nanosecond Z expiry should be expired after whole-second +00:00 now",
+        )
+    }
+
+    #[test]
+    fn advisory_lock_expiry_parse_failure_is_not_expired() -> TestResult {
+        ensure(
+            !super::advisory_lock_is_expired("not-rfc3339", "2026-05-05T03:00:00.000000000Z"),
+            "invalid expiry must not be treated as expired",
+        )?;
+        ensure(
+            !super::advisory_lock_is_expired("2026-05-05T02:59:59.999999999Z", "not-rfc3339"),
+            "invalid comparison time must not be treated as expired",
         )
     }
 
@@ -15297,7 +15867,7 @@ mod tests {
             "expired holder should be replaced by a parallel agent",
         )?;
         ensure(
-            held.holder_id != "agent_expired",
+            !super::text_matches(&held.holder_id, "agent_expired"),
             "expired holder must not remain active",
         )?;
         check.close()?;
