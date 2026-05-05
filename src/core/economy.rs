@@ -3,6 +3,7 @@
 //! Treats agent attention as scarce: scores utility, cost, false alarms,
 //! maintenance debt, and tail-risk reserves before surfacing or demoting artifacts.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -914,16 +915,10 @@ fn load_memory_economy_metrics(
     })?;
     let active_memories = connection
         .list_memories(&workspace_id, None, false)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to read memory rows for economy metrics: {error}"),
-            repair: Some("ee doctor --json".to_owned()),
-        })?;
+        .map_err(economy_metrics_unavailable)?;
     let all_memories = connection
         .list_memories(&workspace_id, None, true)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to read tombstoned memory rows for economy metrics: {error}"),
-            repair: Some("ee doctor --json".to_owned()),
-        })?;
+        .map_err(economy_metrics_unavailable)?;
     let tombstoned_count = u32::try_from(
         all_memories
             .iter()
@@ -935,19 +930,12 @@ fn load_memory_economy_metrics(
     let mut active_artifacts = active_memories
         .iter()
         .map(|memory| {
-            let tags =
-                connection
-                    .get_memory_tags(&memory.id)
-                    .map_err(|error| DomainError::Storage {
-                        message: format!("Failed to read memory tags for economy metrics: {error}"),
-                        repair: Some("ee doctor --json".to_owned()),
-                    })?;
+            let tags = connection
+                .get_memory_tags(&memory.id)
+                .map_err(economy_metrics_unavailable)?;
             let feedback = connection
                 .list_feedback_events_for_target("memory", &memory.id)
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to read memory feedback for economy metrics: {error}"),
-                    repair: Some("ee doctor --json".to_owned()),
-                })?;
+                .map_err(economy_metrics_unavailable)?;
             Ok(memory_metric(memory, &tags, &feedback, now))
         })
         .collect::<Result<Vec<_>, DomainError>>()?;
@@ -958,6 +946,15 @@ fn load_memory_economy_metrics(
         active_artifacts,
         tombstoned_count,
     })
+}
+
+fn economy_metrics_unavailable(error: impl fmt::Display) -> DomainError {
+    DomainError::UnsatisfiedDegradedMode {
+        message: format!(
+            "Memory economy metrics are unavailable because workspace storage is not migrated or readable: {error}"
+        ),
+        repair: Some("ee init --workspace .".to_owned()),
+    }
 }
 
 fn memory_metric(
