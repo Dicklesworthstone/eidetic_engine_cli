@@ -39,6 +39,7 @@ ee --workspace <workspace> learn experiment run --id <experiment-id> --dry-run -
 ee learn observe <experiment-id> --measurement-name <name> --signal neutral --evidence-id <evidence-id> --redaction-status redacted --dry-run --json
 ee learn close <experiment-id> --status inconclusive --decision-impact "<impact>" --safety-note "<note>" --dry-run --json
 ee context "<task>" --workspace <workspace> --json
+ee lab replay --workspace <workspace> --episode-id <episode-id> --json
 ee causal compare --workspace <workspace> --json
 ee economy score --workspace <workspace> --json
 ```
@@ -205,7 +206,7 @@ Unsupported claims include:
 - `safe to close` when sample size is low, outcomes conflict, or rehearsal is
   missing
 - claims from sample, mock, placeholder, stale, degraded, or unredacted data
-- any conclusion from direct DB scraping or hidden index access
+- any conclusion from forbidden direct DB scraping or hidden index access
 - durable memory mutation outside explicit `ee learn observe` or
   `ee learn close` commands
 

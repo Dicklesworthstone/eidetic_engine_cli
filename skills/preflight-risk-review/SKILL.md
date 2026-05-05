@@ -37,16 +37,19 @@ ee context "<task>" --workspace <workspace> --json
 ee search "<query>" --workspace <workspace> --explain --json
 ```
 
+All evidence commands must return parseable `ee.response.v1` or `ee.error.v1`
+JSON on stdout; progress and diagnostics belong on stderr.
+
 Dependency audit inputs are allowed only as explicit command artifacts, such as
 `cargo tree -e features`, forbidden-dependency audit output, or CI JSON/log files
 named by the user or harness. Project rules are allowed only when returned by
 `ee context`, `ee search`, `ee preflight run`, or an `ee.skill_evidence_bundle.v1`
 handoff.
 
-Never scrape FrankenSQLite, Frankensearch indexes, `.ee/`, `.beads/`, CASS
-stores, target directories, or any direct DB path. Durable memory mutation must
-go through an explicit `ee ... --json` command, audited dry-run artifact, or
-user-approved command.
+Direct DB scraping is forbidden. Never scrape FrankenSQLite, Frankensearch
+indexes, `.ee/`, `.beads/`, CASS stores, target directories, or any direct DB
+path. Durable memory mutation must go through an explicit `ee ... --json`
+command, audited dry-run artifact, or user-approved command.
 
 ## Evidence Gathering
 
@@ -96,6 +99,7 @@ workspace: "<workspace path or unknown>"
 riskSummary:
   level: low | medium | high | blocked | unknown
   rationale: "<brief evidence-linked summary>"
+decision: go/no-go | needs-escalation | unavailable
 evidenceBackedTripwires:
   - id: "<tripwire id>"
     state: matched | clear | degraded | unavailable
@@ -103,6 +107,7 @@ evidenceBackedTripwires:
 askNowQuestions:
   - question: "<question>"
     reason: "<why the answer changes action>"
+    disposition: ask_user
     agentGenerated: true
 mustVerifyChecks:
   - check: "<command or manual check>"

@@ -194,7 +194,8 @@ Unsupported claims include:
   evidence
 - `safe to promote` when verification is missing, failed, stale, or degraded
 - claims from sample, mock, placeholder, stale, or degraded data
-- any conclusion from direct DB scraping or unredacted transcript access
+- any conclusion from forbidden direct DB scraping or unredacted transcript
+  access
 - automatic skill installation, copying into a live skills directory, or
   durable memory mutation outside explicit `ee` commands
 

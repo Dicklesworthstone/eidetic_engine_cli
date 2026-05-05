@@ -220,7 +220,7 @@ Unsupported claims include:
   unavailable
 - `payload is current` when stale payload or hash mismatch appears
 - claims from sample, mock, placeholder, stale, degraded, or unredacted data
-- any conclusion from direct DB scraping or hidden index access
+- any conclusion from forbidden direct DB scraping or hidden index access
 - durable memory mutation outside explicit `ee ... --json` commands
 
 Put useful but unsupported ideas in `overclaimRisks`, `missingEvidence`, or

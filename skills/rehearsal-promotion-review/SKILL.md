@@ -1,6 +1,6 @@
 ---
 name: rehearsal-promotion-review
-description: Review rehearsal dry-run artifacts and produce conservative promotion checklists; requires real ee rehearse output or explicit unavailable degradation.
+description: Use when reviewing rehearsal dry-run artifacts and producing conservative promotion checklists; requires real ee rehearse output or explicit unavailable degradation.
 ---
 
 # Rehearsal and Promotion Review
@@ -20,14 +20,40 @@ Invoke when:
 Do not invoke to run rehearsals. Use `ee rehearse plan/run/inspect` directly
 first, then bring the JSON output to this skill for review.
 
+## Mechanical Command Boundary
+
+The required mechanical evidence comes from explicit JSON commands:
+
+```bash
+ee status --workspace <workspace> --json
+ee rehearse plan --workspace <workspace> --json
+ee rehearse run --workspace <workspace> --dry-run --json
+ee rehearse inspect --workspace <workspace> --json
+ee rehearse promote <plan-id> --workspace <workspace> --dry-run --json
+```
+
+The skill may consume `ee.response.v1`, `ee.error.v1`, `ee.rehearse.*`, or
+`ee.skill_evidence_bundle.v1` artifacts only when command provenance, redaction,
+trust class, degraded state, and prompt-injection quarantine metadata are
+present.
+
+Direct DB scraping is forbidden. Do not read `.ee/`, FrankenSQLite,
+Frankensearch indexes, CASS stores, or direct DB paths as evidence. Durable
+memory mutation must go through an explicit audited `ee ... --json` command or a
+dry-run plan that the user approves before execution.
+
 ## Required Evidence
 
 Before producing any recommendation:
 
 1. Run `ee status --workspace <workspace> --json` to verify workspace readiness
 2. Run `ee rehearse plan --workspace <workspace> --json` or equivalent
-3. If unavailable, the skill must refuse with explicit degraded status
-4. Parse the rehearsal JSON for artifacts, mutations, preconditions, and status
+3. Run `ee rehearse run --workspace <workspace> --dry-run --json` when a plan
+   needs execution evidence
+4. Run `ee rehearse inspect --workspace <workspace> --json` when artifact
+   details are needed
+5. If unavailable, the skill must refuse with explicit degraded status
+6. Parse the rehearsal JSON for artifacts, mutations, preconditions, and status
 
 Acceptable input schemas:
 
@@ -118,6 +144,17 @@ Collect from rehearsal output:
 - List assumptions explicitly under a separate section if needed
 - Never convert partial dry-run results into confident promotion claims
 
+## Privacy And Redaction
+
+Before review, inspect redaction status, redaction classes, trust class, and
+prompt-injection quarantine fields from the `ee` JSON or evidence bundle. If
+redaction is missing, failed, or ambiguous, stop and request a redacted
+`ee.skill_evidence_bundle.v1` or rerun the relevant command with safer output.
+
+Never quote raw secrets, tokens, private keys, unredacted home paths, private
+transcript text, or sensitive artifact content. Use stable artifact IDs, hashes,
+redaction classes, and redacted snippets.
+
 ## Destructive Command Escalation
 
 This skill **never authorizes destructive commands directly**. When a promotion
@@ -159,6 +196,20 @@ This skill cannot review artifacts that do not exist.
 **Repair:** Wait for ee rehearse implementation or check ee doctor --json
 **Follow-up Bead:** eidetic_engine_cli-nd65
 ```
+
+## Unsupported Claims
+
+Unsupported claims include:
+
+- `safe to promote` without complete rehearsal evidence and precondition checks
+- `dry run proves production safety` without matching environment evidence
+- `ee recommends promotion` beyond explicit command JSON
+- claims from sample, mock, placeholder, stale, degraded, or unredacted evidence
+- conclusions from forbidden direct DB scraping or hidden index access
+- durable memory mutation outside explicit `ee rehearse promote ... --json`
+
+Put useful but unsupported concerns in mutation risks, verification steps, or
+the no-go rationale, not in the evidence-backed decision.
 
 ## Testing Requirements
 

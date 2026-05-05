@@ -30,6 +30,8 @@ ee causal trace --workspace <workspace> --json
 ee causal estimate --workspace <workspace> --json
 ee causal compare --workspace <workspace> --json
 ee causal promote-plan --workspace <workspace> --json
+ee why <memory-id> --workspace <workspace> --json
+ee search "<query>" --workspace <workspace> --explain --json
 ee status --workspace <workspace> --json
 ```
 
@@ -38,10 +40,16 @@ also consume an `ee.skill_evidence_bundle.v1` artifact that wraps those command
 outputs with provenance, redaction, trust class, degraded states, and mutation
 rules.
 
+Command wrappers may use `ee.response.v1` or `ee.error.v1`; evidence must remain
+machine JSON on stdout with provenance and degraded codes preserved.
+
 Durable memory mutation is forbidden except through an explicit audited `ee`
 command or dry-run plan. The skill must not write memories, causal records,
 candidate rows, audit records, graph snapshots, search indexes, or evidence
 ledgers directly.
+
+Direct DB scraping is forbidden. Use only explicit `ee ... --json` command
+outputs or verified evidence bundles.
 
 ## Evidence Gathering
 

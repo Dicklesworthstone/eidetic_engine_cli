@@ -14,7 +14,8 @@ that `ee` knows what the agent would have done.
 
 Use this skill when a task asks why an agent failed, whether a missing memory or
 different context pack might have changed the result, how to falsify a
-counterfactual claim, or how to review `ee lab` replay/counterfactual output.
+counterfactual claim, which alternative intervention would have been tested, or
+how to review `ee lab` replay/counterfactual output.
 
 Do not use it for ordinary debugging when no `ee lab` evidence or
 `ee.skill_evidence_bundle.v1` handoff exists. Do not use it to infer behavior
@@ -29,6 +30,7 @@ The required mechanical evidence comes from explicit JSON commands:
 ee lab capture --workspace <workspace> --json
 ee lab replay --workspace <workspace> --episode-id <episode-id> --json
 ee lab counterfactual --workspace <workspace> --episode-id <episode-id> --json
+ee why <memory-id> --workspace <workspace> --json
 ee status --workspace <workspace> --json
 ```
 
@@ -37,10 +39,16 @@ also consume an `ee.skill_evidence_bundle.v1` artifact that wraps those command
 outputs with provenance, redaction, trust class, degraded states, and mutation
 rules.
 
+Command wrappers may use `ee.response.v1` or `ee.error.v1`; evidence must remain
+machine JSON on stdout with provenance and degraded codes preserved.
+
 Durable memory mutation is forbidden except through an explicit audited `ee`
 command or dry-run plan. The skill must not write memories, replay rows,
 candidate rows, audit records, graph snapshots, search indexes, or lab evidence
 directly.
+
+Direct DB scraping is forbidden. Use only explicit `ee ... --json` command
+outputs or verified evidence bundles.
 
 ## Evidence Gathering
 
@@ -167,7 +175,7 @@ Unsupported claims include:
 - `root cause proven` without direct replay or external validation evidence
 - `ee decided`, `ee reasoned`, or `ee recommends` beyond command JSON
 - claims from sample, mock, placeholder, stale, or degraded data
-- conclusions from direct DB scraping or unredacted transcript access
+- conclusions from forbidden direct DB scraping or unredacted transcript access
 
 Put useful but unsupported ideas in `hypotheses` or `unsupportedClaims`, not in
 `observedFacts` or `replayEvidence`.

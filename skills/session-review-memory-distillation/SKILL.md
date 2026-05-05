@@ -227,7 +227,7 @@ Unsupported claims include:
   deterministic validation evidence
 - high-confidence procedural rules without provenance and validation plan
 - claims from sample, mock, placeholder, stale, degraded, or unredacted data
-- any conclusion from direct DB scraping or hidden index access
+- any conclusion from forbidden direct DB scraping or hidden index access
 - durable memory mutation outside explicit `ee curate ...` or `ee remember`
   commands
 
