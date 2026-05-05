@@ -7660,6 +7660,15 @@ pub struct StoredRationaleTraceLink {
     pub created_at: String,
 }
 
+/// Input for audited rationale trace creation.
+#[derive(Debug, Clone)]
+pub struct AuditedRationaleTraceInput {
+    pub workspace_id: String,
+    pub trace: RationaleTrace,
+    pub actor: Option<String>,
+    pub details: Option<String>,
+}
+
 impl DbConnection {
     /// Store one safe rationale trace and its target links.
     ///
@@ -7668,60 +7677,108 @@ impl DbConnection {
     /// curation, export, and handoff flows can reuse trace IDs deterministically.
     pub fn insert_rationale_trace(&self, workspace_id: &str, trace: &RationaleTrace) -> Result<()> {
         let trace = normalized_rationale_trace(trace)?;
+        self.with_transaction(|| self.insert_rationale_trace_inner(workspace_id, &trace))
+    }
+
+    /// Store one safe rationale trace with an audit row in the same transaction.
+    pub fn insert_rationale_trace_audited(
+        &self,
+        input: &AuditedRationaleTraceInput,
+    ) -> Result<String> {
+        let trace = normalized_rationale_trace(&input.trace)?;
         self.with_transaction(|| {
-            self.execute_for(
-                DbOperation::Execute,
-                "INSERT INTO rationale_traces (trace_id, workspace_id, schema, kind, author, summary, posture, confidence_basis_points, visibility, redaction_status, evidence_uris_json, linked_memory_ids_json, linked_context_pack_ids_json, linked_recorder_run_ids_json, linked_recorder_event_ids_json, linked_causal_trace_ids_json, supersedes_trace_ids_json, contradicted_by_trace_ids_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
-                &[
-                    Value::Text(trace.trace_id.clone()),
-                    Value::Text(workspace_id.to_string()),
-                    Value::Text(trace.schema.to_string()),
-                    Value::Text(trace.kind.as_str().to_string()),
-                    Value::Text(trace.author.clone()),
-                    Value::Text(trace.summary.clone()),
-                    Value::Text(trace.posture.as_str().to_string()),
-                    Value::BigInt(i64::from(trace.confidence_basis_points)),
-                    Value::Text(trace.visibility.as_str().to_string()),
-                    Value::Text(trace.redaction_status.as_str().to_string()),
-                    Value::Text(json_string_vec(&trace.evidence_uris, "rationale evidence URIs")?),
-                    Value::Text(json_string_vec(
-                        &trace.linked_memory_ids,
-                        "rationale memory links",
-                    )?),
-                    Value::Text(json_string_vec(
-                        &trace.linked_context_pack_ids,
-                        "rationale context-pack links",
-                    )?),
-                    Value::Text(json_string_vec(
-                        &trace.linked_recorder_run_ids,
-                        "rationale recorder-run links",
-                    )?),
-                    Value::Text(json_string_vec(
-                        &trace.linked_recorder_event_ids,
-                        "rationale recorder-event links",
-                    )?),
-                    Value::Text(json_string_vec(
-                        &trace.linked_causal_trace_ids,
-                        "rationale causal-trace links",
-                    )?),
-                    Value::Text(json_string_vec(
-                        &trace.supersedes_trace_ids,
-                        "rationale supersession links",
-                    )?),
-                    Value::Text(json_string_vec(
-                        &trace.contradicted_by_trace_ids,
-                        "rationale contradiction links",
-                    )?),
-                    Value::Text(trace.created_at.clone()),
-                ],
+            self.insert_rationale_trace_inner(&input.workspace_id, &trace)?;
+
+            let audit_id = generate_audit_id();
+            let details = input.details.clone().unwrap_or_else(|| {
+                serde_json::json!({
+                    "traceId": &trace.trace_id,
+                    "kind": trace.kind.as_str(),
+                    "visibility": trace.visibility.as_str(),
+                    "redactionStatus": trace.redaction_status.as_str(),
+                    "evidenceUriCount": trace.evidence_uris.len(),
+                    "linkedMemoryCount": trace.linked_memory_ids.len(),
+                    "linkedContextPackCount": trace.linked_context_pack_ids.len(),
+                    "linkedRecorderRunCount": trace.linked_recorder_run_ids.len(),
+                    "linkedRecorderEventCount": trace.linked_recorder_event_ids.len(),
+                    "linkedCausalTraceCount": trace.linked_causal_trace_ids.len(),
+                })
+                .to_string()
+            });
+
+            self.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(input.workspace_id.clone()),
+                    actor: input.actor.clone(),
+                    action: audit_actions::RATIONALE_TRACE_CREATE.to_string(),
+                    target_type: Some("rationale_trace".to_string()),
+                    target_id: Some(trace.trace_id.clone()),
+                    details: Some(details),
+                },
             )?;
 
-            for link in rationale_trace_link_rows(&trace) {
-                self.insert_rationale_trace_link(&link)?;
-            }
-
-            Ok(())
+            Ok(audit_id)
         })
+    }
+
+    fn insert_rationale_trace_inner(
+        &self,
+        workspace_id: &str,
+        trace: &RationaleTrace,
+    ) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO rationale_traces (trace_id, workspace_id, schema, kind, author, summary, posture, confidence_basis_points, visibility, redaction_status, evidence_uris_json, linked_memory_ids_json, linked_context_pack_ids_json, linked_recorder_run_ids_json, linked_recorder_event_ids_json, linked_causal_trace_ids_json, supersedes_trace_ids_json, contradicted_by_trace_ids_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            &[
+                Value::Text(trace.trace_id.clone()),
+                Value::Text(workspace_id.to_string()),
+                Value::Text(trace.schema.to_string()),
+                Value::Text(trace.kind.as_str().to_string()),
+                Value::Text(trace.author.clone()),
+                Value::Text(trace.summary.clone()),
+                Value::Text(trace.posture.as_str().to_string()),
+                Value::BigInt(i64::from(trace.confidence_basis_points)),
+                Value::Text(trace.visibility.as_str().to_string()),
+                Value::Text(trace.redaction_status.as_str().to_string()),
+                Value::Text(json_string_vec(&trace.evidence_uris, "rationale evidence URIs")?),
+                Value::Text(json_string_vec(
+                    &trace.linked_memory_ids,
+                    "rationale memory links",
+                )?),
+                Value::Text(json_string_vec(
+                    &trace.linked_context_pack_ids,
+                    "rationale context-pack links",
+                )?),
+                Value::Text(json_string_vec(
+                    &trace.linked_recorder_run_ids,
+                    "rationale recorder-run links",
+                )?),
+                Value::Text(json_string_vec(
+                    &trace.linked_recorder_event_ids,
+                    "rationale recorder-event links",
+                )?),
+                Value::Text(json_string_vec(
+                    &trace.linked_causal_trace_ids,
+                    "rationale causal-trace links",
+                )?),
+                Value::Text(json_string_vec(
+                    &trace.supersedes_trace_ids,
+                    "rationale supersession links",
+                )?),
+                Value::Text(json_string_vec(
+                    &trace.contradicted_by_trace_ids,
+                    "rationale contradiction links",
+                )?),
+                Value::Text(trace.created_at.clone()),
+            ],
+        )?;
+
+        for link in rationale_trace_link_rows(trace) {
+            self.insert_rationale_trace_link(&link)?;
+        }
+
+        Ok(())
     }
 
     /// Get one rationale trace by ID.

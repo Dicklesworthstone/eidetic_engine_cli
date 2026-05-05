@@ -8795,7 +8795,21 @@ where
 
     let workspace_id = crate::core::curate::stable_workspace_id(&workspace_path);
 
-    if let Err(e) = conn.insert_rationale_trace(&workspace_id, &trace) {
+    let audit_details = serde_json::json!({
+        "targetType": &args.target_type,
+        "targetId": &args.target_id,
+        "kind": &args.kind,
+        "evidenceUriCount": trace.evidence_uris.len(),
+    })
+    .to_string();
+    let audit_input = crate::db::AuditedRationaleTraceInput {
+        workspace_id: workspace_id.clone(),
+        trace,
+        actor: Some(args.author.clone()),
+        details: Some(audit_details),
+    };
+
+    if let Err(e) = conn.insert_rationale_trace_audited(&audit_input) {
         let domain_error = DomainError::Storage {
             message: format!("Failed to store rationale trace: {e}"),
             repair: Some("ee db migrate".to_string()),

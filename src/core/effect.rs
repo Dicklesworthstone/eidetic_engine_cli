@@ -793,6 +793,14 @@ impl EffectManifest {
             CommandEffect::read_only("agent scan", "Scan agent probe paths"),
             CommandEffect::read_only("agent sources", "List known agent source connectors"),
             CommandEffect::read_only("agent status", "Report local agent inventory status"),
+            CommandEffect::read_only(
+                "analyze clustering",
+                "Analyze consolidation clustering posture",
+            ),
+            CommandEffect::read_only(
+                "analyze drift",
+                "Analyze drift between evaluation snapshots",
+            ),
             CommandEffect::read_only("analyze science-status", "Report science readiness"),
             CommandEffect::read_only("agent-docs", "Display agent documentation"),
             CommandEffect::read_only("backup inspect", "Inspect backup manifest"),
@@ -841,6 +849,8 @@ impl EffectManifest {
             CommandEffect::read_only("outcome quarantine list", "List feedback quarantine rows"),
             CommandEffect::read_only("plan recipe list", "List static plan recipes"),
             CommandEffect::read_only("plan recipe show", "Show static plan recipe"),
+            CommandEffect::read_only("rationale list", "List safe rationale traces"),
+            CommandEffect::read_only("rationale show", "Show a safe rationale trace"),
             CommandEffect::read_only("rule list", "List procedural rules"),
             CommandEffect::read_only("rule show", "Show procedural rule"),
             CommandEffect::read_only("schema export", "Export public response schemas"),
@@ -1318,6 +1328,11 @@ impl EffectManifest {
                 "outcome quarantine release",
                 vec!["feedback_quarantine", "audit_log"],
                 "Release feedback from quarantine",
+            ),
+            CommandEffect::durable_write(
+                "rationale attach",
+                vec!["rationale_traces", "audit_log"],
+                "Attach a safe rationale trace with audit provenance",
             ),
             CommandEffect::durable_write(
                 "remember",
