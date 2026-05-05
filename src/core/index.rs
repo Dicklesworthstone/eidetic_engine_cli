@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::db::{
-    CreateSearchIndexJobInput, DbConnection, DbError, SearchIndexJobType, StoredSearchIndexJob,
+    AcquireLockResult, AdvisoryLockId, CreateSearchIndexJobInput, DbConnection, DbError,
+    SearchIndexJobType, StoredSearchIndexJob,
 };
 use crate::models::MemoryId;
 use crate::search::{
@@ -15,6 +16,49 @@ pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 const INDEX_METADATA_FILE: &str = "meta.json";
 const INDEX_STAGING_PREFIX: &str = ".publish-";
 const INDEX_RETAINED_SUFFIX: &str = ".previous";
+
+/// Lock TTL for index publish operations (5 minutes).
+const INDEX_PUBLISH_LOCK_TTL_SECS: u64 = 300;
+
+/// Generate a unique holder ID for advisory locks.
+fn generate_index_holder_id() -> String {
+    let pid = std::process::id();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("ee-index-{pid}-{ts}")
+}
+
+/// Acquire the index publish lock or return an error.
+fn acquire_index_publish_lock(
+    db: &DbConnection,
+    workspace_id: &str,
+    holder_id: &str,
+) -> Result<(), IndexRebuildError> {
+    let lock_id = AdvisoryLockId::index(workspace_id);
+    match db.acquire_advisory_lock(
+        &lock_id,
+        holder_id,
+        Some(INDEX_PUBLISH_LOCK_TTL_SECS),
+        Some("index publish"),
+    )? {
+        AcquireLockResult::Acquired(_) | AcquireLockResult::Expired { .. } => Ok(()),
+        AcquireLockResult::AlreadyHeld {
+            holder_id: other,
+            acquired_at,
+        } => Err(IndexRebuildError::Index(format!(
+            "Index publish lock held by {other} since {acquired_at}. \
+             Another index operation may be in progress."
+        ))),
+    }
+}
+
+/// Release the index publish lock (best-effort, errors are logged but not propagated).
+fn release_index_publish_lock(db: &DbConnection, workspace_id: &str, holder_id: &str) {
+    let lock_id = AdvisoryLockId::index(workspace_id);
+    let _ = db.release_advisory_lock(&lock_id, holder_id);
+}
 
 #[derive(Clone, Debug)]
 pub struct IndexRebuildOptions {
@@ -579,30 +623,52 @@ pub fn rebuild_index(
         });
     }
 
-    let _recovery_action = recover_interrupted_publish(&index_dir)?;
-    let staging_dir = create_publish_staging_dir(&index_dir)?;
+    // Acquire index publish lock to prevent concurrent publish races.
+    let holder_id = generate_index_holder_id();
+    acquire_index_publish_lock(&db, &workspace_id, &holder_id)?;
 
-    let indexable_docs: Vec<_> = memory_docs
-        .into_iter()
-        .chain(session_docs)
-        .chain(artifact_docs)
-        .map(|doc| doc.into_indexable())
-        .collect();
+    let result = (|| -> Result<IndexRebuildReport, IndexRebuildError> {
+        let _recovery_action = recover_interrupted_publish(&index_dir)?;
+        let staging_dir = create_publish_staging_dir(&index_dir)?;
 
-    let stack = default_embedder_stack();
+        let indexable_docs: Vec<_> = memory_docs
+            .into_iter()
+            .chain(session_docs)
+            .chain(artifact_docs)
+            .map(|doc| doc.into_indexable())
+            .collect();
 
-    let build_result = build_index_sync(&staging_dir, stack, indexable_docs);
+        let stack = default_embedder_stack();
 
-    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let build_result = build_index_sync(&staging_dir, stack, indexable_docs);
 
-    match build_result {
-        Ok(stats) => {
-            let published_generation = db_generation.unwrap_or_else(|| u64::from(documents_total));
-            write_index_metadata(&staging_dir, published_generation, documents_total)?;
-            publish_staged_index(&index_dir, &staging_dir)?;
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-            Ok(IndexRebuildReport {
-                status: IndexRebuildStatus::Success,
+        match build_result {
+            Ok(stats) => {
+                let published_generation =
+                    db_generation.unwrap_or_else(|| u64::from(documents_total));
+                write_index_metadata(&staging_dir, published_generation, documents_total)?;
+                publish_staged_index(&index_dir, &staging_dir)?;
+
+                Ok(IndexRebuildReport {
+                    status: IndexRebuildStatus::Success,
+                    memories_indexed,
+                    sessions_indexed,
+                    artifacts_indexed,
+                    documents_total,
+                    index_dir,
+                    elapsed_ms,
+                    dry_run: false,
+                    errors: stats
+                        .errors
+                        .iter()
+                        .map(|(id, e)| format!("{id}: {e}"))
+                        .collect(),
+                })
+            }
+            Err(e) => Ok(IndexRebuildReport {
+                status: IndexRebuildStatus::IndexError,
                 memories_indexed,
                 sessions_indexed,
                 artifacts_indexed,
@@ -610,25 +676,13 @@ pub fn rebuild_index(
                 index_dir,
                 elapsed_ms,
                 dry_run: false,
-                errors: stats
-                    .errors
-                    .iter()
-                    .map(|(id, e)| format!("{id}: {e}"))
-                    .collect(),
-            })
+                errors: vec![e],
+            }),
         }
-        Err(e) => Ok(IndexRebuildReport {
-            status: IndexRebuildStatus::IndexError,
-            memories_indexed,
-            sessions_indexed,
-            artifacts_indexed,
-            documents_total,
-            index_dir,
-            elapsed_ms,
-            dry_run: false,
-            errors: vec![e],
-        }),
-    }
+    })();
+
+    release_index_publish_lock(&db, &workspace_id, &holder_id);
+    result
 }
 
 pub fn reembed_index(
@@ -722,77 +776,86 @@ pub fn reembed_index(
         });
     }
 
-    let _recovery_action = recover_interrupted_publish(&index_dir)?;
-    let staging_dir = create_publish_staging_dir(&index_dir)?;
-    let indexable_docs: Vec<_> = memory_docs
-        .into_iter()
-        .chain(session_docs)
-        .chain(artifact_docs)
-        .map(|doc| doc.into_indexable())
-        .collect();
+    // Acquire index publish lock to prevent concurrent publish races.
+    let holder_id = generate_index_holder_id();
+    acquire_index_publish_lock(&db, &workspace_id, &holder_id)?;
 
-    let build_result = build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs);
-    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let result = (|| -> Result<IndexReembedReport, IndexRebuildError> {
+        let _recovery_action = recover_interrupted_publish(&index_dir)?;
+        let staging_dir = create_publish_staging_dir(&index_dir)?;
+        let indexable_docs: Vec<_> = memory_docs
+            .into_iter()
+            .chain(session_docs)
+            .chain(artifact_docs)
+            .map(|doc| doc.into_indexable())
+            .collect();
 
-    match build_result {
-        Ok(stats) => {
-            db.update_search_index_job_progress(&job_id, documents_total)?;
-            write_index_metadata(&staging_dir, u64::from(documents_total), documents_total)
-                .and_then(|()| publish_staged_index(&index_dir, &staging_dir))?;
-            db.complete_search_index_job(&job_id, documents_total)?;
+        let build_result = build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs);
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-            Ok(IndexReembedReport {
-                status: IndexReembedStatus::Success,
-                job_id: Some(job_id),
-                job_status: "completed".to_owned(),
-                job_type: SearchIndexJobType::FullRebuild.as_str().to_owned(),
-                document_source: None,
-                embedding_scope: "all_documents".to_owned(),
-                embedding,
-                memories_indexed,
-                sessions_indexed,
-                artifacts_indexed,
-                documents_total,
-                index_dir,
-                elapsed_ms,
-                dry_run: false,
-                idempotency_key,
-                errors: stats
-                    .errors
-                    .iter()
-                    .map(|(id, e)| format!("{id}: {e}"))
-                    .collect(),
-            })
-        }
-        Err(error) => {
-            let primary_error = error;
-            let mut errors = vec![primary_error.clone()];
-            if let Err(fail_error) = db.fail_search_index_job(&job_id, &primary_error) {
-                errors.push(format!(
-                    "failed to mark re-embedding job failed: {fail_error}"
-                ));
+        match build_result {
+            Ok(stats) => {
+                db.update_search_index_job_progress(&job_id, documents_total)?;
+                write_index_metadata(&staging_dir, u64::from(documents_total), documents_total)
+                    .and_then(|()| publish_staged_index(&index_dir, &staging_dir))?;
+                db.complete_search_index_job(&job_id, documents_total)?;
+
+                Ok(IndexReembedReport {
+                    status: IndexReembedStatus::Success,
+                    job_id: Some(job_id),
+                    job_status: "completed".to_owned(),
+                    job_type: SearchIndexJobType::FullRebuild.as_str().to_owned(),
+                    document_source: None,
+                    embedding_scope: "all_documents".to_owned(),
+                    embedding,
+                    memories_indexed,
+                    sessions_indexed,
+                    artifacts_indexed,
+                    documents_total,
+                    index_dir,
+                    elapsed_ms,
+                    dry_run: false,
+                    idempotency_key,
+                    errors: stats
+                        .errors
+                        .iter()
+                        .map(|(id, e)| format!("{id}: {e}"))
+                        .collect(),
+                })
             }
+            Err(error) => {
+                let primary_error = error;
+                let mut errors = vec![primary_error.clone()];
+                if let Err(fail_error) = db.fail_search_index_job(&job_id, &primary_error) {
+                    errors.push(format!(
+                        "failed to mark re-embedding job failed: {fail_error}"
+                    ));
+                }
 
-            Ok(IndexReembedReport {
-                status: IndexReembedStatus::IndexError,
-                job_id: Some(job_id),
-                job_status: "failed".to_owned(),
-                job_type: SearchIndexJobType::FullRebuild.as_str().to_owned(),
-                document_source: None,
-                embedding_scope: "all_documents".to_owned(),
-                embedding,
-                memories_indexed,
-                sessions_indexed,
-                artifacts_indexed,
-                documents_total,
-                index_dir,
-                elapsed_ms,
-                dry_run: false,
-                idempotency_key,
-                errors,
-            })
+                Ok(IndexReembedReport {
+                    status: IndexReembedStatus::IndexError,
+                    job_id: Some(job_id),
+                    job_status: "failed".to_owned(),
+                    job_type: SearchIndexJobType::FullRebuild.as_str().to_owned(),
+                    document_source: None,
+                    embedding_scope: "all_documents".to_owned(),
+                    embedding,
+                    memories_indexed,
+                    sessions_indexed,
+                    artifacts_indexed,
+                    documents_total,
+                    index_dir,
+                    elapsed_ms,
+                    dry_run: false,
+                    idempotency_key,
+                    errors,
+                })
+            }
         }
-    }
+    })();
+
+    release_index_publish_lock(&db, &workspace_id, &holder_id);
+    result
 }
 
 pub fn process_index_jobs(
@@ -947,61 +1010,70 @@ fn process_one_index_job(
         });
     }
 
-    let _recovery_action = recover_interrupted_publish(index_dir)?;
-    let staging_dir = create_publish_staging_dir(index_dir)?;
-    let build_result = build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs)
-        .and_then(|stats| {
-            write_index_metadata(&staging_dir, u64::from(documents_total), documents_total)
-                .and_then(|()| publish_staged_index(index_dir, &staging_dir))
-                .map_err(|error| error.to_string())?;
-            Ok(stats)
-        });
+    // Acquire index publish lock to prevent concurrent publish races.
+    let holder_id = generate_index_holder_id();
+    acquire_index_publish_lock(db, &job.workspace_id, &holder_id)?;
 
-    match build_result {
-        Ok(stats) => {
-            db.update_search_index_job_progress(&job.id, documents_total)?;
-            db.complete_search_index_job(&job.id, documents_total)?;
-            let mut errors = stats
-                .errors
-                .iter()
-                .map(|(id, error)| format!("{id}: {error}"))
-                .collect::<Vec<_>>();
-            errors.sort();
-            Ok(IndexProcessingJobReport {
-                job_id: job.id.clone(),
-                job_type: job.job_type.clone(),
-                document_source: job.document_source.clone(),
-                document_id: job.document_id.clone(),
-                outcome: "completed".to_owned(),
-                processing_mode,
-                documents_total,
-                documents_indexed: documents_total,
-                error: if errors.is_empty() {
-                    None
-                } else {
-                    Some(errors.join("; "))
-                },
-            })
-        }
-        Err(error) => {
-            let mut error_message = error;
-            if let Err(fail_error) = db.fail_search_index_job(&job.id, &error_message) {
-                error_message.push_str("; failed to mark search index job failed: ");
-                error_message.push_str(&fail_error.to_string());
+    let result = (|| -> Result<IndexProcessingJobReport, IndexRebuildError> {
+        let _recovery_action = recover_interrupted_publish(index_dir)?;
+        let staging_dir = create_publish_staging_dir(index_dir)?;
+        let build_result = build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs)
+            .and_then(|stats| {
+                write_index_metadata(&staging_dir, u64::from(documents_total), documents_total)
+                    .and_then(|()| publish_staged_index(index_dir, &staging_dir))
+                    .map_err(|error| error.to_string())?;
+                Ok(stats)
+            });
+
+        match build_result {
+            Ok(stats) => {
+                db.update_search_index_job_progress(&job.id, documents_total)?;
+                db.complete_search_index_job(&job.id, documents_total)?;
+                let mut errors = stats
+                    .errors
+                    .iter()
+                    .map(|(id, error)| format!("{id}: {error}"))
+                    .collect::<Vec<_>>();
+                errors.sort();
+                Ok(IndexProcessingJobReport {
+                    job_id: job.id.clone(),
+                    job_type: job.job_type.clone(),
+                    document_source: job.document_source.clone(),
+                    document_id: job.document_id.clone(),
+                    outcome: "completed".to_owned(),
+                    processing_mode,
+                    documents_total,
+                    documents_indexed: documents_total,
+                    error: if errors.is_empty() {
+                        None
+                    } else {
+                        Some(errors.join("; "))
+                    },
+                })
             }
-            Ok(IndexProcessingJobReport {
-                job_id: job.id.clone(),
-                job_type: job.job_type.clone(),
-                document_source: job.document_source.clone(),
-                document_id: job.document_id.clone(),
-                outcome: "failed".to_owned(),
-                processing_mode,
-                documents_total,
-                documents_indexed: 0,
-                error: Some(error_message),
-            })
+            Err(error) => {
+                let mut error_message = error;
+                if let Err(fail_error) = db.fail_search_index_job(&job.id, &error_message) {
+                    error_message.push_str("; failed to mark search index job failed: ");
+                    error_message.push_str(&fail_error.to_string());
+                }
+                Ok(IndexProcessingJobReport {
+                    job_id: job.id.clone(),
+                    job_type: job.job_type.clone(),
+                    document_source: job.document_source.clone(),
+                    document_id: job.document_id.clone(),
+                    outcome: "failed".to_owned(),
+                    processing_mode,
+                    documents_total,
+                    documents_indexed: 0,
+                    error: Some(error_message),
+                })
+            }
         }
-    }
+    })();
+
+    release_index_publish_lock(db, &job.workspace_id, &holder_id);
+    result
 }
 
 fn collect_workspace_indexable_documents(
