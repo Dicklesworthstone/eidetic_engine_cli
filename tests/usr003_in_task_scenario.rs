@@ -492,8 +492,8 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
         "why must report command=why",
     )?;
     ensure(
-        why_json["data"]["memory_id"] == json!(rule_id),
-        "why must echo the requested memory_id",
+        why_json["data"]["memoryId"] == json!(rule_id),
+        "why must echo the requested memory id",
     )?;
     ensure(
         why_json["data"]["found"] == json!(true),
@@ -501,7 +501,7 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
     )?;
     ensure(
         why_json["data"]["storage"]["origin"].is_string()
-            && why_json["data"]["storage"]["trust_class"].is_string(),
+            && why_json["data"]["storage"]["trustClass"].is_string(),
         "why must explain storage origin and trust class",
     )?;
     ensure(
