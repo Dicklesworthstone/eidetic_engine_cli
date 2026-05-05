@@ -2810,12 +2810,20 @@ pub fn validate_snapshot(
     let schema_compatible = snapshot.schema_version == options.expected_schema_version
         || snapshot.schema_version.starts_with("ee.graph.");
 
+    let hash_verified = if options.verify_hash {
+        Some(graph_snapshot_content_hash(&snapshot.metrics_json) == snapshot.content_hash)
+    } else {
+        None
+    };
+
     let result = if snapshot.status == GraphSnapshotStatus::Invalid
         || snapshot.status == GraphSnapshotStatus::Archived
     {
         SnapshotValidationResult::Invalidated
     } else if !schema_compatible {
         SnapshotValidationResult::SchemaIncompatible
+    } else if hash_verified == Some(false) {
+        SnapshotValidationResult::HashMismatch
     } else if generation_delta > 0 {
         SnapshotValidationResult::Stale
     } else {
@@ -2855,11 +2863,7 @@ pub fn validate_snapshot(
         current_generation: options.current_generation,
         generation_delta: Some(generation_delta),
         schema_compatible,
-        hash_verified: if options.verify_hash {
-            Some(true)
-        } else {
-            None
-        },
+        hash_verified,
         repair_hint,
     })
 }
@@ -4364,6 +4368,22 @@ mod tests {
         metrics_json: &str,
         snapshot_version: u32,
     ) -> TestResult {
+        insert_graph_snapshot_with_hash(
+            connection,
+            id,
+            metrics_json,
+            snapshot_version,
+            "blake3:test-graph-export",
+        )
+    }
+
+    fn insert_graph_snapshot_with_hash(
+        connection: &DbConnection,
+        id: &str,
+        metrics_json: &str,
+        snapshot_version: u32,
+        content_hash: &str,
+    ) -> TestResult {
         connection
             .insert_graph_snapshot(
                 id,
@@ -4375,7 +4395,7 @@ mod tests {
                     node_count: 3,
                     edge_count: 2,
                     metrics_json: metrics_json.to_string(),
-                    content_hash: "blake3:test-graph-export".to_string(),
+                    content_hash: content_hash.to_string(),
                     source_generation: 7,
                     expires_at: None,
                 },
@@ -5749,6 +5769,106 @@ mod tests {
 
         assert_eq!(report.result, super::SnapshotValidationResult::NotFound);
         assert!(!report.is_usable());
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn validate_snapshot_verifies_matching_content_hash() -> TestResult {
+        use crate::db::GraphSnapshotType;
+        let connection = open_snapshot_db()?;
+        let metrics_json = r#"{"nodes":[],"edges":[]}"#;
+        let content_hash = super::graph_snapshot_content_hash(metrics_json);
+        insert_graph_snapshot_with_hash(
+            &connection,
+            "gsnap_0000000000000000000000221",
+            metrics_json,
+            1,
+            &content_hash,
+        )?;
+
+        let report = graph_result(super::validate_snapshot(
+            &connection,
+            &super::SnapshotValidationOptions {
+                workspace_id: WORKSPACE_ID.to_string(),
+                graph_type: GraphSnapshotType::MemoryLinks,
+                current_generation: 7,
+                expected_schema_version: super::GRAPH_EXPORT_SCHEMA_V1.to_string(),
+                verify_hash: true,
+            },
+        ))?;
+
+        assert_eq!(report.result, super::SnapshotValidationResult::Valid);
+        assert_eq!(report.hash_verified, Some(true));
+        assert!(report.repair_hint.is_none());
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn validate_snapshot_rejects_content_hash_mismatch() -> TestResult {
+        use crate::db::GraphSnapshotType;
+        let connection = open_snapshot_db()?;
+        insert_graph_snapshot_with_hash(
+            &connection,
+            "gsnap_0000000000000000000000222",
+            r#"{"nodes":[],"edges":[]}"#,
+            1,
+            "blake3:wrong",
+        )?;
+
+        let report = graph_result(super::validate_snapshot(
+            &connection,
+            &super::SnapshotValidationOptions {
+                workspace_id: WORKSPACE_ID.to_string(),
+                graph_type: GraphSnapshotType::MemoryLinks,
+                current_generation: 7,
+                expected_schema_version: super::GRAPH_EXPORT_SCHEMA_V1.to_string(),
+                verify_hash: true,
+            },
+        ))?;
+
+        assert_eq!(report.result, super::SnapshotValidationResult::HashMismatch);
+        assert_eq!(report.hash_verified, Some(false));
+        assert!(!report.is_usable());
+        assert!(
+            report
+                .repair_hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("centrality-refresh --force"))
+        );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn validate_snapshot_skips_hash_check_when_disabled() -> TestResult {
+        use crate::db::GraphSnapshotType;
+        let connection = open_snapshot_db()?;
+        insert_graph_snapshot_with_hash(
+            &connection,
+            "gsnap_0000000000000000000000223",
+            r#"{"nodes":[],"edges":[]}"#,
+            1,
+            "blake3:wrong",
+        )?;
+
+        let report = graph_result(super::validate_snapshot(
+            &connection,
+            &super::SnapshotValidationOptions {
+                workspace_id: WORKSPACE_ID.to_string(),
+                graph_type: GraphSnapshotType::MemoryLinks,
+                current_generation: 7,
+                expected_schema_version: super::GRAPH_EXPORT_SCHEMA_V1.to_string(),
+                verify_hash: false,
+            },
+        ))?;
+
+        assert_eq!(report.result, super::SnapshotValidationResult::Valid);
+        assert_eq!(report.hash_verified, None);
 
         connection.close().map_err(|error| error.to_string())
     }
