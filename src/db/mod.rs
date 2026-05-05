@@ -42,6 +42,7 @@ pub mod audit_actions {
     pub const MEMORY_TAG_REMOVE: &str = "memory.tag.remove";
     pub const MEMORY_TAG_SET: &str = "memory.tag.set";
     pub const MEMORY_LINK_CREATE: &str = "memory.link.create";
+    pub const CURATION_CANDIDATE_CREATE: &str = "curation_candidate.create";
     pub const CURATION_CANDIDATE_VALIDATE: &str = "curation_candidate.validate";
     pub const CURATION_CANDIDATE_APPLY: &str = "curation_candidate.apply";
     pub const CURATION_CANDIDATE_ACCEPT: &str = "curation_candidate.accept";
@@ -2429,6 +2430,97 @@ CREATE INDEX idx_memories_workspace_workflow
     "blake3:v029_memory_workflow_id_2026_05_05",
 );
 
+/// V030: Allow playbook extraction to propose procedural rule candidates.
+pub const V030_RULE_CURATION_CANDIDATES: Migration = Migration::new(
+    30,
+    "rule_curation_candidates",
+    r#"
+ALTER TABLE curation_candidates RENAME TO curation_candidates_v029;
+
+CREATE TABLE curation_candidates (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'curate_*' AND length(id) = 33),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    candidate_type TEXT NOT NULL CHECK (candidate_type IN (
+        'consolidate', 'promote', 'deprecate', 'supersede', 'tombstone', 'merge', 'split', 'retract', 'rule'
+    )),
+    target_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    proposed_content TEXT CHECK (proposed_content IS NULL OR length(trim(proposed_content)) > 0),
+    proposed_confidence REAL CHECK (proposed_confidence IS NULL OR (proposed_confidence >= 0.0 AND proposed_confidence <= 1.0)),
+    proposed_trust_class TEXT CHECK (proposed_trust_class IS NULL OR proposed_trust_class IN (
+        'human_explicit', 'agent_validated', 'agent_assertion', 'cass_evidence', 'legacy_import'
+    )),
+    source_type TEXT NOT NULL CHECK (source_type IN (
+        'agent_inference', 'rule_engine', 'human_request', 'feedback_event',
+        'contradiction_detected', 'decay_trigger', 'counterfactual_replay'
+    )),
+    source_id TEXT CHECK (source_id IS NULL OR length(trim(source_id)) > 0),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'applied')),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    reviewed_at TEXT CHECK (reviewed_at IS NULL OR length(trim(reviewed_at)) > 0),
+    reviewed_by TEXT CHECK (reviewed_by IS NULL OR length(trim(reviewed_by)) > 0),
+    applied_at TEXT CHECK (applied_at IS NULL OR length(trim(applied_at)) > 0),
+    ttl_expires_at TEXT CHECK (ttl_expires_at IS NULL OR length(trim(ttl_expires_at)) > 0),
+    review_state TEXT NOT NULL DEFAULT 'new' CHECK (review_state IN (
+        'new', 'needs_evidence', 'needs_scope', 'duplicate', 'snoozed',
+        'accepted', 'rejected', 'merged', 'superseded', 'expired', 'applied'
+    )),
+    snoozed_until TEXT CHECK (snoozed_until IS NULL OR length(trim(snoozed_until)) > 0),
+    merged_into_candidate_id TEXT CHECK (merged_into_candidate_id IS NULL OR (
+        merged_into_candidate_id GLOB 'curate_*' AND length(merged_into_candidate_id) = 33
+    )),
+    state_entered_at TEXT CHECK (state_entered_at IS NULL OR length(trim(state_entered_at)) > 0),
+    last_action_at TEXT CHECK (last_action_at IS NULL OR length(trim(last_action_at)) > 0),
+    ttl_policy_id TEXT CHECK (ttl_policy_id IS NULL OR length(trim(ttl_policy_id)) > 0)
+);
+
+INSERT INTO curation_candidates (
+    id, workspace_id, candidate_type, target_memory_id, proposed_content,
+    proposed_confidence, proposed_trust_class, source_type, source_id, reason,
+    confidence, status, created_at, reviewed_at, reviewed_by, applied_at,
+    ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id,
+    state_entered_at, last_action_at, ttl_policy_id
+)
+SELECT
+    id, workspace_id, candidate_type, target_memory_id, proposed_content,
+    proposed_confidence, proposed_trust_class, source_type, source_id, reason,
+    confidence, status, created_at, reviewed_at, reviewed_by, applied_at,
+    ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id,
+    state_entered_at, last_action_at, ttl_policy_id
+FROM curation_candidates_v029;
+
+-- Keep the renamed v029 table as migration evidence. Dropping the renamed table
+-- in this rebuild migration currently leaves FrankenSQLite reporting malformed
+-- freelist pages on PRAGMA integrity_check.
+CREATE INDEX idx_curation_candidates_v030_workspace ON curation_candidates(workspace_id);
+CREATE INDEX idx_curation_candidates_v030_target ON curation_candidates(target_memory_id);
+CREATE INDEX idx_curation_candidates_v030_status ON curation_candidates(status);
+CREATE INDEX idx_curation_candidates_v030_type ON curation_candidates(candidate_type);
+CREATE INDEX idx_curation_candidates_v030_created ON curation_candidates(created_at);
+CREATE INDEX idx_curation_candidates_v030_ttl
+    ON curation_candidates(ttl_expires_at)
+    WHERE ttl_expires_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v030_review_state ON curation_candidates(review_state);
+CREATE INDEX idx_curation_candidates_v030_snoozed_until
+    ON curation_candidates(snoozed_until)
+    WHERE snoozed_until IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v030_merged_into
+    ON curation_candidates(merged_into_candidate_id)
+    WHERE merged_into_candidate_id IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v030_state_entered
+    ON curation_candidates(state_entered_at)
+    WHERE state_entered_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v030_last_action
+    ON curation_candidates(last_action_at)
+    WHERE last_action_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v030_ttl_policy
+    ON curation_candidates(ttl_policy_id)
+    WHERE ttl_policy_id IS NOT NULL;
+"#,
+    "blake3:v030_rule_curation_candidates_2026_05_05",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -2460,6 +2552,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V027_RECORDER_STORE,
     V028_ADVISORY_LOCKS,
     V029_MEMORY_WORKFLOW_ID,
+    V030_RULE_CURATION_CANDIDATES,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {

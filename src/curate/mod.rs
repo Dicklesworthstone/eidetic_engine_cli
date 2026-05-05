@@ -187,6 +187,8 @@ pub enum CandidateType {
     Split,
     /// Withdraw a previous assertion due to contradiction.
     Retract,
+    /// Distill repeated semantic evidence into a procedural rule candidate.
+    Rule,
 }
 
 impl CandidateType {
@@ -201,11 +203,12 @@ impl CandidateType {
             Self::Merge => "merge",
             Self::Split => "split",
             Self::Retract => "retract",
+            Self::Rule => "rule",
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 8] {
+    pub const fn all() -> [Self; 9] {
         [
             Self::Consolidate,
             Self::Promote,
@@ -215,6 +218,7 @@ impl CandidateType {
             Self::Merge,
             Self::Split,
             Self::Retract,
+            Self::Rule,
         ]
     }
 }
@@ -241,7 +245,7 @@ impl fmt::Display for ParseCandidateTypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown candidate type `{}`; expected one of consolidate, promote, deprecate, supersede, tombstone, merge, split, retract",
+            "unknown candidate type `{}`; expected one of consolidate, promote, deprecate, supersede, tombstone, merge, split, retract, rule",
             self.input
         )
     }
@@ -262,6 +266,7 @@ impl FromStr for CandidateType {
             "merge" => Ok(Self::Merge),
             "split" => Ok(Self::Split),
             "retract" => Ok(Self::Retract),
+            "rule" => Ok(Self::Rule),
             _ => Err(ParseCandidateTypeError {
                 input: input.to_owned(),
             }),
@@ -671,7 +676,7 @@ impl CandidateType {
     pub const fn requires_content(self) -> bool {
         matches!(
             self,
-            Self::Consolidate | Self::Supersede | Self::Merge | Self::Split
+            Self::Consolidate | Self::Supersede | Self::Merge | Self::Split | Self::Rule
         )
     }
 
@@ -2807,6 +2812,7 @@ impl CandidateType {
         match self {
             Self::Promote | Self::Deprecate => 0.2,
             Self::Consolidate | Self::Merge => 0.4,
+            Self::Rule => 0.45,
             Self::Supersede | Self::Split => 0.5,
             Self::Retract => 0.7,
             Self::Tombstone => 0.9,
@@ -4956,6 +4962,7 @@ Then update src/policy/mod.rs on main."
         assert!(CandidateType::Supersede.requires_content());
         assert!(CandidateType::Merge.requires_content());
         assert!(CandidateType::Split.requires_content());
+        assert!(CandidateType::Rule.requires_content());
         assert!(!CandidateType::Promote.requires_content());
         assert!(!CandidateType::Deprecate.requires_content());
 

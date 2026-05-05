@@ -335,6 +335,7 @@ That's the core loop.
 | `ee curate validate <id>` | Run validation (specificity, duplication, scope, evidence) |
 | `ee curate apply <id>` / `accept <id>` / `reject <id>` / `snooze <id>` / `merge <a> <b>` | Lifecycle transitions |
 | `ee curate disposition` | Evaluate TTL disposition policy without silent mutation (`--apply` is required to write) |
+| `ee playbook extract [--since <RFC3339>] [--dry-run]` | Propose procedural-rule candidates from repeated semantic memories |
 | `ee rule add` / `list` / `show <id>` / `protect <id>` | Direct rule management |
 
 ### Memory inspection

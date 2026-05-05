@@ -22,7 +22,9 @@ use crate::core::memory::{
 };
 use crate::core::outcome::{OutcomeQuarantineListReport, OutcomeQuarantineReviewReport};
 use crate::core::quarantine::{QuarantineEntry, QuarantineReport};
-use crate::core::rule::{RuleAddReport, RuleListReport, RuleProtectReport, RuleShowReport};
+use crate::core::rule::{
+    PlaybookExtractReport, RuleAddReport, RuleListReport, RuleProtectReport, RuleShowReport,
+};
 use crate::core::status::StatusReport;
 use crate::core::why::WhyReport;
 use crate::core::{VERSION_PROVENANCE_SCHEMA_V1, VersionReport};
@@ -3718,6 +3720,26 @@ pub fn render_rule_protect_toon(report: &RuleProtectReport) -> String {
     render_toon_from_json(&render_rule_protect_json(report))
 }
 
+/// Render a playbook extraction report as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_playbook_extract_json(report: &PlaybookExtractReport) -> String {
+    ResponseEnvelope::success()
+        .data_raw(&report.data_json())
+        .finish()
+}
+
+/// Render a playbook extraction report as human-readable text.
+#[must_use]
+pub fn render_playbook_extract_human(report: &PlaybookExtractReport) -> String {
+    report.human_summary()
+}
+
+/// Render a playbook extraction report as TOON.
+#[must_use]
+pub fn render_playbook_extract_toon(report: &PlaybookExtractReport) -> String {
+    render_toon_from_json(&render_playbook_extract_json(report))
+}
+
 /// Render a feedback quarantine list report as JSON (`ee.response.v1` envelope).
 #[must_use]
 pub fn render_outcome_quarantine_list_json(report: &OutcomeQuarantineListReport) -> String {
@@ -5176,6 +5198,16 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
                 default: None,
             },
         ],
+    },
+    CommandEntry {
+        name: "playbook",
+        description: "Extract playbook rule candidates from repeated memory evidence",
+        available: true,
+        subcommands: &[SubcommandEntry {
+            name: "extract",
+            description: "Create curation candidates for repeated procedural rules",
+        }],
+        args: &[],
     },
     CommandEntry {
         name: "rule",

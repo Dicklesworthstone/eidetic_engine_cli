@@ -94,9 +94,9 @@ use crate::core::rehearse::{
     promote_plan_rehearsal, run_rehearsal,
 };
 use crate::core::rule::{
-    RuleAddOptions, RuleAddReport, RuleListOptions, RuleListReport, RuleProtectOptions,
-    RuleProtectReport, RuleShowOptions, RuleShowReport, add_rule, list_rules, protect_rule,
-    show_rule,
+    PlaybookExtractOptions, PlaybookExtractReport, RuleAddOptions, RuleAddReport, RuleListOptions,
+    RuleListReport, RuleProtectOptions, RuleProtectReport, RuleShowOptions, RuleShowReport,
+    add_rule, extract_playbook_candidates, list_rules, protect_rule, show_rule,
 };
 use crate::core::search::{SearchOptions, SearchReport, run_search};
 use crate::core::status::StatusReport;
@@ -374,6 +374,9 @@ pub enum Command {
     /// Agent goal planner and command recipe resolver.
     #[command(subcommand)]
     Plan(PlanCommand),
+    /// Extract playbook rule candidates from repeated memory evidence.
+    #[command(subcommand)]
+    Playbook(PlaybookCommand),
     /// Manage distilled procedures and skill capsules.
     #[command(subcommand)]
     Procedure(ProcedureCommand),
@@ -2314,6 +2317,37 @@ pub struct PlanExplainArgs {
     pub id: String,
 }
 
+/// Subcommands for `ee playbook`.
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum PlaybookCommand {
+    /// Extract repeated semantic memories into procedural-rule curation candidates.
+    Extract(PlaybookExtractArgs),
+}
+
+/// Arguments for `ee playbook extract`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct PlaybookExtractArgs {
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Only scan semantic memories created at or after this RFC 3339 timestamp.
+    #[arg(long, value_name = "RFC3339")]
+    pub since: Option<String>,
+
+    /// Maximum number of semantic memories to scan.
+    #[arg(long, default_value_t = 100)]
+    pub limit: u32,
+
+    /// Preview candidate creation without writing curation rows or audit.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Actor recorded in audit metadata.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+}
+
 /// Subcommands for `ee procedure`.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum ProcedureCommand {
@@ -2973,7 +3007,7 @@ pub enum CurateCommand {
 /// Arguments for `ee curate candidates`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct CurateCandidatesArgs {
-    /// Optional candidate action type: consolidate, promote, deprecate, supersede, tombstone, merge, split, or retract.
+    /// Optional candidate action type: consolidate, promote, deprecate, supersede, tombstone, merge, split, retract, or rule.
     #[arg(long = "type", value_name = "TYPE")]
     pub candidate_type: Option<String>,
 
@@ -4998,6 +5032,9 @@ where
         }
         Some(Command::Plan(PlanCommand::Explain(ref args))) => {
             handle_plan_explain(&cli, args, stdout, stderr)
+        }
+        Some(Command::Playbook(PlaybookCommand::Extract(ref args))) => {
+            handle_playbook_extract(&cli, args, stdout, stderr)
         }
         Some(Command::Procedure(ProcedureCommand::Propose(ref args))) => {
             handle_procedure_propose(&cli, args, stdout, stderr)
@@ -12634,6 +12671,58 @@ where
     }
 }
 
+fn handle_playbook_extract<W, E>(
+    cli: &Cli,
+    args: &PlaybookExtractArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = PlaybookExtractOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        since: args.since.as_deref(),
+        limit: args.limit,
+        dry_run: args.dry_run,
+        actor: args.actor.as_deref(),
+    };
+
+    match extract_playbook_candidates(&options) {
+        Ok(report) => write_playbook_extract_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_playbook_extract_report<W>(
+    cli: &Cli,
+    report: &PlaybookExtractReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_playbook_extract_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_playbook_extract_toon(report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_playbook_extract_json(report) + "\n"),
+        ),
+    }
+}
+
 fn handle_rule_add<W, E>(
     cli: &Cli,
     args: &RuleAddArgs,
@@ -15467,6 +15556,7 @@ const COMMAND_NAMES: &[&str] = &[
     "outcome-quarantine",
     "pack",
     "plan",
+    "playbook",
     "preflight",
     "procedure",
     "recorder",
@@ -15544,6 +15634,7 @@ const MODEL_SUBCOMMANDS: &[&str] = &["status", "list"];
 const OUTCOME_QUARANTINE_SUBCOMMANDS: &[&str] = &["list", "release"];
 const PLAN_SUBCOMMANDS: &[&str] = &["goal", "recipe", "explain"];
 const PLAN_RECIPE_SUBCOMMANDS: &[&str] = &["list", "show"];
+const PLAYBOOK_SUBCOMMANDS: &[&str] = &["extract"];
 const PREFLIGHT_SUBCOMMANDS: &[&str] = &["run", "show", "close"];
 const PROCEDURE_SUBCOMMANDS: &[&str] = &[
     "propose", "show", "list", "export", "promote", "verify", "drift",
@@ -15779,6 +15870,9 @@ impl NormalizedInvocation {
                     }
                     PlanCommand::Explain(_) => "plan explain".to_string(),
                 },
+                Command::Playbook(playbook) => match playbook {
+                    PlaybookCommand::Extract(_) => "playbook extract".to_string(),
+                },
                 Command::Procedure(proc) => match proc {
                     ProcedureCommand::Propose(_) => "procedure propose".to_string(),
                     ProcedureCommand::Show(_) => "procedure show".to_string(),
@@ -15961,6 +16055,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "outcome-quarantine" => Some(OUTCOME_QUARANTINE_SUBCOMMANDS),
         "plan" => Some(PLAN_SUBCOMMANDS),
         "plan recipe" => Some(PLAN_RECIPE_SUBCOMMANDS),
+        "playbook" => Some(PLAYBOOK_SUBCOMMANDS),
         "preflight" => Some(PREFLIGHT_SUBCOMMANDS),
         "procedure" => Some(PROCEDURE_SUBCOMMANDS),
         "recorder" => Some(RECORDER_SUBCOMMANDS),
@@ -16492,6 +16587,7 @@ mod tests {
     use std::ffi::OsString;
     use std::fmt::Debug;
     use std::fs;
+    use std::path::PathBuf;
 
     use clap::Parser;
 
@@ -16499,9 +16595,9 @@ mod tests {
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli,
         Command, CurateCommand, DiagCommand, EconomyCommand, FieldsLevel, FocusCommand,
         GraphCommand, ImportCommand, LearnCommand, LearnExperimentCommand, MaintenanceCommand,
-        MaintenanceJob, MemoryCommand, OutcomeQuarantineCommand, OutputFormat, RuleCommand,
-        ShadowMode, SituationCommand, TaskFrameCommand, TaskFrameSubgoalCommand, WorkflowCommand,
-        run,
+        MaintenanceJob, MemoryCommand, OutcomeQuarantineCommand, OutputFormat, PlaybookCommand,
+        RuleCommand, ShadowMode, SituationCommand, TaskFrameCommand, TaskFrameSubgoalCommand,
+        WorkflowCommand, run,
     };
     use crate::core::search::{
         ScoreExplanation, ScoreFactor, ScoreSource, SearchHit, SearchReport, SearchStatus,
@@ -21155,6 +21251,44 @@ mod tests {
             "provenance_uri omitted when no source",
         )?;
         ensure(stderr.is_empty(), "remember json stderr must be empty")
+    }
+
+    #[test]
+    fn playbook_extract_command_parses_filters() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "playbook",
+            "extract",
+            "--database",
+            "memory.db",
+            "--since",
+            "2026-05-01T00:00:00Z",
+            "--limit",
+            "50",
+            "--dry-run",
+            "--actor",
+            "agent:test",
+        ])
+        .map_err(|error| format!("failed to parse playbook extract: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Playbook(PlaybookCommand::Extract(ref args))) => {
+                ensure_equal(
+                    &args.database,
+                    &Some(PathBuf::from("memory.db")),
+                    "database",
+                )?;
+                ensure_equal(
+                    &args.since,
+                    &Some("2026-05-01T00:00:00Z".to_string()),
+                    "since",
+                )?;
+                ensure_equal(&args.limit, &50, "limit")?;
+                ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(&args.actor, &Some("agent:test".to_string()), "actor")
+            }
+            _ => Err("expected Playbook Extract command".to_string()),
+        }
     }
 
     #[test]

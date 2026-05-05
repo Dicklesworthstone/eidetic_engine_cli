@@ -1289,7 +1289,15 @@ impl EffectManifest {
             ),
             CommandEffect::durable_write(
                 "curate apply",
-                vec!["curation_candidates", "memories", "audit_log"],
+                vec![
+                    "curation_candidates",
+                    "memories",
+                    "procedural_rules",
+                    "rule_source_memories",
+                    "rule_tags",
+                    "search_index_jobs",
+                    "audit_log",
+                ],
                 "Apply a curation candidate",
             ),
             CommandEffect::durable_write(
@@ -1311,6 +1319,11 @@ impl EffectManifest {
                 "curate snooze",
                 vec!["curation_candidates", "audit_log"],
                 "Snooze a curation candidate",
+            ),
+            CommandEffect::durable_write(
+                "playbook extract",
+                vec!["curation_candidates", "audit_log"],
+                "Extract procedural-rule candidates from repeated semantic memories",
             ),
             CommandEffect::durable_write(
                 "learn close",

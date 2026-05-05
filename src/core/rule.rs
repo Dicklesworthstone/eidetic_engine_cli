@@ -5,19 +5,22 @@
 //! capture while preserving the same workspace, audit, dry-run, and index
 //! queue conventions used by `ee remember`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::curate::{CandidateSource, CandidateType, specificity_score};
 use crate::db::{
-    CreateAuditInput, CreateProceduralRuleInput, CreateSearchIndexJobInput, CreateWorkspaceInput,
-    DbConnection, SearchIndexJobType, StoredProceduralRule, audit_actions, generate_audit_id,
+    CreateAuditInput, CreateCurationCandidateInput, CreateProceduralRuleInput,
+    CreateSearchIndexJobInput, CreateWorkspaceInput, DbConnection, SearchIndexJobType,
+    StoredMemory, StoredProceduralRule, audit_actions, generate_audit_id,
 };
 use crate::models::{
-    DomainError, MemoryContent, MemoryId, RuleId, RuleMaturity, RuleScope, Tag, TrustClass,
-    UnitScore, WorkspaceId,
+    CandidateId, DomainError, MemoryContent, MemoryId, RuleId, RuleMaturity, RuleScope, Tag,
+    TrustClass, UnitScore, WorkspaceId,
 };
 
 /// Stable schema for `ee rule add` response data.
@@ -28,9 +31,13 @@ pub const RULE_LIST_SCHEMA_V1: &str = "ee.rule.list.v1";
 pub const RULE_SHOW_SCHEMA_V1: &str = "ee.rule.show.v1";
 /// Stable schema for `ee rule protect` response data.
 pub const RULE_PROTECT_SCHEMA_V1: &str = "ee.rule.protect.v1";
+/// Stable schema for `ee playbook extract` response data.
+pub const PLAYBOOK_EXTRACT_SCHEMA_V1: &str = "ee.playbook.extract.v1";
 
 const MAX_RULE_CONTENT_BYTES: usize = 8192;
 const MAX_RULE_LIST_LIMIT: u32 = 1000;
+const MAX_PLAYBOOK_EXTRACT_LIMIT: u32 = 1000;
+const PLAYBOOK_MIN_EVIDENCE: usize = 3;
 
 /// Options for creating a procedural rule through `ee rule add`.
 #[derive(Clone, Debug)]
@@ -113,6 +120,23 @@ pub struct RuleProtectOptions<'a> {
     /// Desired protected state. `false` implements `--unprotect`.
     pub protected: bool,
     /// Validate and render the write without mutating storage.
+    pub dry_run: bool,
+    /// Optional audit actor.
+    pub actor: Option<&'a str>,
+}
+
+/// Options for extracting rule candidates from repeated semantic memories.
+#[derive(Clone, Debug)]
+pub struct PlaybookExtractOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Optional lower bound for memory created_at timestamps.
+    pub since: Option<&'a str>,
+    /// Maximum number of semantic memories to scan.
+    pub limit: u32,
+    /// Preview candidate creation without mutating storage.
     pub dry_run: bool,
     /// Optional audit actor.
     pub actor: Option<&'a str>,
@@ -367,6 +391,81 @@ pub struct RuleProtectReport {
     pub dry_run: bool,
     pub audit_id: Option<String>,
     pub degraded: Vec<RuleAddDegradation>,
+}
+
+/// Result of extracting playbook rule candidates.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybookExtractReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub since: Option<String>,
+    pub scanned_memory_count: usize,
+    pub candidate_count: usize,
+    pub persisted_count: usize,
+    pub duplicate_count: usize,
+    pub dry_run: bool,
+    pub durable_mutation: bool,
+    pub candidates: Vec<PlaybookRuleCandidate>,
+    pub degraded: Vec<RuleAddDegradation>,
+    pub next_action: String,
+}
+
+impl PlaybookExtractReport {
+    /// Serialize response data without the outer response envelope.
+    #[must_use]
+    pub fn data_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                r#"{{"schema":"{}","command":"playbook extract","status":"serialization_failed"}}"#,
+                PLAYBOOK_EXTRACT_SCHEMA_V1
+            )
+        })
+    }
+
+    /// Human-readable summary.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mode = if self.dry_run { "DRY RUN" } else { "EXTRACTED" };
+        let mut output = format!(
+            "{mode}: playbook rule candidates ({} created, {} duplicates, {} memories scanned)\n",
+            self.persisted_count, self.duplicate_count, self.scanned_memory_count
+        );
+        for candidate in &self.candidates {
+            output.push_str(&format!(
+                "  {} confidence={:.2} evidence={}\n",
+                candidate.candidate_id.as_deref().unwrap_or("<dry-run>"),
+                candidate.confidence,
+                candidate.source_memory_ids.len()
+            ));
+            output.push_str(&format!("    {}\n", candidate.proposed_content));
+        }
+        output.push_str("\nNext:\n  ");
+        output.push_str(&self.next_action);
+        output.push('\n');
+        output
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybookRuleCandidate {
+    pub candidate_id: Option<String>,
+    pub candidate_type: String,
+    pub target_memory_id: String,
+    pub proposed_content: String,
+    pub command_pattern: String,
+    pub specificity_score: f32,
+    pub confidence: f32,
+    pub reason: String,
+    pub source_memory_ids: Vec<String>,
+    pub persisted: bool,
+    pub duplicate: bool,
+    pub audit_id: Option<String>,
 }
 
 impl RuleProtectReport {
@@ -816,6 +915,429 @@ pub fn protect_rule(options: &RuleProtectOptions<'_>) -> Result<RuleProtectRepor
         false,
         Some(audit_id),
     ))
+}
+
+/// Extract procedural-rule curation candidates from repeated semantic memories.
+pub fn extract_playbook_candidates(
+    options: &PlaybookExtractOptions<'_>,
+) -> Result<PlaybookExtractReport, DomainError> {
+    validate_playbook_limit(options.limit)?;
+    let since = parse_playbook_since(options.since)?;
+    let prepared = prepare_rule_read(
+        options.workspace_path,
+        options.database_path,
+        Some("ee playbook extract --workspace . --json"),
+    )?;
+
+    let connection = open_existing_database(&prepared.database_path)?;
+    connection.migrate().map_err(|error| DomainError::Storage {
+        message: format!("Failed to migrate database: {error}"),
+        repair: Some("ee doctor".to_owned()),
+    })?;
+    ensure_workspace(
+        &connection,
+        &prepared.workspace_id,
+        &prepared.workspace_path,
+    )?;
+
+    let mut memories = connection
+        .list_memories(&prepared.workspace_id, Some("semantic"), false)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to scan semantic memories: {error}"),
+            repair: Some("ee memory list --level semantic --json".to_owned()),
+        })?;
+    memories.retain(|memory| memory_is_after_since(memory, since.as_ref()));
+    memories.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let limit = usize::try_from(options.limit).map_err(|_| {
+        rule_read_usage_error(
+            "playbook extract --limit is too large".to_owned(),
+            "ee playbook extract --help",
+        )
+    })?;
+    memories.truncate(limit);
+
+    let scanned_memory_count = memories.len();
+    let groups = group_playbook_memories(&connection, memories)?;
+    let existing_contents = existing_rule_candidate_contents(&connection, &prepared.workspace_id)?;
+
+    let mut candidates = Vec::new();
+    let mut persisted_count = 0_usize;
+    let mut duplicate_count = 0_usize;
+    let actor = options
+        .actor
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("ee playbook extract");
+
+    for group in groups
+        .into_values()
+        .filter(|group| group.memories.len() >= PLAYBOOK_MIN_EVIDENCE)
+    {
+        let source_memory_ids = group
+            .memories
+            .iter()
+            .map(|memory| memory.id.clone())
+            .collect::<Vec<_>>();
+        let target_memory_id = source_memory_ids.first().cloned().ok_or_else(|| {
+            rule_read_usage_error(
+                "playbook group had no evidence".to_owned(),
+                "ee playbook extract --help",
+            )
+        })?;
+        let proposed_content = proposed_playbook_rule(&group);
+        let normalized = normalize_rule_text(&proposed_content);
+        let duplicate = existing_contents.contains(&normalized);
+        let specificity = specificity_score(&proposed_content).score;
+        let confidence = playbook_candidate_confidence(source_memory_ids.len(), specificity);
+        let reason = format!(
+            "playbook extract observed {} semantic memories repeating `{}`.",
+            source_memory_ids.len(),
+            group.command_pattern
+        );
+        let mut candidate_id = None;
+        let mut audit_id = None;
+        let mut persisted = false;
+
+        if duplicate {
+            duplicate_count += 1;
+        } else if !options.dry_run {
+            let new_candidate_id = generate_curation_candidate_id();
+            let new_audit_id = generate_audit_id();
+            let source_id = source_memory_ids.join(",");
+            let input = CreateCurationCandidateInput {
+                workspace_id: prepared.workspace_id.clone(),
+                candidate_type: CandidateType::Rule.as_str().to_owned(),
+                target_memory_id: target_memory_id.clone(),
+                proposed_content: Some(proposed_content.clone()),
+                proposed_confidence: Some(confidence),
+                proposed_trust_class: None,
+                source_type: CandidateSource::RuleEngine.as_str().to_owned(),
+                source_id: Some(source_id),
+                reason: reason.clone(),
+                confidence,
+                status: Some("pending".to_owned()),
+                created_at: None,
+                ttl_expires_at: None,
+            };
+            let details = playbook_candidate_audit_details(
+                &new_candidate_id,
+                &group.command_pattern,
+                &source_memory_ids,
+                &proposed_content,
+                confidence,
+            );
+            connection
+                .with_transaction(|| {
+                    connection.insert_curation_candidate(&new_candidate_id, &input)?;
+                    connection.insert_audit(
+                        &new_audit_id,
+                        &CreateAuditInput {
+                            workspace_id: Some(prepared.workspace_id.clone()),
+                            actor: Some(actor.to_owned()),
+                            action: audit_actions::CURATION_CANDIDATE_CREATE.to_owned(),
+                            target_type: Some("curation_candidate".to_owned()),
+                            target_id: Some(new_candidate_id.clone()),
+                            details: Some(details.clone()),
+                        },
+                    )
+                })
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to persist playbook candidate: {error}"),
+                    repair: Some("ee curate candidates --type rule --json".to_owned()),
+                })?;
+            candidate_id = Some(new_candidate_id);
+            audit_id = Some(new_audit_id);
+            persisted = true;
+            persisted_count += 1;
+        }
+
+        candidates.push(PlaybookRuleCandidate {
+            candidate_id,
+            candidate_type: CandidateType::Rule.as_str().to_owned(),
+            target_memory_id,
+            proposed_content,
+            command_pattern: group.command_pattern,
+            specificity_score: specificity,
+            confidence,
+            reason,
+            source_memory_ids,
+            persisted,
+            duplicate,
+            audit_id,
+        });
+    }
+
+    candidates.sort_by(|left, right| {
+        left.duplicate
+            .cmp(&right.duplicate)
+            .then_with(|| {
+                right
+                    .source_memory_ids
+                    .len()
+                    .cmp(&left.source_memory_ids.len())
+            })
+            .then_with(|| left.command_pattern.cmp(&right.command_pattern))
+            .then_with(|| left.proposed_content.cmp(&right.proposed_content))
+    });
+
+    let next_action = if persisted_count > 0 {
+        "ee curate candidates --type rule --json".to_owned()
+    } else if options.dry_run && !candidates.is_empty() {
+        "ee playbook extract --workspace . --json".to_owned()
+    } else {
+        "no action required".to_owned()
+    };
+
+    Ok(PlaybookExtractReport {
+        schema: PLAYBOOK_EXTRACT_SCHEMA_V1,
+        command: "playbook extract",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        since: since.map(|timestamp| timestamp.to_rfc3339()),
+        scanned_memory_count,
+        candidate_count: candidates.len(),
+        persisted_count,
+        duplicate_count,
+        dry_run: options.dry_run,
+        durable_mutation: persisted_count > 0,
+        candidates,
+        degraded: Vec::new(),
+        next_action,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct PlaybookMemoryGroup {
+    command_pattern: String,
+    memories: Vec<StoredMemory>,
+    tags: BTreeSet<String>,
+    release_signal: bool,
+}
+
+fn group_playbook_memories(
+    connection: &DbConnection,
+    memories: Vec<StoredMemory>,
+) -> Result<BTreeMap<String, PlaybookMemoryGroup>, DomainError> {
+    let mut groups = BTreeMap::new();
+    for memory in memories {
+        let Some(command_pattern) = extract_command_pattern(&memory.content) else {
+            continue;
+        };
+        let tags =
+            connection
+                .get_memory_tags(&memory.id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to read tags for memory {}: {error}", memory.id),
+                    repair: Some("ee memory show <memory-id> --json".to_owned()),
+                })?;
+        let release_signal = playbook_release_signal(&memory.content, &tags);
+        let entry = groups
+            .entry(command_pattern.clone())
+            .or_insert_with(|| PlaybookMemoryGroup {
+                command_pattern,
+                memories: Vec::new(),
+                tags: BTreeSet::new(),
+                release_signal: false,
+            });
+        entry.release_signal |= release_signal;
+        entry.tags.extend(tags);
+        entry.memories.push(memory);
+    }
+    Ok(groups)
+}
+
+fn extract_command_pattern(content: &str) -> Option<String> {
+    let lower = content.to_ascii_lowercase();
+    const KNOWN_COMMAND_PATTERNS: &[&str] = &[
+        "cargo clippy --all-targets -- -D warnings",
+        "cargo clippy --all-targets -- -d warnings",
+        "cargo fmt --check",
+        "cargo check --all-targets",
+        "cargo test",
+        "bv --robot-triage",
+        "bv --robot-next",
+        "br ready --json",
+        "br sync --flush-only",
+        "ubs",
+    ];
+    for pattern in KNOWN_COMMAND_PATTERNS {
+        if lower.contains(&pattern.to_ascii_lowercase()) {
+            return Some((*pattern).to_owned());
+        }
+    }
+
+    let mut in_backticks = false;
+    let mut span = String::new();
+    for ch in content.chars() {
+        if ch == '`' {
+            if in_backticks {
+                let command = span.trim();
+                if looks_like_command(command) {
+                    return Some(command.to_owned());
+                }
+                span.clear();
+                in_backticks = false;
+            } else {
+                in_backticks = true;
+            }
+            continue;
+        }
+        if in_backticks {
+            span.push(ch);
+        }
+    }
+    None
+}
+
+fn looks_like_command(value: &str) -> bool {
+    let value = value.trim();
+    const COMMAND_PREFIXES: &[&str] = &[
+        "cargo ", "ee ", "git ", "gh ", "br ", "bv ", "cass ", "rch ", "ubs",
+    ];
+    COMMAND_PREFIXES
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+}
+
+fn playbook_release_signal(content: &str, tags: &[String]) -> bool {
+    let lower = content.to_ascii_lowercase();
+    lower.contains("release")
+        || tags.iter().any(|tag| {
+            matches!(
+                tag.as_str(),
+                "release" | "ci" | "verification" | "preflight"
+            )
+        })
+}
+
+fn proposed_playbook_rule(group: &PlaybookMemoryGroup) -> String {
+    if group.release_signal {
+        format!(
+            "Run `{}` from the workspace root before release work on main; if it fails, store the failure with `ee remember --kind failure`.",
+            group.command_pattern
+        )
+    } else {
+        format!(
+            "Run `{}` from the workspace root when the matching workflow applies; if it fails, store the failure with `ee remember --kind failure`.",
+            group.command_pattern
+        )
+    }
+}
+
+fn playbook_candidate_confidence(source_memory_count: usize, specificity: f32) -> f32 {
+    let evidence_score = (source_memory_count as f32 * 0.06).min(0.30);
+    (0.45 + evidence_score + (specificity * 0.20)).min(0.90)
+}
+
+fn existing_rule_candidate_contents(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> Result<BTreeSet<String>, DomainError> {
+    let mut contents = BTreeSet::new();
+    let candidates = connection
+        .list_curation_candidates(workspace_id, Some(CandidateType::Rule.as_str()), None, None)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list existing rule candidates: {error}"),
+            repair: Some("ee curate candidates --type rule --json".to_owned()),
+        })?;
+    for candidate in candidates {
+        if let Some(content) = candidate.proposed_content {
+            contents.insert(normalize_rule_text(&content));
+        }
+    }
+
+    let rules = connection
+        .list_procedural_rules(workspace_id, None, None, false)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list existing procedural rules: {error}"),
+            repair: Some("ee rule list --json".to_owned()),
+        })?;
+    for rule in rules {
+        contents.insert(normalize_rule_text(&rule.content));
+    }
+    Ok(contents)
+}
+
+fn normalize_rule_text(content: &str) -> String {
+    content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn parse_playbook_since(raw: Option<&str>) -> Result<Option<DateTime<Utc>>, DomainError> {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .map(|timestamp| timestamp.with_timezone(&Utc))
+                .map_err(|error| {
+                    rule_read_usage_error(
+                        format!("invalid --since timestamp `{value}`: {error}"),
+                        "ee playbook extract --help",
+                    )
+                })
+        })
+        .transpose()
+}
+
+fn memory_is_after_since(memory: &StoredMemory, since: Option<&DateTime<Utc>>) -> bool {
+    let Some(since) = since else {
+        return true;
+    };
+    DateTime::parse_from_rfc3339(&memory.created_at)
+        .map(|created_at| created_at.with_timezone(&Utc) >= *since)
+        .unwrap_or(true)
+}
+
+fn validate_playbook_limit(limit: u32) -> Result<(), DomainError> {
+    if limit == 0 {
+        return Err(rule_read_usage_error(
+            "playbook extract --limit must be greater than zero".to_owned(),
+            "ee playbook extract --help",
+        ));
+    }
+    if limit > MAX_PLAYBOOK_EXTRACT_LIMIT {
+        return Err(rule_read_usage_error(
+            format!("playbook extract --limit must be <= {MAX_PLAYBOOK_EXTRACT_LIMIT}"),
+            "ee playbook extract --help",
+        ));
+    }
+    Ok(())
+}
+
+fn generate_curation_candidate_id() -> String {
+    let candidate = CandidateId::from_uuid(uuid::Uuid::now_v7()).to_string();
+    format!("curate_{}", candidate.trim_start_matches("cand_"))
+}
+
+fn playbook_candidate_audit_details(
+    candidate_id: &str,
+    command_pattern: &str,
+    source_memory_ids: &[String],
+    proposed_content: &str,
+    confidence: f32,
+) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.playbook_candidate_create.v1",
+        "command": "ee playbook extract",
+        "candidateId": candidate_id,
+        "candidateType": CandidateType::Rule.as_str(),
+        "commandPattern": command_pattern,
+        "sourceMemoryIds": source_memory_ids,
+        "sourceMemoryCount": source_memory_ids.len(),
+        "proposedContent": proposed_content,
+        "confidence": confidence,
+    })
+    .to_string()
 }
 
 fn prepare_rule_read(
@@ -1470,6 +1992,127 @@ mod tests {
         } else {
             Err(message.into())
         }
+    }
+
+    #[test]
+    fn playbook_extract_creates_rule_candidate_and_apply_flow_preserves_evidence() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(workspace_path);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("playbook-extract".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut source_ids = Vec::new();
+        for seed in 1..=5_u128 {
+            let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(seed)).to_string();
+            source_ids.push(memory_id.clone());
+            connection
+                .insert_memory(
+                    &memory_id,
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "semantic".to_owned(),
+                        kind: "lesson".to_owned(),
+                        content: format!(
+                            "Release lesson {seed}: run `cargo fmt --check` before release."
+                        ),
+                        workflow_id: None,
+                        confidence: 0.70,
+                        utility: 0.60,
+                        importance: 0.55,
+                        provenance_uri: None,
+                        trust_class: "agent_assertion".to_owned(),
+                        trust_subclass: None,
+                        tags: vec!["release".to_owned()],
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = extract_playbook_candidates(&PlaybookExtractOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            since: None,
+            limit: 100,
+            dry_run: false,
+            actor: Some("test"),
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.schema, PLAYBOOK_EXTRACT_SCHEMA_V1);
+        assert_eq!(report.scanned_memory_count, 5);
+        assert_eq!(report.candidate_count, 1);
+        assert_eq!(report.persisted_count, 1);
+        assert_eq!(report.duplicate_count, 0);
+        assert_eq!(
+            report.candidates[0].proposed_content,
+            "Run `cargo fmt --check` from the workspace root before release work on main; if it fails, store the failure with `ee remember --kind failure`."
+        );
+        assert_eq!(report.candidates[0].source_memory_ids.len(), 5);
+        let candidate_id = report.candidates[0]
+            .candidate_id
+            .clone()
+            .ok_or_else(|| "candidate id missing".to_owned())?;
+
+        let validate_report = crate::core::curate::validate_curation_candidate(
+            &crate::core::curate::CurateValidateOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                candidate_id: &candidate_id,
+                actor: Some("test"),
+                dry_run: false,
+            },
+        )
+        .map_err(|error| error.message())?;
+        assert_eq!(
+            validate_report.validation.status, "passed",
+            "{:?}",
+            validate_report.validation.errors
+        );
+
+        let apply_report = crate::core::curate::apply_curation_candidate(
+            &crate::core::curate::CurateApplyOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                candidate_id: &candidate_id,
+                actor: Some("test"),
+                dry_run: false,
+            },
+        )
+        .map_err(|error| error.message())?;
+        assert_eq!(apply_report.application.decision, "create_rule");
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let rules = connection
+            .list_procedural_rules(&workspace_id, Some("candidate"), Some("workspace"), false)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(
+            rules[0].content,
+            "Run `cargo fmt --check` from the workspace root before release work on main; if it fails, store the failure with `ee remember --kind failure`."
+        );
+        let mut expected_sources = source_ids;
+        expected_sources.sort();
+        let actual_sources = connection
+            .get_rule_source_memory_ids(&rules[0].id)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(actual_sources, expected_sources);
+        Ok(())
     }
 
     #[test]
