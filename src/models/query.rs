@@ -86,7 +86,7 @@ pub enum FilterOperator {
 
 impl FilterOperator {
     #[must_use]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_name(s: &str) -> Option<Self> {
         match s {
             "eq" => Some(Self::Eq),
             "neq" => Some(Self::Neq),
@@ -252,7 +252,7 @@ pub fn parse_filters(value: &serde_json::Value) -> Option<QueryFilters> {
         let mut filter_predicates = Vec::new();
 
         for (operator_str, value) in pred_object {
-            let operator = FilterOperator::from_str(operator_str)?;
+            let operator = FilterOperator::parse_name(operator_str)?;
             let filter_value = FilterValue::from_json(value);
             filter_predicates.push(FilterPredicate {
                 operator,
@@ -283,12 +283,15 @@ mod tests {
         }
     }
 
+    fn parse_test_filters(value: serde_json::Value) -> Result<QueryFilters, String> {
+        parse_filters(&value).ok_or_else(|| "filters should parse".to_owned())
+    }
+
     #[test]
     fn filter_eq_matches_string() -> TestResult {
-        let filters = parse_filters(&serde_json::json!({
+        let filters = parse_test_filters(serde_json::json!({
             "level": {"eq": "procedural"}
-        }))
-        .unwrap();
+        }))?;
 
         let metadata = serde_json::json!({"level": "procedural"});
         ensure(
@@ -305,10 +308,9 @@ mod tests {
 
     #[test]
     fn filter_gte_matches_number() -> TestResult {
-        let filters = parse_filters(&serde_json::json!({
+        let filters = parse_test_filters(serde_json::json!({
             "confidence": {"gte": 0.8}
-        }))
-        .unwrap();
+        }))?;
 
         let metadata = serde_json::json!({"confidence": 0.9});
         ensure(filters.matches(Some(&metadata)), "0.9 >= 0.8 should match")?;
@@ -325,10 +327,9 @@ mod tests {
 
     #[test]
     fn filter_in_matches_list() -> TestResult {
-        let filters = parse_filters(&serde_json::json!({
+        let filters = parse_test_filters(serde_json::json!({
             "kind": {"in": ["rule", "pattern", "workflow"]}
-        }))
-        .unwrap();
+        }))?;
 
         let metadata = serde_json::json!({"kind": "rule"});
         ensure(filters.matches(Some(&metadata)), "rule should be in list")?;
@@ -342,10 +343,9 @@ mod tests {
 
     #[test]
     fn filter_exists_checks_presence() -> TestResult {
-        let filters = parse_filters(&serde_json::json!({
+        let filters = parse_test_filters(serde_json::json!({
             "validated_at": {"exists": true}
-        }))
-        .unwrap();
+        }))?;
 
         let metadata = serde_json::json!({"validated_at": "2026-05-04T12:00:00Z"});
         ensure(
@@ -362,10 +362,9 @@ mod tests {
 
     #[test]
     fn filter_contains_matches_substring() -> TestResult {
-        let filters = parse_filters(&serde_json::json!({
+        let filters = parse_test_filters(serde_json::json!({
             "content": {"contains": "cargo"}
-        }))
-        .unwrap();
+        }))?;
 
         let metadata = serde_json::json!({"content": "Run cargo build first"});
         ensure(filters.matches(Some(&metadata)), "substring should match")?;
@@ -379,10 +378,9 @@ mod tests {
 
     #[test]
     fn filter_nested_field_access() -> TestResult {
-        let filters = parse_filters(&serde_json::json!({
+        let filters = parse_test_filters(serde_json::json!({
             "source.type": {"eq": "cass"}
-        }))
-        .unwrap();
+        }))?;
 
         let metadata = serde_json::json!({"source": {"type": "cass", "id": "123"}});
         ensure(
@@ -399,11 +397,10 @@ mod tests {
 
     #[test]
     fn multiple_filters_all_must_match() -> TestResult {
-        let filters = parse_filters(&serde_json::json!({
+        let filters = parse_test_filters(serde_json::json!({
             "level": {"eq": "procedural"},
             "confidence": {"gte": 0.7}
-        }))
-        .unwrap();
+        }))?;
 
         let metadata = serde_json::json!({"level": "procedural", "confidence": 0.8});
         ensure(
