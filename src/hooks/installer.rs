@@ -184,6 +184,9 @@ fn check_existing_hook(path: &Path) -> ExistingHookStatus {
             if metadata.file_type().is_symlink() {
                 return ExistingHookStatus::Symlink;
             }
+            if !metadata.is_file() {
+                return ExistingHookStatus::Unreadable;
+            }
         }
         Err(error)
             if matches!(
@@ -413,6 +416,13 @@ fn preflight_hook_target(target_path: &Path) -> Result<(), DomainError> {
             ),
             repair: Some("Remove or rename the directory before installing hooks.".to_owned()),
         }),
+        Ok(metadata) if !metadata.is_file() => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write hook '{}': path is not a regular file",
+                target_path.display()
+            ),
+            repair: Some("Remove or replace the special file before installing hooks.".to_owned()),
+        }),
         Ok(metadata) if metadata.permissions().readonly() => Err(DomainError::Storage {
             message: format!(
                 "Refusing to write hook '{}': path is read-only",
@@ -630,6 +640,32 @@ impl HookStatusReport {
     }
 }
 
+fn hook_path_is_executable(path: &Path, existing: ExistingHookStatus) -> bool {
+    if !matches!(
+        existing,
+        ExistingHookStatus::ManagedByEe | ExistingHookStatus::External
+    ) {
+        return false;
+    }
+
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 /// Check status of hooks.
 pub fn check_hook_status(options: &HookStatusOptions) -> Result<HookStatusReport, DomainError> {
     let now = Utc::now().to_rfc3339();
@@ -642,19 +678,7 @@ pub fn check_hook_status(options: &HookStatusOptions) -> Result<HookStatusReport
         let path = options.hook_dir.join(hook_type.filename());
         let existing = check_existing_hook(&path);
         let exists = !matches!(existing, ExistingHookStatus::NotFound);
-        let executable = path.exists() && {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::metadata(&path)
-                    .map(|m| m.permissions().mode() & 0o111 != 0)
-                    .unwrap_or(false)
-            }
-            #[cfg(not(unix))]
-            {
-                true
-            }
-        };
+        let executable = hook_path_is_executable(&path, existing);
 
         hooks.push(HookStatusItem {
             hook_type: hook_type.as_str().to_owned(),
@@ -862,6 +886,39 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn status_reports_symlink_hook_as_non_executable() -> TestResult {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let target = temp.path().join("target-hook");
+        fs::write(&target, "#!/bin/sh\nexit 0\n").map_err(|e| e.to_string())?;
+        let mut permissions = fs::metadata(&target)
+            .map_err(|e| e.to_string())?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&target, permissions).map_err(|e| e.to_string())?;
+
+        let link = temp.path().join("pre-task");
+        symlink(&target, &link).map_err(|e| e.to_string())?;
+
+        let options = HookStatusOptions {
+            hook_dir: temp.path().to_path_buf(),
+            hooks: vec![HookType::PreTask],
+        };
+        let report = check_hook_status(&options).map_err(|e| e.message())?;
+        let hook = report
+            .hooks
+            .first()
+            .ok_or_else(|| "expected pre-task status".to_owned())?;
+
+        assert_eq!(hook.status, ExistingHookStatus::Symlink.as_str());
+        assert!(!hook.executable, "symlink hooks must not be executable");
+
+        Ok(())
+    }
+
     #[test]
     fn generated_hook_contains_absolute_path_not_bare_ee() -> TestResult {
         // Security test: eidetic_engine_cli-fidt
@@ -982,6 +1039,43 @@ mod tests {
         assert!(
             hook_dir.join("post-task").is_dir(),
             "preflight must not alter the failing hook target"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_preflights_special_file_targets_before_writing() -> TestResult {
+        use std::os::unix::net::UnixListener;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+        let _listener =
+            UnixListener::bind(hook_dir.join("post-task")).map_err(|e| e.to_string())?;
+
+        let options = HookInstallOptions {
+            hook_dir: hook_dir.clone(),
+            hooks: vec![HookType::PreTask, HookType::PostTask],
+            dry_run: false,
+            preserve_existing: false,
+            force: true,
+        };
+
+        let error = match install_hooks(&options) {
+            Ok(_) => return Err("install should reject special hook targets".to_string()),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "storage");
+        assert!(
+            error.message().contains("path is not a regular file"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            !hook_dir.join("pre-task").exists(),
+            "first hook must not be written when a later special file target fails preflight"
         );
 
         Ok(())
