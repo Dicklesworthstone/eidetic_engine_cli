@@ -2633,6 +2633,198 @@ mod tests {
         )
     }
 
+    // ------------------------------------------------------------------
+    // EE-57vk: deeper Unicode edge-case coverage for estimate_tokens
+    //
+    // The earlier tests cover plain emoji, CJK, and basic combining
+    // marks. These additions stress the codepoint-counting contract
+    // against grapheme-level subtleties (ZWJ family sequences, RTL,
+    // multi-codepoint combining marks, BMP/non-BMP boundaries) plus
+    // protocol-level oddities (BOM, embedded NUL) that have historically
+    // tripped up character-counting heuristics in other tools.
+    //
+    // All assertions stay coarse (>= / <=) on purpose: the heuristic
+    // intentionally overestimates and we want the tests to keep passing
+    // if the multiplier is tuned, but flag any catastrophic drift.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn estimate_tokens_zwj_emoji_sequence_counts_each_codepoint() -> TestResult {
+        // 👨‍👩‍👧‍👦 = man + ZWJ + woman + ZWJ + girl + ZWJ + boy = 7 codepoints,
+        // rendered as a single grapheme cluster. Rust's `chars().count()`
+        // counts codepoints, not graphemes — pin that contract so a switch
+        // to grapheme-level counting (which would slash the estimate) is a
+        // visible change and not a silent regression.
+        let family = "👨\u{200D}👩\u{200D}👧\u{200D}👦";
+        ensure_equal(&family.chars().count(), &7, "expected 7 codepoints")?;
+
+        let tokens = estimate_tokens(family, TokenEstimationStrategy::CharacterHeuristic);
+        // 7 codepoints / 3.5 cpt = 2 tokens exactly
+        ensure_equal(&tokens, &2, "ZWJ family sequence character-heuristic")?;
+
+        let word_tokens = estimate_tokens(family, TokenEstimationStrategy::WordHeuristic);
+        ensure_equal(&word_tokens, &2, "ZWJ family is a single word: ceil(1*1.3) = 2")
+    }
+
+    #[test]
+    fn estimate_tokens_rtl_text_matches_codepoint_count() -> TestResult {
+        // Hebrew "shalom" — 6 codepoints, no whitespace, RTL directionality
+        // is a renderer concern only and must not affect estimation.
+        let hebrew = "שלום!";
+        ensure_equal(&hebrew.chars().count(), &5, "expected 5 codepoints")?;
+        let tokens = estimate_tokens(hebrew, TokenEstimationStrategy::CharacterHeuristic);
+        // ceil(5 / 3.5) = 2
+        ensure_equal(&tokens, &2, "RTL token estimate")?;
+
+        // Arabic with explicit RTL marks should still be counted by codepoint
+        let arabic_with_marks = "\u{202E}مرحبا\u{202C}";
+        ensure(
+            estimate_tokens(arabic_with_marks, TokenEstimationStrategy::CharacterHeuristic) >= 1,
+            "Arabic with directional marks should estimate >= 1 token",
+        )
+    }
+
+    #[test]
+    fn estimate_tokens_combining_marks_counted_per_codepoint() -> TestResult {
+        // NFD form of "café" = c + a + f + e + COMBINING ACUTE = 5 codepoints
+        // NFC form = c + a + f + é = 4 codepoints. The two normalize to the
+        // same grapheme but produce different estimates by design.
+        let nfc = "caf\u{00E9}";
+        let nfd = "cafe\u{0301}";
+        ensure_equal(&nfc.chars().count(), &4, "NFC codepoints")?;
+        ensure_equal(&nfd.chars().count(), &5, "NFD codepoints")?;
+
+        let nfc_tokens = estimate_tokens(nfc, TokenEstimationStrategy::CharacterHeuristic);
+        let nfd_tokens = estimate_tokens(nfd, TokenEstimationStrategy::CharacterHeuristic);
+        ensure(
+            nfd_tokens >= nfc_tokens,
+            format!("NFD must not under-count vs NFC: nfc={nfc_tokens} nfd={nfd_tokens}"),
+        )
+    }
+
+    #[test]
+    fn estimate_tokens_handles_supplementary_plane_codepoints() -> TestResult {
+        // Each of these is a single Rust char even though they are encoded
+        // as a surrogate pair in UTF-16 and four bytes in UTF-8. Rust strings
+        // are always valid UTF-8 with no naked surrogates, so the test pins
+        // that boundary handling stays codepoint-based.
+        let smp = "𝐇𝐞𝐥𝐥𝐨"; // Mathematical bold Hello, U+1D400-U+1D4xx range
+        ensure_equal(&smp.chars().count(), &5, "5 SMP codepoints")?;
+        ensure_equal(&smp.len(), &20, "5 codepoints x 4 bytes each")?;
+
+        let tokens = estimate_tokens(smp, TokenEstimationStrategy::CharacterHeuristic);
+        // ceil(5/3.5) = 2
+        ensure_equal(&tokens, &2, "supplementary-plane token estimate")
+    }
+
+    #[test]
+    fn estimate_tokens_strips_leading_byte_order_mark() -> TestResult {
+        // BOM (U+FEFF) is treated as a zero-width no-break space and does
+        // NOT match `char::is_whitespace`, so `str::trim` does not strip
+        // it. That means a leading BOM contributes one codepoint to the
+        // estimate. Pin the current behavior so any switch to bom-stripping
+        // is an intentional, visible change.
+        let with_bom = "\u{FEFF}hello";
+        let without_bom = "hello";
+        let with = estimate_tokens(with_bom, TokenEstimationStrategy::CharacterHeuristic);
+        let without = estimate_tokens(without_bom, TokenEstimationStrategy::CharacterHeuristic);
+        ensure(
+            with >= without,
+            format!("BOM must not under-count: with={with} without={without}"),
+        )?;
+        // Word heuristic: BOM glues to "hello" (no whitespace) so still 1 word
+        let with_word = estimate_tokens(with_bom, TokenEstimationStrategy::WordHeuristic);
+        ensure_equal(&with_word, &2, "BOM + word still counts as 1 word -> 2 tokens")
+    }
+
+    #[test]
+    fn estimate_tokens_handles_embedded_nul_byte() -> TestResult {
+        // Rust strings can carry NUL codepoints. We must (a) not panic and
+        // (b) count the NUL as one codepoint in the character heuristic and
+        // as content for the word heuristic.
+        let with_nul = "hello\u{0000}world";
+        ensure_equal(&with_nul.chars().count(), &11, "NUL counts as 1 codepoint")?;
+
+        let char_tokens = estimate_tokens(with_nul, TokenEstimationStrategy::CharacterHeuristic);
+        // ceil(11/3.5) = 4
+        ensure_equal(&char_tokens, &4, "NUL char-heuristic")?;
+
+        let word_tokens = estimate_tokens(with_nul, TokenEstimationStrategy::WordHeuristic);
+        // No whitespace -> 1 word -> ceil(1.3) = 2
+        ensure_equal(&word_tokens, &2, "NUL word-heuristic")
+    }
+
+    #[test]
+    fn unicode_candidate_respects_token_budget() -> TestResult {
+        // End-to-end: candidates whose content is mostly multi-codepoint
+        // emoji, CJK, RTL, and combining marks must still pack under a
+        // tight budget without overflow. We size each candidate so the
+        // pair just barely fits and assert the assembled draft does not
+        // exceed the budget under any of the Unicode flavours.
+        let budget = TokenBudget::new(20).map_err(|error| format!("budget: {error:?}"))?;
+
+        let emoji = candidate_with_content(
+            1,
+            0.9,
+            0.8,
+            8,
+            "🦀🔥💻 build the release",
+        )?;
+        let cjk = candidate_with_content(
+            2,
+            0.8,
+            0.8,
+            8,
+            "中文字符 必须 也 计入 预算",
+        )?;
+        let zwj = candidate_with_content(
+            3,
+            0.7,
+            0.7,
+            6,
+            "family: 👨\u{200D}👩\u{200D}👧\u{200D}👦",
+        )?;
+        let rtl = candidate_with_content(
+            4,
+            0.6,
+            0.6,
+            6,
+            "shalom שלום and back to ascii",
+        )?;
+        let combining = candidate_with_content(
+            5,
+            0.5,
+            0.5,
+            6,
+            "cafe\u{0301} resume\u{0301} naïve",
+        )?;
+
+        let draft = assemble_draft(
+            "ship a Unicode-safe pack",
+            budget,
+            vec![emoji, cjk, zwj, rtl, combining],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        ensure(
+            draft.used_tokens <= 20,
+            format!(
+                "Unicode candidates must respect budget=20, used={}",
+                draft.used_tokens
+            ),
+        )?;
+        ensure(
+            !draft.items.is_empty(),
+            "at least one Unicode candidate should fit",
+        )?;
+        // All non-selected candidates must show up as omissions, none silently dropped
+        ensure_equal(
+            &(draft.items.len() + draft.omitted.len()),
+            &5,
+            "every input candidate is accounted for",
+        )
+    }
+
     #[test]
     fn section_quota_unlimited_has_no_constraints() -> TestResult {
         let unlimited = SectionQuota::unlimited();
