@@ -6,7 +6,7 @@
 //! init -> remember -> search -> context -> why without mocks.
 
 use serde::Serialize;
-use serde_json::Value as JsonValue;
+use serde_json::{Value as JsonValue, json};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -87,8 +87,10 @@ fn unique_log_dir(scenario_id: &str) -> Result<PathBuf, String> {
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("clock moved backwards: {error}"))?
         .as_nanos();
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
+    let target_root = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+    let dir = target_root
         .join("ee-no-mocks-e2e-logs")
         .join(format!("{scenario_id}-{}-{now}", std::process::id()));
     fs::create_dir_all(&dir)
@@ -266,6 +268,237 @@ fn memory_ids_from_context(value: &JsonValue) -> Result<Vec<String>, String> {
                 .ok_or_else(|| "context pack item missing memoryId".to_owned())
         })
         .collect()
+}
+
+fn json_string<'a>(value: &'a JsonValue, pointer: &str, context: &str) -> Result<&'a str, String> {
+    value
+        .pointer(pointer)
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| format!("{context} missing string at {pointer}"))
+}
+
+fn json_array<'a>(
+    value: &'a JsonValue,
+    pointer: &str,
+    context: &str,
+) -> Result<&'a Vec<JsonValue>, String> {
+    value
+        .pointer(pointer)
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| format!("{context} missing array at {pointer}"))
+}
+
+fn degradation_codes(value: &JsonValue) -> Result<Vec<String>, String> {
+    let mut codes = json_array(value, "/data/degraded", "status degraded")?
+        .iter()
+        .filter_map(|item| item.get("code").and_then(JsonValue::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    codes.sort();
+    Ok(codes)
+}
+
+fn ensure_no_ansi(text: &str, context: &str) -> TestResult {
+    ensure(
+        !text.contains("\u{1b}["),
+        format!("{context} must not contain ANSI escape sequences"),
+    )
+}
+
+#[test]
+fn no_mocks_status_json_conformance_logs_capabilities_and_degradations() -> TestResult {
+    let scenario_id = "lp4p6_status_json_conformance";
+    let log_dir = unique_log_dir(scenario_id)?;
+    let artifact_dir = log_dir.join("artifacts");
+    fs::create_dir_all(&artifact_dir)
+        .map_err(|error| format!("failed to create artifact dir: {error}"))?;
+    let events_path = log_dir.join("commands.jsonl");
+
+    let workspace_temp = tempfile::Builder::new()
+        .prefix("ee-status-conformance-")
+        .tempdir()
+        .map_err(|error| format!("failed to create temp workspace: {error}"))?;
+    let workspace = workspace_temp.path().to_path_buf();
+    let workspace_arg = workspace.display().to_string();
+    let database_path = workspace.join(".ee").join("ee.db");
+
+    let (pre_event, pre_status) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "01_status_before_init",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "status".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    ensure_no_ansi(&pre_event.stdout, "pre-init status stdout")?;
+    ensure_equal(
+        &pre_status.pointer("/data/command"),
+        &Some(&JsonValue::String("status".to_owned())),
+        "pre-init status command",
+    )?;
+    ensure(
+        json_string(&pre_status, "/data/version", "pre-init status")? == env!("CARGO_PKG_VERSION"),
+        "pre-init status must report package version",
+    )?;
+    ensure_equal(
+        &json_string(&pre_status, "/data/capabilities/storage", "pre-init status")?,
+        &"pending",
+        "pre-init storage capability",
+    )?;
+    ensure_equal(
+        &json_string(&pre_status, "/data/capabilities/search", "pre-init status")?,
+        &"pending",
+        "pre-init search capability",
+    )?;
+    let pre_codes = degradation_codes(&pre_status)?;
+    ensure(
+        pre_codes
+            .iter()
+            .any(|code| code == "storage_not_initialized"),
+        format!("pre-init status must diagnose missing storage, got {pre_codes:?}"),
+    )?;
+    ensure(
+        pre_codes
+            .iter()
+            .any(|code| code == "search_waiting_for_storage"),
+        format!("pre-init status must diagnose search waiting for storage, got {pre_codes:?}"),
+    )?;
+
+    let (_init_event, _init_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "02_init",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "init".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    ensure(
+        database_path.is_file(),
+        "init must create real database file",
+    )?;
+
+    let (post_event, post_status) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "03_status_after_init",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "status".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    ensure_no_ansi(&post_event.stdout, "post-init status stdout")?;
+    ensure_equal(
+        &json_string(
+            &post_status,
+            "/data/capabilities/runtime",
+            "post-init status",
+        )?,
+        &"ready",
+        "post-init runtime capability",
+    )?;
+    ensure_equal(
+        &json_string(
+            &post_status,
+            "/data/capabilities/storage",
+            "post-init status",
+        )?,
+        &"ready",
+        "post-init storage capability",
+    )?;
+    ensure(
+        json_string(&post_status, "/data/workspace/root", "post-init status")? == workspace_arg,
+        "post-init status must report selected workspace root",
+    )?;
+    ensure(
+        post_status.pointer("/data/memoryHealth").is_some(),
+        "post-init status must include memory health object",
+    )?;
+    ensure(
+        post_status.pointer("/data/curationHealth").is_some(),
+        "post-init status must include curation health object",
+    )?;
+    ensure(
+        post_status.pointer("/data/feedbackHealth").is_some(),
+        "post-init status must include feedback health object",
+    )?;
+    ensure(
+        !json_array(&post_status, "/data/derivedAssets", "post-init status")?.is_empty(),
+        "post-init status must report derived assets",
+    )?;
+
+    append_jsonl(
+        &events_path,
+        &json!({
+            "schema": "ee.e2e.summary_event.v1",
+            "scenarioId": scenario_id,
+            "event": "summary",
+            "commandCount": 3,
+            "workspace": workspace.display().to_string(),
+            "databasePath": database_path.display().to_string(),
+            "preInitDegradationCodes": pre_codes,
+            "postInitStorageCapability": json_string(
+                &post_status,
+                "/data/capabilities/storage",
+                "post-init status",
+            )?,
+            "stdoutArtifactPaths": [
+                pre_event.stdout_artifact_path,
+                post_event.stdout_artifact_path,
+            ],
+        }),
+    )?;
+
+    let events_text = fs::read_to_string(&events_path).map_err(|error| {
+        format!(
+            "failed to read status JSONL log {}: {error}",
+            events_path.display()
+        )
+    })?;
+    let event_lines = events_text.lines().collect::<Vec<_>>();
+    ensure_equal(
+        &event_lines.len(),
+        &4_usize,
+        "status conformance JSONL event count",
+    )?;
+    for (index, line) in event_lines.iter().enumerate() {
+        let event: JsonValue = serde_json::from_str(line)
+            .map_err(|error| format!("status JSONL event {index} must parse: {error}"))?;
+        ensure(
+            event.get("schema").is_some(),
+            format!("status JSONL event {index} must include schema"),
+        )?;
+    }
+
+    Ok(())
 }
 
 #[test]
