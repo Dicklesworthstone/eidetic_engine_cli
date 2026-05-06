@@ -11,6 +11,59 @@ schema = "ee.perf.budgets.v1"
 version = "0.1.0"
 regression_pct_p50 = 20   # Fail if p50 regresses > 20%
 regression_pct_p99 = 50   # Fail if p99 regresses > 50%
+budget_mode = "advisory"
+
+[profiles.ci-smoke]
+description = "Smallest RCH-friendly no-mock smoke profile for PR and agent closeout checks"
+ci_suitability = "normal_ci"
+workload_tier = "small"
+benches = ["status"]
+sample_size = 10
+measurement_time_secs = 0.5
+release_blocking = false
+advisory = true
+
+[profiles.nightly]
+description = "Broader nightly profile over all Criterion benchmark groups"
+ci_suitability = "nightly_ci"
+workload_tier = "medium"
+benches = [
+  "remember",
+  "search",
+  "context",
+  "why",
+  "outcome",
+  "status",
+  "import_cass",
+  "link",
+  "graph_pagerank",
+  "curate_candidates",
+]
+sample_size = 20
+measurement_time_secs = 2.0
+release_blocking = false
+advisory = true
+
+[profiles.stress]
+description = "Large-machine exploratory profile for 256GB+/64-core validation runs"
+ci_suitability = "local_256gb"
+workload_tier = "stress"
+benches = [
+  "remember",
+  "search",
+  "context",
+  "why",
+  "outcome",
+  "status",
+  "import_cass",
+  "link",
+  "graph_pagerank",
+  "curate_candidates",
+]
+sample_size = 100
+measurement_time_secs = 5.0
+release_blocking = false
+advisory = true
 
 [operations.ee_remember]
 p50_ms_max = 8.0

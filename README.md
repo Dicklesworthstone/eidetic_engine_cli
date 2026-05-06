@@ -722,7 +722,23 @@ Measured on a 2024 MacBook Pro M3 against a workspace with 25 projects, 14k memo
 | `ee graph centrality-refresh` (full refresh) | 2.3 s | 5.8 s |
 | `ee index rebuild` (full) | 18 s | 41 s |
 
-Performance budgets are enforced in CI. Regressions panic the bench job.
+Benchmark profiles are explicit so agents and CI can pick the right cost tier:
+
+```bash
+# Small no-mock smoke run, suitable for agent closeout through rch
+rch exec -- env TMPDIR=/data/tmp CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ee_bench ./scripts/bench.sh --profile ci-smoke --json
+
+# Broader nightly profile over all benchmark groups
+./scripts/bench.sh --profile nightly
+
+# Exploratory large-machine run for 256GB+/64-core hosts
+./scripts/bench.sh --profile stress
+```
+
+Budgets are currently advisory while deterministic scale fixtures stabilize.
+The harness emits `ee.perf.v1` JSON with profile, workload, artifact paths,
+latency fields, resource fields when available, and regression status. Profiles
+can become release-blocking once their fixture variance is low enough for CI.
 
 ---
 

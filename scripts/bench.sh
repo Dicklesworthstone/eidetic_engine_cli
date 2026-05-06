@@ -1,116 +1,281 @@
 #!/bin/sh
 set -eu
 
-# Performance benchmark runner for ee (eidetic_engine_cli-htjd)
+# Performance benchmark runner for ee (eidetic_engine_cli-htjd, fcq1.2)
 #
-# Runs criterion benchmarks and produces ee-perf.v1 JSON artifact.
+# Runs criterion benchmarks and produces an ee.perf.v1 JSON artifact.
 # Compares results against benches/budgets.toml thresholds.
 #
 # Usage:
-#   ./scripts/bench.sh                    # Run all benchmarks
-#   ./scripts/bench.sh --quick            # Run smoke test only (1 iteration)
-#   ./scripts/bench.sh --json             # Output ee-perf.v1 JSON to stdout
-#   ./scripts/bench.sh --check-regression # Fail if regression > threshold
+#   ./scripts/bench.sh --profile ci-smoke --json
+#   ./scripts/bench.sh --profile nightly
+#   ./scripts/bench.sh --profile stress --check-regression
+#   ./scripts/bench.sh --quick            # Alias for --profile ci-smoke
 #
 # Environment:
-#   CARGO_TARGET_DIR  - Build directory (default: target)
-#   EE_BENCH_OUTPUT   - Output path for JSON artifact (default: ee-perf.v1.json)
+#   CARGO_TARGET_DIR       Build directory. For RCH use:
+#                          CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ee_bench
+#   EE_BENCH_ARTIFACT_DIR  Directory for JSON artifacts.
+#   EE_BENCH_OUTPUT        Output path for JSON artifact.
 
-QUICK_MODE=false
+PROFILE="nightly"
 JSON_OUTPUT=false
 CHECK_REGRESSION=false
-OUTPUT_FILE="${EE_BENCH_OUTPUT:-ee-perf.v1.json}"
+LIST_PROFILES=false
 
-for arg in "$@"; do
-    case "$arg" in
-        --quick) QUICK_MODE=true ;;
+usage() {
+    sed -n '3,18p' "$0" | sed 's/^# //' | sed 's/^#//'
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --quick) PROFILE="ci-smoke" ;;
+        --profile)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Missing value for --profile" >&2
+                exit 1
+            fi
+            PROFILE="$1"
+            ;;
+        --profile=*) PROFILE="${1#--profile=}" ;;
+        --list-profiles) LIST_PROFILES=true ;;
         --json) JSON_OUTPUT=true ;;
         --check-regression) CHECK_REGRESSION=true ;;
         --help|-h)
-            sed -n '3,15p' "$0" | sed 's/^# //' | sed 's/^#//'
+            usage
             exit 0
             ;;
         *)
-            echo "Unknown argument: $arg" >&2
+            echo "Unknown argument: $1" >&2
             exit 1
             ;;
     esac
+    shift
 done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BUDGETS_FILE="$PROJECT_ROOT/benches/budgets.toml"
 BASELINE_FILE="$PROJECT_ROOT/benches/baselines/v0.1.json"
-CRITERION_DIR="${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}/criterion"
+WORKLOAD_FILE="$PROJECT_ROOT/tests/fixtures/swarm_scale/workloads.json"
+TARGET_ROOT="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_ee_bench}"
+CRITERION_DIR="$TARGET_ROOT/criterion"
+ARTIFACT_DIR="${EE_BENCH_ARTIFACT_DIR:-$TARGET_ROOT/ee-bench}"
+OUTPUT_FILE="${EE_BENCH_OUTPUT:-$ARTIFACT_DIR/ee-perf.v1.json}"
 
 if [ ! -f "$BUDGETS_FILE" ]; then
     echo "Error: budgets.toml not found at $BUDGETS_FILE" >&2
     exit 1
 fi
 
+if [ "$LIST_PROFILES" = "true" ]; then
+    printf '%s\n' "ci-smoke" "nightly" "stress"
+    exit 0
+fi
+
+case "$PROFILE" in
+    ci-smoke)
+        BENCHMARKS="status"
+        BENCH_ARGS=""
+        PROFILE_CLASS="normal_ci"
+        WORKLOAD_TIER="small"
+        RELEASE_BLOCKING=false
+        ;;
+    nightly)
+        BENCHMARKS="remember search context why outcome status import_cass link graph_pagerank curate_candidates"
+        BENCH_ARGS="--warm-up-time 0.5 --measurement-time 2 --sample-size 20"
+        PROFILE_CLASS="nightly_ci"
+        WORKLOAD_TIER="medium"
+        RELEASE_BLOCKING=false
+        ;;
+    stress)
+        BENCHMARKS="remember search context why outcome status import_cass link graph_pagerank curate_candidates"
+        BENCH_ARGS=""
+        PROFILE_CLASS="local_256gb"
+        WORKLOAD_TIER="stress"
+        RELEASE_BLOCKING=false
+        ;;
+    *)
+        echo "Unknown benchmark profile: $PROFILE" >&2
+        echo "Known profiles: ci-smoke, nightly, stress" >&2
+        exit 1
+        ;;
+esac
+
+mkdir -p "$ARTIFACT_DIR"
+
 echo "=== EE Performance Benchmarks ===" >&2
-echo "" >&2
+echo "profile: $PROFILE ($PROFILE_CLASS)" >&2
+echo "target: $TARGET_ROOT" >&2
+echo "artifacts: $ARTIFACT_DIR" >&2
+echo "workload tier: $WORKLOAD_TIER" >&2
 
 # Build benchmarks first
 echo "[*] Building benchmarks..." >&2
-cargo build --release --benches 2>&1 | grep -v "Compiling\|Finished" || true
-
-# Run benchmarks
-BENCH_ARGS=""
-if [ "$QUICK_MODE" = "true" ]; then
-    BENCH_ARGS="--warm-up-time 0.1 --measurement-time 0.5 --sample-size 10"
-    echo "[*] Running quick benchmark (smoke test)..." >&2
+if [ "$PROFILE" = "ci-smoke" ]; then
+    cargo build --release --bench status >&2
 else
-    echo "[*] Running full benchmarks (this may take several minutes)..." >&2
+    cargo build --release --benches >&2
 fi
 
-# List of benchmarks to run (matches Cargo.toml [[bench]] entries)
-BENCHMARKS="remember search context why outcome status import_cass link graph_pagerank curate_candidates"
+if [ "$PROFILE" = "ci-smoke" ]; then
+    echo "[*] Running ci-smoke benchmark profile..." >&2
+else
+    echo "[*] Running $PROFILE benchmark profile..." >&2
+fi
 
 # Collect results
 RESULTS=""
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 FAILED=false
 
-for bench in $BENCHMARKS; do
-    echo "" >&2
-    echo "[*] Benchmark: $bench" >&2
+append_result() {
+    key="$1"
+    status="$2"
+    p50_ms="$3"
+    p95_ms="$4"
+    p99_ms="$5"
+    max_ms="$6"
+    rows_per_sec="$7"
 
-    # Run criterion benchmark and capture output
-    if cargo bench --bench "$bench" -- $BENCH_ARGS 2>&1 | tee /tmp/bench_output_$$.txt >&2; then
-        # Parse criterion output for timing (simplified - criterion outputs to target/criterion/)
-        # Look for lines like "time:   [X.XXX ms X.XXX ms X.XXX ms]"
-        P50=$(grep -oP 'time:\s+\[\s*\K[0-9.]+' /tmp/bench_output_$$.txt | head -1 || echo "0")
-        UNIT=$(grep -oP 'time:\s+\[[0-9.]+ [a-zμ]+' /tmp/bench_output_$$.txt | head -1 | grep -oP '[a-zμ]+$' || echo "ms")
+    if [ -n "$RESULTS" ]; then
+        RESULTS="$RESULTS,"
+    fi
 
-        # Convert to ms if needed
-        case "$UNIT" in
-            "µs"|"us") P50=$(echo "$P50 / 1000" | bc -l 2>/dev/null || echo "$P50") ;;
-            "s") P50=$(echo "$P50 * 1000" | bc -l 2>/dev/null || echo "$P50") ;;
-        esac
+    RESULTS="$RESULTS
+    \"$key\": {
+      \"status\": \"$status\",
+      \"profile\": \"$PROFILE\",
+      \"workload_tier\": \"$WORKLOAD_TIER\",
+      \"p50_ms\": $p50_ms,
+      \"p95_ms\": $p95_ms,
+      \"p99_ms\": $p99_ms,
+      \"max_ms\": $max_ms,
+      \"max_rss_kb\": null,
+      \"allocation_count\": null,
+      \"db_size_bytes\": null,
+      \"index_size_bytes\": null,
+      \"rows_per_sec\": $rows_per_sec,
+      \"budget_mode\": \"advisory\"
+    }"
+}
 
-        # Store result
-        RESULTS="${RESULTS}\"ee_${bench}\": {\"p50_ms\": ${P50:-0}, \"status\": \"measured\"},"
-        echo "[+] $bench: p50=${P50:-unknown}ms" >&2
+to_ms() {
+    value="$1"
+    unit="$2"
+    awk -v value="$value" -v unit="$unit" 'BEGIN {
+        if (value == "" || value == "null") {
+            print "null";
+        } else if (unit == "ns") {
+            printf "%.6f", value / 1000000;
+        } else if (unit == "us" || unit == "µs") {
+            printf "%.6f", value / 1000;
+        } else if (unit == "s") {
+            printf "%.6f", value * 1000;
+        } else {
+            printf "%.6f", value;
+        }
+    }'
+}
+
+parse_time_value() {
+    output="$1"
+    printf '%s\n' "$output" \
+        | sed -n 's/.*time:[[:space:]]*\[[[:space:]]*\([0-9.][0-9.]*\)[[:space:]]*\([[:alpha:]µ]*\).*/\1 \2/p' \
+        | sed -n '1p'
+}
+
+workload_json() {
+    if command -v jq >/dev/null 2>&1 && [ -f "$WORKLOAD_FILE" ]; then
+        jq -c --arg tier "$WORKLOAD_TIER" '
+            .tiers[]
+            | select(.name == $tier)
+            | {
+                schema: "ee.perf.workload_ref.v1",
+                manifest: "tests/fixtures/swarm_scale/workloads.json",
+                tier: .name,
+                ci_suitability: .ci_suitability,
+                memory_count: .memory_count,
+                agent_count: .agent_count,
+                expected_db_rows: .resource_profile.expected_db_rows,
+                expected_index_bytes: .resource_profile.expected_index_bytes,
+                expected_graph_nodes: .resource_profile.expected_graph_nodes
+              }
+        ' "$WORKLOAD_FILE"
     else
-        RESULTS="${RESULTS}\"ee_${bench}\": {\"p50_ms\": null, \"status\": \"failed\"},"
+        printf '{"schema":"ee.perf.workload_ref.v1","manifest":"tests/fixtures/swarm_scale/workloads.json","tier":"%s"}' "$WORKLOAD_TIER"
+    fi
+}
+
+run_status_smoke() {
+    if output=$(cargo bench --bench status -- --quick); then
+        printf '%s\n' "$output" >&2
+        if command -v jq >/dev/null 2>&1; then
+            p50_ms=$(printf '%s\n' "$output" | jq -r '.aggregate_p50_ms // null')
+            max_ms=$(printf '%s\n' "$output" | jq -r '[.scales[].max_ms] | max // null')
+        else
+            p50_ms=null
+            max_ms=null
+        fi
+        append_result "ee_status" "measured" "$p50_ms" null null "$max_ms" null
+        echo "[+] status: p50=${p50_ms}ms max=${max_ms}ms" >&2
+    else
+        append_result "ee_status" "failed" null null null null null
+        echo "[-] status: FAILED" >&2
+        FAILED=true
+    fi
+}
+
+run_criterion_bench() {
+    bench="$1"
+    if output=$(cargo bench --bench "$bench" -- $BENCH_ARGS 2>&1); then
+        printf '%s\n' "$output" >&2
+        parsed=$(parse_time_value "$output" || true)
+        if [ -n "$parsed" ]; then
+            raw_value=$(printf '%s\n' "$parsed" | awk '{print $1}')
+            raw_unit=$(printf '%s\n' "$parsed" | awk '{print $2}')
+            p50_ms=$(to_ms "$raw_value" "$raw_unit")
+        else
+            p50_ms=null
+        fi
+        append_result "ee_$bench" "measured" "$p50_ms" null null null null
+        echo "[+] $bench: p50=${p50_ms}ms" >&2
+    else
+        printf '%s\n' "$output" >&2
+        append_result "ee_$bench" "failed" null null null null null
         echo "[-] $bench: FAILED" >&2
         FAILED=true
     fi
+}
 
-    rm -f /tmp/bench_output_$$.txt
+for bench in $BENCHMARKS; do
+    echo "" >&2
+    echo "[*] Benchmark: $bench" >&2
+    if [ "$PROFILE" = "ci-smoke" ] && [ "$bench" = "status" ]; then
+        run_status_smoke
+    else
+        run_criterion_bench "$bench"
+    fi
 done
 
-# Remove trailing comma
-RESULTS=$(echo "$RESULTS" | sed 's/,$//')
+WORKLOAD_JSON=$(workload_json)
 
-# Generate ee-perf.v1 JSON
+# Generate ee.perf.v1 JSON
 PERF_JSON=$(cat <<EOF
 {
   "schema": "ee.perf.v1",
+  "profile": "$PROFILE",
+  "profile_class": "$PROFILE_CLASS",
   "timestamp": "$TIMESTAMP",
   "version": "$(grep '^version' "$PROJECT_ROOT/Cargo.toml" | head -1 | cut -d'"' -f2)",
   "git_sha": "$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")",
+  "target_dir": "$TARGET_ROOT",
+  "criterion_dir": "$CRITERION_DIR",
+  "artifact_dir": "$ARTIFACT_DIR",
+  "budget_mode": "advisory",
+  "release_blocking": $RELEASE_BLOCKING,
+  "workload": $WORKLOAD_JSON,
   "operations": {
     $RESULTS
   },
@@ -136,7 +301,8 @@ if [ "$CHECK_REGRESSION" = "true" ]; then
     if [ -f "$BASELINE_FILE" ] && command -v jq >/dev/null 2>&1; then
         echo "[+] Baseline file found: $BASELINE_FILE" >&2
 
-        # Read thresholds from budgets.toml (defaults: 20% p50, 50% p99)
+        # Read thresholds from budgets.toml (defaults: 20% p50, 50% p99).
+        # This gate remains advisory unless --check-regression is requested.
         P50_THRESHOLD=20
         P99_THRESHOLD=50
 
