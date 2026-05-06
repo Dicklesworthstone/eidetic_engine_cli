@@ -96,10 +96,7 @@ fn data_survives_across_sessions() -> TestResult {
 
     // Initialize workspace
     let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
-    ensure(
-        init.status.code() == Some(EXIT_SUCCESS),
-        "init failed",
-    )?;
+    ensure(init.status.code() == Some(EXIT_SUCCESS), "init failed")?;
 
     // Add memories
     let content1 = "Migration test memory one: always verify data persistence";
@@ -108,9 +105,12 @@ fn data_survives_across_sessions() -> TestResult {
 
     for content in [content1, content2, content3] {
         let remember = run_ee(&[
-            "--workspace", &workspace,
-            "remember", content,
-            "--kind", "rule",
+            "--workspace",
+            &workspace,
+            "remember",
+            content,
+            "--kind",
+            "rule",
             "--json",
         ])?;
         ensure(
@@ -121,8 +121,10 @@ fn data_survives_across_sessions() -> TestResult {
 
     // Verify memories exist via search
     let search = run_ee(&[
-        "--workspace", &workspace,
-        "search", "migration test memory",
+        "--workspace",
+        &workspace,
+        "search",
+        "migration test memory",
         "--json",
     ])?;
     ensure(
@@ -145,15 +147,14 @@ fn data_survives_across_sessions() -> TestResult {
 
     // "Restart" by running another command after init (simulating new session)
     let init2 = run_ee(&["--workspace", &workspace, "init", "--json"])?;
-    ensure(
-        init2.status.code() == Some(EXIT_SUCCESS),
-        "re-init failed",
-    )?;
+    ensure(init2.status.code() == Some(EXIT_SUCCESS), "re-init failed")?;
 
     // Verify memories still exist
     let search2 = run_ee(&[
-        "--workspace", &workspace,
-        "search", "migration test memory",
+        "--workspace",
+        &workspace,
+        "search",
+        "migration test memory",
         "--json",
     ])?;
     ensure(
@@ -184,17 +185,11 @@ fn status_reports_storage_ready_after_init() -> TestResult {
 
     // Initialize
     let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
-    ensure(
-        init.status.code() == Some(EXIT_SUCCESS),
-        "init failed",
-    )?;
+    ensure(init.status.code() == Some(EXIT_SUCCESS), "init failed")?;
 
     // Check status
     let status = run_ee(&["--workspace", &workspace, "status", "--json"])?;
-    ensure(
-        status.status.code() == Some(EXIT_SUCCESS),
-        "status failed",
-    )?;
+    ensure(status.status.code() == Some(EXIT_SUCCESS), "status failed")?;
 
     let status_json = stdout_json(&status)?;
 
@@ -234,9 +229,12 @@ fn why_works_for_remembered_memory() -> TestResult {
 
     // Remember something
     let remember = run_ee(&[
-        "--workspace", &workspace,
-        "remember", "Test memory for why command verification",
-        "--kind", "fact",
+        "--workspace",
+        &workspace,
+        "remember",
+        "Test memory for why command verification",
+        "--kind",
+        "fact",
         "--json",
     ])?;
     ensure(
