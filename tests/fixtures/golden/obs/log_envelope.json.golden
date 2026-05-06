@@ -1,0 +1,1 @@
+{"schema":"ee.log.v1","ts":"2026-05-06T00:00:00.123456789Z","level":"info","target":"ee::cli","span_id":"span_status_001","trace_id":"trace_contract_001","fields":{"command":"status","json":true}}

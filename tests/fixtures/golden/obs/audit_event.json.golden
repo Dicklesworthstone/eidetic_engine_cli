@@ -1,0 +1,1 @@
+{"schema":"ee.audit.v1","ts":"2026-05-06T00:00:00.123456789Z","actor":"agent:SwiftCat","action":"remember","subject":"memory:mem_contract_001","outcome":"success","fields":{"audit_id":"audit_contract_001","workspace_id":"ws_contract_001"}}
