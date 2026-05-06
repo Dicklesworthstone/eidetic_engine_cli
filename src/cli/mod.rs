@@ -1030,6 +1030,10 @@ pub struct ContextArgs {
     #[arg(long, default_value_t = 100)]
     pub candidate_pool: u32,
 
+    /// Retrieval speed/quality budget: instant, default, or quality.
+    #[arg(long, value_parser = parse_speed_mode_arg, default_value = "default")]
+    pub speed: crate::search::SpeedMode,
+
     /// Context profile: compact, balanced, thorough, submodular.
     #[arg(long, short = 'p', default_value = "balanced")]
     pub profile: String,
@@ -1057,6 +1061,10 @@ pub struct PackArgs {
     /// Maximum candidate memories to retrieve before packing. Overrides query-file budget.
     #[arg(long)]
     pub candidate_pool: Option<u32>,
+
+    /// Retrieval speed/quality budget. Overrides query-file speed.
+    #[arg(long, value_parser = parse_speed_mode_arg)]
+    pub speed: Option<crate::search::SpeedMode>,
 
     /// Context profile: compact, balanced, thorough, or submodular.
     #[arg(long, short = 'p')]
@@ -3012,6 +3020,10 @@ pub struct SearchArgs {
     /// Maximum number of results to return.
     #[arg(long, short = 'n', default_value_t = 10)]
     pub limit: u32,
+
+    /// Retrieval speed/quality budget: instant, default, or quality.
+    #[arg(long, value_parser = parse_speed_mode_arg, default_value = "default")]
+    pub speed: crate::search::SpeedMode,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -11651,6 +11663,12 @@ fn parse_context_profile(value: &str) -> Result<ContextPackProfile, String> {
     }
 }
 
+fn parse_speed_mode_arg(value: &str) -> Result<crate::search::SpeedMode, String> {
+    value
+        .parse::<crate::search::SpeedMode>()
+        .map_err(|error| error.to_string())
+}
+
 fn write_context_response<W>(
     renderer: output::Renderer,
     response: &ContextResponse,
@@ -11724,6 +11742,7 @@ where
         database_path: args.database.clone(),
         index_dir: args.index_dir.clone(),
         query: args.query.clone(),
+        speed: args.speed,
         profile: Some(profile),
         max_tokens: Some(args.max_tokens),
         candidate_pool: Some(args.candidate_pool),
@@ -11754,6 +11773,7 @@ const QUERY_FILE_TOP_LEVEL_FIELDS: &[&str] = &[
     "graph",
     "output",
     "budget",
+    "speed",
     "pagination",
     "eval",
 ];
@@ -11828,6 +11848,7 @@ struct QueryFileRequest {
     profile: Option<ContextPackProfile>,
     max_tokens: Option<u32>,
     candidate_pool: Option<u32>,
+    speed: crate::search::SpeedMode,
     renderer: Option<output::Renderer>,
     degraded: Vec<ContextResponseDegradation>,
     filters: crate::models::QueryFilters,
@@ -11874,6 +11895,7 @@ where
         database_path: args.database.clone(),
         index_dir: args.index_dir.clone(),
         query: request.query,
+        speed: args.speed.unwrap_or(request.speed),
         filters: request.filters,
         profile,
         max_tokens: args.max_tokens.or(request.max_tokens),
@@ -11993,6 +12015,7 @@ fn parse_query_document(content: &str) -> Result<QueryFileRequest, QueryFileErro
     let query = query_text_from_document(object)?;
     let workspace_path = optional_path_field(object, "workspace")?;
     let (max_tokens, candidate_pool) = budget_from_document(object)?;
+    let speed = speed_from_document(object)?;
     let (profile, renderer, mut output_degraded) = output_from_document(object)?;
     degraded.append(&mut output_degraded);
     let filters = extract_query_filters(object);
@@ -12003,6 +12026,7 @@ fn parse_query_document(content: &str) -> Result<QueryFileRequest, QueryFileErro
         profile,
         max_tokens,
         candidate_pool,
+        speed,
         renderer,
         degraded,
         filters,
@@ -12272,6 +12296,28 @@ fn budget_from_document(
     let max_tokens = optional_positive_u32(budget, "maxTokens")?;
     let candidate_pool = optional_positive_u32(budget, "candidatePool")?;
     Ok((max_tokens, candidate_pool))
+}
+
+fn speed_from_document(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<crate::search::SpeedMode, QueryFileError> {
+    let Some(value) = object.get("speed") else {
+        return Ok(crate::search::SpeedMode::Default);
+    };
+    let speed = value.as_str().map(str::trim).ok_or_else(|| {
+        QueryFileError::new(
+            QueryFileErrorCode::UnsupportedFeature,
+            "speed must be a string.",
+            Some("Use instant, default, or quality.".to_string()),
+        )
+    })?;
+    parse_speed_mode_arg(speed).map_err(|error| {
+        QueryFileError::new(
+            QueryFileErrorCode::UnsupportedFeature,
+            error,
+            Some("Use instant, default, or quality.".to_string()),
+        )
+    })
 }
 
 fn optional_positive_u32(
@@ -12620,6 +12666,7 @@ where
         index_dir: args.index_dir.clone(),
         query: args.query.clone(),
         limit: args.limit,
+        speed: args.speed,
         explain: args.explain,
     };
 
@@ -21602,7 +21649,12 @@ mod tests {
             Some(Command::Context(ref args)) => {
                 ensure_equal(&args.query, &"prepare release".to_string(), "context query")?;
                 ensure_equal(&args.max_tokens, &4000, "context default max_tokens")?;
-                ensure_equal(&args.candidate_pool, &100, "context default candidate_pool")
+                ensure_equal(&args.candidate_pool, &100, "context default candidate_pool")?;
+                ensure_equal(
+                    &args.speed,
+                    &crate::search::SpeedMode::Default,
+                    "context default speed",
+                )
             }
             _ => Err("expected Context command".to_string()),
         }
@@ -21635,6 +21687,21 @@ mod tests {
             Some(Command::Context(ref args)) => {
                 ensure_equal(&args.candidate_pool, &25, "context candidate_pool")
             }
+            _ => Err("expected Context command".to_string()),
+        }
+    }
+
+    #[test]
+    fn context_command_accepts_speed_mode() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "context", "test", "--speed", "quality"])
+            .map_err(|e| format!("failed to parse context with speed: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Context(ref args)) => ensure_equal(
+                &args.speed,
+                &crate::search::SpeedMode::Quality,
+                "context speed",
+            ),
             _ => Err("expected Context command".to_string()),
         }
     }
@@ -21729,6 +21796,8 @@ mod tests {
             "3000",
             "--candidate-pool",
             "42",
+            "--speed",
+            "quality",
             "--profile",
             "compact",
         ])
@@ -21743,6 +21812,11 @@ mod tests {
                 )?;
                 ensure_equal(&args.max_tokens, &Some(3000), "pack max tokens")?;
                 ensure_equal(&args.candidate_pool, &Some(42), "pack candidate pool")?;
+                ensure_equal(
+                    &args.speed,
+                    &Some(crate::search::SpeedMode::Quality),
+                    "pack speed",
+                )?;
                 ensure_equal(&args.profile, &Some("compact".to_string()), "pack profile")
             }
             _ => Err("expected Pack command".to_string()),
@@ -21757,6 +21831,7 @@ mod tests {
               "workspace": "/data/projects/eidetic_engine_cli",
               "query": {"text": "prepare release", "mode": "hybrid"},
               "budget": {"maxTokens": 3000, "candidatePool": 25},
+              "speed": "quality",
               "output": {"profile": "wide", "format": "json", "fields": "summary"}
             }"#,
         )
@@ -21773,6 +21848,11 @@ mod tests {
         ensure_equal(&request.max_tokens, &Some(3000), "max tokens")?;
         ensure_equal(&request.candidate_pool, &Some(25), "candidate pool")?;
         ensure_equal(
+            &request.speed,
+            &crate::search::SpeedMode::Quality,
+            "query file speed",
+        )?;
+        ensure_equal(
             &request.profile,
             &Some(super::ContextPackProfile::Thorough),
             "wide profile maps to thorough",
@@ -21788,6 +21868,24 @@ mod tests {
                 .iter()
                 .any(|entry| entry.code == "query_output_fields_cli_controlled"),
             "output.fields should produce a low-severity degradation",
+        )
+    }
+
+    #[test]
+    fn query_file_document_parses_speed_budget() -> TestResult {
+        let request = super::parse_query_document(
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "prepare release"},
+              "speed": "instant"
+            }"#,
+        )
+        .map_err(|error| error.message)?;
+
+        ensure_equal(
+            &request.speed,
+            &crate::search::SpeedMode::Instant,
+            "query file instant speed",
         )
     }
 
@@ -21967,7 +22065,12 @@ mod tests {
         match parsed.command {
             Some(Command::Search(ref args)) => {
                 ensure_equal(&args.query, &"test query".to_string(), "search query")?;
-                ensure_equal(&args.limit, &10, "search default limit")
+                ensure_equal(&args.limit, &10, "search default limit")?;
+                ensure_equal(
+                    &args.speed,
+                    &crate::search::SpeedMode::Default,
+                    "search default speed",
+                )
             }
             _ => Err("expected Search command".to_string()),
         }
@@ -21980,6 +22083,21 @@ mod tests {
 
         match parsed.command {
             Some(Command::Search(ref args)) => ensure_equal(&args.limit, &25, "search limit"),
+            _ => Err("expected Search command".to_string()),
+        }
+    }
+
+    #[test]
+    fn search_command_accepts_speed_mode() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "search", "test", "--speed", "instant"])
+            .map_err(|e| format!("failed to parse search with speed: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Search(ref args)) => ensure_equal(
+                &args.speed,
+                &crate::search::SpeedMode::Instant,
+                "search speed",
+            ),
             _ => Err("expected Search command".to_string()),
         }
     }

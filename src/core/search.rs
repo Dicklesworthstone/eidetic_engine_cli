@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::search::{Embedder, HashEmbedder, TwoTierConfig, TwoTierIndex, TwoTierSearcher};
+use crate::search::{
+    Embedder, HashEmbedder, SpeedMode, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
+};
 
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 
@@ -13,6 +15,7 @@ pub struct SearchOptions {
     pub index_dir: Option<PathBuf>,
     pub query: String,
     pub limit: u32,
+    pub speed: SpeedMode,
     pub explain: bool,
 }
 
@@ -21,6 +24,17 @@ impl SearchOptions {
         self.index_dir
             .clone()
             .unwrap_or_else(|| self.workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR))
+    }
+
+    fn two_tier_config(&self) -> TwoTierConfig {
+        let mut config = TwoTierConfig::default();
+        let requested = usize::try_from(self.limit).unwrap_or(usize::MAX).max(1);
+        let speed_candidate_multiplier = self.speed.candidate_limit().div_ceil(requested);
+        config.candidate_multiplier = config.candidate_multiplier.max(speed_candidate_multiplier);
+        config.fast_only = !self.speed.uses_embeddings();
+        config.mrl_rescore_top_k = self.speed.rerank_depth();
+        config.explain = self.explain;
+        config
     }
 }
 
@@ -611,6 +625,7 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
         &index_dir,
         &options.query,
         options.limit as usize,
+        options.two_tier_config(),
         options.explain,
     );
 
@@ -648,6 +663,7 @@ fn search_sync(
     index_dir: &Path,
     query: &str,
     limit: usize,
+    config: TwoTierConfig,
     explain: bool,
 ) -> Result<(Vec<SearchHit>, Vec<String>), String> {
     use std::sync::Mutex;
@@ -663,8 +679,6 @@ fn search_sync(
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime_result = crate::core::run_cli_future(async move {
             let cx = asupersync::Cx::for_testing();
-            let config = TwoTierConfig::default();
-
             let index = match TwoTierIndex::open(&index_dir_owned, config.clone()) {
                 Ok(idx) => Arc::new(idx),
                 Err(e) => {
@@ -794,6 +808,7 @@ mod tests {
             index_dir: None,
             query: "test".to_string(),
             limit: 10,
+            speed: SpeedMode::Default,
             explain: false,
         };
 
@@ -804,6 +819,38 @@ mod tests {
     }
 
     #[test]
+    fn search_options_apply_speed_mode_budgets_to_two_tier_config() {
+        let options = SearchOptions {
+            workspace_path: PathBuf::from("/home/user/project"),
+            database_path: None,
+            index_dir: None,
+            query: "test".to_string(),
+            limit: 10,
+            speed: SpeedMode::Quality,
+            explain: true,
+        };
+        let config = options.two_tier_config();
+        assert!(!config.fast_only);
+        assert!(config.explain);
+        assert_eq!(config.mrl_rescore_top_k, SpeedMode::Quality.rerank_depth());
+        let requested_limit = usize::try_from(options.limit).unwrap_or(usize::MAX);
+        assert!(
+            config.candidate_multiplier * requested_limit >= SpeedMode::Quality.candidate_limit()
+        );
+
+        let instant = SearchOptions {
+            speed: SpeedMode::Instant,
+            explain: false,
+            ..options
+        }
+        .two_tier_config();
+        assert!(instant.fast_only);
+        assert!(!instant.explain);
+        assert_eq!(instant.mrl_rescore_top_k, SpeedMode::Instant.rerank_depth());
+        assert!(instant.candidate_multiplier < config.candidate_multiplier);
+    }
+
+    #[test]
     fn search_options_respect_explicit_index_dir() {
         let options = SearchOptions {
             workspace_path: PathBuf::from("/home/user/project"),
@@ -811,6 +858,7 @@ mod tests {
             index_dir: Some(PathBuf::from("/custom/index")),
             query: "test".to_string(),
             limit: 10,
+            speed: SpeedMode::Default,
             explain: false,
         };
 

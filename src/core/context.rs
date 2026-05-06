@@ -264,6 +264,7 @@ pub struct ContextPackOptions {
     pub database_path: Option<PathBuf>,
     pub index_dir: Option<PathBuf>,
     pub query: String,
+    pub speed: crate::search::SpeedMode,
     pub filters: crate::models::QueryFilters,
     pub profile: Option<ContextPackProfile>,
     pub max_tokens: Option<u32>,
@@ -329,6 +330,7 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
         index_dir: options.index_dir.clone(),
         query: request.query.clone(),
         limit: request.candidate_pool,
+        speed: options.speed,
         explain: false,
     })
     .map_err(ContextPackError::Search)?;
