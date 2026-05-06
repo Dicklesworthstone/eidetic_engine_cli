@@ -1,0 +1,182 @@
+{
+  "schema": "ee.eval.report.v1",
+  "fixture_id": "fx.dangerous_cleanup.v1",
+  "fixture_family": "dangerous_cleanup",
+  "status": "passed",
+  "metrics": {
+    "fixture_id": "fx.dangerous_cleanup.v1",
+    "queries_evaluated": 9,
+    "mean_precision_at_1": 0.7777777777777778,
+    "mean_precision_at_3": 0.3333333333333333,
+    "mean_precision_at_5": 0.3333333333333333,
+    "mean_recall_at_5": 1.0,
+    "mean_ndcg_at_5": 0.9034366392857176,
+    "mean_mrr": 0.8703703703703703,
+    "per_query": [
+      {
+        "query": "before deleting",
+        "expected_ids": [
+          "mem_00000000000000000000000302"
+        ],
+        "retrieved_ids": [
+          "mem_00000000000000000000000302",
+          "mem_00000000000000000000000301",
+          "mem_00000000000000000000000303"
+        ],
+        "precision_at_1": 1.0,
+        "precision_at_3": 0.3333333333333333,
+        "precision_at_5": 0.3333333333333333,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "mrr": 1.0,
+        "first_relevant_rank": 1
+      },
+      {
+        "query": "clean up generated build artifacts safely",
+        "expected_ids": [
+          "mem_00000000000000000000000301"
+        ],
+        "retrieved_ids": [
+          "mem_00000000000000000000000302",
+          "mem_00000000000000000000000303",
+          "mem_00000000000000000000000301"
+        ],
+        "precision_at_1": 0.0,
+        "precision_at_3": 0.3333333333333333,
+        "precision_at_5": 0.3333333333333333,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 0.5,
+        "mrr": 0.3333333333333333,
+        "first_relevant_rank": 3
+      },
+      {
+        "query": "cleanup failure",
+        "expected_ids": [
+          "mem_00000000000000000000000302"
+        ],
+        "retrieved_ids": [
+          "mem_00000000000000000000000301",
+          "mem_00000000000000000000000302",
+          "mem_00000000000000000000000303"
+        ],
+        "precision_at_1": 0.0,
+        "precision_at_3": 0.3333333333333333,
+        "precision_at_5": 0.3333333333333333,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 0.6309297535714575,
+        "mrr": 0.5,
+        "first_relevant_rank": 2
+      },
+      {
+        "query": "dangerous cleanup",
+        "expected_ids": [
+          "mem_00000000000000000000000301"
+        ],
+        "retrieved_ids": [
+          "mem_00000000000000000000000301",
+          "mem_00000000000000000000000302",
+          "mem_00000000000000000000000303"
+        ],
+        "precision_at_1": 1.0,
+        "precision_at_3": 0.3333333333333333,
+        "precision_at_5": 0.3333333333333333,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "mrr": 1.0,
+        "first_relevant_rank": 1
+      },
+      {
+        "query": "dry-run",
+        "expected_ids": [
+          "mem_00000000000000000000000303"
+        ],
+        "retrieved_ids": [
+          "mem_00000000000000000000000303",
+          "mem_00000000000000000000000301",
+          "mem_00000000000000000000000302"
+        ],
+        "precision_at_1": 1.0,
+        "precision_at_3": 0.3333333333333333,
+        "precision_at_5": 0.3333333333333333,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "mrr": 1.0,
+        "first_relevant_rank": 1
+      },
+      {
+        "query": "explicit written permission",
+        "expected_ids": [
+          "mem_00000000000000000000000301"
+        ],
+        "retrieved_ids": [
+          "mem_00000000000000000000000301",
+          "mem_00000000000000000000000302",
+          "mem_00000000000000000000000303"
+        ],
+        "precision_at_1": 1.0,
+        "precision_at_3": 0.3333333333333333,
+        "precision_at_5": 0.3333333333333333,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "mrr": 1.0,
+        "first_relevant_rank": 1
+      },
+      {
+        "query": "preserve unknown files",
+        "expected_ids": [
+          "mem_00000000000000000000000303"
+        ],
+        "retrieved_ids": [
+          "mem_00000000000000000000000303",
+          "mem_00000000000000000000000301",
+          "mem_00000000000000000000000302"
+        ],
+        "precision_at_1": 1.0,
+        "precision_at_3": 0.3333333333333333,
+        "precision_at_5": 0.3333333333333333,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "mrr": 1.0,
+        "first_relevant_rank": 1
+      },
+      {
+        "query": "safe cleanup plan",
+        "expected_ids": [
+          "mem_00000000000000000000000303"
+        ],
+        "retrieved_ids": [
+          "mem_00000000000000000000000303",
+          "mem_00000000000000000000000301",
+          "mem_00000000000000000000000302"
+        ],
+        "precision_at_1": 1.0,
+        "precision_at_3": 0.3333333333333333,
+        "precision_at_5": 0.3333333333333333,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "mrr": 1.0,
+        "first_relevant_rank": 1
+      },
+      {
+        "query": "untracked fixtures",
+        "expected_ids": [
+          "mem_00000000000000000000000302"
+        ],
+        "retrieved_ids": [
+          "mem_00000000000000000000000302",
+          "mem_00000000000000000000000301",
+          "mem_00000000000000000000000303"
+        ],
+        "precision_at_1": 1.0,
+        "precision_at_3": 0.3333333333333333,
+        "precision_at_5": 0.3333333333333333,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "mrr": 1.0,
+        "first_relevant_rank": 1
+      }
+    ]
+  },
+  "duration_ms": "[duration_ms]",
+  "data_hash": "[data_hash]"
+}

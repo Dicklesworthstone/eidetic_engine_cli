@@ -350,6 +350,38 @@ pub fn load_source_memories(path: &Path) -> Result<SourceMemoryFile, DomainError
     })
 }
 
+fn source_memory_counts(path: &Path) -> Result<(usize, usize), DomainError> {
+    let content = std::fs::read_to_string(path).map_err(|e| DomainError::Storage {
+        message: format!("Failed to read source memory file {}: {e}", path.display()),
+        repair: None,
+    })?;
+
+    let value: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| DomainError::Import {
+            message: format!("Failed to parse source memory JSON: {e}"),
+            repair: Some("Check source_memory.json syntax".into()),
+        })?;
+
+    let Some(memories) = value.get("memories").and_then(serde_json::Value::as_array) else {
+        return Ok((0, 0));
+    };
+
+    let query_count = memories
+        .iter()
+        .flat_map(|memory| {
+            memory
+                .get("expected_query_match")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(serde_json::Value::as_str)
+        .collect::<HashSet<_>>()
+        .len();
+
+    Ok((memories.len(), query_count))
+}
+
 /// List all available fixtures with metadata.
 pub fn list_fixtures(fixture_dir: &Path) -> Result<Vec<FixtureListEntry>, DomainError> {
     let discovered = discover_fixtures(fixture_dir)?;
@@ -357,20 +389,13 @@ pub fn list_fixtures(fixture_dir: &Path) -> Result<Vec<FixtureListEntry>, Domain
 
     for fixture in discovered {
         let scenario = load_scenario(&fixture.scenario_path)?;
-        let source = load_source_memories(&fixture.source_memory_path)?;
-
-        let query_count: usize = source
-            .memories
-            .iter()
-            .flat_map(|m| &m.expected_query_match)
-            .collect::<HashSet<_>>()
-            .len();
+        let (memory_count, query_count) = source_memory_counts(&fixture.source_memory_path)?;
 
         entries.push(FixtureListEntry {
             fixture_id: fixture.fixture_id,
             fixture_family: fixture.fixture_family,
             journey: scenario.journey,
-            memory_count: source.memories.len(),
+            memory_count,
             query_count,
             path: fixture.path.display().to_string(),
         });
@@ -467,7 +492,12 @@ pub fn compute_query_metrics(
 }
 
 /// Compute aggregate metrics from per-query metrics.
-pub fn compute_fixture_metrics(fixture_id: &str, per_query: Vec<QueryMetrics>) -> FixtureMetrics {
+pub fn compute_fixture_metrics(
+    fixture_id: &str,
+    mut per_query: Vec<QueryMetrics>,
+) -> FixtureMetrics {
+    per_query.sort_by(|left, right| left.query.cmp(&right.query));
+
     let n = per_query.len();
     if n == 0 {
         return FixtureMetrics {

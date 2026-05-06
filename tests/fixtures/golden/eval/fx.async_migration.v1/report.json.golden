@@ -1,0 +1,19 @@
+{
+  "schema": "ee.eval.report.v1",
+  "fixture_id": "fx.async_migration.v1",
+  "fixture_family": "async_migration",
+  "status": "failed",
+  "metrics": {
+    "fixture_id": "fx.async_migration.v1",
+    "queries_evaluated": 0,
+    "mean_precision_at_1": 0.0,
+    "mean_precision_at_3": 0.0,
+    "mean_precision_at_5": 0.0,
+    "mean_recall_at_5": 0.0,
+    "mean_ndcg_at_5": 0.0,
+    "mean_mrr": 0.0,
+    "per_query": []
+  },
+  "duration_ms": "[duration_ms]",
+  "data_hash": "[data_hash]"
+}
