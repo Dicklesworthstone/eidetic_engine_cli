@@ -19,7 +19,9 @@ use serde::{Deserialize, Serialize};
 use crate::core::feedback::{
     RecordFeedbackReport, RecordTripwireFeedbackOptions, TaskOutcome, record_tripwire_feedback,
 };
-use crate::db::{CreateTripwireCheckEventInput, DbConnection, StoredTripwire};
+use crate::db::{
+    CreateCurationCandidateInput, CreateTripwireCheckEventInput, DbConnection, StoredTripwire,
+};
 use crate::models::preflight::{Tripwire, TripwireAction, TripwireState, TripwireType};
 use crate::models::{DomainError, WorkspaceId};
 
@@ -151,12 +153,15 @@ pub struct CheckOptions {
 /// The evaluator intentionally accepts concrete fields instead of reading
 /// ambient task state. This keeps condition outcomes replayable and makes
 /// missing inputs visible to callers.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TripwireEventPayload {
     /// Current task text to evaluate against generated task-term conditions.
     pub task_input: Option<String>,
     /// Explicit source relevance answers keyed as `<source-kind>:<source-id>`.
     pub source_relevance: BTreeMap<String, bool>,
+    /// Optional structured event payload for `event:<key.path>=<glob>` conditions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_data: Option<serde_json::Value>,
 }
 
 impl TripwireEventPayload {
@@ -177,6 +182,13 @@ impl TripwireEventPayload {
             source_relevance_key(source_kind.as_ref(), source_id.as_ref()),
             relevant,
         );
+        self
+    }
+
+    /// Attach a structured event JSON document used by `event:<path>=<glob>` conditions.
+    #[must_use]
+    pub fn with_event_data(mut self, event_data: serde_json::Value) -> Self {
+        self.event_data = Some(event_data);
         self
     }
 }
@@ -792,6 +804,17 @@ pub fn evaluate_tripwire_condition(
         };
     }
 
+    if let Some(parsed) = parse_event_match_condition(condition) {
+        return match parsed {
+            Ok(spec) => evaluate_event_match(condition, &spec, payload),
+            Err(details) => TripwireConditionEvaluation::new(
+                ConditionEvaluationResult::UnsupportedCondition,
+                condition,
+                details,
+            ),
+        };
+    }
+
     TripwireConditionEvaluation::new(
         ConditionEvaluationResult::UnsupportedCondition,
         condition,
@@ -923,6 +946,373 @@ fn parse_source_relevance_condition(condition: &str) -> Option<Result<(String, S
 
 fn source_relevance_key(source_kind: &str, source_id: &str) -> String {
     format!("{}:{}", source_kind.trim(), source_id.trim())
+}
+
+/// A parsed `event:<key.path>=<glob-pattern>` condition specification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventMatchSpec {
+    /// Dotted JSON pointer path (e.g. `command.path`, `tool.name`).
+    pub path: String,
+    /// Glob pattern to match the value at `path` against.
+    pub pattern: String,
+}
+
+fn parse_event_match_condition(condition: &str) -> Option<Result<EventMatchSpec, String>> {
+    let raw = condition.strip_prefix("event:")?;
+    let Some((path, pattern)) = raw.split_once('=') else {
+        return Some(Err(
+            "event match condition must be `event:<key.path>=<glob>`".to_owned(),
+        ));
+    };
+    let path = path.trim();
+    let pattern = pattern.trim();
+    if path.is_empty() || pattern.is_empty() {
+        return Some(Err(
+            "event match condition requires a non-empty key path and glob pattern".to_owned(),
+        ));
+    }
+    if path.contains("..") || path.starts_with('.') || path.ends_with('.') {
+        return Some(Err(format!(
+            "event match condition has malformed key path `{path}`"
+        )));
+    }
+    let pattern = strip_optional_quotes(pattern);
+    Some(Ok(EventMatchSpec {
+        path: path.to_owned(),
+        pattern: pattern.to_owned(),
+    }))
+}
+
+fn strip_optional_quotes(value: &str) -> &str {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+fn evaluate_event_match(
+    condition: &str,
+    spec: &EventMatchSpec,
+    payload: &TripwireEventPayload,
+) -> TripwireConditionEvaluation {
+    let Some(event_data) = payload.event_data.as_ref() else {
+        let mut evaluation = TripwireConditionEvaluation::new(
+            ConditionEvaluationResult::MissingInput,
+            condition,
+            format!(
+                "Condition requires event payload field `event_data` for path `{}`",
+                spec.path
+            ),
+        );
+        evaluation.source_key = Some(spec.path.clone());
+        return evaluation;
+    };
+
+    let Some(value) = lookup_event_path(event_data, &spec.path) else {
+        let mut evaluation = TripwireConditionEvaluation::new(
+            ConditionEvaluationResult::Unsatisfied,
+            condition,
+            format!(
+                "Event payload has no value at path `{}`; tripwire did not match",
+                spec.path
+            ),
+        );
+        evaluation.source_key = Some(spec.path.clone());
+        return evaluation;
+    };
+
+    let candidate = json_value_to_match_string(value);
+    let matched = glob_match(&spec.pattern, &candidate);
+
+    let result = if matched {
+        ConditionEvaluationResult::Satisfied
+    } else {
+        ConditionEvaluationResult::Unsatisfied
+    };
+    let mut evaluation = TripwireConditionEvaluation::new(
+        result,
+        condition,
+        if matched {
+            format!(
+                "Event payload value at `{}` matched glob `{}`",
+                spec.path, spec.pattern
+            )
+        } else {
+            format!(
+                "Event payload value at `{}` did not match glob `{}`",
+                spec.path, spec.pattern
+            )
+        },
+    );
+    evaluation.source_key = Some(spec.path.clone());
+    evaluation.matched_terms = vec![format!("{}={}", spec.path, candidate)];
+    evaluation
+}
+
+fn lookup_event_path<'a>(
+    value: &'a serde_json::Value,
+    path: &str,
+) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for segment in path.split('.') {
+        if segment.is_empty() {
+            return None;
+        }
+        current = match current {
+            serde_json::Value::Object(map) => map.get(segment)?,
+            serde_json::Value::Array(items) => {
+                let index: usize = segment.parse().ok()?;
+                items.get(index)?
+            }
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+fn json_value_to_match_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Null => "null".to_owned(),
+        other => other.to_string(),
+    }
+}
+
+/// Match `text` against a glob `pattern` supporting `*`, `?`, and literal characters.
+///
+/// Globs are anchored: the pattern must consume the whole string. `*` matches any
+/// run of characters (including empty); `?` matches exactly one character. There
+/// is no character-class support — keep the language deterministic and small.
+#[must_use]
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let pattern_bytes = pattern.as_bytes();
+    let text_bytes = text.as_bytes();
+    glob_match_bytes(pattern_bytes, text_bytes)
+}
+
+fn glob_match_bytes(pattern: &[u8], text: &[u8]) -> bool {
+    let mut pi = 0_usize;
+    let mut ti = 0_usize;
+    let mut star_pi: Option<usize> = None;
+    let mut star_ti = 0_usize;
+
+    while ti < text.len() {
+        if pi < pattern.len() {
+            match pattern[pi] {
+                b'*' => {
+                    star_pi = Some(pi);
+                    star_ti = ti;
+                    pi += 1;
+                    continue;
+                }
+                b'?' => {
+                    pi += 1;
+                    ti += 1;
+                    continue;
+                }
+                byte if byte == text[ti] => {
+                    pi += 1;
+                    ti += 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(sp) = star_pi {
+            pi = sp + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < pattern.len() && pattern[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pattern.len()
+}
+
+// ============================================================================
+// Harm-feedback → tripwire candidate promotion
+// ============================================================================
+
+/// Schema for the harm-feedback tripwire promotion proposal.
+pub const TRIPWIRE_HARM_PROMOTION_SCHEMA_V1: &str = "ee.tripwire.harm_promotion.v1";
+
+/// Default minimum count of harmful feedback events that triggers a promotion.
+pub const DEFAULT_HARM_PROMOTION_THRESHOLD: u32 = 3;
+
+/// Source-type token recorded on candidates produced by harm-feedback promotion.
+pub const HARM_PROMOTION_SOURCE_TYPE: &str = "feedback_event";
+
+/// Inputs for proposing a tripwire candidate from accumulated harmful feedback.
+#[derive(Clone, Debug)]
+pub struct HarmFeedbackPromotionOptions {
+    /// Workspace whose memory accumulated the harmful signals.
+    pub workspace_id: String,
+    /// Memory whose harmful feedback crossed the threshold.
+    pub memory_id: String,
+    /// Observed harmful feedback count (over the configured time window).
+    pub harm_count: u32,
+    /// Promotion threshold (events at or above this count promote).
+    pub threshold: u32,
+    /// Optional summary text from the offending memory; informs the proposed condition.
+    pub memory_summary: Option<String>,
+    /// Time window in seconds the harm count is observed across (informational).
+    pub window_seconds: u64,
+    /// Suggested condition string to attach to the proposed tripwire.
+    /// When `None`, a deterministic `source:memory:<id>` condition is built.
+    pub suggested_condition: Option<String>,
+}
+
+/// Outcome from a single harm-feedback promotion attempt.
+#[derive(Clone, Debug)]
+pub enum HarmFeedbackPromotionOutcome {
+    /// Harm count was below the configured threshold; no candidate proposed.
+    BelowThreshold { harm_count: u32, threshold: u32 },
+    /// A `rule` curation candidate was prepared (not yet inserted).
+    Promoted(HarmFeedbackPromotionProposal),
+}
+
+/// Concrete proposal returned by a successful promotion attempt.
+#[derive(Clone, Debug)]
+pub struct HarmFeedbackPromotionProposal {
+    /// Stable candidate id (derivable from inputs).
+    pub candidate_id: String,
+    /// Insertable curation row.
+    pub input: CreateCurationCandidateInput,
+    /// Tripwire condition that the proposed rule would arm.
+    pub condition: String,
+    /// Source memory id (echoed for convenience).
+    pub memory_id: String,
+    /// Threshold that was crossed.
+    pub harm_count: u32,
+    pub threshold: u32,
+}
+
+impl HarmFeedbackPromotionProposal {
+    /// Render the proposal as a stable JSON document for `ee curate candidates`.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": TRIPWIRE_HARM_PROMOTION_SCHEMA_V1,
+            "candidateId": self.candidate_id,
+            "candidateType": self.input.candidate_type,
+            "memoryId": self.memory_id,
+            "harmCount": self.harm_count,
+            "threshold": self.threshold,
+            "condition": self.condition,
+            "reason": self.input.reason,
+            "sourceType": self.input.source_type,
+            "sourceId": self.input.source_id,
+            "confidence": self.input.confidence,
+        })
+    }
+}
+
+/// Decide whether the supplied harm-feedback count should promote a tripwire candidate,
+/// and if so, return a deterministic `CreateCurationCandidateInput` ready to insert.
+#[must_use]
+pub fn propose_tripwire_from_harmful_feedback(
+    options: &HarmFeedbackPromotionOptions,
+) -> HarmFeedbackPromotionOutcome {
+    if options.harm_count < options.threshold {
+        return HarmFeedbackPromotionOutcome::BelowThreshold {
+            harm_count: options.harm_count,
+            threshold: options.threshold,
+        };
+    }
+
+    let condition = options
+        .suggested_condition
+        .clone()
+        .unwrap_or_else(|| format!("source:memory:{} remains relevant", options.memory_id));
+
+    let candidate_id = stable_promotion_candidate_id(
+        &options.workspace_id,
+        &options.memory_id,
+        options.harm_count,
+        &condition,
+    );
+
+    let summary_excerpt = options
+        .memory_summary
+        .as_deref()
+        .map(truncate_for_reason)
+        .unwrap_or_else(|| format!("memory {}", options.memory_id));
+
+    let reason = format!(
+        "Auto-proposed tripwire from {harm_count} harmful feedback events on {summary} (threshold={threshold}, window={window}s); condition `{condition}`",
+        harm_count = options.harm_count,
+        summary = summary_excerpt,
+        threshold = options.threshold,
+        window = options.window_seconds,
+        condition = condition,
+    );
+
+    let input = CreateCurationCandidateInput {
+        workspace_id: options.workspace_id.clone(),
+        candidate_type: "rule".to_owned(),
+        target_memory_id: options.memory_id.clone(),
+        proposed_content: Some(condition.clone()),
+        proposed_confidence: Some(0.55),
+        proposed_trust_class: Some("agent_assertion".to_owned()),
+        source_type: HARM_PROMOTION_SOURCE_TYPE.to_owned(),
+        source_id: Some(format!("harm_feedback:{}", options.memory_id)),
+        reason,
+        confidence: 0.55,
+        status: Some("pending".to_owned()),
+        created_at: None,
+        ttl_expires_at: None,
+    };
+
+    HarmFeedbackPromotionOutcome::Promoted(HarmFeedbackPromotionProposal {
+        candidate_id,
+        input,
+        condition,
+        memory_id: options.memory_id.clone(),
+        harm_count: options.harm_count,
+        threshold: options.threshold,
+    })
+}
+
+fn stable_promotion_candidate_id(
+    workspace_id: &str,
+    memory_id: &str,
+    harm_count: u32,
+    condition: &str,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tripwire_harm_promotion:");
+    hasher.update(workspace_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(memory_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(harm_count.to_string().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(condition.as_bytes());
+    let digest = hasher.finalize().to_hex().to_string();
+    format!("curate_{}", &digest[..26])
+}
+
+fn truncate_for_reason(text: &str) -> String {
+    const MAX: usize = 96;
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= MAX {
+        return trimmed.to_owned();
+    }
+    let mut out: String = trimmed.chars().take(MAX).collect();
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
@@ -1293,6 +1683,249 @@ mod tests {
 
         assert!(json.contains(TRIPWIRE_CHECK_SCHEMA_V1));
         assert!(json.contains("tw_test"));
+    }
+
+    #[test]
+    fn glob_match_matches_full_text() {
+        assert!(glob_match("*", ""));
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("*.sh", "deploy.sh"));
+        assert!(glob_match("rm*", "rm -rf /"));
+        assert!(glob_match("a?c", "abc"));
+        assert!(!glob_match("a?c", "ac"));
+        assert!(!glob_match("a?c", "abbc"));
+        assert!(!glob_match("*.sh", "deploy.txt"));
+        assert!(glob_match("*deploy*", "preprod-deploy-job"));
+        assert!(glob_match("exact", "exact"));
+        assert!(!glob_match("exact", "exactly"));
+    }
+
+    #[test]
+    fn event_match_condition_satisfied_with_glob() -> TestResult {
+        let payload = TripwireEventPayload::default().with_event_data(serde_json::json!({
+            "command": { "path": "scripts/deploy.sh", "argv": ["./deploy.sh", "prod"] },
+            "tool": { "name": "Bash" },
+        }));
+
+        let evaluation = evaluate_tripwire_condition("event:command.path=*.sh", &payload);
+
+        ensure(
+            evaluation.result,
+            ConditionEvaluationResult::Satisfied,
+            "satisfied",
+        )?;
+        ensure(
+            evaluation.source_key,
+            Some("command.path".to_owned()),
+            "source key",
+        )?;
+        ensure(
+            evaluation
+                .matched_terms
+                .iter()
+                .any(|term| term.contains("scripts/deploy.sh")),
+            true,
+            "citation includes value",
+        )
+    }
+
+    #[test]
+    fn event_match_condition_unsatisfied_when_value_differs() -> TestResult {
+        let payload = TripwireEventPayload::default()
+            .with_event_data(serde_json::json!({"tool": {"name": "Read"}}));
+
+        let evaluation = evaluate_tripwire_condition("event:tool.name=\"Bash\"", &payload);
+
+        ensure(
+            evaluation.result,
+            ConditionEvaluationResult::Unsatisfied,
+            "unsatisfied",
+        )
+    }
+
+    #[test]
+    fn event_match_condition_unsatisfied_when_path_missing() -> TestResult {
+        let payload = TripwireEventPayload::default()
+            .with_event_data(serde_json::json!({"tool": {"name": "Bash"}}));
+
+        let evaluation = evaluate_tripwire_condition("event:command.path=*.sh", &payload);
+
+        ensure(
+            evaluation.result,
+            ConditionEvaluationResult::Unsatisfied,
+            "missing path is unsatisfied",
+        )
+    }
+
+    #[test]
+    fn event_match_condition_missing_input_without_event_data() -> TestResult {
+        let payload = TripwireEventPayload::default();
+
+        let evaluation = evaluate_tripwire_condition("event:command.path=*.sh", &payload);
+
+        ensure(
+            evaluation.result,
+            ConditionEvaluationResult::MissingInput,
+            "missing input",
+        )
+    }
+
+    #[test]
+    fn event_match_condition_rejects_malformed_path() -> TestResult {
+        let payload = TripwireEventPayload::default().with_event_data(serde_json::json!({"a": 1}));
+
+        let evaluation = evaluate_tripwire_condition("event:..=foo", &payload);
+
+        ensure(
+            evaluation.result,
+            ConditionEvaluationResult::UnsupportedCondition,
+            "malformed path is unsupported",
+        )
+    }
+
+    #[test]
+    fn event_match_condition_supports_array_index() -> TestResult {
+        let payload = TripwireEventPayload::default().with_event_data(serde_json::json!({
+            "command": {"argv": ["bash", "-c", "rm -rf /tmp/x"]}
+        }));
+
+        let evaluation = evaluate_tripwire_condition("event:command.argv.2=rm*", &payload);
+
+        ensure(
+            evaluation.result,
+            ConditionEvaluationResult::Satisfied,
+            "array index resolves",
+        )
+    }
+
+    #[test]
+    fn check_tripwire_record_triggers_from_event_payload_glob() -> TestResult {
+        let tripwire = Tripwire::new(
+            "tw_event_bash",
+            "pf_evt",
+            TripwireType::Custom,
+            "event:command.path=*.sh",
+            TripwireAction::Halt,
+            "2026-05-06T00:00:00Z",
+        );
+        let report = check_tripwire_record(
+            &tripwire,
+            &CheckOptions {
+                workspace: PathBuf::from("."),
+                tripwire_id: "tw_event_bash".to_owned(),
+                event_payload: TripwireEventPayload::default()
+                    .with_event_data(serde_json::json!({"command": {"path": "deploy.sh"}})),
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .map_err(|error| error.message())?;
+
+        ensure(report.result, CheckResult::Triggered, "triggered")?;
+        ensure(
+            report
+                .condition_evaluation
+                .and_then(|e| e.source_key)
+                .as_deref(),
+            Some("command.path"),
+            "citation key",
+        )
+    }
+
+    #[test]
+    fn harm_feedback_promotion_below_threshold_does_not_promote() {
+        let outcome = propose_tripwire_from_harmful_feedback(&HarmFeedbackPromotionOptions {
+            workspace_id: "ws_test".to_owned(),
+            memory_id: "mem_001".to_owned(),
+            harm_count: 1,
+            threshold: 3,
+            memory_summary: Some("never run rm -rf /".to_owned()),
+            window_seconds: 7 * 24 * 3600,
+            suggested_condition: None,
+        });
+        match outcome {
+            HarmFeedbackPromotionOutcome::BelowThreshold {
+                harm_count,
+                threshold,
+            } => {
+                assert_eq!(harm_count, 1);
+                assert_eq!(threshold, 3);
+            }
+            other => panic!("expected BelowThreshold, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn harm_feedback_promotion_at_threshold_returns_proposal() {
+        let outcome = propose_tripwire_from_harmful_feedback(&HarmFeedbackPromotionOptions {
+            workspace_id: "ws_test".to_owned(),
+            memory_id: "mem_42".to_owned(),
+            harm_count: 4,
+            threshold: 3,
+            memory_summary: Some("destructive command guidance".to_owned()),
+            window_seconds: 7 * 24 * 3600,
+            suggested_condition: Some("event:command.path=*rm*".to_owned()),
+        });
+
+        let HarmFeedbackPromotionOutcome::Promoted(proposal) = outcome else {
+            panic!("expected Promoted variant");
+        };
+
+        assert!(proposal.candidate_id.starts_with("curate_"));
+        assert_eq!(proposal.candidate_id.len(), 33);
+        assert_eq!(proposal.input.candidate_type, "rule");
+        assert_eq!(proposal.input.target_memory_id, "mem_42");
+        assert_eq!(proposal.input.source_type, HARM_PROMOTION_SOURCE_TYPE);
+        assert_eq!(
+            proposal.input.source_id.as_deref(),
+            Some("harm_feedback:mem_42")
+        );
+        assert_eq!(proposal.condition, "event:command.path=*rm*");
+        assert!(
+            proposal.input.reason.contains("4 harmful feedback events"),
+            "reason explains harm count: {}",
+            proposal.input.reason
+        );
+        assert!((proposal.input.confidence - 0.55).abs() < 1e-6);
+
+        // Stable: same inputs → same id.
+        let again = propose_tripwire_from_harmful_feedback(&HarmFeedbackPromotionOptions {
+            workspace_id: "ws_test".to_owned(),
+            memory_id: "mem_42".to_owned(),
+            harm_count: 4,
+            threshold: 3,
+            memory_summary: Some("destructive command guidance".to_owned()),
+            window_seconds: 7 * 24 * 3600,
+            suggested_condition: Some("event:command.path=*rm*".to_owned()),
+        });
+        let HarmFeedbackPromotionOutcome::Promoted(again_proposal) = again else {
+            panic!("expected Promoted variant on replay");
+        };
+        assert_eq!(proposal.candidate_id, again_proposal.candidate_id);
+    }
+
+    #[test]
+    fn harm_feedback_promotion_uses_default_condition_when_none_supplied() {
+        let outcome = propose_tripwire_from_harmful_feedback(&HarmFeedbackPromotionOptions {
+            workspace_id: "ws_test".to_owned(),
+            memory_id: "mem_xyz".to_owned(),
+            harm_count: 3,
+            threshold: 3,
+            memory_summary: None,
+            window_seconds: 86_400,
+            suggested_condition: None,
+        });
+        let HarmFeedbackPromotionOutcome::Promoted(proposal) = outcome else {
+            panic!("expected Promoted variant");
+        };
+        assert_eq!(proposal.condition, "source:memory:mem_xyz remains relevant");
+        let json = proposal.to_json();
+        assert_eq!(
+            json["schema"].as_str(),
+            Some(TRIPWIRE_HARM_PROMOTION_SCHEMA_V1)
+        );
+        assert_eq!(json["memoryId"].as_str(), Some("mem_xyz"));
+        assert_eq!(json["harmCount"].as_i64(), Some(3));
     }
 
     #[test]
