@@ -372,7 +372,8 @@ impl RegretStatistics {
         for output in outputs {
             *category_counts.entry(output.category).or_insert(0u32) += 1;
         }
-        let by_category: Vec<_> = category_counts.into_iter().collect();
+        let mut by_category: Vec<_> = category_counts.into_iter().collect();
+        by_category.sort_by_key(|(category, _count)| category.as_str());
 
         Self {
             total_analyzed,
@@ -844,6 +845,55 @@ mod tests {
         assert_eq!(stats.total_analyzed, 2);
         assert!(stats.actionable_count >= 1);
         assert!(stats.average_score > 0.0);
+    }
+
+    #[test]
+    fn statistics_by_category_order_is_stable() {
+        let outputs = vec![
+            RegretScoringOutput {
+                entry: None,
+                raw_score: 0.1,
+                weighted_score: 0.1,
+                category: RegretCategory::Other,
+                is_actionable: false,
+                explanation: "other".to_string(),
+            },
+            RegretScoringOutput {
+                entry: None,
+                raw_score: 0.2,
+                weighted_score: 0.2,
+                category: RegretCategory::MissingKnowledge,
+                is_actionable: false,
+                explanation: "missing".to_string(),
+            },
+            RegretScoringOutput {
+                entry: None,
+                raw_score: 0.3,
+                weighted_score: 0.3,
+                category: RegretCategory::Misinformation,
+                is_actionable: false,
+                explanation: "misinformation".to_string(),
+            },
+            RegretScoringOutput {
+                entry: None,
+                raw_score: 0.4,
+                weighted_score: 0.4,
+                category: RegretCategory::MissingKnowledge,
+                is_actionable: true,
+                explanation: "missing again".to_string(),
+            },
+        ];
+
+        let stats = RegretStatistics::from_outputs(&outputs);
+
+        assert_eq!(
+            stats.by_category,
+            vec![
+                (RegretCategory::Misinformation, 1),
+                (RegretCategory::MissingKnowledge, 2),
+                (RegretCategory::Other, 1),
+            ]
+        );
     }
 
     #[test]
