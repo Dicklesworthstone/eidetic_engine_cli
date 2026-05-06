@@ -618,6 +618,23 @@ Beads provides a lightweight, dependency-aware issue database and CLI (`br` - be
 - **Shared identifiers:** Use Beads issue ID (e.g., `br-123`) as Mail `thread_id` and prefix subjects with `[br-123]`
 - **Reservations:** When starting a task, call `file_reservation_paths()` with the issue ID in `reason`
 
+### Bead Taxonomy: honesty-only vs implements-surface
+
+These two labels are **mutually exclusive** and govern what "closing a bead" means:
+
+| Label | Closes when... | Does NOT mean... |
+|-------|---------------|------------------|
+| `honesty-only` | The abstention sentinel is correctly wired: stable code, message, severity, repair hint, evidence-source, and follow-up bead. | The feature works. This label explicitly marks work that shipped degraded-honesty infrastructure, not implementation. |
+| `implements-surface:<name>` | The real feature works end-to-end with real persisted data, real golden tests, and the `*_UNAVAILABLE_CODE` constant deleted in the same PR. | Can close with just an abstention sentinel. |
+
+**Rules:**
+
+1. Every surface that currently has an `*_UNAVAILABLE_CODE` constant needs both labels — the existing closed bead carries `honesty-only` (retroactively), and a new open bead carries `implements-surface:<name>`.
+2. The closure linter (CI) blocks any PR that closes an `implements-surface:X` bead while the matching `*_UNAVAILABLE` constant still exists in `src/cli/mod.rs`.
+3. A bead closed with `close_reason` containing `"abstain"`, `"unavailable"`, `"degraded"`, `"stub"`, or `"placeholder"` must carry `honesty-only` and must have a sibling `implements-surface:<same-name>` bead in the open queue.
+
+**Why this matters:** The 2026-05-06 reality-check audit found 14 follow-up beads closed without implementation — each added an abstention sentinel as a SUBSTITUTE for implementation. This taxonomy prevents that pattern from recurring.
+
 ### Typical Agent Flow
 
 1. **Pick ready work (Beads):**
