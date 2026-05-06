@@ -418,6 +418,42 @@ impl WhyReport {
         }
     }
 
+    /// Create a successful report for a search result target that is not a memory.
+    ///
+    /// The CLI currently treats `found=false` reports as memory not-found errors, so
+    /// unsupported non-memory result targets remain renderable and carry a stable
+    /// degradation explaining why full memory provenance is unavailable.
+    #[must_use]
+    fn unsupported_result_target(
+        document_id: String,
+        source: WhyResultDocumentSource,
+        conn: &DbConnection,
+    ) -> Self {
+        let storage = unsupported_result_target_storage(&document_id, source, conn);
+        let retrieval = unsupported_result_target_retrieval(source);
+        let selection = SelectionExplanation {
+            selection_score: 0.0,
+            above_confidence_threshold: false,
+            is_active: false,
+            score_breakdown:
+                "non-memory search result targets are not eligible for memory pack selection"
+                    .to_owned(),
+            latest_pack_selection: None,
+        };
+
+        Self::found(document_id.clone(), storage, retrieval, selection).with_degradation(
+            WhyDegradation {
+                code: "why_result_target_unsupported_source",
+                severity: "medium",
+                message: format!(
+                    "`result:{document_id}` targets a {} document, not a memory. `ee why` currently explains memory result targets and returns this source-level explanation instead of a memory not_found error.",
+                    source.human_label()
+                ),
+                repair: Some(source.repair().to_owned()),
+            },
+        )
+    }
+
     /// Add a non-fatal degradation notice to the report.
     #[must_use]
     pub fn with_degradation(mut self, degraded: WhyDegradation) -> Self {
@@ -481,7 +517,8 @@ impl<'a> WhyOptions<'a> {
 /// Explains why a memory was stored, how it would be retrieved,
 /// and how it would be selected for context packs.
 pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
-    let memory_id = resolve_why_memory_id(options.memory_id);
+    let target = resolve_why_target(options.memory_id);
+    let memory_id = target.document_id;
 
     let conn = match DbConnection::open_file(options.database_path) {
         Ok(c) => c,
@@ -492,6 +529,10 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
             );
         }
     };
+
+    if let Some(source) = target.unsupported_result_source() {
+        return WhyReport::unsupported_result_target(memory_id.to_string(), source, &conn);
+    }
 
     let memory = match conn.get_memory(memory_id) {
         Ok(Some(m)) => m,
@@ -600,11 +641,184 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     )
 }
 
-fn resolve_why_memory_id(target_id: &str) -> &str {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WhyResultDocumentSource {
+    Memory,
+    Session,
+    Artifact,
+    CurationCandidate,
+    Unknown,
+}
+
+impl WhyResultDocumentSource {
+    fn from_document_id(document_id: &str) -> Self {
+        if document_id.starts_with("mem_") {
+            Self::Memory
+        } else if document_id.starts_with("sess_") {
+            Self::Session
+        } else if document_id.starts_with("art_") {
+            Self::Artifact
+        } else if document_id.starts_with("curate_") {
+            Self::CurationCandidate
+        } else {
+            Self::Unknown
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Session => "session",
+            Self::Artifact => "artifact",
+            Self::CurationCandidate => "curation_candidate",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    const fn human_label(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Session => "CASS session",
+            Self::Artifact => "artifact",
+            Self::CurationCandidate => "curation candidate",
+            Self::Unknown => "non-memory search",
+        }
+    }
+
+    const fn repair(self) -> &'static str {
+        match self {
+            Self::Memory => "ee why <memory-id> --json",
+            Self::Session => "ee import sessions --json",
+            Self::Artifact => "ee artifact show <artifact-id> --json",
+            Self::CurationCandidate => "ee curate show <candidate-id> --json",
+            Self::Unknown => "ee search <query> --json",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WhyTarget<'a> {
+    document_id: &'a str,
+    result_source: Option<WhyResultDocumentSource>,
+}
+
+impl WhyTarget<'_> {
+    const fn unsupported_result_source(self) -> Option<WhyResultDocumentSource> {
+        match self.result_source {
+            Some(WhyResultDocumentSource::Memory) | None => None,
+            Some(source) => Some(source),
+        }
+    }
+}
+
+fn resolve_why_target(target_id: &str) -> WhyTarget<'_> {
     target_id
         .strip_prefix("result:")
         .filter(|doc_id| !doc_id.trim().is_empty())
-        .unwrap_or(target_id)
+        .map_or(
+            WhyTarget {
+                document_id: target_id,
+                result_source: None,
+            },
+            |document_id| WhyTarget {
+                document_id,
+                result_source: Some(WhyResultDocumentSource::from_document_id(document_id)),
+            },
+        )
+}
+
+#[cfg(test)]
+fn resolve_why_memory_id(target_id: &str) -> &str {
+    resolve_why_target(target_id).document_id
+}
+
+fn unsupported_result_target_storage(
+    document_id: &str,
+    source: WhyResultDocumentSource,
+    conn: &DbConnection,
+) -> StorageExplanation {
+    match source {
+        WhyResultDocumentSource::Session => {
+            conn.get_session(document_id).ok().flatten().map_or_else(
+                || generic_unsupported_storage(document_id, source),
+                |session| StorageExplanation {
+                    origin: "Imported CASS session search document".to_owned(),
+                    trust_class: "cass_evidence".to_owned(),
+                    trust_subclass: Some("search_result_session".to_owned()),
+                    provenance_uri: session
+                        .source_path
+                        .clone()
+                        .or_else(|| Some(format!("cass://session/{}", session.cass_session_id))),
+                    workflow_id: None,
+                    created_at: session.imported_at,
+                    valid_from: session.started_at,
+                    valid_to: session.ended_at,
+                    validity_status: "not_applicable".to_owned(),
+                    validity_window_kind: "search_document".to_owned(),
+                },
+            )
+        }
+        WhyResultDocumentSource::Artifact => {
+            conn.get_artifact(document_id).ok().flatten().map_or_else(
+                || generic_unsupported_storage(document_id, source),
+                |artifact| StorageExplanation {
+                    origin: "Registered artifact search document".to_owned(),
+                    trust_class: "artifact_metadata".to_owned(),
+                    trust_subclass: Some(artifact.artifact_type),
+                    provenance_uri: artifact
+                        .provenance_uri
+                        .or(artifact.original_path)
+                        .or(artifact.external_ref),
+                    workflow_id: None,
+                    created_at: artifact.created_at,
+                    valid_from: None,
+                    valid_to: None,
+                    validity_status: "not_applicable".to_owned(),
+                    validity_window_kind: "search_document".to_owned(),
+                },
+            )
+        }
+        WhyResultDocumentSource::CurationCandidate | WhyResultDocumentSource::Unknown => {
+            generic_unsupported_storage(document_id, source)
+        }
+        WhyResultDocumentSource::Memory => generic_unsupported_storage(document_id, source),
+    }
+}
+
+fn generic_unsupported_storage(
+    document_id: &str,
+    source: WhyResultDocumentSource,
+) -> StorageExplanation {
+    StorageExplanation {
+        origin: format!(
+            "{} search result target `{document_id}` is not stored as a memory",
+            source.human_label()
+        ),
+        trust_class: "search_document".to_owned(),
+        trust_subclass: Some(format!("unsupported_{}", source.as_str())),
+        provenance_uri: Some(format!("ee://search-result/{document_id}")),
+        workflow_id: None,
+        created_at: "unknown".to_owned(),
+        valid_from: None,
+        valid_to: None,
+        validity_status: "not_applicable".to_owned(),
+        validity_window_kind: "search_document".to_owned(),
+    }
+}
+
+fn unsupported_result_target_retrieval(source: WhyResultDocumentSource) -> RetrievalExplanation {
+    RetrievalExplanation {
+        confidence: 0.0,
+        utility: 0.0,
+        importance: 0.0,
+        tags: vec![
+            "result_target".to_owned(),
+            format!("source:{}", source.as_str()),
+            "unsupported_for_why".to_owned(),
+        ],
+        level: "search_document".to_owned(),
+        kind: source.as_str().to_owned(),
+    }
 }
 
 struct ReportSelectionInputs {
@@ -1096,6 +1310,31 @@ mod tests {
             resolve_why_memory_id("result:mem_00000000000000000000000001"),
             "mem_00000000000000000000000001",
             "result target",
+        )
+    }
+
+    #[test]
+    fn result_target_classifies_non_memory_sources() -> TestResult {
+        ensure(
+            resolve_why_target("result:sess_00000000000000000000000001")
+                .unsupported_result_source(),
+            Some(WhyResultDocumentSource::Session),
+            "session result target",
+        )?;
+        ensure(
+            resolve_why_target("result:art_00000000000000000000000001").unsupported_result_source(),
+            Some(WhyResultDocumentSource::Artifact),
+            "artifact result target",
+        )?;
+        ensure(
+            resolve_why_target("result:curate_0000000000000000000001").unsupported_result_source(),
+            Some(WhyResultDocumentSource::CurationCandidate),
+            "curation candidate result target",
+        )?;
+        ensure(
+            resolve_why_target("result:mem_00000000000000000000000001").unsupported_result_source(),
+            None,
+            "memory result target",
         )
     }
 

@@ -231,6 +231,60 @@ fn why_accepts_result_doc_id_targets() -> TestResult {
 }
 
 #[test]
+fn why_result_target_non_memory_doc_id_explains_unsupported_source() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+    let doc_id = "sess_00000000000000000000000001";
+    let target = format!("result:{doc_id}");
+
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(0), "init exit")?;
+
+    let why = run_ee(&["--workspace", &workspace, "why", &target, "--json"])?;
+    persist_artifact("result_target_session_why", &why);
+    let why_stderr = String::from_utf8_lossy(&why.stderr);
+    ensure_equal(
+        &why.status.code(),
+        &Some(0),
+        &format!("why exit (stderr: {why_stderr})"),
+    )?;
+
+    let why_json = stdout_json(&why)?;
+    persist_json_artifact("result_target_session_why", &why_json);
+
+    ensure_equal(
+        &why_json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "response schema",
+    )?;
+    ensure_equal(
+        &why_json["data"]["memoryId"],
+        &serde_json::json!(doc_id),
+        "document id preserved",
+    )?;
+    ensure_equal(
+        &why_json["data"]["found"],
+        &serde_json::json!(true),
+        "unsupported source is renderable instead of not_found",
+    )?;
+    ensure_equal(
+        &why_json["data"]["retrieval"]["kind"],
+        &serde_json::json!("session"),
+        "session source kind",
+    )?;
+    ensure(
+        why_json["data"]["degraded"]
+            .as_array()
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item["code"] == "why_result_target_unsupported_source")
+            }),
+        "unsupported source degradation must be present",
+    )
+}
+
+#[test]
 fn why_storage_section_is_complete() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let workspace = tempdir.path().to_string_lossy().to_string();
