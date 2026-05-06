@@ -7,5 +7,5 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     let input = String::from_utf8_lossy(data);
-    let _ = ee::core::jsonl_import::parse_jsonl_header_line(&input);
+    let _ = ee::core::jsonl_import::parse_jsonl_header(&input);
 });

@@ -20,6 +20,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "jsonl_header_parser"
+path = "fuzz_targets/jsonl_header_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "eql_parser"
 path = "fuzz_targets/eql_parser.rs"
 test = false

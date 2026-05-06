@@ -117,7 +117,7 @@ impl fmt::Display for JsonlHeaderParseError {
 ///
 /// This is intentionally smaller than [`import_jsonl_records`]: fuzzing should
 /// exercise the record parser directly without opening files or databases.
-pub fn parse_jsonl_header_line(input: &str) -> Result<ExportHeader, JsonlHeaderParseError> {
+pub fn parse_jsonl_header(input: &str) -> Result<ExportHeader, JsonlHeaderParseError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(JsonlHeaderParseError::EmptyLine);
@@ -963,17 +963,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_jsonl_header_line_accepts_header_record_only() -> TestResult {
+    fn parse_jsonl_header_accepts_header_record_only() -> TestResult {
         let header_line = sample_jsonl()
             .lines()
             .next()
             .ok_or_else(|| "sample JSONL must include a header line".to_string())?
             .to_string();
-        let header = parse_jsonl_header_line(&header_line).map_err(|error| error.to_string())?;
+        let header = parse_jsonl_header(&header_line).map_err(|error| error.to_string())?;
 
         ensure(header.export_id, "exp-001".to_string(), "export id")?;
         ensure(
-            parse_jsonl_header_line(r#"{"schema":"ee.export.memory.v1"}"#),
+            parse_jsonl_header(r#"{"schema":"ee.export.memory.v1"}"#),
             Err(JsonlHeaderParseError::WrongSchema {
                 schema: "ee.export.memory.v1".to_string(),
             }),
