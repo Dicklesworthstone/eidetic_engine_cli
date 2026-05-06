@@ -256,6 +256,7 @@ impl DbConnection {
                     .map_err(|source| DbError::sqlmodel(DbOperation::OpenSchemaOnly, source))?
             }
         };
+        configure_file_durability_pragmas(&inner, &config.location, config.mode)?;
         enable_foreign_key_enforcement(&inner)?;
 
         Ok(Self {
@@ -747,6 +748,27 @@ fn enable_foreign_key_enforcement(inner: &FrankenConnection) -> Result<()> {
         .map_err(|source| DbError::sqlmodel(DbOperation::EnableForeignKeys, source))
 }
 
+fn configure_file_durability_pragmas(
+    inner: &FrankenConnection,
+    location: &DatabaseLocation,
+    mode: DatabaseOpenMode,
+) -> Result<()> {
+    if !matches!(
+        (location, mode),
+        (DatabaseLocation::File(_), DatabaseOpenMode::ReadWrite)
+    ) {
+        return Ok(());
+    }
+
+    let _write_owner = lock_file_write_owner_gate(location)?;
+    inner
+        .execute_raw("PRAGMA journal_mode = WAL")
+        .map_err(|source| DbError::sqlmodel(DbOperation::ConfigureDurabilityPragmas, source))?;
+    inner
+        .execute_raw("PRAGMA synchronous = NORMAL")
+        .map_err(|source| DbError::sqlmodel(DbOperation::ConfigureDurabilityPragmas, source))
+}
+
 const FILE_DATABASE_OPEN_MAX_ATTEMPTS: usize = 8;
 const SQLITE_CONTENTION_MAX_ATTEMPTS: usize = 16;
 
@@ -808,7 +830,10 @@ fn database_open_error_is_retryable(error: &DbError) -> bool {
 
     if !matches!(
         operation,
-        DbOperation::OpenReadWrite | DbOperation::OpenSchemaOnly | DbOperation::EnableForeignKeys
+        DbOperation::OpenReadWrite
+            | DbOperation::OpenSchemaOnly
+            | DbOperation::ConfigureDurabilityPragmas
+            | DbOperation::EnableForeignKeys
     ) {
         return false;
     }
@@ -1243,6 +1268,7 @@ pub enum DbOperation {
     OpenMemory,
     OpenReadWrite,
     OpenSchemaOnly,
+    ConfigureDurabilityPragmas,
     EnableForeignKeys,
     Query,
     Execute,
@@ -1265,6 +1291,7 @@ impl fmt::Display for DbOperation {
             Self::OpenMemory => f.write_str("memory open"),
             Self::OpenReadWrite => f.write_str("read-write open"),
             Self::OpenSchemaOnly => f.write_str("schema-only open"),
+            Self::ConfigureDurabilityPragmas => f.write_str("durability pragma configure"),
             Self::EnableForeignKeys => f.write_str("foreign key enforcement enable"),
             Self::Query => f.write_str("query"),
             Self::Execute => f.write_str("execute"),
@@ -11982,6 +12009,18 @@ mod tests {
             "open-time foreign-key PRAGMA should retry transient busy",
         )?;
 
+        let durability_busy = DbError::sqlmodel(
+            DbOperation::ConfigureDurabilityPragmas,
+            sqlmodel_query_error(
+                sqlmodel_core::error::QueryErrorKind::Database,
+                "database is busy",
+            ),
+        );
+        ensure(
+            super::database_open_error_is_retryable(&durability_busy),
+            "open-time durability PRAGMA should retry transient busy",
+        )?;
+
         let permanent_open = read_write_open_error("unable to open database file");
         ensure(
             !super::database_open_error_is_retryable(&permanent_open),
@@ -12704,6 +12743,34 @@ mod tests {
                 })
             ),
             "child row with a missing parent must be rejected",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn opens_file_connection_with_explicit_durability_pragmas() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database_path = tempdir.path().join("durability.db");
+        let connection = DbConnection::open_file(&database_path)?;
+
+        let journal_mode_rows = connection.query("PRAGMA journal_mode", &[])?;
+        let journal_mode = first_value(&journal_mode_rows, 0, "journal_mode pragma")?
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        ensure_equal(
+            &journal_mode.as_str(),
+            &"wal",
+            "file database journal mode is WAL",
+        )?;
+
+        let synchronous_rows = connection.query("PRAGMA synchronous", &[])?;
+        ensure_equal(
+            &first_value(&synchronous_rows, 0, "synchronous pragma")?.as_i64(),
+            &Some(1),
+            "file database synchronous mode is NORMAL",
         )?;
 
         connection.close()?;
@@ -15815,7 +15882,11 @@ mod tests {
         let id2 = super::generate_audit_id();
 
         ensure(id1.starts_with("audit_"), "ID starts with audit_")?;
-        ensure_equal(&id1.len(), &38, "ID has correct length (audit_ + 32 hex UUID v7)")?;
+        ensure_equal(
+            &id1.len(),
+            &38,
+            "ID has correct length (audit_ + 32 hex UUID v7)",
+        )?;
         ensure(id1 != id2, "IDs are unique even in tight loop")?;
 
         Ok(())
