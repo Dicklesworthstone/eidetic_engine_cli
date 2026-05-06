@@ -1,0 +1,19 @@
+---
+source: tests/contracts/causal_trace.rs
+assertion: causal ledger commands use persisted evidence
+schema:
+  trace: ee.causal.trace.v1
+  estimate: ee.causal.estimate.v1
+  compare: ee.causal.compare.v1
+  promote_plan: ee.causal.promote_plan.v1
+contracts:
+  - empty trace returns no generated chains
+  - single-edge and branching ledgers produce deterministic chain IDs
+  - cyclic ledgers are rejected before output
+  - promotion creates a curation candidate with chain provenance
+evidence:
+  - causal_evidence.failure_id
+  - causal_evidence.candidate_cause_id
+  - causal_evidence.contribution_score
+  - causal_evidence.evidence_uris_json
+  - causal_evidence.method
