@@ -1,0 +1,63 @@
+{
+  "schema": "ee.golden.implements_surface.v1",
+  "surface": "append-only-triggers",
+  "bead": "eidetic_engine_cli-is96",
+  "implementationCommit": "d3a6064",
+  "migration": {
+    "id": 36,
+    "name": "append_only_triggers",
+    "constant": "V036_APPEND_ONLY_TRIGGERS"
+  },
+  "tables": [
+    {
+      "table": "recorder_events",
+      "blocked": [
+        {
+          "operation": "UPDATE",
+          "trigger": "recorder_events_no_update",
+          "errorContains": "recorder_events is append-only"
+        }
+      ],
+      "allowedByDesign": [
+        {
+          "operation": "DELETE",
+          "reason": "recorder_events remains cascade-deletable through recorder_runs; direct-delete detection is tracked separately by eidetic_engine_cli-baap"
+        }
+      ]
+    },
+    {
+      "table": "audit_log",
+      "blocked": [
+        {
+          "operation": "UPDATE",
+          "trigger": "audit_log_no_update",
+          "errorContains": "audit_log is append-only"
+        },
+        {
+          "operation": "DELETE",
+          "trigger": "audit_log_no_delete",
+          "errorContains": "audit_log is append-only"
+        }
+      ],
+      "allowedByDesign": [
+        {
+          "operation": "workspace foreign-key SET NULL cascade",
+          "reason": "audit_log_no_update allows the specific workspace_id=NULL cascade while preserving V033 hash-chain verification"
+        }
+      ]
+    }
+  ],
+  "focusedTests": [
+    "core::audit::tests::append_only_trigger_blocks_audit_log_update",
+    "core::audit::tests::append_only_trigger_blocks_audit_log_delete",
+    "core::audit::tests::append_only_trigger_allows_workspace_set_null_cascade",
+    "core::recorder::tests::append_only_trigger_blocks_recorder_events_update",
+    "core::recorder::tests::deleting_recorder_run_still_cascades_to_events"
+  ],
+  "residualRisk": [
+    {
+      "kind": "raw_sql_schema_mutation",
+      "summary": "A caller with unrestricted raw SQL can still remove triggers or directly delete recorder_events rows; chain verification remains the detection layer and recorder direct-delete coverage is tracked by eidetic_engine_cli-baap"
+    }
+  ]
+}
