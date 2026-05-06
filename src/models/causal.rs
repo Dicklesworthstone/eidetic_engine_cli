@@ -199,6 +199,53 @@ pub enum CausalEvidenceStrength {
     Rejected,
 }
 
+/// How a causal evidence ledger edge was produced.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CausalEvidenceMethod {
+    Manual,
+    GraphInferred,
+    CassDerived,
+}
+
+impl CausalEvidenceMethod {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::GraphInferred => "graph-inferred",
+            Self::CassDerived => "cass-derived",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 3] {
+        [Self::Manual, Self::GraphInferred, Self::CassDerived]
+    }
+}
+
+impl fmt::Display for CausalEvidenceMethod {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for CausalEvidenceMethod {
+    type Err = ParseCausalValueError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "manual" => Ok(Self::Manual),
+            "graph-inferred" => Ok(Self::GraphInferred),
+            "cass-derived" => Ok(Self::CassDerived),
+            _ => Err(ParseCausalValueError::new(
+                "causal_evidence_method",
+                input,
+                "manual, graph-inferred, cass-derived",
+            )),
+        }
+    }
+}
+
 impl CausalEvidenceStrength {
     #[must_use]
     pub const fn as_str(self) -> &'static str {

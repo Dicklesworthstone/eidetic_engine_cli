@@ -1884,20 +1884,31 @@ fn recorder_commands_support_human_degraded_output() -> TestResult {
 }
 
 // ============================================================================
-// Causal Command Tests (EE-451..EE-454 - Degraded until evidence ledgers exist)
+// Causal Command Tests (EE-451..EE-454)
 // ============================================================================
 
-fn assert_causal_unavailable(output: &std::process::Output, command: &str) -> TestResult {
+fn initialized_causal_workspace() -> Result<(tempfile::TempDir, String), String> {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().join("workspace");
+    fs::create_dir_all(&workspace)
+        .map_err(|error| format!("failed to create causal workspace: {error}"))?;
+    let workspace_arg = workspace.display().to_string();
+    let output = run_ee(&["init", "--workspace", &workspace_arg, "--json"])?;
     ensure_equal(
         &output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "exit code",
+        &Some(0),
+        "causal workspace init exit code",
     )?;
+    Ok((tempdir, workspace_arg))
+}
+
+fn assert_causal_success(output: &std::process::Output, command: &str, schema: &str) -> TestResult {
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     ensure(stdout_is_json(output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(output), "stdout must be clean")?;
     ensure(
         output.stderr.is_empty(),
-        "json degraded response must keep stderr empty",
+        "json response must keep stderr empty",
     )?;
     let json = stdout_json(output)?;
     ensure_equal(
@@ -1905,84 +1916,72 @@ fn assert_causal_unavailable(output: &std::process::Output, command: &str) -> Te
         &serde_json::json!("ee.response.v1"),
         "response schema",
     )?;
-    ensure_equal(&json["success"], &serde_json::json!(false), "success")?;
+    ensure_equal(&json["success"], &serde_json::json!(true), "success")?;
+    ensure_equal(
+        &json["data"]["schema"],
+        &serde_json::json!(schema),
+        "causal data schema",
+    )?;
     ensure_equal(
         &json["data"]["command"],
         &serde_json::json!(command),
         "command",
-    )?;
-    ensure_equal(
-        &json["data"]["code"],
-        &serde_json::json!("causal_evidence_unavailable"),
-        "degraded code",
-    )?;
-    ensure_equal(
-        &json["data"]["repair"],
-        &serde_json::json!("ee status --json"),
-        "repair",
-    )?;
-    ensure_equal(
-        &json["data"]["followUpBead"],
-        &serde_json::json!("eidetic_engine_cli-dz00"),
-        "follow-up bead",
-    )?;
-    ensure_equal(
-        &json["data"]["sideEffectClass"],
-        &serde_json::json!("read-only, conservative abstention"),
-        "side effect class",
     )
 }
 
 #[test]
-fn causal_trace_degrades_until_evidence_ledgers_exist() -> TestResult {
+fn causal_trace_dry_run_reports_schema() -> TestResult {
+    let (_tempdir, workspace_arg) = initialized_causal_workspace()?;
     let output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "--json",
         "causal",
         "trace",
         "--run-id",
         "run-test-001",
         "--dry-run",
-        "--json",
     ])?;
-    assert_causal_unavailable(&output, "causal trace")
+    assert_causal_success(&output, "causal trace", "ee.causal.trace.v1")
 }
 
 #[test]
-fn causal_estimate_degrades_until_evidence_ledgers_exist() -> TestResult {
+fn causal_estimate_dry_run_reports_schema() -> TestResult {
     let output = run_ee(&[
+        "--json",
         "causal",
         "estimate",
         "--artifact-id",
         "art-001",
         "--dry-run",
-        "--json",
     ])?;
-    assert_causal_unavailable(&output, "causal estimate")
+    assert_causal_success(&output, "causal estimate", "ee.causal.estimate.v1")
 }
 
 #[test]
-fn causal_compare_degrades_until_evidence_ledgers_exist() -> TestResult {
+fn causal_compare_dry_run_reports_schema() -> TestResult {
     let output = run_ee(&[
+        "--json",
         "causal",
         "compare",
         "--fixture-replay-id",
         "fixture-001",
         "--dry-run",
-        "--json",
     ])?;
-    assert_causal_unavailable(&output, "causal compare")
+    assert_causal_success(&output, "causal compare", "ee.causal.compare.v1")
 }
 
 #[test]
-fn causal_promote_plan_degrades_until_evidence_ledgers_exist() -> TestResult {
+fn causal_promote_plan_dry_run_reports_schema() -> TestResult {
     let output = run_ee(&[
+        "--json",
         "causal",
         "promote-plan",
         "--artifact-id",
         "art-001",
         "--dry-run",
-        "--json",
     ])?;
-    assert_causal_unavailable(&output, "causal promote-plan")
+    assert_causal_success(&output, "causal promote-plan", "ee.causal.promote_plan.v1")
 }
 
 #[test]

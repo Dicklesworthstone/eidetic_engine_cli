@@ -36,6 +36,12 @@ use crate::core::backup::{
     verify_backup,
 };
 use crate::core::capabilities::CapabilitiesReport;
+use crate::core::causal::{
+    CompareOptions, EstimateOptions, PromotePlanOptions, TraceOptions,
+    compare_causal_chains_from_store, compare_causal_evidence, estimate_causal_chain_from_store,
+    estimate_causal_uplift, promote_causal_chain_from_store, promote_causal_plan,
+    stable_workspace_id as stable_causal_workspace_id, trace_causal_chains_from_store,
+};
 use crate::core::check::CheckReport;
 use crate::core::context::{ContextPackError, ContextPackOptions, run_context_pack};
 use crate::core::curate::{
@@ -779,7 +785,7 @@ pub struct ClaimListArgs {
     #[arg(long, value_name = "TAG")]
     pub tag: Option<String>,
 
-    /// Path to claims.yaml file. Defaults to <workspace>/claims.yaml.
+    /// Path to claims.yaml file. Defaults to <workspace>/.ee/claims.yaml.
     #[arg(long, value_name = "PATH")]
     pub claims_file: Option<PathBuf>,
 }
@@ -791,7 +797,7 @@ pub struct ClaimShowArgs {
     #[arg(value_name = "CLAIM_ID")]
     pub claim_id: String,
 
-    /// Path to claims.yaml file. Defaults to <workspace>/claims.yaml.
+    /// Path to claims.yaml file. Defaults to <workspace>/.ee/claims.yaml.
     #[arg(long, value_name = "PATH")]
     pub claims_file: Option<PathBuf>,
 
@@ -804,10 +810,14 @@ pub struct ClaimShowArgs {
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct ClaimVerifyArgs {
     /// Claim ID to verify (claim_<26-char>), or "all" to verify all claims.
-    #[arg(value_name = "CLAIM_ID")]
+    #[arg(value_name = "CLAIM_ID", default_value = "all")]
     pub claim_id: String,
 
-    /// Path to claims.yaml file. Defaults to <workspace>/claims.yaml.
+    /// Claim ID to verify. Equivalent to the positional claim ID.
+    #[arg(long = "id", value_name = "CLAIM_ID")]
+    pub id: Option<String>,
+
+    /// Path to claims.yaml file. Defaults to <workspace>/.ee/claims.yaml.
     #[arg(long, value_name = "PATH")]
     pub claims_file: Option<PathBuf>,
 
@@ -1148,7 +1158,7 @@ pub enum DiagCommand {
 /// Arguments for `ee diag claims`.
 #[derive(Clone, Debug, Eq, PartialEq, Parser)]
 pub struct DiagClaimsArgs {
-    /// Path to claims.yaml file. Defaults to <workspace>/claims.yaml.
+    /// Path to claims.yaml file. Defaults to <workspace>/.ee/claims.yaml.
     #[arg(long, value_name = "PATH")]
     pub claims_file: Option<PathBuf>,
 
@@ -2226,6 +2236,10 @@ pub enum CausalCommand {
 /// Arguments for `ee causal trace`.
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
 pub struct CausalTraceArgs {
+    /// Failure memory ID to trace backward through causal evidence.
+    #[arg(value_name = "FAILURE_MEMORY_ID")]
+    pub failure_memory_id: Option<String>,
+
     /// Filter by memory ID.
     #[arg(long, value_name = "MEMORY_ID")]
     pub memory_id: Option<String>,
@@ -2258,6 +2272,10 @@ pub struct CausalTraceArgs {
     #[arg(long, short = 'n', default_value_t = 50)]
     pub limit: usize,
 
+    /// Maximum number of causal edges to walk backward.
+    #[arg(long, default_value_t = 8)]
+    pub depth: usize,
+
     /// Include detailed exposure records in output.
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_exposures: bool,
@@ -2274,6 +2292,14 @@ pub struct CausalTraceArgs {
 /// Arguments for `ee causal compare`.
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
 pub struct CausalCompareArgs {
+    /// Baseline causal chain ID.
+    #[arg(value_name = "CHAIN_A")]
+    pub chain_a: Option<String>,
+
+    /// Candidate causal chain ID.
+    #[arg(value_name = "CHAIN_B")]
+    pub chain_b: Option<String>,
+
     /// Fixture replay ID to include in comparison.
     #[arg(long, value_name = "FIXTURE_REPLAY_ID")]
     pub fixture_replay_id: Option<String>,
@@ -2310,6 +2336,10 @@ pub struct CausalCompareArgs {
 /// Arguments for `ee causal estimate`.
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
 pub struct CausalEstimateArgs {
+    /// Causal chain ID to estimate.
+    #[arg(value_name = "CHAIN_ID")]
+    pub chain_id_arg: Option<String>,
+
     /// Artifact ID to estimate uplift for.
     #[arg(long, value_name = "ARTIFACT_ID")]
     pub artifact_id: Option<String>,
@@ -2346,6 +2376,10 @@ pub struct CausalEstimateArgs {
 /// Arguments for `ee causal promote-plan`.
 #[derive(Clone, Debug, Default, Parser, PartialEq)]
 pub struct CausalPromotePlanArgs {
+    /// Causal chain ID to route into curation.
+    #[arg(value_name = "CHAIN_ID")]
+    pub chain_id: Option<String>,
+
     /// Artifact ID to scope planning.
     #[arg(long, value_name = "ARTIFACT_ID")]
     pub artifact_id: Option<String>,
@@ -15548,55 +15582,6 @@ where
 // EE-451: Causal trace handlers
 // ============================================================================
 
-const CAUSAL_UNAVAILABLE_CODE: &str = "causal_evidence_unavailable";
-const CAUSAL_UNAVAILABLE_MESSAGE: &str = "Causal trace, estimate, compare, and promotion reports are unavailable until they are backed by real evidence ledgers instead of generated fixture data.";
-const CAUSAL_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const CAUSAL_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-dz00";
-
-fn write_causal_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": CAUSAL_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": CAUSAL_UNAVAILABLE_MESSAGE,
-                "repair": CAUSAL_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": CAUSAL_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": CAUSAL_UNAVAILABLE_MESSAGE,
-                        "repair": CAUSAL_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": CAUSAL_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": "read-only, conservative abstention"
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
-
-    let _ = writeln!(stderr, "error: {CAUSAL_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {CAUSAL_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
-}
-
 fn handle_causal_trace<W, E>(
     cli: &Cli,
     args: &CausalTraceArgs,
@@ -15607,8 +15592,46 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_causal_unavailable(cli, "causal trace", stdout, stderr)
+    let memory_id = match merge_optional_arg(
+        args.failure_memory_id.as_deref(),
+        args.memory_id.as_deref(),
+        "causal trace memory ID",
+    ) {
+        Ok(value) => value,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let options = TraceOptions::new()
+        .with_limit(args.limit)
+        .with_depth(args.depth)
+        .apply_if(memory_id, TraceOptions::with_memory_id)
+        .apply_if(args.run_id.clone(), TraceOptions::with_run_id)
+        .apply_if(args.pack_id.clone(), TraceOptions::with_pack_id)
+        .apply_if(args.preflight_id.clone(), TraceOptions::with_preflight_id)
+        .apply_if(args.tripwire_id.clone(), TraceOptions::with_tripwire_id)
+        .apply_if(args.procedure_id.clone(), TraceOptions::with_procedure_id)
+        .apply_if(args.agent_id.clone(), TraceOptions::with_agent_id);
+    let options = if args.include_exposures {
+        options.with_exposures()
+    } else {
+        options
+    };
+    let options = if args.include_outcomes {
+        options.with_outcomes()
+    } else {
+        options
+    };
+    let options = if args.dry_run {
+        options.dry_run()
+    } else {
+        options
+    };
+
+    match open_causal_database(cli).and_then(|(conn, workspace_id)| {
+        trace_causal_chains_from_store(&conn, &workspace_id, &options)
+    }) {
+        Ok(report) => write_causal_report(cli, report.data_json(), report.human_summary(), stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_causal_estimate<W, E>(
@@ -15621,8 +15644,42 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_causal_unavailable(cli, "causal estimate", stdout, stderr)
+    let chain_id = match merge_optional_arg(
+        args.chain_id_arg.as_deref(),
+        args.chain_id.as_deref(),
+        "causal estimate chain ID",
+    ) {
+        Ok(value) => value,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let mut options = EstimateOptions::new()
+        .with_method(args.method.clone())
+        .apply_if(chain_id, EstimateOptions::with_chain_id)
+        .apply_if(args.artifact_id.clone(), EstimateOptions::with_artifact_id)
+        .apply_if(args.decision_id.clone(), EstimateOptions::with_decision_id)
+        .apply_if(args.agent_id.clone(), EstimateOptions::with_agent_id);
+    if args.include_confounders {
+        options = options.with_confounders();
+    }
+    if args.include_assumptions {
+        options = options.with_assumptions();
+    }
+    if args.dry_run {
+        options = options.dry_run();
+    }
+
+    let result = if options.chain_id.is_some() {
+        open_causal_database(cli).and_then(|(conn, workspace_id)| {
+            estimate_causal_chain_from_store(&conn, &workspace_id, &options)
+        })
+    } else {
+        Ok(estimate_causal_uplift(&options))
+    };
+
+    match result {
+        Ok(report) => write_causal_report(cli, report.data_json(), report.human_summary(), stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_causal_compare<W, E>(
@@ -15635,8 +15692,44 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_causal_unavailable(cli, "causal compare", stdout, stderr)
+    let mut options = CompareOptions::new()
+        .apply_if(args.chain_a.clone(), CompareOptions::with_chain_a_id)
+        .apply_if(args.chain_b.clone(), CompareOptions::with_chain_b_id)
+        .apply_if(args.artifact_id.clone(), CompareOptions::with_artifact_id)
+        .apply_if(args.decision_id.clone(), CompareOptions::with_decision_id)
+        .apply_if(
+            args.fixture_replay_id.clone(),
+            CompareOptions::with_fixture_replay_id,
+        )
+        .apply_if(
+            args.shadow_run_id.clone(),
+            CompareOptions::with_shadow_run_id,
+        )
+        .apply_if(
+            args.counterfactual_episode_id.clone(),
+            CompareOptions::with_counterfactual_episode_id,
+        )
+        .apply_if(
+            args.experiment_id.clone(),
+            CompareOptions::with_experiment_id,
+        )
+        .with_method(args.method.clone());
+    if args.dry_run {
+        options = options.dry_run();
+    }
+
+    let result = if options.chain_a_id.is_some() || options.chain_b_id.is_some() {
+        open_causal_database(cli).and_then(|(conn, workspace_id)| {
+            compare_causal_chains_from_store(&conn, &workspace_id, &options)
+        })
+    } else {
+        Ok(compare_causal_evidence(&options))
+    };
+
+    match result {
+        Ok(report) => write_causal_report(cli, report.data_json(), report.human_summary(), stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_causal_promote_plan<W, E>(
@@ -15664,65 +15757,154 @@ where
         },
         None => None,
     };
+    let mut options = PromotePlanOptions::new()
+        .with_method(args.method.clone())
+        .with_minimum_uplift(args.minimum_uplift)
+        .apply_if(args.chain_id.clone(), PromotePlanOptions::with_chain_id)
+        .apply_if(
+            args.artifact_id.clone(),
+            PromotePlanOptions::with_artifact_id,
+        )
+        .apply_if(
+            args.decision_id.clone(),
+            PromotePlanOptions::with_decision_id,
+        )
+        .apply_if(
+            args.estimate_id.clone(),
+            PromotePlanOptions::with_estimate_id,
+        );
+    if let Some(action) = action {
+        options = options.with_action(action);
+    }
+    if args.include_revalidation {
+        options = options.with_revalidation();
+    }
+    if args.include_narrower_routing {
+        options = options.with_narrower_routing();
+    }
+    if args.include_experiment_proposals {
+        options = options.with_experiment_proposals();
+    }
+    if args.dry_run {
+        options = options.dry_run();
+    }
 
-    let _ = action;
-    write_causal_unavailable(cli, "causal promote-plan", stdout, stderr)
+    let result = if options.chain_id.is_some() {
+        open_causal_database(cli).and_then(|(conn, workspace_id)| {
+            promote_causal_chain_from_store(&conn, &workspace_id, &options)
+        })
+    } else {
+        Ok(promote_causal_plan(&options))
+    };
+
+    match result {
+        Ok(report) => write_causal_report(cli, report.data_json(), report.human_summary(), stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+trait ApplyOptionalArg: Sized {
+    fn apply_if<T>(self, value: Option<T>, apply: impl FnOnce(Self, T) -> Self) -> Self {
+        match value {
+            Some(value) => apply(self, value),
+            None => self,
+        }
+    }
+}
+
+impl<T> ApplyOptionalArg for T {}
+
+fn merge_optional_arg(
+    positional: Option<&str>,
+    flagged: Option<&str>,
+    label: &str,
+) -> Result<Option<String>, DomainError> {
+    match (positional, flagged) {
+        (Some(left), Some(right)) if left != right => Err(DomainError::Usage {
+            message: format!("Conflicting {label}s: `{left}` and `{right}`."),
+            repair: Some("Pass the ID either positionally or by flag, not both.".to_owned()),
+        }),
+        (Some(value), _) | (_, Some(value)) => Ok(Some(value.to_owned())),
+        (None, None) => Ok(None),
+    }
+}
+
+fn open_causal_database(cli: &Cli) -> Result<(crate::db::DbConnection, String), DomainError> {
+    let workspace_path = causal_workspace_path(cli)?;
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_owned()),
+        });
+    }
+    let conn = crate::db::DbConnection::open_file(&database_path).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        }
+    })?;
+    conn.migrate()
+        .map_err(|error| DomainError::MigrationRequired {
+            message: format!("Failed to migrate causal evidence database: {error}"),
+            repair: Some("ee init --workspace .".to_owned()),
+        })?;
+    let workspace_id = stable_causal_workspace_id(&workspace_path);
+    Ok((conn, workspace_id))
+}
+
+fn causal_workspace_path(cli: &Cli) -> Result<PathBuf, DomainError> {
+    let raw = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let absolute = if raw.is_absolute() {
+        raw
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(raw)
+    };
+    absolute
+        .canonicalize()
+        .map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Failed to resolve workspace {}: {error}",
+                absolute.display()
+            ),
+            repair: Some("ee init --workspace .".to_owned()),
+        })
+}
+
+fn write_causal_report<W>(
+    cli: &Cli,
+    data: serde_json::Value,
+    human: String,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&data.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let response = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": data,
+            });
+            write_stdout(stdout, &(response.to_string() + "\n"))
+        }
+    }
 }
 
 // ============================================================================
 // EE-362: Claim verification handlers
 // ============================================================================
-
-const CLAIM_UNAVAILABLE_CODE: &str = "claim_verification_unavailable";
-const CLAIM_UNAVAILABLE_MESSAGE: &str = "Claim listing, manifest inspection, and verification are unavailable until claims.yaml is parsed and checked against real evidence artifacts instead of empty placeholder reports.";
-const CLAIM_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const CLAIM_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-v76q";
-const CLAIM_UNAVAILABLE_SIDE_EFFECT: &str =
-    "read-only, conservative abstention; no claim manifest parse or verification result";
-
-fn write_claim_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": CLAIM_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": CLAIM_UNAVAILABLE_MESSAGE,
-                "repair": CLAIM_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": CLAIM_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": CLAIM_UNAVAILABLE_MESSAGE,
-                        "repair": CLAIM_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": CLAIM_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": CLAIM_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
-
-    let _ = writeln!(stderr, "error: {CLAIM_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {CLAIM_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
-}
 
 fn handle_claim_list<W, E>(
     cli: &Cli,
@@ -15746,7 +15928,7 @@ where
 
     match crate::core::claims::build_claim_list_report(&options) {
         Ok(report) => write_claim_list_report(cli, &report, stdout),
-        Err(_) => write_claim_unavailable(cli, "claim list", stdout, stderr),
+        Err(error) => write_claim_error(&error, cli, stdout, stderr),
     }
 }
 
@@ -15772,7 +15954,7 @@ where
 
     match crate::core::claims::build_claim_show_report(&options) {
         Ok(report) => write_claim_show_report(cli, &report, stdout),
-        Err(_) => write_claim_unavailable(cli, "claim show", stdout, stderr),
+        Err(error) => write_claim_error(&error, cli, stdout, stderr),
     }
 }
 
@@ -15786,20 +15968,38 @@ where
     W: Write,
     E: Write,
 {
+    let claim_id = args.id.clone().unwrap_or_else(|| args.claim_id.clone());
     let options = crate::core::claims::ClaimVerifyOptions {
         workspace_path: resolve_cli_workspace_path(
             cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
         ),
         claims_file: args.claims_file.clone(),
         artifacts_dir: args.artifacts_dir.clone(),
-        claim_id: args.claim_id.clone(),
+        claim_id,
         fail_fast: args.fail_fast,
     };
 
     match crate::core::claims::build_claim_verify_report(&options) {
         Ok(report) => write_claim_verify_report(cli, &report, stdout),
-        Err(_) => write_claim_unavailable(cli, "claim verify", stdout, stderr),
+        Err(error) => write_claim_error(&error, cli, stdout, stderr),
     }
+}
+
+fn write_claim_error<W, E>(
+    error: &crate::core::claims::ClaimParseError,
+    cli: &Cli,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let domain_error = DomainError::Usage {
+        message: error.to_string(),
+        repair: Some("Fix .ee/claims.yaml or pass --claims-file <path>.".to_string()),
+    };
+    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
 }
 
 fn write_claim_list_report<W>(

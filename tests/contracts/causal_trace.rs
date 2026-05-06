@@ -9,16 +9,18 @@ use ee::core::causal::{
     CompareOptions, EstimateOptions, PromotePlanOptions, TraceOptions, compare_causal_evidence,
     estimate_causal_uplift, promote_causal_plan, trace_causal_chains,
 };
+use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 use ee::models::causal::CAUSAL_TRACE_SCHEMA_V1;
 use ee::models::{
-    RATIONALE_TRACE_SCHEMA_V1, RationaleTrace, RationaleTraceKind, RationaleTracePosture,
-    RationaleTraceValidationErrorKind, validate_rationale_summary,
+    MemoryId, RATIONALE_TRACE_SCHEMA_V1, RationaleTrace, RationaleTraceKind, RationaleTracePosture,
+    RationaleTraceValidationErrorKind, WorkspaceId, validate_rationale_summary,
 };
 use serde_json::Value as JsonValue;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
-const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 6;
 
 const CAUSAL_COMPARE_ALL_SOURCES_GOLDEN: &str =
     // EE-453: deterministic snapshot across replay, shadow, counterfactual, and experiment inputs.
@@ -32,7 +34,7 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     }
 }
 
-fn run_ee(args: &[&str]) -> Result<Output, String> {
+fn run_ee_owned(args: &[String]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
         .output()
@@ -63,12 +65,12 @@ fn assert_clean_machine_stdout(stdout: &str, context: &str) -> TestResult {
     Ok(())
 }
 
-fn cli_json_with_exit(
-    args: &[&str],
+fn cli_json_owned_with_exit(
+    args: &[String],
     expected_exit: i32,
     context: &str,
 ) -> Result<JsonValue, String> {
-    let output = run_ee(args)?;
+    let output = run_ee_owned(args)?;
     ensure(
         output.status.code() == Some(expected_exit),
         format!(
@@ -93,43 +95,172 @@ fn cli_json_with_exit(
     Ok(json)
 }
 
-fn assert_causal_unavailable(json: &JsonValue, command: &str, context: &str) -> TestResult {
-    assert_schema_field(json, "ee.response.v1", context)?;
+fn assert_success_response(json: &JsonValue, command: &str, data_schema: &str) -> TestResult {
+    assert_schema_field(json, "ee.response.v1", command)?;
     ensure(
-        json.get("success").and_then(JsonValue::as_bool) == Some(false),
-        format!("{context}: success must be false"),
+        json.get("success").and_then(JsonValue::as_bool) == Some(true),
+        format!("{command}: success must be true"),
+    )?;
+    ensure(
+        json.pointer("/data/schema").and_then(JsonValue::as_str) == Some(data_schema),
+        format!("{command}: data schema must be {data_schema}"),
     )?;
     ensure(
         json.pointer("/data/command").and_then(JsonValue::as_str) == Some(command),
-        format!("{context}: command field must be {command}"),
-    )?;
-    ensure(
-        json.pointer("/data/code").and_then(JsonValue::as_str)
-            == Some("causal_evidence_unavailable"),
-        format!("{context}: missing causal_evidence_unavailable code"),
-    )?;
-    ensure(
-        json.pointer("/data/repair").and_then(JsonValue::as_str) == Some("ee status --json"),
-        format!("{context}: repair must point to status"),
-    )?;
-    ensure(
-        json.pointer("/data/followUpBead")
-            .and_then(JsonValue::as_str)
-            == Some("eidetic_engine_cli-dz00"),
-        format!("{context}: follow-up bead missing"),
-    )?;
-    ensure(
-        json.pointer("/data/evidenceIds")
-            .and_then(JsonValue::as_array)
-            .is_some_and(Vec::is_empty),
-        format!("{context}: evidenceIds must be empty"),
-    )?;
-    ensure(
-        json.pointer("/data/sourceIds")
-            .and_then(JsonValue::as_array)
-            .is_some_and(Vec::is_empty),
-        format!("{context}: sourceIds must be empty"),
+        format!("{command}: command field must be {command}"),
     )
+}
+
+fn seeded_causal_cli_fixture() -> Result<CausalCliFixture, String> {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(workspace.join(".ee"))
+        .map_err(|error| format!("failed to create causal fixture workspace: {error}"))?;
+    let canonical_workspace = workspace
+        .canonicalize()
+        .map_err(|error| format!("failed to canonicalize causal fixture: {error}"))?;
+    let workspace_id = stable_test_workspace_id(&canonical_workspace);
+    let database_path = canonical_workspace.join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    connection.migrate().map_err(|error| error.to_string())?;
+    connection
+        .insert_workspace(
+            &workspace_id,
+            &CreateWorkspaceInput {
+                path: canonical_workspace.display().to_string(),
+                name: Some("causal contract fixture".to_owned()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+    let failure = MemoryId::from_uuid(uuid::Uuid::from_u128(11_001)).to_string();
+    let root_a = MemoryId::from_uuid(uuid::Uuid::from_u128(11_002)).to_string();
+    let root_b = MemoryId::from_uuid(uuid::Uuid::from_u128(11_003)).to_string();
+    for (id, kind, content) in [
+        (
+            &failure,
+            "failure",
+            "release failed after unvalidated causal inference",
+        ),
+        (
+            &root_a,
+            "root-cause",
+            "manual review caught missing evidence",
+        ),
+        (
+            &root_b,
+            "root-cause",
+            "evidence ledger changed plan selection",
+        ),
+    ] {
+        connection
+            .insert_memory(id, &causal_fixture_memory(&workspace_id, kind, content))
+            .map_err(|error| error.to_string())?;
+    }
+    insert_causal_fixture_edge(
+        &connection,
+        "cev_contract_a",
+        &workspace_id,
+        &failure,
+        &root_a,
+        0.4,
+    )?;
+    insert_causal_fixture_edge(
+        &connection,
+        "cev_contract_b",
+        &workspace_id,
+        &failure,
+        &root_b,
+        0.9,
+    )?;
+
+    Ok(CausalCliFixture {
+        _temp: temp,
+        workspace: canonical_workspace,
+        failure,
+    })
+}
+
+fn stable_test_workspace_id(path: &Path) -> String {
+    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+}
+
+fn causal_fixture_memory(workspace_id: &str, kind: &str, content: &str) -> CreateMemoryInput {
+    CreateMemoryInput {
+        workspace_id: workspace_id.to_owned(),
+        level: "episodic".to_owned(),
+        kind: kind.to_owned(),
+        content: content.to_owned(),
+        workflow_id: None,
+        confidence: 0.9,
+        utility: 0.8,
+        importance: 0.7,
+        provenance_uri: Some("agent-mail://causal-contract".to_owned()),
+        trust_class: "agent_validated".to_owned(),
+        trust_subclass: None,
+        tags: Vec::new(),
+        valid_from: None,
+        valid_to: None,
+    }
+}
+
+fn insert_causal_fixture_edge(
+    connection: &DbConnection,
+    edge_id: &str,
+    workspace_id: &str,
+    failure_id: &str,
+    candidate_cause_id: &str,
+    score: f64,
+) -> Result<(), String> {
+    connection
+        .execute_raw(&format!(
+            "INSERT INTO causal_evidence (id, workspace_id, failure_id, candidate_cause_id, contribution_score, evidence_uris_json, computed_at, method)
+             VALUES ('{edge_id}', '{workspace_id}', '{failure_id}', '{candidate_cause_id}', {score}, '[\"agent-mail://causal-contract/{edge_id}\"]', '2026-05-06T00:00:00Z', 'manual')"
+        ))
+        .map_err(|error| error.to_string())
+}
+
+struct CausalCliFixture {
+    _temp: tempfile::TempDir,
+    workspace: PathBuf,
+    failure: String,
+}
+
+impl CausalCliFixture {
+    fn args(&self, parts: &[&str]) -> Vec<String> {
+        let mut args = vec![
+            "--workspace".to_owned(),
+            self.workspace.display().to_string(),
+            "--json".to_owned(),
+        ];
+        args.extend(parts.iter().map(|part| (*part).to_owned()));
+        args
+    }
+}
+
+fn first_two_chain_ids(trace: &JsonValue) -> Result<(String, String), String> {
+    let chains = trace
+        .pointer("/data/chains")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| "trace response missing chains array".to_owned())?;
+    ensure(
+        chains.len() >= 2,
+        format!("trace response must include two seeded chains, got {chains:?}"),
+    )?;
+    let left = chains[0]
+        .get("chainId")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| "first chain missing chainId".to_owned())?
+        .to_owned();
+    let right = chains[1]
+        .get("chainId")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| "second chain missing chainId".to_owned())?
+        .to_owned();
+    Ok((left, right))
 }
 
 fn assert_schema_field(json: &JsonValue, expected_schema: &str, context: &str) -> TestResult {
@@ -191,141 +322,76 @@ fn normalize_compare_numeric_fields(value: &mut JsonValue) {
 // ============================================================================
 
 #[test]
-fn causal_cli_json_subcommands_degrade_until_evidence_ledgers_exist() -> TestResult {
-    let cases: [(&str, &[&str]); 4] = [
-        (
-            "causal trace",
-            &[
-                "--json",
-                "causal",
-                "trace",
-                "--run-id",
-                "run_fixture_001",
-                "--pack-id",
-                "pack_fixture_001",
-                "--preflight-id",
-                "pre_fixture_001",
-                "--tripwire-id",
-                "trip_fixture_001",
-                "--procedure-id",
-                "proc_fixture_001",
-                "--agent-id",
-                "agent_fixture_001",
-            ],
-        ),
-        (
-            "causal estimate",
-            &[
-                "--json",
-                "causal",
-                "estimate",
-                "--artifact-id",
-                "mem_fixture_001",
-                "--decision-id",
-                "decision_fixture_001",
-                "--method",
-                "naive",
-                "--include-assumptions",
-                "--include-confounders",
-            ],
-        ),
-        (
-            "causal compare",
-            &[
-                "--json",
-                "causal",
-                "compare",
-                "--artifact-id",
-                "mem_fixture_001",
-                "--fixture-replay-id",
-                "fixture_replay_001",
-                "--shadow-run-id",
-                "shadow_run_001",
-                "--counterfactual-episode-id",
-                "counterfactual_episode_001",
-                "--experiment-id",
-                "experiment_001",
-                "--method",
-                "replay",
-            ],
-        ),
-        (
-            "causal promote-plan",
-            &[
-                "--json",
-                "causal",
-                "promote-plan",
-                "--artifact-id",
-                "mem_fixture_001",
-                "--method",
-                "replay",
-                "--minimum-uplift",
-                "0.05",
-                "--include-revalidation",
-                "--include-narrower-routing",
-                "--include-experiment-proposals",
-                "--dry-run",
-            ],
-        ),
-    ];
+fn causal_cli_json_subcommands_use_persisted_evidence_ledgers() -> TestResult {
+    let fixture = seeded_causal_cli_fixture()?;
+    let trace = cli_json_owned_with_exit(
+        &fixture.args(&["causal", "trace", &fixture.failure, "--depth", "2"]),
+        0,
+        "causal trace",
+    )?;
+    assert_success_response(&trace, "causal trace", CAUSAL_TRACE_SCHEMA_V1)?;
+    ensure(
+        trace
+            .pointer("/data/chains/0/evidenceUris/0")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|uri| uri.starts_with("agent-mail://causal-contract/")),
+        "trace must expose persisted evidence URIs",
+    )?;
+    let (chain_a, chain_b) = first_two_chain_ids(&trace)?;
 
-    for (context, args) in cases {
-        let json = cli_json_with_exit(args, UNSATISFIED_DEGRADED_MODE_EXIT, context)?;
-        assert_causal_unavailable(&json, context, context)?;
-    }
-    Ok(())
-}
+    let estimate = cli_json_owned_with_exit(
+        &fixture.args(&["causal", "estimate", &chain_b, "--method", "replay"]),
+        0,
+        "causal estimate",
+    )?;
+    assert_success_response(&estimate, "causal estimate", CAUSAL_ESTIMATE_SCHEMA_V1)?;
+    ensure(
+        estimate
+            .pointer("/data/estimates/0/chainId")
+            .and_then(JsonValue::as_str)
+            == Some(chain_b.as_str()),
+        "estimate must be tied to the requested chain",
+    )?;
 
-#[test]
-fn causal_cli_promote_plan_dry_run_degrades_before_mutation() -> TestResult {
-    let json = cli_json_with_exit(
-        &[
-            "--json",
+    let compare = cli_json_owned_with_exit(
+        &fixture.args(&[
+            "causal", "compare", &chain_a, &chain_b, "--method", "replay",
+        ]),
+        0,
+        "causal compare",
+    )?;
+    assert_success_response(&compare, "causal compare", CAUSAL_COMPARE_SCHEMA_V1)?;
+    ensure(
+        compare
+            .pointer("/data/comparisons/0/verdict")
+            .and_then(JsonValue::as_str)
+            .is_some(),
+        "compare must emit a deterministic verdict",
+    )?;
+
+    let promote = cli_json_owned_with_exit(
+        &fixture.args(&[
             "causal",
             "promote-plan",
-            "--artifact-id",
-            "mem_fixture_001",
-            "--method",
-            "replay",
+            &chain_b,
             "--minimum-uplift",
             "0.05",
             "--include-revalidation",
-            "--include-narrower-routing",
-            "--include-experiment-proposals",
-            "--dry-run",
-        ],
-        UNSATISFIED_DEGRADED_MODE_EXIT,
-        "causal promote-plan dry-run mutation guard",
-    )?;
-    assert_causal_unavailable(
-        &json,
+        ]),
+        0,
         "causal promote-plan",
-        "causal promote-plan dry-run mutation guard",
-    )
-}
-
-#[test]
-fn causal_cli_confounded_demote_degrades_before_review_claims() -> TestResult {
-    let json = cli_json_with_exit(
-        &[
-            "--json",
-            "causal",
-            "promote-plan",
-            "--artifact-id",
-            "mem_confounded_001",
-            "--method",
-            "naive",
-            "--action",
-            "demote",
-            "--include-revalidation",
-        ],
-        UNSATISFIED_DEGRADED_MODE_EXIT,
-        "causal promote-plan confounded demotion",
     )?;
-    assert_causal_unavailable(
-        &json,
+    assert_success_response(
+        &promote,
         "causal promote-plan",
-        "causal promote-plan confounded demotion",
+        CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
+    )?;
+    ensure(
+        promote
+            .pointer("/data/curationCandidateIds/0")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|id| id.starts_with("curate_")),
+        "promote-plan must create a curation candidate",
     )
 }
 

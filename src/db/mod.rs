@@ -3212,6 +3212,39 @@ END;
     "blake3:v036_append_only_triggers_2026_05_06",
 );
 
+/// V037: Persist causal evidence ledger edges for trace/estimate/compare/promote-plan.
+pub const V037_CAUSAL_EVIDENCE_LEDGER: Migration = Migration::new(
+    37,
+    "causal_evidence_ledger",
+    r#"
+-- Causal evidence is an explicit ledger of directed contribution edges.
+-- Edges point from an observed failure/effect memory to a candidate cause
+-- memory. Higher-level causal reports are deterministic projections over
+-- these persisted rows; the raw ledger remains the source of evidence.
+CREATE TABLE causal_evidence (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'cev_*' AND length(trim(id)) > 5),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    failure_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    candidate_cause_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    contribution_score REAL NOT NULL CHECK (
+        contribution_score >= 0.0 AND contribution_score <= 1.0
+    ),
+    evidence_uris_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(evidence_uris_json)),
+    computed_at TEXT NOT NULL CHECK (length(trim(computed_at)) > 0),
+    method TEXT NOT NULL CHECK (method IN ('manual', 'graph-inferred', 'cass-derived')),
+    CHECK (failure_id != candidate_cause_id)
+);
+
+CREATE INDEX idx_causal_evidence_workspace_failure
+    ON causal_evidence(workspace_id, failure_id, contribution_score DESC, id);
+CREATE INDEX idx_causal_evidence_workspace_candidate
+    ON causal_evidence(workspace_id, candidate_cause_id, id);
+CREATE INDEX idx_causal_evidence_method
+    ON causal_evidence(workspace_id, method, computed_at, id);
+"#,
+    "blake3:v037_causal_evidence_ledger_2026_05_06",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -3250,6 +3283,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V034_PROCEDURE_STORE,
     V035_PLAN_RECIPES,
     V036_APPEND_ONLY_TRIGGERS,
+    V037_CAUSAL_EVIDENCE_LEDGER,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {

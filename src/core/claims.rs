@@ -6,8 +6,11 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use serde_yaml::Value as YamlValue;
 
 use crate::models::{
     ArtifactType, CLAIMS_FILE_SCHEMA_V1, ClaimId, ClaimStatus, DemoId, EvidenceId,
@@ -26,6 +29,8 @@ pub struct ClaimSummary {
     pub title: String,
     pub status: ClaimStatus,
     pub frequency: VerificationFrequency,
+    pub owner: Option<String>,
+    pub ttl: Option<String>,
     pub tags: Vec<String>,
     pub evidence_count: usize,
     pub demo_count: usize,
@@ -51,10 +56,22 @@ pub struct ClaimDetail {
     pub description: String,
     pub status: ClaimStatus,
     pub frequency: VerificationFrequency,
+    pub owner: Option<String>,
+    pub ttl: Option<String>,
     pub policy_id: Option<String>,
     pub evidence_ids: Vec<String>,
+    pub evidence: Vec<ClaimEvidenceDetail>,
     pub demo_ids: Vec<String>,
     pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClaimEvidenceDetail {
+    pub kind: String,
+    pub target: String,
+    pub expected_hash: Option<String>,
+    pub expected_exit: Option<i32>,
+    pub expected_status: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -83,6 +100,9 @@ pub struct ClaimVerifyResult {
     pub artifacts_checked: usize,
     pub artifacts_passed: usize,
     pub artifacts_failed: usize,
+    pub evidence_checked: usize,
+    pub evidence_passed: usize,
+    pub evidence_failed: usize,
     pub errors: Vec<String>,
 }
 
@@ -114,6 +134,9 @@ struct ParsedClaim {
     tags: Vec<String>,
     evidence_count: usize,
     demo_count: usize,
+    owner: Option<String>,
+    ttl: Option<String>,
+    evidence: Vec<ParsedClaimEvidence>,
 }
 
 impl ParsedClaim {
@@ -123,6 +146,8 @@ impl ParsedClaim {
             title: self.title.clone(),
             status: self.status,
             frequency: self.frequency,
+            owner: self.owner.clone(),
+            ttl: self.ttl.clone(),
             tags: self.tags.clone(),
             evidence_count: self.evidence_count,
             demo_count: self.demo_count,
@@ -136,10 +161,71 @@ impl ParsedClaim {
             description: self.description.clone(),
             status: self.status,
             frequency: self.frequency,
+            owner: self.owner.clone(),
+            ttl: self.ttl.clone(),
             policy_id: self.policy_id.map(|id| id.to_string()),
             evidence_ids: self.evidence_ids.iter().map(ToString::to_string).collect(),
+            evidence: self
+                .evidence
+                .iter()
+                .map(ParsedClaimEvidence::detail)
+                .collect(),
             demo_ids: self.demo_ids.iter().map(ToString::to_string).collect(),
             tags: self.tags.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClaimEvidenceKind {
+    FileHash,
+    CommandExit,
+    MemoryPresence,
+    RuleStatus,
+}
+
+impl ClaimEvidenceKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::FileHash => "file-hash",
+            Self::CommandExit => "command-exit",
+            Self::MemoryPresence => "memory-presence",
+            Self::RuleStatus => "rule-status",
+        }
+    }
+}
+
+impl std::str::FromStr for ClaimEvidenceKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "file-hash" | "file_hash" => Ok(Self::FileHash),
+            "command-exit" | "command_exit" => Ok(Self::CommandExit),
+            "memory-presence" | "memory_presence" => Ok(Self::MemoryPresence),
+            "rule-status" | "rule_status" => Ok(Self::RuleStatus),
+            other => Err(format!("unknown claim evidence kind: {other}")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedClaimEvidence {
+    kind: ClaimEvidenceKind,
+    target: String,
+    expected_hash: Option<String>,
+    expected_exit: Option<i32>,
+    expected_status: Option<String>,
+}
+
+impl ParsedClaimEvidence {
+    fn detail(&self) -> ClaimEvidenceDetail {
+        ClaimEvidenceDetail {
+            kind: self.kind.as_str().to_string(),
+            target: self.target.clone(),
+            expected_hash: self.expected_hash.clone(),
+            expected_exit: self.expected_exit,
+            expected_status: self.expected_status.clone(),
         }
     }
 }
@@ -213,8 +299,11 @@ struct RawClaimsFile {
 
 #[derive(Debug, Deserialize)]
 struct RawClaimEntry {
+    #[serde(default, alias = "claim_id", alias = "claimId")]
     id: Option<String>,
     title: Option<String>,
+    #[serde(default)]
+    statement: Option<String>,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -229,6 +318,24 @@ struct RawClaimEntry {
     demo_ids: Vec<String>,
     #[serde(default)]
     tags: Vec<String>,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    ttl: Option<String>,
+    #[serde(default)]
+    evidence: Option<YamlValue>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawClaimEvidence {
+    kind: Option<String>,
+    target: Option<String>,
+    #[serde(default, alias = "expected_hash", alias = "expectedHash")]
+    expected_hash: Option<String>,
+    #[serde(default, alias = "expected_exit", alias = "expectedExit")]
+    expected_exit: Option<i32>,
+    #[serde(default, alias = "expected_status", alias = "expectedStatus")]
+    expected_status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,7 +388,17 @@ impl std::fmt::Display for ClaimParseError {
 impl std::error::Error for ClaimParseError {}
 
 fn claims_file_path(workspace_path: &Path, claims_file: Option<&Path>) -> PathBuf {
-    claims_file.map_or_else(|| workspace_path.join("claims.yaml"), Path::to_path_buf)
+    claims_file.map_or_else(
+        || {
+            let canonical = workspace_path.join(".ee").join("claims.yaml");
+            if canonical.exists() {
+                canonical
+            } else {
+                workspace_path.join("claims.yaml")
+            }
+        },
+        Path::to_path_buf,
+    )
 }
 
 fn artifacts_root_path(workspace_path: &Path, artifacts_dir: Option<&Path>) -> PathBuf {
@@ -350,18 +467,26 @@ fn convert_raw_claim(
     raw_claim: RawClaimEntry,
 ) -> Result<ParsedClaim, ClaimParseError> {
     let raw_id = required_claim_field(raw_claim.id, "claim id", claim_index)?;
-    let id = raw_id.parse::<ClaimId>().map_err(|error| {
-        ClaimParseError::new(format!(
-            "invalid claim id `{raw_id}` at claims[{claim_index}]: {error}"
-        ))
-    })?;
+    let id = parse_claim_identifier(&raw_id, claim_index)?;
 
-    let title = required_claim_field(raw_claim.title, "claim title", claim_index)?;
-    let description = raw_claim.description.unwrap_or_default();
+    let statement = raw_claim.statement;
+    let title = raw_claim
+        .title
+        .or_else(|| statement.clone())
+        .ok_or_else(|| {
+            ClaimParseError::new(format!("missing claim title at claims[{claim_index}]"))
+        })?;
+    if title.trim().is_empty() {
+        return Err(ClaimParseError::new(format!(
+            "missing claim title at claims[{claim_index}]"
+        )));
+    }
+    let description = raw_claim.description.or(statement).unwrap_or_default();
     let status = parse_claim_status(raw_claim.status.as_deref(), claim_index)?;
     let frequency = parse_verification_frequency(raw_claim.frequency.as_deref(), claim_index)?;
     let policy_id = parse_optional_policy_id(raw_claim.policy_id.as_deref(), claim_index)?;
     let evidence_ids = parse_evidence_ids(&raw_claim.evidence_ids, claim_index)?;
+    let evidence = parse_claim_evidence(raw_claim.evidence, claim_index)?;
     let demo_ids = parse_demo_ids(&raw_claim.demo_ids, claim_index)?;
     let mut tags = raw_claim.tags;
     tags.sort();
@@ -374,11 +499,22 @@ fn convert_raw_claim(
         status,
         frequency,
         policy_id,
-        evidence_count: evidence_ids.len(),
+        evidence_count: evidence.len().max(evidence_ids.len()),
         demo_count: demo_ids.len(),
         evidence_ids,
         demo_ids,
         tags,
+        owner: raw_claim.owner,
+        ttl: raw_claim.ttl,
+        evidence,
+    })
+}
+
+fn parse_claim_identifier(raw_id: &str, claim_index: usize) -> Result<ClaimId, ClaimParseError> {
+    raw_id.parse::<ClaimId>().map_err(|error| {
+        ClaimParseError::new(format!(
+            "invalid claim id `{raw_id}` at claims[{claim_index}]: {error}"
+        ))
     })
 }
 
@@ -435,6 +571,79 @@ fn parse_optional_policy_id(
         }),
         None => Ok(None),
     }
+}
+
+fn parse_claim_evidence(
+    raw_evidence: Option<YamlValue>,
+    claim_index: usize,
+) -> Result<Vec<ParsedClaimEvidence>, ClaimParseError> {
+    let Some(raw_evidence) = raw_evidence else {
+        return Ok(Vec::new());
+    };
+
+    match raw_evidence {
+        YamlValue::Null => Ok(Vec::new()),
+        YamlValue::Sequence(items) => items
+            .into_iter()
+            .enumerate()
+            .map(|(evidence_index, value)| {
+                parse_one_claim_evidence(value, claim_index, evidence_index)
+            })
+            .collect(),
+        value => parse_one_claim_evidence(value, claim_index, 0).map(|evidence| vec![evidence]),
+    }
+}
+
+fn parse_one_claim_evidence(
+    value: YamlValue,
+    claim_index: usize,
+    evidence_index: usize,
+) -> Result<ParsedClaimEvidence, ClaimParseError> {
+    let raw: RawClaimEvidence = serde_yaml::from_value(value).map_err(|error| {
+        ClaimParseError::new(format!(
+            "invalid evidence at claims[{claim_index}].evidence[{evidence_index}]: {error}"
+        ))
+    })?;
+    let raw_kind = raw.kind.ok_or_else(|| {
+        ClaimParseError::new(format!(
+            "missing evidence kind at claims[{claim_index}].evidence[{evidence_index}]"
+        ))
+    })?;
+    let kind = raw_kind.parse::<ClaimEvidenceKind>().map_err(|error| {
+        ClaimParseError::new(format!(
+            "invalid evidence kind at claims[{claim_index}].evidence[{evidence_index}]: {error}"
+        ))
+    })?;
+    let target = raw.target.ok_or_else(|| {
+        ClaimParseError::new(format!(
+            "missing evidence target at claims[{claim_index}].evidence[{evidence_index}]"
+        ))
+    })?;
+    if target.trim().is_empty() {
+        return Err(ClaimParseError::new(format!(
+            "missing evidence target at claims[{claim_index}].evidence[{evidence_index}]"
+        )));
+    }
+    if kind == ClaimEvidenceKind::FileHash {
+        let expected_hash = raw.expected_hash.as_deref().ok_or_else(|| {
+            ClaimParseError::new(format!(
+                "missing expected_hash for file-hash evidence at claims[{claim_index}].evidence[{evidence_index}]"
+            ))
+        })?;
+        if !crate::models::is_valid_blake3_hex(expected_hash) {
+            return Err(ClaimParseError::new(format!(
+                "invalid expected_hash `{expected_hash}` at claims[{claim_index}].evidence[{evidence_index}]"
+            )));
+        }
+    }
+
+    Ok(ParsedClaimEvidence {
+        kind,
+        target,
+        expected_hash: raw.expected_hash,
+        expected_exit: raw.expected_exit,
+        expected_status: raw.expected_status,
+    })
 }
 
 fn parse_evidence_ids(
@@ -588,6 +797,9 @@ fn verify_claim_artifacts(
                     artifacts_checked: 0,
                     artifacts_passed: 0,
                     artifacts_failed: 1,
+                    evidence_checked: 0,
+                    evidence_passed: 0,
+                    evidence_failed: 1,
                     errors: vec![format!(
                         "manifest_unavailable: {}: {}",
                         manifest_path.display(),
@@ -659,6 +871,9 @@ fn verify_claim_artifacts(
             artifacts_checked: manifest.artifacts.len(),
             artifacts_passed,
             artifacts_failed,
+            evidence_checked: manifest.artifacts.len(),
+            evidence_passed: artifacts_passed,
+            evidence_failed: artifacts_failed,
             errors,
         },
         Some(manifest),
@@ -701,12 +916,236 @@ fn reject_symlink_component(path: &Path) -> Result<(), String> {
     }
 }
 
+fn verify_claim_evidence(claim: &ParsedClaim, workspace_path: &Path) -> ClaimVerifyResult {
+    let claim_id = claim.id.to_string();
+    if let Some(ttl) = claim.ttl.as_deref() {
+        match claim_ttl_is_expired(ttl) {
+            Ok(true) => {
+                return ClaimVerifyResult {
+                    claim_id,
+                    status: ManifestVerificationStatus::Expired,
+                    artifacts_checked: 0,
+                    artifacts_passed: 0,
+                    artifacts_failed: 1,
+                    evidence_checked: 0,
+                    evidence_passed: 0,
+                    evidence_failed: 1,
+                    errors: vec![format!("claim_expired: ttl {ttl}")],
+                };
+            }
+            Ok(false) => {}
+            Err(error) => {
+                return ClaimVerifyResult {
+                    claim_id,
+                    status: ManifestVerificationStatus::Failing,
+                    artifacts_checked: 0,
+                    artifacts_passed: 0,
+                    artifacts_failed: 1,
+                    evidence_checked: 0,
+                    evidence_passed: 0,
+                    evidence_failed: 1,
+                    errors: vec![error],
+                };
+            }
+        }
+    }
+
+    if claim.evidence.is_empty() {
+        return ClaimVerifyResult {
+            claim_id,
+            status: ManifestVerificationStatus::Unverified,
+            artifacts_checked: 0,
+            artifacts_passed: 0,
+            artifacts_failed: 0,
+            evidence_checked: 0,
+            evidence_passed: 0,
+            evidence_failed: 0,
+            errors: vec!["claim_has_no_executable_evidence".to_string()],
+        };
+    }
+
+    let mut errors = Vec::new();
+    let mut evidence_passed = 0usize;
+    let mut evidence_failed = 0usize;
+    for evidence in &claim.evidence {
+        match verify_one_claim_evidence(workspace_path, evidence) {
+            Ok(()) => evidence_passed += 1,
+            Err(error) => {
+                evidence_failed += 1;
+                errors.push(error);
+            }
+        }
+    }
+    let status = if errors.is_empty() {
+        ManifestVerificationStatus::Passing
+    } else {
+        ManifestVerificationStatus::Failing
+    };
+
+    ClaimVerifyResult {
+        claim_id,
+        status,
+        artifacts_checked: claim.evidence.len(),
+        artifacts_passed: evidence_passed,
+        artifacts_failed: evidence_failed,
+        evidence_checked: claim.evidence.len(),
+        evidence_passed,
+        evidence_failed,
+        errors,
+    }
+}
+
+fn claim_ttl_is_expired(ttl: &str) -> Result<bool, String> {
+    let expires_at = DateTime::parse_from_rfc3339(ttl)
+        .map_err(|error| format!("invalid_claim_ttl: {ttl}: {error}"))?
+        .with_timezone(&Utc);
+    Ok(Utc::now() > expires_at)
+}
+
+fn verify_one_claim_evidence(
+    workspace_path: &Path,
+    evidence: &ParsedClaimEvidence,
+) -> Result<(), String> {
+    match evidence.kind {
+        ClaimEvidenceKind::FileHash => verify_file_hash_evidence(workspace_path, evidence),
+        ClaimEvidenceKind::CommandExit => verify_command_exit_evidence(workspace_path, evidence),
+        ClaimEvidenceKind::MemoryPresence => {
+            verify_memory_presence_evidence(workspace_path, evidence)
+        }
+        ClaimEvidenceKind::RuleStatus => verify_rule_status_evidence(workspace_path, evidence),
+    }
+}
+
+fn verify_file_hash_evidence(
+    workspace_path: &Path,
+    evidence: &ParsedClaimEvidence,
+) -> Result<(), String> {
+    let expected_hash = evidence
+        .expected_hash
+        .as_deref()
+        .ok_or_else(|| format!("missing_expected_hash: {}", evidence.target))?;
+    let path = resolve_claim_artifact_path_no_symlinks(workspace_path, &evidence.target)?;
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("artifact_not_found: {}: {error}", path.display()))?;
+    let actual_hash = blake3::hash(&bytes).to_hex().to_string();
+    if actual_hash == expected_hash {
+        Ok(())
+    } else {
+        Err(format!(
+            "hash_mismatch: {} expected {} got {}",
+            evidence.target, expected_hash, actual_hash
+        ))
+    }
+}
+
+fn verify_command_exit_evidence(
+    workspace_path: &Path,
+    evidence: &ParsedClaimEvidence,
+) -> Result<(), String> {
+    let parts = parse_command_target(&evidence.target)?;
+    let expected_exit = evidence.expected_exit.unwrap_or(0);
+    let output = Command::new(&parts[0])
+        .args(&parts[1..])
+        .current_dir(workspace_path)
+        .output()
+        .map_err(|error| format!("command_exit_unavailable: {}: {error}", evidence.target))?;
+    let actual_exit = output.status.code().unwrap_or(-1);
+    if actual_exit == expected_exit {
+        Ok(())
+    } else {
+        Err(format!(
+            "command_exit_mismatch: {} expected {} got {}",
+            evidence.target, expected_exit, actual_exit
+        ))
+    }
+}
+
+fn parse_command_target(target: &str) -> Result<Vec<String>, String> {
+    let parts = target
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        Err("command_exit_unavailable: empty command target".to_string())
+    } else {
+        Ok(parts)
+    }
+}
+
+fn verify_memory_presence_evidence(
+    workspace_path: &Path,
+    evidence: &ParsedClaimEvidence,
+) -> Result<(), String> {
+    let contents = read_first_existing_claim_store(
+        workspace_path,
+        &[
+            ".ee/memories.jsonl",
+            ".ee/memories.yaml",
+            ".ee/memory.jsonl",
+            "memories.jsonl",
+            "memories.yaml",
+        ],
+        "memory_store_unavailable",
+    )?;
+    if contents.contains(&evidence.target) {
+        Ok(())
+    } else {
+        Err(format!("memory_not_found: {}", evidence.target))
+    }
+}
+
+fn verify_rule_status_evidence(
+    workspace_path: &Path,
+    evidence: &ParsedClaimEvidence,
+) -> Result<(), String> {
+    let contents = read_first_existing_claim_store(
+        workspace_path,
+        &[
+            ".ee/rules.jsonl",
+            ".ee/rules.yaml",
+            ".ee/procedural_rules.jsonl",
+            "rules.jsonl",
+            "rules.yaml",
+        ],
+        "rule_store_unavailable",
+    )?;
+    let expected_status = evidence.expected_status.as_deref().unwrap_or("active");
+    if contents.contains(&evidence.target) && contents.contains(expected_status) {
+        Ok(())
+    } else {
+        Err(format!(
+            "rule_status_mismatch: {} expected {}",
+            evidence.target, expected_status
+        ))
+    }
+}
+
+fn read_first_existing_claim_store(
+    workspace_path: &Path,
+    candidates: &[&str],
+    missing_code: &str,
+) -> Result<String, String> {
+    for candidate in candidates {
+        let path = match resolve_claim_artifact_path_no_symlinks(workspace_path, candidate) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        if path.exists() {
+            return fs::read_to_string(&path)
+                .map_err(|error| format!("{missing_code}: {}: {error}", path.display()));
+        }
+    }
+    Err(format!("{missing_code}: no supported store file found"))
+}
+
 const fn posture_for_claim_status(status: ClaimStatus) -> ClaimPosture {
     match status {
-        ClaimStatus::Draft | ClaimStatus::Active => ClaimPosture::Unverified,
-        ClaimStatus::Verified => ClaimPosture::Verified,
-        ClaimStatus::Stale => ClaimPosture::Stale,
-        ClaimStatus::Regressed => ClaimPosture::Regressed,
+        ClaimStatus::Draft | ClaimStatus::Active | ClaimStatus::Unverified => {
+            ClaimPosture::Unverified
+        }
+        ClaimStatus::Verified | ClaimStatus::Valid => ClaimPosture::Verified,
+        ClaimStatus::Stale | ClaimStatus::Expired => ClaimPosture::Stale,
+        ClaimStatus::Regressed | ClaimStatus::Invalid => ClaimPosture::Regressed,
         ClaimStatus::Retired => ClaimPosture::Unknown,
     }
 }
@@ -848,13 +1287,27 @@ pub fn build_claim_verify_report(
     let total_selected = selected_claim_ids.len();
 
     for claim_id in selected_claim_ids {
-        let (result, _) = verify_claim_artifacts(claim_id, &artifacts_root);
+        let Some(claim) = find_claim(&claims, &claim_id) else {
+            continue;
+        };
+        let result = if claim.evidence.is_empty() {
+            let (result, _) = verify_claim_artifacts(claim_id, &artifacts_root);
+            result
+        } else {
+            verify_claim_evidence(claim, &options.workspace_path)
+        };
         match result.status {
             ManifestVerificationStatus::Passing => verified_count += 1,
-            ManifestVerificationStatus::Failing => failed_count += 1,
+            ManifestVerificationStatus::Failing | ManifestVerificationStatus::Expired => {
+                failed_count += 1;
+            }
             _ => skipped_count += 1,
         }
-        let should_stop = options.fail_fast && result.status == ManifestVerificationStatus::Failing;
+        let should_stop = options.fail_fast
+            && matches!(
+                result.status,
+                ManifestVerificationStatus::Failing | ManifestVerificationStatus::Expired
+            );
         results.push(result);
         if should_stop {
             skipped_count += total_selected.saturating_sub(results.len());
@@ -979,10 +1432,7 @@ pub struct DiagClaimsReport {
 impl DiagClaimsReport {
     #[must_use]
     pub fn gather(options: &DiagClaimsOptions) -> Self {
-        let claims_file = options
-            .claims_file
-            .clone()
-            .unwrap_or_else(|| options.workspace_path.join("claims.yaml"));
+        let claims_file = claims_file_path(&options.workspace_path, options.claims_file.as_deref());
         let claims_file_str = claims_file.display().to_string();
         let claims_file_exists = claims_file.exists();
 

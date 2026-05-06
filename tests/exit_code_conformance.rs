@@ -348,22 +348,32 @@ fn exit_6_degraded_on_preflight_without_evidence() -> TestResult {
 }
 
 #[test]
-fn exit_6_degraded_on_causal_without_ledgers() -> TestResult {
+fn exit_0_on_causal_dry_run_after_init() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().join("workspace");
+    fs::create_dir_all(&workspace)
+        .map_err(|error| format!("failed to create causal workspace: {error}"))?;
+    let workspace_arg = workspace.display().to_string();
+    let init = run_ee(&["init", "--workspace", &workspace_arg, "--json"])?;
+    ensure_equal(
+        &init.status.code(),
+        &Some(0),
+        "causal workspace init exit code",
+    )?;
+
     let output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "--json",
         "causal",
         "trace",
         "--run-id",
         "run-test",
         "--dry-run",
-        "--json",
     ])?;
-    persist_artifact("exit_6_causal_degraded", &output);
+    persist_artifact("exit_0_causal_dry_run", &output);
 
-    ensure_equal(
-        &output.status.code(),
-        &Some(EXIT_DEGRADED),
-        "causal degraded exit code",
-    )
+    ensure_equal(&output.status.code(), &Some(0), "causal dry-run exit code")
 }
 
 // ============================================================================

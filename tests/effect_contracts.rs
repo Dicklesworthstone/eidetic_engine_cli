@@ -483,7 +483,6 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
     let manifest = EffectManifest::build();
 
     for (command, code) in [
-        ("claim verify", "claim_verification_unavailable"),
         ("demo run", "demo_command_execution_unavailable"),
         ("memory revise", "revision_write_unavailable"),
         ("procedure export", "procedure_store_unavailable"),
@@ -528,10 +527,12 @@ fn effect_manifest_tracks_handoff_and_eval_as_real_surfaces() -> TestResult {
 
     let manifest = EffectManifest::build();
 
-    // Read-only handoff/eval surfaces must no longer carry an unavailable
-    // sentinel — h0h1 (handoff) and r1np (eval) shipped real implementations
-    // and the *_UNAVAILABLE_CODE constants in src/cli/mod.rs were deleted.
+    // Read-only claim/handoff/eval surfaces must no longer carry unavailable
+    // sentinels once real parsers/verifiers ship.
     for command in [
+        "claim list",
+        "claim show",
+        "claim verify",
         "eval list",
         "eval run",
         "handoff inspect",

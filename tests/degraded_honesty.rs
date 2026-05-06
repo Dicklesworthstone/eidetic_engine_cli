@@ -80,7 +80,12 @@ fn collect_degradation_codes(value: &Value) -> Vec<String> {
         codes.push(code.to_owned());
     }
 
-    for pointer in ["/degraded", "/data/degraded"] {
+    for pointer in [
+        "/degraded",
+        "/data/degraded",
+        "/degradations",
+        "/data/degradations",
+    ] {
         if let Some(items) = value.pointer(pointer).and_then(Value::as_array) {
             for item in items {
                 if let Some(code) = item.get("code").and_then(Value::as_str) {
@@ -219,11 +224,9 @@ fn side_effect_class(args: &[String]) -> &'static str {
         "read-only persisted trust-state query; no source trust mutation"
     } else if args
         .iter()
-        .any(|arg| arg == "capabilities" || arg == "certificate")
+        .any(|arg| matches!(arg.as_str(), "capabilities" | "certificate" | "claim"))
     {
         "read-only, idempotent"
-    } else if args.iter().any(|arg| arg == "claim") {
-        "read-only, conservative abstention; no claim manifest parse or verification result"
     } else if args
         .windows(2)
         .any(|window| matches!(window, [first, second] if first == "rehearse" && second == "run"))
@@ -241,8 +244,10 @@ fn side_effect_class(args: &[String]) -> &'static str {
         }
     } else if args.iter().any(|arg| arg == "lab") {
         "evidence-only lab report; no behavior inference or durable mutation"
-    } else if args.iter().any(|arg| arg == "economy" || arg == "causal") {
+    } else if args.iter().any(|arg| arg == "economy") {
         "read-only, conservative abstention"
+    } else if args.iter().any(|arg| arg == "causal") {
+        "persisted causal-evidence query; promote-plan writes audited curation candidates when storage is available"
     } else if args.iter().any(|arg| arg == "procedure") {
         "conservative abstention; no procedure mutation or artifact write"
     } else if args.iter().any(|arg| arg == "situation") {
@@ -1308,8 +1313,8 @@ fn certificate_verify_reports_not_found_instead_of_mock_success() -> TestResult 
 }
 
 #[test]
-fn claim_commands_degrade_instead_of_reporting_empty_placeholder_results() -> TestResult {
-    let workspace_root = unique_artifact_dir("claim-unavailable-workspace")?;
+fn claim_commands_reject_invalid_claims_without_placeholder_success() -> TestResult {
+    let workspace_root = unique_artifact_dir("claim-invalid-workspace")?;
     let workspace = workspace_root.join("workspace");
     fs::create_dir_all(&workspace).map_err(|error| {
         format!(
@@ -1326,7 +1331,7 @@ fn claim_commands_degrade_instead_of_reporting_empty_placeholder_results() -> Te
 
     let cases = [
         (
-            "claim-list-unavailable",
+            "claim-list-invalid",
             "claim list",
             vec![
                 "--workspace".to_owned(),
@@ -1337,7 +1342,7 @@ fn claim_commands_degrade_instead_of_reporting_empty_placeholder_results() -> Te
             ],
         ),
         (
-            "claim-show-unavailable",
+            "claim-show-invalid",
             "claim show",
             vec![
                 "--workspace".to_owned(),
@@ -1349,7 +1354,7 @@ fn claim_commands_degrade_instead_of_reporting_empty_placeholder_results() -> Te
             ],
         ),
         (
-            "claim-verify-unavailable",
+            "claim-verify-invalid",
             "claim verify",
             vec![
                 "--workspace".to_owned(),
@@ -1366,64 +1371,31 @@ fn claim_commands_degrade_instead_of_reporting_empty_placeholder_results() -> Te
         let result = run_ee_logged(name, Some(&workspace), args)?;
         ensure_equal(
             &result.exit_code,
-            &UNSATISFIED_DEGRADED_MODE_EXIT,
-            &format!("{command} unavailable exit code"),
+            &1,
+            &format!("{command} invalid claim usage exit code"),
         )?;
         ensure(
             result.stderr.is_empty(),
-            format!("{command} JSON degraded response must keep stderr empty"),
+            format!("{command} JSON error response must keep stderr empty"),
         )?;
-        ensure_no_ansi(&result.stdout, &format!("{command} degraded stdout"))?;
+        ensure_no_ansi(&result.stdout, &format!("{command} error stdout"))?;
         ensure_json_pointer(
             &result.parsed,
             "/schema",
-            json!("ee.response.v1"),
-            &format!("{command} degraded response schema"),
-        )?;
-        ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/command",
-            json!(command),
-            &format!("{command} command label"),
+            json!("ee.error.v1"),
+            &format!("{command} error response schema"),
         )?;
         ensure_json_pointer(
             &result.parsed,
-            "/data/code",
-            json!("claim_verification_unavailable"),
-            &format!("{command} degraded code"),
+            "/error/code",
+            json!("usage"),
+            &format!("{command} error code"),
         )?;
         ensure_json_pointer(
             &result.parsed,
-            "/data/degraded/0/code",
-            json!("claim_verification_unavailable"),
-            &format!("{command} degraded array code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/followUpBead",
-            json!("eidetic_engine_cli-v76q"),
-            &format!("{command} follow-up bead"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sideEffectClass",
-            json!(
-                "read-only, conservative abstention; no claim manifest parse or verification result"
-            ),
-            &format!("{command} side-effect class"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/evidenceIds",
-            json!([]),
-            &format!("{command} evidence ids"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sourceIds",
-            json!([]),
-            &format!("{command} source ids"),
+            "/error/repair",
+            json!("Fix .ee/claims.yaml or pass --claims-file <path>."),
+            &format!("{command} repair command"),
         )?;
 
         let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
@@ -1437,7 +1409,7 @@ fn claim_commands_degrade_instead_of_reporting_empty_placeholder_results() -> Te
         ensure(
             unsupported_claims.passed,
             format!(
-                "degraded {command} output should not count as unsupported success: {unsupported_claims:?}"
+                "invalid {command} output should not count as unsupported success: {unsupported_claims:?}"
             ),
         )?;
 
@@ -1448,13 +1420,13 @@ fn claim_commands_degrade_instead_of_reporting_empty_placeholder_results() -> Te
         ensure_json_pointer(
             &log_json,
             "/degradationCodes",
-            json!(["claim_verification_unavailable"]),
-            &format!("logged {command} degradation code"),
+            json!(["usage"]),
+            &format!("logged {command} error code"),
         )?;
         ensure_json_pointer(
             &log_json,
             "/repairCommand",
-            json!("ee status --json"),
+            json!("Fix .ee/claims.yaml or pass --claims-file <path>."),
             &format!("logged {command} repair command"),
         )?;
         ensure_json_pointer(
@@ -1466,9 +1438,7 @@ fn claim_commands_degrade_instead_of_reporting_empty_placeholder_results() -> Te
         ensure_json_pointer(
             &log_json,
             "/sideEffectClass",
-            json!(
-                "read-only, conservative abstention; no claim manifest parse or verification result"
-            ),
+            json!("read-only, idempotent"),
             &format!("logged {command} side-effect class"),
         )?;
     }
@@ -2296,81 +2266,95 @@ fn economy_report_degrades_instead_of_reporting_seed_metrics() -> TestResult {
 }
 
 #[test]
-fn causal_trace_degrades_instead_of_reporting_generated_chains() -> TestResult {
-    let result = run_ee_logged(
-        "causal-trace-unavailable",
-        None,
+fn causal_trace_without_failure_id_reports_empty_evidence_query() -> TestResult {
+    let workspace_root = unique_artifact_dir("causal-trace-empty-workspace")?;
+    let workspace = workspace_root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    let workspace_arg = workspace.display().to_string();
+
+    let init = run_ee_logged(
+        "causal-trace-empty-init",
+        Some(&workspace),
         vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "init".to_owned(),
+        ],
+    )?;
+    ensure_equal(&init.exit_code, &0, "causal trace workspace init exit")?;
+
+    let result = run_ee_logged(
+        "causal-trace-empty-query",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg,
             "--json".to_owned(),
             "causal".to_owned(),
             "trace".to_owned(),
-            "--run-id".to_owned(),
-            "run_fixture_001".to_owned(),
+            "--dry-run".to_owned(),
         ],
     )?;
 
     ensure_equal(
         &result.exit_code,
-        &UNSATISFIED_DEGRADED_MODE_EXIT,
-        "causal unavailable exit code",
+        &0,
+        "causal empty evidence query exit code",
     )?;
     ensure(
         result.stderr.is_empty(),
-        "causal JSON degraded response must keep stderr empty",
+        "causal JSON response must keep stderr empty",
     )?;
-    ensure_no_ansi(&result.stdout, "causal degraded stdout")?;
+    ensure_no_ansi(&result.stdout, "causal stdout")?;
     ensure_json_pointer(
         &result.parsed,
         "/schema",
         json!("ee.response.v1"),
-        "causal degraded response schema",
+        "causal response schema",
     )?;
-    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+    ensure_json_pointer(&result.parsed, "/success", json!(true), "success flag")?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/code",
-        json!("causal_evidence_unavailable"),
-        "causal degraded code",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/degraded/0/code",
-        json!("causal_evidence_unavailable"),
-        "causal degraded array code",
+        "/data/schema",
+        json!("ee.causal.trace.v1"),
+        "causal trace data schema",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/followUpBead",
-        json!("eidetic_engine_cli-dz00"),
-        "causal follow-up bead",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/evidenceIds",
+        "/data/chains",
         json!([]),
-        "causal evidence ids",
+        "causal trace must not generate chains without a failure memory id",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/sourceIds",
-        json!([]),
-        "causal source ids",
+        "/data/degradations/0/code",
+        json!("causal_failure_id_required"),
+        "causal missing failure-id degradation",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/dryRun",
+        json!(true),
+        "causal trace dry-run flag",
     )?;
 
-    let fake_success =
-        validate_no_fake_success_output("causal trace", false, false, &result.stdout);
+    let fake_success = validate_no_fake_success_output("causal trace", true, false, &result.stdout);
     ensure(
         fake_success.passed,
-        format!("degraded causal output should not be fake success: {fake_success:?}"),
+        format!("causal output should not be fake success: {fake_success:?}"),
     )?;
 
     let unsupported_claims =
-        validate_no_unsupported_evidence_claims("causal trace", false, false, &result.stdout);
+        validate_no_unsupported_evidence_claims("causal trace", true, false, &result.stdout);
     ensure(
         unsupported_claims.passed,
-        format!(
-            "degraded causal output should not count as unsupported success: {unsupported_claims:?}"
-        ),
+        format!("causal output should not count as unsupported success: {unsupported_claims:?}"),
     )?;
 
     let log_text = fs::read_to_string(&result.log_path)
@@ -2380,13 +2364,13 @@ fn causal_trace_degrades_instead_of_reporting_generated_chains() -> TestResult {
     ensure_json_pointer(
         &log_json,
         "/degradationCodes",
-        json!(["causal_evidence_unavailable"]),
+        json!(["causal_failure_id_required"]),
         "logged causal degradation code",
     )?;
     ensure_json_pointer(
         &log_json,
         "/repairCommand",
-        json!("ee status --json"),
+        Value::Null,
         "logged causal repair command",
     )?;
     ensure_json_pointer(
@@ -2398,7 +2382,9 @@ fn causal_trace_degrades_instead_of_reporting_generated_chains() -> TestResult {
     ensure_json_pointer(
         &log_json,
         "/sideEffectClass",
-        json!("read-only, conservative abstention"),
+        json!(
+            "persisted causal-evidence query; promote-plan writes audited curation candidates when storage is available"
+        ),
         "logged causal side-effect class",
     )
 }
@@ -3267,6 +3253,7 @@ fn preflight_and_tripwire_commands_degrade_instead_of_reporting_fixture_risk_sta
 }
 
 #[test]
+#[ignore = "ee handoff create writes real capsules now (h0h1, eidetic_engine_cli-172p) — needs replacement with a positive contract test; tracked in eidetic_engine_cli-oskm follow-up"]
 fn handoff_create_degrades_instead_of_writing_placeholder_capsule() -> TestResult {
     let output_dir = unique_artifact_dir("handoff-create-output")?;
     let capsule_path = output_dir.join("handoff.json");

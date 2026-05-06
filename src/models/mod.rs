@@ -42,12 +42,12 @@ pub use backup::{
 };
 pub use causal::{
     CAUSAL_EXPOSURE_SCHEMA_V1, CAUSAL_SCHEMA_CATALOG_V1, CAUSAL_TRACE_SCHEMA_V1,
-    CONFOUNDER_SCHEMA_V1, CausalConfounder, CausalDecisionTrace, CausalEvidenceStrength,
-    CausalExposure, CausalExposureChannel, CausalFieldSchema, CausalObjectSchema, ConfounderKind,
-    DECISION_TRACE_SCHEMA_V1, DecisionTraceOutcome, PROMOTION_PLAN_SCHEMA_V1,
-    ParseCausalValueError, PromotionAction, PromotionPlan, PromotionPlanStatus,
-    UPLIFT_ESTIMATE_SCHEMA_V1, UpliftDirection, UpliftEstimate, causal_schema_catalog_json,
-    causal_schemas,
+    CONFOUNDER_SCHEMA_V1, CausalConfounder, CausalDecisionTrace, CausalEvidenceMethod,
+    CausalEvidenceStrength, CausalExposure, CausalExposureChannel, CausalFieldSchema,
+    CausalObjectSchema, ConfounderKind, DECISION_TRACE_SCHEMA_V1, DecisionTraceOutcome,
+    PROMOTION_PLAN_SCHEMA_V1, ParseCausalValueError, PromotionAction, PromotionPlan,
+    PromotionPlanStatus, UPLIFT_ESTIMATE_SCHEMA_V1, UpliftDirection, UpliftEstimate,
+    causal_schema_catalog_json, causal_schemas,
 };
 pub use certificate::{
     CERTIFICATE_SCHEMA_V1, Certificate, CertificateKind, CertificateStatus, CurationCertificate,

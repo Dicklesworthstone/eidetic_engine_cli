@@ -818,6 +818,12 @@ impl EffectManifest {
                 "Verify persisted certificate hash and signature evidence",
             ),
             CommandEffect::read_only("check", "Quick posture summary"),
+            CommandEffect::read_only("claim list", "List executable claims from claims.yaml"),
+            CommandEffect::read_only("claim show", "Inspect one executable claim"),
+            CommandEffect::read_only(
+                "claim verify",
+                "Verify executable claim evidence without mutating source records",
+            ),
             CommandEffect::read_only("context", "Assemble context pack (reads only)"),
             CommandEffect::read_only("curate candidates", "List curation candidates"),
             CommandEffect::read_only("curate validate", "Validate curation candidate"),
@@ -938,21 +944,6 @@ impl EffectManifest {
                 "causal promote-plan",
                 "causal_evidence_unavailable",
                 "Causal promotion planning abstains until real evidence ledgers exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "claim list",
-                "claim_verification_unavailable",
-                "Claim listing abstains until claims manifests are parsed",
-            ),
-            CommandEffect::degraded_unavailable(
-                "claim show",
-                "claim_verification_unavailable",
-                "Claim inspection abstains until claims manifests are parsed",
-            ),
-            CommandEffect::degraded_unavailable(
-                "claim verify",
-                "claim_verification_unavailable",
-                "Claim verification abstains until real evidence artifacts exist",
             ),
             CommandEffect::degraded_unavailable(
                 "daemon",

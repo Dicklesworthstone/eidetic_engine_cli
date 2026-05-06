@@ -1064,6 +1064,15 @@ impl JsonBuilder {
         self
     }
 
+    pub fn field_i32(&mut self, key: &str, value: i32) -> &mut Self {
+        self.separator();
+        self.buffer.push('"');
+        self.buffer.push_str(key);
+        self.buffer.push_str("\":");
+        self.buffer.push_str(&value.to_string());
+        self
+    }
+
     pub fn field_object<F>(&mut self, key: &str, build: F) -> &mut Self
     where
         F: FnOnce(&mut JsonBuilder),
@@ -6743,6 +6752,12 @@ pub fn render_claim_list_json(report: &ClaimListReport) -> String {
             d.field_str("title", &claim.title);
             d.field_str("status", claim.status.as_str());
             d.field_str("frequency", claim.frequency.as_str());
+            if let Some(ref owner) = claim.owner {
+                d.field_str("owner", owner);
+            }
+            if let Some(ref ttl) = claim.ttl {
+                d.field_str("ttl", ttl);
+            }
             d.field_u32("evidenceCount", claim.evidence_count as u32);
             d.field_u32("demoCount", claim.demo_count as u32);
         });
@@ -6799,9 +6814,34 @@ pub fn render_claim_show_json(report: &ClaimShowReport) -> String {
                 d.field_str("description", &claim.description);
                 d.field_str("status", claim.status.as_str());
                 d.field_str("frequency", claim.frequency.as_str());
+                if let Some(ref owner) = claim.owner {
+                    d.field_str("owner", owner);
+                }
+                if let Some(ref ttl) = claim.ttl {
+                    d.field_str("ttl", ttl);
+                }
                 if let Some(ref pid) = claim.policy_id {
                     d.field_str("policyId", pid);
                 }
+                let evidence_ids = claim
+                    .evidence_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                d.field_array_of_strs("evidenceIds", &evidence_ids);
+                d.field_array_of_objects("evidence", &claim.evidence, |d, evidence| {
+                    d.field_str("kind", &evidence.kind);
+                    d.field_str("target", &evidence.target);
+                    if let Some(ref expected_hash) = evidence.expected_hash {
+                        d.field_str("expectedHash", expected_hash);
+                    }
+                    if let Some(expected_exit) = evidence.expected_exit {
+                        d.field_i32("expectedExit", expected_exit);
+                    }
+                    if let Some(ref expected_status) = evidence.expected_status {
+                        d.field_str("expectedStatus", expected_status);
+                    }
+                });
             });
         }
         if report.include_manifest {
@@ -6867,6 +6907,9 @@ pub fn render_claim_verify_json(report: &ClaimVerifyReport) -> String {
             d.field_u32("artifactsChecked", result.artifacts_checked as u32);
             d.field_u32("artifactsPassed", result.artifacts_passed as u32);
             d.field_u32("artifactsFailed", result.artifacts_failed as u32);
+            d.field_u32("evidenceChecked", result.evidence_checked as u32);
+            d.field_u32("evidencePassed", result.evidence_passed as u32);
+            d.field_u32("evidenceFailed", result.evidence_failed as u32);
             if !result.errors.is_empty() {
                 let errors = result.errors.iter().map(String::as_str).collect::<Vec<_>>();
                 d.field_array_of_strs("errors", &errors);

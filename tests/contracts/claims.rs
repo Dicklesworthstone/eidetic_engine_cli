@@ -157,6 +157,54 @@ fn write_real_claim_fixture(
     })
 }
 
+#[derive(Debug)]
+struct EvidenceClaimFixture {
+    workspace: PathBuf,
+    file_claim_id: String,
+}
+
+fn write_evidence_claim_fixture(label: &str, ttl: &str) -> Result<EvidenceClaimFixture, String> {
+    let workspace = unique_claim_workspace(label)?;
+    let ee_dir = workspace.join(".ee");
+    fs::create_dir_all(&ee_dir).map_err(|error| format!("failed to create .ee dir: {error}"))?;
+    let evidence_dir = workspace.join("evidence");
+    fs::create_dir_all(&evidence_dir)
+        .map_err(|error| format!("failed to create evidence dir: {error}"))?;
+
+    let file_claim_id = ClaimId::from_uuid(id_uuid(0x5000)).to_string();
+    let command_claim_id = ClaimId::from_uuid(id_uuid(0x5001)).to_string();
+    let memory_claim_id = ClaimId::from_uuid(id_uuid(0x5002)).to_string();
+    let rule_claim_id = ClaimId::from_uuid(id_uuid(0x5003)).to_string();
+    let payload = b"claim evidence payload\n";
+    fs::write(evidence_dir.join("payload.txt"), payload)
+        .map_err(|error| format!("failed to write payload evidence: {error}"))?;
+    let payload_hash = blake3::hash(payload).to_hex().to_string();
+
+    fs::write(
+        ee_dir.join("memories.jsonl"),
+        "{\"id\":\"memory-release-check\",\"body\":\"Run release checks\"}\n",
+    )
+    .map_err(|error| format!("failed to write memory store: {error}"))?;
+    fs::write(
+        ee_dir.join("rules.jsonl"),
+        "{\"id\":\"rule-release-check\",\"status\":\"active\"}\n",
+    )
+    .map_err(|error| format!("failed to write rule store: {error}"))?;
+
+    fs::write(
+        ee_dir.join("claims.yaml"),
+        format!(
+            "schema: ee.claims_file.v1\nversion: 1\nclaims:\n  - claim_id: {file_claim_id}\n    statement: File hash claim\n    status: unverified\n    owner: qa\n    ttl: \"{ttl}\"\n    evidence:\n      kind: file-hash\n      target: evidence/payload.txt\n      expected_hash: {payload_hash}\n  - claim_id: {command_claim_id}\n    statement: Command exits successfully\n    status: unverified\n    owner: qa\n    ttl: \"{ttl}\"\n    evidence:\n      kind: command-exit\n      target: rustc --version\n      expected_exit: 0\n  - claim_id: {memory_claim_id}\n    statement: Memory exists\n    status: unverified\n    owner: qa\n    ttl: \"{ttl}\"\n    evidence:\n      kind: memory-presence\n      target: memory-release-check\n  - claim_id: {rule_claim_id}\n    statement: Rule is active\n    status: unverified\n    owner: qa\n    ttl: \"{ttl}\"\n    evidence:\n      kind: rule-status\n      target: rule-release-check\n      expected_status: active\n"
+        ),
+    )
+    .map_err(|error| format!("failed to write .ee/claims.yaml: {error}"))?;
+
+    Ok(EvidenceClaimFixture {
+        workspace,
+        file_claim_id,
+    })
+}
+
 fn verified_claim_report() -> ClaimVerifyReport {
     ClaimVerifyReport {
         schema: CLAIM_VERIFY_SCHEMA_V1,
@@ -175,6 +223,9 @@ fn verified_claim_report() -> ClaimVerifyReport {
             artifacts_checked: 3,
             artifacts_passed: 3,
             artifacts_failed: 0,
+            evidence_checked: 3,
+            evidence_passed: 3,
+            evidence_failed: 0,
             errors: Vec::new(),
         }],
     }
@@ -198,6 +249,9 @@ fn regressed_claim_report() -> ClaimVerifyReport {
             artifacts_checked: 3,
             artifacts_passed: 1,
             artifacts_failed: 2,
+            evidence_checked: 3,
+            evidence_passed: 1,
+            evidence_failed: 2,
             errors: vec![
                 "artifact_not_found: artifacts/stdout.json".to_string(),
                 "stale_payload_hash: artifacts/benchmark.json".to_string(),
@@ -322,6 +376,119 @@ fn gate14_core_claim_reports_parse_and_verify_real_manifest_hashes() -> TestResu
     ensure(result.artifacts_passed == 1, "artifact passed count")?;
     ensure(result.artifacts_failed == 0, "artifact failed count")?;
     ensure(result.errors.is_empty(), "passing claim has no errors")
+}
+
+#[test]
+fn gate14_core_claim_verify_supports_claims_yaml_evidence_kinds() -> TestResult {
+    let fixture = write_evidence_claim_fixture("core_evidence_kinds", "2999-01-01T00:00:00Z")?;
+
+    let list = build_claim_list_report(&ClaimListOptions {
+        workspace_path: fixture.workspace.clone(),
+        status: Some("unverified".to_string()),
+        ..Default::default()
+    })
+    .map_err(|error| error.to_string())?;
+    ensure(list.claims_file_exists, ".ee/claims.yaml should exist")?;
+    ensure(list.total_count == 4, "four executable claims are parsed")?;
+    ensure(list.filtered_count == 4, "status filter handles unverified")?;
+    ensure(
+        list.claims
+            .iter()
+            .all(|claim| claim.owner.as_deref() == Some("qa")),
+        "claim owner comes from claims.yaml",
+    )?;
+
+    let show = build_claim_show_report(&ClaimShowOptions {
+        workspace_path: fixture.workspace.clone(),
+        claim_id: fixture.file_claim_id.clone(),
+        ..Default::default()
+    })
+    .map_err(|error| error.to_string())?;
+    let claim = show
+        .claim
+        .as_ref()
+        .ok_or_else(|| "claim details should exist".to_string())?;
+    ensure(claim.evidence.len() == 1, "claim show includes evidence")?;
+    ensure(
+        claim.evidence[0].kind == "file-hash",
+        "evidence kind is parsed",
+    )?;
+
+    let verify = build_claim_verify_report(&ClaimVerifyOptions {
+        workspace_path: fixture.workspace,
+        claim_id: "all".to_string(),
+        fail_fast: false,
+        ..Default::default()
+    })
+    .map_err(|error| error.to_string())?;
+    ensure(verify.verified_count == 4, "all evidence kinds verify")?;
+    ensure(verify.failed_count == 0, "no evidence claims fail")?;
+    ensure(verify.results.len() == 4, "one result per claim")?;
+    ensure(
+        verify
+            .results
+            .iter()
+            .all(|result| result.evidence_checked == 1 && result.evidence_passed == 1),
+        "each claim checked one evidence entry",
+    )
+}
+
+#[test]
+fn gate14_core_claim_verify_reports_file_hash_tampering() -> TestResult {
+    let fixture = write_evidence_claim_fixture("core_evidence_tamper", "2999-01-01T00:00:00Z")?;
+    fs::write(
+        fixture.workspace.join("evidence").join("payload.txt"),
+        b"tampered\n",
+    )
+    .map_err(|error| format!("failed to tamper evidence payload: {error}"))?;
+
+    let verify = build_claim_verify_report(&ClaimVerifyOptions {
+        workspace_path: fixture.workspace,
+        claim_id: "all".to_string(),
+        fail_fast: false,
+        ..Default::default()
+    })
+    .map_err(|error| error.to_string())?;
+    ensure(verify.verified_count == 3, "untampered claims still pass")?;
+    ensure(verify.failed_count == 1, "tampered file hash fails")?;
+    ensure(
+        verify
+            .results
+            .iter()
+            .flat_map(|result| result.errors.iter())
+            .any(|error| error.contains("hash_mismatch")),
+        "hash mismatch is reported",
+    )
+}
+
+#[test]
+fn gate14_core_claim_verify_reports_expired_claim_ttl() -> TestResult {
+    let fixture = write_evidence_claim_fixture("core_evidence_expired", "2000-01-01T00:00:00Z")?;
+
+    let verify = build_claim_verify_report(&ClaimVerifyOptions {
+        workspace_path: fixture.workspace,
+        claim_id: "all".to_string(),
+        fail_fast: true,
+        ..Default::default()
+    })
+    .map_err(|error| error.to_string())?;
+    ensure(verify.verified_count == 0, "expired claim does not verify")?;
+    ensure(verify.failed_count == 1, "expired claim fails")?;
+    let result = verify
+        .results
+        .first()
+        .ok_or_else(|| "expired claim result should exist".to_string())?;
+    ensure(
+        result.status == ManifestVerificationStatus::Expired,
+        "expired status is reported",
+    )?;
+    ensure(
+        result
+            .errors
+            .iter()
+            .any(|error| error.contains("claim_expired")),
+        "expired claim reason is reported",
+    )
 }
 
 #[test]

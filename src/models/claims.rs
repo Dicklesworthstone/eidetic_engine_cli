@@ -25,6 +25,10 @@ pub const MANIFEST_ARTIFACT_SCHEMA_V1: &str = "ee.manifest_artifact.v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClaimStatus {
+    Unverified,
+    Valid,
+    Invalid,
+    Expired,
     Draft,
     Active,
     Verified,
@@ -37,6 +41,10 @@ impl ClaimStatus {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Unverified => "unverified",
+            Self::Valid => "valid",
+            Self::Invalid => "invalid",
+            Self::Expired => "expired",
             Self::Draft => "draft",
             Self::Active => "active",
             Self::Verified => "verified",
@@ -47,8 +55,12 @@ impl ClaimStatus {
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 6] {
+    pub const fn all() -> [Self; 10] {
         [
+            Self::Unverified,
+            Self::Valid,
+            Self::Invalid,
+            Self::Expired,
             Self::Draft,
             Self::Active,
             Self::Verified,
@@ -81,6 +93,10 @@ impl std::str::FromStr for ClaimStatus {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "unverified" => Ok(Self::Unverified),
+            "valid" => Ok(Self::Valid),
+            "invalid" => Ok(Self::Invalid),
+            "expired" => Ok(Self::Expired),
             "draft" => Ok(Self::Draft),
             "active" => Ok(Self::Active),
             "verified" => Ok(Self::Verified),
@@ -307,6 +323,7 @@ pub enum ManifestVerificationStatus {
     Passing,
     Failing,
     Stale,
+    Expired,
     Incomplete,
 }
 
@@ -318,17 +335,19 @@ impl ManifestVerificationStatus {
             Self::Passing => "passing",
             Self::Failing => "failing",
             Self::Stale => "stale",
+            Self::Expired => "expired",
             Self::Incomplete => "incomplete",
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 5] {
+    pub const fn all() -> [Self; 6] {
         [
             Self::Unverified,
             Self::Passing,
             Self::Failing,
             Self::Stale,
+            Self::Expired,
             Self::Incomplete,
         ]
     }
@@ -360,6 +379,7 @@ impl std::str::FromStr for ManifestVerificationStatus {
             "passing" => Ok(Self::Passing),
             "failing" => Ok(Self::Failing),
             "stale" => Ok(Self::Stale),
+            "expired" => Ok(Self::Expired),
             "incomplete" => Ok(Self::Incomplete),
             other => Err(ParseManifestVerificationStatusError(other.to_owned())),
         }
