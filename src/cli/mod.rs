@@ -1118,6 +1118,24 @@ pub struct DiagIntegrityArgs {
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum GraphCommand {
+    /// Compute PageRank scores over the memory-link graph.
+    Pagerank(GraphAlgorithmArgs),
+    /// Compute betweenness centrality over the memory-link graph.
+    Betweenness(GraphAlgorithmArgs),
+    /// Compute HITS hub and authority scores over the memory-link graph.
+    Hits(GraphAlgorithmArgs),
+    /// Compute Louvain communities over the undirected memory-link graph.
+    Louvain(GraphLouvainArgs),
+    /// Compute deterministic label-propagation communities.
+    Communities(GraphAlgorithmArgs),
+    /// Compute the k-core of the undirected memory-link graph.
+    KCore(GraphKCoreArgs),
+    /// List articulation points in the undirected memory-link graph.
+    Articulation(GraphAlgorithmArgs),
+    /// Find the shortest memory-link path between two memories.
+    Path(GraphPathArgs),
+    /// Explain direct and path-based graph evidence between two memories.
+    ExplainLink(GraphExplainLinkArgs),
     /// Export a graph snapshot as a deterministic artifact.
     Export(GraphExportArgs),
     /// Refresh centrality metrics (PageRank, betweenness) for memory graph.
@@ -1126,6 +1144,150 @@ pub enum GraphCommand {
     FeatureEnrichment(GraphFeatureEnrichmentArgs),
     /// Show the deterministic memory-link neighborhood for a memory.
     Neighborhood(GraphNeighborhoodArgs),
+}
+
+/// Shared arguments for read-only graph algorithms.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct GraphAlgorithmArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Minimum link weight to include (0.0 - 1.0).
+    #[arg(long, value_name = "WEIGHT")]
+    pub min_weight: Option<f32>,
+
+    /// Minimum link confidence to include (0.0 - 1.0).
+    #[arg(long, value_name = "CONFIDENCE")]
+    pub min_confidence: Option<f32>,
+
+    /// Maximum number of links to process.
+    #[arg(long, value_name = "COUNT")]
+    pub link_limit: Option<u32>,
+
+    /// Maximum number of rows, nodes, or communities to emit.
+    #[arg(long, value_name = "COUNT")]
+    pub limit: Option<usize>,
+}
+
+/// Arguments for `ee graph louvain`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct GraphLouvainArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Minimum link weight to include (0.0 - 1.0).
+    #[arg(long, value_name = "WEIGHT")]
+    pub min_weight: Option<f32>,
+
+    /// Minimum link confidence to include (0.0 - 1.0).
+    #[arg(long, value_name = "CONFIDENCE")]
+    pub min_confidence: Option<f32>,
+
+    /// Maximum number of links to process.
+    #[arg(long, value_name = "COUNT")]
+    pub link_limit: Option<u32>,
+
+    /// Maximum number of communities to emit.
+    #[arg(long, value_name = "COUNT")]
+    pub limit: Option<usize>,
+
+    /// Louvain modularity resolution.
+    #[arg(long, default_value_t = 1.0)]
+    pub resolution: f64,
+
+    /// Louvain modularity improvement threshold.
+    #[arg(long, default_value_t = 1.0e-7)]
+    pub threshold: f64,
+
+    /// Stop after this many Louvain levels.
+    #[arg(long = "max-level", value_name = "COUNT")]
+    pub max_level: Option<usize>,
+
+    /// Deterministic Louvain seed.
+    #[arg(long, value_name = "SEED")]
+    pub seed: Option<u64>,
+}
+
+/// Arguments for `ee graph k-core`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct GraphKCoreArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Minimum link weight to include (0.0 - 1.0).
+    #[arg(long, value_name = "WEIGHT")]
+    pub min_weight: Option<f32>,
+
+    /// Minimum link confidence to include (0.0 - 1.0).
+    #[arg(long, value_name = "CONFIDENCE")]
+    pub min_confidence: Option<f32>,
+
+    /// Maximum number of links to process.
+    #[arg(long, value_name = "COUNT")]
+    pub link_limit: Option<u32>,
+
+    /// Core number to extract. Defaults to the main core.
+    #[arg(long, value_name = "K")]
+    pub k: Option<usize>,
+}
+
+/// Arguments for `ee graph path`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct GraphPathArgs {
+    /// Source memory ID.
+    #[arg(value_name = "SRC_MEMORY_ID")]
+    pub src_memory_id: String,
+
+    /// Destination memory ID.
+    #[arg(value_name = "DST_MEMORY_ID")]
+    pub dst_memory_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Minimum link weight to include (0.0 - 1.0).
+    #[arg(long, value_name = "WEIGHT")]
+    pub min_weight: Option<f32>,
+
+    /// Minimum link confidence to include (0.0 - 1.0).
+    #[arg(long, value_name = "CONFIDENCE")]
+    pub min_confidence: Option<f32>,
+
+    /// Maximum number of links to process.
+    #[arg(long, value_name = "COUNT")]
+    pub link_limit: Option<u32>,
+}
+
+/// Arguments for `ee graph explain-link`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct GraphExplainLinkArgs {
+    /// Source memory ID.
+    #[arg(value_name = "SRC_MEMORY_ID")]
+    pub src_memory_id: String,
+
+    /// Destination memory ID.
+    #[arg(value_name = "DST_MEMORY_ID")]
+    pub dst_memory_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Minimum link weight to include (0.0 - 1.0).
+    #[arg(long, value_name = "WEIGHT")]
+    pub min_weight: Option<f32>,
+
+    /// Minimum link confidence to include (0.0 - 1.0).
+    #[arg(long, value_name = "CONFIDENCE")]
+    pub min_confidence: Option<f32>,
+
+    /// Maximum number of links to process.
+    #[arg(long, value_name = "COUNT")]
+    pub link_limit: Option<u32>,
 }
 
 /// Arguments for `ee graph export`.
@@ -5023,6 +5185,33 @@ where
         }
         Some(Command::Learn(LearnCommand::Summary(ref args))) => {
             handle_learn_summary(&cli, args, stdout, stderr)
+        }
+        Some(Command::Graph(GraphCommand::Pagerank(ref args))) => {
+            handle_graph_pagerank(&cli, args, stdout, stderr)
+        }
+        Some(Command::Graph(GraphCommand::Betweenness(ref args))) => {
+            handle_graph_betweenness(&cli, args, stdout, stderr)
+        }
+        Some(Command::Graph(GraphCommand::Hits(ref args))) => {
+            handle_graph_hits(&cli, args, stdout, stderr)
+        }
+        Some(Command::Graph(GraphCommand::Louvain(ref args))) => {
+            handle_graph_louvain(&cli, args, stdout, stderr)
+        }
+        Some(Command::Graph(GraphCommand::Communities(ref args))) => {
+            handle_graph_communities(&cli, args, stdout, stderr)
+        }
+        Some(Command::Graph(GraphCommand::KCore(ref args))) => {
+            handle_graph_k_core(&cli, args, stdout, stderr)
+        }
+        Some(Command::Graph(GraphCommand::Articulation(ref args))) => {
+            handle_graph_articulation(&cli, args, stdout, stderr)
+        }
+        Some(Command::Graph(GraphCommand::Path(ref args))) => {
+            handle_graph_path(&cli, args, stdout, stderr)
+        }
+        Some(Command::Graph(GraphCommand::ExplainLink(ref args))) => {
+            handle_graph_explain_link(&cli, args, stdout, stderr)
         }
         Some(Command::Graph(GraphCommand::Export(ref args))) => {
             handle_graph_export(&cli, args, stdout, stderr)
@@ -9532,6 +9721,940 @@ where
     let _ = writeln!(stderr, "error: {DIAG_QUARANTINE_UNAVAILABLE_MESSAGE}");
     let _ = writeln!(stderr, "\nNext:\n  {DIAG_QUARANTINE_UNAVAILABLE_REPAIR}");
     ProcessExitCode::UnsatisfiedDegradedMode
+}
+
+const GRAPH_ALGORITHM_SCHEMA_V1: &str = "ee.graph.algorithm.v1";
+
+#[derive(Clone, Copy)]
+struct GraphReadOptions<'a> {
+    database: Option<&'a Path>,
+    min_weight: Option<f32>,
+    min_confidence: Option<f32>,
+    link_limit: Option<u32>,
+    limit: Option<usize>,
+}
+
+impl<'a> From<&'a GraphAlgorithmArgs> for GraphReadOptions<'a> {
+    fn from(args: &'a GraphAlgorithmArgs) -> Self {
+        Self {
+            database: args.database.as_deref(),
+            min_weight: args.min_weight,
+            min_confidence: args.min_confidence,
+            link_limit: args.link_limit,
+            limit: args.limit,
+        }
+    }
+}
+
+impl<'a> From<&'a GraphLouvainArgs> for GraphReadOptions<'a> {
+    fn from(args: &'a GraphLouvainArgs) -> Self {
+        Self {
+            database: args.database.as_deref(),
+            min_weight: args.min_weight,
+            min_confidence: args.min_confidence,
+            link_limit: args.link_limit,
+            limit: args.limit,
+        }
+    }
+}
+
+impl<'a> From<&'a GraphKCoreArgs> for GraphReadOptions<'a> {
+    fn from(args: &'a GraphKCoreArgs) -> Self {
+        Self {
+            database: args.database.as_deref(),
+            min_weight: args.min_weight,
+            min_confidence: args.min_confidence,
+            link_limit: args.link_limit,
+            limit: None,
+        }
+    }
+}
+
+impl<'a> From<&'a GraphPathArgs> for GraphReadOptions<'a> {
+    fn from(args: &'a GraphPathArgs) -> Self {
+        Self {
+            database: args.database.as_deref(),
+            min_weight: args.min_weight,
+            min_confidence: args.min_confidence,
+            link_limit: args.link_limit,
+            limit: None,
+        }
+    }
+}
+
+impl<'a> From<&'a GraphExplainLinkArgs> for GraphReadOptions<'a> {
+    fn from(args: &'a GraphExplainLinkArgs) -> Self {
+        Self {
+            database: args.database.as_deref(),
+            min_weight: args.min_weight,
+            min_confidence: args.min_confidence,
+            link_limit: args.link_limit,
+            limit: None,
+        }
+    }
+}
+
+fn handle_graph_pagerank<W, E>(
+    cli: &Cli,
+    args: &GraphAlgorithmArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match validate_graph_read_options(GraphReadOptions::from(args)) {
+        Ok(()) => {}
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+
+    #[cfg(feature = "graph")]
+    {
+        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+            Ok(input) => {
+                let result = fnx_algorithms::pagerank_directed(&input.directed);
+                let data = graph_metric_data(
+                    "graph pagerank",
+                    &input,
+                    serde_json::json!({
+                        "scores": graph_scores_json(&result.scores, args.limit),
+                        "witness": graph_witness_json(&result.witness),
+                    }),
+                );
+                write_graph_surface_data(cli, stdout, data)
+            }
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    }
+
+    #[cfg(not(feature = "graph"))]
+    {
+        let _ = stderr;
+        write_graph_surface_data(cli, stdout, graph_feature_disabled_data("graph pagerank"))
+    }
+}
+
+fn handle_graph_betweenness<W, E>(
+    cli: &Cli,
+    args: &GraphAlgorithmArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match validate_graph_read_options(GraphReadOptions::from(args)) {
+        Ok(()) => {}
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+
+    #[cfg(feature = "graph")]
+    {
+        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+            Ok(input) => {
+                let result = fnx_algorithms::betweenness_centrality_directed(&input.directed);
+                let data = graph_metric_data(
+                    "graph betweenness",
+                    &input,
+                    serde_json::json!({
+                        "scores": graph_scores_json(&result.scores, args.limit),
+                        "witness": graph_witness_json(&result.witness),
+                    }),
+                );
+                write_graph_surface_data(cli, stdout, data)
+            }
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    }
+
+    #[cfg(not(feature = "graph"))]
+    {
+        let _ = stderr;
+        write_graph_surface_data(
+            cli,
+            stdout,
+            graph_feature_disabled_data("graph betweenness"),
+        )
+    }
+}
+
+fn handle_graph_hits<W, E>(
+    cli: &Cli,
+    args: &GraphAlgorithmArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match validate_graph_read_options(GraphReadOptions::from(args)) {
+        Ok(()) => {}
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+
+    #[cfg(feature = "graph")]
+    {
+        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+            Ok(input) => {
+                let result = fnx_algorithms::hits_centrality_directed(&input.directed);
+                let data = graph_metric_data(
+                    "graph hits",
+                    &input,
+                    serde_json::json!({
+                        "hubs": graph_scores_json(&result.hubs, args.limit),
+                        "authorities": graph_scores_json(&result.authorities, args.limit),
+                        "witness": graph_witness_json(&result.witness),
+                    }),
+                );
+                write_graph_surface_data(cli, stdout, data)
+            }
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    }
+
+    #[cfg(not(feature = "graph"))]
+    {
+        let _ = stderr;
+        write_graph_surface_data(cli, stdout, graph_feature_disabled_data("graph hits"))
+    }
+}
+
+fn handle_graph_louvain<W, E>(
+    cli: &Cli,
+    args: &GraphLouvainArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match validate_graph_read_options(GraphReadOptions::from(args))
+        .and_then(|()| validate_graph_louvain_args(args))
+    {
+        Ok(()) => {}
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+
+    #[cfg(feature = "graph")]
+    {
+        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+            Ok(input) => {
+                let communities = fnx_algorithms::louvain_communities(
+                    &input.undirected,
+                    args.resolution,
+                    "weight",
+                    args.threshold,
+                    args.max_level,
+                    args.seed,
+                );
+                let data = graph_communities_data("graph louvain", &input, communities, args.limit);
+                write_graph_surface_data(cli, stdout, data)
+            }
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    }
+
+    #[cfg(not(feature = "graph"))]
+    {
+        let _ = stderr;
+        write_graph_surface_data(cli, stdout, graph_feature_disabled_data("graph louvain"))
+    }
+}
+
+fn handle_graph_communities<W, E>(
+    cli: &Cli,
+    args: &GraphAlgorithmArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match validate_graph_read_options(GraphReadOptions::from(args)) {
+        Ok(()) => {}
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+
+    #[cfg(feature = "graph")]
+    {
+        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+            Ok(input) => {
+                let communities = fnx_algorithms::label_propagation_communities(&input.undirected);
+                let data =
+                    graph_communities_data("graph communities", &input, communities, args.limit);
+                write_graph_surface_data(cli, stdout, data)
+            }
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    }
+
+    #[cfg(not(feature = "graph"))]
+    {
+        let _ = stderr;
+        write_graph_surface_data(
+            cli,
+            stdout,
+            graph_feature_disabled_data("graph communities"),
+        )
+    }
+}
+
+fn handle_graph_k_core<W, E>(
+    cli: &Cli,
+    args: &GraphKCoreArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match validate_graph_read_options(GraphReadOptions::from(args)) {
+        Ok(()) => {}
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+
+    #[cfg(feature = "graph")]
+    {
+        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+            Ok(input) => {
+                let result = fnx_algorithms::k_core(&input.undirected, args.k);
+                let data = graph_metric_data(
+                    "graph k-core",
+                    &input,
+                    serde_json::json!({
+                        "k": args.k,
+                        "nodes": result.nodes,
+                        "edges": result.edges.iter().map(|(left, right)| {
+                            serde_json::json!({"left": left, "right": right})
+                        }).collect::<Vec<_>>(),
+                        "witness": graph_witness_json(&result.witness),
+                    }),
+                );
+                write_graph_surface_data(cli, stdout, data)
+            }
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    }
+
+    #[cfg(not(feature = "graph"))]
+    {
+        let _ = stderr;
+        write_graph_surface_data(cli, stdout, graph_feature_disabled_data("graph k-core"))
+    }
+}
+
+fn handle_graph_articulation<W, E>(
+    cli: &Cli,
+    args: &GraphAlgorithmArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match validate_graph_read_options(GraphReadOptions::from(args)) {
+        Ok(()) => {}
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+
+    #[cfg(feature = "graph")]
+    {
+        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+            Ok(input) => {
+                let result = fnx_algorithms::articulation_points(&input.undirected);
+                let data = graph_metric_data(
+                    "graph articulation",
+                    &input,
+                    serde_json::json!({
+                        "articulationPoints": result.nodes,
+                        "witness": graph_witness_json(&result.witness),
+                    }),
+                );
+                write_graph_surface_data(cli, stdout, data)
+            }
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    }
+
+    #[cfg(not(feature = "graph"))]
+    {
+        let _ = stderr;
+        write_graph_surface_data(
+            cli,
+            stdout,
+            graph_feature_disabled_data("graph articulation"),
+        )
+    }
+}
+
+fn handle_graph_path<W, E>(
+    cli: &Cli,
+    args: &GraphPathArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match validate_graph_read_options(GraphReadOptions::from(args))
+        .and_then(|()| validate_graph_memory_pair(&args.src_memory_id, &args.dst_memory_id))
+    {
+        Ok(()) => {}
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+
+    #[cfg(feature = "graph")]
+    {
+        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+            Ok(input) => {
+                let result = fnx_algorithms::shortest_path_unweighted_directed(
+                    &input.directed,
+                    &args.src_memory_id,
+                    &args.dst_memory_id,
+                );
+                let path_length = result
+                    .path
+                    .as_ref()
+                    .map(|path| path.len().saturating_sub(1));
+                let status = if result.path.is_some() {
+                    "path_found"
+                } else {
+                    "no_path"
+                };
+                let data = graph_metric_data_with_status(
+                    "graph path",
+                    status,
+                    &input,
+                    serde_json::json!({
+                        "srcMemoryId": args.src_memory_id,
+                        "dstMemoryId": args.dst_memory_id,
+                        "path": result.path,
+                        "pathLength": path_length,
+                        "witness": graph_witness_json(&result.witness),
+                    }),
+                );
+                write_graph_surface_data(cli, stdout, data)
+            }
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    }
+
+    #[cfg(not(feature = "graph"))]
+    {
+        let _ = stderr;
+        write_graph_surface_data(cli, stdout, graph_feature_disabled_data("graph path"))
+    }
+}
+
+fn handle_graph_explain_link<W, E>(
+    cli: &Cli,
+    args: &GraphExplainLinkArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match validate_graph_read_options(GraphReadOptions::from(args))
+        .and_then(|()| validate_graph_memory_pair(&args.src_memory_id, &args.dst_memory_id))
+    {
+        Ok(()) => {}
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+
+    #[cfg(feature = "graph")]
+    {
+        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+            Ok(input) => {
+                let result = fnx_algorithms::shortest_path_unweighted_directed(
+                    &input.directed,
+                    &args.src_memory_id,
+                    &args.dst_memory_id,
+                );
+                let direct_links =
+                    graph_direct_link_json(&input.links, &args.src_memory_id, &args.dst_memory_id);
+                let status = if !direct_links.is_empty() {
+                    "direct_link_found"
+                } else if result.path.is_some() {
+                    "path_found"
+                } else {
+                    "no_link_path"
+                };
+                let data = graph_metric_data_with_status(
+                    "graph explain-link",
+                    status,
+                    &input,
+                    serde_json::json!({
+                        "srcMemoryId": args.src_memory_id,
+                        "dstMemoryId": args.dst_memory_id,
+                        "directLinks": direct_links,
+                        "path": result.path,
+                        "pathLength": result.path.as_ref().map(|path| path.len().saturating_sub(1)),
+                        "witness": graph_witness_json(&result.witness),
+                    }),
+                );
+                write_graph_surface_data(cli, stdout, data)
+            }
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    }
+
+    #[cfg(not(feature = "graph"))]
+    {
+        let _ = stderr;
+        write_graph_surface_data(
+            cli,
+            stdout,
+            graph_feature_disabled_data("graph explain-link"),
+        )
+    }
+}
+
+fn validate_graph_read_options(options: GraphReadOptions<'_>) -> Result<(), DomainError> {
+    let _ = options.database;
+    let _ = options.link_limit;
+    if matches!(options.limit, Some(0)) {
+        return Err(DomainError::Usage {
+            message: "--limit must be greater than zero".to_string(),
+            repair: Some("Omit --limit or pass a positive value.".to_string()),
+        });
+    }
+    validate_graph_threshold(options.min_weight, "--min-weight")?;
+    validate_graph_threshold(options.min_confidence, "--min-confidence")
+}
+
+fn validate_graph_threshold(value: Option<f32>, name: &'static str) -> Result<(), DomainError> {
+    if value.is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value)) {
+        Err(DomainError::Usage {
+            message: format!("{name} must be a finite value in [0.0, 1.0]"),
+            repair: Some(format!("Use a value like 0.5 or omit {name}.")),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_graph_louvain_args(args: &GraphLouvainArgs) -> Result<(), DomainError> {
+    if !args.resolution.is_finite() || args.resolution <= 0.0 {
+        return Err(DomainError::Usage {
+            message: "--resolution must be a finite positive value".to_string(),
+            repair: Some("Use a value like 1.0.".to_string()),
+        });
+    }
+    if !args.threshold.is_finite() || args.threshold < 0.0 {
+        return Err(DomainError::Usage {
+            message: "--threshold must be a finite non-negative value".to_string(),
+            repair: Some("Use a value like 1e-7.".to_string()),
+        });
+    }
+    if matches!(args.max_level, Some(0)) {
+        return Err(DomainError::Usage {
+            message: "--max-level must be greater than zero".to_string(),
+            repair: Some("Omit --max-level or pass a positive value.".to_string()),
+        });
+    }
+    Ok(())
+}
+
+fn validate_graph_memory_pair(src_memory_id: &str, dst_memory_id: &str) -> Result<(), DomainError> {
+    if src_memory_id.trim().is_empty() || dst_memory_id.trim().is_empty() {
+        return Err(DomainError::Usage {
+            message: "source and destination memory IDs must be non-empty".to_string(),
+            repair: Some(
+                "Pass two memory IDs, for example `ee graph path mem_a mem_b`.".to_string(),
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "graph")]
+struct GraphAlgorithmInput {
+    directed: fnx_classes::digraph::DiGraph,
+    undirected: fnx_classes::Graph,
+    links: Vec<crate::db::StoredMemoryLink>,
+}
+
+#[cfg(feature = "graph")]
+impl GraphAlgorithmInput {
+    fn node_count(&self) -> usize {
+        self.directed.node_count()
+    }
+
+    fn edge_count(&self) -> usize {
+        self.directed.edge_count()
+    }
+}
+
+#[cfg(feature = "graph")]
+fn graph_algorithm_input(
+    cli: &Cli,
+    options: GraphReadOptions<'_>,
+) -> Result<GraphAlgorithmInput, DomainError> {
+    use fnx_classes::{AttrMap, Graph, digraph::DiGraph};
+    use fnx_runtime::CgseValue;
+
+    let database_path = graph_database_path(cli, options.database)?;
+    let conn = crate::db::DbConnection::open_file(&database_path).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: None,
+        }
+    })?;
+    let links = conn
+        .list_all_memory_links(options.link_limit)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query memory links: {error}"),
+            repair: Some("ee doctor --json".to_string()),
+        })?
+        .into_iter()
+        .filter(|link| graph_link_matches_read_options(link, options))
+        .collect::<Vec<_>>();
+
+    let mut directed = DiGraph::strict();
+    let mut undirected = Graph::strict();
+    for link in &links {
+        let attrs = graph_link_attrs(link);
+        directed
+            .add_edge_with_attrs(
+                link.src_memory_id.clone(),
+                link.dst_memory_id.clone(),
+                attrs.clone(),
+            )
+            .map_err(|error| DomainError::Graph {
+                message: format!("Failed to build directed graph projection: {error}"),
+                repair: Some("Validate memory link rows with `ee doctor --json`.".to_string()),
+            })?;
+        if !link.directed {
+            directed
+                .add_edge_with_attrs(
+                    link.dst_memory_id.clone(),
+                    link.src_memory_id.clone(),
+                    attrs.clone(),
+                )
+                .map_err(|error| DomainError::Graph {
+                    message: format!("Failed to build reciprocal graph projection: {error}"),
+                    repair: Some("Validate memory link rows with `ee doctor --json`.".to_string()),
+                })?;
+        }
+        undirected
+            .add_edge_with_attrs(
+                link.src_memory_id.clone(),
+                link.dst_memory_id.clone(),
+                attrs,
+            )
+            .map_err(|error| DomainError::Graph {
+                message: format!("Failed to build undirected graph projection: {error}"),
+                repair: Some("Validate memory link rows with `ee doctor --json`.".to_string()),
+            })?;
+    }
+
+    fn graph_link_attrs(link: &crate::db::StoredMemoryLink) -> AttrMap {
+        let mut attrs = AttrMap::new();
+        attrs.insert(
+            "weight".to_string(),
+            CgseValue::Float(f64::from(link.weight)),
+        );
+        attrs.insert(
+            "confidence".to_string(),
+            CgseValue::Float(f64::from(link.confidence)),
+        );
+        attrs.insert(
+            "relation".to_string(),
+            CgseValue::String(link.relation.clone()),
+        );
+        attrs.insert("source".to_string(), CgseValue::String(link.source.clone()));
+        attrs.insert(
+            "evidence_count".to_string(),
+            CgseValue::Int(i64::from(link.evidence_count)),
+        );
+        attrs
+    }
+
+    Ok(GraphAlgorithmInput {
+        directed,
+        undirected,
+        links,
+    })
+}
+
+#[cfg(feature = "graph")]
+fn graph_database_path(
+    cli: &Cli,
+    explicit_database: Option<&Path>,
+) -> Result<PathBuf, DomainError> {
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = explicit_database
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        });
+    }
+    Ok(database_path)
+}
+
+#[cfg(feature = "graph")]
+fn graph_link_matches_read_options(
+    link: &crate::db::StoredMemoryLink,
+    options: GraphReadOptions<'_>,
+) -> bool {
+    options
+        .min_weight
+        .is_none_or(|min_weight| link.weight >= min_weight)
+        && options
+            .min_confidence
+            .is_none_or(|min_confidence| link.confidence >= min_confidence)
+}
+
+#[cfg(feature = "graph")]
+fn graph_metric_data(
+    command: &'static str,
+    input: &GraphAlgorithmInput,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    graph_metric_data_with_status(command, "computed", input, extra)
+}
+
+#[cfg(feature = "graph")]
+fn graph_metric_data_with_status(
+    command: &'static str,
+    status: &'static str,
+    input: &GraphAlgorithmInput,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut data = serde_json::json!({
+        "schema": GRAPH_ALGORITHM_SCHEMA_V1,
+        "command": command,
+        "version": env!("CARGO_PKG_VERSION"),
+        "status": status,
+        "graph": {
+            "nodeCount": input.node_count(),
+            "edgeCount": input.edge_count(),
+            "sourceLinkCount": input.links.len(),
+        },
+    });
+    if let (Some(object), Some(extra)) = (data.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra {
+            object.insert(key.clone(), value.clone());
+        }
+    }
+    data
+}
+
+#[cfg(feature = "graph")]
+fn graph_communities_data(
+    command: &'static str,
+    input: &GraphAlgorithmInput,
+    communities: Vec<Vec<String>>,
+    limit: Option<usize>,
+) -> serde_json::Value {
+    let total = communities.len();
+    let limited = limit.is_some_and(|limit| communities.len() > limit);
+    let communities = if let Some(limit) = limit {
+        communities.into_iter().take(limit).collect::<Vec<_>>()
+    } else {
+        communities
+    };
+    graph_metric_data(
+        command,
+        input,
+        serde_json::json!({
+            "communityCount": total,
+            "limited": limited,
+            "communities": communities
+                .into_iter()
+                .enumerate()
+                .map(|(index, nodes)| {
+                    serde_json::json!({
+                        "communityId": format!("community_{:04}", index + 1),
+                        "size": nodes.len(),
+                        "nodes": nodes,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        }),
+    )
+}
+
+#[cfg(feature = "graph")]
+fn graph_scores_json(
+    scores: &[fnx_algorithms::CentralityScore],
+    limit: Option<usize>,
+) -> Vec<serde_json::Value> {
+    let mut ordered = scores.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.node.cmp(&right.node))
+    });
+    if let Some(limit) = limit {
+        ordered.truncate(limit);
+    }
+    ordered
+        .into_iter()
+        .enumerate()
+        .map(|(index, score)| {
+            serde_json::json!({
+                "rank": index + 1,
+                "memoryId": score.node,
+                "score": graph_score_json_value(score.score),
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "graph")]
+fn graph_witness_json(witness: &fnx_algorithms::ComplexityWitness) -> serde_json::Value {
+    serde_json::json!({
+        "algorithm": witness.algorithm,
+        "complexityClaim": witness.complexity_claim,
+        "nodesTouched": witness.nodes_touched,
+        "edgesScanned": witness.edges_scanned,
+        "queuePeak": witness.queue_peak,
+    })
+}
+
+#[cfg(feature = "graph")]
+fn graph_direct_link_json(
+    links: &[crate::db::StoredMemoryLink],
+    src_memory_id: &str,
+    dst_memory_id: &str,
+) -> Vec<serde_json::Value> {
+    links
+        .iter()
+        .filter(|link| {
+            (link.src_memory_id == src_memory_id && link.dst_memory_id == dst_memory_id)
+                || (link.src_memory_id == dst_memory_id && link.dst_memory_id == src_memory_id)
+        })
+        .map(|link| {
+            serde_json::json!({
+                "linkId": link.id,
+                "srcMemoryId": link.src_memory_id,
+                "dstMemoryId": link.dst_memory_id,
+                "relation": link.relation,
+                "directed": link.directed,
+                "weight": score_json_value(link.weight),
+                "confidence": score_json_value(link.confidence),
+                "evidenceCount": link.evidence_count,
+                "source": link.source,
+                "createdAt": link.created_at,
+                "lastReinforcedAt": link.last_reinforced_at,
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "graph"))]
+fn graph_feature_disabled_data(command: &'static str) -> serde_json::Value {
+    serde_json::json!({
+        "schema": GRAPH_ALGORITHM_SCHEMA_V1,
+        "command": command,
+        "version": env!("CARGO_PKG_VERSION"),
+        "status": "graph_feature_disabled",
+        "graph": {
+            "nodeCount": 0,
+            "edgeCount": 0,
+            "sourceLinkCount": 0,
+        },
+        "degraded": [{
+            "code": "graph_feature_disabled",
+            "severity": "medium",
+            "message": "Graph algorithm execution requires the optional graph feature.",
+            "repair": "Build or run ee with --features graph."
+        }]
+    })
+}
+
+fn write_graph_surface_data<W>(
+    cli: &Cli,
+    stdout: &mut W,
+    data: serde_json::Value,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &graph_surface_human_output(&data))
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(graph_surface_toon_output(&data) + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": data,
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn graph_surface_human_output(data: &serde_json::Value) -> String {
+    let command = data["command"].as_str().unwrap_or("graph");
+    let status = data["status"].as_str().unwrap_or("unknown");
+    let node_count = data["graph"]["nodeCount"].as_u64().unwrap_or(0);
+    let edge_count = data["graph"]["edgeCount"].as_u64().unwrap_or(0);
+    let mut output =
+        format!("{command}: {status}\n\n  Nodes: {node_count}\n  Edges: {edge_count}\n");
+    if let Some(scores) = data["scores"].as_array() {
+        output.push_str("\nTop scores:\n");
+        for score in scores.iter().take(5) {
+            output.push_str(&format!(
+                "  {}. {} {}\n",
+                score["rank"].as_u64().unwrap_or(0),
+                score["memoryId"].as_str().unwrap_or("-"),
+                score["score"].as_f64().unwrap_or(0.0)
+            ));
+        }
+    }
+    if let Some(communities) = data["communities"].as_array() {
+        output.push_str(&format!("\nCommunities: {}\n", communities.len()));
+    }
+    if let Some(path) = data["path"].as_array() {
+        output.push_str(&format!("\nPath: {}\n", path.len()));
+    }
+    if let Some(degraded) = data["degraded"].as_array() {
+        for entry in degraded {
+            output.push_str(&format!(
+                "\nDegraded: {}\nNext: {}\n",
+                entry["message"]
+                    .as_str()
+                    .unwrap_or("graph command degraded"),
+                entry["repair"]
+                    .as_str()
+                    .unwrap_or("rerun with graph support")
+            ));
+        }
+    }
+    output
+}
+
+fn graph_surface_toon_output(data: &serde_json::Value) -> String {
+    format!(
+        "schema: {}\nsuccess: true\ndata:\n  command: {}\n  status: {}\n  nodeCount: {}\n  edgeCount: {}",
+        crate::models::RESPONSE_SCHEMA_V1,
+        data["command"].as_str().unwrap_or("graph"),
+        data["status"].as_str().unwrap_or("unknown"),
+        data["graph"]["nodeCount"].as_u64().unwrap_or(0),
+        data["graph"]["edgeCount"].as_u64().unwrap_or(0),
+    )
 }
 
 fn handle_graph_centrality_refresh<W, E>(
@@ -15801,6 +16924,15 @@ const ECONOMY_SUBCOMMANDS: &[&str] = &["report", "score", "simulate", "prune-pla
 const EVAL_SUBCOMMANDS: &[&str] = &["run", "list"];
 const FOCUS_SUBCOMMANDS: &[&str] = &["show", "set", "add", "remove", "clear", "explain"];
 const GRAPH_SUBCOMMANDS: &[&str] = &[
+    "pagerank",
+    "betweenness",
+    "hits",
+    "louvain",
+    "communities",
+    "k-core",
+    "articulation",
+    "path",
+    "explain-link",
     "export",
     "centrality-refresh",
     "feature-enrichment",
@@ -15998,6 +17130,15 @@ impl NormalizedInvocation {
                     InstallCommand::Plan(_) => "install plan".to_string(),
                 },
                 Command::Graph(graph) => match graph {
+                    GraphCommand::Pagerank(_) => "graph pagerank".to_string(),
+                    GraphCommand::Betweenness(_) => "graph betweenness".to_string(),
+                    GraphCommand::Hits(_) => "graph hits".to_string(),
+                    GraphCommand::Louvain(_) => "graph louvain".to_string(),
+                    GraphCommand::Communities(_) => "graph communities".to_string(),
+                    GraphCommand::KCore(_) => "graph k-core".to_string(),
+                    GraphCommand::Articulation(_) => "graph articulation".to_string(),
+                    GraphCommand::Path(_) => "graph path".to_string(),
+                    GraphCommand::ExplainLink(_) => "graph explain-link".to_string(),
                     GraphCommand::Export(_) => "graph export".to_string(),
                     GraphCommand::CentralityRefresh(_) => "graph centrality-refresh".to_string(),
                     GraphCommand::FeatureEnrichment(_) => "graph feature-enrichment".to_string(),
@@ -17941,6 +19082,109 @@ mod tests {
                 ensure(args.snapshot_id.is_none(), "snapshot id defaults empty")
             }
             other => Err(format!("expected graph export command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_graph_algorithm_surface() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "graph",
+            "hits",
+            "--min-weight",
+            "0.25",
+            "--min-confidence",
+            "0.5",
+            "--link-limit",
+            "64",
+            "--limit",
+            "8",
+        ])
+        .map(|cli| cli.command)
+        .map_err(|error| format!("failed to parse graph hits: {:?}", error.kind()))?;
+
+        match parsed {
+            Some(Command::Graph(GraphCommand::Hits(args))) => {
+                ensure_equal(&args.min_weight, &Some(0.25_f32), "min weight")?;
+                ensure_equal(&args.min_confidence, &Some(0.5_f32), "min confidence")?;
+                ensure_equal(&args.link_limit, &Some(64_u32), "link limit")?;
+                ensure_equal(&args.limit, &Some(8_usize), "limit")
+            }
+            other => Err(format!("expected graph hits command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_graph_path_and_explain_link() -> TestResult {
+        let path = Cli::try_parse_from(["ee", "graph", "path", "mem_src", "mem_dst"])
+            .map(|cli| cli.command)
+            .map_err(|error| format!("failed to parse graph path: {:?}", error.kind()))?;
+        match path {
+            Some(Command::Graph(GraphCommand::Path(args))) => {
+                ensure_equal(&args.src_memory_id, &"mem_src".to_string(), "path src")?;
+                ensure_equal(&args.dst_memory_id, &"mem_dst".to_string(), "path dst")?;
+            }
+            other => return Err(format!("expected graph path command, got {other:?}")),
+        }
+
+        let explain = Cli::try_parse_from([
+            "ee",
+            "graph",
+            "explain-link",
+            "mem_src",
+            "mem_dst",
+            "--min-confidence",
+            "0.3",
+        ])
+        .map(|cli| cli.command)
+        .map_err(|error| format!("failed to parse graph explain-link: {:?}", error.kind()))?;
+        match explain {
+            Some(Command::Graph(GraphCommand::ExplainLink(args))) => {
+                ensure_equal(&args.src_memory_id, &"mem_src".to_string(), "explain src")?;
+                ensure_equal(&args.dst_memory_id, &"mem_dst".to_string(), "explain dst")?;
+                ensure_equal(&args.min_confidence, &Some(0.3_f32), "min confidence")
+            }
+            other => Err(format!(
+                "expected graph explain-link command, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_graph_louvain_and_k_core() -> TestResult {
+        let louvain = Cli::try_parse_from([
+            "ee",
+            "graph",
+            "louvain",
+            "--resolution",
+            "0.8",
+            "--threshold",
+            "0.0001",
+            "--max-level",
+            "2",
+            "--seed",
+            "7",
+        ])
+        .map(|cli| cli.command)
+        .map_err(|error| format!("failed to parse graph louvain: {:?}", error.kind()))?;
+        match louvain {
+            Some(Command::Graph(GraphCommand::Louvain(args))) => {
+                ensure_equal(&args.resolution, &0.8_f64, "resolution")?;
+                ensure_equal(&args.threshold, &0.0001_f64, "threshold")?;
+                ensure_equal(&args.max_level, &Some(2_usize), "max level")?;
+                ensure_equal(&args.seed, &Some(7_u64), "seed")?;
+            }
+            other => return Err(format!("expected graph louvain command, got {other:?}")),
+        }
+
+        let k_core = Cli::try_parse_from(["ee", "graph", "k-core", "--k", "3"])
+            .map(|cli| cli.command)
+            .map_err(|error| format!("failed to parse graph k-core: {:?}", error.kind()))?;
+        match k_core {
+            Some(Command::Graph(GraphCommand::KCore(args))) => {
+                ensure_equal(&args.k, &Some(3_usize), "k")
+            }
+            other => Err(format!("expected graph k-core command, got {other:?}")),
         }
     }
 
