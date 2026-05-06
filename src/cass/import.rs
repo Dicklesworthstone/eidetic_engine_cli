@@ -7,10 +7,12 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use blake3;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Value as JsonValue, json};
+use sqlmodel_core::IsolationLevel;
 use uuid::Uuid;
 
 use super::{
@@ -362,46 +364,49 @@ pub fn import_cass_sessions(
                 continue;
             }
 
-            let session_id = stable_session_id(&session.source_path);
-            let index_job_id = stable_search_index_job_id(&workspace_id, &session_id);
             let spans = if options.include_spans {
                 view_session_spans(client, &session.source_path)?
             } else {
                 Vec::new()
             };
 
-            connection.with_transaction(|| {
-                connection.insert_session(&session_id, &session_input(&workspace_id, &session))?;
-                for span in &spans {
-                    connection.insert_evidence_span(
-                        &stable_evidence_id(&session_id, &span.cass_span_id),
-                        &evidence_input(&workspace_id, &session_id, span),
-                    )?;
+            match persist_session_import_if_absent(&connection, &workspace_id, &session, &spans)? {
+                SessionImportPersistResult::Skipped { session_id } => {
+                    cursor.record_skipped();
+                    skipped = skipped.saturating_add(1);
+                    session_reports.push(ImportedCassSession {
+                        source_path: session.source_path,
+                        session_id: Some(session_id),
+                        index_job_id: None,
+                        status: ImportSessionStatus::Skipped,
+                        spans_imported: 0,
+                        message_count: session.message_count,
+                    });
+                    continue;
                 }
-                connection.insert_search_index_job(
-                    &index_job_id,
-                    &search_index_job_input(&workspace_id, &session_id),
-                )?;
-                Ok(())
-            })?;
+                SessionImportPersistResult::Imported {
+                    session_id,
+                    index_job_id,
+                } => {
+                    for span in &spans {
+                        cursor.record_span(&session.source_path, span.end_line);
+                    }
+                    let session_spans = saturating_len(spans.len());
+                    spans_imported = spans_imported.saturating_add(session_spans);
 
-            for span in &spans {
-                cursor.record_span(&session.source_path, span.end_line);
+                    cursor.record_imported(&session.source_path);
+                    imported = imported.saturating_add(1);
+                    index_jobs_queued = index_jobs_queued.saturating_add(1);
+                    session_reports.push(ImportedCassSession {
+                        source_path: session.source_path,
+                        session_id: Some(session_id),
+                        index_job_id: Some(index_job_id),
+                        status: ImportSessionStatus::Imported,
+                        spans_imported: session_spans,
+                        message_count: session.message_count,
+                    });
+                }
             }
-            let session_spans = saturating_len(spans.len());
-            spans_imported = spans_imported.saturating_add(session_spans);
-
-            cursor.record_imported(&session.source_path);
-            imported = imported.saturating_add(1);
-            index_jobs_queued = index_jobs_queued.saturating_add(1);
-            session_reports.push(ImportedCassSession {
-                source_path: session.source_path,
-                session_id: Some(session_id),
-                index_job_id: Some(index_job_id),
-                status: ImportSessionStatus::Imported,
-                spans_imported: session_spans,
-                message_count: session.message_count,
-            });
         }
         Ok(())
     })();
@@ -444,6 +449,150 @@ pub fn import_cass_sessions(
         status: "completed".to_string(),
         sessions: session_reports,
     })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SessionImportPersistResult {
+    Imported {
+        session_id: String,
+        index_job_id: String,
+    },
+    Skipped {
+        session_id: String,
+    },
+}
+
+fn persist_session_import_if_absent(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session: &CassSessionInfo,
+    spans: &[CassViewSpanForImport],
+) -> Result<SessionImportPersistResult, DbError> {
+    let session_id = stable_session_id(&session.source_path);
+    let index_job_id = stable_search_index_job_id(workspace_id, &session_id);
+
+    with_import_session_transaction(connection, || {
+        if let Some(existing) =
+            connection.get_session_by_cass_id(workspace_id, &session.source_path)?
+        {
+            return Ok(SessionImportPersistResult::Skipped {
+                session_id: existing.id,
+            });
+        }
+
+        connection.insert_session(&session_id, &session_input(workspace_id, session))?;
+        for span in spans {
+            connection.insert_evidence_span(
+                &stable_evidence_id(&session_id, &span.cass_span_id),
+                &evidence_input(workspace_id, &session_id, span),
+            )?;
+        }
+        connection.insert_search_index_job(
+            &index_job_id,
+            &search_index_job_input(workspace_id, &session_id),
+        )?;
+        Ok(SessionImportPersistResult::Imported {
+            session_id,
+            index_job_id,
+        })
+    })
+}
+
+fn with_import_session_transaction<T>(
+    connection: &DbConnection,
+    operation: impl FnOnce() -> Result<T, DbError>,
+) -> Result<T, DbError> {
+    begin_import_session_transaction(connection)?;
+    match operation() {
+        Ok(result) => match connection.commit() {
+            Ok(()) => Ok(result),
+            Err(error) => {
+                let _ = connection.rollback();
+                Err(error)
+            }
+        },
+        Err(error) => {
+            let _ = connection.rollback();
+            Err(error)
+        }
+    }
+}
+
+fn begin_import_session_transaction(connection: &DbConnection) -> Result<(), DbError> {
+    const MAX_ATTEMPTS: usize = 16;
+    let mut last_retryable_error = None;
+
+    for attempt in 0..MAX_ATTEMPTS {
+        match connection.begin_transaction(IsolationLevel::RepeatableRead) {
+            Ok(()) => return Ok(()),
+            Err(error) if import_session_transaction_error_is_retryable(&error) => {
+                last_retryable_error = Some(error);
+                if attempt + 1 < MAX_ATTEMPTS {
+                    std::thread::sleep(import_session_transaction_retry_delay(attempt));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    match last_retryable_error {
+        Some(error) => Err(error),
+        None => connection.begin_transaction(IsolationLevel::RepeatableRead),
+    }
+}
+
+fn import_session_transaction_error_is_retryable(error: &DbError) -> bool {
+    let DbError::SqlModel { source, .. } = error else {
+        return false;
+    };
+
+    match source.as_ref() {
+        sqlmodel_core::Error::Connection(connection) => {
+            matches!(
+                connection.kind,
+                sqlmodel_core::error::ConnectionErrorKind::Connect
+            ) && sqlite_contention_message_is_retryable(&connection.message)
+        }
+        sqlmodel_core::Error::Query(query) => match query.kind {
+            sqlmodel_core::error::QueryErrorKind::Deadlock
+            | sqlmodel_core::error::QueryErrorKind::Serialization => true,
+            sqlmodel_core::error::QueryErrorKind::Database => {
+                sqlite_contention_message_is_retryable(&query.message)
+            }
+            sqlmodel_core::error::QueryErrorKind::Syntax
+            | sqlmodel_core::error::QueryErrorKind::Constraint
+            | sqlmodel_core::error::QueryErrorKind::NotFound
+            | sqlmodel_core::error::QueryErrorKind::Permission
+            | sqlmodel_core::error::QueryErrorKind::DataTruncation
+            | sqlmodel_core::error::QueryErrorKind::Timeout
+            | sqlmodel_core::error::QueryErrorKind::Cancelled => false,
+        },
+        sqlmodel_core::Error::Type(_)
+        | sqlmodel_core::Error::Transaction(_)
+        | sqlmodel_core::Error::Protocol(_)
+        | sqlmodel_core::Error::Pool(_)
+        | sqlmodel_core::Error::Schema(_)
+        | sqlmodel_core::Error::Config(_)
+        | sqlmodel_core::Error::Validation(_)
+        | sqlmodel_core::Error::Io(_)
+        | sqlmodel_core::Error::Timeout
+        | sqlmodel_core::Error::Cancelled
+        | sqlmodel_core::Error::Serde(_)
+        | sqlmodel_core::Error::Custom(_) => false,
+    }
+}
+
+fn sqlite_contention_message_is_retryable(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("database is busy") || message.contains("snapshot conflict")
+}
+
+fn import_session_transaction_retry_delay(attempt: usize) -> Duration {
+    const BASE_DELAY_MS: u64 = 1;
+    const MAX_DELAY_MS: u64 = 50;
+
+    let multiplier = 1_u64 << attempt.min(6);
+    Duration::from_millis(BASE_DELAY_MS.saturating_mul(multiplier).min(MAX_DELAY_MS))
 }
 
 fn discover_sessions(
@@ -1149,6 +1298,8 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     #[cfg(unix)]
+    use std::sync::{Arc, Barrier};
+    #[cfg(unix)]
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -1552,6 +1703,88 @@ mod tests {
             &Some(session_id),
             "job document",
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_session_import_persistence_is_idempotent() -> TestResult {
+        let root = unique_test_dir("concurrent-session-import")?;
+        let workspace_path = root.join("workspace");
+        let database_path = root.join("ee.db");
+        let session_path = root.join("session.jsonl");
+        fs::create_dir_all(&workspace_path).map_err(|error| error.to_string())?;
+        fs::write(&session_path, "{}\n").map_err(|error| error.to_string())?;
+
+        let setup = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        setup.migrate().map_err(|error| error.to_string())?;
+        let workspace_id =
+            ensure_workspace(&setup, &workspace_path).map_err(|error| error.to_string())?;
+        setup.close().map_err(|error| error.to_string())?;
+
+        let barrier = Arc::new(Barrier::new(2));
+        let session_source_path = session_path.to_string_lossy().into_owned();
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let barrier = Arc::clone(&barrier);
+            let database_path = database_path.clone();
+            let workspace_id = workspace_id.clone();
+            let session_source_path = session_source_path.clone();
+            handles.push(std::thread::spawn(
+                move || -> Result<SessionImportPersistResult, String> {
+                    let connection = DbConnection::open_file(&database_path)
+                        .map_err(|error| error.to_string())?;
+                    let mut session = CassSessionInfo::new(session_source_path);
+                    session.message_count = Some(1);
+
+                    barrier.wait();
+                    let result =
+                        persist_session_import_if_absent(&connection, &workspace_id, &session, &[])
+                            .map_err(|error| error.to_string());
+                    let close_result = connection.close().map_err(|error| error.to_string());
+
+                    match (result, close_result) {
+                        (Ok(result), Ok(())) => Ok(result),
+                        (Err(error), _) | (_, Err(error)) => Err(error),
+                    }
+                },
+            ));
+        }
+
+        let mut imported = 0_u32;
+        let mut skipped = 0_u32;
+        for handle in handles {
+            match handle
+                .join()
+                .map_err(|_| "session import thread panicked".to_string())??
+            {
+                SessionImportPersistResult::Imported { .. } => {
+                    imported = imported.saturating_add(1);
+                }
+                SessionImportPersistResult::Skipped { .. } => {
+                    skipped = skipped.saturating_add(1);
+                }
+            }
+        }
+
+        ensure_equal(&imported, &1, "exactly one import wins")?;
+        ensure_equal(&skipped, &1, "exactly one import observes existing session")?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let stored = connection
+            .get_session_by_cass_id(&workspace_id, &session_source_path)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "stored session should exist".to_string())?;
+        let jobs = connection
+            .list_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &stored.cass_session_id.as_str(),
+            &session_source_path.as_str(),
+            "stored cass session id",
+        )?;
+        ensure_equal(&jobs.len(), &1, "one index job is queued")?;
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[cfg(unix)]
