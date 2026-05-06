@@ -142,6 +142,70 @@ fn status_supports_default_v1_and_explicit_v0_response_envelopes() -> TestResult
 }
 
 #[test]
+fn context_supports_explicit_v0_response_envelope() -> TestResult {
+    let workspace = tempfile::Builder::new()
+        .prefix("ee-schema-context-compat-")
+        .tempdir()
+        .map_err(|error| format!("failed to create schema compat workspace: {error}"))?;
+    let workspace_path = workspace.path();
+
+    run_json(workspace_path, &["--workspace", ".", "--json", "init"])?;
+    run_json(
+        workspace_path,
+        &[
+            "--workspace",
+            ".",
+            "--json",
+            "remember",
+            "Run cargo fmt before release.",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--tags",
+            "release,formatting",
+        ],
+    )?;
+    run_json(
+        workspace_path,
+        &["--workspace", ".", "--json", "index", "rebuild"],
+    )?;
+
+    let context = run_json(
+        workspace_path,
+        &[
+            "--workspace",
+            ".",
+            "--schema-version",
+            "v0",
+            "--json",
+            "context",
+            "format before release",
+            "--profile",
+            "compact",
+            "--candidate-pool",
+            "5",
+            "--max-tokens",
+            "512",
+        ],
+    )?;
+
+    ensure_string(&context, &["schema"], "ee.response.v0")?;
+    ensure_bool(&context, &["ok"], true)?;
+    if context.get("result").is_none() || context.get("data").is_some() {
+        return Err("context v0 response should use result and not data".to_string());
+    }
+    ensure_string(&context, &["result", "command"], "context")?;
+    ensure_string(
+        &context,
+        &["result", "request", "query"],
+        "format before release",
+    )?;
+
+    Ok(())
+}
+
+#[test]
 fn status_v0_golden_fixture_is_byte_stable_after_scrubbing() -> TestResult {
     let workspace = tempfile::Builder::new()
         .prefix("ee-schema-compat-golden-")

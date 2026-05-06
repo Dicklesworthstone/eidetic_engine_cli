@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
@@ -282,6 +284,11 @@ impl Cli {
     pub const fn has_shadow_tracking(&self) -> bool {
         self.shadow.is_active()
     }
+}
+
+thread_local! {
+    static ACTIVE_RESPONSE_SCHEMA_VERSION: Cell<output::ResponseSchemaVersion> =
+        const { Cell::new(output::ResponseSchemaVersion::V1) };
 }
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
@@ -4697,12 +4704,18 @@ where
     W: Write,
     E: Write,
 {
+    ACTIVE_RESPONSE_SCHEMA_VERSION.with(|version| {
+        version.set(output::ResponseSchemaVersion::V1);
+    });
     let args: Vec<OsString> = normalize_outcome_quarantine_args(args.into_iter().collect());
     let mut cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(error) => return write_parse_error(error, &args, stdout, stderr),
     };
     resolve_workspace_alias_global(&mut cli);
+    ACTIVE_RESPONSE_SCHEMA_VERSION.with(|version| {
+        version.set(cli.response_schema_version());
+    });
 
     if cli.schema {
         return write_stdout(stdout, &(output::schema_json() + "\n"));
@@ -6954,11 +6967,35 @@ where
     .to_string()
 }
 
+fn active_response_schema_stdout(text: &str) -> Cow<'_, str> {
+    ACTIVE_RESPONSE_SCHEMA_VERSION.with(|version| response_schema_stdout(text, version.get()))
+}
+
+fn response_schema_stdout(
+    text: &str,
+    schema_version: output::ResponseSchemaVersion,
+) -> Cow<'_, str> {
+    if matches!(schema_version, output::ResponseSchemaVersion::V1) {
+        return Cow::Borrowed(text);
+    }
+
+    let (body, has_newline) = match text.strip_suffix('\n') {
+        Some(body) => (body, true),
+        None => (text, false),
+    };
+    let mut converted = output::render_response_json_for_schema_version(body, schema_version);
+    if has_newline {
+        converted.push('\n');
+    }
+    Cow::Owned(converted)
+}
+
 fn write_stdout<W>(stdout: &mut W, text: &str) -> ProcessExitCode
 where
     W: Write,
 {
-    match stdout.write_all(text.as_bytes()) {
+    let output = active_response_schema_stdout(text);
+    match stdout.write_all(output.as_bytes()) {
         Ok(()) => ProcessExitCode::Success,
         Err(_) => ProcessExitCode::Usage,
     }
