@@ -8694,9 +8694,7 @@ fn audit_detail_hash(details: Option<&str>, keys: &[&str]) -> Option<String> {
 /// Generate a stable audit ID from timestamp and content hash (EE-070).
 #[must_use]
 pub fn generate_audit_id() -> String {
-    let now = Utc::now();
-    let nanos = now.timestamp_nanos_opt().unwrap_or(0);
-    format!("audit_{:026x}", nanos as u128)
+    format!("audit_{}", uuid::Uuid::now_v7().simple())
 }
 
 /// Input for audited memory creation (EE-070).
@@ -15732,9 +15730,25 @@ mod tests {
         let id2 = super::generate_audit_id();
 
         ensure(id1.starts_with("audit_"), "ID starts with audit_")?;
-        ensure_equal(&id1.len(), &32, "ID has correct length")?;
-        ensure(id1 != id2, "IDs are unique")?;
+        ensure_equal(&id1.len(), &38, "ID has correct length (audit_ + 32 hex UUID v7)")?;
+        ensure(id1 != id2, "IDs are unique even in tight loop")?;
 
+        Ok(())
+    }
+
+    #[test]
+    fn generate_audit_id_no_collisions_in_tight_loop() -> TestResult {
+        use std::collections::HashSet;
+
+        let mut ids = HashSet::new();
+        for _ in 0..1000 {
+            let id = super::generate_audit_id();
+            ensure(
+                ids.insert(id.clone()),
+                format!("audit ID collision detected: {id}"),
+            )?;
+        }
+        ensure_equal(&ids.len(), &1000, "all 1000 IDs are unique")?;
         Ok(())
     }
 
