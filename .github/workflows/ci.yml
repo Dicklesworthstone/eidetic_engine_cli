@@ -29,6 +29,11 @@ jobs:
       - name: Closure linter
         run: ./scripts/closure-lint.sh --json
 
+      - name: Vision coverage
+        run: |
+          git fetch origin main:refs/remotes/origin/main --depth=1
+          sh ./scripts/vision-coverage.sh --json --compare-ref origin/main
+
       - name: Format
         run: cargo fmt --check
 
