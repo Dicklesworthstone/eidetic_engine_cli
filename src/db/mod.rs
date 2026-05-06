@@ -197,6 +197,7 @@ fn lock_database_write_file(database_path: &Path) -> Result<File> {
     let lock_path = database_path.with_extension("write.lock");
     let lock_file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
