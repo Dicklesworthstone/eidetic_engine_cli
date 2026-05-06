@@ -13,10 +13,11 @@ set -eu
 #
 # Gates (in order):
 #   1. Forbidden Dependencies  - cargo tree audit for banned crates
-#   2. Unit/Contract/Golden    - cargo test --workspace --all-targets
-#   3. Basic E2E               - scripts/e2e_test.sh
-#   4. Advanced E2E            - scripts/e2e_advanced.sh
-#   5. Boundary Migration      - scripts/e2e_boundary_migration.sh
+#   2. Closure Linter          - prevent abstention-as-implementation closure
+#   3. Unit/Contract/Golden    - cargo test --workspace --all-targets
+#   4. Basic E2E               - scripts/e2e_test.sh
+#   5. Advanced E2E            - scripts/e2e_advanced.sh
+#   6. Boundary Migration      - scripts/e2e_boundary_migration.sh
 #
 # Exit codes match AGENTS.md conventions (0=success, 1=usage, 3=storage, etc.)
 # Artifacts are written to /tmp/ee-e2e-*/artifacts by E2E scripts.
@@ -68,16 +69,19 @@ run_stage() {
 # Gate 1: Check Forbidden Dependencies
 run_stage "Forbidden Dependencies" "./scripts/check-forbidden-deps.sh"
 
-# Gate 2: Core Cargo Tests (Contracts, Logic, Golden)
+# Gate 2: Closure Discipline
+run_stage "Closure Linter" "./scripts/closure-lint.sh --json"
+
+# Gate 3: Core Cargo Tests (Contracts, Logic, Golden)
 run_stage "Unit, Contract, and Golden Tests" "cargo test --workspace --all-targets"
 
-# Gate 3: Basic End-to-End
+# Gate 4: Basic End-to-End
 run_stage "Basic E2E Scripts" "./scripts/e2e_test.sh"
 
-# Gate 4: Advanced End-to-End
+# Gate 5: Advanced End-to-End
 run_stage "Advanced E2E Scripts" "./scripts/e2e_advanced.sh"
 
-# Gate 5: Boundary Migration
+# Gate 6: Boundary Migration
 run_stage "Boundary Migration Scripts" "./scripts/e2e_boundary_migration.sh"
 
 TOTAL_END=$(date +%s)

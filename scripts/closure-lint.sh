@@ -4,11 +4,13 @@
 # Enforces the honesty-only vs implements-surface bead taxonomy:
 # - implements-surface:* beads cannot close with abstention language
 # - implements-surface:* beads cannot close while *_UNAVAILABLE_CODE exists
+# - implements-surface:* beads must have a golden snapshot
 # - honesty-only beads must have a sibling implements-surface bead in open queue
 #
 # Usage:
-#   ./scripts/closure-lint.sh           # Lint all closed beads
-#   ./scripts/closure-lint.sh --json    # Output JSON report
+#   ./scripts/closure-lint.sh           # Lint relevant bead closures changed recently
+#   ./scripts/closure-lint.sh --audit   # Audit all relevant closed beads
+#   ./scripts/closure-lint.sh --json    # Also write JSON report
 #
 # Exit codes: 0=pass, 1=violations found
 
@@ -17,6 +19,7 @@ set -eu
 BEADS_FILE=".beads/issues.jsonl"
 CLI_MOD="src/cli/mod.rs"
 REPORT_FILE=".closure-lint-report.json"
+GOLDEN_DIR="tests/golden"
 
 # Abstention patterns that indicate stub/placeholder closures
 ABSTENTION_REGEX='abstain|unavailable|degraded|stub|placeholder|removed simulation|honest empty|conservative abstention'
@@ -31,9 +34,13 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
 fi
 
 JSON_OUTPUT=false
+AUDIT_MODE=false
+COMMITS="${CLOSURE_LINT_COMMITS:-1}"
 for arg in "$@"; do
     case "$arg" in
         --json) JSON_OUTPUT=true ;;
+        --audit) AUDIT_MODE=true ;;
+        --commits=*) COMMITS="${arg#--commits=}" ;;
     esac
 done
 
@@ -52,23 +59,141 @@ add_violation() {
     local reason="$4"
 
     VIOLATION_COUNT=$((VIOLATION_COUNT + 1))
+    local object
+    object=$(jq -cn \
+        --arg bead "$bead_id" \
+        --arg label "$label" \
+        --arg surface "$surface" \
+        --arg reason "$reason" \
+        '{bead:$bead,label:$label,surface:$surface,reason:$reason}')
+    VIOLATIONS="${VIOLATIONS}${object}
+"
+
     if [ "$JSON_OUTPUT" = true ]; then
-        VIOLATIONS="${VIOLATIONS}{\"bead\":\"$bead_id\",\"label\":\"$label\",\"surface\":\"$surface\",\"reason\":\"$reason\"},"
+        :
     else
-        echo "  ✗ $bead_id [$label] surface=$surface: $reason"
+        echo "  x $bead_id [$label] surface=$surface: $reason"
     fi
 }
 
-echo "=== Closure Linter ==="
-echo ""
+write_report() {
+    local status="$1"
+    if [ -n "$VIOLATIONS" ]; then
+        printf "%s" "$VIOLATIONS" |
+            jq -s --arg status "$status" '{violations:.,count:length,status:$status}' > "$REPORT_FILE"
+    else
+        jq -cn --arg status "$status" '{violations:[],count:0,status:$status}' > "$REPORT_FILE"
+    fi
+}
 
-# Get list of closed bead IDs with implements-surface or honesty-only labels
-BEAD_IDS=$(jq -r 'select(.status == "closed") | select(.labels != null) | select(.labels | any(test("implements-surface:|honesty-only"))) | .id' "$BEADS_FILE" 2>/dev/null || true)
+implementation_surfaces_for_bead() {
+    local bead_id="$1"
+    jq -r --arg bead_id "$bead_id" '
+        select(.id == $bead_id)
+        | [
+            ((.labels // [])[]? | select(startswith("implements-surface:")) | sub("^implements-surface:"; "")),
+            (try (.title | capture("\\[implements-surface:(?<surface>[^]]+)\\]").surface) catch empty)
+          ]
+        | unique[]
+    ' "$BEADS_FILE" 2>/dev/null || true
+}
+
+OPEN_SURFACES_JSON=$(
+    jq -sc '
+        [
+          .[]
+          | select(.status != "closed")
+          | (
+              ((.labels // [])[]? | select(startswith("implements-surface:")) | sub("^implements-surface:"; "")),
+              (try (.title | capture("\\[implements-surface:(?<surface>[^]]+)\\]").surface) catch empty)
+            )
+        ]
+        | unique
+    ' "$BEADS_FILE" 2>/dev/null || echo '[]'
+)
+
+honesty_surfaces_for_bead() {
+    local bead_id="$1"
+    jq -r --arg bead_id "$bead_id" --argjson open_surfaces "$OPEN_SURFACES_JSON" '
+        select(.id == $bead_id)
+        | . as $bead
+        | [
+            $open_surfaces[] as $surface
+            | select(
+                (($bead.labels // []) | index($surface))
+                or any(($bead.labels // [])[]?; . as $label | $surface | startswith($label + "-"))
+              )
+            | $surface
+          ]
+        | unique[]
+    ' "$BEADS_FILE" 2>/dev/null || true
+}
+
+if [ "$JSON_OUTPUT" != true ]; then
+    echo "=== Closure Linter ==="
+    echo ""
+fi
+
+relevant_closed_bead_ids() {
+    jq -r '
+        select(.status == "closed")
+        | select(
+            ((.labels // []) | index("honesty-only"))
+            or ((.labels // []) | any(startswith("implements-surface:")))
+            or ((.title // "") | test("\\[implements-surface:"))
+          )
+        | .id
+    ' "$BEADS_FILE" 2>/dev/null || true
+}
+
+recently_changed_bead_ids() {
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        relevant_closed_bead_ids
+        return
+    fi
+
+    base=$(git rev-parse "HEAD~$COMMITS" 2>/dev/null || git rev-list --max-parents=0 HEAD 2>/dev/null | tail -1 || true)
+    if [ -z "$base" ]; then
+        relevant_closed_bead_ids
+        return
+    fi
+
+    git diff --unified=0 "$base" -- "$BEADS_FILE" 2>/dev/null |
+        sed -n 's/^+{"id":"\([^"]*\)".*/\1/p' |
+        sort -u
+}
+
+if [ "$AUDIT_MODE" = true ]; then
+    BEAD_IDS=$(relevant_closed_bead_ids)
+else
+    CHANGED_IDS=$(recently_changed_bead_ids)
+    BEAD_IDS=""
+    for changed_id in $CHANGED_IDS; do
+        if jq -e --arg bead_id "$changed_id" '
+            select(.id == $bead_id)
+            | select(.status == "closed")
+            | select(
+                ((.labels // []) | index("honesty-only"))
+                or ((.labels // []) | any(startswith("implements-surface:")))
+                or ((.title // "") | test("\\[implements-surface:"))
+              )
+        ' "$BEADS_FILE" >/dev/null 2>&1; then
+            BEAD_IDS="${BEAD_IDS}${changed_id}
+"
+        fi
+    done
+fi
 
 if [ -z "$BEAD_IDS" ]; then
-    echo "No closed beads with implements-surface or honesty-only labels found."
+    if [ "$JSON_OUTPUT" != true ]; then
+        if [ "$AUDIT_MODE" = true ]; then
+            echo "No closed beads with implements-surface or honesty-only labels found."
+        else
+            echo "No recently changed closed beads with implements-surface or honesty-only labels found."
+        fi
+    fi
     if [ "$JSON_OUTPUT" = true ]; then
-        echo '{"violations":[],"count":0,"status":"pass"}' > "$REPORT_FILE"
+        write_report "pass"
     fi
     exit 0
 fi
@@ -81,60 +206,74 @@ for bead_id in $BEAD_IDS; do
 
     [ -z "$labels" ] && continue
 
-    # Check implements-surface beads
-    if echo "$labels" | grep -qE 'implements-surface:'; then
-        # Extract surface name
-        surface=$(echo "$labels" | tr ',' '\n' | grep -oE 'implements-surface:[a-zA-Z0-9_-]+' | sed 's/implements-surface://' | head -1)
-
+    implementation_surfaces=$(implementation_surfaces_for_bead "$bead_id")
+    if [ -n "$implementation_surfaces" ]; then
         # Rule 1: Check for abstention language in close_reason
         if echo "$close_reason" | grep -qiE "$ABSTENTION_REGEX"; then
-            add_violation "$bead_id" "implements-surface" "$surface" "close_reason contains abstention language"
+            for surface in $implementation_surfaces; do
+                add_violation "$bead_id" "implements-surface" "$surface" "close_reason contains abstention language"
+            done
         fi
 
-        # Rule 2: Check if UNAVAILABLE_CODE constant still exists
-        if [ -n "$surface" ] && [ -f "$CLI_MOD" ]; then
-            # Convert surface name to constant: eval -> EVAL_UNAVAILABLE_CODE
-            constant=$(echo "$surface" | tr '[:lower:]-' '[:upper:]_')_UNAVAILABLE_CODE
-            if grep -q "$constant" "$CLI_MOD" 2>/dev/null; then
-                add_violation "$bead_id" "implements-surface" "$surface" "${constant} still exists in src/cli/mod.rs"
+        for surface in $implementation_surfaces; do
+            # Rule 2: Check if UNAVAILABLE_CODE constant still exists
+            if [ -f "$CLI_MOD" ]; then
+                constant=$(echo "$surface" | tr '[:lower:]-' '[:upper:]_')_UNAVAILABLE_CODE
+                if grep -q "$constant" "$CLI_MOD" 2>/dev/null; then
+                    add_violation "$bead_id" "implements-surface" "$surface" "${constant} still exists in src/cli/mod.rs"
+                fi
             fi
-        fi
+
+            # Rule 3: Implements-surface closures need a public golden snapshot.
+            if [ ! -f "$GOLDEN_DIR/$surface.snap" ]; then
+                add_violation "$bead_id" "implements-surface" "$surface" "missing $GOLDEN_DIR/$surface.snap"
+            fi
+        done
     fi
 
     # Check honesty-only beads
     if echo "$labels" | grep -qE '\bhonesty-only\b'; then
-        # Try to extract surface from other labels (skip common non-surface labels)
-        surface=$(echo "$labels" | tr ',' '\n' | grep -vE '^(honesty-only|closure-linted|wave-[0-9]+|test-coverage-required|mechanical-boundary|unit-tests-required|logged-e2e-required|schema-golden-required)$' | head -1 || true)
-
-        # Rule 3: Check for sibling implements-surface bead in open queue
-        if [ -n "$surface" ]; then
-            sibling_exists=$(jq -r "select(.status != \"closed\") | select(.labels != null) | select(.labels | any(. == \"implements-surface:$surface\")) | .id" "$BEADS_FILE" 2>/dev/null | head -1 || true)
-            if [ -z "$sibling_exists" ]; then
-                # Only warn if we found a recognizable surface name
-                : # Skip warning for now since surface extraction from labels is imprecise
-            fi
+        honesty_surfaces=$(honesty_surfaces_for_bead "$bead_id")
+        if [ -z "$honesty_surfaces" ]; then
+            add_violation "$bead_id" "honesty-only" "unknown" "no open implements-surface sibling matches this bead's surface labels"
         fi
+
+        for surface in $honesty_surfaces; do
+            sibling_exists=$(jq -r --arg surface "$surface" '
+                select(.status != "closed")
+                | select(
+                    ((.labels // []) | index("implements-surface:" + $surface))
+                    or ((.title // "") | test("\\[implements-surface:" + $surface + "\\]"))
+                  )
+                | .id
+            ' "$BEADS_FILE" 2>/dev/null | head -1 || true)
+            if [ -z "$sibling_exists" ]; then
+                add_violation "$bead_id" "honesty-only" "$surface" "missing open implements-surface sibling"
+            fi
+        done
     fi
 done
 
 # Output results
 if [ "$VIOLATION_COUNT" -gt 0 ]; then
-    echo ""
-    echo "Found $VIOLATION_COUNT violation(s)"
+    if [ "$JSON_OUTPUT" != true ]; then
+        echo ""
+        echo "Found $VIOLATION_COUNT violation(s)"
+    fi
 
     if [ "$JSON_OUTPUT" = true ]; then
-        # Remove trailing comma and wrap in JSON
-        VIOLATIONS=$(echo "$VIOLATIONS" | sed 's/,$//')
-        echo "{\"violations\":[$VIOLATIONS],\"count\":$VIOLATION_COUNT,\"status\":\"fail\"}" > "$REPORT_FILE"
+        write_report "fail"
         echo "Report written to $REPORT_FILE"
     fi
 
     exit 1
 else
-    echo "No violations found."
+    if [ "$JSON_OUTPUT" != true ]; then
+        echo "No violations found."
+    fi
 
     if [ "$JSON_OUTPUT" = true ]; then
-        echo '{"violations":[],"count":0,"status":"pass"}' > "$REPORT_FILE"
+        write_report "pass"
     fi
 
     exit 0
