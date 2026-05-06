@@ -2797,6 +2797,45 @@ CREATE INDEX idx_curation_candidates_v030_ttl_policy
     "blake3:v030_rule_curation_candidates_2026_05_05",
 );
 
+/// V031: Persist learning observation ledger rows for active learning.
+pub const V031_LEARNING_OBSERVATIONS: Migration = Migration::new(
+    31,
+    "learning_observations",
+    r#"
+CREATE TABLE learning_observations (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'lobs_*' AND length(trim(id)) > 5),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    observation_kind TEXT NOT NULL CHECK (observation_kind IN (
+        'feedback_event', 'cass_import', 'curation_apply',
+        'experiment_observe', 'experiment_close'
+    )),
+    source_type TEXT NOT NULL CHECK (length(trim(source_type)) > 0),
+    source_id TEXT CHECK (source_id IS NULL OR length(trim(source_id)) > 0),
+    target_type TEXT NOT NULL CHECK (length(trim(target_type)) > 0),
+    target_id TEXT NOT NULL CHECK (length(trim(target_id)) > 0),
+    topic TEXT CHECK (topic IS NULL OR length(trim(topic)) > 0),
+    signal TEXT NOT NULL CHECK (signal IN (
+        'positive', 'negative', 'neutral', 'contradiction', 'confirmation',
+        'harmful', 'helpful', 'stale', 'inaccurate', 'outdated'
+    )),
+    evidence_json TEXT CHECK (evidence_json IS NULL OR json_valid(evidence_json)),
+    observed_at TEXT NOT NULL CHECK (length(trim(observed_at)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    UNIQUE (workspace_id, observation_kind, source_type, source_id, target_type, target_id)
+);
+CREATE INDEX idx_learning_observations_workspace
+    ON learning_observations(workspace_id, observed_at, id);
+CREATE INDEX idx_learning_observations_topic
+    ON learning_observations(workspace_id, topic, observed_at, id)
+    WHERE topic IS NOT NULL;
+CREATE INDEX idx_learning_observations_target
+    ON learning_observations(workspace_id, target_type, target_id, observed_at);
+CREATE INDEX idx_learning_observations_signal
+    ON learning_observations(workspace_id, signal, observed_at);
+"#,
+    "blake3:v031_learning_observations_2026_05_06",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -2829,6 +2868,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V028_ADVISORY_LOCKS,
     V029_MEMORY_WORKFLOW_ID,
     V030_RULE_CURATION_CANDIDATES,
+    V031_LEARNING_OBSERVATIONS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -4678,6 +4718,38 @@ pub struct StoredFeedbackEvent {
     pub created_at: String,
 }
 
+/// Input for creating a learning observation ledger row.
+#[derive(Debug, Clone)]
+pub struct CreateLearningObservationInput {
+    pub workspace_id: String,
+    pub observation_kind: String,
+    pub source_type: String,
+    pub source_id: Option<String>,
+    pub target_type: String,
+    pub target_id: String,
+    pub topic: Option<String>,
+    pub signal: String,
+    pub evidence_json: Option<String>,
+    pub observed_at: String,
+}
+
+/// A stored learning_observations row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredLearningObservation {
+    pub id: String,
+    pub workspace_id: String,
+    pub observation_kind: String,
+    pub source_type: String,
+    pub source_id: Option<String>,
+    pub target_type: String,
+    pub target_id: String,
+    pub topic: Option<String>,
+    pub signal: String,
+    pub evidence_json: Option<String>,
+    pub observed_at: String,
+    pub created_at: String,
+}
+
 /// Input for recording a quarantined harmful feedback event.
 #[derive(Debug, Clone)]
 pub struct CreateFeedbackQuarantineInput {
@@ -4773,6 +4845,64 @@ impl DbConnection {
         )?;
 
         Ok(())
+    }
+
+    /// Insert a learning observation ledger row idempotently.
+    pub fn insert_learning_observation(
+        &self,
+        id: &str,
+        input: &CreateLearningObservationInput,
+    ) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "INSERT OR IGNORE INTO learning_observations (id, workspace_id, observation_kind, source_type, source_id, target_type, target_id, topic, signal, evidence_json, observed_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.observation_kind.clone()),
+                Value::Text(input.source_type.clone()),
+                input
+                    .source_id
+                    .as_ref()
+                    .map_or(Value::Null, |source| Value::Text(source.clone())),
+                Value::Text(input.target_type.clone()),
+                Value::Text(input.target_id.clone()),
+                input
+                    .topic
+                    .as_ref()
+                    .map_or(Value::Null, |topic| Value::Text(topic.clone())),
+                Value::Text(input.signal.clone()),
+                input
+                    .evidence_json
+                    .as_ref()
+                    .map_or(Value::Null, |evidence| Value::Text(evidence.clone())),
+                Value::Text(input.observed_at.clone()),
+                Value::Text(now),
+            ],
+        )?;
+
+        Ok(affected > 0)
+    }
+
+    /// List learning observation rows for one workspace in deterministic order.
+    pub fn list_learning_observations(
+        &self,
+        workspace_id: &str,
+        topic: Option<&str>,
+    ) -> Result<Vec<StoredLearningObservation>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, observation_kind, source_type, source_id, target_type, target_id, topic, signal, evidence_json, observed_at, created_at FROM learning_observations WHERE workspace_id = ?1 AND (?2 IS NULL OR topic = ?2) ORDER BY observed_at ASC, id ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                topic.map_or(Value::Null, |value| Value::Text(value.to_string())),
+            ],
+        )?;
+
+        rows.iter()
+            .map(stored_learning_observation_from_row)
+            .collect()
     }
 
     /// Get a feedback event by its ID.
@@ -5362,6 +5492,24 @@ fn stored_feedback_event_from_row(row: &Row) -> Result<StoredFeedbackEvent> {
         session_id: optional_text(row, 10)?.map(str::to_string),
         applied_at: optional_text(row, 11)?.map(str::to_string),
         created_at: required_text(row, 12, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
+fn stored_learning_observation_from_row(row: &Row) -> Result<StoredLearningObservation> {
+    Ok(StoredLearningObservation {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        observation_kind: required_text(row, 2, DbOperation::Query, "observation_kind")?
+            .to_string(),
+        source_type: required_text(row, 3, DbOperation::Query, "source_type")?.to_string(),
+        source_id: optional_text(row, 4)?.map(str::to_string),
+        target_type: required_text(row, 5, DbOperation::Query, "target_type")?.to_string(),
+        target_id: required_text(row, 6, DbOperation::Query, "target_id")?.to_string(),
+        topic: optional_text(row, 7)?.map(str::to_string),
+        signal: required_text(row, 8, DbOperation::Query, "signal")?.to_string(),
+        evidence_json: optional_text(row, 9)?.map(str::to_string),
+        observed_at: required_text(row, 10, DbOperation::Query, "observed_at")?.to_string(),
+        created_at: required_text(row, 11, DbOperation::Query, "created_at")?.to_string(),
     })
 }
 

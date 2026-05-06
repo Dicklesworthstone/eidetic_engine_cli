@@ -12,6 +12,10 @@
       "priority": 88,
       "uncertainty": 0.74,
       "source": "procedure_drift_review",
+      "sample_ids": [
+        "fb_gate21_procedure",
+        "mem_gate21_procedure"
+      ],
       "status": "open",
       "created_at": "2026-01-02T02:00:00Z"
     },
@@ -22,6 +26,10 @@
       "priority": 73,
       "uncertainty": 0.61,
       "source": "budget_audit",
+      "sample_ids": [
+        "fb_gate21_economy",
+        "mem_gate21_budget"
+      ],
       "status": "open",
       "created_at": "2026-01-02T02:05:00Z"
     }

@@ -100,6 +100,10 @@ fn agenda_fixture() -> LearnAgendaReport {
                 priority: 88,
                 uncertainty: 0.74,
                 source: "procedure_drift_review".to_string(),
+                sample_ids: vec![
+                    "fb_gate21_procedure".to_string(),
+                    "mem_gate21_procedure".to_string(),
+                ],
                 status: "open".to_string(),
                 created_at: "2026-01-02T02:00:00Z".to_string(),
             },
@@ -110,6 +114,10 @@ fn agenda_fixture() -> LearnAgendaReport {
                 priority: 73,
                 uncertainty: 0.61,
                 source: "budget_audit".to_string(),
+                sample_ids: vec![
+                    "fb_gate21_economy".to_string(),
+                    "mem_gate21_budget".to_string(),
+                ],
                 status: "open".to_string(),
                 created_at: "2026-01-02T02:05:00Z".to_string(),
             },

@@ -3,13 +3,18 @@
 //! Provides agenda, uncertainty, and summary operations for identifying
 //! knowledge gaps and prioritizing learning opportunities.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::core::outcome::{OutcomeRecordOptions, OutcomeRecordReport, record_outcome};
-use crate::db::{CreateWorkspaceInput, DbConnection};
+use crate::db::{
+    CreateCurationCandidateInput, CreateLearningObservationInput, CreateWorkspaceInput,
+    DbConnection, StoredCurationCandidate, StoredFeedbackEvent, StoredLearningObservation,
+    StoredMemory,
+};
 use crate::models::{
     DomainError, ExperimentOutcome, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
     LearningObservation, LearningObservationSignal, LearningTargetKind, WorkspaceId,
@@ -39,20 +44,9 @@ pub const LEARN_CLOSE_SCHEMA_V1: &str = "ee.learn.close.v1";
 /// Schema for downstream learning feedback projections.
 pub const LEARN_DOWNSTREAM_EFFECTS_SCHEMA_V1: &str = "ee.learn.downstream_effects.v1";
 
-const LEARNING_RECORDS_UNAVAILABLE_MESSAGE: &str = "Learning agenda, uncertainty, summary, and experiment proposal records are unavailable until learn commands read persisted observation and evaluation ledgers instead of seed data.";
-const LEARNING_RECORDS_UNAVAILABLE_REPAIR: &str =
-    "ee learn observe <experiment-id> --dry-run --json";
-
 const EXPERIMENT_REGISTRY_UNAVAILABLE_MESSAGE: &str = "Experiment execution requires persisted experiment definitions from an evaluation registry. Hard-coded experiment templates have been removed to preserve deterministic explainable retrieval.";
 const EXPERIMENT_REGISTRY_UNAVAILABLE_REPAIR: &str =
     "Provide explicit input datasets or use skill workflows for experiment orchestration.";
-
-fn learning_records_unavailable() -> DomainError {
-    DomainError::UnsatisfiedDegradedMode {
-        message: LEARNING_RECORDS_UNAVAILABLE_MESSAGE.to_string(),
-        repair: Some(LEARNING_RECORDS_UNAVAILABLE_REPAIR.to_string()),
-    }
-}
 
 fn experiment_registry_unavailable() -> DomainError {
     DomainError::UnsatisfiedDegradedMode {
@@ -84,6 +78,7 @@ pub struct AgendaItem {
     pub priority: u8,
     pub uncertainty: f64,
     pub source: String,
+    pub sample_ids: Vec<String>,
     pub status: String,
     pub created_at: String,
 }
@@ -107,8 +102,57 @@ impl LearnAgendaReport {
 }
 
 /// Show the active learning agenda.
-pub fn show_agenda(_options: &LearnAgendaOptions) -> Result<LearnAgendaReport, DomainError> {
-    Err(learning_records_unavailable())
+pub fn show_agenda(options: &LearnAgendaOptions) -> Result<LearnAgendaReport, DomainError> {
+    let clusters = load_learning_clusters(&options.workspace, options.topic.as_deref())?;
+    let mut items = clusters
+        .iter()
+        .filter(|cluster| options.include_resolved || cluster.status() != "resolved")
+        .map(|cluster| cluster.agenda_item())
+        .collect::<Vec<_>>();
+
+    match options.sort.as_str() {
+        "uncertainty" => items.sort_by(|left, right| {
+            right
+                .uncertainty
+                .total_cmp(&left.uncertainty)
+                .then_with(|| right.priority.cmp(&left.priority))
+                .then_with(|| left.topic.cmp(&right.topic))
+                .then_with(|| left.id.cmp(&right.id))
+        }),
+        "recency" => items.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.priority.cmp(&left.priority))
+                .then_with(|| left.topic.cmp(&right.topic))
+                .then_with(|| left.id.cmp(&right.id))
+        }),
+        _ => items.sort_by(|left, right| {
+            right
+                .priority
+                .cmp(&left.priority)
+                .then_with(|| right.uncertainty.total_cmp(&left.uncertainty))
+                .then_with(|| left.topic.cmp(&right.topic))
+                .then_with(|| left.id.cmp(&right.id))
+        }),
+    }
+
+    let total_gaps = items.len() as u32;
+    let high_priority_count = items.iter().filter(|item| item.priority >= 70).count() as u32;
+    let resolved_count = items
+        .iter()
+        .filter(|item| item.status == "resolved")
+        .count() as u32;
+    items.truncate(options.limit as usize);
+
+    Ok(LearnAgendaReport {
+        schema: LEARN_AGENDA_SCHEMA_V1.to_string(),
+        items,
+        total_gaps,
+        high_priority_count,
+        resolved_count,
+        generated_at: stable_learning_generated_at(),
+    })
 }
 
 // ============================================================================
@@ -157,9 +201,38 @@ impl LearnUncertaintyReport {
 
 /// Show uncertainty estimates and sampling priorities.
 pub fn show_uncertainty(
-    _options: &LearnUncertaintyOptions,
+    options: &LearnUncertaintyOptions,
 ) -> Result<LearnUncertaintyReport, DomainError> {
-    Err(learning_records_unavailable())
+    let clusters = load_learning_clusters(&options.workspace, options.kind.as_deref())?;
+    let mut items = clusters
+        .iter()
+        .map(|cluster| cluster.uncertainty_item())
+        .filter(|item| item.uncertainty >= options.min_uncertainty)
+        .filter(|item| !options.low_confidence || item.confidence < 0.5)
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        right
+            .uncertainty
+            .total_cmp(&left.uncertainty)
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    let mean_uncertainty = if items.is_empty() {
+        0.0
+    } else {
+        rounded_metric(items.iter().map(|item| item.uncertainty).sum::<f64>() / items.len() as f64)
+    };
+    let high_uncertainty_count = items.iter().filter(|item| item.uncertainty >= 0.7).count() as u32;
+    let sampling_candidates = items.len() as u32;
+    items.truncate(options.limit as usize);
+
+    Ok(LearnUncertaintyReport {
+        schema: LEARN_UNCERTAINTY_SCHEMA_V1.to_string(),
+        items,
+        mean_uncertainty,
+        high_uncertainty_count,
+        sampling_candidates,
+        generated_at: stable_learning_generated_at(),
+    })
 }
 
 // ============================================================================
@@ -171,6 +244,7 @@ pub fn show_uncertainty(
 pub struct LearnSummaryOptions {
     pub workspace: PathBuf,
     pub period: String,
+    pub since: Option<String>,
     pub detailed: bool,
 }
 
@@ -185,6 +259,10 @@ pub struct LearningSummary {
     pub rules_validated: u32,
     pub gaps_identified: u32,
     pub gaps_resolved: u32,
+    pub observations_recorded: u32,
+    pub candidates_proposed: u32,
+    pub applied_rules: u32,
+    pub harmful_feedback_count: u32,
     pub net_knowledge_delta: i32,
 }
 
@@ -214,8 +292,114 @@ impl LearnSummaryReport {
 }
 
 /// Show learning summary for a period.
-pub fn show_summary(_options: &LearnSummaryOptions) -> Result<LearnSummaryReport, DomainError> {
-    Err(learning_records_unavailable())
+pub fn show_summary(options: &LearnSummaryOptions) -> Result<LearnSummaryReport, DomainError> {
+    let snapshot = load_learning_snapshot(&options.workspace)?;
+    let since = options.since.as_deref();
+    let events = snapshot
+        .feedback_events
+        .iter()
+        .filter(|event| since.is_none_or(|since| event.created_at.as_str() >= since))
+        .cloned()
+        .collect::<Vec<_>>();
+    let ledger_observation_count = snapshot
+        .learning_observations
+        .iter()
+        .filter(|observation| since.is_none_or(|since| observation.observed_at.as_str() >= since))
+        .count() as u32;
+    let clusters = build_learning_clusters(&snapshot, None, &events);
+    let harmful_feedback_count = events
+        .iter()
+        .filter(|event| is_negative_signal(&event.signal))
+        .count() as u32;
+    let memories_created = snapshot
+        .memories
+        .values()
+        .filter(|memory| since.is_none_or(|since| memory.created_at.as_str() >= since))
+        .count() as u32;
+    let candidates = snapshot
+        .curation_candidates
+        .iter()
+        .filter(|candidate| since.is_none_or(|since| candidate.created_at.as_str() >= since))
+        .collect::<Vec<_>>();
+    let candidates_proposed = candidates.len() as u32;
+    let applied_rules = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.candidate_type == "rule"
+                && (candidate.status == "applied" || candidate.applied_at.is_some())
+        })
+        .count() as u32;
+    let rules_validated = candidates
+        .iter()
+        .filter(|candidate| candidate.candidate_type == "rule" && candidate.status == "approved")
+        .count() as u32;
+    let rules_learned = candidates
+        .iter()
+        .filter(|candidate| candidate.candidate_type == "rule")
+        .count() as u32;
+    let gaps_identified = clusters.len() as u32;
+    let gaps_resolved = clusters
+        .iter()
+        .filter(|cluster| cluster.status() == "resolved")
+        .count() as u32;
+    let memories_promoted = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.signal.as_str(),
+                "positive" | "helpful" | "confirmation"
+            )
+        })
+        .count() as u32;
+    let memories_demoted = harmful_feedback_count;
+    let net_knowledge_delta = i32::try_from(memories_promoted + rules_learned + rules_validated)
+        .unwrap_or(i32::MAX)
+        - i32::try_from(memories_demoted).unwrap_or(i32::MAX);
+
+    let mut learning_events = Vec::new();
+    if options.detailed {
+        for event in events.iter().rev().take(10) {
+            learning_events.push(LearningEvent {
+                event_type: event.signal.clone(),
+                description: event
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| format!("Observed {} feedback.", event.signal)),
+                impact: feedback_impact(&event.signal).to_string(),
+                occurred_at: event.created_at.clone(),
+            });
+        }
+        learning_events.sort_by(|left, right| {
+            right
+                .occurred_at
+                .cmp(&left.occurred_at)
+                .then_with(|| left.event_type.cmp(&right.event_type))
+        });
+    }
+
+    Ok(LearnSummaryReport {
+        schema: LEARN_SUMMARY_SCHEMA_V1.to_string(),
+        summary: LearningSummary {
+            period: options
+                .since
+                .clone()
+                .unwrap_or_else(|| options.period.clone()),
+            memories_created,
+            memories_promoted,
+            memories_demoted,
+            rules_learned,
+            rules_validated,
+            gaps_identified,
+            gaps_resolved,
+            observations_recorded: ledger_observation_count.max(events.len() as u32),
+            candidates_proposed,
+            applied_rules,
+            harmful_feedback_count,
+            net_knowledge_delta,
+        },
+        events: learning_events,
+        generated_at: stable_learning_generated_at(),
+    })
 }
 
 // ============================================================================
@@ -662,7 +846,7 @@ pub fn observe_experiment(
         database_path: &database_path,
         target_type: "candidate".to_string(),
         target_id: experiment_id,
-        workspace_id: Some(workspace_id),
+        workspace_id: Some(workspace_id.clone()),
         signal: observation_signal_to_feedback(options.signal).to_string(),
         weight: None,
         source_type: "automated_check".to_string(),
@@ -676,6 +860,24 @@ pub fn observe_experiment(
         harmful_per_source_per_hour: crate::core::outcome::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
         harmful_burst_window_seconds: crate::core::outcome::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
     })?;
+    persist_learning_observation(
+        &database_path,
+        &workspace_id,
+        &LearningObservationLedgerInput {
+            observation_kind: "experiment_observe",
+            source_type: "feedback_event",
+            source_id: feedback
+                .event_id
+                .clone()
+                .or_else(|| feedback.source_id.clone()),
+            target_type: "candidate",
+            target_id: &observation.experiment_id,
+            topic: Some(normalize_topic(&observation.experiment_id)),
+            signal: observation_signal_to_feedback(options.signal),
+            evidence_json: Some(observation.data_json().to_string()),
+            observed_at: &observation.observed_at,
+        },
+    )?;
     let status = if feedback.status.as_str() == "already_recorded" {
         "already_recorded"
     } else {
@@ -789,7 +991,7 @@ pub fn close_experiment(options: &LearnCloseOptions) -> Result<LearnCloseReport,
         database_path: &database_path,
         target_type: "candidate".to_string(),
         target_id: experiment_id,
-        workspace_id: Some(workspace_id),
+        workspace_id: Some(workspace_id.clone()),
         signal: outcome_status_to_feedback(options.status).to_string(),
         weight: None,
         source_type: "outcome_observed".to_string(),
@@ -803,6 +1005,24 @@ pub fn close_experiment(options: &LearnCloseOptions) -> Result<LearnCloseReport,
         harmful_per_source_per_hour: crate::core::outcome::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
         harmful_burst_window_seconds: crate::core::outcome::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
     })?;
+    persist_learning_observation(
+        &database_path,
+        &workspace_id,
+        &LearningObservationLedgerInput {
+            observation_kind: "experiment_close",
+            source_type: "feedback_event",
+            source_id: feedback
+                .event_id
+                .clone()
+                .or_else(|| feedback.source_id.clone()),
+            target_type: "candidate",
+            target_id: &outcome.experiment_id,
+            topic: Some(normalize_topic(&outcome.experiment_id)),
+            signal: outcome_status_to_feedback(options.status),
+            evidence_json: Some(outcome.data_json().to_string()),
+            observed_at: &outcome.closed_at,
+        },
+    )?;
     let status = if feedback.status.as_str() == "already_recorded" {
         "already_recorded"
     } else {
@@ -1503,9 +1723,93 @@ impl LearnExperimentRunReport {
 
 /// Propose safe dry-run-first experiments that could change memory decisions.
 pub fn propose_experiments(
-    _options: &LearnExperimentProposeOptions,
+    options: &LearnExperimentProposeOptions,
 ) -> Result<LearnExperimentProposalReport, DomainError> {
-    Err(learning_records_unavailable())
+    let snapshot = load_learning_snapshot(&options.workspace)?;
+    let clusters = load_learning_clusters(&options.workspace, options.topic.as_deref())?;
+    let database_path = learning_database_path(None, &options.workspace);
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+
+    let mut durable_proposals = Vec::new();
+    for cluster in clusters
+        .iter()
+        .filter(|cluster| cluster.is_non_trivial())
+        .filter(|cluster| cluster.expected_value() >= options.min_expected_value)
+    {
+        let Some(target_memory_id) = cluster.target_memory_id() else {
+            continue;
+        };
+        let candidate_id = cluster.curation_candidate_id();
+        let proposed_content = cluster.proposed_rule_content();
+        let source_ids = cluster.sample_ids_vec();
+        let already_exists = connection
+            .get_curation_candidate(&snapshot.workspace_id, &candidate_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to check learning curation candidate: {error}"),
+                repair: Some("ee curate candidates --json".to_string()),
+            })?
+            .is_some();
+        if !already_exists {
+            connection
+                .insert_curation_candidate(
+                    &candidate_id,
+                    &CreateCurationCandidateInput {
+                        workspace_id: snapshot.workspace_id.clone(),
+                        candidate_type: "rule".to_string(),
+                        target_memory_id: target_memory_id.clone(),
+                        proposed_content: Some(proposed_content),
+                        proposed_confidence: Some(cluster.proposed_confidence()),
+                        proposed_trust_class: Some("agent_validated".to_string()),
+                        source_type: "feedback_event".to_string(),
+                        source_id: Some(source_ids.join(",")),
+                        reason: cluster.proposal_reason(),
+                        confidence: cluster.proposed_confidence(),
+                        status: Some("pending".to_string()),
+                        created_at: Some(stable_learning_generated_at()),
+                        ttl_expires_at: None,
+                    },
+                )
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to insert learning curation candidate: {error}"),
+                    repair: Some("ee curate candidates --json".to_string()),
+                })?;
+        }
+        durable_proposals.push(cluster.experiment_proposal(
+            options.max_attention_tokens,
+            options.max_runtime_seconds,
+            options.safety_boundary,
+        ));
+    }
+    connection.close().map_err(|error| DomainError::Storage {
+        message: format!("Failed to close database: {error}"),
+        repair: Some("ee doctor".to_string()),
+    })?;
+
+    durable_proposals.sort_by(|left, right| {
+        right
+            .expected_value
+            .total_cmp(&left.expected_value)
+            .then_with(|| left.topic.cmp(&right.topic))
+            .then_with(|| left.experiment_id.cmp(&right.experiment_id))
+    });
+    let total_candidates = durable_proposals.len() as u32;
+    durable_proposals.truncate(options.limit as usize);
+    let returned = durable_proposals.len() as u32;
+
+    Ok(LearnExperimentProposalReport {
+        schema: LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1.to_string(),
+        proposals: durable_proposals,
+        total_candidates,
+        returned,
+        min_expected_value: rounded_metric(options.min_expected_value),
+        max_attention_tokens: options.max_attention_tokens,
+        max_runtime_seconds: options.max_runtime_seconds,
+        generated_at: stable_learning_generated_at(),
+    })
 }
 
 /// Run a deterministic dry-run-only active learning experiment rehearsal.
@@ -1526,10 +1830,799 @@ fn rounded_metric(value: f64) -> f64 {
     }
 }
 
+fn stable_learning_generated_at() -> String {
+    "1970-01-01T00:00:00Z".to_string()
+}
+
+#[derive(Clone, Debug)]
+struct LearningSnapshot {
+    workspace_id: String,
+    memories: BTreeMap<String, StoredMemory>,
+    memory_tags: BTreeMap<String, Vec<String>>,
+    feedback_events: Vec<StoredFeedbackEvent>,
+    learning_observations: Vec<StoredLearningObservation>,
+    curation_candidates: Vec<StoredCurationCandidate>,
+}
+
+struct LearningObservationLedgerInput<'a> {
+    observation_kind: &'a str,
+    source_type: &'a str,
+    source_id: Option<String>,
+    target_type: &'a str,
+    target_id: &'a str,
+    topic: Option<String>,
+    signal: &'a str,
+    evidence_json: Option<String>,
+    observed_at: &'a str,
+}
+
+#[derive(Clone, Debug)]
+struct LearningCluster {
+    topic: String,
+    positive_count: u32,
+    negative_count: u32,
+    neutral_count: u32,
+    decay_count: u32,
+    positive_weight: f64,
+    negative_weight: f64,
+    neutral_weight: f64,
+    decay_weight: f64,
+    memory_ids: BTreeSet<String>,
+    sample_ids: BTreeSet<String>,
+    source_types: BTreeSet<String>,
+    content_previews: BTreeSet<String>,
+    last_seen_at: String,
+}
+
+impl LearningCluster {
+    fn new(topic: String) -> Self {
+        Self {
+            topic,
+            positive_count: 0,
+            negative_count: 0,
+            neutral_count: 0,
+            decay_count: 0,
+            positive_weight: 0.0,
+            negative_weight: 0.0,
+            neutral_weight: 0.0,
+            decay_weight: 0.0,
+            memory_ids: BTreeSet::new(),
+            sample_ids: BTreeSet::new(),
+            source_types: BTreeSet::new(),
+            content_previews: BTreeSet::new(),
+            last_seen_at: stable_learning_generated_at(),
+        }
+    }
+
+    fn record(
+        &mut self,
+        event: &StoredFeedbackEvent,
+        evidence_ids: BTreeSet<String>,
+        memory_ids: BTreeSet<String>,
+        previews: BTreeSet<String>,
+    ) {
+        match signal_bucket(&event.signal) {
+            SignalBucket::Positive => {
+                self.positive_count = self.positive_count.saturating_add(1);
+                self.positive_weight += f64::from(event.weight);
+            }
+            SignalBucket::Negative => {
+                self.negative_count = self.negative_count.saturating_add(1);
+                self.negative_weight += f64::from(event.weight);
+            }
+            SignalBucket::Decay => {
+                self.decay_count = self.decay_count.saturating_add(1);
+                self.decay_weight += f64::from(event.weight);
+            }
+            SignalBucket::Neutral => {
+                self.neutral_count = self.neutral_count.saturating_add(1);
+                self.neutral_weight += f64::from(event.weight);
+            }
+        }
+        self.sample_ids.insert(event.id.clone());
+        self.sample_ids.insert(event.target_id.clone());
+        if let Some(source_id) = &event.source_id {
+            self.sample_ids.insert(source_id.clone());
+        }
+        self.sample_ids.extend(evidence_ids);
+        self.memory_ids.extend(memory_ids);
+        self.source_types.insert(event.source_type.clone());
+        self.content_previews.extend(previews);
+        if event.created_at > self.last_seen_at {
+            self.last_seen_at = event.created_at.clone();
+        }
+    }
+
+    fn total_count(&self) -> u32 {
+        self.positive_count + self.negative_count + self.neutral_count + self.decay_count
+    }
+
+    fn confidence(&self) -> f64 {
+        let total =
+            self.positive_weight + self.negative_weight + self.neutral_weight + self.decay_weight;
+        if total <= f64::EPSILON {
+            return 0.0;
+        }
+        rounded_metric(
+            ((self.positive_weight + self.neutral_weight * 0.5)
+                / (total + self.decay_weight * 0.5))
+                .clamp(0.0, 1.0),
+        )
+    }
+
+    fn uncertainty(&self) -> f64 {
+        let positive = self.positive_weight.max(0.0);
+        let negative = self.negative_weight.max(0.0);
+        let neutral = (self.neutral_weight + self.decay_weight).max(0.0);
+        let total = positive + negative + neutral;
+        let entropy = if total <= f64::EPSILON {
+            0.0
+        } else {
+            let mut entropy = 0.0;
+            for weight in [positive, negative, neutral] {
+                if weight > f64::EPSILON {
+                    let probability = weight / total;
+                    entropy -= probability * probability.log2();
+                }
+            }
+            entropy / 3.0_f64.log2()
+        };
+        let scarcity = if self.total_count() >= 4 {
+            0.0
+        } else {
+            (4.0 - f64::from(self.total_count())) / 4.0
+        };
+        rounded_metric(entropy.max(scarcity).clamp(0.0, 1.0))
+    }
+
+    fn priority(&self) -> u8 {
+        let evidence_bonus = f64::from(self.total_count().min(20)) * 1.5;
+        let contradiction_bonus = if self.positive_count > 0 && self.negative_count > 0 {
+            15.0
+        } else {
+            0.0
+        };
+        let priority = self.uncertainty() * 65.0 + evidence_bonus + contradiction_bonus;
+        priority.round().clamp(1.0, 100.0) as u8
+    }
+
+    fn status(&self) -> &'static str {
+        if self.total_count() >= 8
+            && self.negative_count == 0
+            && self.decay_count == 0
+            && self.uncertainty() < 0.25
+        {
+            "resolved"
+        } else {
+            "open"
+        }
+    }
+
+    fn agenda_item(&self) -> AgendaItem {
+        AgendaItem {
+            id: self.question_id(),
+            topic: self.topic.clone(),
+            gap_description: self.gap_description(),
+            priority: self.priority(),
+            uncertainty: self.uncertainty(),
+            source: self.source(),
+            sample_ids: self.sample_ids_vec(),
+            status: self.status().to_string(),
+            created_at: self.last_seen_at.clone(),
+        }
+    }
+
+    fn uncertainty_item(&self) -> UncertaintyItem {
+        UncertaintyItem {
+            memory_id: self
+                .target_memory_id()
+                .unwrap_or_else(|| self.question_id()),
+            content_preview: self.content_preview(),
+            kind: self.topic.clone(),
+            uncertainty: self.uncertainty(),
+            confidence: self.confidence(),
+            retrieval_count: self.total_count(),
+            last_accessed: Some(self.last_seen_at.clone()),
+        }
+    }
+
+    fn experiment_proposal(
+        &self,
+        max_attention_tokens: u32,
+        max_runtime_seconds: u32,
+        safety_boundary: ExperimentSafetyBoundary,
+    ) -> ExperimentProposal {
+        let evidence_ids = self.sample_ids_vec();
+        let target_memory_id = self
+            .target_memory_id()
+            .unwrap_or_else(|| self.question_id());
+        let experiment_id = self.experiment_id();
+        ExperimentProposal {
+            experiment_id: experiment_id.clone(),
+            question_id: self.question_id(),
+            title: format!("Validate {} learning cluster", self.topic),
+            hypothesis: self.proposal_hypothesis(),
+            status: "proposed".to_string(),
+            topic: self.topic.clone(),
+            expected_value: self.expected_value(),
+            uncertainty_reduction: rounded_metric((self.uncertainty() * 0.45 + 0.15).min(1.0)),
+            confidence: self.confidence(),
+            budget: ExperimentBudget {
+                attention_tokens: max_attention_tokens,
+                max_runtime_seconds,
+                dry_run_required: true,
+                budget_class: budget_class(max_attention_tokens, max_runtime_seconds).to_string(),
+            },
+            safety: safety_plan(safety_boundary),
+            decision_impact: ExperimentDecisionImpact {
+                decision_id: format!(
+                    "decision_{}",
+                    stable_suffix("learn_decision", &self.topic, 20)
+                ),
+                target_artifact_ids: vec![target_memory_id],
+                current_decision: self.current_decision(),
+                possible_change: self.possible_change(),
+                impact_score: rounded_metric((self.expected_value() + self.uncertainty()) / 2.0),
+            },
+            evidence_ids,
+            next_command: format!("ee learn experiment run --dry-run --id {experiment_id} --json"),
+        }
+    }
+
+    fn is_non_trivial(&self) -> bool {
+        self.total_count() >= 2 && self.sample_ids.len() >= 2 && !self.memory_ids.is_empty()
+    }
+
+    fn question_id(&self) -> String {
+        format!("gap_{}", stable_suffix("learn_question", &self.topic, 20))
+    }
+
+    fn experiment_id(&self) -> String {
+        format!("exp_{}", stable_suffix("learn_experiment", &self.topic, 24))
+    }
+
+    fn curation_candidate_id(&self) -> String {
+        format!(
+            "curate_{}",
+            stable_suffix("learn_candidate", &self.topic, 26)
+        )
+    }
+
+    fn target_memory_id(&self) -> Option<String> {
+        self.memory_ids.iter().next().cloned()
+    }
+
+    fn sample_ids_vec(&self) -> Vec<String> {
+        self.sample_ids.iter().take(12).cloned().collect()
+    }
+
+    fn proposed_confidence(&self) -> f32 {
+        rounded_metric((self.confidence() * 0.75 + self.expected_value() * 0.25).clamp(0.05, 0.95))
+            as f32
+    }
+
+    fn expected_value(&self) -> f64 {
+        let evidence_strength = (f64::from(self.total_count()).ln_1p() / 4.0).min(0.35);
+        let contradiction_value = if self.positive_count > 0 && self.negative_count > 0 {
+            0.15
+        } else {
+            0.0
+        };
+        rounded_metric(
+            (self.uncertainty() * 0.35
+                + self.confidence() * 0.20
+                + evidence_strength
+                + contradiction_value)
+                .clamp(0.0, 1.0),
+        )
+    }
+
+    fn proposed_rule_content(&self) -> String {
+        if self.positive_count >= self.negative_count {
+            format!(
+                "For {}, prefer the pattern supported by {} positive outcome(s) and {} total observation(s): {}",
+                self.topic,
+                self.positive_count,
+                self.total_count(),
+                self.content_preview()
+            )
+        } else {
+            format!(
+                "For {}, avoid or revalidate the pattern contradicted by {} negative outcome(s): {}",
+                self.topic,
+                self.negative_count,
+                self.content_preview()
+            )
+        }
+    }
+
+    fn proposal_reason(&self) -> String {
+        format!(
+            "Learning cluster `{}` has {} observation(s), uncertainty {:.3}, confidence {:.3}, and {} evidence pointer(s).",
+            self.topic,
+            self.total_count(),
+            self.uncertainty(),
+            self.confidence(),
+            self.sample_ids.len()
+        )
+    }
+
+    fn gap_description(&self) -> String {
+        if self.positive_count > 0 && self.negative_count > 0 {
+            format!(
+                "{} has contradictory outcome evidence; replay or review before promoting a procedural rule.",
+                self.topic
+            )
+        } else if self.total_count() < 3 {
+            format!(
+                "{} has only {} outcome observation(s); gather more evidence before promotion.",
+                self.topic,
+                self.total_count()
+            )
+        } else if self.negative_count > 0 || self.decay_count > 0 {
+            format!(
+                "{} has harmful, stale, or contradictory feedback that needs procedural review.",
+                self.topic
+            )
+        } else {
+            format!(
+                "{} has repeated supportive outcomes and is ready for a candidate procedural rule.",
+                self.topic
+            )
+        }
+    }
+
+    fn content_preview(&self) -> String {
+        self.content_previews
+            .iter()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| format!("Outcome observations for {}.", self.topic))
+    }
+
+    fn source(&self) -> String {
+        if self.source_types.is_empty() {
+            "feedback_event".to_string()
+        } else {
+            self.source_types
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+    }
+
+    fn proposal_hypothesis(&self) -> String {
+        if self.positive_count > 0 && self.negative_count > 0 {
+            format!(
+                "A dry-run comparison can separate valid {} guidance from contradicted cases.",
+                self.topic
+            )
+        } else {
+            format!(
+                "The repeated {} outcomes can be consolidated into a durable procedural rule.",
+                self.topic
+            )
+        }
+    }
+
+    fn current_decision(&self) -> String {
+        format!(
+            "Keep {} guidance at confidence {:.3} until the evidence cluster is reviewed.",
+            self.topic,
+            self.confidence()
+        )
+    }
+
+    fn possible_change(&self) -> String {
+        if self.negative_count > self.positive_count {
+            "Demote or quarantine the candidate rule if replay confirms harmful outcomes."
+                .to_string()
+        } else {
+            "Promote a candidate procedural rule through ee curate candidates.".to_string()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SignalBucket {
+    Positive,
+    Negative,
+    Neutral,
+    Decay,
+}
+
+fn load_learning_clusters(
+    workspace: &Path,
+    topic_filter: Option<&str>,
+) -> Result<Vec<LearningCluster>, DomainError> {
+    let snapshot = load_learning_snapshot(workspace)?;
+    let events = snapshot.feedback_events.clone();
+    Ok(build_learning_clusters(&snapshot, topic_filter, &events))
+}
+
+fn load_learning_snapshot(workspace: &Path) -> Result<LearningSnapshot, DomainError> {
+    let database_path = learning_database_path(None, workspace);
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        });
+    }
+
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+    let normalized_workspace = normalize_workspace_path(workspace);
+    let workspace_path_text = normalized_workspace.to_string_lossy().into_owned();
+    let workspace_id = connection
+        .get_workspace_by_path(&workspace_path_text)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query workspace: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?
+        .map_or_else(
+            || stable_workspace_id(&workspace_path_text),
+            |workspace| workspace.id,
+        );
+    let memory_rows = connection
+        .list_memories(&workspace_id, None, false)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list learning memories: {error}"),
+            repair: Some("ee remember --workspace . --json".to_string()),
+        })?;
+    let memories = memory_rows
+        .into_iter()
+        .map(|memory| (memory.id.clone(), memory))
+        .collect::<BTreeMap<_, _>>();
+    let memory_ids = memories.keys().map(String::as_str).collect::<Vec<_>>();
+    let memory_tags = connection
+        .get_memory_tags_batch(&memory_ids)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load memory tags for learning: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+    let feedback_events = connection
+        .list_feedback_events(&workspace_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list learning feedback events: {error}"),
+            repair: Some("ee outcome list --json".to_string()),
+        })?;
+    let learning_observations = connection
+        .list_learning_observations(&workspace_id, None)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list learning observations: {error}"),
+            repair: Some("ee learn observe <experiment-id> --json".to_string()),
+        })?;
+    let curation_candidates = connection
+        .list_curation_candidates(&workspace_id, None, None, None)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list curation candidates: {error}"),
+            repair: Some("ee curate candidates --json".to_string()),
+        })?;
+    connection.close().map_err(|error| DomainError::Storage {
+        message: format!("Failed to close database: {error}"),
+        repair: Some("ee doctor".to_string()),
+    })?;
+
+    Ok(LearningSnapshot {
+        workspace_id,
+        memories,
+        memory_tags,
+        feedback_events,
+        learning_observations,
+        curation_candidates,
+    })
+}
+
+fn persist_learning_observation(
+    database_path: &Path,
+    workspace_id: &str,
+    input: &LearningObservationLedgerInput<'_>,
+) -> Result<(), DomainError> {
+    let connection =
+        DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+    let observation_id = stable_learning_observation_id(input);
+    connection
+        .insert_learning_observation(
+            &observation_id,
+            &CreateLearningObservationInput {
+                workspace_id: workspace_id.to_string(),
+                observation_kind: input.observation_kind.to_string(),
+                source_type: input.source_type.to_string(),
+                source_id: input.source_id.clone(),
+                target_type: input.target_type.to_string(),
+                target_id: input.target_id.to_string(),
+                topic: input.topic.clone(),
+                signal: input.signal.to_string(),
+                evidence_json: input.evidence_json.clone(),
+                observed_at: input.observed_at.to_string(),
+            },
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to insert learning observation: {error}"),
+            repair: Some("ee learn summary --json".to_string()),
+        })?;
+    connection.close().map_err(|error| DomainError::Storage {
+        message: format!("Failed to close database: {error}"),
+        repair: Some("ee doctor".to_string()),
+    })?;
+    Ok(())
+}
+
+fn stable_learning_observation_id(input: &LearningObservationLedgerInput<'_>) -> String {
+    let payload = serde_json::json!({
+        "kind": input.observation_kind,
+        "sourceType": input.source_type,
+        "sourceId": &input.source_id,
+        "targetType": input.target_type,
+        "targetId": input.target_id,
+        "observedAt": input.observed_at,
+    });
+    format!(
+        "lobs_{}",
+        blake3::hash(payload.to_string().as_bytes())
+            .to_hex()
+            .chars()
+            .take(32)
+            .collect::<String>()
+    )
+}
+
+fn build_learning_clusters(
+    snapshot: &LearningSnapshot,
+    topic_filter: Option<&str>,
+    events: &[StoredFeedbackEvent],
+) -> Vec<LearningCluster> {
+    let normalized_filter = topic_filter.map(normalize_topic);
+    let mut clusters = BTreeMap::new();
+    for event in events {
+        let evidence_ids = evidence_ids_for_event(event);
+        let memory_ids = memory_ids_for_event(snapshot, event, &evidence_ids);
+        let topic = topic_for_event(snapshot, event, &memory_ids);
+        if normalized_filter
+            .as_ref()
+            .is_some_and(|filter| &topic != filter)
+        {
+            continue;
+        }
+        let previews = previews_for_memories(snapshot, &memory_ids, event);
+        clusters
+            .entry(topic.clone())
+            .or_insert_with(|| LearningCluster::new(topic))
+            .record(event, evidence_ids, memory_ids, previews);
+    }
+
+    clusters.into_values().collect()
+}
+
+fn evidence_ids_for_event(event: &StoredFeedbackEvent) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    ids.insert(event.target_id.clone());
+    if let Some(source_id) = &event.source_id {
+        ids.insert(source_id.clone());
+    }
+    if let Some(evidence_json) = &event.evidence_json {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(evidence_json) {
+            collect_evidence_ids(&value, &mut ids);
+        }
+    }
+    ids
+}
+
+fn collect_evidence_ids(value: &serde_json::Value, ids: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_evidence_ids(value, ids);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                if matches!(
+                    key.as_str(),
+                    "evidenceIds"
+                        | "promotedArtifactIds"
+                        | "demotedArtifactIds"
+                        | "targetArtifactIds"
+                        | "auditIds"
+                ) {
+                    if let Some(values) = value.as_array() {
+                        ids.extend(
+                            values
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .map(str::to_string),
+                        );
+                    }
+                }
+                collect_evidence_ids(value, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn memory_ids_for_event(
+    snapshot: &LearningSnapshot,
+    event: &StoredFeedbackEvent,
+    evidence_ids: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut memory_ids = BTreeSet::new();
+    if event.target_type == "memory" && snapshot.memories.contains_key(&event.target_id) {
+        memory_ids.insert(event.target_id.clone());
+    }
+    memory_ids.extend(
+        evidence_ids
+            .iter()
+            .filter(|id| snapshot.memories.contains_key(id.as_str()))
+            .cloned(),
+    );
+    memory_ids
+}
+
+fn topic_for_event(
+    snapshot: &LearningSnapshot,
+    event: &StoredFeedbackEvent,
+    memory_ids: &BTreeSet<String>,
+) -> String {
+    memory_ids
+        .iter()
+        .filter_map(|memory_id| {
+            snapshot
+                .memory_tags
+                .get(memory_id)
+                .and_then(|tags| tags.iter().find(|tag| !tag.trim().is_empty()))
+                .cloned()
+                .or_else(|| {
+                    snapshot
+                        .memories
+                        .get(memory_id)
+                        .map(|memory| memory.kind.clone())
+                })
+        })
+        .map(|topic| normalize_topic(&topic))
+        .find(|topic| topic != "general")
+        .unwrap_or_else(|| normalize_topic(&event.target_type))
+}
+
+fn previews_for_memories(
+    snapshot: &LearningSnapshot,
+    memory_ids: &BTreeSet<String>,
+    event: &StoredFeedbackEvent,
+) -> BTreeSet<String> {
+    let mut previews = memory_ids
+        .iter()
+        .filter_map(|memory_id| snapshot.memories.get(memory_id))
+        .map(|memory| preview_text(&memory.content, 120))
+        .collect::<BTreeSet<_>>();
+    if previews.is_empty() {
+        if let Some(reason) = &event.reason {
+            previews.insert(preview_text(reason, 120));
+        }
+    }
+    previews
+}
+
+fn preview_text(raw: &str, max_chars: usize) -> String {
+    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        normalized
+    } else {
+        format!(
+            "{}...",
+            normalized
+                .chars()
+                .take(max_chars.saturating_sub(3))
+                .collect::<String>()
+        )
+    }
+}
+
+fn normalize_topic(raw: &str) -> String {
+    let mut topic = raw
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    while topic.contains("__") {
+        topic = topic.replace("__", "_");
+    }
+    let topic = topic.trim_matches('_').to_string();
+    if topic.is_empty() {
+        "general".to_string()
+    } else {
+        topic
+    }
+}
+
+fn signal_bucket(signal: &str) -> SignalBucket {
+    match signal {
+        "positive" | "helpful" | "confirmation" => SignalBucket::Positive,
+        "negative" | "harmful" | "contradiction" | "inaccurate" => SignalBucket::Negative,
+        "stale" | "outdated" => SignalBucket::Decay,
+        _ => SignalBucket::Neutral,
+    }
+}
+
+fn is_negative_signal(signal: &str) -> bool {
+    matches!(
+        signal,
+        "negative" | "harmful" | "contradiction" | "inaccurate" | "outdated" | "stale"
+    )
+}
+
+fn feedback_impact(signal: &str) -> &'static str {
+    match signal_bucket(signal) {
+        SignalBucket::Positive => "promotes confidence",
+        SignalBucket::Negative => "requires review",
+        SignalBucket::Decay => "lowers freshness",
+        SignalBucket::Neutral => "adds evidence",
+    }
+}
+
+fn stable_suffix(namespace: &str, value: &str, len: usize) -> String {
+    let hash = blake3::hash(format!("{namespace}:{value}").as_bytes());
+    hash.to_hex().chars().take(len).collect()
+}
+
+fn budget_class(attention_tokens: u32, runtime_seconds: u32) -> &'static str {
+    if attention_tokens <= 600 && runtime_seconds <= 120 {
+        "small"
+    } else if attention_tokens <= 1_500 && runtime_seconds <= 600 {
+        "medium"
+    } else {
+        "large"
+    }
+}
+
+fn safety_plan(boundary: ExperimentSafetyBoundary) -> ExperimentSafetyPlan {
+    let boundary_name = boundary.as_str().to_string();
+    let mutation_allowed = false;
+    let review_required = matches!(
+        boundary,
+        ExperimentSafetyBoundary::AskBeforeActing | ExperimentSafetyBoundary::HumanReview
+    );
+    let denied_reasons = if boundary == ExperimentSafetyBoundary::Denied {
+        vec!["Safety boundary denies experiment execution.".to_string()]
+    } else {
+        Vec::new()
+    };
+
+    ExperimentSafetyPlan {
+        boundary: boundary_name,
+        dry_run_first: true,
+        mutation_allowed,
+        review_required,
+        stop_conditions: vec![
+            "Stop after the replay produces a pass/fail explanation or safety finding.".to_string(),
+            "Stop before any durable memory mutation; close with observe/close evidence first."
+                .to_string(),
+        ],
+        denied_reasons,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::DbConnection;
+    use crate::db::{
+        CreateFeedbackEventInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
+    };
 
     type TestResult = Result<(), String>;
 
@@ -1548,19 +2641,24 @@ mod tests {
         Ok((dir, database))
     }
 
-    fn assert_learning_records_unavailable<T>(result: Result<T, DomainError>) -> TestResult {
-        match result {
-            Err(DomainError::UnsatisfiedDegradedMode { message, repair }) => {
-                assert_eq!(message, LEARNING_RECORDS_UNAVAILABLE_MESSAGE);
-                assert_eq!(repair.as_deref(), Some(LEARNING_RECORDS_UNAVAILABLE_REPAIR));
-                Ok(())
-            }
-            Err(error) => Err(format!(
-                "expected unsatisfied degraded mode, got {}",
-                error.code()
-            )),
-            Ok(_) => Err("expected unsatisfied degraded mode, got success".to_string()),
-        }
+    fn seed_learning_workspace(
+        prefix: &str,
+    ) -> Result<(tempfile::TempDir, PathBuf, String), String> {
+        let (dir, database) = seed_learning_database(prefix)?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let workspace_path = dir.path().to_string_lossy().into_owned();
+        let workspace_id = stable_workspace_id(&workspace_path);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path,
+                    name: Some(prefix.to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        Ok((dir, database, workspace_id))
     }
 
     fn assert_experiment_registry_unavailable<T>(result: Result<T, DomainError>) -> TestResult {
@@ -1584,37 +2682,210 @@ mod tests {
         }
     }
 
+    fn seed_memory(
+        connection: &DbConnection,
+        workspace_id: &str,
+        id: &str,
+        tag: &str,
+        content: &str,
+    ) -> TestResult {
+        connection
+            .insert_memory(
+                id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_string(),
+                    level: "episodic".to_string(),
+                    kind: "procedure".to_string(),
+                    content: content.to_string(),
+                    workflow_id: None,
+                    confidence: 0.5,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some(format!("test://{id}")),
+                    trust_class: "agent_assertion".to_string(),
+                    trust_subclass: None,
+                    tags: vec![tag.to_string()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn seed_feedback(
+        connection: &DbConnection,
+        workspace_id: &str,
+        id: &str,
+        memory_id: &str,
+        signal: &str,
+    ) -> TestResult {
+        connection
+            .insert_feedback_event(
+                id,
+                &CreateFeedbackEventInput {
+                    workspace_id: workspace_id.to_string(),
+                    target_type: "memory".to_string(),
+                    target_id: memory_id.to_string(),
+                    signal: signal.to_string(),
+                    weight: 1.0,
+                    source_type: "outcome_observed".to_string(),
+                    source_id: Some(format!("outcome_{id}")),
+                    reason: Some(format!("{signal} outcome for {memory_id}")),
+                    evidence_json: Some(
+                        serde_json::json!({
+                            "evidenceIds": [memory_id],
+                            "status": signal,
+                        })
+                        .to_string(),
+                    ),
+                    session_id: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
     #[test]
-    fn agenda_reports_unavailable_until_backed_by_learning_records() -> TestResult {
-        let options = LearnAgendaOptions {
+    fn agenda_empty_ledger_returns_empty_report() -> TestResult {
+        let (dir, _database, _workspace_id) = seed_learning_workspace("ee-learn-empty")?;
+        let report = show_agenda(&LearnAgendaOptions {
+            workspace: dir.path().to_path_buf(),
             limit: 10,
             include_resolved: false,
             ..Default::default()
-        };
+        })
+        .map_err(|error| error.message())?;
 
-        assert_learning_records_unavailable(show_agenda(&options))
+        assert_eq!(report.schema, LEARN_AGENDA_SCHEMA_V1);
+        assert!(report.items.is_empty());
+        assert_eq!(report.total_gaps, 0);
+        Ok(())
     }
 
     #[test]
-    fn uncertainty_reports_unavailable_until_backed_by_learning_records() -> TestResult {
-        let options = LearnUncertaintyOptions {
+    fn agenda_clusters_single_observation_with_sample_ids() -> TestResult {
+        let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-single")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_memory(
+            &connection,
+            &workspace_id,
+            "mem_11234567890123456789012345",
+            "testing",
+            "Run the database contract fixture before promoting test guidance.",
+        )?;
+        seed_feedback(
+            &connection,
+            &workspace_id,
+            "fb_11234567890123456789012345",
+            "mem_11234567890123456789012345",
+            "confirmation",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = show_agenda(&LearnAgendaOptions {
+            workspace: dir.path().to_path_buf(),
             limit: 10,
-            min_uncertainty: 0.5,
+            include_resolved: true,
             ..Default::default()
-        };
+        })
+        .map_err(|error| error.message())?;
 
-        assert_learning_records_unavailable(show_uncertainty(&options))
+        assert_eq!(report.items.len(), 1);
+        let item = &report.items[0];
+        assert_eq!(item.topic, "testing");
+        assert!(
+            item.sample_ids
+                .contains(&"fb_11234567890123456789012345".to_string())
+        );
+        assert!(
+            item.sample_ids
+                .contains(&"mem_11234567890123456789012345".to_string())
+        );
+        assert!(item.uncertainty >= 0.7);
+        Ok(())
     }
 
     #[test]
-    fn summary_reports_unavailable_until_backed_by_learning_records() -> TestResult {
-        let options = LearnSummaryOptions {
-            period: "week".to_owned(),
-            detailed: true,
-            ..Default::default()
-        };
+    fn uncertainty_detects_contradictory_observations() -> TestResult {
+        let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-contradict")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_memory(
+            &connection,
+            &workspace_id,
+            "mem_21234567890123456789012345",
+            "review",
+            "Promote review-session candidates only after evidence aggregation.",
+        )?;
+        seed_feedback(
+            &connection,
+            &workspace_id,
+            "fb_21234567890123456789012345",
+            "mem_21234567890123456789012345",
+            "confirmation",
+        )?;
+        seed_feedback(
+            &connection,
+            &workspace_id,
+            "fb_22234567890123456789012345",
+            "mem_21234567890123456789012345",
+            "contradiction",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
 
-        assert_learning_records_unavailable(show_summary(&options))
+        let report = show_uncertainty(&LearnUncertaintyOptions {
+            workspace: dir.path().to_path_buf(),
+            limit: 10,
+            min_uncertainty: 0.0,
+            kind: Some("review".to_string()),
+            low_confidence: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.items.len(), 1);
+        assert!(report.items[0].uncertainty >= 0.6);
+        assert!(report.items[0].confidence < 0.6);
+        Ok(())
+    }
+
+    #[test]
+    fn summary_aggregates_learning_observations_and_candidates() -> TestResult {
+        let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-summary")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_memory(
+            &connection,
+            &workspace_id,
+            "mem_31234567890123456789012345",
+            "summary",
+            "Summarize learning signals from feedback and curation rows.",
+        )?;
+        seed_feedback(
+            &connection,
+            &workspace_id,
+            "fb_31234567890123456789012345",
+            "mem_31234567890123456789012345",
+            "helpful",
+        )?;
+        seed_feedback(
+            &connection,
+            &workspace_id,
+            "fb_32234567890123456789012345",
+            "mem_31234567890123456789012345",
+            "harmful",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = show_summary(&LearnSummaryOptions {
+            workspace: dir.path().to_path_buf(),
+            period: "all".to_string(),
+            since: None,
+            detailed: true,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.summary.observations_recorded, 2);
+        assert_eq!(report.summary.harmful_feedback_count, 1);
+        assert_eq!(report.summary.gaps_identified, 1);
+        assert_eq!(report.events.len(), 2);
+        Ok(())
     }
 
     #[test]
@@ -1694,6 +2965,11 @@ mod tests {
             .map_err(|error| error.to_string())?;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].source_id.as_deref(), Some("lobs_recorded"));
+        let observations = connection
+            .list_learning_observations(&feedback.workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].observation_kind, "experiment_observe");
         connection.close().map_err(|error| error.to_string())
     }
 
@@ -1853,6 +3129,13 @@ mod tests {
                 .pointer("/downstreamEffects/audit/silentMutation"),
             Some(&serde_json::json!(false))
         );
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let observations = connection
+            .list_learning_observations(&feedback.workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].observation_kind, "experiment_close");
+        connection.close().map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -1884,10 +3167,56 @@ mod tests {
     }
 
     #[test]
-    fn learn_experiment_proposals_report_unavailable_until_backed_by_records() -> TestResult {
-        assert_learning_records_unavailable(propose_experiments(
-            &LearnExperimentProposeOptions::default(),
-        ))
+    fn learn_experiment_proposals_persist_deterministic_rule_candidates() -> TestResult {
+        let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-propose")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        for index in 0..50 {
+            let memory_id = format!("mem_{index:026}");
+            let feedback_id = format!("fb_{index:026}");
+            seed_memory(
+                &connection,
+                &workspace_id,
+                &memory_id,
+                "large_cluster",
+                "Use RCH with an isolated Cargo target directory before closing shared Rust beads.",
+            )?;
+            seed_feedback(
+                &connection,
+                &workspace_id,
+                &feedback_id,
+                &memory_id,
+                "confirmation",
+            )?;
+        }
+        connection.close().map_err(|error| error.to_string())?;
+
+        let options = LearnExperimentProposeOptions {
+            workspace: dir.path().to_path_buf(),
+            limit: 5,
+            topic: Some("large_cluster".to_string()),
+            min_expected_value: 0.0,
+            max_attention_tokens: 900,
+            max_runtime_seconds: 180,
+            safety_boundary: ExperimentSafetyBoundary::HumanReview,
+        };
+        let first = propose_experiments(&options).map_err(|error| error.message())?;
+        let second = propose_experiments(&options).map_err(|error| error.message())?;
+
+        assert_eq!(first.proposals.len(), 1);
+        assert_eq!(
+            first.proposals[0].experiment_id,
+            second.proposals[0].experiment_id
+        );
+        assert!(first.proposals[0].evidence_ids.len() >= 2);
+        assert_eq!(first.proposals[0].topic, "large_cluster");
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let candidates = connection
+            .list_curation_candidates(&workspace_id, Some("rule"), Some("pending"), None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].source_type, "feedback_event");
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]
