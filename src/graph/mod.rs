@@ -3749,8 +3749,90 @@ mod tests {
     const MEMORY_A: &str = "mem_00000000000000000000000011";
     const MEMORY_B: &str = "mem_00000000000000000000000012";
     const MEMORY_C: &str = "mem_00000000000000000000000013";
+    const KARATE_SNAPSHOT_HASH: &str =
+        "blake3:8ba3ce7af8fad71c62945e735d6ebf46b1709368ecfbd80f528130391d90987d";
+    const KARATE_EDGE_PAIRS: &[(u8, u8)] = &[
+        (1, 2),
+        (1, 3),
+        (1, 4),
+        (1, 5),
+        (1, 6),
+        (1, 7),
+        (1, 8),
+        (1, 9),
+        (1, 11),
+        (1, 12),
+        (1, 13),
+        (1, 14),
+        (1, 18),
+        (1, 20),
+        (1, 22),
+        (1, 32),
+        (2, 3),
+        (2, 4),
+        (2, 8),
+        (2, 14),
+        (2, 18),
+        (2, 20),
+        (2, 22),
+        (2, 31),
+        (3, 4),
+        (3, 8),
+        (3, 9),
+        (3, 10),
+        (3, 14),
+        (3, 28),
+        (3, 29),
+        (3, 33),
+        (4, 8),
+        (4, 13),
+        (4, 14),
+        (5, 7),
+        (5, 11),
+        (6, 7),
+        (6, 11),
+        (6, 17),
+        (7, 17),
+        (9, 31),
+        (9, 33),
+        (9, 34),
+        (10, 34),
+        (14, 34),
+        (15, 33),
+        (15, 34),
+        (16, 33),
+        (16, 34),
+        (19, 33),
+        (19, 34),
+        (20, 34),
+        (21, 33),
+        (21, 34),
+        (23, 33),
+        (23, 34),
+        (24, 26),
+        (24, 28),
+        (24, 30),
+        (24, 33),
+        (24, 34),
+        (25, 26),
+        (25, 28),
+        (25, 32),
+        (26, 32),
+        (27, 30),
+        (27, 34),
+        (28, 34),
+        (29, 32),
+        (29, 34),
+        (30, 33),
+        (30, 34),
+        (31, 33),
+        (31, 34),
+        (32, 33),
+        (32, 34),
+        (33, 34),
+    ];
 
-    type TestResult = Result<(), String>;
+    type TestResult<T = ()> = Result<T, String>;
 
     fn graph_result<T>(result: super::GraphResult<T>) -> Result<T, String> {
         result.map_err(|error| error.to_string())
@@ -4594,6 +4676,77 @@ mod tests {
         }
     }
 
+    fn karate_memory_id(node: u8) -> String {
+        format!("mem_karate_{node:02}")
+    }
+
+    fn karate_degree(node: u8) -> usize {
+        KARATE_EDGE_PAIRS
+            .iter()
+            .filter(|edge| edge.0 == node || edge.1 == node)
+            .count()
+    }
+
+    fn karate_graph_snapshot_metrics_json() -> TestResult<String> {
+        let nodes: Vec<_> = (1_u8..=34)
+            .map(|node| {
+                let memory_id = karate_memory_id(node);
+                let degree = u32::try_from(karate_degree(node))
+                    .map_err(|error| format!("karate degree should fit u32: {error}"))?;
+                Ok(serde_json::json!({
+                    "id": memory_id,
+                    "memoryId": memory_id,
+                    "label": format!("Karate {node:02}"),
+                    "pagerank": f64::from(35_u8 - node) / 100.0,
+                    "betweenness": f64::from(degree) / 100.0,
+                }))
+            })
+            .collect::<Result<_, String>>()?;
+        let edges: Vec<_> = KARATE_EDGE_PAIRS
+            .iter()
+            .enumerate()
+            .map(|(index, (source, target))| {
+                serde_json::json!({
+                    "id": format!("edge_karate_{:03}", index + 1),
+                    "source": karate_memory_id(*source),
+                    "target": karate_memory_id(*target),
+                    "sourceMemoryId": karate_memory_id(*source),
+                    "targetMemoryId": karate_memory_id(*target),
+                    "relation": "karate_tie",
+                    "label": "club tie",
+                    "directed": false,
+                    "weight": 1.0,
+                    "confidence": 1.0,
+                    "evidenceCount": 1,
+                    "sourceKind": "fixture",
+                })
+            })
+            .collect();
+        let top_pagerank = (1_u8..=10).map(karate_memory_id).collect::<Vec<_>>();
+        let top_betweenness = [1_u8, 34, 33, 3, 2, 4, 32, 9, 14, 24]
+            .into_iter()
+            .map(karate_memory_id)
+            .collect::<Vec<_>>();
+        let metrics = serde_json::json!({
+            "schema": "ee.graph.snapshot.metrics.v1",
+            "graphType": GraphSnapshotType::MemoryLinks.as_str(),
+            "graph": {
+                "nodes": nodes.clone(),
+                "edges": edges.clone(),
+            },
+            "nodes": nodes,
+            "edges": edges,
+            "centrality": {
+                "status": super::CentralityRefreshStatus::Refreshed.as_str(),
+                "topPagerank": top_pagerank,
+                "topBetweenness": top_betweenness,
+            },
+        });
+
+        serde_json::to_string(&metrics)
+            .map_err(|error| format!("karate fixture metrics should serialize: {error}"))
+    }
+
     #[test]
     fn graph_feature_enrichment_schema_is_versioned() {
         assert_eq!(
@@ -5078,6 +5231,56 @@ mod tests {
         assert!(report.diagram.contains("graph snapshot not found"));
 
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn karate_fixture_exports_stable_diagram_and_snapshot_witness() -> TestResult {
+        let connection = open_snapshot_db()?;
+        insert_graph_snapshot_with_hash(
+            &connection,
+            "gsnap_karate_fixture_000000000001",
+            &karate_graph_snapshot_metrics_json()?,
+            1,
+            KARATE_SNAPSHOT_HASH,
+        )?;
+
+        let options = super::GraphExportOptions {
+            workspace_id: WORKSPACE_ID.to_string(),
+            ..Default::default()
+        };
+        let first = graph_result(super::export_graph_snapshot(&connection, &options))?;
+        let second = graph_result(super::export_graph_snapshot(&connection, &options))?;
+
+        assert_eq!(first.status, super::GraphExportStatus::Exported);
+        assert_eq!(first.node_count, 34);
+        assert_eq!(first.edge_count, 78);
+        assert_eq!(first.diagram, second.diagram);
+        assert_eq!(first.data_json(), second.data_json());
+        assert!(first.diagram.contains("Karate 01"));
+        assert!(first.diagram.contains("Karate 34"));
+        assert!(first.diagram.contains("n1 ---|club tie| n2"));
+        let snapshot = first
+            .snapshot
+            .as_ref()
+            .ok_or_else(|| "karate export should include snapshot witness".to_owned())?;
+        assert_eq!(snapshot.content_hash, KARATE_SNAPSHOT_HASH);
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn karate_fixture_witness_hash_is_byte_stable() -> TestResult {
+        let first = karate_graph_snapshot_metrics_json()?;
+        let second = karate_graph_snapshot_metrics_json()?;
+
+        assert_eq!(first, second);
+        assert!(first.contains("mem_karate_34"));
+        assert_eq!(
+            super::graph_snapshot_content_hash(&first),
+            KARATE_SNAPSHOT_HASH
+        );
+        Ok(())
     }
 
     #[cfg(feature = "graph")]
