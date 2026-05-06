@@ -13,6 +13,7 @@ use ee::core::{
     outcome_class, outcome_exit_code, run_cli_future,
 };
 use ee::models::{DomainError, ProcessExitCode};
+use ee::steward::{DaemonForegroundOptions, JobType, run_daemon_foreground_supervised};
 
 type TestResult = Result<(), String>;
 
@@ -356,6 +357,68 @@ fn lab_runtime_cancellation_report_is_seed_deterministic() -> TestResult {
     let second = run_lab_cancel_probe(0xEE_208)?;
 
     ensure_equal(&first, &second, "same-seed lab cancellation report")
+}
+
+#[test]
+fn daemon_foreground_loop_cancels_between_maintenance_ticks() -> TestResult {
+    let mut lab = LabRuntime::new(LabConfig::new(0xEE_905).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let workspace = std::env::temp_dir()
+        .join("ee-daemon-cancellation-contract")
+        .to_string_lossy()
+        .into_owned();
+    let mut options = DaemonForegroundOptions::new(workspace);
+    options.dry_run = true;
+    options.interval_ms = 1_000;
+    options.tick_limit = 2;
+    options.job_types = vec![JobType::HealthCheck];
+
+    let (task_id, mut handle) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let Some(cx) = Cx::current() else {
+                return Outcome::Err("LabRuntime task should install Cx".to_owned());
+            };
+            run_daemon_foreground_supervised(&cx, &options).await
+        })
+        .map_err(|error| format!("failed to create daemon contract task: {error}"))?;
+    lab.scheduler.lock().schedule(task_id, 0);
+    lab.run_until_idle();
+    ensure(
+        !handle.is_finished(),
+        "daemon loop should wait between maintenance ticks",
+    )?;
+
+    let reason = CancelReason::user("daemon contract cancellation");
+    for (cancelled_task, priority) in lab.state.cancel_request(root, &reason, None) {
+        lab.scheduler.lock().schedule(cancelled_task, priority);
+    }
+    lab.scheduler.lock().schedule(task_id, 0);
+    lab.advance_time(1_000_000_000);
+    let report = lab.run_until_quiescent_with_report();
+    ensure(report.quiescent, "cancelled daemon lab run must quiesce")?;
+    ensure(
+        report.invariant_violations.is_empty(),
+        format!(
+            "cancelled daemon lab run must preserve invariants: {:?}",
+            report.invariant_violations
+        ),
+    )?;
+
+    let outcome = handle
+        .try_join()
+        .map_err(|error| format!("daemon contract join failed: {error}"))?
+        .ok_or_else(|| "daemon contract task did not finish".to_owned())?;
+    match outcome {
+        Outcome::Cancelled(reason) => ensure_equal(
+            &reason.message.as_deref(),
+            &Some("daemon contract cancellation"),
+            "daemon cancellation reason",
+        ),
+        other => Err(format!(
+            "daemon contract expected cancellation, got {other:?}"
+        )),
+    }
 }
 
 #[test]

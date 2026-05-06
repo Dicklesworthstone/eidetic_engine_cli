@@ -814,10 +814,10 @@ fn regret_profile(
 
 fn claim_profile(status: ClaimStatus, score: f64) -> (RiskLevel, TripwireAction) {
     match status {
-        ClaimStatus::Regressed => (RiskLevel::High, TripwireAction::Pause),
-        ClaimStatus::Stale => (RiskLevel::High, TripwireAction::Warn),
-        ClaimStatus::Draft => (RiskLevel::Medium, TripwireAction::Audit),
-        ClaimStatus::Active | ClaimStatus::Verified => {
+        ClaimStatus::Invalid | ClaimStatus::Regressed => (RiskLevel::High, TripwireAction::Pause),
+        ClaimStatus::Expired | ClaimStatus::Stale => (RiskLevel::High, TripwireAction::Warn),
+        ClaimStatus::Unverified | ClaimStatus::Draft => (RiskLevel::Medium, TripwireAction::Audit),
+        ClaimStatus::Valid | ClaimStatus::Active | ClaimStatus::Verified => {
             if score >= 0.8 {
                 (RiskLevel::Medium, TripwireAction::Warn)
             } else {
