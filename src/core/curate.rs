@@ -4316,10 +4316,10 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        CurateCandidatesOptions, CurateReviewAction, CurateReviewOptions, ReviewSessionOptions,
-        apply_curation_candidate, candidate_summary_from_stored, list_curation_candidates,
-        review_curation_candidate, review_session_proposals, stable_workspace_id,
-        validate_curation_candidate,
+        CurateCandidatesOptions, CurateReviewAction, CurateReviewOptions, ReviewSessionCandidate,
+        ReviewSessionOptions, ReviewSessionReport, apply_curation_candidate,
+        candidate_summary_from_stored, list_curation_candidates, review_curation_candidate,
+        review_session_proposals, stable_workspace_id, validate_curation_candidate,
     };
     use crate::db::{
         CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateMemoryInput,
@@ -4568,6 +4568,53 @@ mod tests {
             limit: 0,
         });
         assert!(invalid_limit.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn review_session_report_json_matches_golden() -> TestResult {
+        let report = ReviewSessionReport {
+            schema: "ee.review.session.v1",
+            command: "review session",
+            version: "0.0.0",
+            workspace_id: "wsp_review_golden".to_owned(),
+            workspace_path: "/workspace/example".to_owned(),
+            database_path: "/workspace/example/.ee/ee.db".to_owned(),
+            session_id: "sess_review_golden".to_owned(),
+            cass_session_id: "cass-review-golden".to_owned(),
+            propose_mode: true,
+            dry_run: true,
+            durable_mutation: false,
+            evidence_span_count: 2,
+            topic_count: 1,
+            candidate_count: 1,
+            candidates: vec![ReviewSessionCandidate {
+                candidate_id: "curate_review_golden".to_owned(),
+                candidate_type: "rule".to_owned(),
+                candidate_kind: "rule".to_owned(),
+                topic_key: "testing".to_owned(),
+                target_memory_id: "mem_review_golden".to_owned(),
+                proposed_content:
+                    "For `testing` work, follow the evidence-backed procedure shown in this session: Run golden tests / Keep JSON stable"
+                        .to_owned(),
+                proposed_confidence: 0.61,
+                source_type: "agent_inference".to_owned(),
+                source_ids: vec!["ev_review_a".to_owned(), "ev_review_b".to_owned()],
+                reason:
+                    "Session review clustered 2 evidence span(s) for topic `testing` from CASS session `cass-review-golden`."
+                        .to_owned(),
+                confidence: 0.61,
+                content_hash: "blake3:review-golden-hash".to_owned(),
+                persisted: false,
+            }],
+            degraded: Vec::new(),
+            next_action: "ee review session <session-id> --propose --json".to_owned(),
+        };
+
+        let actual = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
+        let expected =
+            include_str!("../../tests/fixtures/golden/review/session_propose.golden").trim_end();
+        assert_eq!(actual, expected);
         Ok(())
     }
 

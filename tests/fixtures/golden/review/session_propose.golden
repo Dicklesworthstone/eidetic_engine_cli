@@ -1,0 +1,38 @@
+{
+  "schema": "ee.review.session.v1",
+  "command": "review session",
+  "version": "0.0.0",
+  "workspaceId": "wsp_review_golden",
+  "workspacePath": "/workspace/example",
+  "databasePath": "/workspace/example/.ee/ee.db",
+  "sessionId": "sess_review_golden",
+  "cassSessionId": "cass-review-golden",
+  "proposeMode": true,
+  "dryRun": true,
+  "durableMutation": false,
+  "evidenceSpanCount": 2,
+  "topicCount": 1,
+  "candidateCount": 1,
+  "candidates": [
+    {
+      "candidateId": "curate_review_golden",
+      "candidateType": "rule",
+      "candidateKind": "rule",
+      "topicKey": "testing",
+      "targetMemoryId": "mem_review_golden",
+      "proposedContent": "For `testing` work, follow the evidence-backed procedure shown in this session: Run golden tests / Keep JSON stable",
+      "proposedConfidence": 0.61,
+      "sourceType": "agent_inference",
+      "sourceIds": [
+        "ev_review_a",
+        "ev_review_b"
+      ],
+      "reason": "Session review clustered 2 evidence span(s) for topic `testing` from CASS session `cass-review-golden`.",
+      "confidence": 0.61,
+      "contentHash": "blake3:review-golden-hash",
+      "persisted": false
+    }
+  ],
+  "degraded": [],
+  "nextAction": "ee review session <session-id> --propose --json"
+}
