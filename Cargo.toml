@@ -65,6 +65,10 @@ sha2 = { version = "0.10.9" }
 sqlmodel-core = { version = "0.2.2", path = "/data/projects/sqlmodel_rust/crates/sqlmodel-core" }
 sqlmodel-frankensqlite = { version = "0.2.2", path = "/data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite" }
 tempfile = { version = "3.27.0" }
+# Real BPE tokenization for context pack budget enforcement
+# (eidetic_engine_cli-aitk). Default features only; the `async-openai`
+# feature would pull tokio/reqwest/hyper which are forbidden here.
+tiktoken-rs = { version = "0.11.0", default-features = false }
 toon = { package = "tru", version = "0.2.2", path = "/data/projects/toon_rust", default-features = false }
 toml_edit = { version = "0.25.11", default-features = false, features = ["parse"] }
 tracing = { version = "0.1.44" }

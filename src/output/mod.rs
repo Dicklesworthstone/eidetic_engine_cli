@@ -1350,9 +1350,13 @@ impl OutputSizeDiagnostic {
     }
 }
 
-/// Estimate token count using a simple heuristic.
+/// Estimate token count using the same cl100k_base BPE encoder the pack
+/// budget enforcer uses (eidetic_engine_cli-aitk). Routes through
+/// `crate::pack::estimate_tokens_default` so JSON-vs-TOON size diagnostics
+/// quote the same tokens-per-payload values an `ee context` budget would
+/// see.
 fn estimate_tokens(text: &str) -> usize {
-    text.split_whitespace().count().saturating_mul(4) / 3
+    crate::pack::estimate_tokens_default(text) as usize
 }
 
 /// Compute size diagnostics for representative payloads.

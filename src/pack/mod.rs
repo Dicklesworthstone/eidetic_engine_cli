@@ -1,8 +1,10 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt;
+use std::sync::OnceLock;
 
 use serde::Serialize;
+use tiktoken_rs::{CoreBPE, cl100k_base};
 
 use crate::models::{
     ContextProfile, ContextProfileName, ContextProfileSection, ContextProfileSectionMix,
@@ -60,19 +62,64 @@ where
     }
 }
 
-/// Conservative characters-per-token ratio for heuristic estimation.
-/// Uses 3.5 instead of 4.0 to bias toward overestimation.
+/// Conservative characters-per-token ratio for the legacy character
+/// heuristic. Uses 3.5 instead of 4.0 to bias toward overestimation.
+///
+/// Retained for the explicit `CharacterHeuristic` fallback strategy. The
+/// default token estimator no longer uses this constant — see
+/// `TokenEstimationStrategy::TiktokenCl100kBase`.
 pub const DEFAULT_CHARS_PER_TOKEN: f32 = 3.5;
 
-/// Token estimation strategy (EE-143).
+/// Process-wide cache for the cl100k_base BPE encoder. The encoder is
+/// expensive to construct (loads embedded merge tables) and immutable once
+/// built, so a single instance is reused across all callers.
+///
+/// The cache is `Option<CoreBPE>` rather than `CoreBPE` so a failure to
+/// initialize the embedded tables (which would indicate a corrupt build
+/// artifact) degrades to the character heuristic instead of panicking
+/// from inside a budget calculation.
+static CL100K_BASE: OnceLock<Option<CoreBPE>> = OnceLock::new();
+
+/// Borrow the shared cl100k_base encoder, initializing on first use.
+/// Returns `None` only if tiktoken-rs's embedded BPE tables fail to load,
+/// in which case `estimate_tokens` falls back to the character heuristic.
+fn cl100k_base_encoder() -> Option<&'static CoreBPE> {
+    CL100K_BASE
+        .get_or_init(|| match cl100k_base() {
+            Ok(encoder) => Some(encoder),
+            Err(error) => {
+                tracing::error!(
+                    target: "ee::pack::tokenizer",
+                    error = %error,
+                    "tiktoken-rs cl100k_base failed to initialize; pack token \
+                     estimation is falling back to the character heuristic"
+                );
+                None
+            }
+        })
+        .as_ref()
+}
+
+/// Token estimation strategy (EE-143, eidetic_engine_cli-aitk).
+///
+/// The default is real BPE counting via `tiktoken-rs`'s `cl100k_base`
+/// encoder — the same encoder OpenAI's GPT-3.5 / GPT-4 family uses. The
+/// character and word heuristics remain available as explicit fallbacks
+/// for callers who need a faster (~zero-allocation) approximation and
+/// can tolerate the bias bands documented on each variant.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum TokenEstimationStrategy {
-    /// Use character count divided by chars-per-token ratio.
-    /// Conservative and fast, suitable for most use cases.
+    /// Real BPE counting using the cl100k_base encoder shared across the
+    /// process. Authoritative for context budget enforcement: matches the
+    /// token count that GPT-3.5 / GPT-4 family models would actually see.
     #[default]
+    TiktokenCl100kBase,
+    /// Character-count divided by `DEFAULT_CHARS_PER_TOKEN` (3.5).
+    /// Fast and allocation-free but biased: undercounts CJK by roughly
+    /// 3-4x and miscounts code/JSON with many short tokens.
     CharacterHeuristic,
-    /// Count whitespace-separated words, multiplied by 1.3.
-    /// More accurate for code but slower.
+    /// Whitespace-separated word count, multiplied by 1.3.
+    /// More accurate for prose; still biased for code and CJK content.
     WordHeuristic,
 }
 
@@ -80,14 +127,19 @@ impl TokenEstimationStrategy {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::TiktokenCl100kBase => "tiktoken_cl100k_base",
             Self::CharacterHeuristic => "character_heuristic",
             Self::WordHeuristic => "word_heuristic",
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 2] {
-        [Self::CharacterHeuristic, Self::WordHeuristic]
+    pub const fn all() -> [Self; 3] {
+        [
+            Self::TiktokenCl100kBase,
+            Self::CharacterHeuristic,
+            Self::WordHeuristic,
+        ]
     }
 }
 
@@ -99,11 +151,13 @@ impl fmt::Display for TokenEstimationStrategy {
 
 /// Estimate the number of tokens in the given text.
 ///
-/// This is a deterministic heuristic that intentionally overestimates
-/// to ensure packs fit within budgets. The default strategy uses a
-/// character-based ratio; pass a custom strategy for different behavior.
+/// The default strategy (`TiktokenCl100kBase`) returns the exact BPE
+/// token count GPT-3.5/4-class models would see. The heuristic strategies
+/// remain available for callers that need an allocation-free estimate
+/// and can tolerate the documented bias.
 ///
-/// Returns at least 1 for any non-empty trimmed input.
+/// Returns at least 1 for any non-empty trimmed input regardless of
+/// strategy, so callers can use the result as a budget floor.
 #[must_use]
 pub fn estimate_tokens(content: &str, strategy: TokenEstimationStrategy) -> u32 {
     let trimmed = content.trim();
@@ -112,6 +166,19 @@ pub fn estimate_tokens(content: &str, strategy: TokenEstimationStrategy) -> u32 
     }
 
     match strategy {
+        TokenEstimationStrategy::TiktokenCl100kBase => {
+            if let Some(encoder) = cl100k_base_encoder() {
+                let count = encoder.encode_with_special_tokens(trimmed).len();
+                u32::try_from(count).unwrap_or(u32::MAX).max(1)
+            } else {
+                // Embedded BPE tables failed to load; the warning was
+                // already emitted on first init. Fall back to the
+                // character heuristic so budget enforcement still runs.
+                let char_count = trimmed.chars().count();
+                let estimate = (char_count as f32 / DEFAULT_CHARS_PER_TOKEN).ceil();
+                (estimate as u32).max(1)
+            }
+        }
         TokenEstimationStrategy::CharacterHeuristic => {
             let char_count = trimmed.chars().count();
             // Divide by chars-per-token, round up for conservatism.
@@ -2768,6 +2835,11 @@ mod tests {
     #[test]
     fn token_estimation_strategy_strings_are_stable() -> TestResult {
         ensure_equal(
+            &TokenEstimationStrategy::TiktokenCl100kBase.as_str(),
+            &"tiktoken_cl100k_base",
+            "tiktoken cl100k_base strategy",
+        )?;
+        ensure_equal(
             &TokenEstimationStrategy::CharacterHeuristic.as_str(),
             &"character_heuristic",
             "character heuristic strategy",
@@ -2779,13 +2851,13 @@ mod tests {
         )?;
         ensure_equal(
             &TokenEstimationStrategy::all().len(),
-            &2,
+            &3,
             "all strategies count",
         )?;
         ensure_equal(
             &TokenEstimationStrategy::default(),
-            &TokenEstimationStrategy::CharacterHeuristic,
-            "default strategy",
+            &TokenEstimationStrategy::TiktokenCl100kBase,
+            "default strategy is tiktoken cl100k_base",
         )
     }
 
@@ -2856,15 +2928,81 @@ mod tests {
     }
 
     #[test]
-    fn estimate_tokens_default_uses_character_heuristic() -> TestResult {
+    fn estimate_tokens_default_uses_tiktoken_cl100k_base() -> TestResult {
         let content = "test content";
         let default_result = estimate_tokens_default(content);
-        let explicit_result = estimate_tokens(content, TokenEstimationStrategy::CharacterHeuristic);
+        let explicit_result =
+            estimate_tokens(content, TokenEstimationStrategy::TiktokenCl100kBase);
         ensure_equal(
             &default_result,
             &explicit_result,
-            "default matches character heuristic",
+            "default matches tiktoken cl100k_base",
         )
+    }
+
+    /// eidetic_engine_cli-aitk: real BPE counts must match what GPT-3.5/4
+    /// would actually see, not the character-ratio heuristic. These three
+    /// short strings have well-known cl100k_base token counts.
+    #[test]
+    fn estimate_tokens_tiktoken_matches_known_short_strings() -> TestResult {
+        // "hello world" tokenizes as ["hello", " world"] under cl100k_base
+        // — exactly 2 tokens.
+        ensure_equal(
+            &estimate_tokens("hello world", TokenEstimationStrategy::TiktokenCl100kBase),
+            &2,
+            "hello world is 2 cl100k_base tokens",
+        )?;
+        // A single ASCII letter is 1 token.
+        ensure_equal(
+            &estimate_tokens("a", TokenEstimationStrategy::TiktokenCl100kBase),
+            &1,
+            "single letter is 1 cl100k_base token",
+        )?;
+        // Empty string still returns 0 (consistent with the heuristic
+        // strategies' early-return contract).
+        ensure_equal(
+            &estimate_tokens("", TokenEstimationStrategy::TiktokenCl100kBase),
+            &0,
+            "empty string is 0 cl100k_base tokens",
+        )?;
+        // Whitespace-only strings are trimmed away first.
+        ensure_equal(
+            &estimate_tokens("   \n\t", TokenEstimationStrategy::TiktokenCl100kBase),
+            &0,
+            "whitespace trims to 0 tokens",
+        )
+    }
+
+    /// eidetic_engine_cli-aitk: the original bug noted that CJK content
+    /// tokenizes at ~1 token/char in cl100k while the character heuristic
+    /// undercounts it ~3.5x. This test pins the actual ratio so a future
+    /// regression doesn't quietly drift back to the heuristic.
+    #[test]
+    fn estimate_tokens_tiktoken_is_more_accurate_than_heuristic_for_cjk() -> TestResult {
+        let cjk = "你好世界你好世界你好世界你好世界"; // 16 CJK chars
+        let tiktoken = estimate_tokens(cjk, TokenEstimationStrategy::TiktokenCl100kBase);
+        let character = estimate_tokens(cjk, TokenEstimationStrategy::CharacterHeuristic);
+        ensure(
+            tiktoken > character,
+            "tiktoken should count CJK higher than the chars/3.5 heuristic does",
+        )?;
+        // 16 chars / 3.5 = 5; cl100k_base typically lands around 16-32 for
+        // this kind of content. Lower bound is conservative.
+        ensure(
+            tiktoken >= 8,
+            "16 CJK chars should round to at least 8 cl100k_base tokens",
+        )
+    }
+
+    /// eidetic_engine_cli-aitk: tiktoken counting must be deterministic
+    /// across calls, since context pack hashes are part of the
+    /// reproducibility contract.
+    #[test]
+    fn estimate_tokens_tiktoken_is_deterministic() -> TestResult {
+        let content = "Procedural rule: run cargo fmt --check before release.";
+        let first = estimate_tokens(content, TokenEstimationStrategy::TiktokenCl100kBase);
+        let second = estimate_tokens(content, TokenEstimationStrategy::TiktokenCl100kBase);
+        ensure_equal(&first, &second, "tiktoken estimation must be deterministic")
     }
 
     #[test]
