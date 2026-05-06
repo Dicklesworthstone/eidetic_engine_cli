@@ -249,7 +249,7 @@ fn side_effect_class(args: &[String]) -> &'static str {
     } else if args.iter().any(|arg| arg == "eval") {
         "read-only, conservative abstention; no fixture discovery, evaluation report, or science metrics emitted"
     } else if args.iter().any(|arg| arg == "review") {
-        "read-only, conservative abstention; no session review or curation candidate proposal emitted"
+        "audited curation candidate mutation only when storage is available; missing storage prevents review"
     } else if args.iter().any(|arg| arg == "handoff") {
         "conservative abstention; no continuity capsule write"
     } else if args.iter().any(|arg| arg == "daemon") {
@@ -2885,11 +2885,23 @@ fn eval_run_and_list_degrade_instead_of_reporting_no_scenario_stub_success() -> 
 }
 
 #[test]
-fn review_session_degrades_instead_of_reporting_empty_proposal_success() -> TestResult {
+fn review_session_reports_storage_error_without_unavailable_sentinel() -> TestResult {
+    let workspace_root = unique_artifact_dir("review-session-missing-db-workspace")?;
+    let workspace = workspace_root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    let workspace_arg = workspace.display().to_string();
+
     let result = run_ee_logged(
-        "review-session-unavailable",
-        None,
+        "review-session-missing-db",
+        Some(&workspace),
         vec![
+            "--workspace".to_owned(),
+            workspace_arg,
             "--json".to_owned(),
             "review".to_owned(),
             "session".to_owned(),
@@ -2899,74 +2911,36 @@ fn review_session_degrades_instead_of_reporting_empty_proposal_success() -> Test
 
     ensure_equal(
         &result.exit_code,
-        &UNSATISFIED_DEGRADED_MODE_EXIT,
-        "review session unavailable exit code",
+        &3,
+        "review session storage error exit code",
     )?;
     ensure(
         result.stderr.is_empty(),
-        "review session JSON degraded response must keep stderr empty",
+        "review session JSON error response must keep stderr empty",
     )?;
-    ensure_no_ansi(&result.stdout, "review session degraded stdout")?;
+    ensure_no_ansi(&result.stdout, "review session error stdout")?;
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.response.v1"),
-        "review session degraded response schema",
-    )?;
-    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/command",
-        json!("review session"),
-        "review session command label",
+        json!("ee.error.v1"),
+        "review session error response schema",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/code",
-        json!("review_evidence_unavailable"),
-        "review session degraded code",
+        "/error/code",
+        json!("storage"),
+        "review session storage error code",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/degraded/0/code",
-        json!("review_evidence_unavailable"),
-        "review session degraded array code",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/repair",
-        json!("ee import cass --workspace . --dry-run --json"),
+        "/error/repair",
+        json!("ee init --workspace ."),
         "review session repair command",
     )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/followUpBead",
-        json!("eidetic_engine_cli-0hjw"),
-        "review session follow-up bead",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/sideEffectClass",
-        json!(
-            "read-only, conservative abstention; no session review or curation candidate proposal emitted"
-        ),
-        "review session side-effect class",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/evidenceIds",
-        json!([]),
-        "review session evidence ids",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/sourceIds",
-        json!([]),
-        "review session source ids",
-    )?;
     ensure(
-        result.parsed.pointer("/data/candidates").is_none(),
-        "review session must not emit empty candidate proposals without CASS evidence",
+        !result.stdout.contains("review_evidence_unavailable")
+            && !result.stdout.contains("Session review is unavailable"),
+        "review session must not emit the removed unavailable sentinel",
     )?;
 
     let fake_success =
@@ -2992,13 +2966,13 @@ fn review_session_degrades_instead_of_reporting_empty_proposal_success() -> Test
     ensure_json_pointer(
         &log_json,
         "/degradationCodes",
-        json!(["review_evidence_unavailable"]),
-        "logged review session degradation code",
+        json!(["storage"]),
+        "logged review session storage error code",
     )?;
     ensure_json_pointer(
         &log_json,
         "/repairCommand",
-        json!("ee import cass --workspace . --dry-run --json"),
+        json!("ee init --workspace ."),
         "logged review session repair command",
     )?;
     ensure_json_pointer(
@@ -3011,7 +2985,7 @@ fn review_session_degrades_instead_of_reporting_empty_proposal_success() -> Test
         &log_json,
         "/sideEffectClass",
         json!(
-            "read-only, conservative abstention; no session review or curation candidate proposal emitted"
+            "audited curation candidate mutation only when storage is available; missing storage prevents review"
         ),
         "logged review session side-effect class",
     )

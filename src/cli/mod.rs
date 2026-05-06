@@ -35,8 +35,9 @@ use crate::core::context::{ContextPackError, ContextPackOptions, run_context_pac
 use crate::core::curate::{
     CurateApplyOptions, CurateApplyReport, CurateCandidatesOptions, CurateCandidatesReport,
     CurateDispositionOptions, CurateDispositionReport, CurateReviewAction, CurateReviewOptions,
-    CurateReviewReport, CurateValidateOptions, CurateValidateReport, apply_curation_candidate,
-    list_curation_candidates, review_curation_candidate, run_curation_disposition,
+    CurateReviewReport, CurateValidateOptions, CurateValidateReport, ReviewSessionOptions,
+    ReviewSessionReport, apply_curation_candidate, list_curation_candidates,
+    review_curation_candidate, review_session_proposals, run_curation_disposition,
     validate_curation_candidate,
 };
 use crate::core::doctor::{
@@ -4267,9 +4268,13 @@ pub struct ReviewSessionArgs {
     #[arg(value_name = "SESSION")]
     pub session: Option<String>,
 
-    /// Generate curation candidate proposals without applying them.
+    /// Generate and persist curation candidate proposals.
     #[arg(long, action = ArgAction::SetTrue)]
     pub propose: bool,
+
+    /// Preview proposals without writing curation candidate records.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 
     /// Minimum confidence threshold for proposals (0.0-1.0).
     #[arg(long, default_value_t = 0.5)]
@@ -4278,6 +4283,10 @@ pub struct ReviewSessionArgs {
     /// Maximum number of candidates to propose.
     #[arg(long, default_value_t = 10)]
     pub limit: u32,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -12526,95 +12535,6 @@ where
     ProcessExitCode::Usage
 }
 
-// ============================================================================
-// EE-186: Review Session Command
-// ============================================================================
-
-/// Report from reviewing a session and proposing curation candidates.
-pub struct ReviewSessionReport {
-    pub schema: &'static str,
-    pub session_id: Option<String>,
-    pub propose_mode: bool,
-    pub candidates: Vec<ProposedCandidate>,
-    pub elapsed_ms: f64,
-}
-
-/// A proposed curation candidate from session review.
-pub struct ProposedCandidate {
-    pub candidate_type: String,
-    pub target_memory_id: Option<String>,
-    pub reason: String,
-    pub confidence: f32,
-    pub source_type: String,
-}
-
-impl ReviewSessionReport {
-    #[must_use]
-    pub fn human_output(&self) -> String {
-        let mut output = String::new();
-        if self.propose_mode {
-            output.push_str("Review Session Proposals\n\n");
-        } else {
-            output.push_str("Review Session Report\n\n");
-        }
-
-        if let Some(ref sid) = self.session_id {
-            output.push_str(&format!("Session: {sid}\n"));
-        }
-
-        output.push_str(&format!("Candidates: {}\n", self.candidates.len()));
-        output.push_str(&format!("Elapsed: {:.2}ms\n\n", self.elapsed_ms));
-
-        for (i, candidate) in self.candidates.iter().enumerate() {
-            output.push_str(&format!(
-                "{}. {} (confidence: {:.2})\n   {}\n\n",
-                i + 1,
-                candidate.candidate_type,
-                candidate.confidence,
-                candidate.reason
-            ));
-        }
-
-        if self.candidates.is_empty() {
-            output.push_str("No curation candidates proposed.\n");
-        }
-
-        output
-    }
-
-    #[must_use]
-    pub fn json_output(&self) -> String {
-        let candidates_json: Vec<serde_json::Value> = self
-            .candidates
-            .iter()
-            .map(|c| {
-                serde_json::json!({
-                    "candidateType": c.candidate_type,
-                    "targetMemoryId": c.target_memory_id,
-                    "reason": c.reason,
-                    "confidence": c.confidence,
-                    "sourceType": c.source_type,
-                })
-            })
-            .collect();
-
-        serde_json::json!({
-            "schema": self.schema,
-            "sessionId": self.session_id,
-            "proposeMode": self.propose_mode,
-            "candidates": candidates_json,
-            "candidateCount": self.candidates.len(),
-            "elapsedMs": self.elapsed_ms,
-        })
-        .to_string()
-    }
-
-    #[must_use]
-    pub fn toon_output(&self) -> String {
-        crate::output::render_toon_from_json(&self.json_output())
-    }
-}
-
 fn handle_review_session<W, E>(
     cli: &Cli,
     args: &ReviewSessionArgs,
@@ -12625,59 +12545,87 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_review_unavailable(cli, "review session", stdout, stderr)
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = ReviewSessionOptions {
+        workspace_path: workspace_path.as_path(),
+        database_path: args.database.as_deref(),
+        session_id: args.session.as_deref(),
+        propose: args.propose,
+        dry_run: args.dry_run,
+        min_confidence: args.min_confidence,
+        limit: args.limit,
+    };
+
+    match review_session_proposals(&options) {
+        Ok(report) => write_review_session_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
-const REVIEW_UNAVAILABLE_CODE: &str = "review_evidence_unavailable";
-const REVIEW_UNAVAILABLE_MESSAGE: &str = "Session review is unavailable until it reads CASS session evidence and writes explicit candidate records instead of reporting an empty generated proposal set.";
-const REVIEW_UNAVAILABLE_REPAIR: &str = "ee import cass --workspace . --dry-run --json";
-const REVIEW_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-0hjw";
-const REVIEW_UNAVAILABLE_SIDE_EFFECT: &str =
-    "read-only, conservative abstention; no session review or curation candidate proposal emitted";
-
-fn write_review_unavailable<W, E>(
+fn write_review_session_report<W>(
     cli: &Cli,
-    command: &'static str,
+    report: &ReviewSessionReport,
     stdout: &mut W,
-    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
-    E: Write,
 {
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": REVIEW_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": REVIEW_UNAVAILABLE_MESSAGE,
-                "repair": REVIEW_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": REVIEW_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": REVIEW_UNAVAILABLE_MESSAGE,
-                        "repair": REVIEW_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": REVIEW_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": REVIEW_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &format_review_session_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&format_review_session_json(report)) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(format_review_session_json(report) + "\n"))
+        }
     }
+}
 
-    let _ = writeln!(stderr, "error: {REVIEW_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {REVIEW_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
+fn format_review_session_json(report: &ReviewSessionReport) -> String {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": report,
+    })
+    .to_string()
+}
+
+fn format_review_session_human(report: &ReviewSessionReport) -> String {
+    let mode = if report.dry_run {
+        "DRY RUN"
+    } else if report.durable_mutation {
+        "PROPOSED"
+    } else {
+        "REVIEW"
+    };
+    let mut output = format!(
+        "{mode}: review session {}\n\n  evidence spans: {}\n  topics: {}\n  candidates: {}\n",
+        report.cass_session_id,
+        report.evidence_span_count,
+        report.topic_count,
+        report.candidate_count
+    );
+    for candidate in &report.candidates {
+        output.push_str(&format!(
+            "\n  {} [{}] confidence={:.2}\n    target: {}\n    evidence: {}\n    {}\n",
+            candidate.candidate_id,
+            candidate.topic_key,
+            candidate.confidence,
+            candidate.target_memory_id,
+            candidate.source_ids.join(","),
+            candidate.reason
+        ));
+    }
+    output.push_str("\nNext:\n  ");
+    output.push_str(&report.next_action);
+    output.push('\n');
+    output
 }
 
 fn handle_search<W, E>(

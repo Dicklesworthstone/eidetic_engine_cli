@@ -294,8 +294,8 @@ ee remember --workspace . --level procedural --kind rule \
   --tags rust,testing \
   "Integration tests must hit a real Postgres instance, never a mock. See incident 2025-Q3."
 
-# 5. After a session, review curation candidates
-# (ee review session --propose is not yet implemented; use ee curate)
+# 5. After a session, distill evidence-backed curation candidates
+ee review session <cass-session-id> --workspace . --propose --dry-run --json
 ee curate candidates --workspace .
 ee curate validate <candidate-id>
 ee curate apply <candidate-id>
@@ -357,7 +357,7 @@ Each gate reports exit code and elapsed time.
 
 | Command | Purpose |
 |---|---|
-| `ee review session <id> --propose` | *(not yet implemented)* Distill a session into proposed memories/rules |
+| `ee review session <id> --propose [--dry-run]` | Distill imported CASS session evidence into proposed memories/rules |
 | `ee curate candidates [--workspace .]` | List pending curation candidates |
 | `ee curate validate <id>` | Run validation (specificity, duplication, scope, evidence) |
 | `ee curate apply <id>` / `accept <id>` / `reject <id>` / `snooze <id>` / `merge <a> <b>` | Lifecycle transitions |
@@ -596,7 +596,8 @@ ee import cass --workspace . --limit 50 --dry-run --json
 # Real import (idempotent, resumable, ledger-tracked)
 ee import cass --workspace . --limit 50
 
-# Review curation candidates (ee review session --propose not yet implemented)
+# Review curation candidates proposed from imported session evidence
+ee review session <cass-session-id> --workspace . --propose --dry-run --json
 ee curate candidates --workspace .
 ```
 
