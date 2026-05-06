@@ -19,21 +19,6 @@ pub const TASK_FRAME_REPORT_SCHEMA_V1: &str = "ee.task_frame.report.v1";
 pub const TASK_FRAME_ID_PREFIX: &str = "tf_";
 pub const TASK_SUBGOAL_ID_PREFIX: &str = "tg_";
 pub const NON_EXECUTING_CONTRACT: &str = "records task state only; never executes shell commands, plans tools, or mutates workspace files";
-const REDACTION_PLACEHOLDER: &str = "***REDACTED***";
-const SECRET_KEYS: &[&str] = &[
-    "api_key",
-    "apikey",
-    "auth_token",
-    "bearer_token",
-    "client_secret",
-    "database_url",
-    "password",
-    "passwd",
-    "private_key",
-    "secret",
-    "ssh_key",
-    "token",
-];
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -736,10 +721,8 @@ fn append_unique_strings(target: &mut Vec<String>, values: &[String]) {
 }
 
 fn redact_task_text(value: &str) -> (String, bool) {
-    let trimmed = value.trim();
-    let (without_key_values, key_value_redacted) = redact_secret_key_values(trimmed);
-    let (without_url_passwords, url_redacted) = redact_url_passwords(&without_key_values);
-    (without_url_passwords, key_value_redacted || url_redacted)
+    let report = crate::policy::redact_secret_like_content(value.trim());
+    (report.content, report.redacted)
 }
 
 fn redact_optional_task_text(value: Option<String>) -> (Option<String>, bool) {
@@ -786,140 +769,6 @@ fn redaction_status(redacted: bool) -> String {
     } else {
         "none".to_owned()
     }
-}
-
-fn redact_secret_key_values(input: &str) -> (String, bool) {
-    let mut output = input.to_owned();
-    let mut changed = false;
-
-    for key in SECRET_KEYS {
-        let mut search_start = 0;
-        loop {
-            let lower = output.to_ascii_lowercase();
-            if search_start >= lower.len() {
-                break;
-            }
-            let Some(relative) = lower[search_start..].find(key) else {
-                break;
-            };
-            let key_start = search_start + relative;
-            let key_end = key_start + key.len();
-            if !is_key_boundary(lower.as_bytes(), key_start, key_end) {
-                search_start = key_end;
-                continue;
-            }
-
-            let Some((value_start, value_end)) = secret_value_range(&output, key_end) else {
-                search_start = key_end;
-                continue;
-            };
-            if value_start == value_end {
-                search_start = key_end;
-                continue;
-            }
-            output.replace_range(value_start..value_end, REDACTION_PLACEHOLDER);
-            changed = true;
-            search_start = value_start + REDACTION_PLACEHOLDER.len();
-        }
-    }
-
-    (output, changed)
-}
-
-fn is_key_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
-    let before_ok = start == 0
-        || bytes
-            .get(start.saturating_sub(1))
-            .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
-    let after_ok = bytes
-        .get(end)
-        .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
-    before_ok && after_ok
-}
-
-fn secret_value_range(input: &str, key_end: usize) -> Option<(usize, usize)> {
-    let mut cursor = key_end;
-    cursor = skip_ascii_spaces(input, cursor);
-    let separator = input.as_bytes().get(cursor).copied()?;
-    if !matches!(separator, b'=' | b':') {
-        return None;
-    }
-    cursor += 1;
-    cursor = skip_ascii_spaces(input, cursor);
-    if cursor >= input.len() {
-        return None;
-    }
-
-    let quote = input.as_bytes().get(cursor).copied();
-    if matches!(quote, Some(b'"' | b'\'')) {
-        let quote = quote?;
-        let value_start = cursor + 1;
-        let value_end = input[value_start..]
-            .bytes()
-            .position(|byte| byte == quote)
-            .map_or(input.len(), |relative| value_start + relative);
-        return Some((value_start, value_end));
-    }
-
-    let value_end = input[cursor..]
-        .char_indices()
-        .find_map(|(offset, ch)| {
-            if ch.is_whitespace() || matches!(ch, ',' | ';' | '&') {
-                Some(cursor + offset)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(input.len());
-    Some((cursor, value_end))
-}
-
-fn skip_ascii_spaces(input: &str, mut cursor: usize) -> usize {
-    while matches!(input.as_bytes().get(cursor), Some(b' ' | b'\t')) {
-        cursor += 1;
-    }
-    cursor
-}
-
-fn redact_url_passwords(input: &str) -> (String, bool) {
-    let mut output = input.to_owned();
-    let mut changed = false;
-    let mut search_start = 0;
-    let mut lower = output.to_ascii_lowercase();
-
-    loop {
-        if search_start >= lower.len() {
-            break;
-        }
-        let Some(relative_scheme) = lower[search_start..].find("://") else {
-            break;
-        };
-        let scheme_marker = search_start + relative_scheme + 3;
-        let segment_end = output[scheme_marker..]
-            .char_indices()
-            .find_map(|(offset, ch)| ch.is_whitespace().then_some(scheme_marker + offset))
-            .unwrap_or(output.len());
-        let Some(at_relative) = output[scheme_marker..segment_end].find('@') else {
-            search_start = segment_end;
-            continue;
-        };
-        let at_index = scheme_marker + at_relative;
-        let Some(colon_relative) = output[scheme_marker..at_index].rfind(':') else {
-            search_start = at_index + 1;
-            continue;
-        };
-        let value_start = scheme_marker + colon_relative + 1;
-        if value_start < at_index {
-            output.replace_range(value_start..at_index, REDACTION_PLACEHOLDER);
-            lower = output.to_ascii_lowercase();
-            changed = true;
-            search_start = value_start + REDACTION_PLACEHOLDER.len();
-        } else {
-            search_start = at_index + 1;
-        }
-    }
-
-    (output, changed)
 }
 
 fn normalized_evidence_links(values: &[TaskEvidenceLink]) -> Vec<TaskEvidenceLink> {
@@ -1127,23 +976,43 @@ mod tests {
     fn task_frame_redacts_secret_like_values_before_persisting() -> TestResult {
         let workspace = temp_workspace("redaction")?;
         let mut options = create_options(workspace.clone());
-        options.goal = "Rotate api_key=sk-live-123 before release".to_owned();
-        options.current_focus =
-            Some("Check DATABASE_URL=postgres://user:hunter2@example.test/db".to_owned());
+        let raw_token = format!("{}{}", concat!("sk", "-ant", "-api03", "-"), "A".repeat(52));
+        let aws_key = format!("{}{}", concat!("AK", "IA"), "B".repeat(16));
+        let jwt = [
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+            "Rq8IjqberX03cRIZHg7v0Rq8IjqberX03cRIZHg7v0",
+        ]
+        .join(".");
+        let pem_body = concat!("MII", "Redact", "TaskFrame", "Body");
+        options.goal = format!("Rotate api_key=sk-live-123 and {raw_token} before release");
+        options.current_focus = Some(format!(
+            "Check DATABASE_URL=postgres://user:hunter2@example.test/db and AWS {aws_key}"
+        ));
         options.blockers = vec![
             "needs password='open-sesame' from operator".to_owned(),
-            "token: ghp_secret_token".to_owned(),
+            format!("Authorization: Bearer {jwt}"),
+            format!(
+                "Do not persist -----BEGIN PRIVATE KEY-----\n{pem_body}\n-----END PRIVATE KEY-----"
+            ),
         ];
         let report = create_task_frame(&options).map_err(|e| e.message())?;
         let frame = report.frame.ok_or_else(|| "missing frame".to_owned())?;
         let serialized = serde_json::to_string(&frame).map_err(|error| error.to_string())?;
 
         assert_eq!(frame.redaction_status, "redacted");
-        assert!(serialized.contains(REDACTION_PLACEHOLDER));
+        assert!(serialized.contains(&crate::policy::redaction_placeholder("api_key")));
+        assert!(serialized.contains(&crate::policy::redaction_placeholder("anthropic_api_key")));
+        assert!(serialized.contains(&crate::policy::redaction_placeholder("aws_access_key")));
+        assert!(serialized.contains(&crate::policy::redaction_placeholder("bearer_token")));
+        assert!(serialized.contains(&crate::policy::redaction_placeholder("pem_block")));
         assert!(!serialized.contains("sk-live-123"));
+        assert!(!serialized.contains(&raw_token));
+        assert!(!serialized.contains(&aws_key));
+        assert!(!serialized.contains(&jwt));
+        assert!(!serialized.contains(pem_body));
         assert!(!serialized.contains("hunter2"));
         assert!(!serialized.contains("open-sesame"));
-        assert!(!serialized.contains("ghp_secret_token"));
         assert!(task_frame_store_path(&workspace).exists());
         Ok(())
     }
@@ -1190,7 +1059,10 @@ mod tests {
         let serialized = serde_json::to_string(&frame).map_err(|error| error.to_string())?;
 
         assert_eq!(frame.redaction_status, "redacted");
-        assert!(serialized.contains(REDACTION_PLACEHOLDER));
+        assert!(serialized.contains(&crate::policy::redaction_placeholder("token")));
+        assert!(serialized.contains(&crate::policy::redaction_placeholder("secret")));
+        assert!(serialized.contains(&crate::policy::redaction_placeholder("private_key")));
+        assert!(serialized.contains(&crate::policy::redaction_placeholder("password")));
         assert!(!serialized.contains("abc123"));
         assert!(!serialized.contains("hidden"));
         assert!(!serialized.contains("abcdef"));

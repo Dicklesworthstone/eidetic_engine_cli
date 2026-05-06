@@ -379,22 +379,35 @@ fn handoff_resume_is_structurally_consistent_across_runs() -> TestResult {
 fn handoff_create_redacts_task_frame_secrets_from_capsule_file() -> TestResult {
     let (_dir, ws) = init_workspace()?;
 
-    // Seed a task-frame containing a fake API key + password. The unit-test
-    // suite in core/handoff.rs proves the in-memory redaction path; this
+    // Seed a task-frame containing key/value secrets plus bare secret-like
+    // tokens. The unit-test suite proves the in-memory redaction path; this
     // test asserts the same is true when invoked through the CLI binary.
+    let raw_api_token = format!("{}{}", concat!("sk", "-ant", "-api03", "-"), "A".repeat(52));
+    let aws_key = format!("{}{}", concat!("AK", "IA"), "B".repeat(16));
+    let jwt = [
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        "eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+        "Rq8IjqberX03cRIZHg7v0Rq8IjqberX03cRIZHg7v0",
+    ]
+    .join(".");
+    let pem_body = concat!("MII", "Handoff", "Capsule", "Body");
+    let pem_block = format!("-----BEGIN PRIVATE KEY-----\n{pem_body}\n-----END PRIVATE KEY-----");
+    let goal = format!("Continue release with api_key=sk-live-XYZ123 and rotate {raw_api_token}");
+    let current_focus = format!("verify handoff redaction for AWS key {aws_key}");
+    let blocker = format!("password=hunter2; Authorization: Bearer {jwt}; {pem_block}");
     let frame_create = run_ee(&[
         "--workspace",
         &ws,
         "task-frame",
         "create",
         "--goal",
-        "Continue release with api_key=sk-live-XYZ123",
+        &goal,
         "--actor",
         "cc_1_pane6",
         "--current-focus",
-        "verify handoff redaction",
+        &current_focus,
         "--blocker",
-        "password=hunter2 still unavailable",
+        &blocker,
         "--memory-id",
         "mem_redact_check",
         "--json",
@@ -430,6 +443,22 @@ fn handoff_create_redacts_task_frame_secrets_from_capsule_file() -> TestResult {
     ensure(
         !body.contains("sk-live-XYZ123"),
         "capsule file must not contain raw API key after redaction",
+    )?;
+    ensure(
+        !body.contains(&raw_api_token),
+        "capsule file must not contain raw bare API token after redaction",
+    )?;
+    ensure(
+        !body.contains(&aws_key),
+        "capsule file must not contain raw AWS key after redaction",
+    )?;
+    ensure(
+        !body.contains(&jwt),
+        "capsule file must not contain raw bearer/JWT value after redaction",
+    )?;
+    ensure(
+        !body.contains(pem_body),
+        "capsule file must not contain raw PEM body after redaction",
     )?;
     ensure(
         !body.contains("hunter2"),
