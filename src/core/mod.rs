@@ -54,6 +54,7 @@ pub mod tripwire;
 pub mod verify;
 pub mod why;
 pub mod workspace;
+pub mod write_owner;
 
 pub use budget::{BudgetDimension, BudgetExceeded, BudgetSnapshot, RequestBudget};
 pub use context::{AccessLevel, CapabilitySet, CommandContext};
@@ -61,6 +62,10 @@ pub use outcome::{
     CliCancelReason, CliOutcomeClass, CliOutcomeSummary, EXIT_CANCELLED, EXIT_PANICKED,
     OutcomeFeedbackSummary, OutcomeRecordOptions, OutcomeRecordReport, OutcomeRecordStatus,
     outcome_class, outcome_exit_code, record_outcome,
+};
+pub use write_owner::{
+    WRITE_OWNER_STATUS_SCHEMA_V1, WriteHandle, WriteOperation, WriteOwner, WriteOwnerStatus,
+    WriteResult,
 };
 
 pub const VERSION_PROVENANCE_SCHEMA_V1: &str = "ee.version.provenance.v1";
