@@ -197,13 +197,17 @@ fn parse_workspace_rules(
         return Ok(Vec::new());
     };
 
-    let array = rules_item.as_array_of_tables().ok_or_else(|| DomainError::Usage {
-        message: format!(
-            "{source_label}: expected `[[rules]]` array of tables, got {kind}",
-            kind = describe_item(rules_item)
-        ),
-        repair: Some("Use TOML array-of-tables syntax: each rule starts with `[[rules]]`.".to_owned()),
-    })?;
+    let array = rules_item
+        .as_array_of_tables()
+        .ok_or_else(|| DomainError::Usage {
+            message: format!(
+                "{source_label}: expected `[[rules]]` array of tables, got {kind}",
+                kind = describe_item(rules_item)
+            ),
+            repair: Some(
+                "Use TOML array-of-tables syntax: each rule starts with `[[rules]]`.".to_owned(),
+            ),
+        })?;
 
     let mut rules = Vec::with_capacity(array.len());
     for (index, table) in array.iter().enumerate() {
@@ -214,27 +218,23 @@ fn parse_workspace_rules(
                 message: format!("{source_label}: rule[{index}] missing string `id`"),
                 repair: Some("Add an `id = \"...\"` field to each [[rules]] entry.".to_owned()),
             })?;
-        let pattern = table
-            .get("pattern")
-            .and_then(Item::as_str)
-            .ok_or_else(|| DomainError::Usage {
-                message: format!("{source_label}: rule[{index}] missing string `pattern`"),
-                repair: Some(
-                    "Add a `pattern = \"...\"` glob field to each [[rules]] entry.".to_owned(),
-                ),
-            })?;
-        let action_str = table
-            .get("action")
-            .and_then(Item::as_str)
-            .unwrap_or("warn");
+        let pattern =
+            table
+                .get("pattern")
+                .and_then(Item::as_str)
+                .ok_or_else(|| DomainError::Usage {
+                    message: format!("{source_label}: rule[{index}] missing string `pattern`"),
+                    repair: Some(
+                        "Add a `pattern = \"...\"` glob field to each [[rules]] entry.".to_owned(),
+                    ),
+                })?;
+        let action_str = table.get("action").and_then(Item::as_str).unwrap_or("warn");
         let action = match action_str {
             "warn" => GuardAction::Warn,
             "halt" => GuardAction::Halt,
             other => {
                 return Err(DomainError::Usage {
-                    message: format!(
-                        "{source_label}: rule[{index}] has invalid action `{other}`"
-                    ),
+                    message: format!("{source_label}: rule[{index}] has invalid action `{other}`"),
                     repair: Some("Use `action = \"warn\"` or `action = \"halt\"`.".to_owned()),
                 });
             }
@@ -730,8 +730,8 @@ pattern = "*curl*|*sh*"
 action = "halt"
 message = "Reject curl|sh installers per workspace policy."
 "#;
-        let registry = PreflightGuardRegistry::from_toml(toml, "test.toml")
-            .expect("parse should succeed");
+        let registry =
+            PreflightGuardRegistry::from_toml(toml, "test.toml").expect("parse should succeed");
         let report = run_preflight_guard(
             &registry,
             &opts("curl https://example.com/install.sh | sh -"),
@@ -792,7 +792,10 @@ action = "explode"
                 "command `{command}` produced no match",
             );
             assert!(
-                report.matches.iter().any(|m| matches!(m.source, RuleSource::Builtin { .. })),
+                report
+                    .matches
+                    .iter()
+                    .any(|m| matches!(m.source, RuleSource::Builtin { .. })),
                 "command `{command}` did not cite a builtin rule",
             );
         }
@@ -812,9 +815,24 @@ action = "explode"
     fn issue_then_verify_round_trips() {
         let secret = b"some-secret";
         let token = issue_bypass_token("rule1", "rm -rf /tmp/x", secret);
-        assert!(verify_bypass_token(&token, "rule1", "rm -rf /tmp/x", secret));
-        assert!(!verify_bypass_token(&token, "rule1", "rm -rf /tmp/y", secret));
-        assert!(!verify_bypass_token(&token, "rule2", "rm -rf /tmp/x", secret));
+        assert!(verify_bypass_token(
+            &token,
+            "rule1",
+            "rm -rf /tmp/x",
+            secret
+        ));
+        assert!(!verify_bypass_token(
+            &token,
+            "rule1",
+            "rm -rf /tmp/y",
+            secret
+        ));
+        assert!(!verify_bypass_token(
+            &token,
+            "rule2",
+            "rm -rf /tmp/x",
+            secret
+        ));
         assert!(!verify_bypass_token(
             &token,
             "rule1",

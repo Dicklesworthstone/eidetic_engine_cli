@@ -318,10 +318,7 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         .ok_or_else(|| "missing restoredDatabasePath".to_owned())?;
     ensure(
         restored_db_path.exists(),
-        format!(
-            "restored database exists at {}",
-            restored_db_path.display()
-        ),
+        format!("restored database exists at {}", restored_db_path.display()),
     )?;
 
     let restored_conn = DbConnection::open_file(&restored_db_path)
@@ -343,7 +340,8 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
     restored_pairs.sort_by(|a, b| a.0.content.cmp(&b.0.content));
 
     // 8. Row-by-row diff. Content + tag set must match exactly per pair.
-    for (index, (src_pair, restored_pair)) in src_pairs.iter().zip(restored_pairs.iter()).enumerate()
+    for (index, (src_pair, restored_pair)) in
+        src_pairs.iter().zip(restored_pairs.iter()).enumerate()
     {
         ensure_equal(
             &restored_pair.0,

@@ -58,10 +58,7 @@ fn agents_md_forbidden_actions_halt_with_exit_seven() {
             "command `{command}` did not cite a builtin rule",
         );
         assert!(
-            report
-                .matches
-                .iter()
-                .any(|m| m.action == GuardAction::Halt),
+            report.matches.iter().any(|m| m.action == GuardAction::Halt),
             "command `{command}` had no halt-class match",
         );
     }
@@ -106,9 +103,13 @@ fn workspace_toml_missing_required_field_is_usage_error() {
 [[rules]]
 pattern = "*foo*"
 "#;
-    let err = PreflightGuardRegistry::from_toml(toml, "bad.toml")
-        .expect_err("should reject missing id");
-    assert!(err.message().contains("missing string `id`"), "{}", err.message());
+    let err =
+        PreflightGuardRegistry::from_toml(toml, "bad.toml").expect_err("should reject missing id");
+    assert!(
+        err.message().contains("missing string `id`"),
+        "{}",
+        err.message()
+    );
 }
 
 #[test]
@@ -196,7 +197,8 @@ fn bypass_token_invalid_keeps_halt_and_audits_invalid() {
 #[test]
 fn bypass_token_for_different_command_fails_verification() {
     let secret = b"k";
-    let token_for_other_command = issue_bypass_token("builtin:git_reset_hard", "git reset --hard A", secret);
+    let token_for_other_command =
+        issue_bypass_token("builtin:git_reset_hard", "git reset --hard A", secret);
     let registry = PreflightGuardRegistry::with_builtins();
     let mut options = opts("git reset --hard B");
     options.bypass_secret = Some(secret.to_vec());
@@ -244,9 +246,24 @@ fn bypass_secret_missing_is_distinct_from_invalid_token() {
 fn issue_then_verify_round_trip_is_domain_separated() {
     let secret = b"some-secret";
     let token = issue_bypass_token("rule1", "rm -rf /tmp/x", secret);
-    assert!(verify_bypass_token(&token, "rule1", "rm -rf /tmp/x", secret));
-    assert!(!verify_bypass_token(&token, "rule1", "rm -rf /tmp/y", secret));
-    assert!(!verify_bypass_token(&token, "rule2", "rm -rf /tmp/x", secret));
+    assert!(verify_bypass_token(
+        &token,
+        "rule1",
+        "rm -rf /tmp/x",
+        secret
+    ));
+    assert!(!verify_bypass_token(
+        &token,
+        "rule1",
+        "rm -rf /tmp/y",
+        secret
+    ));
+    assert!(!verify_bypass_token(
+        &token,
+        "rule2",
+        "rm -rf /tmp/x",
+        secret
+    ));
     assert!(!verify_bypass_token(
         &token,
         "rule1",

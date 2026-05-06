@@ -15,7 +15,11 @@ use serde_json::Value as JsonValue;
 type TestResult = Result<(), String>;
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
-    if condition { Ok(()) } else { Err(message.into()) }
+    if condition {
+        Ok(())
+    } else {
+        Err(message.into())
+    }
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
@@ -51,76 +55,172 @@ fn init_workspace(dir: &Path) -> TestResult {
 
 fn seed_release_memories(dir: &Path) -> TestResult {
     let memories = [
-        ("Always run cargo test before creating a release tag.", "rule", "procedural"),
-        ("The 2026-04-15 release failed because tests weren't run locally first.", "fact", "episodic"),
-        ("Never force-push to main branch during release.", "rule", "procedural"),
-        ("Publishing to crates.io requires cargo publish --dry-run first.", "rule", "procedural"),
+        (
+            "Always run cargo test before creating a release tag.",
+            "rule",
+            "procedural",
+        ),
+        (
+            "The 2026-04-15 release failed because tests weren't run locally first.",
+            "fact",
+            "episodic",
+        ),
+        (
+            "Never force-push to main branch during release.",
+            "rule",
+            "procedural",
+        ),
+        (
+            "Publishing to crates.io requires cargo publish --dry-run first.",
+            "rule",
+            "procedural",
+        ),
     ];
     for (content, kind, level) in memories {
         let output = run_ee(&[
-            "remember", content,
-            "--workspace", dir.to_str().unwrap(),
-            "--kind", kind, "--level", level,
+            "remember",
+            content,
+            "--workspace",
+            dir.to_str().unwrap(),
+            "--kind",
+            kind,
+            "--level",
+            level,
             "--json",
         ])?;
-        ensure(output.status.success(), format!("seed memory failed: {content}"))?;
+        ensure(
+            output.status.success(),
+            format!("seed memory failed: {content}"),
+        )?;
     }
     Ok(())
 }
 
 fn seed_async_migration_memories(dir: &Path) -> TestResult {
     let memories = [
-        ("Asupersync uses &Cx for threading, not Tokio runtime.", "rule", "procedural"),
-        ("Outcome::ok() and Outcome::err() replace Result in async code.", "rule", "procedural"),
-        ("Budget and capability fields must be threaded through &Cx.", "rule", "procedural"),
-        ("Tokio is forbidden in this codebase per AGENTS.md.", "rule", "procedural"),
+        (
+            "Asupersync uses &Cx for threading, not Tokio runtime.",
+            "rule",
+            "procedural",
+        ),
+        (
+            "Outcome::ok() and Outcome::err() replace Result in async code.",
+            "rule",
+            "procedural",
+        ),
+        (
+            "Budget and capability fields must be threaded through &Cx.",
+            "rule",
+            "procedural",
+        ),
+        (
+            "Tokio is forbidden in this codebase per AGENTS.md.",
+            "rule",
+            "procedural",
+        ),
     ];
     for (content, kind, level) in memories {
         let output = run_ee(&[
-            "remember", content,
-            "--workspace", dir.to_str().unwrap(),
-            "--kind", kind, "--level", level,
+            "remember",
+            content,
+            "--workspace",
+            dir.to_str().unwrap(),
+            "--kind",
+            kind,
+            "--level",
+            level,
             "--json",
         ])?;
-        ensure(output.status.success(), format!("seed memory failed: {content}"))?;
+        ensure(
+            output.status.success(),
+            format!("seed memory failed: {content}"),
+        )?;
     }
     Ok(())
 }
 
 fn seed_onboarding_memories(dir: &Path) -> TestResult {
     let memories = [
-        ("Run cargo fmt --check before committing.", "rule", "procedural"),
-        ("The project uses Rust 2024 edition with nightly toolchain.", "fact", "semantic"),
-        ("Check AGENTS.md for coding conventions.", "rule", "procedural"),
-        ("Use scripts/verify.sh to run all gates.", "rule", "procedural"),
+        (
+            "Run cargo fmt --check before committing.",
+            "rule",
+            "procedural",
+        ),
+        (
+            "The project uses Rust 2024 edition with nightly toolchain.",
+            "fact",
+            "semantic",
+        ),
+        (
+            "Check AGENTS.md for coding conventions.",
+            "rule",
+            "procedural",
+        ),
+        (
+            "Use scripts/verify.sh to run all gates.",
+            "rule",
+            "procedural",
+        ),
     ];
     for (content, kind, level) in memories {
         let output = run_ee(&[
-            "remember", content,
-            "--workspace", dir.to_str().unwrap(),
-            "--kind", kind, "--level", level,
+            "remember",
+            content,
+            "--workspace",
+            dir.to_str().unwrap(),
+            "--kind",
+            kind,
+            "--level",
+            level,
             "--json",
         ])?;
-        ensure(output.status.success(), format!("seed memory failed: {content}"))?;
+        ensure(
+            output.status.success(),
+            format!("seed memory failed: {content}"),
+        )?;
     }
     Ok(())
 }
 
 fn seed_cleanup_memories(dir: &Path) -> TestResult {
     let memories = [
-        ("git clean -fd is dangerous - use git status first.", "rule", "procedural"),
-        ("Never run rm -rf without explicit confirmation.", "rule", "procedural"),
-        ("Use git stash instead of discarding uncommitted changes.", "rule", "procedural"),
-        ("The 2026-03-10 incident lost work due to accidental git reset --hard.", "fact", "episodic"),
+        (
+            "git clean -fd is dangerous - use git status first.",
+            "rule",
+            "procedural",
+        ),
+        (
+            "Never run rm -rf without explicit confirmation.",
+            "rule",
+            "procedural",
+        ),
+        (
+            "Use git stash instead of discarding uncommitted changes.",
+            "rule",
+            "procedural",
+        ),
+        (
+            "The 2026-03-10 incident lost work due to accidental git reset --hard.",
+            "fact",
+            "episodic",
+        ),
     ];
     for (content, kind, level) in memories {
         let output = run_ee(&[
-            "remember", content,
-            "--workspace", dir.to_str().unwrap(),
-            "--kind", kind, "--level", level,
+            "remember",
+            content,
+            "--workspace",
+            dir.to_str().unwrap(),
+            "--kind",
+            kind,
+            "--level",
+            level,
             "--json",
         ])?;
-        ensure(output.status.success(), format!("seed memory failed: {content}"))?;
+        ensure(
+            output.status.success(),
+            format!("seed memory failed: {content}"),
+        )?;
     }
     Ok(())
 }
@@ -136,8 +236,10 @@ fn north_star_1_release_context_includes_verification_rules() -> TestResult {
     let output = run_ee(&[
         "context",
         "what should I know before releasing this project?",
-        "--workspace", dir.to_str().unwrap(),
-        "--format", "markdown",
+        "--workspace",
+        dir.to_str().unwrap(),
+        "--format",
+        "markdown",
     ])?;
 
     ensure(output.status.success(), "context command failed")?;
@@ -166,7 +268,8 @@ fn north_star_2_async_migration_context_is_json_and_mentions_cx() -> TestResult 
     let output = run_ee(&[
         "context",
         "replace a tokio service with asupersync",
-        "--workspace", dir.to_str().unwrap(),
+        "--workspace",
+        dir.to_str().unwrap(),
         "--json",
     ])?;
 
@@ -199,9 +302,12 @@ fn north_star_4_onboarding_context_includes_conventions() -> TestResult {
     let output = run_ee(&[
         "context",
         "start working in this repository",
-        "--workspace", dir.to_str().unwrap(),
-        "--max-tokens", "3000",
-        "--format", "markdown",
+        "--workspace",
+        dir.to_str().unwrap(),
+        "--max-tokens",
+        "3000",
+        "--format",
+        "markdown",
     ])?;
 
     ensure(output.status.success(), "context command failed")?;
@@ -230,8 +336,10 @@ fn north_star_5_cleanup_context_warns_about_dangers() -> TestResult {
     let output = run_ee(&[
         "context",
         "clean up generated files and reset the repo state",
-        "--workspace", dir.to_str().unwrap(),
-        "--format", "markdown",
+        "--workspace",
+        dir.to_str().unwrap(),
+        "--format",
+        "markdown",
     ])?;
 
     ensure(output.status.success(), "context command failed")?;
@@ -253,9 +361,14 @@ fn north_star_6_degraded_mode_uses_lexical_fallback() -> TestResult {
     init_workspace(&dir)?;
 
     let output = run_ee(&[
-        "remember", "Run tests before release to catch regressions.",
-        "--workspace", dir.to_str().unwrap(),
-        "--kind", "rule", "--level", "procedural",
+        "remember",
+        "Run tests before release to catch regressions.",
+        "--workspace",
+        dir.to_str().unwrap(),
+        "--kind",
+        "rule",
+        "--level",
+        "procedural",
         "--json",
     ])?;
     ensure(output.status.success(), "seed memory failed")?;
@@ -263,11 +376,15 @@ fn north_star_6_degraded_mode_uses_lexical_fallback() -> TestResult {
     let output = run_ee(&[
         "context",
         "run tests before release",
-        "--workspace", dir.to_str().unwrap(),
+        "--workspace",
+        dir.to_str().unwrap(),
         "--json",
     ])?;
 
-    ensure(output.status.success(), "context command failed in degraded mode")?;
+    ensure(
+        output.status.success(),
+        "context command failed in degraded mode",
+    )?;
     let json = parse_json_stdout(&output, "degraded context")?;
     ensure(json.is_object(), "output must be JSON object")?;
 

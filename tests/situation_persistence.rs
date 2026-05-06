@@ -100,9 +100,8 @@ fn incident_response_classifies_with_high_confidence_when_multi_signal() {
 
 #[test]
 fn exploration_classifies_when_multiple_research_signals_match() {
-    let result = classify_task(
-        "spike: explore prototype design space for the cache, evaluate feasibility",
-    );
+    let result =
+        classify_task("spike: explore prototype design space for the cache, evaluate feasibility");
     assert_eq!(result.category, SituationCategory::Exploration);
     assert!(result.confidence_score >= 0.7);
 }

@@ -80,7 +80,13 @@ fn abstention_code(value: &JsonValue) -> Option<&str> {
     value.pointer("/data/code").and_then(JsonValue::as_str)
 }
 
-fn seed_memory(workspace_arg: &str, level: &str, kind: &str, tags: &str, content: &str) -> Result<String, String> {
+fn seed_memory(
+    workspace_arg: &str,
+    level: &str,
+    kind: &str,
+    tags: &str,
+    content: &str,
+) -> Result<String, String> {
     let value = run_ee_json(&[
         "--workspace",
         workspace_arg,
@@ -183,9 +189,7 @@ fn procedural_distillation_partial_chain_through_audit_and_why() -> TestResult {
         .collect();
     ensure(
         retrieved_ids.contains(&rule_id.as_str()),
-        format!(
-            "search results {retrieved_ids:?} did not contain seeded rule {rule_id}"
-        ),
+        format!("search results {retrieved_ids:?} did not contain seeded rule {rule_id}"),
     )?;
 
     // 5. ee why returns a rich explanation for the rule, including selection
@@ -197,7 +201,8 @@ fn procedural_distillation_partial_chain_through_audit_and_why() -> TestResult {
         "why marks memory as found",
     )?;
     ensure_equal(
-        &why.pointer("/data/storage/trustClass").and_then(JsonValue::as_str),
+        &why.pointer("/data/storage/trustClass")
+            .and_then(JsonValue::as_str),
         &Some("human_explicit"),
         "why surfaces human_explicit trust class",
     )?;
