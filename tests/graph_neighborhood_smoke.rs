@@ -233,6 +233,211 @@ fn graph_neighborhood_json_envelope_is_stable() -> TestResult {
     Ok(())
 }
 
+#[cfg(feature = "graph")]
+#[test]
+fn graph_link_path_and_why_outputs_compose_for_real_memory_edges() -> TestResult {
+    let workspace = unique_workspace("link-path")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+
+    let init = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "init"])?;
+    ensure(
+        init.status.success(),
+        format!(
+            "ee init must succeed; stderr: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )?;
+
+    let source = remember(
+        &workspace_arg,
+        "Graph link path source alpha evidence memory.",
+    )?;
+    let bridge = remember(
+        &workspace_arg,
+        "Graph link path bridge memory with linked provenance.",
+    )?;
+    let target = remember(
+        &workspace_arg,
+        "Graph link path target memory refined by the bridge.",
+    )?;
+
+    let database_path = workspace.join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    connection
+        .insert_memory_link(
+            "link_00000000000000000000000110",
+            &CreateMemoryLinkInput {
+                src_memory_id: source.clone(),
+                dst_memory_id: bridge.clone(),
+                relation: MemoryLinkRelation::Supports,
+                weight: 0.93_f32,
+                confidence: 0.89_f32,
+                directed: true,
+                evidence_count: 3,
+                last_reinforced_at: Some("2026-05-06T04:00:00Z".to_string()),
+                source: MemoryLinkSource::Human,
+                created_by: Some("graph-link-path-e2e".to_string()),
+                metadata_json: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .insert_memory_link(
+            "link_00000000000000000000000111",
+            &CreateMemoryLinkInput {
+                src_memory_id: bridge.clone(),
+                dst_memory_id: target.clone(),
+                relation: MemoryLinkRelation::Supersedes,
+                weight: 0.81_f32,
+                confidence: 0.77_f32,
+                directed: true,
+                evidence_count: 2,
+                last_reinforced_at: Some("2026-05-06T04:01:00Z".to_string()),
+                source: MemoryLinkSource::Human,
+                created_by: Some("graph-link-path-e2e".to_string()),
+                metadata_json: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    connection.close().map_err(|error| error.to_string())?;
+
+    let neighborhood = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "graph",
+        "neighborhood",
+        bridge.as_str(),
+        "--direction",
+        "both",
+    ])?;
+    ensure(
+        neighborhood.status.success(),
+        format!(
+            "graph neighborhood must succeed; stderr: {}",
+            String::from_utf8_lossy(&neighborhood.stderr)
+        ),
+    )?;
+    ensure(
+        neighborhood.stderr.is_empty(),
+        format!(
+            "graph neighborhood stderr must stay empty; got: {}",
+            String::from_utf8_lossy(&neighborhood.stderr)
+        ),
+    )?;
+    let neighborhood_json: Value =
+        serde_json::from_slice(&neighborhood.stdout).map_err(|error| error.to_string())?;
+    let edges = neighborhood_json["data"]["edges"]
+        .as_array()
+        .ok_or_else(|| "neighborhood edges must be an array".to_string())?;
+    ensure_eq(edges.len(), 2, "two incident edges around bridge")?;
+    ensure(
+        edges.iter().any(|edge| {
+            edge["linkId"] == "link_00000000000000000000000110"
+                && edge["neighborMemoryId"] == source
+                && edge["relativeDirection"] == "incoming"
+                && edge["relation"] == "supports"
+        }),
+        "bridge neighborhood must include incoming support from source",
+    )?;
+    ensure(
+        edges.iter().any(|edge| {
+            edge["linkId"] == "link_00000000000000000000000111"
+                && edge["neighborMemoryId"] == target
+                && edge["relativeDirection"] == "outgoing"
+                && edge["relation"] == "supersedes"
+        }),
+        "bridge neighborhood must include outgoing supersedes edge to target",
+    )?;
+
+    let path = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "graph",
+        "explain-link",
+        source.as_str(),
+        target.as_str(),
+    ])?;
+    ensure(
+        path.status.success(),
+        format!(
+            "graph explain-link must succeed; stderr: {}",
+            String::from_utf8_lossy(&path.stderr)
+        ),
+    )?;
+    ensure(
+        path.stderr.is_empty(),
+        format!(
+            "graph explain-link stderr must stay empty; got: {}",
+            String::from_utf8_lossy(&path.stderr)
+        ),
+    )?;
+    let path_json: Value =
+        serde_json::from_slice(&path.stdout).map_err(|error| error.to_string())?;
+    ensure(
+        path_json["data"]["status"] == "path_found",
+        "source to target should be connected by a two-hop path",
+    )?;
+    ensure(
+        path_json["data"]["path"] == serde_json::json!([source, bridge, target]),
+        "graph path should traverse the bridge memory",
+    )?;
+    ensure(
+        path_json["data"]["pathLength"] == serde_json::json!(2),
+        "graph path length should be two edges",
+    )?;
+
+    let why = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "why",
+        bridge.as_str(),
+    ])?;
+    ensure(
+        why.status.success(),
+        format!(
+            "why must succeed; stderr: {}",
+            String::from_utf8_lossy(&why.stderr)
+        ),
+    )?;
+    ensure(
+        why.stderr.is_empty(),
+        format!(
+            "why stderr must stay empty; got: {}",
+            String::from_utf8_lossy(&why.stderr)
+        ),
+    )?;
+    let why_json: Value = serde_json::from_slice(&why.stdout).map_err(|error| error.to_string())?;
+    let why_links = why_json["data"]["links"]
+        .as_array()
+        .ok_or_else(|| "why links must be an array".to_string())?;
+    ensure(
+        why_links.iter().any(|link| {
+            link["linkId"] == "link_00000000000000000000000110"
+                && link["linkedMemoryId"] == source
+                && link["direction"] == "incoming"
+                && link["relation"] == "supports"
+        }),
+        "why must explain the incoming support link",
+    )?;
+    ensure(
+        why_links.iter().any(|link| {
+            link["linkId"] == "link_00000000000000000000000111"
+                && link["linkedMemoryId"] == target
+                && link["direction"] == "outgoing"
+                && link["relation"] == "supersedes"
+        }),
+        "why must explain the outgoing supersedes link",
+    )?;
+
+    Ok(())
+}
+
 #[test]
 fn graph_neighborhood_relation_filter_excludes_other_relations() -> TestResult {
     let (_workspace, workspace_arg, center, _neighbor, _link_id) = seed_workspace_with_link()?;
