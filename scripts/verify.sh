@@ -8,24 +8,40 @@ set -eu
 # complex E2E/boundary migration pipelines.
 #
 # Usage:
-#   ./scripts/verify.sh          # Run all gates
-#   ./scripts/verify.sh --help   # Show this help
+#   ./scripts/verify.sh                # Run all gates
+#   ./scripts/verify.sh --include-bench # Include performance benchmarks
+#   ./scripts/verify.sh --help         # Show this help
 #
 # Gates (in order):
 #   1. Forbidden Dependencies  - cargo tree audit for banned crates
 #   2. Closure Linter          - prevent abstention-as-implementation closure
-#   3. Unit/Contract/Golden    - cargo test --workspace --all-targets
-#   4. Basic E2E               - scripts/e2e_test.sh
-#   5. Advanced E2E            - scripts/e2e_advanced.sh
-#   6. Boundary Migration      - scripts/e2e_boundary_migration.sh
+#   3. Vision Coverage         - report documented implemented/stubbed/missing surfaces
+#   4. Unit/Contract/Golden    - cargo test --workspace --all-targets
+#   5. Basic E2E               - scripts/e2e_test.sh
+#   6. Advanced E2E            - scripts/e2e_advanced.sh
+#   7. Boundary Migration      - scripts/e2e_boundary_migration.sh
+#   8. Benchmarks (optional)   - scripts/bench.sh --check-regression
 #
 # Exit codes match AGENTS.md conventions (0=success, 1=usage, 3=storage, etc.)
 # Artifacts are written to /tmp/ee-e2e-*/artifacts by E2E scripts.
 
-if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-    sed -n '3,20p' "$0" | sed 's/^# //' | sed 's/^#//'
-    exit 0
-fi
+INCLUDE_BENCH=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --help|-h)
+            sed -n '3,21p' "$0" | sed 's/^# //' | sed 's/^#//'
+            exit 0
+            ;;
+        --include-bench)
+            INCLUDE_BENCH=true
+            ;;
+        *)
+            echo "Unknown argument: $arg" >&2
+            exit 1
+            ;;
+    esac
+done
 
 echo "=== EE Verification Runner ==="
 echo ""
@@ -72,17 +88,25 @@ run_stage "Forbidden Dependencies" "./scripts/check-forbidden-deps.sh"
 # Gate 2: Closure Discipline
 run_stage "Closure Linter" "./scripts/closure-lint.sh --json"
 
-# Gate 3: Core Cargo Tests (Contracts, Logic, Golden)
+# Gate 3: Strategic Vision Coverage
+run_stage "Vision Coverage" "sh ./scripts/vision-coverage.sh --json"
+
+# Gate 4: Core Cargo Tests (Contracts, Logic, Golden)
 run_stage "Unit, Contract, and Golden Tests" "cargo test --workspace --all-targets"
 
-# Gate 4: Basic End-to-End
+# Gate 5: Basic End-to-End
 run_stage "Basic E2E Scripts" "./scripts/e2e_test.sh"
 
-# Gate 5: Advanced End-to-End
+# Gate 6: Advanced End-to-End
 run_stage "Advanced E2E Scripts" "./scripts/e2e_advanced.sh"
 
-# Gate 6: Boundary Migration
+# Gate 7: Boundary Migration
 run_stage "Boundary Migration Scripts" "./scripts/e2e_boundary_migration.sh"
+
+# Gate 8: Performance Benchmarks (optional, gated behind --include-bench)
+if [ "$INCLUDE_BENCH" = "true" ]; then
+    run_stage "Performance Benchmarks" "./scripts/bench.sh --check-regression"
+fi
 
 TOTAL_END=$(date +%s)
 TOTAL_DURATION=$((TOTAL_END - TOTAL_START))

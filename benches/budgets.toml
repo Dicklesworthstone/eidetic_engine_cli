@@ -1,0 +1,65 @@
+# Performance budgets for ee benchmarks (eidetic_engine_cli-htjd)
+#
+# These values define the pass/fail thresholds for CI. Regressions beyond
+# the specified percentages fail the bench job.
+#
+# Schema: ee.perf.budgets.v1
+# Source: baselines/v0.1.json, README performance table
+
+[meta]
+schema = "ee.perf.budgets.v1"
+version = "0.1.0"
+regression_pct_p50 = 20   # Fail if p50 regresses > 20%
+regression_pct_p99 = 50   # Fail if p99 regresses > 50%
+
+[operations.ee_remember]
+p50_ms_max = 8.0
+p99_ms_max = 22.0
+description = "Store a new memory with indexing"
+
+[operations.ee_search]
+p50_ms_max = 38.0
+p99_ms_max = 110.0
+description = "Hybrid lexical+semantic search over 5k memories"
+
+[operations.ee_context]
+p50_ms_max = 95.0
+p99_ms_max = 240.0
+description = "Build 4k-token context pack from 100 memories"
+
+[operations.ee_why]
+p50_ms_max = 25.0
+p99_ms_max = 75.0
+description = "Explain memory provenance and selection"
+
+[operations.ee_outcome]
+p50_ms_max = 8.0
+p99_ms_max = 30.0
+description = "Record helpful/harmful feedback"
+
+[operations.ee_status]
+p50_ms_max = 30.0
+p99_ms_max = 100.0
+hard_ceiling_ms = 100.0
+description = "Report workspace health metrics"
+
+[operations.ee_import_cass]
+p50_ms_max = 4100.0
+p99_ms_max = 11000.0
+hard_ceiling_ms = 30000.0
+description = "Import 1000 CASS session messages"
+
+[operations.ee_link]
+p50_ms_max = 15.0
+p99_ms_max = 50.0
+description = "Create memory relationship link"
+
+[operations.ee_graph_pagerank]
+p50_ms_max = 200.0
+p99_ms_max = 600.0
+description = "Compute PageRank over memory graph"
+
+[operations.ee_curate_candidates]
+p50_ms_max = 50.0
+p99_ms_max = 150.0
+description = "Generate curation candidates from feedback"
