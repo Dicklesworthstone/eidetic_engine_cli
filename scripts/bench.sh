@@ -133,14 +133,45 @@ if [ "$CHECK_REGRESSION" = "true" ]; then
     echo "" >&2
     echo "[*] Checking for regressions against baseline..." >&2
 
-    # Simple regression check (full implementation would parse baseline JSON)
-    if [ -f "$BASELINE_FILE" ]; then
+    if [ -f "$BASELINE_FILE" ] && command -v jq >/dev/null 2>&1; then
         echo "[+] Baseline file found: $BASELINE_FILE" >&2
-        # TODO: Implement proper regression comparison
-        # For now, just report that we'd check
-        echo "[*] Regression check: not yet implemented (placeholder)" >&2
-    else
+
+        # Read thresholds from budgets.toml (defaults: 20% p50, 50% p99)
+        P50_THRESHOLD=20
+        P99_THRESHOLD=50
+
+        REGRESSION_FOUND=false
+
+        for bench in $BENCHMARKS; do
+            OP_NAME="ee_${bench}"
+            BASELINE_P50=$(jq -r ".operations.${OP_NAME}.p50_ms // 0" "$BASELINE_FILE" 2>/dev/null)
+            CURRENT_P50=$(echo "$PERF_JSON" | jq -r ".operations.${OP_NAME}.p50_ms // 0" 2>/dev/null)
+
+            if [ "$BASELINE_P50" != "0" ] && [ "$BASELINE_P50" != "null" ] && [ "$CURRENT_P50" != "0" ] && [ "$CURRENT_P50" != "null" ]; then
+                # Calculate regression percentage: (current - baseline) / baseline * 100
+                REGRESSION_PCT=$(echo "scale=2; ($CURRENT_P50 - $BASELINE_P50) / $BASELINE_P50 * 100" | bc -l 2>/dev/null || echo "0")
+
+                if [ "$(echo "$REGRESSION_PCT > $P50_THRESHOLD" | bc -l 2>/dev/null)" = "1" ]; then
+                    echo "[-] REGRESSION: $OP_NAME p50 regressed ${REGRESSION_PCT}% (baseline: ${BASELINE_P50}ms, current: ${CURRENT_P50}ms)" >&2
+                    REGRESSION_FOUND=true
+                else
+                    echo "[+] $OP_NAME: p50 within threshold (${REGRESSION_PCT}% change)" >&2
+                fi
+            fi
+        done
+
+        if [ "$REGRESSION_FOUND" = "true" ]; then
+            echo "" >&2
+            echo "[-] Performance regression detected - failing build" >&2
+            FAILED=true
+        else
+            echo "" >&2
+            echo "[+] No significant regressions detected" >&2
+        fi
+    elif [ ! -f "$BASELINE_FILE" ]; then
         echo "[!] No baseline file found - skipping regression check" >&2
+    else
+        echo "[!] jq not available - skipping regression check" >&2
     fi
 fi
 
