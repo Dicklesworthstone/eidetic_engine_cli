@@ -2803,9 +2803,9 @@ CREATE INDEX idx_curation_candidates_v030_ttl_policy
     "blake3:v030_rule_curation_candidates_2026_05_05",
 );
 
-/// V031: Persist certificate records and source trust quarantine summaries.
-pub const V031_CERTIFICATES_AND_TRUST_QUARANTINE: Migration = Migration::new(
-    31,
+/// V032: Persist certificate records and source trust quarantine summaries.
+pub const V032_CERTIFICATES_AND_TRUST_QUARANTINE: Migration = Migration::new(
+    32,
     "certificates_and_trust_quarantine",
     r#"
 CREATE TABLE certificates (
@@ -2864,12 +2864,12 @@ CREATE INDEX idx_trust_quarantine_active
 CREATE INDEX idx_trust_quarantine_last_event
     ON trust_quarantine(workspace_id, last_event_at, source_uri);
 "#,
-    "blake3:v031_certificates_and_trust_quarantine_2026_05_06",
+    "blake3:v032_certificates_and_trust_quarantine_2026_05_06",
 );
 
-/// V032: Add audit hash-chain columns for persisted audit verification.
-pub const V032_AUDIT_HASH_CHAIN: Migration = Migration::new(
-    32,
+/// V033: Add audit hash-chain columns for persisted audit verification.
+pub const V033_AUDIT_HASH_CHAIN: Migration = Migration::new(
+    33,
     "audit_hash_chain",
     r#"
 ALTER TABLE audit_log ADD COLUMN surface TEXT;
@@ -2894,12 +2894,12 @@ WHERE surface IS NULL OR mutation_kind IS NULL;
 CREATE INDEX idx_audit_log_surface ON audit_log(surface, timestamp, id);
 CREATE INDEX idx_audit_log_chain ON audit_log(prev_row_hash, this_row_hash);
 "#,
-    "blake3:v032_audit_hash_chain_2026_05_06",
+    "blake3:v033_audit_hash_chain_2026_05_06",
 );
 
-/// V033: Persist learning observation ledger rows for active learning.
-pub const V033_LEARNING_OBSERVATIONS: Migration = Migration::new(
-    33,
+/// V031: Persist learning observation ledger rows for active learning.
+pub const V031_LEARNING_OBSERVATIONS: Migration = Migration::new(
+    31,
     "learning_observations",
     r#"
 CREATE TABLE learning_observations (
@@ -2933,7 +2933,7 @@ CREATE INDEX idx_learning_observations_target
 CREATE INDEX idx_learning_observations_signal
     ON learning_observations(workspace_id, signal, observed_at);
 "#,
-    "blake3:v033_learning_observations_2026_05_06",
+    "blake3:v031_learning_observations_2026_05_06",
 );
 
 /// V034: Persist reusable procedures and their maturity history.
@@ -3143,9 +3143,9 @@ pub const MIGRATIONS: &[Migration] = &[
     V028_ADVISORY_LOCKS,
     V029_MEMORY_WORKFLOW_ID,
     V030_RULE_CURATION_CANDIDATES,
-    V031_CERTIFICATES_AND_TRUST_QUARANTINE,
-    V032_AUDIT_HASH_CHAIN,
-    V033_LEARNING_OBSERVATIONS,
+    V031_LEARNING_OBSERVATIONS,
+    V032_CERTIFICATES_AND_TRUST_QUARANTINE,
+    V033_AUDIT_HASH_CHAIN,
     V034_PROCEDURE_STORE,
     V035_PLAN_RECIPES,
 ];
