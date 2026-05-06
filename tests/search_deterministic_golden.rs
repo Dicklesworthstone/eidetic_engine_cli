@@ -445,6 +445,14 @@ fn assert_search_contract(value: &JsonValue) -> TestResult {
             result["explanation"]["factors"].is_array(),
             format!("search result must include explanation factors: {result:?}"),
         )?;
+        ensure(
+            result["why"].is_string(),
+            format!("search result must include top-level why: {result:?}"),
+        )?;
+        ensure(
+            result["provenance"].is_array(),
+            format!("search result must include normalized provenance: {result:?}"),
+        )?;
     }
 
     for pair in results.windows(2) {

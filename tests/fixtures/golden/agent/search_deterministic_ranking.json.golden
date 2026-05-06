@@ -10,6 +10,13 @@
         "docId": "mem_00000000000000000000010001",
         "score": 0.5892333984375,
         "source": "semantic_fast",
+        "why": "Score 0.5892 via fast semantic (0.59)",
+        "provenance": [
+          {
+            "kind": "search_document",
+            "docId": "mem_00000000000000000000010001"
+          }
+        ],
         "fastScore": 0.5892333984375,
         "explanation": {
           "summary": "Score 0.5892 via fast semantic (0.59)",
@@ -28,6 +35,13 @@
         "docId": "mem_00000000000000000000010003",
         "score": 0.316162109375,
         "source": "semantic_fast",
+        "why": "Score 0.3162 via fast semantic (0.32)",
+        "provenance": [
+          {
+            "kind": "search_document",
+            "docId": "mem_00000000000000000000010003"
+          }
+        ],
         "fastScore": 0.316162109375,
         "explanation": {
           "summary": "Score 0.3162 via fast semantic (0.32)",
@@ -46,6 +60,13 @@
         "docId": "mem_00000000000000000000010002",
         "score": 0.28857421875,
         "source": "semantic_fast",
+        "why": "Score 0.2886 via fast semantic (0.29)",
+        "provenance": [
+          {
+            "kind": "search_document",
+            "docId": "mem_00000000000000000000010002"
+          }
+        ],
         "fastScore": 0.28857421875,
         "explanation": {
           "summary": "Score 0.2886 via fast semantic (0.29)",

@@ -236,6 +236,8 @@ impl SearchReport {
                     "docId": hit.doc_id,
                     "score": hit.score,
                     "source": hit.source.as_str(),
+                    "why": hit.why(),
+                    "provenance": hit.provenance_json(),
                 });
                 if let Some(obj_map) = obj.as_object_mut() {
                     if let Some(fast) = hit.fast_score {
@@ -291,6 +293,52 @@ impl SearchReport {
             "errors": self.errors,
         })
     }
+}
+
+impl SearchHit {
+    #[must_use]
+    fn why(&self) -> String {
+        self.explanation
+            .as_ref()
+            .map(|explanation| explanation.summary.clone())
+            .unwrap_or_else(|| {
+                format!(
+                    "Selected by {} retrieval with score {:.4}.",
+                    self.source.as_str(),
+                    self.score
+                )
+            })
+    }
+
+    #[must_use]
+    fn provenance_json(&self) -> Vec<serde_json::Value> {
+        let mut provenance = Vec::new();
+
+        if let Some(ref metadata) = self.metadata {
+            for key in ["provenanceUri", "provenance_uri"] {
+                if let Some(uri) = metadata_string(metadata, key) {
+                    provenance.push(serde_json::json!({
+                        "kind": "provenance_uri",
+                        "uri": uri,
+                    }));
+                    break;
+                }
+            }
+        }
+
+        provenance.push(serde_json::json!({
+            "kind": "search_document",
+            "docId": self.doc_id,
+        }));
+        provenance
+    }
+}
+
+fn metadata_string<'a>(metadata: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    metadata
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
 }
 
 impl RetrievalMetrics {
@@ -734,6 +782,8 @@ mod tests {
         assert_eq!(json["metrics"]["requestedLimit"], 10);
         assert_eq!(json["metrics"]["returnedCount"], 1);
         assert_eq!(json["metrics"]["errorCount"], 0);
+        assert!(json["results"][0]["why"].is_string());
+        assert!(json["results"][0]["provenance"].is_array());
     }
 
     #[test]
@@ -821,6 +871,55 @@ mod tests {
         assert!(result.get("rerankScore").is_none());
         assert_eq!(result["metadata"]["level"], "procedural");
         assert_eq!(result["metadata"]["kind"], "rule");
+    }
+
+    #[test]
+    fn search_json_exposes_stable_why_and_provenance() {
+        let mut hit = SearchHit {
+            doc_id: "doc-provenance".to_string(),
+            score: 0.82,
+            source: ScoreSource::Hybrid,
+            fast_score: Some(0.71),
+            quality_score: None,
+            lexical_score: Some(0.42),
+            rerank_score: None,
+            metadata: Some(serde_json::json!({
+                "level": "procedural",
+                "provenance_uri": "file://AGENTS.md#L42",
+            })),
+            explanation: None,
+        };
+        hit.explanation = Some(ScoreExplanation::generate(&hit));
+
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "provenance".to_string(),
+            requested_limit: 1,
+            results: vec![hit],
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+        };
+
+        let json = report.data_json();
+        let result = &json["results"][0];
+
+        assert_eq!(
+            result["why"], result["explanation"]["summary"],
+            "why should be the stable selection summary"
+        );
+        assert_eq!(
+            result["provenance"],
+            serde_json::json!([
+                {
+                    "kind": "provenance_uri",
+                    "uri": "file://AGENTS.md#L42",
+                },
+                {
+                    "kind": "search_document",
+                    "docId": "doc-provenance",
+                }
+            ])
+        );
     }
 
     #[test]
