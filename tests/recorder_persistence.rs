@@ -217,3 +217,54 @@ fn list_recorder_events_filters_by_run_and_since() {
     assert!(entries.iter().all(|e| e.run_id == start.run_id));
     assert!(entries.iter().all(|e| e.event_hash.starts_with("blake3:")));
 }
+
+#[test]
+fn list_recorder_events_with_limit_zero_returns_every_match() {
+    // Regression for eidetic_engine_cli-2nkb. Previously
+    // `RecorderEventsListOptions::default()` (limit=0) was relayed straight
+    // into `LIMIT 0`, silently returning zero rows. The fix treats limit=0
+    // as "no limit" so a defaulted caller still observes the data.
+    let conn = connect();
+    let start = start_and_persist_recording(&conn, &start_options()).expect("start");
+    for tag in ["alpha", "beta", "gamma", "delta", "epsilon"] {
+        let _ = record_and_persist_event(&conn, &event_options(&start.run_id, Some(tag)))
+            .unwrap_or_else(|err| panic!("event {tag} failed: {err}"));
+    }
+
+    let entries = list_recorder_events(
+        &conn,
+        &RecorderEventsListOptions {
+            run_id: Some(start.run_id.clone()),
+            limit: 0,
+            ..RecorderEventsListOptions::default()
+        },
+    )
+    .expect("list with limit=0");
+
+    assert_eq!(entries.len(), 5, "limit=0 must surface every matching row");
+    assert!(entries.iter().all(|e| e.run_id == start.run_id));
+}
+
+#[test]
+fn list_recorder_events_filtered_with_limit_zero_returns_every_match() {
+    // DB-level mirror of the regression: hit the underlying
+    // `list_recorder_events_filtered` directly to prove the SQL builder
+    // skips the LIMIT clause when limit=0.
+    let conn = connect();
+    let start = start_and_persist_recording(&conn, &start_options()).expect("start");
+    for tag in ["a", "b", "c", "d"] {
+        let _ = record_and_persist_event(&conn, &event_options(&start.run_id, Some(tag)))
+            .unwrap_or_else(|err| panic!("event {tag} failed: {err}"));
+    }
+
+    let stored = conn
+        .list_recorder_events_filtered(Some(&start.run_id), None, None, 0)
+        .expect("list filtered with limit=0");
+    assert_eq!(stored.len(), 4);
+
+    // Sanity: a positive limit still bounds the result.
+    let bounded = conn
+        .list_recorder_events_filtered(Some(&start.run_id), None, None, 2)
+        .expect("list filtered with limit=2");
+    assert_eq!(bounded.len(), 2);
+}

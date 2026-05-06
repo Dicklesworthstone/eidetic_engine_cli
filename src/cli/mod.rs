@@ -9723,6 +9723,16 @@ where
         }
     };
 
+    if args.limit == 0 {
+        let domain_error = DomainError::Usage {
+            message: "--limit must be greater than zero".to_owned(),
+            repair: Some(
+                "Pass --limit with a positive integer (default: 100), or omit it.".to_owned(),
+            ),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
     let options = RecorderEventsListOptions {
         since: args.since.clone(),
         source: args.source.clone(),

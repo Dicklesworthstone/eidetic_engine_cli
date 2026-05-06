@@ -2864,6 +2864,47 @@ mod tests {
     }
 
     #[test]
+    fn tail_recording_from_events_with_limit_zero_returns_empty_with_has_more() {
+        // Contract decision for eidetic_engine_cli-2nkb: an explicit
+        // `--limit 0` on the tail surface honors the user's literal request
+        // and returns zero events, but reports `has_more=true` whenever
+        // any matching events exist so the caller can distinguish
+        // "no data" from "you asked for nothing".
+        let options = RecorderTailOptions {
+            run_id: Some("run_test".to_string()),
+            since: None,
+            limit: 0,
+            from_sequence: None,
+            follow: false,
+            filter: None,
+        };
+        let events = vec![
+            event_summary(
+                "run_test",
+                "evt_001",
+                1,
+                RecorderEventType::ToolCall,
+                "2026-01-01T00:00:01Z",
+                false,
+            ),
+            event_summary(
+                "run_test",
+                "evt_002",
+                2,
+                RecorderEventType::ToolResult,
+                "2026-01-01T00:00:02Z",
+                false,
+            ),
+        ];
+
+        let report = tail_recording_from_events(&options, &events);
+
+        assert_eq!(report.events.len(), 0);
+        assert_eq!(report.total_events, 2);
+        assert!(report.has_more);
+    }
+
+    #[test]
     fn follow_event_schema_is_stable() -> TestResult {
         ensure(
             RECORDER_TAIL_FOLLOW_EVENT_SCHEMA_V1,

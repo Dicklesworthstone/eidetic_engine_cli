@@ -11541,6 +11541,14 @@ impl DbConnection {
     }
 
     /// List recorder events with optional filters.
+    ///
+    /// `limit == 0` is treated as "no limit" (every matching row is returned)
+    /// rather than the SQLite-native `LIMIT 0` semantic of "zero rows". This
+    /// removes the silent footgun where a caller using
+    /// `RecorderEventsListOptions::default()` would otherwise get an empty
+    /// result set with no error. Callers that want to forbid an unbounded
+    /// query must validate at their own layer (the `recorder events list` CLI
+    /// surface rejects `--limit 0` with a usage error).
     pub fn list_recorder_events_filtered(
         &self,
         run_id: Option<&str>,
@@ -11580,8 +11588,10 @@ impl DbConnection {
         }
 
         sql.push_str(" ORDER BY e.timestamp DESC, e.sequence DESC");
-        params.push(Value::from_u64_clamped(u64::from(limit)));
-        sql.push_str(&format!(" LIMIT ?{}", params.len()));
+        if limit > 0 {
+            params.push(Value::from_u64_clamped(u64::from(limit)));
+            sql.push_str(&format!(" LIMIT ?{}", params.len()));
+        }
 
         let rows = self.query_for(DbOperation::Query, &sql, &params)?;
         rows.iter().map(stored_recorder_event_from_row).collect()
