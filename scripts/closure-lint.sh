@@ -8,9 +8,10 @@
 # - honesty-only beads must have a sibling implements-surface bead in open queue
 #
 # Usage:
-#   ./scripts/closure-lint.sh           # Lint relevant bead closures changed recently
-#   ./scripts/closure-lint.sh --audit   # Audit all relevant closed beads
-#   ./scripts/closure-lint.sh --json    # Also write JSON report
+#   ./scripts/closure-lint.sh                # Lint relevant bead closures changed recently
+#   ./scripts/closure-lint.sh --audit        # Audit all relevant closed beads
+#   ./scripts/closure-lint.sh --audit --json # CI/verify mode: audit all and write JSON report
+#   ./scripts/closure-lint.sh --json         # Write JSON report for the default recent-closure mode
 #
 # Exit codes: 0=pass, 1=violations found
 

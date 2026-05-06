@@ -86,7 +86,7 @@ run_stage() {
 run_stage "Forbidden Dependencies" "./scripts/check-forbidden-deps.sh"
 
 # Gate 2: Closure Discipline
-run_stage "Closure Linter" "./scripts/closure-lint.sh --json"
+run_stage "Closure Linter" "./scripts/closure-lint.sh --audit --json"
 
 # Gate 3: Strategic Vision Coverage
 run_stage "Vision Coverage" "sh ./scripts/vision-coverage.sh --json"

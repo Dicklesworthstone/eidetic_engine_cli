@@ -27,7 +27,7 @@ jobs:
         run: ./scripts/check-forbidden-deps.sh
 
       - name: Closure linter
-        run: ./scripts/closure-lint.sh --json
+        run: ./scripts/closure-lint.sh --audit --json
 
       - name: Vision coverage
         run: |

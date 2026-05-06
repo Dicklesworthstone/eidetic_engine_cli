@@ -630,7 +630,7 @@ These two labels are **mutually exclusive** and govern what "closing a bead" mea
 **Rules:**
 
 1. Every surface that currently has an `*_UNAVAILABLE_CODE` constant needs both labels — the existing closed bead carries `honesty-only` (retroactively), and a new open bead carries `implements-surface:<name>`.
-2. The closure linter (CI) blocks any PR that closes an `implements-surface:X` bead while the matching `*_UNAVAILABLE` constant still exists in `src/cli/mod.rs`.
+2. The closure linter in CI and `./scripts/verify.sh` runs `./scripts/closure-lint.sh --audit --json`; a green closure-lint gate means **all** closed `implements-surface:*` and `honesty-only` beads pass the taxonomy, not only beads changed in the latest commit. This blocks any commit while a closed `implements-surface:X` bead still has the matching `*_UNAVAILABLE` constant in `src/cli/mod.rs`.
 3. A bead closed with `close_reason` containing `"abstain"`, `"unavailable"`, `"degraded"`, `"stub"`, or `"placeholder"` must carry `honesty-only` and must have a sibling `implements-surface:<same-name>` bead in the open queue.
 
 **Why this matters:** The 2026-05-06 reality-check audit found 14 follow-up beads closed without implementation — each added an abstention sentinel as a SUBSTITUTE for implementation. This taxonomy prevents that pattern from recurring.
