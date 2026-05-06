@@ -5616,6 +5616,9 @@ impl DbConnection {
             "UPDATE memories SET tombstoned_at = ?1, updated_at = ?1 WHERE id = ?2 AND tombstoned_at IS NULL",
             &[Value::Text(now), Value::Text(id.to_string())],
         )?;
+        if affected > 0 {
+            self.garbage_collect_auto_memory_links_for_memory_inner(id)?;
+        }
         Ok(affected > 0)
     }
 
@@ -5634,24 +5637,34 @@ impl DbConnection {
 
     /// Add tags to a memory (idempotent).
     pub fn add_memory_tags(&self, memory_id: &str, tags: &[String]) -> Result<()> {
+        let mut changed = false;
         for tag in tags {
-            self.execute_for(
+            let affected = self.execute_for(
                 DbOperation::Execute,
                 "INSERT OR IGNORE INTO memory_tags (memory_id, tag) VALUES (?1, ?2)",
                 &[Value::Text(memory_id.to_string()), Value::Text(tag.clone())],
             )?;
+            changed |= affected > 0;
+        }
+        if changed {
+            self.garbage_collect_auto_memory_links_for_memory_inner(memory_id)?;
         }
         Ok(())
     }
 
     /// Remove tags from a memory.
     pub fn remove_memory_tags(&self, memory_id: &str, tags: &[String]) -> Result<()> {
+        let mut changed = false;
         for tag in tags {
-            self.execute_for(
+            let affected = self.execute_for(
                 DbOperation::Execute,
                 "DELETE FROM memory_tags WHERE memory_id = ?1 AND tag = ?2",
                 &[Value::Text(memory_id.to_string()), Value::Text(tag.clone())],
             )?;
+            changed |= affected > 0;
+        }
+        if changed {
+            self.garbage_collect_auto_memory_links_for_memory_inner(memory_id)?;
         }
         Ok(())
     }
@@ -5701,18 +5714,22 @@ impl DbConnection {
 
     /// Replace all tags on a memory atomically.
     pub fn set_memory_tags(&self, memory_id: &str, tags: &[String]) -> Result<()> {
-        self.execute_for(
+        let mut changed = self.execute_for(
             DbOperation::Execute,
             "DELETE FROM memory_tags WHERE memory_id = ?1",
             &[Value::Text(memory_id.to_string())],
-        )?;
+        )? > 0;
 
         for tag in tags {
-            self.execute_for(
+            let affected = self.execute_for(
                 DbOperation::Execute,
                 "INSERT INTO memory_tags (memory_id, tag) VALUES (?1, ?2)",
                 &[Value::Text(memory_id.to_string()), Value::Text(tag.clone())],
             )?;
+            changed |= affected > 0;
+        }
+        if changed {
+            self.garbage_collect_auto_memory_links_for_memory_inner(memory_id)?;
         }
         Ok(())
     }
@@ -6379,6 +6396,9 @@ impl DbConnection {
                 Value::Text(input.workspace_id.clone()),
             ],
         )?;
+        if affected > 0 {
+            self.garbage_collect_auto_memory_links_for_memory_inner(memory_id)?;
+        }
         Ok(affected > 0)
     }
 
@@ -6552,6 +6572,7 @@ impl DbConnection {
             if affected == 0 {
                 continue;
             }
+            self.garbage_collect_auto_memory_links_for_memory_inner(&memory.id)?;
 
             let audit_id = generate_audit_id();
             self.insert_audit(
@@ -7720,6 +7741,49 @@ impl DbConnection {
 
         let rows = self.query_for(DbOperation::Query, &sql, &params)?;
         rows.iter().map(stored_memory_link_from_row).collect()
+    }
+
+    /// Remove derived AUTO links incident to a memory.
+    ///
+    /// AUTO links are rebuilt from memory contents, tags, and workflow activity.
+    /// Human, agent, import, and maintenance links are preserved because they
+    /// are explicit source-of-truth edges rather than derived graph hints.
+    pub fn garbage_collect_auto_memory_links_for_memory(
+        &self,
+        memory_id: &str,
+    ) -> Result<Vec<StoredMemoryLink>> {
+        self.with_transaction(|| self.garbage_collect_auto_memory_links_for_memory_inner(memory_id))
+    }
+
+    fn garbage_collect_auto_memory_links_for_memory_inner(
+        &self,
+        memory_id: &str,
+    ) -> Result<Vec<StoredMemoryLink>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, src_memory_id, dst_memory_id, relation, weight, confidence, directed, evidence_count, last_reinforced_at, source, created_at, created_by, metadata_json FROM memory_links WHERE (src_memory_id = ?1 OR dst_memory_id = ?1) AND source = ?2 ORDER BY relation ASC, src_memory_id ASC, dst_memory_id ASC, id ASC",
+            &[
+                Value::Text(memory_id.to_string()),
+                Value::Text(MemoryLinkSource::Auto.as_str().to_string()),
+            ],
+        )?;
+        let removed = rows
+            .iter()
+            .map(stored_memory_link_from_row)
+            .collect::<Result<Vec<_>>>()?;
+
+        for link in &removed {
+            self.execute_for(
+                DbOperation::Execute,
+                "DELETE FROM memory_links WHERE id = ?1 AND source = ?2",
+                &[
+                    Value::Text(link.id.clone()),
+                    Value::Text(MemoryLinkSource::Auto.as_str().to_string()),
+                ],
+            )?;
+        }
+
+        Ok(removed)
     }
 
     /// Return true when any link already connects the two memory IDs.
@@ -14424,6 +14488,123 @@ mod tests {
         connection.insert_memory_link("link_00000000000000000000000005", &input)?;
         let duplicate = connection.insert_memory_link("link_00000000000000000000000006", &input);
         ensure(duplicate.is_err(), "duplicate typed edge must be rejected")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn auto_memory_link_gc_removes_only_auto_incident_edges() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_link_memories(&connection)?;
+
+        let mut auto_link = memory_link_input(super::MemoryLinkRelation::Related);
+        auto_link.source = super::MemoryLinkSource::Auto;
+        auto_link.created_by = Some("ee auto-link".to_string());
+        auto_link.metadata_json = Some(r#"{"schema":"test.auto"}"#.to_string());
+        connection.insert_memory_link("link_00000000000000000000000007", &auto_link)?;
+
+        let manual_link = memory_link_input(super::MemoryLinkRelation::Supports);
+        connection.insert_memory_link("link_00000000000000000000000008", &manual_link)?;
+
+        let removed = connection
+            .garbage_collect_auto_memory_links_for_memory("mem_00000000000000000000000011")?;
+        ensure_equal(&removed.len(), &1, "one auto link removed")?;
+        ensure_equal(
+            &removed[0].id.as_str(),
+            &"link_00000000000000000000000007",
+            "removed auto link id",
+        )?;
+
+        let remaining = connection.list_all_memory_links(None)?;
+        ensure_equal(&remaining.len(), &1, "manual link remains")?;
+        ensure_equal(
+            &remaining[0].id.as_str(),
+            &"link_00000000000000000000000008",
+            "remaining manual link id",
+        )?;
+        ensure_equal(
+            &remaining[0].source_enum(),
+            &Some(super::MemoryLinkSource::Agent),
+            "manual source preserved",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn tombstone_memory_garbage_collects_auto_links() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_link_memories(&connection)?;
+
+        let mut auto_link = memory_link_input(super::MemoryLinkRelation::Related);
+        auto_link.source = super::MemoryLinkSource::Auto;
+        auto_link.created_by = Some("ee auto-link".to_string());
+        auto_link.metadata_json = Some(r#"{"schema":"test.auto"}"#.to_string());
+        connection.insert_memory_link("link_00000000000000000000000009", &auto_link)?;
+
+        let manual_link = memory_link_input(super::MemoryLinkRelation::Supports);
+        connection.insert_memory_link("link_00000000000000000000000010", &manual_link)?;
+
+        let affected = connection.tombstone_memory("mem_00000000000000000000000011")?;
+        ensure(affected, "memory was tombstoned")?;
+
+        let remaining = connection.list_all_memory_links(None)?;
+        ensure_equal(
+            &remaining
+                .iter()
+                .map(|link| link.id.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["link_00000000000000000000000010"],
+            "only explicit link remains",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mutable_memory_updates_garbage_collect_auto_links() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_link_memories(&connection)?;
+
+        let mut auto_link = memory_link_input(super::MemoryLinkRelation::Related);
+        auto_link.source = super::MemoryLinkSource::Auto;
+        auto_link.created_by = Some("ee auto-link".to_string());
+        auto_link.metadata_json = Some(r#"{"schema":"test.auto"}"#.to_string());
+        connection.insert_memory_link("link_00000000000000000000000013", &auto_link)?;
+
+        connection.add_memory_tags("mem_00000000000000000000000011", &["changed".to_string()])?;
+        let after_tag_change = connection.list_all_memory_links(None)?;
+        ensure(
+            after_tag_change.is_empty(),
+            "tag changes remove derived auto links",
+        )?;
+
+        let mut second_auto_link = memory_link_input(super::MemoryLinkRelation::Related);
+        second_auto_link.source = super::MemoryLinkSource::Auto;
+        second_auto_link.created_by = Some("ee auto-link".to_string());
+        second_auto_link.metadata_json = Some(r#"{"schema":"test.auto"}"#.to_string());
+        connection.insert_memory_link("link_00000000000000000000000014", &second_auto_link)?;
+        let updated = connection.apply_memory_curation_update(
+            "mem_00000000000000000000000011",
+            &super::ApplyMemoryCurationInput {
+                workspace_id: "wsp_01234567890123456789012345".to_string(),
+                content: "Graph source memory after curation.".to_string(),
+                confidence: 0.82,
+                trust_class: "agent_validated".to_string(),
+            },
+        )?;
+        ensure(updated, "curation update changed memory")?;
+        let after_content_change = connection.list_all_memory_links(None)?;
+        ensure(
+            after_content_change.is_empty(),
+            "content changes remove derived auto links",
+        )?;
 
         connection.close()?;
         Ok(())

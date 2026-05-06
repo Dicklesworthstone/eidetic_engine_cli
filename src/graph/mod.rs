@@ -5238,7 +5238,7 @@ mod tests {
         let connection = open_snapshot_db()?;
         insert_graph_snapshot_with_hash(
             &connection,
-            "gsnap_karate_fixture_000000000001",
+            "gsnap_0000000000000000000000002",
             &karate_graph_snapshot_metrics_json()?,
             1,
             KARATE_SNAPSHOT_HASH,
