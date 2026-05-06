@@ -105,15 +105,22 @@ $ ee context "fix the failing release workflow" --workspace . --profile thorough
 provenance footer: 14 memories, 3 sessions, 1 graph snapshot, pack hash 4b1c…7e90
 
 # 5. Ask why a memory was selected
-$ ee why mem_01HPCC3T --json | jq '.score_components'
+$ ee why mem_01HPCC3T --json | jq '.data | {retrieval, graphRetrievalFeatures}'
 {
-  "lexical_bm25": 8.42,
-  "semantic_cosine": 0.71,
-  "recency_decay": 0.88,
-  "confidence": 0.92,
-  "graph_pagerank_boost": 0.15,
-  "profile_bonus": 0.30,
-  "final": 9.04
+  "retrieval": {
+    "confidence": 0.92,
+    "utility": 0.74,
+    "importance": 0.81,
+    "tags": ["release", "ci"],
+    "level": "procedural",
+    "kind": "rule"
+  },
+  "graphRetrievalFeatures": {
+    "status": "available",
+    "centralityScore": 0.64,
+    "authorityScore": 0.57,
+    "reasons": ["linked to recent release evidence"]
+  }
 }
 
 # 6. Record that the rule helped
