@@ -1,5 +1,6 @@
 //! Query filter types for ee.query.v1 structured queries.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// A parsed filter from an ee.query.v1 document.
@@ -830,6 +831,10 @@ fn metadata_created_at(metadata: &serde_json::Value) -> Option<&str> {
         .and_then(serde_json::Value::as_str)
 }
 
+fn metadata_created_at_instant(metadata: &serde_json::Value) -> Option<DateTime<Utc>> {
+    metadata_created_at(metadata).and_then(parse_rfc3339_instant)
+}
+
 fn matches_since(metadata: &serde_json::Value, since: &str) -> bool {
     if let Some(days) = parse_relative_days(since) {
         return metadata
@@ -837,11 +842,17 @@ fn matches_since(metadata: &serde_json::Value, since: &str) -> bool {
             .and_then(serde_json::Value::as_f64)
             .is_some_and(|age_days| age_days <= days);
     }
-    metadata_created_at(metadata).is_some_and(|created_at| created_at >= since)
+    let Some(since) = parse_rfc3339_instant(since) else {
+        return false;
+    };
+    metadata_created_at_instant(metadata).is_some_and(|created_at| created_at >= since)
 }
 
 fn matches_until(metadata: &serde_json::Value, until: &str) -> bool {
-    metadata_created_at(metadata).is_some_and(|created_at| created_at <= until)
+    let Some(until) = parse_rfc3339_instant(until) else {
+        return false;
+    };
+    metadata_created_at_instant(metadata).is_some_and(|created_at| created_at <= until)
 }
 
 fn parse_relative_days(value: &str) -> Option<f64> {
@@ -849,6 +860,12 @@ fn parse_relative_days(value: &str) -> Option<f64> {
         .strip_suffix('d')
         .and_then(|days| days.parse::<f64>().ok())
         .filter(|days| days.is_finite() && *days >= 0.0)
+}
+
+fn parse_rfc3339_instant(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc))
 }
 
 #[cfg(test)]
@@ -1014,5 +1031,58 @@ mod tests {
             "empty filters match everything",
         )?;
         ensure(filters.matches(None), "empty filters match None metadata")
+    }
+
+    #[test]
+    fn eql_since_filter_compares_rfc3339_instants() -> TestResult {
+        let metadata = serde_json::json!({
+            "createdAt": "2026-05-04T09:00:00-04:00"
+        });
+
+        ensure(
+            matches_since(&metadata, "2026-05-04T12:30:00Z"),
+            "13:00Z should match since 12:30Z despite local hour sorting earlier",
+        )?;
+
+        ensure(
+            !matches_since(&metadata, "2026-05-04T13:30:00Z"),
+            "13:00Z should not match since 13:30Z",
+        )
+    }
+
+    #[test]
+    fn eql_until_filter_compares_rfc3339_instants() -> TestResult {
+        let metadata = serde_json::json!({
+            "created_at": "2026-05-04T13:30:00+02:00"
+        });
+
+        ensure(
+            matches_until(&metadata, "2026-05-04T12:00:00Z"),
+            "11:30Z should match until 12:00Z despite local hour sorting later",
+        )?;
+
+        ensure(
+            !matches_until(&metadata, "2026-05-04T11:00:00Z"),
+            "11:30Z should not match until 11:00Z",
+        )
+    }
+
+    #[test]
+    fn eql_absolute_time_filters_reject_invalid_timestamps() -> TestResult {
+        let metadata = serde_json::json!({
+            "createdAt": "2026-05-04T12:00:00Z"
+        });
+        ensure(
+            !matches_since(&metadata, "not-a-timestamp"),
+            "invalid since timestamp should not match",
+        )?;
+
+        let metadata = serde_json::json!({
+            "createdAt": "not-a-timestamp"
+        });
+        ensure(
+            !matches_until(&metadata, "2026-05-04T12:00:00Z"),
+            "invalid metadata timestamp should not match",
+        )
     }
 }
