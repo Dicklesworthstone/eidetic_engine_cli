@@ -541,6 +541,10 @@ fn compute_pack_hash(
         if let Some(subclass) = &item.trust.subclass {
             hasher.update(subclass.as_bytes());
         }
+        for redaction in &item.redactions {
+            hasher.update(redaction.reason.as_bytes());
+            hasher.update(redaction.placeholder.as_bytes());
+        }
     }
     for omission in &draft.omitted {
         hasher.update(omission.memory_id.to_string().as_bytes());
@@ -1452,6 +1456,7 @@ mod tests {
             why: "test explanation".to_string(),
             diversity_key: None,
             trust: PackTrustSignal::new(TrustClass::AgentAssertion, None),
+            redactions: Vec::new(),
         };
 
         let base_draft = PackDraft {

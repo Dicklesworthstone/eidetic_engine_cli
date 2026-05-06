@@ -1444,10 +1444,14 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
                 let provenance = item.rendered_provenance();
                 obj.field_array_of_objects("provenance", &provenance, build_rendered_provenance);
                 if !item.redactions.is_empty() {
-                    obj.field_array_of_objects("redactions", &item.redactions, |redaction_obj, redaction| {
-                        redaction_obj.field_str("reason", redaction.reason);
-                        redaction_obj.field_str("placeholder", &redaction.placeholder);
-                    });
+                    obj.field_array_of_objects(
+                        "redactions",
+                        &item.redactions,
+                        |redaction_obj, redaction| {
+                            redaction_obj.field_str("reason", redaction.reason);
+                            redaction_obj.field_str("placeholder", &redaction.placeholder);
+                        },
+                    );
                 }
                 obj.field_str("why", &item.why);
                 if let Some(diversity_key) = &item.diversity_key {
@@ -10179,6 +10183,48 @@ mod tests {
             "item trust posture",
         )?;
         ensure_contains(&json, "\"relevance\":0.800000", "stable relevance")
+    }
+
+    #[test]
+    fn context_response_json_renders_pack_item_redactions() -> TestResult {
+        let request = ContextRequest::from_query("protect context pack secrets")
+            .map_err(|error| format!("request rejected: {error:?}"))?;
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let key_name = concat!("api", "_", "key");
+        let raw_value = concat!("sk", "_", "pack", "_", "secret", "_", "123");
+        let candidate = PackCandidate::new(PackCandidateInput {
+            memory_id: memory_id(314),
+            section: PackSection::ProceduralRules,
+            content: format!("Keep the operational note; mask {key_name}={raw_value} for review."),
+            estimated_tokens: 12,
+            relevance: score(0.9)?,
+            utility: score(0.7)?,
+            provenance: vec![pack_provenance("file://AGENTS.md#L7")?],
+            why: "selected because it matches a secret-handling task".to_string(),
+        })
+        .map_err(|error| format!("candidate rejected: {error:?}"))?;
+        let draft = assemble_draft(&request.query, budget, vec![candidate])
+            .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let response = ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| format!("response rejected: {error:?}"))?;
+
+        let json = render_context_response_json(&response);
+
+        ensure(
+            !json.contains(raw_value),
+            "context JSON should not contain raw secret-like value",
+        )?;
+        ensure_contains(
+            &json,
+            "\"content\":\"Keep the operational note; mask api_key=[REDACTED:api_key] for review.\"",
+            "context JSON emits redacted pack content",
+        )?;
+        ensure_contains(
+            &json,
+            "\"redactions\":[{\"reason\":\"api_key\",\"placeholder\":\"[REDACTED:api_key]\"}]",
+            "context JSON emits per-item redaction metadata",
+        )
     }
 
     #[test]

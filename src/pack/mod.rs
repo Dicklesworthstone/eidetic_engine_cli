@@ -1238,9 +1238,57 @@ pub struct PackDraftItem {
     pub why: String,
     pub diversity_key: Option<String>,
     pub trust: PackTrustSignal,
+    pub redactions: Vec<PackItemRedaction>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackItemRedaction {
+    pub reason: &'static str,
+    pub placeholder: String,
+}
+
+impl PackItemRedaction {
+    #[must_use]
+    pub fn new(reason: &'static str) -> Self {
+        Self {
+            reason,
+            placeholder: crate::policy::redaction_placeholder(reason),
+        }
+    }
 }
 
 impl PackDraftItem {
+    #[must_use]
+    fn from_selected_candidate(rank: u32, candidate: PackCandidate) -> Self {
+        let PackCandidate {
+            memory_id,
+            section,
+            content,
+            estimated_tokens,
+            relevance,
+            utility,
+            provenance,
+            why,
+            diversity_key,
+            trust,
+        } = candidate;
+        let (content, redactions) = redact_pack_item_content(content);
+        Self {
+            rank,
+            memory_id,
+            section,
+            content,
+            estimated_tokens,
+            relevance,
+            utility,
+            provenance,
+            why,
+            diversity_key,
+            trust,
+            redactions,
+        }
+    }
+
     #[must_use]
     pub fn rendered_provenance(&self) -> Vec<RenderedPackProvenance> {
         self.provenance
@@ -1248,6 +1296,19 @@ impl PackDraftItem {
             .map(PackProvenance::rendered)
             .collect()
     }
+}
+
+fn redact_pack_item_content(content: String) -> (String, Vec<PackItemRedaction>) {
+    let report = crate::policy::redact_secret_like_content(&content);
+    if !report.redacted {
+        return (report.content, Vec::new());
+    }
+    let redactions = report
+        .redacted_reasons
+        .into_iter()
+        .map(PackItemRedaction::new)
+        .collect();
+    (report.content, redactions)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1525,19 +1586,7 @@ fn assemble_mmr_draft(
                 used_tokens = total;
                 let candidate = selection.candidate;
                 selected_signatures.push(selection.signature);
-                items.push(PackDraftItem {
-                    rank,
-                    memory_id: candidate.memory_id,
-                    section: candidate.section,
-                    content: candidate.content,
-                    estimated_tokens: candidate.estimated_tokens,
-                    relevance: candidate.relevance,
-                    utility: candidate.utility,
-                    provenance: candidate.provenance,
-                    why: candidate.why,
-                    diversity_key: candidate.diversity_key,
-                    trust: candidate.trust,
-                });
+                items.push(PackDraftItem::from_selected_candidate(rank, candidate));
             }
             _ => omitted.push(PackOmission {
                 memory_id: selection.candidate.memory_id,
@@ -1652,40 +1701,16 @@ fn assemble_facility_location_draft(
         update_facility_coverages(&mut current_coverages, &candidates, profile_index);
         objective_value = facility_location_value_from_coverages(&candidates, &current_coverages);
         let covered_features = certificate_features(&candidate);
-        let PackCandidate {
-            memory_id,
-            section,
-            content,
-            estimated_tokens,
-            relevance,
-            utility,
-            provenance,
-            why,
-            diversity_key,
-            trust,
-        } = candidate;
         steps.push(PackSelectionStep {
             rank,
-            memory_id,
+            memory_id: candidate.memory_id,
             marginal_gain,
             objective_value,
-            token_cost: estimated_tokens,
+            token_cost: candidate.estimated_tokens,
             feasible: true,
             covered_features,
         });
-        items.push(PackDraftItem {
-            rank,
-            memory_id,
-            section,
-            content,
-            estimated_tokens,
-            relevance,
-            utility,
-            provenance,
-            why,
-            diversity_key,
-            trust,
-        });
+        items.push(PackDraftItem::from_selected_candidate(rank, candidate));
     }
 
     Ok(PackDraft {
@@ -2474,7 +2499,7 @@ mod tests {
         CONTEXT_COMMAND, CandidateSignature, ContextPackProfile, ContextRequest,
         ContextRequestInput, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
         DEFAULT_CHARS_PER_TOKEN, FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR, PackCandidate,
-        PackCandidateInput, PackOmissionReason, PackProvenance, PackSection,
+        PackCandidateInput, PackItemRedaction, PackOmissionReason, PackProvenance, PackSection,
         PackSelectionObjective, PackTrustSignal, PackValidationError, SectionQuota, SectionQuotas,
         TokenBudget, TokenEstimationStrategy, assemble_draft, assemble_draft_with_profile,
         candidate_similarity, estimate_tokens, estimate_tokens_default, facility_similarity,
@@ -3848,6 +3873,41 @@ mod tests {
             &draft.items.get(1).map(|item| item.rank),
             &Some(2),
             "second rank",
+        )
+    }
+
+    #[test]
+    fn assemble_draft_redacts_secret_like_content_before_emit() -> TestResult {
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let key_name = concat!("api", "_", "key");
+        let raw_value = concat!("sk", "_", "pack", "_", "secret", "_", "123");
+        let content = format!("Preserve the note but mask {key_name}={raw_value}.");
+
+        let draft = assemble_draft(
+            "protect context pack secrets",
+            budget,
+            vec![candidate_with_content(42, 1.0, 0.8, 12, content)?],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let item = draft
+            .items
+            .first()
+            .ok_or_else(|| "expected selected item".to_string())?;
+
+        ensure(
+            !item.content.contains(raw_value),
+            "selected pack item should not retain raw secret-like value",
+        )?;
+        ensure_contains(
+            &item.content,
+            &crate::policy::redaction_placeholder("api_key"),
+            "selected pack item includes deterministic redaction placeholder",
+        )?;
+        ensure_equal(
+            &item.redactions,
+            &vec![PackItemRedaction::new("api_key")],
+            "selected pack item records redaction reason",
         )
     }
 
