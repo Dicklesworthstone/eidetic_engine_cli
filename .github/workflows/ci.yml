@@ -42,3 +42,6 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace --all-targets
+
+      - name: MCP parity tests
+        run: cargo test --workspace --features mcp --test mcp_parity

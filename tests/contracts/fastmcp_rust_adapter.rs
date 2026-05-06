@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 type TestResult = Result<(), String>;
 
 const CARGO_TOML_PATH: &str = "Cargo.toml";
+const CI_WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 const DEPENDENCY_MATRIX_PATH: &str =
     "tests/fixtures/golden/dependencies/contract_matrix.json.golden";
 #[cfg(feature = "mcp")]
@@ -150,6 +151,15 @@ fn fastmcp_dependency_remains_explicitly_gated_after_no_go_spike() -> TestResult
     ensure(
         string(fastmcp, "release_pin_decision")?.contains("Do not link"),
         "FastMCP release decision must forbid linking before audit evidence exists",
+    )
+}
+
+#[test]
+fn ci_runs_mcp_parity_feature_profile() -> TestResult {
+    let workflow = read_text(CI_WORKFLOW_PATH)?;
+    ensure(
+        workflow.contains("cargo test --workspace --features mcp --test mcp_parity"),
+        "CI must run tests/mcp_parity.rs with the mcp feature enabled",
     )
 }
 
