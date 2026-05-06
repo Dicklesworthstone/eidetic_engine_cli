@@ -1466,9 +1466,10 @@ fn assemble_mmr_draft(
     candidates: impl IntoIterator<Item = PackCandidate>,
 ) -> Result<PackDraft, PackValidationError> {
     let query = trim_required(query.into(), PackValidationError::EmptyQuery)?;
-    let mut candidates: Vec<PackCandidate> = candidates.into_iter().collect();
+    let mut candidates: Vec<MmrCandidate> =
+        candidates.into_iter().map(MmrCandidate::from).collect();
     let candidate_count = candidates.len();
-    candidates.sort_by(compare_candidates);
+    candidates.sort_by(|left, right| compare_candidates(&left.candidate, &right.candidate));
 
     let quotas = SectionQuotas::for_profile(profile, budget.max_tokens());
 
@@ -1482,11 +1483,11 @@ fn assemble_mmr_draft(
 
     while !candidates.is_empty() {
         let candidate_index = select_next_candidate_index(&candidates, &selected_signatures);
-        let candidate = candidates.remove(candidate_index);
-        if is_redundant(&candidate, &selected_signatures) {
+        let selection = candidates.remove(candidate_index);
+        if is_redundant(&selection.signature, &selected_signatures) {
             omitted.push(PackOmission {
-                memory_id: candidate.memory_id,
-                estimated_tokens: candidate.estimated_tokens,
+                memory_id: selection.candidate.memory_id,
+                estimated_tokens: selection.candidate.estimated_tokens,
                 reason: PackOmissionReason::RedundantCandidate,
             });
             continue;
@@ -1494,32 +1495,36 @@ fn assemble_mmr_draft(
 
         let section_used: u32 = items
             .iter()
-            .filter(|i| i.section == candidate.section)
+            .filter(|i| i.section == selection.candidate.section)
             .map(|i| i.estimated_tokens)
             .sum();
 
-        let section_has_room =
-            quotas.has_room(candidate.section, section_used, candidate.estimated_tokens);
+        let section_has_room = quotas.has_room(
+            selection.candidate.section,
+            section_used,
+            selection.candidate.estimated_tokens,
+        );
 
-        match used_tokens.checked_add(candidate.estimated_tokens) {
+        match used_tokens.checked_add(selection.candidate.estimated_tokens) {
             Some(total) if total <= budget.max_tokens() && section_has_room => {
                 let rank = next_rank;
                 next_rank = next_rank
                     .checked_add(1)
                     .ok_or(PackValidationError::CandidateRankOverflow)?;
-                let marginal_gain = redundancy_adjusted_score(&candidate, &selected_signatures);
+                let marginal_gain = redundancy_adjusted_score(&selection, &selected_signatures);
                 objective_value += marginal_gain.max(0.0);
                 steps.push(PackSelectionStep {
                     rank,
-                    memory_id: candidate.memory_id,
+                    memory_id: selection.candidate.memory_id,
                     marginal_gain,
                     objective_value,
-                    token_cost: candidate.estimated_tokens,
+                    token_cost: selection.candidate.estimated_tokens,
                     feasible: true,
-                    covered_features: certificate_features(&candidate),
+                    covered_features: certificate_features(&selection.candidate),
                 });
                 used_tokens = total;
-                selected_signatures.push(CandidateSignature::from(&candidate));
+                let candidate = selection.candidate;
+                selected_signatures.push(selection.signature);
                 items.push(PackDraftItem {
                     rank,
                     memory_id: candidate.memory_id,
@@ -1535,8 +1540,8 @@ fn assemble_mmr_draft(
                 });
             }
             _ => omitted.push(PackOmission {
-                memory_id: candidate.memory_id,
-                estimated_tokens: candidate.estimated_tokens,
+                memory_id: selection.candidate.memory_id,
+                estimated_tokens: selection.candidate.estimated_tokens,
                 reason: PackOmissionReason::TokenBudgetExceeded,
             }),
         }
@@ -1710,20 +1715,40 @@ pub(crate) struct CandidateSignature {
     memory_id: MemoryId,
     diversity_key: Option<String>,
     normalized_content: String,
+    content_terms: BTreeSet<String>,
 }
 
 impl From<&PackCandidate> for CandidateSignature {
     fn from(candidate: &PackCandidate) -> Self {
+        let normalized_content = normalize_redundancy_content(&candidate.content);
+        let content_terms = normalized_terms(&normalized_content);
         Self {
             memory_id: candidate.memory_id,
             diversity_key: candidate.diversity_key.clone(),
-            normalized_content: normalize_redundancy_content(&candidate.content),
+            normalized_content,
+            content_terms,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MmrCandidate {
+    candidate: PackCandidate,
+    signature: CandidateSignature,
+}
+
+impl From<PackCandidate> for MmrCandidate {
+    fn from(candidate: PackCandidate) -> Self {
+        let signature = CandidateSignature::from(&candidate);
+        Self {
+            candidate,
+            signature,
         }
     }
 }
 
 fn select_next_candidate_index(
-    candidates: &[PackCandidate],
+    candidates: &[MmrCandidate],
     selected: &[CandidateSignature],
 ) -> usize {
     let mut best_index = 0_usize;
@@ -1737,32 +1762,32 @@ fn select_next_candidate_index(
 }
 
 fn compare_candidates_with_redundancy(
-    left: &PackCandidate,
-    right: &PackCandidate,
+    left: &MmrCandidate,
+    right: &MmrCandidate,
     selected: &[CandidateSignature],
 ) -> Ordering {
     let left_score = redundancy_adjusted_score(left, selected);
     let right_score = redundancy_adjusted_score(right, selected);
     right_score
         .total_cmp(&left_score)
-        .then_with(|| compare_candidates(left, right))
+        .then_with(|| compare_candidates(&left.candidate, &right.candidate))
 }
 
-fn redundancy_adjusted_score(candidate: &PackCandidate, selected: &[CandidateSignature]) -> f32 {
-    let relevance_score = candidate.relevance.into_inner();
-    let max_similarity = max_selected_similarity(candidate, selected);
+fn redundancy_adjusted_score(candidate: &MmrCandidate, selected: &[CandidateSignature]) -> f32 {
+    let relevance_score = candidate.candidate.relevance.into_inner();
+    let max_similarity = max_selected_similarity(&candidate.signature, selected);
     (DEFAULT_MMR_RELEVANCE_WEIGHT * relevance_score)
         - ((1.0 - DEFAULT_MMR_RELEVANCE_WEIGHT) * max_similarity)
 }
 
-fn is_redundant(candidate: &PackCandidate, selected: &[CandidateSignature]) -> bool {
+fn is_redundant(candidate: &CandidateSignature, selected: &[CandidateSignature]) -> bool {
     max_selected_similarity(candidate, selected) >= 1.0
 }
 
-fn max_selected_similarity(candidate: &PackCandidate, selected: &[CandidateSignature]) -> f32 {
+fn max_selected_similarity(candidate: &CandidateSignature, selected: &[CandidateSignature]) -> f32 {
     selected
         .iter()
-        .map(|signature| candidate_similarity(candidate, signature))
+        .map(|signature| candidate_signature_similarity(candidate, signature))
         .fold(0.0_f32, f32::max)
 }
 
@@ -1869,7 +1894,7 @@ fn facility_candidate_weight(candidate: &PackCandidate) -> f32 {
 /// falls back to the larger of:
 /// - [`FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR`] when both sides
 ///   advertise the same `diversity_key` bucket, and
-/// - the Jaccard content overlap from [`content_overlap_similarity`].
+/// - the Jaccard content overlap from precomputed content terms.
 ///
 /// The function intentionally does *not* combine the two signals: matching
 /// only the diversity_key is a coarse bucket hint, not evidence of literal
@@ -1879,7 +1904,8 @@ fn facility_similarity(candidate: &PackCandidate, selected: &CandidateSignature)
     if candidate.memory_id == selected.memory_id {
         return 1.0;
     }
-    if normalize_redundancy_content(&candidate.content) == selected.normalized_content {
+    let candidate_normalized_content = normalize_redundancy_content(&candidate.content);
+    if candidate_normalized_content == selected.normalized_content {
         return 1.0;
     }
 
@@ -1889,15 +1915,17 @@ fn facility_similarity(candidate: &PackCandidate, selected: &CandidateSignature)
     {
         similarity = similarity.max(FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR);
     }
-    similarity.max(content_overlap_similarity(
-        &candidate.content,
-        &selected.normalized_content,
+    let candidate_terms = normalized_terms(&candidate_normalized_content);
+    similarity.max(content_overlap_similarity_terms(
+        &candidate_terms,
+        &selected.content_terms,
     ))
 }
 
-fn content_overlap_similarity(left: &str, right_normalized: &str) -> f32 {
-    let left_terms = normalized_terms(left);
-    let right_terms = normalized_terms(right_normalized);
+fn content_overlap_similarity_terms(
+    left_terms: &BTreeSet<String>,
+    right_terms: &BTreeSet<String>,
+) -> f32 {
     if left_terms.is_empty() || right_terms.is_empty() {
         return 0.0;
     }
@@ -1910,7 +1938,25 @@ fn content_overlap_similarity(left: &str, right_normalized: &str) -> f32 {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static NORMALIZED_TERMS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_normalized_terms_call_count() {
+    NORMALIZED_TERMS_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+fn normalized_terms_call_count() -> usize {
+    NORMALIZED_TERMS_CALLS.with(std::cell::Cell::get)
+}
+
 fn normalized_terms(content: &str) -> BTreeSet<String> {
+    #[cfg(test)]
+    NORMALIZED_TERMS_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
+
     content
         .split_whitespace()
         .map(|term| {
@@ -1937,20 +1983,29 @@ fn certificate_features(candidate: &PackCandidate) -> Vec<String> {
 /// can share a coarse tag like "formatting" without being duplicates.
 ///
 /// Bug: eidetic_engine_cli-6cjh
+#[cfg(test)]
 fn candidate_similarity(candidate: &PackCandidate, selected: &CandidateSignature) -> f32 {
+    let candidate_signature = CandidateSignature::from(candidate);
+    candidate_signature_similarity(&candidate_signature, selected)
+}
+
+fn candidate_signature_similarity(
+    candidate: &CandidateSignature,
+    selected: &CandidateSignature,
+) -> f32 {
     // Same memory is always fully redundant
     if candidate.memory_id == selected.memory_id {
         return 1.0;
     }
 
     // Exact content match is fully redundant
-    if normalize_redundancy_content(&candidate.content) == selected.normalized_content {
+    if candidate.normalized_content == selected.normalized_content {
         return 1.0;
     }
 
     // Compute content overlap similarity
     let content_similarity =
-        content_overlap_similarity(&candidate.content, &selected.normalized_content);
+        content_overlap_similarity_terms(&candidate.content_terms, &selected.content_terms);
 
     // Matching diversity_key boosts similarity but doesn't cause full redundancy by itself.
     // Two memories tagged "formatting" with different content are NOT duplicates.
@@ -3826,6 +3881,45 @@ mod tests {
         )?;
         ensure_equal(&draft.used_tokens, &30, "all three selected")?;
         ensure_equal(&draft.omitted.len(), &0, "no redundant candidates")
+    }
+
+    #[test]
+    fn mmr_precomputes_candidate_terms_once() -> TestResult {
+        let budget =
+            TokenBudget::new(1_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let candidates = (1_u128..=8)
+            .map(|seed| {
+                let relevance = 1.0 - (seed as f32 * 0.01);
+                candidate_with_content(
+                    seed,
+                    relevance,
+                    0.5,
+                    10,
+                    format!("release workflow step {seed} cargo fmt clippy shared term"),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        super::reset_normalized_terms_call_count();
+        let draft = assemble_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare release",
+            budget,
+            candidates,
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        ensure_equal(
+            &draft.selection_certificate.candidate_count,
+            &8,
+            "candidate count",
+        )?;
+        ensure_equal(&draft.items.len(), &8, "all candidates fit the budget")?;
+        ensure_equal(
+            &super::normalized_terms_call_count(),
+            &8,
+            "MMR tokenizes once per candidate instead of during pairwise similarity checks",
+        )
     }
 
     #[test]
