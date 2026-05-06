@@ -8,11 +8,15 @@
 use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 use std::env;
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use ee::db::{DatabaseConfig, DbConnection};
 
 type TestResult = Result<(), String>;
 
@@ -181,10 +185,25 @@ fn run_step(
     workspace: &Path,
     spec: StepSpec,
 ) -> Result<(CommandEvent, JsonValue), String> {
+    run_step_with_env(scenario_id, log_path, artifact_dir, workspace, spec, &[])
+}
+
+fn run_step_with_env(
+    scenario_id: &'static str,
+    log_path: &Path,
+    artifact_dir: &Path,
+    workspace: &Path,
+    spec: StepSpec,
+    envs: &[(&str, OsString)],
+) -> Result<(CommandEvent, JsonValue), String> {
     let started_at_unix_ms = unix_ms_now()?;
     let start = Instant::now();
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(&spec.args)
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    command.args(&spec.args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command
         .output()
         .map_err(|error| format!("failed to execute step {}: {error}", spec.name))?;
     let elapsed_ms = start.elapsed().as_millis();
@@ -303,6 +322,135 @@ fn ensure_no_ansi(text: &str, context: &str) -> TestResult {
         !text.contains("\u{1b}["),
         format!("{context} must not contain ANSI escape sequences"),
     )
+}
+
+#[cfg(unix)]
+fn real_cass_binary_path() -> Result<PathBuf, String> {
+    if let Some(path) = env::var_os("EE_CASS_BINARY") {
+        let path = PathBuf::from(path);
+        ensure(
+            path.is_absolute(),
+            format!("EE_CASS_BINARY must be absolute for no-mocks CASS e2e: {path:?}"),
+        )?;
+        ensure(
+            path.file_name().and_then(|name| name.to_str()) == Some("cass"),
+            format!("EE_CASS_BINARY must point to a real cass executable: {path:?}"),
+        )?;
+        ensure(path.is_file(), format!("cass binary not found: {path:?}"))?;
+        return path.canonicalize().map_err(|error| error.to_string());
+    }
+
+    if let Some(path) = env::var_os("PATH") {
+        for dir in env::split_paths(&path) {
+            let candidate = dir.join("cass");
+            if candidate.is_file() {
+                return candidate.canonicalize().map_err(|error| error.to_string());
+            }
+        }
+    }
+
+    Err("real cass binary not found on PATH".to_owned())
+}
+
+#[cfg(unix)]
+fn path_with_binary_parent(binary: &Path) -> Result<OsString, String> {
+    let parent = binary
+        .parent()
+        .ok_or_else(|| format!("cass binary has no parent directory: {binary:?}"))?;
+    let mut entries = vec![parent.to_path_buf()];
+    if let Some(existing) = env::var_os("PATH") {
+        entries.extend(env::split_paths(&existing));
+    }
+    env::join_paths(entries).map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+fn write_codex_cass_fixture_session(
+    codex_home: &Path,
+    workspace: &Path,
+) -> Result<PathBuf, String> {
+    let sessions_dir = codex_home
+        .join("sessions")
+        .join("2026")
+        .join("05")
+        .join("06");
+    fs::create_dir_all(&sessions_dir).map_err(|error| error.to_string())?;
+    let session_path = sessions_dir.join("rollout-x65f-cass-import.jsonl");
+    let workspace_path = workspace.display().to_string();
+    let records = [
+        json!({
+            "timestamp": "2026-05-06T03:40:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "x65f-cass-import-fixture",
+                "cwd": workspace_path,
+                "cli_version": "0.42.0"
+            }
+        }),
+        json!({
+            "timestamp": "2026-05-06T03:40:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "x65f cass import fixture release evidence alpha"
+                    }
+                ]
+            }
+        }),
+        json!({
+            "timestamp": "2026-05-06T03:40:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "x65f imported CASS evidence remains durable and searchable"
+                    }
+                ]
+            }
+        }),
+    ];
+
+    let mut jsonl = String::new();
+    for record in records {
+        jsonl.push_str(&serde_json::to_string(&record).map_err(|error| error.to_string())?);
+        jsonl.push('\n');
+    }
+    write_text(&session_path, &jsonl)?;
+    Ok(session_path)
+}
+
+#[cfg(unix)]
+fn run_cass_json(
+    args: &[OsString],
+    cwd: &Path,
+    envs: &[(&str, OsString)],
+    context: &str,
+) -> Result<JsonValue, String> {
+    let mut command = Command::new("cass");
+    command.current_dir(cwd).args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to run cass for {context}: {error}"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure(
+        output.status.success(),
+        format!(
+            "cass {context} failed with exit {:?}: {stderr}",
+            output.status.code()
+        ),
+    )?;
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("cass {context} stdout must be JSON: {error}"))
 }
 
 #[test]
@@ -497,6 +645,270 @@ fn no_mocks_status_json_conformance_logs_capabilities_and_degradations() -> Test
             format!("status JSONL event {index} must include schema"),
         )?;
     }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResult {
+    let scenario_id = "x65f_cass_import_e2e";
+    let log_dir = unique_log_dir(scenario_id)?;
+    let artifact_dir = log_dir.join("artifacts");
+    fs::create_dir_all(&artifact_dir)
+        .map_err(|error| format!("failed to create artifact dir: {error}"))?;
+    let events_path = log_dir.join("commands.jsonl");
+
+    let workspace = log_dir.join("workspace");
+    let home = log_dir.join("home");
+    let codex_home = log_dir.join("codex-home");
+    let cass_data_dir = log_dir.join("cass-data");
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&home).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&codex_home).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&cass_data_dir).map_err(|error| error.to_string())?;
+
+    let cass_binary = real_cass_binary_path()?;
+    let cass_path = path_with_binary_parent(&cass_binary)?;
+    let session_path = write_codex_cass_fixture_session(&codex_home, &workspace)?;
+    let workspace_arg = workspace.display().to_string();
+    let database_path = workspace.join(".ee").join("ee.db");
+    let database_arg = database_path.display().to_string();
+    let cass_data_arg = cass_data_dir.display().to_string();
+    let session_arg = session_path.display().to_string();
+    let envs = vec![
+        ("HOME", home.as_os_str().to_owned()),
+        ("CODEX_HOME", codex_home.as_os_str().to_owned()),
+        ("CASS_DATA_DIR", cass_data_dir.as_os_str().to_owned()),
+        ("CASS_IGNORE_SOURCES_CONFIG", OsString::from("1")),
+        ("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", OsString::from("1")),
+        ("CASS_INDEX_NO_PROGRESS_EVENTS", OsString::from("1")),
+        ("NO_COLOR", OsString::from("1")),
+        ("EE_CASS_BINARY", cass_binary.as_os_str().to_owned()),
+        ("PATH", cass_path),
+    ];
+
+    let cass_index = run_cass_json(
+        &[
+            OsString::from("index"),
+            OsString::from("--full"),
+            OsString::from("--data-dir"),
+            OsString::from(cass_data_arg.clone()),
+            OsString::from("--json"),
+        ],
+        &workspace,
+        &envs,
+        "index fixture sessions",
+    )?;
+    ensure_equal(
+        &cass_index.pointer("/success"),
+        &Some(&json!(true)),
+        "cass fixture index success",
+    )?;
+    ensure_equal(
+        &cass_index.pointer("/conversations"),
+        &Some(&json!(1)),
+        "cass fixture conversation count",
+    )?;
+
+    let cass_sessions = run_cass_json(
+        &[
+            OsString::from("sessions"),
+            OsString::from("--workspace"),
+            OsString::from(workspace_arg.clone()),
+            OsString::from("--json"),
+            OsString::from("--limit"),
+            OsString::from("5"),
+        ],
+        &workspace,
+        &envs,
+        "sessions fixture discovery",
+    )?;
+    ensure_equal(
+        &cass_sessions.pointer("/sessions/0/path"),
+        &Some(&json!(session_arg)),
+        "cass fixture session path",
+    )?;
+    ensure_equal(
+        &cass_sessions.pointer("/sessions/0/workspace"),
+        &Some(&json!(workspace_arg)),
+        "cass fixture workspace path",
+    )?;
+
+    let (_init_event, _init_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "01_init",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "init".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+
+    let (_import_event, import_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "02_import_cass",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "import".to_owned(),
+                "cass".to_owned(),
+                "--database".to_owned(),
+                database_arg.clone(),
+                "--limit".to_owned(),
+                "5".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    ensure_equal(
+        &import_json.pointer("/data/status"),
+        &Some(&json!("completed")),
+        "CASS import status",
+    )?;
+    ensure_equal(
+        &import_json.pointer("/data/sessionsImported"),
+        &Some(&json!(1)),
+        "CASS sessions imported",
+    )?;
+    ensure(
+        import_json
+            .pointer("/data/spansImported")
+            .and_then(JsonValue::as_u64)
+            .unwrap_or(0)
+            >= 3,
+        "CASS import must capture evidence spans from the fixture session",
+    )?;
+    ensure_equal(
+        &import_json.pointer("/data/sessions/0/sourcePath"),
+        &Some(&json!(session_arg)),
+        "CASS import report source path",
+    )?;
+
+    let connection = DbConnection::open(DatabaseConfig::file(database_path.clone()))
+        .map_err(|error| error.to_string())?;
+    let workspaces = connection
+        .list_workspaces()
+        .map_err(|error| error.to_string())?;
+    ensure_equal(&workspaces.len(), &1_usize, "stored workspace count")?;
+    ensure_equal(&workspaces[0].path, &workspace_arg, "stored workspace path")?;
+    let sessions = connection
+        .list_sessions(&workspaces[0].id)
+        .map_err(|error| error.to_string())?;
+    ensure_equal(&sessions.len(), &1_usize, "stored CASS session count")?;
+    ensure_equal(
+        &sessions[0].source_path,
+        &Some(session_arg.clone()),
+        "stored CASS session source path",
+    )?;
+    ensure_equal(
+        &sessions[0].agent_name,
+        &Some("codex".to_owned()),
+        "stored CASS session agent",
+    )?;
+    let spans = connection
+        .list_evidence_spans_for_session(&sessions[0].id)
+        .map_err(|error| error.to_string())?;
+    ensure(
+        spans.len() >= 3,
+        format!("expected at least 3 imported spans, got {}", spans.len()),
+    )?;
+    let span_text = spans
+        .iter()
+        .map(|span| span.excerpt.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    ensure(
+        span_text.contains("x65f cass import fixture release evidence alpha"),
+        "stored evidence spans must include the fixture user text",
+    )?;
+    ensure(
+        span_text.contains("x65f imported CASS evidence remains durable and searchable"),
+        "stored evidence spans must include the fixture assistant text",
+    )?;
+    ensure(
+        spans.iter().all(|span| {
+            span.cass_span_id.starts_with(session_arg.as_str()) && !span.content_hash.is_empty()
+        }),
+        "evidence spans must preserve CASS source IDs and content hashes",
+    )?;
+    let stored_session_id = sessions[0].id.clone();
+    connection.close().map_err(|error| error.to_string())?;
+
+    let (_index_event, index_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "03_index_rebuild",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "index".to_owned(),
+                "rebuild".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    ensure_equal(
+        &index_json.pointer("/data/sessions_indexed"),
+        &Some(&json!(1)),
+        "indexed CASS session count",
+    )?;
+
+    let (_search_event, search_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "04_search_imported_session",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg,
+                "--json".to_owned(),
+                "search".to_owned(),
+                "CASS session codex".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    let search_results = json_array(&search_json, "/data/results", "CASS import search")?;
+    ensure(
+        search_results.iter().any(|result| {
+            result
+                .get("docId")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|doc_id| doc_id.eq(stored_session_id.as_str()))
+        }),
+        "search must retrieve the imported CASS session document",
+    )?;
 
     Ok(())
 }
