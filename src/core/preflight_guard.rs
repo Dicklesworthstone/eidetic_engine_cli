@@ -449,7 +449,12 @@ pub fn run_preflight_guard(
     let mut any_enforced_halt = false;
     for matched in matches {
         let resolution = resolve_match(matched, options);
-        if matches!(resolution, MatchResolution::Enforced) && matched.action.stops_execution() {
+        // A halt rule continues to halt unless the bypass actually succeeded.
+        // An invalid token, missing secret, or no token at all all leave the
+        // policy denial in force.
+        if matched.action.stops_execution()
+            && !matches!(resolution, MatchResolution::BypassedWithToken)
+        {
             any_enforced_halt = true;
         }
         report_matches.push(GuardMatch {
@@ -546,6 +551,11 @@ fn constant_time_eq_str(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    //! Inline tests duplicate cases from `tests/preflight_guard.rs`; the
+    //! integration test file is the canonical exercise of the public API.
+    //! These remain here so the unit-test suite still covers the module
+    //! when other crates' broken `#[cfg(test)]` blocks aren't blocking
+    //! the lib-test build.
     use super::*;
 
     fn registry_with_only(rules: Vec<PreflightGuardRule>) -> PreflightGuardRegistry {
