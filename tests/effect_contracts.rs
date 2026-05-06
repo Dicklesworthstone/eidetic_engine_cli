@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
-const NORMALIZED_CLI_COMMAND_COUNT: usize = 174;
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 179;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",
@@ -485,8 +485,6 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
     for (command, code) in [
         ("claim verify", "claim_verification_unavailable"),
         ("demo run", "demo_command_execution_unavailable"),
-        ("eval list", "eval_fixtures_unavailable"),
-        ("handoff create", "handoff_unavailable"),
         ("memory revise", "revision_write_unavailable"),
         ("procedure export", "procedure_store_unavailable"),
         ("support bundle", "support_bundle_unavailable"),
@@ -521,6 +519,75 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
             &format!("{command} degraded code"),
         )?;
     }
+    Ok(())
+}
+
+#[test]
+fn effect_manifest_tracks_handoff_and_eval_as_real_surfaces() -> TestResult {
+    use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
+
+    let manifest = EffectManifest::build();
+
+    // Read-only handoff/eval surfaces must no longer carry an unavailable
+    // sentinel — h0h1 (handoff) and r1np (eval) shipped real implementations
+    // and the *_UNAVAILABLE_CODE constants in src/cli/mod.rs were deleted.
+    for command in [
+        "eval list",
+        "eval run",
+        "handoff inspect",
+        "handoff preview",
+        "handoff resume",
+    ] {
+        let effect = manifest
+            .get(command)
+            .ok_or_else(|| format!("{command} not in manifest"))?;
+        ensure(
+            effect.default_effect,
+            EffectClass::ReadOnly,
+            &format!("{command} stays read-only"),
+        )?;
+        ensure(
+            effect.mutation_contract.side_effect_class,
+            SideEffectClass::ReadOnly,
+            &format!("{command} has read-only contract"),
+        )?;
+        ensure(
+            effect.mutation_contract.degraded_code,
+            None,
+            &format!("{command} no longer has an unavailable sentinel"),
+        )?;
+    }
+
+    // handoff create writes a capsule file to a user-specified --out path,
+    // so it is a workspace-file-write surface (parallel to backup create).
+    let create = manifest
+        .get("handoff create")
+        .ok_or_else(|| "handoff create not in manifest".to_string())?;
+    ensure(
+        create.default_effect,
+        EffectClass::WorkspaceFileWrite,
+        "handoff create writes to a user-specified output path",
+    )?;
+    ensure(
+        create.dry_run_effect,
+        Some(EffectClass::ReadOnly),
+        "handoff create --dry-run is read-only",
+    )?;
+    ensure(
+        create.mutation_contract.side_effect_class,
+        SideEffectClass::SidePathArtifact,
+        "handoff create class is side-path artifact",
+    )?;
+    ensure(
+        create.mutation_contract.degraded_code,
+        None,
+        "handoff create no longer has handoff_unavailable sentinel",
+    )?;
+    ensure(
+        create.write_surfaces.workspace_files.is_empty(),
+        false,
+        "handoff create names the --out workspace file surface",
+    )?;
     Ok(())
 }
 

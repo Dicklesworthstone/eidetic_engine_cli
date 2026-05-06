@@ -850,6 +850,10 @@ impl EffectManifest {
             CommandEffect::read_only("graph pagerank", "Compute graph PageRank scores"),
             CommandEffect::read_only("graph path", "Find graph shortest path"),
             CommandEffect::read_only("handoff inspect", "Inspect handoff capsule"),
+            CommandEffect::read_only(
+                "handoff preview",
+                "Plan handoff capsule contents without writing",
+            ),
             CommandEffect::read_only("handoff resume", "Render handoff resume payload"),
             CommandEffect::read_only("artifact inspect", "Inspect artifact metadata"),
             CommandEffect::read_only("artifact list", "List registered artifacts"),
@@ -859,6 +863,8 @@ impl EffectManifest {
             CommandEffect::read_only("install check", "Inspect install posture"),
             CommandEffect::read_only("install plan", "Plan install without mutation"),
             CommandEffect::read_only("introspect", "Introspect ee metadata"),
+            CommandEffect::read_only("job list", "List available steward job types"),
+            CommandEffect::read_only("job show", "Show steward job row details"),
             CommandEffect::read_only("maintenance status", "Report maintenance job availability"),
             CommandEffect::read_only("mcp manifest", "Inspect optional MCP adapter manifest"),
             CommandEffect::read_only("memory history", "Show memory revision history"),
@@ -992,26 +998,6 @@ impl EffectManifest {
                 "Economy prune planning abstains until persisted workspace metrics exist",
             ),
             CommandEffect::degraded_unavailable(
-                "eval run",
-                "eval_fixtures_unavailable",
-                "Evaluation run abstains until deterministic fixture registries exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "eval list",
-                "eval_fixtures_unavailable",
-                "Evaluation listing abstains until deterministic fixture registries exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "handoff preview",
-                "handoff_unavailable",
-                "Handoff preview abstains until redacted continuity evidence exists",
-            ),
-            CommandEffect::degraded_unavailable(
-                "handoff create",
-                "handoff_unavailable",
-                "Handoff creation abstains until redacted continuity evidence exists",
-            ),
-            CommandEffect::degraded_unavailable(
                 "lab capture",
                 "lab_replay_unavailable",
                 "Lab capture abstains until stored episodes are implemented",
@@ -1139,6 +1125,10 @@ impl EffectManifest {
                 "Recorder import planning is read-only unless explicitly promoted to execution",
             ),
             CommandEffect::read_only(
+                "recorder events list",
+                "List persisted recorder events without mutation",
+            ),
+            CommandEffect::read_only(
                 "rehearse plan",
                 "Rehearsal planning validates command specs and estimates side-path artifacts",
             ),
@@ -1217,6 +1207,11 @@ impl EffectManifest {
                 "daemon foreground decay_sweep",
                 vec!["memories", "feedback_events", "audit_log"],
                 "Run the real score-decay steward handler in a bounded foreground daemon tick",
+            ),
+            CommandEffect::supervised_job(
+                "job run",
+                vec!["memories", "feedback_events", "audit_log"],
+                "Run a steward job directly through the job interface",
             ),
             CommandEffect::supervised_job(
                 "maintenance run",
@@ -1398,6 +1393,11 @@ impl EffectManifest {
                 "focus add",
                 vec![".ee/focus/state.json"],
                 "Add explicit memories to passive focus state without eviction",
+            ),
+            CommandEffect::workspace_file_write(
+                "handoff create",
+                vec!["<--out path>"],
+                "Write a redacted continuity capsule to a user-specified output path",
             ),
             CommandEffect::workspace_file_write(
                 "focus clear",
@@ -2022,7 +2022,6 @@ mod tests {
 
         for (command, code) in [
             ("demo run", "demo_command_execution_unavailable"),
-            ("handoff create", "handoff_unavailable"),
             ("procedure export", "procedure_store_unavailable"),
             ("support bundle", "support_bundle_unavailable"),
         ] {
