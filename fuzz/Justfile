@@ -11,3 +11,15 @@ pack-token-budget-ci:
 
 pack-token-budget-check:
   cd .. && cargo +nightly fuzz check pack_token_budget
+
+packing-budget-ci:
+  cd .. && cargo +nightly fuzz run packing_budget -- -max_total_time=600 -timeout=10
+
+packing-budget-check:
+  cd .. && cargo +nightly fuzz check packing_budget
+
+search-query-parser-ci:
+  cd .. && cargo +nightly fuzz run search_query_parser -- -max_total_time=900 -timeout=10
+
+search-query-parser-check:
+  cd .. && cargo +nightly fuzz check search_query_parser

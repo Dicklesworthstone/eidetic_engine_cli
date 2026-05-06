@@ -41,6 +41,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "packing_budget"
+path = "fuzz_targets/packing_budget.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "memory_id"
 path = "fuzz_targets/memory_id.rs"
 test = false
@@ -57,6 +64,13 @@ bench = false
 [[bin]]
 name = "schema_version"
 path = "fuzz_targets/schema_version.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "search_query_parser"
+path = "fuzz_targets/search_query_parser.rs"
 test = false
 doc = false
 bench = false

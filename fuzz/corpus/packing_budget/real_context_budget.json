@@ -1,0 +1,1 @@
+{"wallClockMs":30000,"tokensLimit":4000,"memoryLimitBytes":268435456,"ioLimitBytes":104857600,"elapsedMs":29999,"tokenRecords":[512,1024,2048],"memoryRecords":[65536,1048576],"ioRecords":[4096,8192]}
