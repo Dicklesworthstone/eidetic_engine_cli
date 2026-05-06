@@ -34,6 +34,7 @@ pub mod schema;
 pub mod situation;
 pub mod timing;
 pub mod trust;
+pub mod why_tag;
 
 pub use backup::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
@@ -247,6 +248,7 @@ pub use situation::{
 };
 pub use timing::{DiagnosticTiming, TimingCapture, TimingPhase};
 pub use trust::{ParseTrustClassError, TrustClass};
+pub use why_tag::{ParseWhyTagError, WhyTag};
 
 // ============================================================================
 // Public JSON Contract Schema Constants
@@ -255,6 +257,9 @@ pub use trust::{ParseTrustClassError, TrustClass};
 // They MUST be used instead of inline string literals to ensure consistency
 // and enable schema drift detection.
 // ============================================================================
+
+/// Legacy response envelope schema retained for one minor-version cycle.
+pub const RESPONSE_SCHEMA_V0: &str = "ee.response.v0";
 
 /// Response envelope schema for successful command output.
 pub const RESPONSE_SCHEMA_V1: &str = "ee.response.v1";

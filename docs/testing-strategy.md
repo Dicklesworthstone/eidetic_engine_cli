@@ -386,6 +386,19 @@ are reserved as the shared vocabulary for future work. When a later bead changes
 one of these names, it must update this document, the bead description, and the
 relevant golden/contract references together.
 
+### Central Verification Runner
+
+All readiness gates are orchestrated by `scripts/verify.sh`. This is the single
+entry point for verifying the codebase:
+
+```bash
+./scripts/verify.sh
+```
+
+The script runs gates in order (forbidden-deps → cargo test → E2E suites),
+reports per-gate exit codes and durations, and lists artifact directories
+written by the E2E harnesses. See `./scripts/verify.sh --help` for details.
+
 ## Discovery Rules For Future Agents
 
 Future agents should be able to find the right tests with predictable searches:
