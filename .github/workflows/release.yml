@@ -308,3 +308,51 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           ee --version
           ee --help
+
+  update-homebrew:
+    needs: [check-version, tag, release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Wait for release assets
+        run: sleep 30
+
+      - name: Generate Homebrew formula
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          ./scripts/homebrew/update-formula.sh "$VERSION" > ee.rb
+          cat ee.rb
+
+      - name: Create PR to homebrew-tap
+        env:
+          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+
+          # Clone the tap repo
+          git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/Dicklesworthstone/homebrew-tap.git" tap
+          cd tap
+
+          # Create or update formula
+          mkdir -p Formula
+          cp ../ee.rb Formula/ee.rb
+
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create branch and PR
+          BRANCH="update-ee-v${VERSION}"
+          git checkout -b "$BRANCH"
+          git add Formula/ee.rb
+          git commit -m "Update ee to v${VERSION}"
+          git push origin "$BRANCH"
+
+          # Create PR (will fail gracefully if HOMEBREW_TAP_TOKEN not set)
+          gh pr create \
+            --title "Update ee to v${VERSION}" \
+            --body "Automated update from ee release workflow." \
+            --head "$BRANCH" \
+            --base main || echo "PR creation skipped (token may not be configured)"

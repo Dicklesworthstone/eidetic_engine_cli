@@ -1,0 +1,47 @@
+# Homebrew formula for ee (Eidetic Engine CLI)
+# Template for Dicklesworthstone/homebrew-tap/Formula/ee.rb
+#
+# This file is a template. The release workflow substitutes:
+#   {{VERSION}} - release version (e.g., 0.1.0)
+#   {{SHA256_DARWIN_ARM64}} - SHA256 of ee-aarch64-apple-darwin.tar.xz
+#   {{SHA256_DARWIN_X86_64}} - SHA256 of ee-x86_64-apple-darwin.tar.xz
+#   {{SHA256_LINUX_X86_64}} - SHA256 of ee-x86_64-unknown-linux-gnu.tar.xz
+
+class Ee < Formula
+  desc "Durable, local-first, explainable memory for coding agents"
+  homepage "https://github.com/Dicklesworthstone/eidetic_engine_cli"
+  version "{{VERSION}}"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v{{VERSION}}/ee-aarch64-apple-darwin.tar.xz"
+      sha256 "{{SHA256_DARWIN_ARM64}}"
+    end
+    on_intel do
+      url "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v{{VERSION}}/ee-x86_64-apple-darwin.tar.xz"
+      sha256 "{{SHA256_DARWIN_X86_64}}"
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v{{VERSION}}/ee-x86_64-unknown-linux-gnu.tar.xz"
+      sha256 "{{SHA256_LINUX_X86_64}}"
+    end
+  end
+
+  def install
+    bin.install "ee"
+
+    # Generate shell completions
+    generate_completions_from_executable(bin/"ee", "completion")
+  end
+
+  test do
+    assert_match "ee #{version}", shell_output("#{bin}/ee --version")
+
+    # Quick health check
+    system "#{bin}/ee", "health"
+  end
+end
