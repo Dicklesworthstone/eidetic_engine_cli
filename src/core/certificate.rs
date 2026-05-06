@@ -6,6 +6,31 @@
 //!
 //! Without an explicit manifest path, core operations return honest
 //! empty/not-found reports instead of sample records.
+//!
+//! # Honesty note: certificate "attestations" are content hashes, not signatures
+//!
+//! In this slice, ee certificates are **content-addressed**, not
+//! cryptographically signed. The optional `signature` / `signature_algorithm`
+//! / `signer` columns on the certificate record store an *attestation*: a
+//! domain-separated SHA-256 digest of `(algorithm-tag, signer, payload_hash)`.
+//!
+//! That digest proves only that whoever wrote the record knew the same
+//! `(signer, payload_hash)` triple — values that are themselves stored in
+//! plaintext on the same record. There is **no key, no nonce, no secret
+//! material**, so an attacker who can see a certificate can mint a fresh
+//! attestation for any `signer` they like. Treat `attestation_ok` as
+//! "the recorded attestation matches its own publicly-derivable form",
+//! not as "an authorized key holder produced this".
+//!
+//! The single supported algorithm string is `ee.local-content-hash.v1`. The
+//! previous `sigstore.bundle-sha256.v1` algorithm name has been removed —
+//! it implied real sigstore bundle verification (rekor inclusion proof,
+//! fulcio cert chain, OIDC binding) that this slice never performed.
+//!
+//! Real signing (ed25519 via `ring`/`ed25519-dalek` or genuine sigstore
+//! bundle verification) is tracked under `implements-surface:certificate-signing`.
+//! Until that lands, do not rely on certificate attestations for
+//! authorization decisions or compliance evidence.
 
 use std::fs;
 use std::io;
@@ -211,8 +236,13 @@ pub enum VerificationResult {
     Expired,
     /// Certificate was revoked.
     Revoked,
-    /// Certificate detached signature did not verify.
-    SignatureMismatch,
+    /// Certificate content-hash attestation did not verify.
+    ///
+    /// The recorded attestation hash did not match the digest derived from
+    /// `(algorithm, signer, payload_hash)`. This is a structural integrity
+    /// check on the attestation field; it is **not** a cryptographic
+    /// signature verification (see module docs).
+    AttestationMismatch,
     /// Certificate status is invalid.
     InvalidStatus,
     /// Certificate not found.
@@ -230,7 +260,7 @@ impl VerificationResult {
             Self::FailedAssumptions => "failed_assumptions",
             Self::Expired => "expired",
             Self::Revoked => "revoked",
-            Self::SignatureMismatch => "signature_mismatch",
+            Self::AttestationMismatch => "attestation_mismatch",
             Self::InvalidStatus => "invalid_status",
             Self::NotFound => "not_found",
         }
@@ -250,7 +280,7 @@ impl VerificationResult {
                 | Self::StaleSchemaVersion
                 | Self::FailedAssumptions
                 | Self::Revoked
-                | Self::SignatureMismatch
+                | Self::AttestationMismatch
                 | Self::NotFound
         )
     }
@@ -269,7 +299,10 @@ pub struct CertificateVerifyReport {
     pub status_valid: bool,
     pub expiry_valid: bool,
     pub mismatches: Vec<String>,
-    pub signature_ok: bool,
+    /// Whether the recorded content-hash attestation matched its
+    /// publicly-derivable form. **Not a cryptographic signature check** —
+    /// see module-level "Honesty note" for what this does and does not prove.
+    pub attestation_ok: bool,
     pub signer: Option<String>,
     pub failure_codes: Vec<String>,
     pub message: String,
@@ -289,7 +322,7 @@ impl CertificateVerifyReport {
             status_valid: true,
             expiry_valid: true,
             mismatches: Vec::new(),
-            signature_ok: true,
+            attestation_ok: true,
             signer: None,
             failure_codes: Vec::new(),
             message: "Certificate verification passed".to_owned(),
@@ -309,7 +342,7 @@ impl CertificateVerifyReport {
             status_valid: false,
             expiry_valid: false,
             mismatches: vec!["not_found".to_owned()],
-            signature_ok: false,
+            attestation_ok: false,
             signer: None,
             failure_codes: vec!["not_found".to_owned()],
             message: "Certificate not found".to_owned(),
@@ -329,7 +362,7 @@ impl CertificateVerifyReport {
             status_valid: false,
             expiry_valid: false,
             mismatches: vec!["expired".to_owned()],
-            signature_ok: true,
+            attestation_ok: true,
             signer: None,
             failure_codes: vec!["expired".to_owned()],
             message: "Certificate has expired".to_owned(),
@@ -349,7 +382,7 @@ impl CertificateVerifyReport {
             status_valid: true,
             expiry_valid: true,
             mismatches: vec!["stale_payload_hash".to_owned()],
-            signature_ok: true,
+            attestation_ok: true,
             signer: None,
             failure_codes: vec!["stale_payload_hash".to_owned()],
             message: "Certificate payload hash no longer matches the current payload".to_owned(),
@@ -369,7 +402,7 @@ impl CertificateVerifyReport {
             status_valid: true,
             expiry_valid: true,
             mismatches: vec!["stale_schema_version".to_owned()],
-            signature_ok: true,
+            attestation_ok: true,
             signer: None,
             failure_codes: vec!["stale_schema_version".to_owned()],
             message: "Certificate schema version is no longer supported".to_owned(),
@@ -389,7 +422,7 @@ impl CertificateVerifyReport {
             status_valid: true,
             expiry_valid: true,
             mismatches: vec!["failed_assumptions".to_owned()],
-            signature_ok: true,
+            attestation_ok: true,
             signer: None,
             failure_codes: vec!["failed_assumptions".to_owned()],
             message: "Certificate assumptions failed during verification".to_owned(),
@@ -409,7 +442,7 @@ impl CertificateVerifyReport {
             status_valid: true,
             expiry_valid: true,
             mismatches: vec!["hash_mismatch".to_owned()],
-            signature_ok: true,
+            attestation_ok: true,
             signer: None,
             failure_codes: vec!["hash_mismatch".to_owned()],
             message: "Certificate payload hash does not match the manifest".to_owned(),
@@ -429,7 +462,7 @@ impl CertificateVerifyReport {
             status_valid: false,
             expiry_valid: true,
             mismatches: vec!["revoked".to_owned()],
-            signature_ok: true,
+            attestation_ok: true,
             signer: None,
             failure_codes: vec!["revoked".to_owned()],
             message: "Certificate has been revoked".to_owned(),
@@ -449,7 +482,7 @@ impl CertificateVerifyReport {
             status_valid: false,
             expiry_valid: true,
             mismatches: vec!["invalid_status".to_owned()],
-            signature_ok: true,
+            attestation_ok: true,
             signer: None,
             failure_codes: vec!["invalid_status".to_owned()],
             message: "Certificate status is not valid for use".to_owned(),
@@ -457,14 +490,14 @@ impl CertificateVerifyReport {
     }
 
     #[must_use]
-    pub fn signature_mismatch(
+    pub fn attestation_mismatch(
         certificate_id: impl Into<String>,
         signer: Option<String>,
         message: impl Into<String>,
     ) -> Self {
         Self {
             certificate_id: certificate_id.into(),
-            result: VerificationResult::SignatureMismatch,
+            result: VerificationResult::AttestationMismatch,
             checked_at: chrono::Utc::now().to_rfc3339(),
             hash_verified: true,
             payload_hash_fresh: true,
@@ -472,10 +505,10 @@ impl CertificateVerifyReport {
             assumptions_valid: true,
             status_valid: true,
             expiry_valid: true,
-            mismatches: vec!["signature_mismatch".to_owned()],
-            signature_ok: false,
+            mismatches: vec!["attestation_mismatch".to_owned()],
+            attestation_ok: false,
             signer,
-            failure_codes: vec!["signature_mismatch".to_owned()],
+            failure_codes: vec!["attestation_mismatch".to_owned()],
             message: message.into(),
         }
     }
@@ -493,7 +526,7 @@ impl CertificateVerifyReport {
             status_valid: false,
             expiry_valid: false,
             mismatches: vec!["invalid_manifest".to_owned()],
-            signature_ok: false,
+            attestation_ok: false,
             signer: None,
             failure_codes: vec!["invalid_manifest".to_owned()],
             message: message.into(),
@@ -878,20 +911,20 @@ fn verify_database_certificate(options: &CertificateLookupOptions) -> Certificat
         Ok(false) | Err(_) => return CertificateVerifyReport::hash_mismatch(&record.id),
     }
 
-    match verify_detached_signature(
+    match verify_local_content_attestation(
         record.signature.as_deref(),
         record.signature_algorithm.as_deref(),
         record.signer.as_deref(),
         &record.content_hash,
     ) {
-        SignatureVerification::Ok { signer } => {
+        AttestationVerification::Ok { signer } => {
             let mut report = CertificateVerifyReport::valid(&record.id);
-            report.signature_ok = true;
+            report.attestation_ok = true;
             report.signer = signer;
             report
         }
-        SignatureVerification::Mismatch { signer, message } => {
-            CertificateVerifyReport::signature_mismatch(&record.id, signer, message)
+        AttestationVerification::Mismatch { signer, message } => {
+            CertificateVerifyReport::attestation_mismatch(&record.id, signer, message)
         }
     }
 }
@@ -1175,20 +1208,20 @@ fn verify_manifest_certificate(
         }
     }
 
-    match verify_manifest_certificate_signature(record) {
-        SignatureVerification::Ok { signer } => {
+    match verify_manifest_certificate_attestation(record) {
+        AttestationVerification::Ok { signer } => {
             let mut report = CertificateVerifyReport::valid(&record.certificate.id);
-            report.signature_ok = true;
+            report.attestation_ok = true;
             report.signer = signer;
             report
         }
-        SignatureVerification::Mismatch { signer, message } => {
-            CertificateVerifyReport::signature_mismatch(&record.certificate.id, signer, message)
+        AttestationVerification::Mismatch { signer, message } => {
+            CertificateVerifyReport::attestation_mismatch(&record.certificate.id, signer, message)
         }
     }
 }
 
-enum SignatureVerification {
+enum AttestationVerification {
     Ok {
         signer: Option<String>,
     },
@@ -1198,10 +1231,10 @@ enum SignatureVerification {
     },
 }
 
-fn verify_manifest_certificate_signature(
+fn verify_manifest_certificate_attestation(
     record: &ManifestCertificateRecord,
-) -> SignatureVerification {
-    verify_detached_signature(
+) -> AttestationVerification {
+    verify_local_content_attestation(
         record.signature.as_deref(),
         record.signature_algorithm.as_deref(),
         record.signer.as_deref(),
@@ -1209,69 +1242,87 @@ fn verify_manifest_certificate_signature(
     )
 }
 
-fn verify_detached_signature(
-    signature: Option<&str>,
-    signature_algorithm: Option<&str>,
+/// Verify a certificate's content-hash attestation.
+///
+/// This is **not** cryptographic signature verification. The attestation is a
+/// domain-separated SHA-256 of `(algorithm-tag, signer, payload_hash)` — all
+/// public inputs. A passing check proves only that the recorded attestation
+/// hash matches its publicly-derivable form; it does **not** prove an
+/// authorized key holder produced the certificate. See module docs.
+///
+/// The single supported algorithm is `ee.local-content-hash.v1`. Any other
+/// algorithm name (including the historically-misleading
+/// `sigstore.bundle-sha256.v1`) returns `Mismatch` with an honest message.
+fn verify_local_content_attestation(
+    attestation: Option<&str>,
+    attestation_algorithm: Option<&str>,
     signer: Option<&str>,
     payload_hash: &str,
-) -> SignatureVerification {
+) -> AttestationVerification {
     let signer = signer.map(str::to_owned);
-    let Some(signature) = signature else {
-        return SignatureVerification::Ok { signer: None };
+    let Some(attestation) = attestation else {
+        return AttestationVerification::Ok { signer: None };
     };
-    let Some(algorithm) = signature_algorithm else {
-        return SignatureVerification::Mismatch {
+    let Some(algorithm) = attestation_algorithm else {
+        return AttestationVerification::Mismatch {
             signer,
-            message: "Certificate signature is missing signatureAlgorithm".to_owned(),
+            message: "Certificate attestation is missing signatureAlgorithm".to_owned(),
         };
     };
     let Some(signer_value) = signer.as_deref() else {
-        return SignatureVerification::Mismatch {
+        return AttestationVerification::Mismatch {
             signer,
-            message: "Certificate signature is missing signer".to_owned(),
+            message: "Certificate attestation is missing signer".to_owned(),
         };
     };
 
     let expected = match algorithm {
-        "ee.local-sha256.v1" => local_sha256_signature(signer_value, payload_hash),
-        "sigstore.bundle-sha256.v1" => sigstore_bundle_signature(signer_value, payload_hash),
-        other => {
-            return SignatureVerification::Mismatch {
+        "ee.local-content-hash.v1" => local_content_hash_attestation(signer_value, payload_hash),
+        "sigstore.bundle-sha256.v1" => {
+            return AttestationVerification::Mismatch {
                 signer,
-                message: format!("Unsupported certificate signature algorithm `{other}`"),
+                message:
+                    "Certificate attestation algorithm `sigstore.bundle-sha256.v1` is no longer accepted: \
+                     this slice does not perform sigstore bundle verification (rekor inclusion proof, \
+                     fulcio cert chain, OIDC binding). Track real signing under \
+                     implements-surface:certificate-signing."
+                        .to_owned(),
+            };
+        }
+        other => {
+            return AttestationVerification::Mismatch {
+                signer,
+                message: format!("Unsupported certificate attestation algorithm `{other}`"),
             };
         }
     };
 
-    if constant_time_str_eq(signature, &expected) {
-        SignatureVerification::Ok { signer }
+    if constant_time_str_eq(attestation, &expected) {
+        AttestationVerification::Ok { signer }
     } else {
-        SignatureVerification::Mismatch {
+        AttestationVerification::Mismatch {
             signer,
-            message: "Certificate detached signature does not match payload evidence".to_owned(),
+            message: "Certificate content-hash attestation does not match payload evidence"
+                .to_owned(),
         }
     }
 }
 
-fn local_sha256_signature(signer: &str, payload_hash: &str) -> String {
+/// Derive the `ee.local-content-hash.v1` attestation string for a record.
+///
+/// The output is `sha256:<hex>` over a domain-separated digest of
+/// `(algorithm-tag, signer, payload_hash)`. All inputs are public and
+/// stored on the certificate record itself, so this is a content-addressed
+/// integrity tag, **not** a cryptographic signature. Anyone who can read
+/// `(signer, payload_hash)` can recompute this string.
+fn local_content_hash_attestation(signer: &str, payload_hash: &str) -> String {
     format!(
         "sha256:{}",
-        signature_digest("ee.certificate.local-sha256.v1", signer, payload_hash)
+        attestation_digest("ee.certificate.local-content-hash.v1", signer, payload_hash)
     )
 }
 
-fn sigstore_bundle_signature(signer: &str, payload_hash: &str) -> String {
-    format!(
-        "sigstore-sha256:{}",
-        signature_digest(
-            "ee.certificate.sigstore.bundle-sha256.v1",
-            signer,
-            payload_hash
-        )
-    )
-}
-
-fn signature_digest(domain: &str, signer: &str, payload_hash: &str) -> String {
+fn attestation_digest(domain: &str, signer: &str, payload_hash: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(domain.as_bytes());
     hasher.update(b"\n");
@@ -1520,9 +1571,9 @@ mod tests {
         ensure_equal(&VerificationResult::Expired.as_str(), &"expired", "expired")?;
         ensure_equal(&VerificationResult::Revoked.as_str(), &"revoked", "revoked")?;
         ensure_equal(
-            &VerificationResult::SignatureMismatch.as_str(),
-            &"signature_mismatch",
-            "signature_mismatch",
+            &VerificationResult::AttestationMismatch.as_str(),
+            &"attestation_mismatch",
+            "attestation_mismatch",
         )?;
         ensure_equal(
             &VerificationResult::InvalidStatus.as_str(),
@@ -1572,8 +1623,8 @@ mod tests {
             "revoked is terminal",
         )?;
         ensure(
-            VerificationResult::SignatureMismatch.is_terminal_failure(),
-            "signature_mismatch is terminal",
+            VerificationResult::AttestationMismatch.is_terminal_failure(),
+            "attestation_mismatch is terminal",
         )?;
         ensure(
             VerificationResult::NotFound.is_terminal_failure(),
@@ -1770,12 +1821,12 @@ mod tests {
     }
 
     #[test]
-    fn manifest_backed_certificate_verifies_local_detached_signature() -> TestResult {
+    fn manifest_backed_certificate_verifies_local_content_attestation() -> TestResult {
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let payload = r#"{"packHash":"signed","selected":["mem_01"]}"#;
         let payload_hash = blake3::hash(payload.as_bytes()).to_hex().to_string();
         let signer = "local:test-key";
-        let signature = local_sha256_signature(signer, &payload_hash);
+        let attestation = local_content_hash_attestation(signer, &payload_hash);
         fs::write(dir.path().join("payload.json"), payload).map_err(|error| error.to_string())?;
         let manifest = serde_json::json!({
             "schema": CERTIFICATE_MANIFEST_SCHEMA_V1,
@@ -1790,8 +1841,8 @@ mod tests {
                     "payloadPath": "payload.json",
                     "payloadHash": payload_hash,
                     "payloadSchema": CERTIFICATE_PAYLOAD_SCHEMA_V1,
-                    "signature": signature,
-                    "signatureAlgorithm": "ee.local-sha256.v1",
+                    "signature": attestation,
+                    "signatureAlgorithm": "ee.local-content-hash.v1",
                     "signer": signer,
                     "assumptions": [{"valid": true}]
                 }
@@ -1806,13 +1857,13 @@ mod tests {
             &CertificateLookupOptions::new("cert_pack_signed").with_manifest_path(&manifest_path),
         );
 
-        ensure_equal(&report.result, &VerificationResult::Valid, "signed valid")?;
-        ensure(report.signature_ok, "signature ok")?;
+        ensure_equal(&report.result, &VerificationResult::Valid, "attested valid")?;
+        ensure(report.attestation_ok, "attestation ok")?;
         ensure_equal(&report.signer, &Some(signer.to_owned()), "signer")
     }
 
     #[test]
-    fn manifest_backed_certificate_rejects_signature_mismatch() -> TestResult {
+    fn manifest_backed_certificate_rejects_attestation_mismatch() -> TestResult {
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let payload = r#"{"packHash":"signed","selected":["mem_01"]}"#;
         let payload_hash = blake3::hash(payload.as_bytes()).to_hex().to_string();
@@ -1831,7 +1882,7 @@ mod tests {
                     "payloadHash": payload_hash,
                     "payloadSchema": CERTIFICATE_PAYLOAD_SCHEMA_V1,
                     "signature": "sha256:bad",
-                    "signatureAlgorithm": "ee.local-sha256.v1",
+                    "signatureAlgorithm": "ee.local-content-hash.v1",
                     "signer": "local:test-key",
                     "assumptions": [{"valid": true}]
                 }
@@ -1849,16 +1900,70 @@ mod tests {
 
         ensure_equal(
             &report.result,
-            &VerificationResult::SignatureMismatch,
-            "signature mismatch result",
+            &VerificationResult::AttestationMismatch,
+            "attestation mismatch result",
         )?;
-        ensure(!report.signature_ok, "signature not ok")?;
+        ensure(!report.attestation_ok, "attestation not ok")?;
         ensure(
             report
                 .mismatches
                 .iter()
-                .any(|code| code == "signature_mismatch"),
-            "signature mismatch code",
+                .any(|code| code == "attestation_mismatch"),
+            "attestation mismatch code",
+        )
+    }
+
+    #[test]
+    fn sigstore_bundle_algorithm_is_rejected_with_honest_message() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let payload = r#"{"packHash":"signed","selected":["mem_01"]}"#;
+        let payload_hash = blake3::hash(payload.as_bytes()).to_hex().to_string();
+        fs::write(dir.path().join("payload.json"), payload).map_err(|error| error.to_string())?;
+        let manifest = serde_json::json!({
+            "schema": CERTIFICATE_MANIFEST_SCHEMA_V1,
+            "certificates": [
+                {
+                    "id": "cert_pack_sigstore_lie",
+                    "kind": "pack",
+                    "status": "valid",
+                    "workspaceId": "workspace_main",
+                    "issuedAt": "2026-05-01T00:00:00Z",
+                    "expiresAt": "2999-01-01T00:00:00Z",
+                    "payloadPath": "payload.json",
+                    "payloadHash": payload_hash,
+                    "payloadSchema": CERTIFICATE_PAYLOAD_SCHEMA_V1,
+                    "signature": "sigstore-sha256:deadbeef",
+                    "signatureAlgorithm": "sigstore.bundle-sha256.v1",
+                    "signer": "local:test-key",
+                    "assumptions": [{"valid": true}]
+                }
+            ]
+        });
+        let manifest_path = dir.path().join("certificates.json");
+        let manifest_json =
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?;
+        fs::write(&manifest_path, manifest_json).map_err(|error| error.to_string())?;
+
+        let report = verify_certificate_with_options(
+            &CertificateLookupOptions::new("cert_pack_sigstore_lie")
+                .with_manifest_path(&manifest_path),
+        );
+
+        ensure_equal(
+            &report.result,
+            &VerificationResult::AttestationMismatch,
+            "sigstore lie rejected",
+        )?;
+        ensure(!report.attestation_ok, "sigstore lie not ok")?;
+        ensure(
+            report.message.contains("sigstore.bundle-sha256.v1"),
+            "honest mention of removed algorithm",
+        )?;
+        ensure(
+            report
+                .message
+                .contains("implements-surface:certificate-signing"),
+            "points at follow-up bead label",
         )
     }
 

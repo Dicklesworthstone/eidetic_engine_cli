@@ -1443,6 +1443,12 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
                 });
                 let provenance = item.rendered_provenance();
                 obj.field_array_of_objects("provenance", &provenance, build_rendered_provenance);
+                if !item.redactions.is_empty() {
+                    obj.field_array_of_objects("redactions", &item.redactions, |redaction_obj, redaction| {
+                        redaction_obj.field_str("reason", redaction.reason);
+                        redaction_obj.field_str("placeholder", &redaction.placeholder);
+                    });
+                }
                 obj.field_str("why", &item.why);
                 if let Some(diversity_key) = &item.diversity_key {
                     obj.field_str("diversityKey", diversity_key);
@@ -6617,7 +6623,7 @@ pub fn render_certificate_verify_json(report: &CertificateVerifyReport) -> Strin
         d.field_bool("assumptionsValid", report.assumptions_valid);
         d.field_bool("statusValid", report.status_valid);
         d.field_bool("expiryValid", report.expiry_valid);
-        d.field_bool("signatureOk", report.signature_ok);
+        d.field_bool("attestationOk", report.attestation_ok);
         if let Some(signer) = &report.signer {
             d.field_str("signer", signer);
         }
@@ -6683,8 +6689,8 @@ pub fn render_certificate_verify_human(report: &CertificateVerifyReport) -> Stri
         if report.expiry_valid { "yes" } else { "no" }
     ));
     out.push_str(&format!(
-        "  Signature OK: {}\n",
-        if report.signature_ok { "yes" } else { "no" }
+        "  Attestation OK (content-hash, not a cryptographic signature): {}\n",
+        if report.attestation_ok { "yes" } else { "no" }
     ));
     if let Some(signer) = &report.signer {
         out.push_str(&format!("  Signer: {signer}\n"));

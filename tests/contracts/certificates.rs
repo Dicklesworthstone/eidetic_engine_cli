@@ -105,9 +105,9 @@ fn prefixed_hash_payload(payload: &str) -> String {
     format!("blake3:{}", hash_payload(payload))
 }
 
-fn local_signature(signer: &str, payload_hash: &str) -> String {
+fn local_content_hash_attestation(signer: &str, payload_hash: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"ee.certificate.local-sha256.v1\n");
+    hasher.update(b"ee.certificate.local-content-hash.v1\n");
     hasher.update(signer.as_bytes());
     hasher.update(b"\n");
     hasher.update(payload_hash.as_bytes());
@@ -376,8 +376,8 @@ fn certificate_core_verifies_persisted_database_records() -> TestResult {
             target_id: "pack_valid".to_string(),
             hash_algo: "blake3".to_string(),
             content_hash: payload_hash.clone(),
-            signature: Some(local_signature(signer, &payload_hash)),
-            signature_algorithm: Some("ee.local-sha256.v1".to_string()),
+            signature: Some(local_content_hash_attestation(signer, &payload_hash)),
+            signature_algorithm: Some("ee.local-content-hash.v1".to_string()),
             signer: Some(signer.to_string()),
             signed_at: Some("2026-05-06T00:00:00Z".to_string()),
             verified_at: None,
@@ -435,7 +435,10 @@ fn certificate_core_verifies_persisted_database_records() -> TestResult {
         "database verify result",
     )?;
     ensure(verified.hash_verified, "database hash verified")?;
-    ensure(verified.signature_ok, "database signature verified")?;
+    ensure(
+        verified.attestation_ok,
+        "database content-hash attestation verified",
+    )?;
     ensure_equal(
         &verified.signer,
         &Some(signer.to_string()),
