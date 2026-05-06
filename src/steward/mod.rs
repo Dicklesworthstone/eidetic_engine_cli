@@ -2253,6 +2253,7 @@ impl ManualRunner {
                     &workspace_id,
                     &preflight,
                     None,
+                    self.options.dry_run,
                     false,
                 )),
             );
@@ -2267,6 +2268,7 @@ impl ManualRunner {
                     &workspace_id,
                     &preflight,
                     None,
+                    self.options.dry_run,
                     false,
                 )),
             );
@@ -2304,6 +2306,7 @@ impl ManualRunner {
                 &workspace_id,
                 &preflight,
                 Some(&report),
+                self.options.dry_run,
                 durable_mutation,
             )),
         )
@@ -2509,13 +2512,14 @@ fn graph_centrality_job_details(
     workspace_id: &str,
     preflight: &crate::graph::GraphRefreshJobReport,
     result: Option<&crate::graph::GraphRefreshJobReport>,
+    dry_run: bool,
     durable_mutation: bool,
 ) -> JsonValue {
     json!({
         "schema": GRAPH_CENTRALITY_JOB_SCHEMA_V1,
         "command": "steward graph-centrality-refresh",
         "workspaceId": workspace_id,
-        "dryRun": result.is_none(),
+        "dryRun": dry_run,
         "durableMutation": durable_mutation,
         "sideEffectClass": if durable_mutation { "derived_graph_snapshot" } else { "report_only" },
         "preflight": preflight.data_json(),
@@ -4368,6 +4372,11 @@ mod tests {
         let details = result
             .details
             .ok_or_else(|| "graph budget details missing".to_owned())?;
+        ensure(
+            details["dryRun"].as_bool(),
+            Some(false),
+            "non-dry-run cancellation must report dry-run false",
+        )?;
         ensure(
             details["durableMutation"].as_bool(),
             Some(false),
