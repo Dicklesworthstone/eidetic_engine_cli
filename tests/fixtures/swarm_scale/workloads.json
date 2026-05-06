@@ -1,0 +1,222 @@
+{
+  "schema": "ee.swarm_scale.workloads.v1",
+  "owning_bead_id": "eidetic_engine_cli-fcq1.1",
+  "fixed_clock": "2026-05-06T00:00:00Z",
+  "deterministic_seed": "seed.swarm_scale.v1",
+  "embedding_profile": "hash_embedder",
+  "requires_paid_api": false,
+  "synthetic_secret_policy": "none",
+  "memory_id_width": 8,
+  "traffic_families": [
+    "read_heavy_context_burst",
+    "remember_write_burst",
+    "cass_import_spike",
+    "index_rebuild",
+    "graph_refresh",
+    "daemon_maintenance",
+    "mixed_mode_swarm"
+  ],
+  "tiers": [
+    {
+      "name": "small",
+      "ci_suitability": "normal_ci",
+      "agent_count": 4,
+      "memory_count": 100,
+      "cass_session_count": 20,
+      "provenance_link_count": 160,
+      "graph_edge_count": 180,
+      "index_document_count": 100,
+      "generator": {
+        "seed": "seed.swarm_scale.v1.small",
+        "memory_id_prefix": "mem_swarm_small_",
+        "first_memory_ordinal": 1,
+        "expected_first_memory_id": "mem_swarm_small_00000001",
+        "expected_last_memory_id": "mem_swarm_small_00000100",
+        "topic_cycle": ["release", "debug", "refactor", "policy"],
+        "trust_cycle": ["human_explicit", "agent_assertion", "tool_observation"],
+        "timestamp_step_seconds": 17
+      },
+      "resource_profile": {
+        "expected_db_rows": 560,
+        "expected_index_bytes": 131072,
+        "expected_graph_nodes": 140,
+        "expected_graph_edges": 180,
+        "ram_class": "512mb",
+        "cpu_class": "2_core",
+        "disk_class": "10mb"
+      },
+      "traffic_mix": [
+        {
+          "family": "read_heavy_context_burst",
+          "agents": 4,
+          "operations": 80,
+          "writers": 0,
+          "expected_artifacts": ["context_pack", "why_trace", "search_report"]
+        },
+        {
+          "family": "remember_write_burst",
+          "agents": 4,
+          "operations": 20,
+          "writers": 1,
+          "expected_artifacts": ["memory_rows", "audit_rows"]
+        }
+      ]
+    },
+    {
+      "name": "medium",
+      "ci_suitability": "nightly_ci",
+      "agent_count": 16,
+      "memory_count": 5000,
+      "cass_session_count": 800,
+      "provenance_link_count": 9000,
+      "graph_edge_count": 12000,
+      "index_document_count": 5000,
+      "generator": {
+        "seed": "seed.swarm_scale.v1.medium",
+        "memory_id_prefix": "mem_swarm_medium_",
+        "first_memory_ordinal": 1,
+        "expected_first_memory_id": "mem_swarm_medium_00000001",
+        "expected_last_memory_id": "mem_swarm_medium_00005000",
+        "topic_cycle": ["release", "debug", "refactor", "policy", "performance", "testing"],
+        "trust_cycle": ["human_explicit", "agent_assertion", "tool_observation", "cass_import"],
+        "timestamp_step_seconds": 11
+      },
+      "resource_profile": {
+        "expected_db_rows": 24800,
+        "expected_index_bytes": 10485760,
+        "expected_graph_nodes": 5800,
+        "expected_graph_edges": 12000,
+        "ram_class": "4gb",
+        "cpu_class": "8_core",
+        "disk_class": "500mb"
+      },
+      "traffic_mix": [
+        {
+          "family": "read_heavy_context_burst",
+          "agents": 16,
+          "operations": 960,
+          "writers": 0,
+          "expected_artifacts": ["context_pack", "why_trace", "cache_report"]
+        },
+        {
+          "family": "cass_import_spike",
+          "agents": 4,
+          "operations": 80,
+          "writers": 1,
+          "expected_artifacts": ["import_report", "source_hashes"]
+        },
+        {
+          "family": "index_rebuild",
+          "agents": 1,
+          "operations": 2,
+          "writers": 1,
+          "expected_artifacts": ["index_manifest", "generation_report"]
+        }
+      ]
+    },
+    {
+      "name": "large",
+      "ci_suitability": "release_candidate",
+      "agent_count": 64,
+      "memory_count": 25000,
+      "cass_session_count": 8000,
+      "provenance_link_count": 64000,
+      "graph_edge_count": 90000,
+      "index_document_count": 25000,
+      "generator": {
+        "seed": "seed.swarm_scale.v1.large",
+        "memory_id_prefix": "mem_swarm_large_",
+        "first_memory_ordinal": 1,
+        "expected_first_memory_id": "mem_swarm_large_00000001",
+        "expected_last_memory_id": "mem_swarm_large_00025000",
+        "topic_cycle": ["release", "debug", "refactor", "policy", "performance", "testing", "graph", "search"],
+        "trust_cycle": ["human_explicit", "agent_assertion", "tool_observation", "cass_import"],
+        "timestamp_step_seconds": 7
+      },
+      "resource_profile": {
+        "expected_db_rows": 147000,
+        "expected_index_bytes": 83886080,
+        "expected_graph_nodes": 33000,
+        "expected_graph_edges": 90000,
+        "ram_class": "16gb",
+        "cpu_class": "32_core",
+        "disk_class": "4gb"
+      },
+      "traffic_mix": [
+        {
+          "family": "read_heavy_context_burst",
+          "agents": 64,
+          "operations": 6400,
+          "writers": 0,
+          "expected_artifacts": ["context_pack", "why_trace", "search_report", "cache_report"]
+        },
+        {
+          "family": "graph_refresh",
+          "agents": 2,
+          "operations": 6,
+          "writers": 1,
+          "expected_artifacts": ["graph_projection", "centrality_report"]
+        },
+        {
+          "family": "daemon_maintenance",
+          "agents": 1,
+          "operations": 12,
+          "writers": 1,
+          "expected_artifacts": ["job_ledger", "budget_report"]
+        }
+      ]
+    },
+    {
+      "name": "stress",
+      "ci_suitability": "local_256gb",
+      "agent_count": 256,
+      "memory_count": 100000,
+      "cass_session_count": 50000,
+      "provenance_link_count": 320000,
+      "graph_edge_count": 500000,
+      "index_document_count": 100000,
+      "generator": {
+        "seed": "seed.swarm_scale.v1.stress",
+        "memory_id_prefix": "mem_swarm_stress_",
+        "first_memory_ordinal": 1,
+        "expected_first_memory_id": "mem_swarm_stress_00000001",
+        "expected_last_memory_id": "mem_swarm_stress_00100000",
+        "topic_cycle": ["release", "debug", "refactor", "policy", "performance", "testing", "graph", "search", "cass", "steward"],
+        "trust_cycle": ["human_explicit", "agent_assertion", "tool_observation", "cass_import"],
+        "timestamp_step_seconds": 3
+      },
+      "resource_profile": {
+        "expected_db_rows": 970000,
+        "expected_index_bytes": 536870912,
+        "expected_graph_nodes": 150000,
+        "expected_graph_edges": 500000,
+        "ram_class": "64gb",
+        "cpu_class": "64_core",
+        "disk_class": "32gb"
+      },
+      "traffic_mix": [
+        {
+          "family": "mixed_mode_swarm",
+          "agents": 256,
+          "operations": 50000,
+          "writers": 1,
+          "expected_artifacts": ["support_bundle", "latency_histogram", "write_queue_report", "cache_report"]
+        },
+        {
+          "family": "remember_write_burst",
+          "agents": 128,
+          "operations": 10000,
+          "writers": 1,
+          "expected_artifacts": ["memory_rows", "audit_rows", "backpressure_report"]
+        },
+        {
+          "family": "index_rebuild",
+          "agents": 1,
+          "operations": 4,
+          "writers": 1,
+          "expected_artifacts": ["index_manifest", "generation_report", "profile_report"]
+        }
+      ]
+    }
+  ]
+}
