@@ -49,6 +49,10 @@ pub mod audit_actions {
     pub const MEMORY_TAG_REMOVE: &str = "memory.tag.remove";
     pub const MEMORY_TAG_SET: &str = "memory.tag.set";
     pub const MEMORY_LINK_CREATE: &str = "memory.link.create";
+    pub const PROCEDURE_CREATE: &str = "procedure.create";
+    pub const PROCEDURE_PROMOTE: &str = "procedure.promote";
+    pub const PROCEDURE_RETIRE: &str = "procedure.retire";
+    pub const PROCEDURE_OUTCOME: &str = "procedure.outcome";
     pub const CURATION_CANDIDATE_CREATE: &str = "curation_candidate.create";
     pub const CURATION_CANDIDATE_VALIDATE: &str = "curation_candidate.validate";
     pub const CURATION_CANDIDATE_APPLY: &str = "curation_candidate.apply";
@@ -2932,6 +2936,148 @@ CREATE INDEX idx_learning_observations_signal
     "blake3:v033_learning_observations_2026_05_06",
 );
 
+/// V034: Persist reusable procedures and their maturity history.
+pub const V034_PROCEDURE_STORE: Migration = Migration::new(
+    34,
+    "procedure_store",
+    r#"
+ALTER TABLE curation_candidates RENAME TO curation_candidates_v033;
+
+CREATE TABLE curation_candidates (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'curate_*' AND length(id) = 33),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    candidate_type TEXT NOT NULL CHECK (candidate_type IN (
+        'consolidate', 'promote', 'deprecate', 'supersede', 'tombstone',
+        'merge', 'split', 'retract', 'rule', 'procedure'
+    )),
+    target_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    proposed_content TEXT CHECK (proposed_content IS NULL OR length(trim(proposed_content)) > 0),
+    proposed_confidence REAL CHECK (proposed_confidence IS NULL OR (proposed_confidence >= 0.0 AND proposed_confidence <= 1.0)),
+    proposed_trust_class TEXT CHECK (proposed_trust_class IS NULL OR proposed_trust_class IN (
+        'human_explicit', 'agent_validated', 'agent_assertion', 'cass_evidence', 'legacy_import'
+    )),
+    source_type TEXT NOT NULL CHECK (source_type IN (
+        'agent_inference', 'rule_engine', 'human_request', 'feedback_event',
+        'contradiction_detected', 'decay_trigger', 'counterfactual_replay'
+    )),
+    source_id TEXT CHECK (source_id IS NULL OR length(trim(source_id)) > 0),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'applied')),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    reviewed_at TEXT CHECK (reviewed_at IS NULL OR length(trim(reviewed_at)) > 0),
+    reviewed_by TEXT CHECK (reviewed_by IS NULL OR length(trim(reviewed_by)) > 0),
+    applied_at TEXT CHECK (applied_at IS NULL OR length(trim(applied_at)) > 0),
+    ttl_expires_at TEXT CHECK (ttl_expires_at IS NULL OR length(trim(ttl_expires_at)) > 0),
+    review_state TEXT NOT NULL DEFAULT 'new' CHECK (review_state IN (
+        'new', 'needs_evidence', 'needs_scope', 'duplicate', 'snoozed',
+        'accepted', 'rejected', 'merged', 'superseded', 'expired', 'applied'
+    )),
+    snoozed_until TEXT CHECK (snoozed_until IS NULL OR length(trim(snoozed_until)) > 0),
+    merged_into_candidate_id TEXT CHECK (merged_into_candidate_id IS NULL OR (
+        merged_into_candidate_id GLOB 'curate_*' AND length(merged_into_candidate_id) = 33
+    )),
+    state_entered_at TEXT CHECK (state_entered_at IS NULL OR length(trim(state_entered_at)) > 0),
+    last_action_at TEXT CHECK (last_action_at IS NULL OR length(trim(last_action_at)) > 0),
+    ttl_policy_id TEXT CHECK (ttl_policy_id IS NULL OR length(trim(ttl_policy_id)) > 0)
+);
+
+INSERT INTO curation_candidates (
+    id, workspace_id, candidate_type, target_memory_id, proposed_content,
+    proposed_confidence, proposed_trust_class, source_type, source_id, reason,
+    confidence, status, created_at, reviewed_at, reviewed_by, applied_at,
+    ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id,
+    state_entered_at, last_action_at, ttl_policy_id
+)
+SELECT
+    id, workspace_id, candidate_type, target_memory_id, proposed_content,
+    proposed_confidence, proposed_trust_class, source_type, source_id, reason,
+    confidence, status, created_at, reviewed_at, reviewed_by, applied_at,
+    ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id,
+    state_entered_at, last_action_at, ttl_policy_id
+FROM curation_candidates_v033;
+
+CREATE INDEX idx_curation_candidates_v034_workspace ON curation_candidates(workspace_id);
+CREATE INDEX idx_curation_candidates_v034_target ON curation_candidates(target_memory_id);
+CREATE INDEX idx_curation_candidates_v034_status ON curation_candidates(status);
+CREATE INDEX idx_curation_candidates_v034_type ON curation_candidates(candidate_type);
+CREATE INDEX idx_curation_candidates_v034_created ON curation_candidates(created_at);
+CREATE INDEX idx_curation_candidates_v034_ttl
+    ON curation_candidates(ttl_expires_at)
+    WHERE ttl_expires_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v034_review_state ON curation_candidates(review_state);
+CREATE INDEX idx_curation_candidates_v034_snoozed_until
+    ON curation_candidates(snoozed_until)
+    WHERE snoozed_until IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v034_merged_into
+    ON curation_candidates(merged_into_candidate_id)
+    WHERE merged_into_candidate_id IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v034_state_entered
+    ON curation_candidates(state_entered_at)
+    WHERE state_entered_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v034_last_action
+    ON curation_candidates(last_action_at)
+    WHERE last_action_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v034_ttl_policy
+    ON curation_candidates(ttl_policy_id)
+    WHERE ttl_policy_id IS NOT NULL;
+
+CREATE TABLE procedures (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'proc_*' AND length(trim(id)) > 5),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    body TEXT NOT NULL CHECK (length(trim(body)) > 0),
+    level TEXT NOT NULL DEFAULT 'procedural' CHECK (level IN ('procedural')),
+    maturity TEXT NOT NULL DEFAULT 'provisional' CHECK (
+        maturity IN ('provisional', 'validated', 'mature', 'retired')
+    ),
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    utility REAL NOT NULL CHECK (utility >= 0.0 AND utility <= 1.0),
+    importance REAL NOT NULL CHECK (importance >= 0.0 AND importance <= 1.0),
+    evidence_uris_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(evidence_uris_json)),
+    helpful_count INTEGER NOT NULL DEFAULT 0 CHECK (helpful_count >= 0),
+    harmful_count INTEGER NOT NULL DEFAULT 0 CHECK (harmful_count >= 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    last_promoted_at TEXT CHECK (last_promoted_at IS NULL OR length(trim(last_promoted_at)) > 0),
+    last_validated_at TEXT CHECK (last_validated_at IS NULL OR length(trim(last_validated_at)) > 0),
+    retired_at TEXT CHECK (retired_at IS NULL OR length(trim(retired_at)) > 0),
+    retire_reason TEXT CHECK (retire_reason IS NULL OR length(trim(retire_reason)) > 0)
+);
+CREATE INDEX idx_procedures_workspace_maturity
+    ON procedures(workspace_id, maturity, updated_at, id);
+CREATE INDEX idx_procedures_workspace_level
+    ON procedures(workspace_id, level, id);
+CREATE INDEX idx_procedures_updated
+    ON procedures(updated_at, id);
+
+CREATE TABLE procedure_events (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'pevt_*' AND length(trim(id)) > 5),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    procedure_id TEXT NOT NULL REFERENCES procedures(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL CHECK (event_type IN (
+        'created', 'promoted', 'retired', 'outcome_helpful',
+        'outcome_harmful', 'curation_apply'
+    )),
+    from_maturity TEXT CHECK (
+        from_maturity IS NULL OR from_maturity IN ('provisional', 'validated', 'mature', 'retired')
+    ),
+    to_maturity TEXT CHECK (
+        to_maturity IS NULL OR to_maturity IN ('provisional', 'validated', 'mature', 'retired')
+    ),
+    reason TEXT CHECK (reason IS NULL OR length(trim(reason)) > 0),
+    evidence_uris_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(evidence_uris_json)),
+    actor TEXT CHECK (actor IS NULL OR length(trim(actor)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0)
+);
+CREATE INDEX idx_procedure_events_procedure
+    ON procedure_events(procedure_id, created_at, id);
+CREATE INDEX idx_procedure_events_workspace
+    ON procedure_events(workspace_id, created_at, id);
+"#,
+    "blake3:v034_procedure_store_2026_05_06",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -2967,6 +3113,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V031_CERTIFICATES_AND_TRUST_QUARANTINE,
     V032_AUDIT_HASH_CHAIN,
     V033_LEARNING_OBSERVATIONS,
+    V034_PROCEDURE_STORE,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -5142,6 +5289,81 @@ pub struct StoredLearningObservation {
     pub created_at: String,
 }
 
+/// Input for creating a persisted procedure row.
+#[derive(Debug, Clone)]
+pub struct CreateProcedureInput {
+    pub workspace_id: String,
+    pub name: String,
+    pub body: String,
+    pub level: String,
+    pub maturity: String,
+    pub confidence: f32,
+    pub utility: f32,
+    pub importance: f32,
+    pub evidence_uris: Vec<String>,
+    pub created_at: Option<String>,
+}
+
+/// Stored reusable procedure row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredProcedure {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub body: String,
+    pub level: String,
+    pub maturity: String,
+    pub confidence: f32,
+    pub utility: f32,
+    pub importance: f32,
+    pub evidence_uris: Vec<String>,
+    pub helpful_count: u32,
+    pub harmful_count: u32,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_promoted_at: Option<String>,
+    pub last_validated_at: Option<String>,
+    pub retired_at: Option<String>,
+    pub retire_reason: Option<String>,
+}
+
+/// Input for recording a procedure history event.
+#[derive(Debug, Clone)]
+pub struct CreateProcedureEventInput {
+    pub workspace_id: String,
+    pub procedure_id: String,
+    pub event_type: String,
+    pub from_maturity: Option<String>,
+    pub to_maturity: Option<String>,
+    pub reason: Option<String>,
+    pub evidence_uris: Vec<String>,
+    pub actor: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// Stored procedure history event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredProcedureEvent {
+    pub id: String,
+    pub workspace_id: String,
+    pub procedure_id: String,
+    pub event_type: String,
+    pub from_maturity: Option<String>,
+    pub to_maturity: Option<String>,
+    pub reason: Option<String>,
+    pub evidence_uris: Vec<String>,
+    pub actor: Option<String>,
+    pub created_at: String,
+}
+
+/// Effect of applying a feedback signal to a procedure.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcedureFeedbackUpdate {
+    pub procedure: StoredProcedure,
+    pub event: StoredProcedureEvent,
+    pub auto_retired: bool,
+}
+
 /// Input for recording a quarantined harmful feedback event.
 #[derive(Debug, Clone)]
 pub struct CreateFeedbackQuarantineInput {
@@ -5295,6 +5517,366 @@ impl DbConnection {
         rows.iter()
             .map(stored_learning_observation_from_row)
             .collect()
+    }
+
+    /// Insert a persisted reusable procedure row.
+    pub fn insert_procedure(
+        &self,
+        id: &str,
+        input: &CreateProcedureInput,
+    ) -> Result<StoredProcedure> {
+        let created_at = input
+            .created_at
+            .clone()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        let evidence_uris_json = json_string_vec(&input.evidence_uris, "procedure evidence URIs")?;
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO procedures (id, workspace_id, name, body, level, maturity, confidence, utility, importance, evidence_uris_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.name.clone()),
+                Value::Text(input.body.clone()),
+                Value::Text(input.level.clone()),
+                Value::Text(input.maturity.clone()),
+                Value::Float(input.confidence),
+                Value::Float(input.utility),
+                Value::Float(input.importance),
+                Value::Text(evidence_uris_json),
+                Value::Text(created_at.clone()),
+                Value::Text(created_at),
+            ],
+        )?;
+
+        self.get_procedure(&input.workspace_id, id)?
+            .ok_or_else(|| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "inserted procedure row could not be reloaded".to_owned(),
+            })
+    }
+
+    /// Insert one procedure history event.
+    pub fn insert_procedure_event(
+        &self,
+        id: &str,
+        input: &CreateProcedureEventInput,
+    ) -> Result<StoredProcedureEvent> {
+        let created_at = input
+            .created_at
+            .clone()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        let evidence_uris_json =
+            json_string_vec(&input.evidence_uris, "procedure event evidence URIs")?;
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO procedure_events (id, workspace_id, procedure_id, event_type, from_maturity, to_maturity, reason, evidence_uris_json, actor, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.procedure_id.clone()),
+                Value::Text(input.event_type.clone()),
+                input
+                    .from_maturity
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .to_maturity
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .reason
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(evidence_uris_json),
+                input
+                    .actor
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(created_at),
+            ],
+        )?;
+
+        self.get_procedure_event(id)?
+            .ok_or_else(|| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "inserted procedure event row could not be reloaded".to_owned(),
+            })
+    }
+
+    /// Get a persisted procedure by workspace and ID.
+    pub fn get_procedure(
+        &self,
+        workspace_id: &str,
+        procedure_id: &str,
+    ) -> Result<Option<StoredProcedure>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, name, body, level, maturity, confidence, utility, importance, evidence_uris_json, helpful_count, harmful_count, created_at, updated_at, last_promoted_at, last_validated_at, retired_at, retire_reason FROM procedures WHERE workspace_id = ?1 AND id = ?2",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(procedure_id.to_string()),
+            ],
+        )?;
+
+        rows.first().map(stored_procedure_from_row).transpose()
+    }
+
+    /// Find a persisted procedure by ID across workspaces.
+    pub fn get_procedure_by_id(&self, procedure_id: &str) -> Result<Option<StoredProcedure>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, name, body, level, maturity, confidence, utility, importance, evidence_uris_json, helpful_count, harmful_count, created_at, updated_at, last_promoted_at, last_validated_at, retired_at, retire_reason FROM procedures WHERE id = ?1",
+            &[Value::Text(procedure_id.to_string())],
+        )?;
+
+        rows.first().map(stored_procedure_from_row).transpose()
+    }
+
+    /// List persisted procedures in stable reverse-update order.
+    pub fn list_procedure_records(
+        &self,
+        workspace_id: &str,
+        maturity: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<StoredProcedure>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, name, body, level, maturity, confidence, utility, importance, evidence_uris_json, helpful_count, harmful_count, created_at, updated_at, last_promoted_at, last_validated_at, retired_at, retire_reason FROM procedures WHERE workspace_id = ?1 AND (?2 IS NULL OR maturity = ?2) ORDER BY updated_at DESC, id ASC LIMIT ?3",
+            &[
+                Value::Text(workspace_id.to_string()),
+                maturity.map_or(Value::Null, |value| Value::Text(value.to_string())),
+                Value::BigInt(i64::from(limit)),
+            ],
+        )?;
+
+        rows.iter().map(stored_procedure_from_row).collect()
+    }
+
+    /// Get one procedure history event by ID.
+    pub fn get_procedure_event(&self, event_id: &str) -> Result<Option<StoredProcedureEvent>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, procedure_id, event_type, from_maturity, to_maturity, reason, evidence_uris_json, actor, created_at FROM procedure_events WHERE id = ?1",
+            &[Value::Text(event_id.to_string())],
+        )?;
+
+        rows.first()
+            .map(stored_procedure_event_from_row)
+            .transpose()
+    }
+
+    /// List procedure history in deterministic chronological order.
+    pub fn list_procedure_events(&self, procedure_id: &str) -> Result<Vec<StoredProcedureEvent>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, procedure_id, event_type, from_maturity, to_maturity, reason, evidence_uris_json, actor, created_at FROM procedure_events WHERE procedure_id = ?1 ORDER BY created_at ASC, id ASC",
+            &[Value::Text(procedure_id.to_string())],
+        )?;
+
+        rows.iter().map(stored_procedure_event_from_row).collect()
+    }
+
+    /// Promote a persisted procedure and record a history event atomically.
+    pub fn promote_procedure_record(
+        &self,
+        workspace_id: &str,
+        procedure_id: &str,
+        to_maturity: &str,
+        event_id: &str,
+        reason: Option<&str>,
+        actor: Option<&str>,
+        evidence_uris: &[String],
+    ) -> Result<Option<StoredProcedureEvent>> {
+        self.with_transaction(|| {
+            let Some(before) = self.get_procedure(workspace_id, procedure_id)? else {
+                return Ok(None);
+            };
+            let now = Utc::now().to_rfc3339();
+            let last_validated_at = if matches!(to_maturity, "validated" | "mature") {
+                Value::Text(now.clone())
+            } else {
+                Value::Null
+            };
+            let affected = self.execute_for(
+                DbOperation::Execute,
+                "UPDATE procedures SET maturity = ?1, updated_at = ?2, last_promoted_at = ?2, last_validated_at = COALESCE(?3, last_validated_at), retired_at = NULL, retire_reason = NULL WHERE workspace_id = ?4 AND id = ?5",
+                &[
+                    Value::Text(to_maturity.to_string()),
+                    Value::Text(now.clone()),
+                    last_validated_at,
+                    Value::Text(workspace_id.to_string()),
+                    Value::Text(procedure_id.to_string()),
+                ],
+            )?;
+            if affected == 0 {
+                return Ok(None);
+            }
+            self.insert_procedure_event(
+                event_id,
+                &CreateProcedureEventInput {
+                    workspace_id: workspace_id.to_string(),
+                    procedure_id: procedure_id.to_string(),
+                    event_type: "promoted".to_owned(),
+                    from_maturity: Some(before.maturity),
+                    to_maturity: Some(to_maturity.to_string()),
+                    reason: reason.map(str::to_owned),
+                    evidence_uris: evidence_uris.to_vec(),
+                    actor: actor.map(str::to_owned),
+                    created_at: Some(now),
+                },
+            )
+            .map(Some)
+        })
+    }
+
+    /// Retire a persisted procedure and record a history event atomically.
+    pub fn retire_procedure_record(
+        &self,
+        workspace_id: &str,
+        procedure_id: &str,
+        event_id: &str,
+        reason: &str,
+        actor: Option<&str>,
+    ) -> Result<Option<StoredProcedureEvent>> {
+        self.with_transaction(|| {
+            let Some(before) = self.get_procedure(workspace_id, procedure_id)? else {
+                return Ok(None);
+            };
+            let now = Utc::now().to_rfc3339();
+            let affected = self.execute_for(
+                DbOperation::Execute,
+                "UPDATE procedures SET maturity = 'retired', updated_at = ?1, retired_at = ?1, retire_reason = ?2 WHERE workspace_id = ?3 AND id = ?4",
+                &[
+                    Value::Text(now.clone()),
+                    Value::Text(reason.to_string()),
+                    Value::Text(workspace_id.to_string()),
+                    Value::Text(procedure_id.to_string()),
+                ],
+            )?;
+            if affected == 0 {
+                return Ok(None);
+            }
+            self.insert_procedure_event(
+                event_id,
+                &CreateProcedureEventInput {
+                    workspace_id: workspace_id.to_string(),
+                    procedure_id: procedure_id.to_string(),
+                    event_type: "retired".to_owned(),
+                    from_maturity: Some(before.maturity),
+                    to_maturity: Some("retired".to_owned()),
+                    reason: Some(reason.to_string()),
+                    evidence_uris: Vec::new(),
+                    actor: actor.map(str::to_owned),
+                    created_at: Some(now),
+                },
+            )
+            .map(Some)
+        })
+    }
+
+    /// Apply one feedback signal to a procedure and optionally auto-retire it.
+    pub fn apply_procedure_feedback(
+        &self,
+        workspace_id: &str,
+        procedure_id: &str,
+        signal: &str,
+        weight: f32,
+        auto_retire_harmful_threshold: u32,
+        event_id: &str,
+        reason: Option<&str>,
+        actor: Option<&str>,
+    ) -> Result<Option<ProcedureFeedbackUpdate>> {
+        self.with_transaction(|| {
+            let Some(before) = self.get_procedure(workspace_id, procedure_id)? else {
+                return Ok(None);
+            };
+            let helpful = matches!(signal, "helpful" | "positive" | "confirmation");
+            let harmful = matches!(signal, "harmful" | "negative" | "contradiction" | "inaccurate");
+            if !helpful && !harmful {
+                return Ok(None);
+            }
+
+            let now = Utc::now().to_rfc3339();
+            let mut helpful_count = before.helpful_count;
+            let mut harmful_count = before.harmful_count;
+            let mut utility = before.utility;
+            let mut confidence = before.confidence;
+            if helpful {
+                helpful_count = helpful_count.saturating_add(1);
+                utility = (utility + 0.08 * weight).clamp(0.0, 1.0);
+                confidence = (confidence + 0.04 * weight).clamp(0.0, 1.0);
+            }
+            if harmful {
+                harmful_count = harmful_count.saturating_add(1);
+                utility = (utility - 0.12 * weight).clamp(0.0, 1.0);
+                confidence = (confidence - 0.10 * weight).clamp(0.0, 1.0);
+            }
+            let auto_retired = harmful
+                && harmful_count >= auto_retire_harmful_threshold
+                && before.maturity != "retired";
+            let next_maturity = if auto_retired {
+                "retired".to_owned()
+            } else {
+                before.maturity.clone()
+            };
+            let retire_reason = if auto_retired {
+                Some("harmful feedback threshold reached".to_owned())
+            } else {
+                before.retire_reason.clone()
+            };
+
+            let affected = self.execute_for(
+                DbOperation::Execute,
+                "UPDATE procedures SET maturity = ?1, confidence = ?2, utility = ?3, helpful_count = ?4, harmful_count = ?5, updated_at = ?6, retired_at = ?7, retire_reason = ?8 WHERE workspace_id = ?9 AND id = ?10",
+                &[
+                    Value::Text(next_maturity.clone()),
+                    Value::Float(confidence),
+                    Value::Float(utility),
+                    Value::BigInt(i64::from(helpful_count)),
+                    Value::BigInt(i64::from(harmful_count)),
+                    Value::Text(now.clone()),
+                    if auto_retired { Value::Text(now.clone()) } else { before.retired_at.as_ref().map_or(Value::Null, |value| Value::Text(value.clone())) },
+                    retire_reason
+                        .as_ref()
+                        .map_or(Value::Null, |value| Value::Text(value.clone())),
+                    Value::Text(workspace_id.to_string()),
+                    Value::Text(procedure_id.to_string()),
+                ],
+            )?;
+            if affected == 0 {
+                return Ok(None);
+            }
+            let event = self.insert_procedure_event(
+                event_id,
+                &CreateProcedureEventInput {
+                    workspace_id: workspace_id.to_string(),
+                    procedure_id: procedure_id.to_string(),
+                    event_type: if helpful {
+                        "outcome_helpful".to_owned()
+                    } else {
+                        "outcome_harmful".to_owned()
+                    },
+                    from_maturity: Some(before.maturity),
+                    to_maturity: Some(next_maturity),
+                    reason: reason.map(str::to_owned),
+                    evidence_uris: Vec::new(),
+                    actor: actor.map(str::to_owned),
+                    created_at: Some(now),
+                },
+            )?;
+            let procedure = self
+                .get_procedure(workspace_id, procedure_id)?
+                .ok_or_else(|| DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "updated procedure row could not be reloaded".to_owned(),
+                })?;
+            Ok(Some(ProcedureFeedbackUpdate {
+                procedure,
+                event,
+                auto_retired,
+            }))
+        })
     }
 
     /// Get a feedback event by its ID.
@@ -5902,6 +6484,44 @@ fn stored_learning_observation_from_row(row: &Row) -> Result<StoredLearningObser
         evidence_json: optional_text(row, 9)?.map(str::to_string),
         observed_at: required_text(row, 10, DbOperation::Query, "observed_at")?.to_string(),
         created_at: required_text(row, 11, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
+fn stored_procedure_from_row(row: &Row) -> Result<StoredProcedure> {
+    Ok(StoredProcedure {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        name: required_text(row, 2, DbOperation::Query, "name")?.to_string(),
+        body: required_text(row, 3, DbOperation::Query, "body")?.to_string(),
+        level: required_text(row, 4, DbOperation::Query, "level")?.to_string(),
+        maturity: required_text(row, 5, DbOperation::Query, "maturity")?.to_string(),
+        confidence: required_f64(row, 6, DbOperation::Query, "confidence")? as f32,
+        utility: required_f64(row, 7, DbOperation::Query, "utility")? as f32,
+        importance: required_f64(row, 8, DbOperation::Query, "importance")? as f32,
+        evidence_uris: required_json_string_vec(row, 9, "evidence_uris_json")?,
+        helpful_count: required_u32(row, 10, DbOperation::Query, "helpful_count")?,
+        harmful_count: required_u32(row, 11, DbOperation::Query, "harmful_count")?,
+        created_at: required_text(row, 12, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 13, DbOperation::Query, "updated_at")?.to_string(),
+        last_promoted_at: optional_text(row, 14)?.map(str::to_string),
+        last_validated_at: optional_text(row, 15)?.map(str::to_string),
+        retired_at: optional_text(row, 16)?.map(str::to_string),
+        retire_reason: optional_text(row, 17)?.map(str::to_string),
+    })
+}
+
+fn stored_procedure_event_from_row(row: &Row) -> Result<StoredProcedureEvent> {
+    Ok(StoredProcedureEvent {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        procedure_id: required_text(row, 2, DbOperation::Query, "procedure_id")?.to_string(),
+        event_type: required_text(row, 3, DbOperation::Query, "event_type")?.to_string(),
+        from_maturity: optional_text(row, 4)?.map(str::to_string),
+        to_maturity: optional_text(row, 5)?.map(str::to_string),
+        reason: optional_text(row, 6)?.map(str::to_string),
+        evidence_uris: required_json_string_vec(row, 7, "evidence_uris_json")?,
+        actor: optional_text(row, 8)?.map(str::to_string),
+        created_at: required_text(row, 9, DbOperation::Query, "created_at")?.to_string(),
     })
 }
 

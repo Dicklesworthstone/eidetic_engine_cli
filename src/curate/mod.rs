@@ -343,6 +343,8 @@ pub enum CandidateType {
     Retract,
     /// Distill repeated semantic evidence into a procedural rule candidate.
     Rule,
+    /// Distill evidence into a persisted reusable procedure.
+    Procedure,
 }
 
 impl CandidateType {
@@ -358,11 +360,12 @@ impl CandidateType {
             Self::Split => "split",
             Self::Retract => "retract",
             Self::Rule => "rule",
+            Self::Procedure => "procedure",
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 9] {
+    pub const fn all() -> [Self; 10] {
         [
             Self::Consolidate,
             Self::Promote,
@@ -373,6 +376,7 @@ impl CandidateType {
             Self::Split,
             Self::Retract,
             Self::Rule,
+            Self::Procedure,
         ]
     }
 }
@@ -399,7 +403,7 @@ impl fmt::Display for ParseCandidateTypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown candidate type `{}`; expected one of consolidate, promote, deprecate, supersede, tombstone, merge, split, retract, rule",
+            "unknown candidate type `{}`; expected one of consolidate, promote, deprecate, supersede, tombstone, merge, split, retract, rule, procedure",
             self.input
         )
     }
@@ -421,6 +425,7 @@ impl FromStr for CandidateType {
             "split" => Ok(Self::Split),
             "retract" => Ok(Self::Retract),
             "rule" => Ok(Self::Rule),
+            "procedure" => Ok(Self::Procedure),
             _ => Err(ParseCandidateTypeError {
                 input: input.to_owned(),
             }),
@@ -830,7 +835,12 @@ impl CandidateType {
     pub const fn requires_content(self) -> bool {
         matches!(
             self,
-            Self::Consolidate | Self::Supersede | Self::Merge | Self::Split | Self::Rule
+            Self::Consolidate
+                | Self::Supersede
+                | Self::Merge
+                | Self::Split
+                | Self::Rule
+                | Self::Procedure
         )
     }
 
@@ -2966,7 +2976,7 @@ impl CandidateType {
         match self {
             Self::Promote | Self::Deprecate => 0.2,
             Self::Consolidate | Self::Merge => 0.4,
-            Self::Rule => 0.45,
+            Self::Rule | Self::Procedure => 0.45,
             Self::Supersede | Self::Split => 0.5,
             Self::Retract => 0.7,
             Self::Tombstone => 0.9,
@@ -5225,6 +5235,7 @@ Then update src/policy/mod.rs on main."
         assert!(CandidateType::Merge.requires_content());
         assert!(CandidateType::Split.requires_content());
         assert!(CandidateType::Rule.requires_content());
+        assert!(CandidateType::Procedure.requires_content());
         assert!(!CandidateType::Promote.requires_content());
         assert!(!CandidateType::Deprecate.requires_content());
 

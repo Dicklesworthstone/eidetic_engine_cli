@@ -12,9 +12,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::db::{
+    CreateAuditInput, CreateProcedureEventInput, CreateProcedureInput, DbConnection,
+    StoredProcedure, StoredProcedureEvent, audit_actions, generate_audit_id,
+};
 use crate::models::{
-    DomainError, ProcedureExportFormat, ProcedureStatus, ProcedureVerificationStatus,
-    SKILL_CAPSULE_SCHEMA_V1, SkillCapsuleInstallMode,
+    DomainError, ProcedureExportFormat, ProcedureMaturity, ProcedureStatus,
+    ProcedureVerificationStatus, SKILL_CAPSULE_SCHEMA_V1, SkillCapsuleInstallMode,
 };
 use crate::output::markdown;
 
@@ -87,26 +91,69 @@ impl ProcedureProposeReport {
 pub fn propose_procedure(
     options: &ProcedureProposeOptions,
 ) -> Result<ProcedureProposeReport, DomainError> {
-    if !options.dry_run {
-        return Err(DomainError::PolicyDenied {
-            message: "procedure proposal is dry-run-only until procedure records are backed by persisted evidence".to_owned(),
-            repair: Some("ee procedure propose <title> --dry-run --json".to_owned()),
-        });
-    }
-
     let procedure_id = format!("proc_{}", generate_id());
     let created_at = Utc::now().to_rfc3339();
     let summary = options.summary.clone().unwrap_or_else(|| {
         "Procedure candidate request from explicit evidence; ee did not distill steps or claims."
             .to_owned()
     });
+    if !options.dry_run {
+        let Some(store) = open_procedure_store(&options.workspace)? else {
+            return Err(DomainError::Storage {
+                message: "procedure proposal requires an initialized ee workspace database"
+                    .to_owned(),
+                repair: Some("ee init --workspace .".to_owned()),
+            });
+        };
+        let evidence_uris = procedure_evidence_uris(&options.source_run_ids, &options.evidence_ids);
+        let procedure = store
+            .connection
+            .insert_procedure(
+                &procedure_id,
+                &CreateProcedureInput {
+                    workspace_id: store.workspace_id.clone(),
+                    name: options.title.clone(),
+                    body: summary.clone(),
+                    level: "procedural".to_owned(),
+                    maturity: ProcedureMaturity::Provisional.as_str().to_owned(),
+                    confidence: initial_procedure_confidence(evidence_uris.len()),
+                    utility: 0.50,
+                    importance: 0.60,
+                    evidence_uris: evidence_uris.clone(),
+                    created_at: Some(created_at.clone()),
+                },
+            )
+            .map_err(storage_error("failed to persist procedure"))?;
+        store
+            .connection
+            .insert_procedure_event(
+                &format!("pevt_{}", generate_id()),
+                &CreateProcedureEventInput {
+                    workspace_id: store.workspace_id,
+                    procedure_id: procedure_id.clone(),
+                    event_type: "created".to_owned(),
+                    from_maturity: None,
+                    to_maturity: Some(procedure.maturity),
+                    reason: Some("procedure proposed from explicit evidence".to_owned()),
+                    evidence_uris,
+                    actor: None,
+                    created_at: Some(created_at.clone()),
+                },
+            )
+            .map_err(storage_error("failed to record procedure creation event"))?;
+    }
 
     let report = ProcedureProposeReport {
         schema: PROCEDURE_PROPOSE_REPORT_SCHEMA_V1.to_owned(),
         procedure_id: procedure_id.clone(),
         title: options.title.clone(),
         summary,
-        status: ProcedureStatus::Candidate.as_str().to_owned(),
+        status: if options.dry_run {
+            ProcedureStatus::Candidate.as_str()
+        } else {
+            ProcedureMaturity::Provisional.as_str()
+        }
+        .to_owned(),
         source_run_count: options.source_run_ids.len(),
         evidence_count: options.evidence_ids.len(),
         dry_run: options.dry_run,
@@ -136,6 +183,7 @@ pub struct ProcedureShowReport {
     pub procedure: ProcedureDetail,
     pub steps: Vec<ProcedureStepDetail>,
     pub verification: Option<VerificationDetail>,
+    pub history: Vec<ProcedureHistoryEvent>,
 }
 
 /// Durable procedure projection supplied by a repository or fixture.
@@ -144,6 +192,7 @@ pub struct ProcedureRecord {
     pub procedure: ProcedureDetail,
     pub steps: Vec<ProcedureStepDetail>,
     pub verification: Option<VerificationDetail>,
+    pub history: Vec<ProcedureHistoryEvent>,
 }
 
 impl ProcedureRecord {
@@ -153,6 +202,7 @@ impl ProcedureRecord {
             procedure,
             steps: Vec::new(),
             verification: None,
+            history: Vec::new(),
         }
     }
 
@@ -165,6 +215,12 @@ impl ProcedureRecord {
     #[must_use]
     pub fn with_verification(mut self, verification: VerificationDetail) -> Self {
         self.verification = Some(verification);
+        self
+    }
+
+    #[must_use]
+    pub fn with_history(mut self, history: Vec<ProcedureHistoryEvent>) -> Self {
+        self.history = history;
         self
     }
 
@@ -216,6 +272,20 @@ pub struct VerificationDetail {
     pub fail_count: u32,
 }
 
+/// One persisted procedure history entry.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcedureHistoryEvent {
+    pub event_id: String,
+    pub event_type: String,
+    pub from_maturity: Option<String>,
+    pub to_maturity: Option<String>,
+    pub reason: Option<String>,
+    pub evidence_uris: Vec<String>,
+    pub actor: Option<String>,
+    pub created_at: String,
+}
+
 impl ProcedureShowReport {
     #[must_use]
     pub fn to_json(&self) -> String {
@@ -225,7 +295,8 @@ impl ProcedureShowReport {
 
 /// Show details of a procedure.
 pub fn show_procedure(options: &ProcedureShowOptions) -> Result<ProcedureShowReport, DomainError> {
-    show_procedure_from_records(options, &[])
+    let records = load_procedure_records(&options.workspace, None, u32::MAX)?;
+    show_procedure_from_records(options, &records)
 }
 
 /// Show details from explicit procedure records.
@@ -261,6 +332,7 @@ pub fn show_procedure_from_records(
         } else {
             None
         },
+        history: record.history.clone(),
     })
 }
 
@@ -305,7 +377,12 @@ impl ProcedureListReport {
 
 /// List procedures with optional filters.
 pub fn list_procedures(options: &ProcedureListOptions) -> Result<ProcedureListReport, DomainError> {
-    list_procedures_from_records(options, &[])
+    let records = load_procedure_records(
+        &options.workspace,
+        options.status_filter.as_deref(),
+        list_limit(options.limit),
+    )?;
+    list_procedures_from_records(options, &records)
 }
 
 /// List procedures from explicit records.
@@ -383,7 +460,8 @@ impl ProcedureExportReport {
 pub fn export_procedure(
     options: &ProcedureExportOptions,
 ) -> Result<ProcedureExportReport, DomainError> {
-    export_procedure_from_records(options, &[])
+    let records = load_procedure_records(&options.workspace, None, u32::MAX)?;
+    export_procedure_from_records(options, &records)
 }
 
 /// Export a procedure supplied by explicit records.
@@ -787,6 +865,7 @@ fn write_export_file(path: &Path, content: &str) -> Result<(), DomainError> {
 pub struct ProcedurePromoteOptions {
     pub workspace: PathBuf,
     pub procedure_id: String,
+    pub to_maturity: Option<String>,
     pub dry_run: bool,
     pub actor: Option<String>,
     pub reason: Option<String>,
@@ -895,12 +974,9 @@ pub fn promote_procedure(
             repair: Some("ee procedure promote <procedure-id> --dry-run --json".to_owned()),
         });
     }
-
+    let target_maturity = parse_target_maturity(options.to_maturity.as_deref())?;
     if !options.dry_run {
-        return Err(DomainError::PolicyDenied {
-            message: "procedure promotion is dry-run-only in this implementation slice".to_owned(),
-            repair: Some("ee procedure promote <procedure-id> --dry-run --json".to_owned()),
-        });
+        return promote_persisted_procedure(options, procedure_id, target_maturity);
     }
 
     let generated_at = Utc::now().to_rfc3339();
@@ -920,7 +996,7 @@ pub fn promote_procedure(
     })?;
 
     let from_status = show.procedure.status.clone();
-    let to_status = ProcedureStatus::Verified.as_str().to_owned();
+    let to_status = target_maturity.as_str().to_owned();
     let promotion_id = format!("pprom_{}", generate_id());
     let candidate_id = format!("curate_{}", generate_id());
     let operation_id = format!("audit_{}", generate_id());
@@ -1086,6 +1162,340 @@ pub fn promote_procedure(
         warnings,
         next_actions,
         generated_at,
+    })
+}
+
+fn promote_persisted_procedure(
+    options: &ProcedurePromoteOptions,
+    procedure_id: &str,
+    target_maturity: ProcedureMaturity,
+) -> Result<ProcedurePromoteReport, DomainError> {
+    let Some(store) = open_procedure_store(&options.workspace)? else {
+        return Err(DomainError::Storage {
+            message: "procedure promotion requires an initialized ee workspace database".to_owned(),
+            repair: Some("ee init --workspace .".to_owned()),
+        });
+    };
+    let stored = store
+        .connection
+        .get_procedure(&store.workspace_id, procedure_id)
+        .map_err(storage_error("failed to load procedure"))?
+        .ok_or_else(|| procedure_not_found(procedure_id))?;
+    let from_maturity =
+        ProcedureMaturity::from_str(&stored.maturity).map_err(|error| DomainError::Storage {
+            message: format!("stored procedure has invalid maturity: {error}"),
+            repair: Some("repair the procedure row or re-import the candidate".to_owned()),
+        })?;
+    if !from_maturity.can_promote_to(target_maturity) {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "cannot promote procedure from {} to {}",
+                from_maturity.as_str(),
+                target_maturity.as_str()
+            ),
+            repair: Some("choose a forward maturity transition".to_owned()),
+        });
+    }
+    let threshold = promotion_evidence_threshold(target_maturity);
+    if stored.evidence_uris.len() < threshold {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "procedure promotion to {} requires at least {threshold} evidence URI(s); found {}",
+                target_maturity.as_str(),
+                stored.evidence_uris.len()
+            ),
+            repair: Some(format!(
+                "add evidence before running ee procedure promote {procedure_id} --to {}",
+                target_maturity.as_str()
+            )),
+        });
+    }
+
+    let generated_at = Utc::now().to_rfc3339();
+    let promotion_id = format!("pprom_{}", generate_id());
+    let operation_id = generate_audit_id();
+    let actor = options
+        .actor
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("agent")
+        .to_owned();
+    let reason = options
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            format!(
+                "Promote procedure {procedure_id} from {} to {} with {} evidence URI(s).",
+                from_maturity.as_str(),
+                target_maturity.as_str(),
+                stored.evidence_uris.len()
+            )
+        });
+    let event_id = format!("pevt_{}", generate_id());
+    let event = store
+        .connection
+        .promote_procedure_record(
+            &store.workspace_id,
+            procedure_id,
+            target_maturity.as_str(),
+            &event_id,
+            Some(&reason),
+            Some(&actor),
+            &stored.evidence_uris,
+        )
+        .map_err(storage_error("failed to promote procedure"))?
+        .ok_or_else(|| procedure_not_found(procedure_id))?;
+    let audit_details = json!({
+        "promotionId": promotion_id,
+        "eventId": event.id.clone(),
+        "fromMaturity": from_maturity.as_str(),
+        "toMaturity": target_maturity.as_str(),
+        "evidenceUris": stored.evidence_uris.clone(),
+        "reason": reason,
+    })
+    .to_string();
+    store
+        .connection
+        .insert_audit(
+            &operation_id,
+            &CreateAuditInput {
+                workspace_id: Some(store.workspace_id.clone()),
+                actor: Some(actor.clone()),
+                action: audit_actions::PROCEDURE_PROMOTE.to_owned(),
+                target_type: Some("procedure".to_owned()),
+                target_id: Some(procedure_id.to_owned()),
+                details: Some(audit_details),
+            },
+        )
+        .map_err(storage_error("failed to audit procedure promotion"))?;
+
+    let verification = ProcedurePromotionVerificationSummary {
+        verification_id: event.id.clone(),
+        status: "passed".to_owned(),
+        overall_result: "passed".to_owned(),
+        pass_count: usize_to_u32_saturating(event.evidence_uris.len()),
+        fail_count: 0,
+        skip_count: 0,
+        confidence: stored.confidence.into(),
+        evidence_checked: event.evidence_uris.clone(),
+    };
+    let curation = ProcedurePromotionCurationPlan {
+        schema: PROCEDURE_PROMOTION_CURATION_SCHEMA_V1.to_owned(),
+        candidate_id: "not_required".to_owned(),
+        candidate_type: "procedure".to_owned(),
+        target_type: "procedure".to_owned(),
+        target_id: procedure_id.to_owned(),
+        target_title: stored.name.clone(),
+        source_type: "procedure_store".to_owned(),
+        source_id: Some(event.id.clone()),
+        reason: "direct procedure maturity promotion".to_owned(),
+        confidence: stored.confidence.into(),
+        evidence_ids: event.evidence_uris.clone(),
+        status: "applied".to_owned(),
+        would_persist: true,
+        applied: true,
+    };
+    let audit = ProcedurePromotionAuditPlan {
+        schema: PROCEDURE_PROMOTION_AUDIT_SCHEMA_V1.to_owned(),
+        operation_id: operation_id.clone(),
+        action: audit_actions::PROCEDURE_PROMOTE.to_owned(),
+        effect_class: "durable_memory_write".to_owned(),
+        outcome: "success".to_owned(),
+        dry_run: false,
+        actor,
+        target_type: "procedure".to_owned(),
+        target_id: procedure_id.to_owned(),
+        changed_surfaces: vec!["procedures".to_owned(), "procedure_events".to_owned()],
+        transaction_status: "committed".to_owned(),
+        would_record: true,
+        recorded: true,
+    };
+
+    Ok(ProcedurePromoteReport {
+        schema: PROCEDURE_PROMOTE_REPORT_SCHEMA_V1.to_owned(),
+        promotion_id,
+        procedure_id: procedure_id.to_owned(),
+        dry_run: false,
+        status: "promoted".to_owned(),
+        from_status: from_maturity.as_str().to_owned(),
+        to_status: target_maturity.as_str().to_owned(),
+        curation,
+        audit,
+        verification,
+        planned_effects: vec![
+            ProcedurePromotionEffect {
+                surface: "procedures".to_owned(),
+                operation: "update_maturity".to_owned(),
+                target_id: procedure_id.to_owned(),
+                before: Some(from_maturity.as_str().to_owned()),
+                after: Some(target_maturity.as_str().to_owned()),
+                would_write: true,
+                applied: true,
+            },
+            ProcedurePromotionEffect {
+                surface: "procedure_events".to_owned(),
+                operation: "insert".to_owned(),
+                target_id: event.id,
+                before: None,
+                after: Some("promoted".to_owned()),
+                would_write: true,
+                applied: true,
+            },
+            ProcedurePromotionEffect {
+                surface: "audit_log".to_owned(),
+                operation: "insert".to_owned(),
+                target_id: operation_id,
+                before: None,
+                after: Some(audit_actions::PROCEDURE_PROMOTE.to_owned()),
+                would_write: true,
+                applied: true,
+            },
+        ],
+        warnings: Vec::new(),
+        next_actions: vec![format!("ee procedure show {procedure_id} --json")],
+        generated_at,
+    })
+}
+
+fn parse_target_maturity(raw: Option<&str>) -> Result<ProcedureMaturity, DomainError> {
+    raw.map(ProcedureMaturity::from_str)
+        .transpose()
+        .map_err(|error| DomainError::Usage {
+            message: error.to_string(),
+            repair: Some("Use --to validated, --to mature, or --to retired.".to_owned()),
+        })
+        .map(|value| value.unwrap_or(ProcedureMaturity::Validated))
+}
+
+fn promotion_evidence_threshold(target: ProcedureMaturity) -> usize {
+    match target {
+        ProcedureMaturity::Provisional => 0,
+        ProcedureMaturity::Validated => 1,
+        ProcedureMaturity::Mature => 2,
+        ProcedureMaturity::Retired => 0,
+    }
+}
+
+/// Options for retiring a procedure.
+#[derive(Clone, Debug, Default)]
+pub struct ProcedureRetireOptions {
+    pub workspace: PathBuf,
+    pub procedure_id: String,
+    pub reason: String,
+    pub actor: Option<String>,
+}
+
+/// Report from retiring a procedure.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcedureRetireReport {
+    pub schema: String,
+    pub procedure_id: String,
+    pub status: String,
+    pub from_maturity: String,
+    pub to_maturity: String,
+    pub event_id: String,
+    pub audit_id: String,
+    pub reason: String,
+    pub retired_at: String,
+}
+
+impl ProcedureRetireReport {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+/// Retire a procedure with an audited history row.
+pub fn retire_procedure(
+    options: &ProcedureRetireOptions,
+) -> Result<ProcedureRetireReport, DomainError> {
+    let procedure_id = options.procedure_id.trim();
+    if procedure_id.is_empty() {
+        return Err(DomainError::Usage {
+            message: "procedure id is required for retirement".to_owned(),
+            repair: Some("ee procedure retire <procedure-id> --reason <reason>".to_owned()),
+        });
+    }
+    let reason = options.reason.trim();
+    if reason.is_empty() {
+        return Err(DomainError::Usage {
+            message: "procedure retirement reason is required".to_owned(),
+            repair: Some("ee procedure retire <procedure-id> --reason <reason>".to_owned()),
+        });
+    }
+    let Some(store) = open_procedure_store(&options.workspace)? else {
+        return Err(DomainError::Storage {
+            message: "procedure retirement requires an initialized ee workspace database"
+                .to_owned(),
+            repair: Some("ee init --workspace .".to_owned()),
+        });
+    };
+    let before = store
+        .connection
+        .get_procedure(&store.workspace_id, procedure_id)
+        .map_err(storage_error("failed to load procedure"))?
+        .ok_or_else(|| procedure_not_found(procedure_id))?;
+    let actor = options
+        .actor
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("agent")
+        .to_owned();
+    let event_id = format!("pevt_{}", generate_id());
+    let event = store
+        .connection
+        .retire_procedure_record(
+            &store.workspace_id,
+            procedure_id,
+            &event_id,
+            reason,
+            Some(&actor),
+        )
+        .map_err(storage_error("failed to retire procedure"))?
+        .ok_or_else(|| procedure_not_found(procedure_id))?;
+    let audit_id = generate_audit_id();
+    let audit_details = json!({
+        "eventId": event.id.clone(),
+        "fromMaturity": before.maturity,
+        "toMaturity": "retired",
+        "reason": reason,
+    })
+    .to_string();
+    store
+        .connection
+        .insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(store.workspace_id),
+                actor: Some(actor),
+                action: audit_actions::PROCEDURE_RETIRE.to_owned(),
+                target_type: Some("procedure".to_owned()),
+                target_id: Some(procedure_id.to_owned()),
+                details: Some(audit_details),
+            },
+        )
+        .map_err(storage_error("failed to audit procedure retirement"))?;
+
+    Ok(ProcedureRetireReport {
+        schema: "ee.procedure.retire_report.v1".to_owned(),
+        procedure_id: procedure_id.to_owned(),
+        status: "retired".to_owned(),
+        from_maturity: event
+            .from_maturity
+            .clone()
+            .unwrap_or_else(|| ProcedureMaturity::Provisional.as_str().to_owned()),
+        to_maturity: "retired".to_owned(),
+        event_id: event.id,
+        audit_id,
+        reason: reason.to_owned(),
+        retired_at: event.created_at,
     })
 }
 
@@ -1762,6 +2172,213 @@ fn count_source_results(sources: &[VerificationSourceResult], result: &str) -> u
     usize_to_u32_saturating(count)
 }
 
+struct ProcedureStore {
+    connection: DbConnection,
+    workspace_id: String,
+}
+
+fn open_procedure_store(workspace: &Path) -> Result<Option<ProcedureStore>, DomainError> {
+    if workspace.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    let workspace_path = resolve_workspace_path(workspace)?;
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.is_file() {
+        return Ok(None);
+    }
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+            message: format!("failed to open procedure database: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    connection.migrate().map_err(|error| DomainError::Storage {
+        message: format!("failed to migrate procedure database: {error}"),
+        repair: Some("ee init --workspace . --json".to_owned()),
+    })?;
+    let workspace_key = workspace_path.display().to_string();
+    let workspace = connection
+        .get_workspace_by_path(&workspace_key)
+        .map_err(storage_error("failed to load workspace row"))?;
+    let Some(workspace) = workspace else {
+        return Ok(None);
+    };
+    Ok(Some(ProcedureStore {
+        connection,
+        workspace_id: workspace.id,
+    }))
+}
+
+fn resolve_workspace_path(workspace: &Path) -> Result<PathBuf, DomainError> {
+    if workspace.is_absolute() {
+        Ok(workspace.to_path_buf())
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(workspace))
+            .map_err(|error| DomainError::Configuration {
+                message: format!("failed to resolve current directory: {error}"),
+                repair: Some("pass --workspace with an absolute path".to_owned()),
+            })
+    }
+}
+
+fn load_procedure_records(
+    workspace: &Path,
+    maturity: Option<&str>,
+    limit: u32,
+) -> Result<Vec<ProcedureRecord>, DomainError> {
+    let Some(store) = open_procedure_store(workspace)? else {
+        return Ok(Vec::new());
+    };
+    let procedures = store
+        .connection
+        .list_procedure_records(&store.workspace_id, maturity, list_limit(limit))
+        .map_err(storage_error("failed to list procedures"))?;
+    procedures
+        .into_iter()
+        .map(|procedure| {
+            let events = store
+                .connection
+                .list_procedure_events(&procedure.id)
+                .map_err(storage_error("failed to list procedure history"))?;
+            Ok(procedure_record_from_stored(procedure, events))
+        })
+        .collect()
+}
+
+fn procedure_record_from_stored(
+    procedure: StoredProcedure,
+    events: Vec<StoredProcedureEvent>,
+) -> ProcedureRecord {
+    let steps = procedure_steps_from_body(&procedure);
+    let verification = VerificationDetail {
+        status: if procedure.last_validated_at.is_some() {
+            ProcedureVerificationStatus::Passed.as_str().to_owned()
+        } else {
+            ProcedureVerificationStatus::Pending.as_str().to_owned()
+        },
+        verified_at: procedure.last_validated_at.clone(),
+        verified_by: None,
+        pass_count: if procedure.last_validated_at.is_some() {
+            usize_to_u32_saturating(procedure.evidence_uris.len())
+        } else {
+            0
+        },
+        fail_count: procedure.harmful_count,
+    };
+    ProcedureRecord::new(ProcedureDetail {
+        procedure_id: procedure.id.clone(),
+        title: procedure.name,
+        summary: procedure.body,
+        status: procedure.maturity,
+        step_count: usize_to_u32_saturating(steps.len()),
+        source_run_ids: procedure_source_runs(&procedure.evidence_uris),
+        evidence_ids: procedure.evidence_uris,
+        created_at: procedure.created_at,
+        updated_at: procedure.updated_at,
+        verified_at: procedure.last_validated_at,
+    })
+    .with_steps(steps)
+    .with_verification(verification)
+    .with_history(
+        events
+            .into_iter()
+            .map(procedure_history_from_stored)
+            .collect(),
+    )
+}
+
+fn procedure_steps_from_body(procedure: &StoredProcedure) -> Vec<ProcedureStepDetail> {
+    let lines: Vec<_> = procedure
+        .body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.len() <= 1 {
+        return vec![ProcedureStepDetail {
+            step_id: format!("step_{}_001", procedure.id),
+            sequence: 1,
+            title: procedure.name.clone(),
+            instruction: procedure.body.clone(),
+            command_hint: None,
+            required: true,
+        }];
+    }
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let sequence = usize_to_u32_saturating(index + 1);
+            ProcedureStepDetail {
+                step_id: format!("step_{}_{sequence:03}", procedure.id),
+                sequence,
+                title: format!("Step {sequence}"),
+                instruction: line
+                    .trim_start_matches(|ch: char| {
+                        ch.is_ascii_digit() || matches!(ch, '.' | ')' | '-' | '*')
+                    })
+                    .trim()
+                    .to_owned(),
+                command_hint: None,
+                required: true,
+            }
+        })
+        .collect()
+}
+
+fn procedure_history_from_stored(event: StoredProcedureEvent) -> ProcedureHistoryEvent {
+    ProcedureHistoryEvent {
+        event_id: event.id,
+        event_type: event.event_type,
+        from_maturity: event.from_maturity,
+        to_maturity: event.to_maturity,
+        reason: event.reason,
+        evidence_uris: event.evidence_uris,
+        actor: event.actor,
+        created_at: event.created_at,
+    }
+}
+
+fn procedure_evidence_uris(source_run_ids: &[String], evidence_ids: &[String]) -> Vec<String> {
+    let mut uris: Vec<String> = source_run_ids
+        .iter()
+        .map(|id| format!("cass-run://{}", id.trim()))
+        .collect();
+    uris.extend(
+        evidence_ids
+            .iter()
+            .map(|id| format!("evidence://{}", id.trim())),
+    );
+    uris.retain(|uri| !uri.ends_with("://"));
+    uris.sort();
+    uris.dedup();
+    uris
+}
+
+fn procedure_source_runs(evidence_uris: &[String]) -> Vec<String> {
+    evidence_uris
+        .iter()
+        .filter_map(|uri| uri.strip_prefix("cass-run://").map(str::to_owned))
+        .collect()
+}
+
+fn initial_procedure_confidence(evidence_count: usize) -> f32 {
+    (0.45 + 0.05 * evidence_count as f32).clamp(0.45, 0.75)
+}
+
+fn list_limit(limit: u32) -> u32 {
+    if limit == 0 { 20 } else { limit }
+}
+
+fn storage_error(
+    context: &'static str,
+) -> impl Fn(crate::db::DbError) -> DomainError + Copy + 'static {
+    move |error| DomainError::Storage {
+        message: format!("{context}: {error}"),
+        repair: Some("ee doctor --json".to_owned()),
+    }
+}
+
 fn procedure_not_found(procedure_id: &str) -> DomainError {
     DomainError::NotFound {
         resource: "procedure".to_owned(),
@@ -1791,6 +2408,8 @@ fn generate_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{CreateWorkspaceInput, DbConnection};
+    use std::fs;
 
     type TestResult = Result<(), String>;
 
@@ -1858,6 +2477,28 @@ mod tests {
         }
     }
 
+    fn procedure_store_workspace() -> Result<PathBuf, String> {
+        let mut payload = uuid::Uuid::now_v7().simple().to_string();
+        payload.truncate(26);
+        let workspace_id = format!("wsp_{payload}");
+        let workspace = std::env::temp_dir().join(format!("ee-procedure-hssh-{payload}"));
+        let ee_dir = workspace.join(".ee");
+        fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let connection =
+            DbConnection::open_file(ee_dir.join("ee.db")).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("procedure hssh test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(workspace)
+    }
+
     #[test]
     fn propose_creates_candidate() -> TestResult {
         let options = ProcedureProposeOptions {
@@ -1877,7 +2518,7 @@ mod tests {
     }
 
     #[test]
-    fn propose_without_dry_run_is_policy_denied() -> TestResult {
+    fn propose_without_dry_run_reports_missing_store() -> TestResult {
         let options = ProcedureProposeOptions {
             title: "Test procedure".to_owned(),
             source_run_ids: vec!["run_1".to_owned()],
@@ -1886,9 +2527,9 @@ mod tests {
         };
 
         let Err(error) = propose_procedure(&options) else {
-            return Err("non-dry-run proposal should be denied".to_owned());
+            return Err("non-dry-run proposal should require a procedure store".to_owned());
         };
-        assert_eq!(error.code(), "policy_denied");
+        assert_eq!(error.code(), "storage");
         Ok(())
     }
 
@@ -1936,6 +2577,79 @@ mod tests {
         assert_eq!(report.total_count, 0);
         assert_eq!(report.filtered_count, 0);
         assert!(report.procedures.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_store_promotes_and_retires_with_history() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let proposal = propose_procedure(&ProcedureProposeOptions {
+            workspace: workspace.clone(),
+            title: "Run release verification".to_owned(),
+            summary: Some("1. Check formatting\n2. Run clippy through RCH".to_owned()),
+            source_run_ids: vec!["run_release_001".to_owned()],
+            evidence_ids: vec!["ev_release_log".to_owned()],
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(proposal.status, "provisional");
+
+        let listed = list_procedures(&ProcedureListOptions {
+            workspace: workspace.clone(),
+            status_filter: Some("provisional".to_owned()),
+            limit: 10,
+            include_steps: false,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(listed.filtered_count, 1);
+        assert_eq!(listed.procedures[0].procedure_id, proposal.procedure_id);
+
+        let promoted = promote_procedure(&ProcedurePromoteOptions {
+            workspace: workspace.clone(),
+            procedure_id: proposal.procedure_id.clone(),
+            to_maturity: Some("validated".to_owned()),
+            dry_run: false,
+            actor: Some("BronzeTurtle".to_owned()),
+            reason: Some("evidence threshold satisfied".to_owned()),
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(promoted.status, "promoted");
+        assert_eq!(promoted.to_status, "validated");
+        assert!(promoted.audit.recorded);
+
+        let retired = retire_procedure(&ProcedureRetireOptions {
+            workspace: workspace.clone(),
+            procedure_id: proposal.procedure_id.clone(),
+            reason: "procedure drifted".to_owned(),
+            actor: Some("BronzeTurtle".to_owned()),
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(retired.status, "retired");
+
+        let show = show_procedure(&ProcedureShowOptions {
+            workspace,
+            procedure_id: proposal.procedure_id,
+            include_steps: true,
+            include_verification: true,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(show.procedure.status, "retired");
+        assert_eq!(show.steps.len(), 2);
+        assert!(
+            show.history
+                .iter()
+                .any(|event| event.event_type == "created")
+        );
+        assert!(
+            show.history
+                .iter()
+                .any(|event| event.event_type == "promoted")
+        );
+        assert!(
+            show.history
+                .iter()
+                .any(|event| event.event_type == "retired")
+        );
         Ok(())
     }
 
@@ -2146,15 +2860,10 @@ mod tests {
         };
 
         let Err(error) = promote_procedure(&options) else {
-            return Err("non-dry-run promotion should be denied".to_owned());
+            return Err("non-dry-run promotion should require a store".to_owned());
         };
-        assert_eq!(error.code(), "policy_denied");
-        assert!(
-            error
-                .repair()
-                .unwrap_or_default()
-                .contains("procedure promote")
-        );
+        assert_eq!(error.code(), "storage");
+        assert!(error.repair().unwrap_or_default().contains("ee init"));
         Ok(())
     }
 

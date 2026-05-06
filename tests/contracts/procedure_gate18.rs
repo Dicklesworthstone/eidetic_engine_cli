@@ -151,6 +151,7 @@ fn procedure_show_fixture() -> ProcedureShowReport {
             pass_count: 0,
             fail_count: 0,
         }),
+        history: Vec::new(),
     }
 }
 

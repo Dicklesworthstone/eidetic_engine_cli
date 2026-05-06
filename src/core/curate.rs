@@ -18,10 +18,11 @@ use crate::curate::{
 };
 use crate::db::{
     ApplyMemoryCurationInput, CreateAuditInput, CreateCurationCandidateInput,
-    CreateProceduralRuleInput, CreateSearchIndexJobInput, CurationCandidateReviewUpdate,
-    DbConnection, SearchIndexJobType, StoredCurationCandidate, StoredCurationTtlPolicy,
-    StoredEvidenceSpan, StoredMemory, StoredSession, audit_actions,
-    default_curation_ttl_policy_id_for_review_state, generate_audit_id,
+    CreateProceduralRuleInput, CreateProcedureEventInput, CreateProcedureInput,
+    CreateSearchIndexJobInput, CurationCandidateReviewUpdate, DbConnection, SearchIndexJobType,
+    StoredCurationCandidate, StoredCurationTtlPolicy, StoredEvidenceSpan, StoredMemory,
+    StoredSession, audit_actions, default_curation_ttl_policy_id_for_review_state,
+    generate_audit_id,
 };
 use crate::models::{
     CandidateId, DomainError, MemoryId, REVIEW_SESSION_SCHEMA_V1, RuleId, WorkspaceId,
@@ -2016,6 +2017,7 @@ struct ApplyDecision {
     should_persist: bool,
     memory_update: Option<ApplyMemoryCurationInput>,
     rule_create: Option<ApplyRuleCurationInput>,
+    procedure_create: Option<ApplyProcedureCurationInput>,
     tombstone_memory: bool,
     target_before: Option<CurateApplyMemoryState>,
     target_after: Option<CurateApplyMemoryState>,
@@ -2028,6 +2030,14 @@ struct ApplyRuleCurationInput {
     rule: CreateProceduralRuleInput,
     index_job_id: String,
     index_job: CreateSearchIndexJobInput,
+}
+
+#[derive(Clone, Debug)]
+struct ApplyProcedureCurationInput {
+    procedure_id: String,
+    procedure: CreateProcedureInput,
+    event_id: String,
+    event: CreateProcedureEventInput,
 }
 
 #[derive(Clone, Debug)]
@@ -2234,6 +2244,7 @@ fn evaluate_candidate_for_apply(
                 should_persist: false,
                 memory_update: None,
                 rule_create: None,
+                procedure_create: None,
                 tombstone_memory: false,
                 target_before: target_before.clone(),
                 target_after: target_before,
@@ -2373,6 +2384,7 @@ fn evaluate_candidate_for_apply(
     let mut changes = Vec::new();
     let mut memory_update = None;
     let mut rule_create = None;
+    let mut procedure_create = None;
     let mut tombstone_memory = false;
 
     match candidate_type {
@@ -2427,7 +2439,7 @@ fn evaluate_candidate_for_apply(
                 ));
             }
         }
-        CandidateType::Rule => {
+        CandidateType::Rule | CandidateType::Procedure => {
             let proposed_content = stored.proposed_content.as_deref().map(str::trim);
             match proposed_content.filter(|value| !value.is_empty()) {
                 Some(content) => {
@@ -2439,76 +2451,128 @@ fn evaluate_candidate_for_apply(
                             "Review the candidate and keep only durable, non-secret procedural guidance.",
                         ));
                     }
-                    let source_memory_ids = source_memory_ids_for_rule_candidate(stored);
-                    let rule_id = RuleId::now().to_string();
-                    let index_job_id = generate_rule_search_index_job_id();
-                    push_apply_change(&mut changes, "ruleId", None, Some(rule_id.clone()));
-                    push_apply_change(
-                        &mut changes,
-                        "ruleContent",
-                        None,
-                        Some(redaction.content.clone()),
-                    );
-                    push_apply_change(
-                        &mut changes,
-                        "sourceMemoryCount",
-                        None,
-                        Some(source_memory_ids.len().to_string()),
-                    );
-                    push_apply_change(
-                        &mut changes,
-                        "ruleConfidence",
-                        None,
-                        Some(format_score(
-                            stored.proposed_confidence.unwrap_or(stored.confidence),
-                        )),
-                    );
-                    let rule_trust_class = stored
-                        .proposed_trust_class
-                        .clone()
-                        .unwrap_or_else(|| "agent_assertion".to_owned());
-                    push_apply_change(
-                        &mut changes,
-                        "ruleTrustClass",
-                        None,
-                        Some(rule_trust_class.clone()),
-                    );
-                    rule_create = Some(ApplyRuleCurationInput {
-                        rule_id: rule_id.clone(),
-                        rule: CreateProceduralRuleInput {
-                            workspace_id: stored.workspace_id.clone(),
-                            content: redaction.content,
-                            confidence: stored.proposed_confidence.unwrap_or(stored.confidence),
-                            utility: target_memory.utility,
-                            importance: target_memory.importance,
-                            trust_class: rule_trust_class,
-                            scope: "workspace".to_owned(),
-                            scope_pattern: None,
-                            maturity: "candidate".to_owned(),
-                            protected: false,
-                            source_memory_ids,
-                            tags: vec!["playbook".to_owned(), "extracted".to_owned()],
-                        },
-                        index_job_id,
-                        index_job: CreateSearchIndexJobInput {
-                            workspace_id: stored.workspace_id.clone(),
-                            job_type: SearchIndexJobType::SingleDocument,
-                            document_source: Some("rule".to_owned()),
-                            document_id: Some(rule_id),
-                            documents_total: 1,
-                        },
-                    });
+                    if candidate_type == CandidateType::Rule {
+                        let source_memory_ids = source_memory_ids_for_rule_candidate(stored);
+                        let rule_id = RuleId::now().to_string();
+                        let index_job_id = generate_rule_search_index_job_id();
+                        push_apply_change(&mut changes, "ruleId", None, Some(rule_id.clone()));
+                        push_apply_change(
+                            &mut changes,
+                            "ruleContent",
+                            None,
+                            Some(redaction.content.clone()),
+                        );
+                        push_apply_change(
+                            &mut changes,
+                            "sourceMemoryCount",
+                            None,
+                            Some(source_memory_ids.len().to_string()),
+                        );
+                        push_apply_change(
+                            &mut changes,
+                            "ruleConfidence",
+                            None,
+                            Some(format_score(
+                                stored.proposed_confidence.unwrap_or(stored.confidence),
+                            )),
+                        );
+                        let rule_trust_class = stored
+                            .proposed_trust_class
+                            .clone()
+                            .unwrap_or_else(|| "agent_assertion".to_owned());
+                        push_apply_change(
+                            &mut changes,
+                            "ruleTrustClass",
+                            None,
+                            Some(rule_trust_class.clone()),
+                        );
+                        rule_create = Some(ApplyRuleCurationInput {
+                            rule_id: rule_id.clone(),
+                            rule: CreateProceduralRuleInput {
+                                workspace_id: stored.workspace_id.clone(),
+                                content: redaction.content,
+                                confidence: stored.proposed_confidence.unwrap_or(stored.confidence),
+                                utility: target_memory.utility,
+                                importance: target_memory.importance,
+                                trust_class: rule_trust_class,
+                                scope: "workspace".to_owned(),
+                                scope_pattern: None,
+                                maturity: "candidate".to_owned(),
+                                protected: false,
+                                source_memory_ids,
+                                tags: vec!["playbook".to_owned(), "extracted".to_owned()],
+                            },
+                            index_job_id,
+                            index_job: CreateSearchIndexJobInput {
+                                workspace_id: stored.workspace_id.clone(),
+                                job_type: SearchIndexJobType::SingleDocument,
+                                document_source: Some("rule".to_owned()),
+                                document_id: Some(rule_id),
+                                documents_total: 1,
+                            },
+                        });
+                    } else {
+                        let procedure_id = generate_procedure_id();
+                        let event_id = generate_procedure_event_id(&procedure_id);
+                        let evidence_uris = procedure_evidence_uris(stored, target_memory);
+                        push_apply_change(
+                            &mut changes,
+                            "procedureId",
+                            None,
+                            Some(procedure_id.clone()),
+                        );
+                        push_apply_change(
+                            &mut changes,
+                            "procedureMaturity",
+                            None,
+                            Some("provisional".to_owned()),
+                        );
+                        push_apply_change(
+                            &mut changes,
+                            "procedureEvidenceCount",
+                            None,
+                            Some(evidence_uris.len().to_string()),
+                        );
+                        procedure_create = Some(ApplyProcedureCurationInput {
+                            procedure_id: procedure_id.clone(),
+                            procedure: CreateProcedureInput {
+                                workspace_id: stored.workspace_id.clone(),
+                                name: target_memory.kind.clone(),
+                                body: redaction.content,
+                                level: "procedural".to_owned(),
+                                maturity: "provisional".to_owned(),
+                                confidence: stored.proposed_confidence.unwrap_or(stored.confidence),
+                                utility: target_memory.utility,
+                                importance: target_memory.importance,
+                                evidence_uris: evidence_uris.clone(),
+                                created_at: None,
+                            },
+                            event_id,
+                            event: CreateProcedureEventInput {
+                                workspace_id: stored.workspace_id.clone(),
+                                procedure_id,
+                                event_type: "curation_apply".to_owned(),
+                                from_maturity: None,
+                                to_maturity: Some("provisional".to_owned()),
+                                reason: Some(stored.reason.clone()),
+                                evidence_uris,
+                                actor: None,
+                                created_at: None,
+                            },
+                        });
+                    }
                 }
                 None => errors.push(validation_issue(
                     CandidateValidationError::ContentRequiredForType { candidate_type }.code(),
                     format!("proposed content is required for {candidate_type} candidates"),
-                    "Validate or recreate the candidate with proposed rule content.",
+                    "Validate or recreate the candidate with proposed procedural content.",
                 )),
             }
         }
     }
 
     if candidate_type != CandidateType::Rule
+        && candidate_type != CandidateType::Procedure
         && let Some(confidence) = stored.proposed_confidence
     {
         push_apply_change(
@@ -2520,6 +2584,7 @@ fn evaluate_candidate_for_apply(
         target_after.confidence = confidence;
     }
     if candidate_type != CandidateType::Rule
+        && candidate_type != CandidateType::Procedure
         && let Some(trust_class) = &stored.proposed_trust_class
     {
         push_apply_change(
@@ -2556,7 +2621,7 @@ fn evaluate_candidate_for_apply(
         );
     }
 
-    if !tombstone_memory && rule_create.is_none() {
+    if !tombstone_memory && rule_create.is_none() && procedure_create.is_none() {
         memory_update = Some(ApplyMemoryCurationInput {
             workspace_id: stored.workspace_id.clone(),
             content: target_after.content.clone(),
@@ -2570,6 +2635,8 @@ fn evaluate_candidate_for_apply(
             status: "ready".to_owned(),
             decision: if rule_create.is_some() {
                 "create_rule".to_owned()
+            } else if procedure_create.is_some() {
+                "create_procedure".to_owned()
             } else if tombstone_memory {
                 "tombstone_memory".to_owned()
             } else {
@@ -2586,6 +2653,7 @@ fn evaluate_candidate_for_apply(
             .is_some_and(|status| status.can_transition_to(CandidateStatus::Applied)),
         memory_update,
         rule_create,
+        procedure_create,
         tombstone_memory,
         target_before,
         target_after: Some(target_after),
@@ -3399,6 +3467,7 @@ fn blocked_apply(
         should_persist: false,
         memory_update: None,
         rule_create: None,
+        procedure_create: None,
         tombstone_memory: false,
         target_before: target_before.clone(),
         target_after: target_before,
@@ -3603,6 +3672,35 @@ fn generate_rule_search_index_job_id() -> String {
     let rule_id = RuleId::now().to_string();
     let payload = rule_id.trim_start_matches("rule_");
     format!("sidx_{payload}")
+}
+
+fn generate_procedure_id() -> String {
+    let mut payload = uuid::Uuid::now_v7().simple().to_string();
+    payload.truncate(26);
+    format!("proc_{payload}")
+}
+
+fn generate_procedure_event_id(procedure_id: &str) -> String {
+    let hash = blake3::hash(procedure_id.as_bytes()).to_hex().to_string();
+    format!("pevt_{}", &hash[..26])
+}
+
+fn procedure_evidence_uris(
+    stored: &StoredCurationCandidate,
+    target_memory: &StoredMemory,
+) -> Vec<String> {
+    let mut uris = BTreeSet::new();
+    uris.insert(format!("memory://{}", target_memory.id));
+    if let Some(source_id) = stored.source_id.as_deref() {
+        for raw in source_id
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            uris.insert(format!("curation-source://{raw}"));
+        }
+    }
+    uris.into_iter().collect()
 }
 
 fn persist_candidate_validation(
@@ -3879,6 +3977,7 @@ fn persist_candidate_application_inner(
         false
     };
     let mut created_rule_id = None;
+    let mut created_procedure_id = None;
     if let Some(rule_create) = &decision.rule_create {
         connection
             .insert_procedural_rule(&rule_create.rule_id, &rule_create.rule)
@@ -3896,10 +3995,25 @@ fn persist_candidate_application_inner(
             })?;
         created_rule_id = Some(rule_create.rule_id.clone());
     }
-    if !memory_changed && created_rule_id.is_none() {
+    if let Some(procedure_create) = &decision.procedure_create {
+        connection
+            .insert_procedure(&procedure_create.procedure_id, &procedure_create.procedure)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to create procedure from curation candidate: {error}"),
+                repair: Some("ee procedure list --json".to_owned()),
+            })?;
+        connection
+            .insert_procedure_event(&procedure_create.event_id, &procedure_create.event)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to record procedure curation history event: {error}"),
+                repair: Some("ee procedure show <id> --json".to_owned()),
+            })?;
+        created_procedure_id = Some(procedure_create.procedure_id.clone());
+    }
+    if !memory_changed && created_rule_id.is_none() && created_procedure_id.is_none() {
         return Err(DomainError::Storage {
             message: format!(
-                "Curation candidate {} did not mutate target memory {} or create a rule.",
+                "Curation candidate {} did not mutate target memory {} or create a rule/procedure.",
                 stored.id, stored.target_memory_id
             ),
             repair: Some("ee curate candidates --json".to_owned()),
@@ -3930,16 +4044,20 @@ fn persist_candidate_application_inner(
         "toStatus": decision.to_status.as_str(),
         "decision": decision.application.decision.as_str(),
         "createdRuleId": created_rule_id.as_deref(),
+        "createdProcedureId": created_procedure_id.as_deref(),
         "changes": &decision.application.changes,
     })
     .to_string();
     let target_type = if created_rule_id.is_some() {
         "rule"
+    } else if created_procedure_id.is_some() {
+        "procedure"
     } else {
         "memory"
     };
     let target_id = created_rule_id
         .as_deref()
+        .or(created_procedure_id.as_deref())
         .unwrap_or(stored.target_memory_id.as_str());
     connection
         .insert_audit(

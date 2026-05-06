@@ -82,6 +82,77 @@ impl FromStr for ProcedureStatus {
     }
 }
 
+/// Evidence-backed maturity level for the persisted procedure store.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ProcedureMaturity {
+    Provisional,
+    Validated,
+    Mature,
+    Retired,
+}
+
+impl ProcedureMaturity {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Provisional => "provisional",
+            Self::Validated => "validated",
+            Self::Mature => "mature",
+            Self::Retired => "retired",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 4] {
+        [
+            Self::Provisional,
+            Self::Validated,
+            Self::Mature,
+            Self::Retired,
+        ]
+    }
+
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Retired)
+    }
+
+    #[must_use]
+    pub const fn can_promote_to(self, target: Self) -> bool {
+        matches!(
+            (self, target),
+            (Self::Provisional, Self::Validated | Self::Mature)
+                | (Self::Validated, Self::Mature)
+                | (Self::Mature, Self::Mature)
+        )
+    }
+}
+
+impl fmt::Display for ProcedureMaturity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ProcedureMaturity {
+    type Err = ParseProcedureValueError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let normalized = input.trim().to_ascii_lowercase().replace('-', "_");
+        match normalized.as_str() {
+            "provisional" | "candidate" => Ok(Self::Provisional),
+            "validated" | "verified" => Ok(Self::Validated),
+            "mature" | "proven" | "established" => Ok(Self::Mature),
+            "retired" | "deprecated" => Ok(Self::Retired),
+            _ => Err(ParseProcedureValueError::new(
+                "procedure_maturity",
+                input,
+                "provisional, validated, mature, retired",
+            )),
+        }
+    }
+}
+
 /// Verification outcome for a procedure or procedure step.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProcedureVerificationStatus {

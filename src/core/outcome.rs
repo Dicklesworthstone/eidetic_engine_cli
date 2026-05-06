@@ -228,7 +228,15 @@ impl CliOutcomeSummary {
     }
 }
 
-const ALLOWED_TARGET_TYPES: &[&str] = &["memory", "rule", "session", "source", "pack", "candidate"];
+const ALLOWED_TARGET_TYPES: &[&str] = &[
+    "memory",
+    "procedure",
+    "rule",
+    "session",
+    "source",
+    "pack",
+    "candidate",
+];
 const ALLOWED_SIGNALS: &[&str] = &[
     "positive",
     "negative",
@@ -833,6 +841,24 @@ pub fn record_outcome(
             repair: Some("ee doctor".to_string()),
         })?;
 
+    if target_type == "procedure" {
+        connection
+            .apply_procedure_feedback(
+                &target.workspace_id,
+                &target_id,
+                &signal,
+                weight,
+                3,
+                &procedure_event_id_for_feedback(&event_id),
+                feedback_input.reason.as_deref(),
+                options.actor.as_deref(),
+            )
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to update procedure feedback score: {error}"),
+                repair: Some("ee procedure show <id> --json".to_string()),
+            })?;
+    }
+
     let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
 
     Ok(OutcomeRecordReport {
@@ -1295,6 +1321,23 @@ fn resolve_target_workspace(
             verified: true,
         });
     }
+    if target_type == "procedure" {
+        let procedure = connection
+            .get_procedure_by_id(target_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query procedure target: {error}"),
+                repair: Some("ee doctor".to_string()),
+            })?
+            .ok_or_else(|| DomainError::NotFound {
+                resource: "procedure".to_string(),
+                id: target_id.to_string(),
+                repair: Some("ee procedure list --json".to_string()),
+            })?;
+        return Ok(TargetResolution {
+            workspace_id: procedure.workspace_id,
+            verified: true,
+        });
+    }
 
     let workspace_id = require_nonempty(
         "workspace id",
@@ -1545,6 +1588,13 @@ fn generate_feedback_quarantine_id() -> String {
     let mut payload = uuid::Uuid::now_v7().simple().to_string();
     payload.truncate(26);
     format!("fq_{payload}")
+}
+
+fn procedure_event_id_for_feedback(feedback_event_id: &str) -> String {
+    let hash = blake3::hash(feedback_event_id.as_bytes())
+        .to_hex()
+        .to_string();
+    format!("pevt_{}", &hash[..26])
 }
 
 fn validate_feedback_event_id(raw: &str) -> Result<String, DomainError> {

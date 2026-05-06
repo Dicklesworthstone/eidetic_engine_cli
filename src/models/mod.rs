@@ -178,10 +178,10 @@ pub use preflight::{
 pub use procedure::{
     PROCEDURE_EXPORT_SCHEMA_V1, PROCEDURE_SCHEMA_CATALOG_V1, PROCEDURE_SCHEMA_V1,
     PROCEDURE_STEP_SCHEMA_V1, PROCEDURE_VERIFICATION_SCHEMA_V1, ParseProcedureValueError,
-    Procedure, ProcedureExport, ProcedureExportFormat, ProcedureFieldSchema, ProcedureObjectSchema,
-    ProcedureStatus, ProcedureStep, ProcedureVerification, ProcedureVerificationStatus,
-    SKILL_CAPSULE_SCHEMA_V1, SkillCapsule, SkillCapsuleInstallMode, procedure_schema_catalog_json,
-    procedure_schemas,
+    Procedure, ProcedureExport, ProcedureExportFormat, ProcedureFieldSchema, ProcedureMaturity,
+    ProcedureObjectSchema, ProcedureStatus, ProcedureStep, ProcedureVerification,
+    ProcedureVerificationStatus, SKILL_CAPSULE_SCHEMA_V1, SkillCapsule, SkillCapsuleInstallMode,
+    procedure_schema_catalog_json, procedure_schemas,
 };
 pub use progress::{
     PROGRESS_EVENT_SCHEMA_V1, ParseProgressEventTypeError, ProgressEvent, ProgressEventBuilder,
