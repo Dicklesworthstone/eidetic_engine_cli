@@ -1,0 +1,8 @@
+{
+  "budget": 0,
+  "query": "zero budget",
+  "candidates": [
+    { "tokens": 0, "section": "procedural_rules", "content": "zero token candidate" },
+    { "tokens": 1, "section": "decisions", "content": "valid candidate" }
+  ]
+}

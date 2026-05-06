@@ -1,0 +1,10 @@
+{
+  "budget": 4000,
+  "query": "release workflow token packing",
+  "candidates": [
+    { "tokens": 400, "section": "procedural_rules", "relevance": 0.99, "utility": 0.8, "content": "Run cargo fmt before release.", "diversity_key": "release" },
+    { "tokens": 3999, "section": "evidence", "relevance": 0.8, "utility": 0.7, "content": "Large evidence item", "diversity_key": "evidence" },
+    { "tokens": 4000, "section": "artifacts", "relevance": 0.7, "utility": 0.6, "content": "Exact budget artifact", "diversity_key": "artifact" },
+    { "tokens": 4001, "section": "failures", "relevance": 0.6, "utility": 0.9, "content": "Oversized failure history", "diversity_key": "failure" }
+  ]
+}

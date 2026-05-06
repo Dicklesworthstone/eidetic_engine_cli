@@ -27,6 +27,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "pack_token_budget"
+path = "fuzz_targets/pack_token_budget.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "memory_id"
 path = "fuzz_targets/memory_id.rs"
 test = false

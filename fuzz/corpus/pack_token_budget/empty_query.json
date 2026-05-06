@@ -1,0 +1,7 @@
+{
+  "budget": 4000,
+  "query": "",
+  "candidates": [
+    { "tokens": 1, "section": "procedural_rules", "content": "valid candidate with empty query" }
+  ]
+}

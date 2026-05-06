@@ -1,0 +1,10 @@
+{
+  "budget": 10,
+  "query": "budget edge cases",
+  "candidates": [
+    { "tokens": 1, "section": "procedural_rules", "content": "one token" },
+    { "tokens": 9, "section": "decisions", "content": "budget minus one" },
+    { "tokens": 10, "section": "failures", "content": "exact budget" },
+    { "tokens": 11, "section": "evidence", "content": "budget plus one" }
+  ]
+}

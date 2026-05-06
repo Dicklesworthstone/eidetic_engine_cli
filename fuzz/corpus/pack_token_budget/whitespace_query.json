@@ -1,0 +1,7 @@
+{
+  "budget": 4000,
+  "query": "   \n\t",
+  "candidates": [
+    { "tokens": 1, "section": "procedural_rules", "content": "valid candidate with whitespace query" }
+  ]
+}

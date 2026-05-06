@@ -1,0 +1,8 @@
+{
+  "budget": 1,
+  "query": "tiny budget",
+  "candidates": [
+    { "tokens": 1, "section": "procedural_rules", "relevance": 1.0, "utility": 1.0, "content": "fits", "diversity_key": "a" },
+    { "tokens": 2, "section": "decisions", "relevance": 0.9, "utility": 0.8, "content": "too large", "diversity_key": "b" }
+  ]
+}

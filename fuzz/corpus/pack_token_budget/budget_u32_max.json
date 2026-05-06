@@ -1,0 +1,9 @@
+{
+  "budget": 4294967295,
+  "query": "extreme token budget",
+  "candidates": [
+    { "tokens": 1, "section": "procedural_rules", "content": "small" },
+    { "tokens": 4294967294, "section": "decisions", "content": "budget minus one" },
+    { "tokens": 4294967295, "section": "failures", "content": "exact max" }
+  ]
+}

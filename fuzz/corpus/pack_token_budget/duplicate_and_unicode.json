@@ -1,0 +1,9 @@
+{
+  "budget": 128,
+  "query": "unicode \\u03c0 duplicate",
+  "candidates": [
+    { "tokens": 16, "section": "procedural_rules", "content": "duplicate \\u03c0 content", "diversity_key": "same" },
+    { "tokens": 16, "section": "procedural_rules", "content": "duplicate \\u03c0 content", "diversity_key": "same" },
+    { "tokens": 64, "section": "evidence", "content": "distinct \\u6771\\u4eac evidence", "diversity_key": "unicode" }
+  ]
+}

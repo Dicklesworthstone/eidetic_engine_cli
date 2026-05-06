@@ -5,3 +5,9 @@ eql-parser-ci:
 
 eql-parser-check:
   cd .. && cargo +nightly fuzz check eql_parser
+
+pack-token-budget-ci:
+  cd .. && cargo +nightly fuzz run pack_token_budget -- -max_total_time=300 -timeout=10
+
+pack-token-budget-check:
+  cd .. && cargo +nightly fuzz check pack_token_budget
