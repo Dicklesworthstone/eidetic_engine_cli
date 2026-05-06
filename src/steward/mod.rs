@@ -7,14 +7,20 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
 use std::time::{Duration, Instant};
 
 use asupersync::runtime::yield_now::yield_now;
 use asupersync::time::sleep as asupersync_sleep;
 use asupersync::{CancelReason, Cx, Outcome};
 use chrono::{DateTime, Utc};
+#[cfg(unix)]
+use rustix::fs::{FlockOperation, flock};
+#[cfg(unix)]
+use rustix::io::Errno;
 use serde_json::{Value as JsonValue, json};
 
 use crate::db::{
@@ -29,10 +35,153 @@ pub const JOB_LEDGER_SCHEMA_V1: &str = "ee.steward.job_ledger.v1";
 
 /// Schema identifier for individual job records.
 pub const JOB_RECORD_SCHEMA_V1: &str = "ee.steward.job.v1";
+pub const MAINTENANCE_JOB_LOCK_SCHEMA_V1: &str = "ee.steward.maintenance_job_lock.v1";
+pub const MAINTENANCE_JOB_LOCK_BUSY_CODE: &str = "maintenance_job_lock_busy";
+
+static MAINTENANCE_JOB_PROCESS_GATE: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
     SUBSYSTEM
+}
+
+fn maintenance_job_process_gate() -> &'static Mutex<()> {
+    MAINTENANCE_JOB_PROCESS_GATE.get_or_init(|| Mutex::new(()))
+}
+
+/// Process and file guard for one active maintenance job trigger.
+#[derive(Debug)]
+pub struct MaintenanceJobLock {
+    path: PathBuf,
+    holder_id: String,
+    _file: File,
+    _process_guard: MutexGuard<'static, ()>,
+}
+
+impl MaintenanceJobLock {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn holder_id(&self) -> &str {
+        &self.holder_id
+    }
+}
+
+/// Error returned when the cooperative maintenance job lock cannot be acquired.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MaintenanceJobLockError {
+    Busy { path: PathBuf, message: String },
+    OpenFailed { path: PathBuf, message: String },
+}
+
+impl MaintenanceJobLockError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Busy { .. } => MAINTENANCE_JOB_LOCK_BUSY_CODE,
+            Self::OpenFailed { .. } => "maintenance_job_lock_open_failed",
+        }
+    }
+
+    #[must_use]
+    pub const fn severity(&self) -> &'static str {
+        match self {
+            Self::Busy { .. } => "medium",
+            Self::OpenFailed { .. } => "high",
+        }
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Busy { message, .. } | Self::OpenFailed { message, .. } => message,
+        }
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Busy { path, .. } | Self::OpenFailed { path, .. } => path,
+        }
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "schema": MAINTENANCE_JOB_LOCK_SCHEMA_V1,
+            "code": self.code(),
+            "severity": self.severity(),
+            "message": self.message(),
+            "path": self.path().display().to_string(),
+            "repair": "Wait for the active maintenance job to finish, then rerun ee job list --json or ee job run <kind> --json.",
+        })
+    }
+}
+
+/// Try to acquire the cooperative lock for manual and daemon maintenance work.
+///
+/// The lock file is persistent and unlocked by closing the file descriptor; it
+/// is intentionally not deleted after a run.
+pub fn try_acquire_maintenance_job_lock(
+    workspace_path: &Path,
+    holder_id: &str,
+) -> Result<MaintenanceJobLock, MaintenanceJobLockError> {
+    let lock_path = workspace_path.join(".ee").join("maintenance-job.lock");
+    let process_guard = match maintenance_job_process_gate().try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => {
+            return Err(MaintenanceJobLockError::Busy {
+                path: lock_path,
+                message: "Another maintenance job is already running in this process.".to_owned(),
+            });
+        }
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+    };
+
+    let Some(parent) = lock_path.parent() else {
+        return Err(MaintenanceJobLockError::OpenFailed {
+            path: lock_path,
+            message: "Could not resolve maintenance job lock parent directory.".to_owned(),
+        });
+    };
+    std::fs::create_dir_all(parent).map_err(|error| MaintenanceJobLockError::OpenFailed {
+        path: lock_path.clone(),
+        message: format!("Failed to create maintenance job lock directory: {error}"),
+    })?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| MaintenanceJobLockError::OpenFailed {
+            path: lock_path.clone(),
+            message: format!("Failed to open maintenance job lock: {error}"),
+        })?;
+
+    #[cfg(unix)]
+    if let Err(error) = flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        if error == Errno::WOULDBLOCK || error == Errno::AGAIN {
+            return Err(MaintenanceJobLockError::Busy {
+                path: lock_path,
+                message: "Another maintenance job holds the workspace lock.".to_owned(),
+            });
+        }
+        return Err(MaintenanceJobLockError::OpenFailed {
+            path: lock_path,
+            message: format!("Failed to acquire maintenance job lock: {error}"),
+        });
+    }
+
+    Ok(MaintenanceJobLock {
+        path: lock_path,
+        holder_id: holder_id.to_owned(),
+        _file: file,
+        _process_guard: process_guard,
+    })
 }
 
 // ============================================================================

@@ -16803,6 +16803,39 @@ where
     W: Write,
 {
     let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let lock_holder = format!(
+        "ee-{}-{}",
+        request.command.replace(' ', "_"),
+        uuid::Uuid::now_v7().simple()
+    );
+    let _lock =
+        match crate::steward::try_acquire_maintenance_job_lock(&workspace_path, &lock_holder) {
+            Ok(lock) => lock,
+            Err(error) => {
+                let data = serde_json::json!({
+                    "schema": MAINTENANCE_RUN_SCHEMA_V1,
+                    "command": request.command,
+                    "requestedJob": request.job_type.as_str(),
+                    "workspace": workspace_path.display().to_string(),
+                    "dryRun": request.dry_run,
+                    "durableMutation": false,
+                    "summary": {
+                        "total": 1,
+                        "succeeded": 0,
+                        "skipped": 0,
+                        "failed": 1,
+                    },
+                    "job": null,
+                    "history": {
+                        "persisted": false,
+                        "path": maintenance_job_history_path(&workspace_path).display().to_string(),
+                    },
+                    "results": [],
+                    "degraded": [error.data_json()],
+                });
+                return write_maintenance_response(cli, stdout, false, data);
+            }
+        };
     let mut runner_options = crate::steward::RunnerOptions::new()
         .with_workspace_path(workspace_path.clone())
         .with_actor("ee-maintenance")
@@ -16831,25 +16864,31 @@ where
         "path": maintenance_job_history_path(&workspace_path).display().to_string(),
     });
 
-    if matches!(result.outcome, crate::steward::RunOutcome::Success) {
-        if !request.dry_run {
-            match append_maintenance_job_history(&workspace_path, &row) {
-                Ok(path) => {
-                    history["persisted"] = serde_json::json!(true);
-                    history["path"] = serde_json::json!(path.display().to_string());
-                    history["rowId"] = row["id"].clone();
-                }
-                Err(message) => degraded.push(serde_json::json!({
-                    "code": "maintenance_job_history_write_failed",
-                    "severity": "high",
-                    "message": message,
-                    "repair": "Check workspace .ee directory permissions and rerun the job.",
-                })),
+    if !request.dry_run {
+        match append_maintenance_job_history(&workspace_path, &row) {
+            Ok(path) => {
+                history["persisted"] = serde_json::json!(true);
+                history["path"] = serde_json::json!(path.display().to_string());
+                history["rowId"] = row["id"].clone();
             }
+            Err(message) => degraded.push(serde_json::json!({
+                "code": "maintenance_job_history_write_failed",
+                "severity": "high",
+                "message": message,
+                "repair": "Check workspace .ee directory permissions and rerun the job.",
+            })),
         }
-    } else {
+    }
+    if !matches!(result.outcome, crate::steward::RunOutcome::Success) {
+        let code = match result.outcome {
+            crate::steward::RunOutcome::Cancelled => "maintenance_job_cancelled",
+            crate::steward::RunOutcome::TimedOut => "maintenance_job_timed_out",
+            crate::steward::RunOutcome::Failed => "maintenance_job_failed",
+            crate::steward::RunOutcome::Skipped => "maintenance_job_skipped",
+            crate::steward::RunOutcome::Success => "maintenance_job_failed",
+        };
         degraded.push(serde_json::json!({
-            "code": "maintenance_job_failed",
+            "code": code,
             "severity": "medium",
             "message": result
                 .error
@@ -18828,7 +18867,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use clap::Parser;
+    use clap::{Parser, error::ErrorKind};
 
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli,
@@ -18910,6 +18949,21 @@ mod tests {
         let stdout = String::from_utf8_lossy(&stdout).into_owned();
         let stderr = String::from_utf8_lossy(&stderr).into_owned();
         (exit, stdout, stderr)
+    }
+
+    fn unique_temp_workspace(prefix: &str) -> Result<String, String> {
+        Ok(std::env::temp_dir()
+            .join(format!(
+                "{}-{}-{}",
+                prefix,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|error| format!("system clock before unix epoch: {error}"))?
+                    .as_nanos()
+            ))
+            .to_string_lossy()
+            .into_owned())
     }
 
     fn ensure_repair_command_parses(repair: &str, context: &str) -> TestResult {
@@ -22083,17 +22137,7 @@ mod tests {
 
     #[test]
     fn job_run_list_show_json_persists_history_row() -> TestResult {
-        let workspace = std::env::temp_dir()
-            .join(format!(
-                "ee-job-history-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|error| format!("system clock before unix epoch: {error}"))?
-                    .as_nanos()
-            ))
-            .to_string_lossy()
-            .into_owned();
+        let workspace = unique_temp_workspace("ee-job-history")?;
 
         let (run_exit, run_stdout, run_stderr) = invoke(&[
             "ee",
@@ -22181,6 +22225,176 @@ mod tests {
             &serde_json::json!([]),
             "linked audit entries",
         )
+    }
+
+    #[test]
+    fn job_run_rejects_unknown_kind() -> TestResult {
+        let error = Cli::try_parse_from(["ee", "job", "run", "not_a_real_job"])
+            .expect_err("unknown job kind should fail parsing");
+
+        ensure_equal(
+            &error.kind(),
+            &ErrorKind::ValueValidation,
+            "unknown job kind error",
+        )
+    }
+
+    #[test]
+    fn job_run_failed_outcome_is_persisted_in_history() -> TestResult {
+        let workspace = unique_temp_workspace("ee-job-failure")?;
+
+        let (run_exit, run_stdout, run_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "job",
+            "run",
+            "decay_sweep",
+            "--json",
+        ]);
+        ensure_equal(
+            &run_exit,
+            &ProcessExitCode::UnsatisfiedDegradedMode,
+            "failed job run exit",
+        )?;
+        ensure(run_stderr.is_empty(), "failed job run stderr empty")?;
+        let run_json: serde_json::Value =
+            serde_json::from_str(&run_stdout).map_err(|error| error.to_string())?;
+        let golden = serde_json::json!({
+            "schema": "ee.maintenance.run.v1",
+            "command": "job run",
+            "requestedJob": "decay_sweep",
+            "outcome": "failed",
+            "historyPersisted": true,
+            "degradedCode": "maintenance_job_failed",
+        });
+        let actual = serde_json::json!({
+            "schema": run_json["data"]["schema"],
+            "command": run_json["data"]["command"],
+            "requestedJob": run_json["data"]["requestedJob"],
+            "outcome": run_json["data"]["job"]["outcome"],
+            "historyPersisted": run_json["data"]["history"]["persisted"],
+            "degradedCode": run_json["data"]["degraded"][0]["code"],
+        });
+        ensure_equal(&actual, &golden, "failed job run golden")?;
+
+        let (list_exit, list_stdout, list_stderr) =
+            invoke(&["ee", "--workspace", &workspace, "job", "list", "--json"]);
+        ensure_equal(&list_exit, &ProcessExitCode::Success, "failure list exit")?;
+        ensure(list_stderr.is_empty(), "failure list stderr empty")?;
+        let list_json: serde_json::Value =
+            serde_json::from_str(&list_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &list_json["data"]["jobs"][0]["outcome"],
+            &serde_json::json!("failed"),
+            "failed row listed",
+        )
+    }
+
+    #[test]
+    fn job_run_cancellation_is_reported_and_persisted() -> TestResult {
+        let workspace = unique_temp_workspace("ee-job-cancel")?;
+
+        let (init_exit, _init_stdout, init_stderr) =
+            invoke(&["ee", "--workspace", &workspace, "init", "--json"]);
+        ensure_equal(&init_exit, &ProcessExitCode::Success, "cancel init exit")?;
+        ensure(init_stderr.is_empty(), "cancel init stderr empty")?;
+        let (remember_exit, _remember_stdout, remember_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "remember",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "Run cancellation-sensitive steward jobs through the shared runner.",
+            "--json",
+        ]);
+        ensure_equal(
+            &remember_exit,
+            &ProcessExitCode::Success,
+            "cancel remember exit",
+        )?;
+        ensure(remember_stderr.is_empty(), "cancel remember stderr empty")?;
+
+        let (run_exit, run_stdout, run_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "job",
+            "run",
+            "decay_sweep",
+            "--item-limit",
+            "0",
+            "--json",
+        ]);
+        ensure_equal(
+            &run_exit,
+            &ProcessExitCode::UnsatisfiedDegradedMode,
+            "cancelled job run exit",
+        )?;
+        ensure(run_stderr.is_empty(), "cancelled job run stderr empty")?;
+        let run_json: serde_json::Value =
+            serde_json::from_str(&run_stdout).map_err(|error| error.to_string())?;
+        let golden = serde_json::json!({
+            "schema": "ee.maintenance.run.v1",
+            "requestedJob": "decay_sweep",
+            "outcome": "cancelled",
+            "historyPersisted": true,
+            "degradedCode": "maintenance_job_cancelled",
+        });
+        let actual = serde_json::json!({
+            "schema": run_json["data"]["schema"],
+            "requestedJob": run_json["data"]["requestedJob"],
+            "outcome": run_json["data"]["job"]["outcome"],
+            "historyPersisted": run_json["data"]["history"]["persisted"],
+            "degradedCode": run_json["data"]["degraded"][0]["code"],
+        });
+        ensure_equal(&actual, &golden, "cancelled job run golden")
+    }
+
+    #[test]
+    fn job_run_reports_lock_busy_without_running_handler() -> TestResult {
+        let workspace = unique_temp_workspace("ee-job-lock")?;
+        let _guard = crate::steward::try_acquire_maintenance_job_lock(
+            std::path::Path::new(&workspace),
+            "test-holder",
+        )
+        .map_err(|error| error.message().to_owned())?;
+
+        let (run_exit, run_stdout, run_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "job",
+            "run",
+            "health_check",
+            "--json",
+        ]);
+        ensure_equal(
+            &run_exit,
+            &ProcessExitCode::UnsatisfiedDegradedMode,
+            "busy job run exit",
+        )?;
+        ensure(run_stderr.is_empty(), "busy job run stderr empty")?;
+        let run_json: serde_json::Value =
+            serde_json::from_str(&run_stdout).map_err(|error| error.to_string())?;
+        let golden = serde_json::json!({
+            "schema": "ee.maintenance.run.v1",
+            "requestedJob": "health_check",
+            "job": null,
+            "degradedCode": "maintenance_job_lock_busy",
+            "results": [],
+        });
+        let actual = serde_json::json!({
+            "schema": run_json["data"]["schema"],
+            "requestedJob": run_json["data"]["requestedJob"],
+            "job": run_json["data"]["job"],
+            "degradedCode": run_json["data"]["degraded"][0]["code"],
+            "results": run_json["data"]["results"],
+        });
+        ensure_equal(&actual, &golden, "lock busy golden")
     }
 
     #[test]
