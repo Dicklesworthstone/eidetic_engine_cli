@@ -702,7 +702,7 @@ ee backup inspect bk_01HQ4… --json
 ee backup restore bk_01HQ4… --side-path ~/ee-restored/
 ```
 
-Backups include the DB, the index manifest, the graph snapshot, the curation audit log, and a `manifest.json` with content hashes. Verification re-hashes everything on disk.
+Backups include the durable DB/JSONL source of truth, the curation audit log, and a `manifest.json` with content hashes. Missing index manifests are reported as degraded, and graph snapshots are derived assets that are not included in the current backup foundation slice. Verification re-hashes everything included on disk.
 
 ---
 
