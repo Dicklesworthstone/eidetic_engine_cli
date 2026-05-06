@@ -102,6 +102,7 @@ fn dependency_surface_reports_unavailable_dependency_codes() -> TestResult {
 }
 
 #[test]
+#[ignore = "ee eval run is real now (r1np, eidetic_engine_cli-172p) — eval no longer degrades to eval_fixtures_unavailable from a clean workspace; replacement positive test tracked in eidetic_engine_cli-g6pf"]
 fn eval_and_science_status_return_useful_partial_output_under_degradation() -> TestResult {
     let eval_output = run_ee(&["eval", "run", "--science", "--json"])?;
     ensure(
