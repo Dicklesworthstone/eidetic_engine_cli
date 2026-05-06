@@ -1,0 +1,18 @@
+{
+  "q": "large array edge",
+  "levels": ["procedural", "episodic", "semantic", "working", "procedural", "episodic"],
+  "kinds": ["rule", "fact", "decision", "failure", "artifact", "note"],
+  "tags": [
+    "release",
+    "format",
+    "cargo",
+    "clippy",
+    "test",
+    "ci",
+    "unicode-π",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "scope": ["repo", "workspace", "session", "global"],
+  "limit": 4294967295,
+  "speed": "default"
+}

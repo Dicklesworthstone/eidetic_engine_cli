@@ -1,0 +1,7 @@
+set shell := ["sh", "-cu"]
+
+eql-parser-ci:
+  cd .. && cargo +nightly fuzz run eql_parser -- -max_total_time=300 -timeout=10
+
+eql-parser-check:
+  cd .. && cargo +nightly fuzz check eql_parser

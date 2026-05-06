@@ -946,6 +946,7 @@ dependencies = [
  "clap_complete",
  "franken-agent-detection",
  "frankensearch",
+ "getrandom 0.3.4",
  "regex-lite",
  "serde",
  "serde_json",
@@ -955,6 +956,7 @@ dependencies = [
  "sqlmodel-frankensqlite",
  "tempfile",
  "toml_edit",
+ "tracing",
  "tru",
  "uuid",
 ]
@@ -965,6 +967,7 @@ version = "0.0.0"
 dependencies = [
  "ee",
  "libfuzzer-sys",
+ "serde_json",
 ]
 
 [[package]]

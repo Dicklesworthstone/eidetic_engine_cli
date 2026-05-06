@@ -1,0 +1,7 @@
+{
+  "query": "unicode π release checklist",
+  "tags": ["unicode-π", "format"],
+  "tags_mode": "any",
+  "limit": 1,
+  "speed": "instant"
+}

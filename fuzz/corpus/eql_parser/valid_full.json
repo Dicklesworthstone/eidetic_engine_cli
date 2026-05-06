@@ -1,0 +1,27 @@
+{
+  "q": "prepare release",
+  "workspace": "workspace-a",
+  "levels": ["procedural", "episodic"],
+  "kinds": ["rule", "fact"],
+  "tags": ["release", "format"],
+  "tags_mode": "all",
+  "scope": ["repo", "release"],
+  "time": {
+    "since": "7d",
+    "until": "2026-05-06T00:00:00Z"
+  },
+  "confidence": {
+    "min": 0.1,
+    "max": 1.0
+  },
+  "graph": {
+    "center": "mem_00000000000000000000000000",
+    "hops": 2,
+    "relations": ["supports", "derived_from"]
+  },
+  "limit": 25,
+  "speed": "quality",
+  "rerank": true,
+  "return_subgraph": true,
+  "explain": true
+}

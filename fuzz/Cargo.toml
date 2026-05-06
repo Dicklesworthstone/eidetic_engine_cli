@@ -10,10 +10,18 @@ cargo-fuzz = true
 [dependencies]
 ee = { path = ".." }
 libfuzzer-sys = "0.4"
+serde_json = "1.0.149"
 
 [[bin]]
 name = "jsonl_header"
 path = "fuzz_targets/jsonl_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "eql_parser"
+path = "fuzz_targets/eql_parser.rs"
 test = false
 doc = false
 bench = false
