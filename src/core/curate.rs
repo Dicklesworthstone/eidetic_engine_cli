@@ -17,12 +17,15 @@ use crate::curate::{
     validate_review_queue_transition,
 };
 use crate::db::{
-    ApplyMemoryCurationInput, CreateAuditInput, CreateProceduralRuleInput,
-    CreateSearchIndexJobInput, CurationCandidateReviewUpdate, DbConnection, SearchIndexJobType,
-    StoredCurationCandidate, StoredCurationTtlPolicy, StoredMemory, audit_actions,
+    ApplyMemoryCurationInput, CreateAuditInput, CreateCurationCandidateInput,
+    CreateProceduralRuleInput, CreateSearchIndexJobInput, CurationCandidateReviewUpdate,
+    DbConnection, SearchIndexJobType, StoredCurationCandidate, StoredCurationTtlPolicy,
+    StoredEvidenceSpan, StoredMemory, StoredSession, audit_actions,
     default_curation_ttl_policy_id_for_review_state, generate_audit_id,
 };
-use crate::models::{DomainError, MemoryId, RuleId, WorkspaceId};
+use crate::models::{
+    CandidateId, DomainError, MemoryId, REVIEW_SESSION_SCHEMA_V1, RuleId, WorkspaceId,
+};
 
 /// Stable schema for `ee curate candidates` response data.
 pub const CURATE_CANDIDATES_SCHEMA_V1: &str = "ee.curate.candidates.v1";
@@ -34,9 +37,10 @@ pub const CURATE_APPLY_SCHEMA_V1: &str = "ee.curate.apply.v1";
 pub const CURATE_REVIEW_SCHEMA_V1: &str = "ee.curate.review.v1";
 /// Stable schema for deterministic TTL disposition reports.
 pub const CURATE_DISPOSITION_SCHEMA_V1: &str = "ee.curate.disposition.v1";
-
 const MAX_CANDIDATE_LIST_LIMIT: u32 = 1000;
+const MAX_REVIEW_SESSION_LIMIT: u32 = 100;
 const DEFAULT_SNOOZE_SECONDS: u64 = 90 * 24 * 60 * 60;
+const REVIEW_SESSION_CREATED_AT: &str = "1970-01-01T00:00:00Z";
 
 /// Options for listing curation candidates through `ee curate candidates`.
 #[derive(Clone, Debug)]
@@ -168,6 +172,25 @@ pub struct CurateDispositionOptions<'a> {
     pub now_rfc3339: Option<&'a str>,
 }
 
+/// Options for reviewing a CASS session and proposing curation candidates.
+#[derive(Clone, Debug)]
+pub struct ReviewSessionOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Internal ee session ID or upstream CASS session ID. Defaults to the last stable session.
+    pub session_id: Option<&'a str>,
+    /// Persist proposals into the curation queue.
+    pub propose: bool,
+    /// Preview without inserting curation candidates.
+    pub dry_run: bool,
+    /// Minimum confidence threshold for proposals.
+    pub min_confidence: f32,
+    /// Maximum candidates to return.
+    pub limit: u32,
+}
+
 /// Result of listing curation candidates.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -270,6 +293,48 @@ pub struct CurateDispositionReport {
     pub decisions: Vec<CurateDispositionDecision>,
     pub degraded: Vec<CurateCandidatesDegradation>,
     pub next_action: String,
+}
+
+/// Result of reviewing one CASS session for curation candidates.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSessionReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub session_id: String,
+    pub cass_session_id: String,
+    pub propose_mode: bool,
+    pub dry_run: bool,
+    pub durable_mutation: bool,
+    pub evidence_span_count: usize,
+    pub topic_count: usize,
+    pub candidate_count: usize,
+    pub candidates: Vec<ReviewSessionCandidate>,
+    pub degraded: Vec<CurateCandidatesDegradation>,
+    pub next_action: String,
+}
+
+/// One proposed curation candidate distilled from session evidence.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSessionCandidate {
+    pub candidate_id: String,
+    pub candidate_type: String,
+    pub candidate_kind: String,
+    pub topic_key: String,
+    pub target_memory_id: String,
+    pub proposed_content: String,
+    pub proposed_confidence: f32,
+    pub source_type: String,
+    pub source_ids: Vec<String>,
+    pub reason: String,
+    pub confidence: f32,
+    pub content_hash: String,
+    pub persisted: bool,
 }
 
 impl CurateValidateReport {
@@ -928,6 +993,488 @@ pub fn list_curation_candidates(
         degraded: Vec::new(),
         next_action,
     })
+}
+
+/// Review imported CASS evidence for a session and optionally persist proposals.
+pub fn review_session_proposals(
+    options: &ReviewSessionOptions<'_>,
+) -> Result<ReviewSessionReport, DomainError> {
+    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    validate_review_session_options(options)?;
+
+    let connection = open_existing_database(&prepared.database_path)?;
+    let session = resolve_review_session(
+        &connection,
+        &prepared.workspace_id,
+        options
+            .session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    )?;
+    let evidence_spans = connection
+        .list_evidence_spans_for_session(&session.id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list session evidence spans: {error}"),
+            repair: Some("ee import cass --workspace . --json".to_owned()),
+        })?;
+
+    let mut candidates = build_review_session_candidates(
+        &prepared.workspace_id,
+        &session,
+        &evidence_spans,
+        options.min_confidence,
+        options.limit,
+    );
+
+    let mut durable_mutation = false;
+    if options.propose && !options.dry_run {
+        for candidate in &mut candidates {
+            if connection
+                .get_curation_candidate(&prepared.workspace_id, &candidate.candidate_id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to check existing curation candidate: {error}"),
+                    repair: Some("ee curate candidates --json".to_owned()),
+                })?
+                .is_some()
+            {
+                continue;
+            }
+            connection
+                .insert_curation_candidate(
+                    &candidate.candidate_id,
+                    &CreateCurationCandidateInput {
+                        workspace_id: prepared.workspace_id.clone(),
+                        candidate_type: candidate.candidate_type.clone(),
+                        target_memory_id: candidate.target_memory_id.clone(),
+                        proposed_content: Some(candidate.proposed_content.clone()),
+                        proposed_confidence: Some(candidate.proposed_confidence),
+                        proposed_trust_class: None,
+                        source_type: candidate.source_type.clone(),
+                        source_id: Some(candidate.source_ids.join(",")),
+                        reason: candidate.reason.clone(),
+                        confidence: candidate.confidence,
+                        status: Some(CandidateStatus::Pending.as_str().to_owned()),
+                        created_at: Some(REVIEW_SESSION_CREATED_AT.to_owned()),
+                        ttl_expires_at: None,
+                    },
+                )
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to insert session review curation candidate: {error}"),
+                    repair: Some("ee curate candidates --json".to_owned()),
+                })?;
+            candidate.persisted = true;
+            durable_mutation = true;
+        }
+    }
+
+    let topic_count = candidates
+        .iter()
+        .map(|candidate| candidate.topic_key.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let candidate_count = candidates.len();
+    let next_action = if candidate_count == 0 {
+        "no session-review candidates proposed".to_owned()
+    } else if options.propose && !options.dry_run {
+        "ee curate candidates --status pending --json".to_owned()
+    } else {
+        "ee review session <session-id> --propose --json".to_owned()
+    };
+
+    Ok(ReviewSessionReport {
+        schema: REVIEW_SESSION_SCHEMA_V1,
+        command: "review session",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        session_id: session.id,
+        cass_session_id: session.cass_session_id,
+        propose_mode: options.propose,
+        dry_run: options.dry_run,
+        durable_mutation,
+        evidence_span_count: evidence_spans.len(),
+        topic_count,
+        candidate_count,
+        candidates,
+        degraded: Vec::new(),
+        next_action,
+    })
+}
+
+fn validate_review_session_options(options: &ReviewSessionOptions<'_>) -> Result<(), DomainError> {
+    if !(0.0..=1.0).contains(&options.min_confidence) {
+        return Err(curate_usage_error(
+            format!(
+                "review session --min-confidence must be between 0.0 and 1.0, got {}",
+                options.min_confidence
+            ),
+            "ee review session --help",
+        ));
+    }
+    if options.limit == 0 {
+        return Err(curate_usage_error(
+            "review session --limit must be greater than zero".to_owned(),
+            "ee review session --help",
+        ));
+    }
+    if options.limit > MAX_REVIEW_SESSION_LIMIT {
+        return Err(curate_usage_error(
+            format!("review session --limit must be <= {MAX_REVIEW_SESSION_LIMIT}"),
+            "ee review session --help",
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_review_session(
+    connection: &DbConnection,
+    workspace_id: &str,
+    requested: Option<&str>,
+) -> Result<StoredSession, DomainError> {
+    if let Some(session_id) = requested {
+        if let Some(session) = connection
+            .get_session(session_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to load session: {error}"),
+                repair: Some("ee import cass --workspace . --json".to_owned()),
+            })?
+            .filter(|session| session.workspace_id == workspace_id)
+        {
+            return Ok(session);
+        }
+        return connection
+            .get_session_by_cass_id(workspace_id, session_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to load CASS session: {error}"),
+                repair: Some("ee import cass --workspace . --json".to_owned()),
+            })?
+            .ok_or_else(|| DomainError::NotFound {
+                resource: "CASS session".to_owned(),
+                id: session_id.to_owned(),
+                repair: Some("ee import cass --workspace . --json".to_owned()),
+            });
+    }
+
+    connection
+        .list_sessions(workspace_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list sessions: {error}"),
+            repair: Some("ee import cass --workspace . --json".to_owned()),
+        })?
+        .into_iter()
+        .max_by(|left, right| {
+            review_session_recency_key(left)
+                .cmp(&review_session_recency_key(right))
+                .then_with(|| left.cass_session_id.cmp(&right.cass_session_id))
+                .then_with(|| left.id.cmp(&right.id))
+        })
+        .ok_or_else(|| DomainError::NotFound {
+            resource: "CASS session".to_owned(),
+            id: "latest".to_owned(),
+            repair: Some("ee import cass --workspace . --json".to_owned()),
+        })
+}
+
+fn review_session_recency_key(session: &StoredSession) -> &str {
+    session
+        .ended_at
+        .as_deref()
+        .or(session.started_at.as_deref())
+        .unwrap_or(session.imported_at.as_str())
+}
+
+fn build_review_session_candidates(
+    workspace_id: &str,
+    session: &StoredSession,
+    evidence_spans: &[StoredEvidenceSpan],
+    min_confidence: f32,
+    limit: u32,
+) -> Vec<ReviewSessionCandidate> {
+    let mut grouped: BTreeMap<String, Vec<&StoredEvidenceSpan>> = BTreeMap::new();
+    for span in evidence_spans {
+        if span.memory_id.as_deref().is_none_or(str::is_empty) {
+            continue;
+        }
+        let topic_key = review_topic_key(&span.excerpt);
+        if topic_key == "noise" {
+            continue;
+        }
+        grouped.entry(topic_key).or_default().push(span);
+    }
+
+    let mut candidates = grouped
+        .into_iter()
+        .filter_map(|(topic_key, mut spans)| {
+            spans.sort_by(|left, right| {
+                left.start_line
+                    .cmp(&right.start_line)
+                    .then_with(|| left.end_line.cmp(&right.end_line))
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            build_review_candidate(workspace_id, session, &topic_key, &spans)
+        })
+        .filter(|candidate| candidate.confidence >= min_confidence)
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|left, right| {
+        right
+            .confidence
+            .total_cmp(&left.confidence)
+            .then_with(|| left.topic_key.cmp(&right.topic_key))
+            .then_with(|| left.candidate_id.cmp(&right.candidate_id))
+    });
+    candidates.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    candidates
+}
+
+fn build_review_candidate(
+    workspace_id: &str,
+    session: &StoredSession,
+    topic_key: &str,
+    spans: &[&StoredEvidenceSpan],
+) -> Option<ReviewSessionCandidate> {
+    let evidence_ids = spans
+        .iter()
+        .map(|span| span.id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if evidence_ids.len() < 2 {
+        return None;
+    }
+    let target_memory_id = spans
+        .iter()
+        .filter_map(|span| span.memory_id.as_deref())
+        .filter(|memory_id| !memory_id.trim().is_empty())
+        .min()?
+        .to_owned();
+    let candidate_kind = review_candidate_kind(spans);
+    let proposed_content = review_candidate_content(topic_key, &candidate_kind, spans);
+    let confidence = review_candidate_confidence(spans.len());
+    let content_hash = format!(
+        "blake3:{}",
+        blake3::hash(proposed_content.as_bytes()).to_hex()
+    );
+    let candidate_id = deterministic_curate_id(&[
+        workspace_id,
+        session.id.as_str(),
+        session.cass_session_id.as_str(),
+        topic_key,
+        evidence_ids.join(",").as_str(),
+        content_hash.as_str(),
+    ]);
+    let reason = format!(
+        "Session review clustered {} evidence span(s) for topic `{topic_key}` from CASS session `{}`.",
+        evidence_ids.len(),
+        session.cass_session_id
+    );
+
+    Some(ReviewSessionCandidate {
+        candidate_id,
+        candidate_type: CandidateType::Rule.as_str().to_owned(),
+        candidate_kind,
+        topic_key: topic_key.to_owned(),
+        target_memory_id,
+        proposed_content,
+        proposed_confidence: confidence,
+        source_type: CandidateSource::AgentInference.as_str().to_owned(),
+        source_ids: evidence_ids,
+        reason,
+        confidence,
+        content_hash,
+        persisted: false,
+    })
+}
+
+fn review_topic_key(excerpt: &str) -> String {
+    let tokens = normalized_review_tokens(excerpt);
+    topic_from_keywords(&tokens).unwrap_or_else(|| {
+        tokens
+            .iter()
+            .find(|token| token.len() >= 5)
+            .cloned()
+            .unwrap_or_else(|| "noise".to_owned())
+    })
+}
+
+fn topic_from_keywords(tokens: &BTreeSet<String>) -> Option<String> {
+    const TOPICS: &[(&str, &[&str])] = &[
+        ("formatting", &["fmt", "format", "formatting", "rustfmt"]),
+        (
+            "linting",
+            &["clippy", "lint", "lints", "warning", "warnings"],
+        ),
+        (
+            "testing",
+            &["e2e", "fixture", "fixtures", "golden", "test", "tests"],
+        ),
+        (
+            "storage",
+            &[
+                "database",
+                "db",
+                "frankensqlite",
+                "migration",
+                "sqlite",
+                "sqlmodel",
+                "storage",
+            ],
+        ),
+        (
+            "retrieval",
+            &[
+                "bm25",
+                "embedding",
+                "frankensearch",
+                "retrieval",
+                "search",
+                "semantic",
+            ],
+        ),
+        (
+            "runtime",
+            &[
+                "asupersync",
+                "budget",
+                "cancellation",
+                "labruntime",
+                "runtime",
+            ],
+        ),
+        (
+            "process",
+            &[
+                "agent",
+                "beads",
+                "br",
+                "bv",
+                "mail",
+                "reservation",
+                "worktree",
+            ],
+        ),
+        ("cass", &["cass", "session", "span", "transcript"]),
+    ];
+
+    TOPICS.iter().find_map(|(topic, keywords)| {
+        keywords
+            .iter()
+            .any(|keyword| tokens.contains(*keyword))
+            .then(|| (*topic).to_owned())
+    })
+}
+
+fn normalized_review_tokens(excerpt: &str) -> BTreeSet<String> {
+    excerpt
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(str::trim)
+        .filter(|token| token.len() >= 2)
+        .map(str::to_ascii_lowercase)
+        .filter(|token| !review_stopword(token))
+        .collect()
+}
+
+fn review_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "about"
+            | "after"
+            | "also"
+            | "and"
+            | "are"
+            | "before"
+            | "but"
+            | "for"
+            | "from"
+            | "has"
+            | "into"
+            | "must"
+            | "not"
+            | "should"
+            | "that"
+            | "the"
+            | "this"
+            | "through"
+            | "to"
+            | "use"
+            | "when"
+            | "with"
+    )
+}
+
+fn review_candidate_kind(spans: &[&StoredEvidenceSpan]) -> String {
+    let joined = spans
+        .iter()
+        .map(|span| span.excerpt.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    if ["failed", "failure", "panic", "regression"]
+        .iter()
+        .any(|term| joined.contains(term))
+    {
+        "failure".to_owned()
+    } else if ["adr", "decided", "decision", "choose", "chose"]
+        .iter()
+        .any(|term| joined.contains(term))
+    {
+        "decision".to_owned()
+    } else {
+        "rule".to_owned()
+    }
+}
+
+fn review_candidate_content(
+    topic_key: &str,
+    candidate_kind: &str,
+    spans: &[&StoredEvidenceSpan],
+) -> String {
+    let excerpts = spans
+        .iter()
+        .take(2)
+        .map(|span| compact_excerpt(&span.excerpt))
+        .collect::<Vec<_>>()
+        .join(" / ");
+    match candidate_kind {
+        "failure" => format!(
+            "When `{topic_key}` work resembles this session, check the prior failure evidence before repeating it: {excerpts}"
+        ),
+        "decision" => format!(
+            "For `{topic_key}` work, preserve the evidence-backed decision from this session: {excerpts}"
+        ),
+        _ => format!(
+            "For `{topic_key}` work, follow the evidence-backed procedure shown in this session: {excerpts}"
+        ),
+    }
+}
+
+fn compact_excerpt(excerpt: &str) -> String {
+    const MAX_CHARS: usize = 180;
+    let compact = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= MAX_CHARS {
+        return compact;
+    }
+    let mut truncated = compact.chars().take(MAX_CHARS).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn review_candidate_confidence(span_count: usize) -> f32 {
+    (0.45_f32 + (span_count.min(6) as f32 * 0.08)).min(0.85)
+}
+
+fn deterministic_curate_id(parts: &[&str]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for part in parts {
+        hasher.update(part.as_bytes());
+        hasher.update(b"\0");
+    }
+    let hash = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    let candidate = CandidateId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string();
+    format!("curate_{}", candidate.trim_start_matches("cand_"))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3766,16 +4313,20 @@ fn curate_usage_error(message: String, repair: &str) -> DomainError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{
-        CurateCandidatesOptions, CurateReviewAction, CurateReviewOptions, apply_curation_candidate,
-        candidate_summary_from_stored, list_curation_candidates, review_curation_candidate,
-        stable_workspace_id, validate_curation_candidate,
+        CurateCandidatesOptions, CurateReviewAction, CurateReviewOptions, ReviewSessionOptions,
+        apply_curation_candidate, candidate_summary_from_stored, list_curation_candidates,
+        review_curation_candidate, review_session_proposals, stable_workspace_id,
+        validate_curation_candidate,
     };
     use crate::db::{
-        CreateCurationCandidateInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
-        StoredCurationCandidate, audit_actions,
+        CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateMemoryInput,
+        CreateSessionInput, CreateWorkspaceInput, DbConnection, StoredCurationCandidate,
+        audit_actions,
     };
-    use crate::models::{CandidateId, MemoryId};
+    use crate::models::{CandidateId, EvidenceId, MemoryId, SessionId};
 
     type TestResult = Result<(), String>;
 
@@ -3830,6 +4381,194 @@ mod tests {
         );
         assert_eq!(summary.validation.status, "not_run");
         assert_eq!(summary.evidence.len(), 1);
+    }
+
+    #[test]
+    fn review_session_proposes_two_topics_with_stable_ids() -> TestResult {
+        let fixture = review_session_fixture()?;
+
+        let first = review_session_proposals(&ReviewSessionOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            session_id: Some("cass-review-session-a"),
+            propose: true,
+            dry_run: true,
+            min_confidence: 0.50,
+            limit: 10,
+        })
+        .map_err(|error| error.message())?;
+        let second = review_session_proposals(&ReviewSessionOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            session_id: Some("cass-review-session-a"),
+            propose: true,
+            dry_run: true,
+            min_confidence: 0.50,
+            limit: 10,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(first.candidate_count, 2);
+        assert_eq!(first.topic_count, 2);
+        assert!(!first.durable_mutation);
+        assert_eq!(first.candidates, second.candidates);
+        for candidate in &first.candidates {
+            assert!(candidate.source_ids.len() >= 2);
+            assert!(candidate.candidate_id.starts_with("curate_"));
+            assert_eq!(candidate.candidate_type, "rule");
+            assert!(candidate.content_hash.starts_with("blake3:"));
+        }
+        let topics = first
+            .candidates
+            .iter()
+            .map(|candidate| candidate.topic_key.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(topics, BTreeSet::from(["storage", "testing"]));
+        Ok(())
+    }
+
+    #[test]
+    fn review_session_persists_candidates_idempotently() -> TestResult {
+        let fixture = review_session_fixture()?;
+
+        let first = review_session_proposals(&ReviewSessionOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            session_id: Some(fixture.session_id.as_str()),
+            propose: true,
+            dry_run: false,
+            min_confidence: 0.50,
+            limit: 10,
+        })
+        .map_err(|error| error.message())?;
+        let second = review_session_proposals(&ReviewSessionOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            session_id: Some(fixture.session_id.as_str()),
+            propose: true,
+            dry_run: false,
+            min_confidence: 0.50,
+            limit: 10,
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(first.durable_mutation);
+        assert_eq!(
+            first
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.persisted)
+                .count(),
+            2
+        );
+        assert!(!second.durable_mutation);
+        assert_eq!(
+            second
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.persisted)
+                .count(),
+            0
+        );
+
+        let report = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            candidate_type: Some("rule"),
+            status: Some("pending"),
+            target_memory_id: None,
+            limit: 10,
+            offset: 0,
+            sort: "created",
+            group_duplicates: false,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(report.total_count, 2);
+        assert!(
+            report
+                .candidates
+                .iter()
+                .all(|candidate| candidate.evidence.len() >= 2)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn review_session_empty_and_noisy_sessions_propose_nothing() -> TestResult {
+        let fixture = review_session_fixture()?;
+        let connection =
+            DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+        let empty_session_id = SessionId::from_uuid(uuid::Uuid::from_u128(404)).to_string();
+        let noise_session_id = SessionId::from_uuid(uuid::Uuid::from_u128(405)).to_string();
+        connection
+            .insert_session(
+                &empty_session_id,
+                &session_input(&fixture.workspace_id, "cass-empty-review"),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_session(
+                &noise_session_id,
+                &session_input(&fixture.workspace_id, "cass-noise-review"),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_evidence_span(
+                &evidence_id(500),
+                &evidence_span_input(
+                    &fixture.workspace_id,
+                    &noise_session_id,
+                    None,
+                    "noise-a",
+                    1,
+                    "ok yes and the but use this",
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        for session_id in ["cass-empty-review", "cass-noise-review"] {
+            let report = review_session_proposals(&ReviewSessionOptions {
+                workspace_path: fixture.workspace_path.as_path(),
+                database_path: Some(fixture.database_path.as_path()),
+                session_id: Some(session_id),
+                propose: true,
+                dry_run: true,
+                min_confidence: 0.50,
+                limit: 10,
+            })
+            .map_err(|error| error.message())?;
+            assert_eq!(report.candidate_count, 0, "{session_id}");
+            assert_eq!(report.next_action, "no session-review candidates proposed");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn review_session_rejects_invalid_confidence_and_limit() -> TestResult {
+        let fixture = review_session_fixture()?;
+        let invalid_confidence = review_session_proposals(&ReviewSessionOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            session_id: Some("cass-review-session-a"),
+            propose: true,
+            dry_run: true,
+            min_confidence: 1.1,
+            limit: 10,
+        });
+        assert!(invalid_confidence.is_err());
+
+        let invalid_limit = review_session_proposals(&ReviewSessionOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            session_id: Some("cass-review-session-a"),
+            propose: true,
+            dry_run: true,
+            min_confidence: 0.5,
+            limit: 0,
+        });
+        assert!(invalid_limit.is_err());
+        Ok(())
     }
 
     #[test]
@@ -4819,6 +5558,186 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
         Ok(connection)
+    }
+
+    struct ReviewFixture {
+        _tempdir: tempfile::TempDir,
+        workspace_path: std::path::PathBuf,
+        database_path: std::path::PathBuf,
+        workspace_id: String,
+        session_id: String,
+    }
+
+    fn review_session_fixture() -> Result<ReviewFixture, String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path().to_path_buf();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(&workspace_path);
+        let session_id = SessionId::from_uuid(uuid::Uuid::from_u128(303)).to_string();
+        let storage_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(101)).to_string();
+        let testing_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(202)).to_string();
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("review-session-test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        insert_review_memory(
+            &connection,
+            &workspace_id,
+            &storage_memory_id,
+            "Use SQLModel with FrankenSQLite for durable curation storage.",
+        )?;
+        insert_review_memory(
+            &connection,
+            &workspace_id,
+            &testing_memory_id,
+            "Golden tests must cover review session proposal output.",
+        )?;
+        connection
+            .insert_session(
+                &session_id,
+                &session_input(&workspace_id, "cass-review-session-a"),
+            )
+            .map_err(|error| error.to_string())?;
+
+        let storage_excerpts = [
+            "Storage review decided SQLModel and FrankenSQLite remain the source of truth.",
+            "Database migration evidence says curation candidates must persist in SQLite.",
+            "FrankenSQLite storage spans preserve provenance for review proposals.",
+            "SQLModel storage rows need deterministic curation candidate identifiers.",
+            "The storage layer must retain CASS evidence links for later validation.",
+        ];
+        let testing_excerpts = [
+            "Golden tests should cover review session proposal JSON output.",
+            "The test fixture needs two topics and deterministic candidate IDs.",
+            "E2E tests verify review proposals route into the curation queue.",
+            "Malformed review input should return a usage error in tests.",
+            "Empty review sessions must produce no curation candidates.",
+        ];
+        for (index, excerpt) in storage_excerpts.iter().enumerate() {
+            connection
+                .insert_evidence_span(
+                    &evidence_id(u128::try_from(index + 1).map_err(|error| error.to_string())?),
+                    &evidence_span_input(
+                        &workspace_id,
+                        &session_id,
+                        Some(&storage_memory_id),
+                        &format!("storage-{index}"),
+                        u32::try_from(index + 1).map_err(|error| error.to_string())?,
+                        excerpt,
+                    ),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        for (index, excerpt) in testing_excerpts.iter().enumerate() {
+            connection
+                .insert_evidence_span(
+                    &evidence_id(u128::try_from(index + 20).map_err(|error| error.to_string())?),
+                    &evidence_span_input(
+                        &workspace_id,
+                        &session_id,
+                        Some(&testing_memory_id),
+                        &format!("testing-{index}"),
+                        u32::try_from(index + 20).map_err(|error| error.to_string())?,
+                        excerpt,
+                    ),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection.close().map_err(|error| error.to_string())?;
+
+        Ok(ReviewFixture {
+            _tempdir: tempdir,
+            workspace_path,
+            database_path,
+            workspace_id,
+            session_id,
+        })
+    }
+
+    fn insert_review_memory(
+        connection: &DbConnection,
+        workspace_id: &str,
+        memory_id: &str,
+        content: &str,
+    ) -> Result<(), String> {
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "episodic".to_owned(),
+                    kind: "cass_import".to_owned(),
+                    content: content.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.55,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("cass-session://cass-review-session-a#L1-L2".to_owned()),
+                    trust_class: "cass_evidence".to_owned(),
+                    trust_subclass: Some("session-span".to_owned()),
+                    tags: vec!["cass".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn session_input(workspace_id: &str, cass_session_id: &str) -> CreateSessionInput {
+        CreateSessionInput {
+            workspace_id: workspace_id.to_owned(),
+            cass_session_id: cass_session_id.to_owned(),
+            source_path: Some("/tmp/cass/session.jsonl".to_owned()),
+            agent_name: Some("codex".to_owned()),
+            model: Some("gpt-5".to_owned()),
+            started_at: Some("2026-05-06T00:00:00Z".to_owned()),
+            ended_at: Some("2026-05-06T00:10:00Z".to_owned()),
+            message_count: 10,
+            token_count: Some(1000),
+            content_hash: format!(
+                "blake3:{}",
+                blake3::hash(cass_session_id.as_bytes()).to_hex()
+            ),
+            metadata_json: Some(r#"{"source":"cass","schema":"cass.session.v1"}"#.to_owned()),
+        }
+    }
+
+    fn evidence_span_input(
+        workspace_id: &str,
+        session_id: &str,
+        memory_id: Option<&str>,
+        cass_span_id: &str,
+        start_line: u32,
+        excerpt: &str,
+    ) -> CreateEvidenceSpanInput {
+        CreateEvidenceSpanInput {
+            workspace_id: workspace_id.to_owned(),
+            session_id: session_id.to_owned(),
+            memory_id: memory_id.map(str::to_owned),
+            cass_span_id: cass_span_id.to_owned(),
+            span_kind: "message".to_owned(),
+            start_line,
+            end_line: start_line + 1,
+            start_byte: Some(start_line.saturating_mul(100)),
+            end_byte: Some(start_line.saturating_mul(100).saturating_add(80)),
+            role: Some("assistant".to_owned()),
+            excerpt: excerpt.to_owned(),
+            content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+            metadata_json: Some(r#"{"source":"cass","schema":"cass.evidence_span.v1"}"#.to_owned()),
+        }
+    }
+
+    fn evidence_id(seed: u128) -> String {
+        EvidenceId::from_uuid(uuid::Uuid::from_u128(seed)).to_string()
     }
 
     fn curate_id(seed: u128) -> String {
