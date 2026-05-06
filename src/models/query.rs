@@ -756,6 +756,8 @@ fn parse_eql_confidence(
     }
     let min = optional_f64_field(object, "min")?;
     let max = optional_f64_field(object, "max")?;
+    validate_unit_confidence_bound("min", min)?;
+    validate_unit_confidence_bound("max", max)?;
     if let (Some(min), Some(max)) = (min, max)
         && min > max
     {
@@ -765,6 +767,18 @@ fn parse_eql_confidence(
         ));
     }
     Ok(Some(EqlConfidenceFilter { min, max }))
+}
+
+fn validate_unit_confidence_bound(field: &str, value: Option<f64>) -> Result<(), EqlQueryError> {
+    if let Some(value) = value
+        && !(0.0..=1.0).contains(&value)
+    {
+        return Err(EqlQueryError::new(
+            nested_field_name("confidence", field),
+            "expected a unit score between 0.0 and 1.0",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_eql_graph(
@@ -884,6 +898,19 @@ mod tests {
 
     fn parse_test_filters(value: serde_json::Value) -> Result<QueryFilters, String> {
         parse_filters(&value).ok_or_else(|| "filters should parse".to_owned())
+    }
+
+    fn parse_test_confidence(value: serde_json::Value) -> Result<EqlConfidenceFilter, String> {
+        parse_eql_confidence(Some(&value))
+            .map_err(|err| err.to_string())?
+            .ok_or_else(|| "confidence filter should parse".to_owned())
+    }
+
+    fn parse_test_confidence_error(value: serde_json::Value) -> Result<EqlQueryError, String> {
+        match parse_eql_confidence(Some(&value)) {
+            Ok(_) => Err("confidence filter should reject invalid input".to_owned()),
+            Err(err) => Ok(err),
+        }
     }
 
     #[test]
@@ -1031,6 +1058,54 @@ mod tests {
             "empty filters match everything",
         )?;
         ensure(filters.matches(None), "empty filters match None metadata")
+    }
+
+    #[test]
+    fn eql_confidence_filter_accepts_unit_bounds() -> TestResult {
+        let confidence = parse_test_confidence(serde_json::json!({
+            "min": 0.0,
+            "max": 1.0
+        }))?;
+
+        ensure(
+            confidence
+                .min
+                .is_some_and(|value| (value - 0.0).abs() < f64::EPSILON),
+            "min should accept lower unit-score bound",
+        )?;
+        ensure(
+            confidence
+                .max
+                .is_some_and(|value| (value - 1.0).abs() < f64::EPSILON),
+            "max should accept upper unit-score bound",
+        )
+    }
+
+    #[test]
+    fn eql_confidence_filter_rejects_out_of_unit_bounds() -> TestResult {
+        let err = parse_test_confidence_error(serde_json::json!({
+            "min": -0.01
+        }))?;
+        ensure(
+            err.field == "confidence.min",
+            "negative min should identify confidence.min",
+        )?;
+        ensure(
+            err.message.contains("unit score"),
+            "negative min should report unit-score domain",
+        )?;
+
+        let err = parse_test_confidence_error(serde_json::json!({
+            "max": 1.01
+        }))?;
+        ensure(
+            err.field == "confidence.max",
+            "greater-than-one max should identify confidence.max",
+        )?;
+        ensure(
+            err.message.contains("unit score"),
+            "greater-than-one max should report unit-score domain",
+        )
     }
 
     #[test]
