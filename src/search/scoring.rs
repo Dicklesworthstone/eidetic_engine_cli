@@ -512,11 +512,27 @@ mod tests {
     }
 
     #[test]
-    fn speed_mode_parse() {
-        assert_eq!("instant".parse::<SpeedMode>().unwrap(), SpeedMode::Instant);
-        assert_eq!("default".parse::<SpeedMode>().unwrap(), SpeedMode::Default);
-        assert_eq!("quality".parse::<SpeedMode>().unwrap(), SpeedMode::Quality);
+    fn speed_mode_parse() -> Result<(), String> {
+        assert_eq!(
+            "instant"
+                .parse::<SpeedMode>()
+                .map_err(|error| error.to_string())?,
+            SpeedMode::Instant
+        );
+        assert_eq!(
+            "default"
+                .parse::<SpeedMode>()
+                .map_err(|error| error.to_string())?,
+            SpeedMode::Default
+        );
+        assert_eq!(
+            "quality"
+                .parse::<SpeedMode>()
+                .map_err(|error| error.to_string())?,
+            SpeedMode::Quality
+        );
         assert!("fast".parse::<SpeedMode>().is_err());
+        Ok(())
     }
 
     #[test]
