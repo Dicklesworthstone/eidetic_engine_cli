@@ -123,41 +123,7 @@ fn parse_json_stdout(output: Output, context: &str) -> Result<JsonValue, String>
         .map_err(|error| format!("{context}: stdout is invalid JSON: {error}\n{stdout}"))
 }
 
-fn parse_degraded_json_stdout(
-    output: Output,
-    context: &str,
-    expected_exit: i32,
-) -> Result<JsonValue, String> {
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|error| format!("{context}: stdout not UTF-8: {error}"))?;
-    let stderr = String::from_utf8(output.stderr)
-        .map_err(|error| format!("{context}: stderr not UTF-8: {error}"))?;
-
-    ensure(
-        output.status.code() == Some(expected_exit),
-        format!(
-            "{context}: expected degraded exit {expected_exit}, got {:?}; stderr: {stderr}",
-            output.status.code()
-        ),
-    )?;
-    ensure(
-        stderr.is_empty(),
-        format!("{context}: diagnostics leaked to stderr: {stderr:?}"),
-    )?;
-    ensure(
-        stdout.ends_with('\n'),
-        format!("{context}: JSON stdout must end with newline"),
-    )?;
-
-    serde_json::from_str(&stdout)
-        .map_err(|error| format!("{context}: stdout is invalid JSON: {error}\n{stdout}"))
-}
-
-fn assert_eval_unavailable_payload(
-    payload: &JsonValue,
-    command: &str,
-    context: &str,
-) -> TestResult {
+fn assert_eval_report_payload(payload: &JsonValue, context: &str) -> TestResult {
     ensure_json_equal(
         payload.get("schema").ok_or("missing schema")?,
         &json!("ee.response.v1"),
@@ -165,34 +131,63 @@ fn assert_eval_unavailable_payload(
     )?;
     ensure_json_equal(
         payload.get("success").ok_or("missing success")?,
-        &json!(false),
+        &json!(true),
         context,
     )?;
     ensure_json_equal(
         payload.pointer("/data/command").ok_or("missing command")?,
-        &json!(command),
-        context,
-    )?;
-    ensure_json_equal(
-        payload.pointer("/data/code").ok_or("missing code")?,
-        &json!("eval_fixtures_unavailable"),
+        &json!("eval run"),
         context,
     )?;
     ensure_json_equal(
         payload
-            .pointer("/data/degraded/0/code")
-            .ok_or("missing degraded code")?,
-        &json!("eval_fixtures_unavailable"),
+            .pointer("/data/report/schema")
+            .ok_or("missing report schema")?,
+        &json!("ee.eval.report.v1"),
         context,
     )?;
     ensure_json_equal(
-        payload.pointer("/data/repair").ok_or("missing repair")?,
-        &json!("ee status --json"),
+        payload
+            .pointer("/data/report/fixture_id")
+            .ok_or("missing fixture id")?,
+        &json!("fx.release_failure.v1"),
+        context,
+    )?;
+    ensure_json_equal(
+        payload
+            .pointer("/data/report/metrics/queries_evaluated")
+            .ok_or("missing query count")?,
+        &json!(5),
         context,
     )?;
     ensure(
         payload.pointer("/data/scienceMetrics").is_none(),
-        format!("{context}: eval must not emit scienceMetrics without real scenario results"),
+        format!("{context}: default build must not emit scienceMetrics"),
+    )
+}
+
+fn assert_eval_list_payload(payload: &JsonValue, context: &str) -> TestResult {
+    ensure_json_equal(
+        payload.get("schema").ok_or("missing schema")?,
+        &json!("ee.response.v1"),
+        context,
+    )?;
+    ensure_json_equal(
+        payload.get("success").ok_or("missing success")?,
+        &json!(true),
+        context,
+    )?;
+    ensure_json_equal(
+        payload.pointer("/data/command").ok_or("missing command")?,
+        &json!("eval list"),
+        context,
+    )?;
+    ensure_json_equal(
+        payload
+            .pointer("/data/fixtureCount")
+            .ok_or("missing fixture count")?,
+        &json!(7),
+        context,
     )
 }
 
@@ -242,30 +237,33 @@ fn science_status_json_matches_fixture() -> TestResult {
 }
 
 #[test]
-fn eval_run_simple_json_reports_unavailable() -> TestResult {
-    let payload =
-        parse_degraded_json_stdout(run_ee(&["--json", "eval", "run"])?, "ee --json eval run", 6)?;
-    assert_eval_unavailable_payload(&payload, "eval run", "eval run unavailable")
+fn eval_run_simple_json_reports_fixture_metrics() -> TestResult {
+    let payload = parse_json_stdout(
+        run_ee(&["--json", "eval", "run", "fx.release_failure.v1"])?,
+        "ee --json eval run fx.release_failure.v1",
+    )?;
+    assert_eval_report_payload(&payload, "eval run fixture")
 }
 
 #[test]
-fn eval_run_science_json_reports_unavailable_without_metrics() -> TestResult {
-    let payload = parse_degraded_json_stdout(
-        run_ee(&["--json", "eval", "run", "--science"])?,
-        "ee --json eval run --science",
-        6,
+fn eval_run_science_json_reports_fixture_without_metrics() -> TestResult {
+    let payload = parse_json_stdout(
+        run_ee(&[
+            "--json",
+            "eval",
+            "run",
+            "fx.release_failure.v1",
+            "--science",
+        ])?,
+        "ee --json eval run fx.release_failure.v1 --science",
     )?;
-    assert_eval_unavailable_payload(&payload, "eval run", "eval run --science unavailable")
+    assert_eval_report_payload(&payload, "eval run --science fixture")
 }
 
 #[test]
-fn eval_list_json_reports_unavailable() -> TestResult {
-    let payload = parse_degraded_json_stdout(
-        run_ee(&["--json", "eval", "list"])?,
-        "ee --json eval list",
-        6,
-    )?;
-    assert_eval_unavailable_payload(&payload, "eval list", "eval list unavailable")
+fn eval_list_json_reports_fixture_inventory() -> TestResult {
+    let payload = parse_json_stdout(run_ee(&["--json", "eval", "list"])?, "ee --json eval list")?;
+    assert_eval_list_payload(&payload, "eval list fixtures")
 }
 
 #[test]

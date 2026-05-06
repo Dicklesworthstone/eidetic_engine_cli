@@ -1,8 +1,7 @@
-//! Contract coverage for public `ee eval` degraded honesty.
+//! Contract coverage for public `ee eval` JSON output.
 //!
-//! Eval renderers still have lower-level fixture contracts, but the public CLI
-//! must not report no-scenario stub success before fixture discovery and
-//! execution are actually wired.
+//! Eval now has fixture discovery and execution wired. These tests keep the
+//! public CLI contract honest without requiring science analytics fields.
 
 use serde_json::{Value as JsonValue, json};
 use std::process::{Command, Output};
@@ -33,17 +32,23 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
 }
 
 #[test]
-fn eval_run_science_json_degrades_until_fixture_runner_exists() -> TestResult {
-    let output = run_ee(&["--json", "eval", "run", "--science"])?;
+fn eval_run_science_json_reports_fixture_without_science_metrics() -> TestResult {
+    let output = run_ee(&[
+        "--json",
+        "eval",
+        "run",
+        "fx.release_failure.v1",
+        "--science",
+    ])?;
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("eval run --science stdout was not UTF-8: {error}"))?;
     let stderr = String::from_utf8(output.stderr)
         .map_err(|error| format!("eval run --science stderr was not UTF-8: {error}"))?;
 
     ensure(
-        output.status.code() == Some(6),
+        output.status.success(),
         format!(
-            "eval run --science must fail closed with degraded exit; got {:?}; stderr: {stderr}",
+            "eval run --science must succeed for a fixture; got {:?}; stderr: {stderr}",
             output.status.code()
         ),
     )?;
@@ -64,45 +69,35 @@ fn eval_run_science_json_degrades_until_fixture_runner_exists() -> TestResult {
         json!("ee.response.v1"),
         "response schema",
     )?;
-    ensure_json_equal(value.get("success"), JsonValue::Bool(false), "success")?;
+    ensure_json_equal(value.get("success"), JsonValue::Bool(true), "success")?;
     ensure_json_equal(value.pointer("/data/command"), json!("eval run"), "command")?;
     ensure_json_equal(
-        value.pointer("/data/code"),
-        json!("eval_fixtures_unavailable"),
-        "degraded code",
+        value.pointer("/data/report/schema"),
+        json!("ee.eval.report.v1"),
+        "report schema",
     )?;
     ensure_json_equal(
-        value.pointer("/data/degraded/0/code"),
-        json!("eval_fixtures_unavailable"),
-        "degraded array code",
-    )?;
-    ensure_json_equal(
-        value.pointer("/data/repair"),
-        json!("ee status --json"),
-        "repair command",
-    )?;
-    ensure_json_equal(
-        value.pointer("/data/followUpBead"),
-        json!("eidetic_engine_cli-uiy3"),
-        "follow-up bead",
+        value.pointer("/data/report/fixture_id"),
+        json!("fx.release_failure.v1"),
+        "fixture id",
     )?;
     ensure(
         value.pointer("/data/scienceMetrics").is_none(),
-        "scienceMetrics must not be emitted without a real eval report",
+        "scienceMetrics must not be emitted by the default build",
     )
 }
 
 #[test]
-fn eval_run_without_science_degrades_before_metrics_contract() -> TestResult {
-    let output = run_ee(&["--json", "eval", "run"])?;
+fn eval_run_without_science_reports_fixture_metrics_contract() -> TestResult {
+    let output = run_ee(&["--json", "eval", "run", "fx.release_failure.v1"])?;
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("eval run stdout was not UTF-8: {error}"))?;
     let stderr = String::from_utf8(output.stderr)
         .map_err(|error| format!("eval run stderr was not UTF-8: {error}"))?;
     ensure(
-        output.status.code() == Some(6),
+        output.status.success(),
         format!(
-            "eval run must fail closed with degraded exit; got {:?}; stderr: {stderr}",
+            "eval run must succeed for a fixture; got {:?}; stderr: {stderr}",
             output.status.code()
         ),
     )?;
@@ -114,12 +109,17 @@ fn eval_run_without_science_degrades_before_metrics_contract() -> TestResult {
     let value: JsonValue = serde_json::from_str(&stdout)
         .map_err(|error| format!("stdout JSON parse failed: {error}"))?;
     ensure_json_equal(
-        value.pointer("/data/code"),
-        json!("eval_fixtures_unavailable"),
-        "degraded code",
+        value.pointer("/data/report/schema"),
+        json!("ee.eval.report.v1"),
+        "report schema",
+    )?;
+    ensure_json_equal(
+        value.pointer("/data/report/metrics/queries_evaluated"),
+        json!(5),
+        "queries evaluated",
     )?;
     ensure(
         value.pointer("/data/scienceMetrics").is_none(),
-        "scienceMetrics should be omitted while eval is unavailable",
+        "scienceMetrics should be omitted without science output",
     )
 }
