@@ -289,13 +289,14 @@ fn stage_7_mmr(policy_filtered: &[ScoredFixture]) -> Result<Vec<MemoryId>, Strin
     let candidates: Result<Vec<_>, _> = policy_filtered
         .iter()
         .map(|candidate| {
+            let diversity_key = candidate.fixture.kind;
             PackCandidate::new(PackCandidateInput {
                 memory_id: memory_id(candidate.fixture.seed),
                 section: match candidate.fixture.level {
                     "procedural" => PackSection::ProceduralRules,
-                    "episodic" => PackSection::PriorFailures,
+                    "episodic" => PackSection::Failures,
                     "semantic" => PackSection::Decisions,
-                    _ => PackSection::SupportingEvidence,
+                    _ => PackSection::Evidence,
                 },
                 content: candidate.fixture.content.to_string(),
                 estimated_tokens: 10,
@@ -307,7 +308,7 @@ fn stage_7_mmr(policy_filtered: &[ScoredFixture]) -> Result<Vec<MemoryId>, Strin
                     candidate.fixture.seed
                 ),
             })
-            .map(|candidate| candidate.with_diversity_key(candidate.fixture.kind))
+            .map(|candidate| candidate.with_diversity_key(diversity_key))
             .map_err(|error| format!("{error:?}"))
         })
         .collect();
@@ -373,7 +374,10 @@ fn retrieval_pipeline_narrows_monotonically_across_eight_stages() -> TestResult 
         };
         ensure(
             next.count <= previous.count,
-            "retrieval pipeline widened between adjacent stages",
+            format!(
+                "retrieval pipeline widened from {} to {}",
+                previous.name, next.name
+            ),
         )?;
     }
 

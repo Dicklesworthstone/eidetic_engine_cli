@@ -412,7 +412,10 @@ mod tests {
         assert_eq!(success.entity_id(), Some("id-123"));
 
         let failed = WriteResult::Failed {
-            error: DomainError::storage("test error"),
+            error: DomainError::Storage {
+                message: "test error".to_string(),
+                repair: None,
+            },
         };
         assert!(!failed.is_success());
         assert_eq!(failed.entity_id(), None);

@@ -181,21 +181,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_tags_round_trip_through_from_str() {
+    fn all_tags_round_trip_through_from_str() -> Result<(), String> {
         for tag in WhyTag::ALL {
             let s = tag.as_str();
-            let parsed: WhyTag = s.parse().expect("should parse");
+            let parsed: WhyTag = s.parse().map_err(|error: ParseWhyTagError| {
+                format!("why tag should parse from {s}: {error}")
+            })?;
             assert_eq!(parsed, *tag);
         }
+        Ok(())
     }
 
     #[test]
-    fn all_tags_round_trip_through_serde() {
+    fn all_tags_round_trip_through_serde() -> Result<(), String> {
         for tag in WhyTag::ALL {
-            let json = serde_json::to_string(tag).expect("serialize");
-            let parsed: WhyTag = serde_json::from_str(&json).expect("deserialize");
+            let json = serde_json::to_string(tag)
+                .map_err(|error| format!("why tag should serialize: {error}"))?;
+            let parsed: WhyTag = serde_json::from_str(&json)
+                .map_err(|error| format!("why tag should deserialize from {json}: {error}"))?;
             assert_eq!(parsed, *tag);
         }
+        Ok(())
     }
 
     #[test]
@@ -206,9 +212,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tag_returns_error() {
-        let err = "unknown_tag".parse::<WhyTag>().unwrap_err();
-        assert_eq!(err.input, "unknown_tag");
+    fn unknown_tag_returns_error() -> Result<(), String> {
+        match "unknown_tag".parse::<WhyTag>() {
+            Ok(tag) => Err(format!("unknown_tag unexpectedly parsed as {tag:?}")),
+            Err(err) => {
+                assert_eq!(err.input, "unknown_tag");
+                Ok(())
+            }
+        }
     }
 
     #[test]
