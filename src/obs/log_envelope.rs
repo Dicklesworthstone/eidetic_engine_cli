@@ -109,6 +109,13 @@ impl LogEnvelope {
         line.push('\n');
         Ok(line)
     }
+
+    pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        let line = self
+            .to_json_line()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        writer.write_all(line.as_bytes())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

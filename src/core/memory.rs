@@ -22,6 +22,7 @@ use crate::models::{
     DomainError, MemoryContent, MemoryId, MemoryKind, MemoryLevel, ProvenanceUri, Tag, TrustClass,
     UnitScore, WorkspaceId,
 };
+use crate::obs::{AuditEvent, AuditOutcome, now_rfc3339_nanos};
 
 /// A memory with its associated tags for display.
 #[derive(Clone, Debug, PartialEq)]
@@ -328,6 +329,8 @@ pub fn remember_memory(
             message: format!("Failed to store memory: {error}"),
             repair: Some("ee doctor".to_string()),
         })?;
+
+    append_remember_audit_jsonl(&prepared, &audit_id, &memory_id, &memory_input)?;
 
     let (auto_links, auto_link_status, auto_link_degradations) =
         match create_auto_links_for_remember(
@@ -885,6 +888,46 @@ fn remember_audit_details(memory_id: &str, input: &CreateMemoryInput) -> String 
         "tagCount": input.tags.len(),
     })
     .to_string()
+}
+
+fn append_remember_audit_jsonl(
+    prepared: &PreparedRememberMemory,
+    audit_id: &str,
+    memory_id: &str,
+    input: &CreateMemoryInput,
+) -> Result<(), DomainError> {
+    let audit_dir = prepared
+        .database_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| prepared.workspace_path.join(".ee"));
+    let audit_path = audit_dir.join("audit.jsonl");
+    let event = AuditEvent::new(
+        now_rfc3339_nanos(),
+        "ee remember",
+        audit_actions::MEMORY_CREATE,
+        format!("memory:{memory_id}"),
+        AuditOutcome::Success,
+    )
+    .with_field("audit_id", serde_json::json!(audit_id))
+    .with_field(
+        "workspace_id",
+        serde_json::json!(input.workspace_id.clone()),
+    )
+    .with_field("memory_id", serde_json::json!(memory_id))
+    .with_field("level", serde_json::json!(input.level.clone()))
+    .with_field("kind", serde_json::json!(input.kind.clone()))
+    .with_field("command", serde_json::json!("ee remember"));
+
+    event
+        .append_to_path(&audit_path)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Remembered memory but failed to append audit JSONL stream at {}: {error}",
+                audit_path.display()
+            ),
+            repair: Some("ee doctor".to_owned()),
+        })
 }
 
 const REMEMBER_AUTO_LINK_LIMIT: u32 = 8;
