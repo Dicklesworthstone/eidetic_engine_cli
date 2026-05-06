@@ -359,7 +359,7 @@ impl WhyReport {
 pub struct WhyOptions<'a> {
     /// Database path.
     pub database_path: &'a Path,
-    /// Memory ID to explain.
+    /// Memory ID or `result:<doc-id>` search result target to explain.
     pub memory_id: &'a str,
     /// Confidence threshold for selection (default 0.5).
     pub confidence_threshold: f32,
@@ -375,45 +375,44 @@ impl<'a> WhyOptions<'a> {
 /// Explains why a memory was stored, how it would be retrieved,
 /// and how it would be selected for context packs.
 pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
+    let memory_id = resolve_why_memory_id(options.memory_id);
+
     let conn = match DbConnection::open_file(options.database_path) {
         Ok(c) => c,
         Err(e) => {
             return WhyReport::error(
-                options.memory_id.to_string(),
+                memory_id.to_string(),
                 format!("Failed to open database: {e}"),
             );
         }
     };
 
-    let memory = match conn.get_memory(options.memory_id) {
+    let memory = match conn.get_memory(memory_id) {
         Ok(Some(m)) => m,
-        Ok(None) => return WhyReport::not_found(options.memory_id.to_string()),
+        Ok(None) => return WhyReport::not_found(memory_id.to_string()),
         Err(e) => {
             return WhyReport::error(
-                options.memory_id.to_string(),
+                memory_id.to_string(),
                 format!("Failed to query memory: {e}"),
             );
         }
     };
 
-    let tags = match conn.get_memory_tags(options.memory_id) {
+    let tags = match conn.get_memory_tags(memory_id) {
         Ok(t) => t,
         Err(e) => {
-            return WhyReport::error(
-                options.memory_id.to_string(),
-                format!("Failed to query tags: {e}"),
-            );
+            return WhyReport::error(memory_id.to_string(), format!("Failed to query tags: {e}"));
         }
     };
 
     // Fetch contradiction feedback events (EE-263)
-    let contradictions = fetch_contradictions(&conn, options.memory_id);
+    let contradictions = fetch_contradictions(&conn, memory_id);
 
     // Fetch memory links (EE-LINK-USAGE-001)
-    let links = fetch_links(&conn, options.memory_id);
+    let links = fetch_links(&conn, memory_id);
 
     // Fetch rationale traces (EE-RATIONALE-TRACE-001)
-    let rationale_traces = fetch_rationale_traces(&conn, &memory.workspace_id, options.memory_id);
+    let rationale_traces = fetch_rationale_traces(&conn, &memory.workspace_id, memory_id);
 
     let validity = memory_validity(&memory.valid_from, &memory.valid_to);
     let storage = StorageExplanation {
@@ -443,11 +442,11 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
         compute_selection_score(memory.confidence, memory.utility, memory.importance);
     let above_threshold = memory.confidence >= options.confidence_threshold;
 
-    let latest_pack_selection = match latest_pack_selection(&conn, options.memory_id) {
+    let latest_pack_selection = match latest_pack_selection(&conn, memory_id) {
         Ok(selection) => selection,
         Err(message) => {
             let report = build_report(
-                options,
+                memory_id,
                 storage,
                 retrieval,
                 ReportSelectionInputs {
@@ -470,7 +469,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     };
 
     build_report(
-        options,
+        memory_id,
         storage,
         retrieval,
         ReportSelectionInputs {
@@ -485,6 +484,13 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     )
 }
 
+fn resolve_why_memory_id(target_id: &str) -> &str {
+    target_id
+        .strip_prefix("result:")
+        .filter(|doc_id| !doc_id.trim().is_empty())
+        .unwrap_or(target_id)
+}
+
 struct ReportSelectionInputs {
     is_active: bool,
     selection_score: f32,
@@ -496,7 +502,7 @@ struct ReportSelectionInputs {
 }
 
 fn build_report(
-    options: &WhyOptions<'_>,
+    memory_id: &str,
     storage: StorageExplanation,
     retrieval: RetrievalExplanation,
     selection_inputs: ReportSelectionInputs,
@@ -515,7 +521,7 @@ fn build_report(
         latest_pack_selection: selection_inputs.latest_pack_selection,
     };
 
-    WhyReport::found(options.memory_id.to_string(), storage, retrieval, selection)
+    WhyReport::found(memory_id.to_string(), storage, retrieval, selection)
         .with_contradictions(selection_inputs.contradictions)
         .with_links(selection_inputs.links)
         .with_rationale_traces(selection_inputs.rationale_traces)
@@ -720,6 +726,24 @@ mod tests {
     }
 
     #[test]
+    fn result_target_resolves_to_search_doc_id() -> TestResult {
+        ensure(
+            resolve_why_memory_id("result:mem_00000000000000000000000001"),
+            "mem_00000000000000000000000001",
+            "result target",
+        )
+    }
+
+    #[test]
+    fn empty_result_target_stays_queryable_for_not_found_errors() -> TestResult {
+        ensure(
+            resolve_why_memory_id("result:"),
+            "result:",
+            "empty result target",
+        )
+    }
+
+    #[test]
     fn determine_origin_for_explicit_memory() -> TestResult {
         let origin = determine_origin("human_explicit");
         ensure(
@@ -755,11 +779,7 @@ mod tests {
             selected_at: "2026-04-29T12:00:00Z".to_string(),
         };
         let report = build_report(
-            &WhyOptions {
-                database_path: Path::new("/tmp/unused.db"),
-                memory_id: "mem_00000000000000000000000001",
-                confidence_threshold: WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
-            },
+            "mem_00000000000000000000000001",
             StorageExplanation {
                 origin: "Explicitly remembered via `ee remember`".to_string(),
                 trust_class: "human_explicit".to_string(),

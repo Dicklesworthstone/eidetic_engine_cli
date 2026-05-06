@@ -163,6 +163,74 @@ fn why_response_schema_is_ee_response_v1() -> TestResult {
 }
 
 #[test]
+fn why_accepts_result_doc_id_targets() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(0), "init exit")?;
+
+    let remember = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "Result target explanation memory for release diagnostics.",
+        "--level",
+        "episodic",
+        "--kind",
+        "fact",
+        "--tags",
+        "result-target,explainability",
+        "--json",
+    ])?;
+    persist_artifact("result_target_remember", &remember);
+    ensure_equal(&remember.status.code(), &Some(0), "remember exit")?;
+
+    let rebuild = run_ee(&["--workspace", &workspace, "index", "rebuild", "--json"])?;
+    ensure_equal(&rebuild.status.code(), &Some(0), "rebuild exit")?;
+
+    let search = run_ee(&[
+        "--workspace",
+        &workspace,
+        "search",
+        "release diagnostics",
+        "--limit",
+        "1",
+        "--json",
+    ])?;
+    persist_artifact("result_target_search", &search);
+    ensure_equal(&search.status.code(), &Some(0), "search exit")?;
+    let search_json = stdout_json(&search)?;
+    persist_json_artifact("result_target_search", &search_json);
+    let doc_id = search_json["data"]["results"][0]["docId"]
+        .as_str()
+        .ok_or_else(|| "search result docId must be a string".to_string())?;
+    let target = format!("result:{doc_id}");
+
+    let why = run_ee(&["--workspace", &workspace, "why", &target, "--json"])?;
+    persist_artifact("result_target_why", &why);
+    ensure_equal(&why.status.code(), &Some(0), "why exit")?;
+
+    let why_json = stdout_json(&why)?;
+    persist_json_artifact("result_target_why", &why_json);
+
+    ensure_equal(
+        &why_json["data"]["memoryId"],
+        &serde_json::json!(doc_id),
+        "result target resolves to underlying document id",
+    )?;
+    ensure_equal(
+        &why_json["data"]["found"],
+        &serde_json::json!(true),
+        "found",
+    )?;
+    ensure(
+        why_json["data"]["retrieval"].is_object(),
+        "result target must include retrieval explanation",
+    )
+}
+
+#[test]
 fn why_storage_section_is_complete() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let workspace = tempdir.path().to_string_lossy().to_string();
