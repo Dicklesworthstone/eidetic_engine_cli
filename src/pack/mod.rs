@@ -2931,8 +2931,7 @@ mod tests {
     fn estimate_tokens_default_uses_tiktoken_cl100k_base() -> TestResult {
         let content = "test content";
         let default_result = estimate_tokens_default(content);
-        let explicit_result =
-            estimate_tokens(content, TokenEstimationStrategy::TiktokenCl100kBase);
+        let explicit_result = estimate_tokens(content, TokenEstimationStrategy::TiktokenCl100kBase);
         ensure_equal(
             &default_result,
             &explicit_result,
@@ -4145,6 +4144,81 @@ mod tests {
             &item.redactions,
             &vec![PackItemRedaction::new("anthropic_api_key")],
             "selected pack item records redaction reason",
+        )
+    }
+
+    #[test]
+    fn submodular_draft_used_tokens_match_post_redaction_content() -> TestResult {
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let raw_value = format!("{}{}", concat!("sk", "-ant", "-api03", "-"), "B".repeat(52));
+        let original_estimate = 80;
+        let content = format!("Facility selection must mask {raw_value} before budgeting.");
+
+        let draft = assemble_draft_with_profile(
+            ContextPackProfile::Submodular,
+            "protect context pack secrets",
+            budget,
+            vec![candidate_with_content(
+                43,
+                1.0,
+                0.8,
+                original_estimate,
+                content,
+            )?],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let item = draft
+            .items
+            .first()
+            .ok_or_else(|| "expected selected item".to_string())?;
+
+        ensure(
+            !item.content.contains(&raw_value),
+            "submodular pack item should not retain raw secret-like value",
+        )?;
+        let expected_rendered_tokens = estimate_tokens_default(&item.content);
+        ensure_equal(
+            &item.estimated_tokens,
+            &expected_rendered_tokens,
+            "submodular item token estimate matches post-redaction content",
+        )?;
+        ensure(
+            item.estimated_tokens < original_estimate,
+            "submodular item should not keep pre-redaction token estimate",
+        )?;
+        ensure_equal(
+            &draft.used_tokens,
+            &expected_rendered_tokens,
+            "submodular draft used tokens match rendered content",
+        )?;
+        ensure_equal(
+            &draft.selection_certificate.budget_used,
+            &expected_rendered_tokens,
+            "submodular certificate budget uses rendered content",
+        )?;
+        ensure_equal(
+            &draft
+                .selection_certificate
+                .selected_items
+                .first()
+                .map(|item| item.token_cost),
+            &Some(expected_rendered_tokens),
+            "submodular selected token cost uses rendered content",
+        )?;
+        ensure_equal(
+            &draft
+                .selection_certificate
+                .steps
+                .first()
+                .map(|step| step.token_cost),
+            &Some(expected_rendered_tokens),
+            "submodular step token cost uses rendered content",
+        )?;
+        ensure_equal(
+            &item.redactions,
+            &vec![PackItemRedaction::new("anthropic_api_key")],
+            "submodular selected pack item records redaction reason",
         )
     }
 
