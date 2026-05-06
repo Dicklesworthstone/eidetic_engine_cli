@@ -803,10 +803,20 @@ impl EffectManifest {
             ),
             CommandEffect::read_only("analyze science-status", "Report science readiness"),
             CommandEffect::read_only("agent-docs", "Display agent documentation"),
+            CommandEffect::read_only("audit diff", "Show audit log mutations in a time window"),
+            CommandEffect::read_only("audit show", "Show one audit log row"),
+            CommandEffect::read_only("audit timeline", "List audit log rows"),
+            CommandEffect::read_only("audit verify", "Verify audit hash-chain integrity"),
             CommandEffect::read_only("backup inspect", "Inspect backup manifest"),
             CommandEffect::read_only("backup list", "List backup manifests"),
             CommandEffect::read_only("backup verify", "Verify backup manifest and contents"),
             CommandEffect::read_only("capabilities", "Report feature availability"),
+            CommandEffect::read_only("certificate list", "List persisted certificate records"),
+            CommandEffect::read_only("certificate show", "Inspect a persisted certificate record"),
+            CommandEffect::read_only(
+                "certificate verify",
+                "Verify persisted certificate hash and signature evidence",
+            ),
             CommandEffect::read_only("check", "Quick posture summary"),
             CommandEffect::read_only("context", "Assemble context pack (reads only)"),
             CommandEffect::read_only("curate candidates", "List curation candidates"),
@@ -904,26 +914,6 @@ impl EffectManifest {
     fn degraded_unavailable_commands() -> Vec<CommandEffect> {
         vec![
             CommandEffect::degraded_unavailable(
-                "audit timeline",
-                "audit_log_unavailable",
-                "Audit timeline abstains until persisted audit log records exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "audit show",
-                "audit_log_unavailable",
-                "Audit operation inspection abstains until persisted audit log records exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "audit diff",
-                "audit_log_unavailable",
-                "Audit diff abstains until persisted audit log records exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "audit verify",
-                "audit_log_unavailable",
-                "Audit verification abstains until persisted audit hash chains exist",
-            ),
-            CommandEffect::degraded_unavailable(
                 "causal trace",
                 "causal_evidence_unavailable",
                 "Causal tracing abstains until real evidence ledgers exist",
@@ -942,21 +932,6 @@ impl EffectManifest {
                 "causal promote-plan",
                 "causal_evidence_unavailable",
                 "Causal promotion planning abstains until real evidence ledgers exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "certificate list",
-                "certificate_store_unavailable",
-                "Certificate listing abstains until manifest storage exists",
-            ),
-            CommandEffect::degraded_unavailable(
-                "certificate show",
-                "certificate_store_unavailable",
-                "Certificate inspection abstains until manifest storage exists",
-            ),
-            CommandEffect::degraded_unavailable(
-                "certificate verify",
-                "certificate_store_unavailable",
-                "Certificate verification abstains until manifest storage exists",
             ),
             CommandEffect::degraded_unavailable(
                 "claim list",
@@ -1015,11 +990,6 @@ impl EffectManifest {
                 "economy prune-plan",
                 "economy_metrics_unavailable",
                 "Economy prune planning abstains until persisted workspace metrics exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "diag quarantine",
-                "quarantine_trust_state_unavailable",
-                "Quarantine diagnostics abstain until persistent source trust state exists",
             ),
             CommandEffect::degraded_unavailable(
                 "eval run",
@@ -1156,15 +1126,17 @@ impl EffectManifest {
                 "recorder_store_unavailable",
                 "Recorder finish abstains until event storage exists",
             ),
-            CommandEffect::degraded_unavailable(
+            CommandEffect::read_only(
                 "recorder tail",
-                "recorder_tail_unavailable",
-                "Recorder tail abstains until persisted event tailing exists",
+                "Recorder tail reads persisted recorder events without mutation",
             ),
-            CommandEffect::degraded_unavailable(
+            CommandEffect::read_only(
+                "recorder follow",
+                "Recorder follow streams persisted recorder events without mutation",
+            ),
+            CommandEffect::read_only(
                 "recorder import",
-                "recorder_tail_unavailable",
-                "Recorder import planning abstains until persisted event tailing exists",
+                "Recorder import planning is read-only unless explicitly promoted to execution",
             ),
             CommandEffect::read_only(
                 "rehearse plan",
@@ -2049,7 +2021,6 @@ mod tests {
         let manifest = EffectManifest::build();
 
         for (command, code) in [
-            ("audit timeline", "audit_log_unavailable"),
             ("demo run", "demo_command_execution_unavailable"),
             ("handoff create", "handoff_unavailable"),
             ("procedure export", "procedure_store_unavailable"),

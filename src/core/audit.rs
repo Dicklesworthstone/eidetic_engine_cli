@@ -1,20 +1,23 @@
-//! Operation audit timeline and inspection (EE-AUDIT-001).
+//! Operation audit timeline and inspection.
 //!
-//! Provides an agent-facing audit timeline for inspecting EE's own operations.
-//! Commands are read-only and do not mutate audit records.
+//! Audit commands are read-only projections over the persisted `audit_log`
+//! table. Mutating commands append rows through `ee-db`; this module only
+//! lists, shows, diffs, and verifies those rows.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value as JsonValue, json};
 
+use crate::db::{DbConnection, StoredAuditEntry, compute_audit_row_hash};
 use crate::models::DomainError;
 
 /// Schema for audit timeline response.
 pub const AUDIT_TIMELINE_SCHEMA_V1: &str = "ee.audit.timeline.v1";
 
-/// Schema for audit operation record.
-pub const AUDIT_OPERATION_SCHEMA_V1: &str = "ee.audit.operation.v1";
+/// Schema for audit show response.
+pub const AUDIT_SHOW_SCHEMA_V1: &str = "ee.audit.show.v1";
 
 /// Schema for audit diff response.
 pub const AUDIT_DIFF_SCHEMA_V1: &str = "ee.audit.diff.v1";
@@ -22,111 +25,63 @@ pub const AUDIT_DIFF_SCHEMA_V1: &str = "ee.audit.diff.v1";
 /// Schema for audit verify response.
 pub const AUDIT_VERIFY_SCHEMA_V1: &str = "ee.audit.verify.v1";
 
-// ============================================================================
-// Effect and Outcome Types
-// ============================================================================
-
-/// Effect class describing what a command may have done.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuditEffectClass {
-    ReadOnly,
-    DerivedArtifactWrite,
-    DurableMemoryWrite,
-    WorkspaceFileWrite,
-    ConfigWrite,
-    ExternalIo,
-}
-
-impl AuditEffectClass {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ReadOnly => "read_only",
-            Self::DerivedArtifactWrite => "derived_artifact_write",
-            Self::DurableMemoryWrite => "durable_memory_write",
-            Self::WorkspaceFileWrite => "workspace_file_write",
-            Self::ConfigWrite => "config_write",
-            Self::ExternalIo => "external_io",
-        }
-    }
-}
-
-/// Outcome status of an audited operation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuditOutcome {
-    Success,
-    Failure,
-    Cancelled,
-    DryRun,
-    Rollback,
-}
-
-impl AuditOutcome {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::Failure => "failure",
-            Self::Cancelled => "cancelled",
-            Self::DryRun => "dry_run",
-            Self::Rollback => "rollback",
-        }
-    }
-}
-
-/// Redaction posture for an audit record.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RedactionPosture {
-    Full,
-    Partial,
-    None,
-}
-
-impl RedactionPosture {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Full => "full",
-            Self::Partial => "partial",
-            Self::None => "none",
-        }
-    }
-}
-
-// ============================================================================
-// Timeline Operation
-// ============================================================================
-
 /// Options for listing the audit timeline.
 #[derive(Clone, Debug, Default)]
 pub struct AuditTimelineOptions {
     pub workspace: PathBuf,
+    pub database_path: Option<PathBuf>,
     pub since: Option<String>,
+    pub surface: Option<String>,
     pub limit: u32,
     pub cursor: Option<String>,
 }
 
-/// Summary of an operation in the timeline.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Options for showing one audit row.
+#[derive(Clone, Debug, Default)]
+pub struct AuditShowOptions {
+    pub workspace: PathBuf,
+    pub database_path: Option<PathBuf>,
+    pub audit_id: String,
+}
+
+/// Options for showing audit rows between two timestamps.
+#[derive(Clone, Debug, Default)]
+pub struct AuditDiffOptions {
+    pub workspace: PathBuf,
+    pub database_path: Option<PathBuf>,
+    pub from: String,
+    pub to: String,
+}
+
+/// Options for verifying audit integrity.
+#[derive(Clone, Debug, Default)]
+pub struct AuditVerifyOptions {
+    pub workspace: PathBuf,
+    pub database_path: Option<PathBuf>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+}
+
+/// Summary of a persisted audit row.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditTimelineEntry {
-    pub operation_id: String,
-    pub command_path: String,
-    pub effect_class: String,
-    pub outcome: String,
-    pub dry_run: bool,
+    pub id: String,
+    pub timestamp: String,
+    pub actor: Option<String>,
+    pub surface: String,
+    pub mutation_kind: String,
+    pub before_hash: Option<String>,
+    pub after_hash: Option<String>,
+    pub prev_row_hash: Option<String>,
+    pub this_row_hash: Option<String>,
     pub workspace_id: Option<String>,
-    pub changed_surfaces: Vec<String>,
-    pub redaction_posture: String,
-    pub degradation_codes: Vec<String>,
-    pub started_at: String,
-    pub finished_at: Option<String>,
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
+    pub details: Option<JsonValue>,
 }
 
 /// Pagination metadata for timeline.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TimelinePagination {
     pub total_count: u32,
     pub returned_count: u32,
@@ -135,12 +90,11 @@ pub struct TimelinePagination {
 }
 
 /// Report from listing the audit timeline.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditTimelineReport {
     pub schema: String,
     pub entries: Vec<AuditTimelineEntry>,
     pub pagination: TimelinePagination,
-    pub generated_at: String,
 }
 
 impl AuditTimelineReport {
@@ -150,127 +104,23 @@ impl AuditTimelineReport {
     }
 }
 
-/// List recent operations in the audit timeline.
-pub fn list_timeline(options: &AuditTimelineOptions) -> Result<AuditTimelineReport, DomainError> {
-    let now = Utc::now().to_rfc3339();
-
-    let entries = vec![
-        AuditTimelineEntry {
-            operation_id: "op_001".to_owned(),
-            command_path: "ee init".to_owned(),
-            effect_class: AuditEffectClass::DurableMemoryWrite.as_str().to_owned(),
-            outcome: AuditOutcome::Success.as_str().to_owned(),
-            dry_run: false,
-            workspace_id: Some("ws_default".to_owned()),
-            changed_surfaces: vec!["memories".to_owned(), "audit".to_owned()],
-            redaction_posture: RedactionPosture::Partial.as_str().to_owned(),
-            degradation_codes: vec![],
-            started_at: now.clone(),
-            finished_at: Some(now.clone()),
-        },
-        AuditTimelineEntry {
-            operation_id: "op_002".to_owned(),
-            command_path: "ee remember".to_owned(),
-            effect_class: AuditEffectClass::DurableMemoryWrite.as_str().to_owned(),
-            outcome: AuditOutcome::Success.as_str().to_owned(),
-            dry_run: false,
-            workspace_id: Some("ws_default".to_owned()),
-            changed_surfaces: vec!["memories".to_owned()],
-            redaction_posture: RedactionPosture::Partial.as_str().to_owned(),
-            degradation_codes: vec![],
-            started_at: now.clone(),
-            finished_at: Some(now.clone()),
-        },
-        AuditTimelineEntry {
-            operation_id: "op_003".to_owned(),
-            command_path: "ee search".to_owned(),
-            effect_class: AuditEffectClass::ReadOnly.as_str().to_owned(),
-            outcome: AuditOutcome::Success.as_str().to_owned(),
-            dry_run: false,
-            workspace_id: Some("ws_default".to_owned()),
-            changed_surfaces: vec![],
-            redaction_posture: RedactionPosture::None.as_str().to_owned(),
-            degradation_codes: vec![],
-            started_at: now.clone(),
-            finished_at: Some(now.clone()),
-        },
-    ];
-
-    let limited: Vec<_> = entries.into_iter().take(options.limit as usize).collect();
-
-    Ok(AuditTimelineReport {
-        schema: AUDIT_TIMELINE_SCHEMA_V1.to_owned(),
-        pagination: TimelinePagination {
-            total_count: 3,
-            returned_count: limited.len() as u32,
-            has_more: false,
-            next_cursor: None,
-        },
-        entries: limited,
-        generated_at: now,
-    })
+/// Linked target snapshot included by `ee audit show`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LinkedSnapshot {
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
+    pub found: bool,
+    pub snapshot_hash: Option<String>,
+    pub snapshot: Option<JsonValue>,
 }
 
-// ============================================================================
-// Show Operation
-// ============================================================================
-
-/// Options for showing an operation record.
-#[derive(Clone, Debug, Default)]
-pub struct AuditShowOptions {
-    pub workspace: PathBuf,
-    pub operation_id: String,
-}
-
-/// Changed surface summary.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChangedSurface {
-    pub surface_type: String,
-    pub surface_name: String,
-    pub rows_affected: Option<u32>,
-    pub bytes_changed: Option<u64>,
-}
-
-/// Detailed operation record.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AuditOperationRecord {
-    pub operation_id: String,
-    pub command_path: String,
-    pub command_hash: String,
-    pub workspace_id: Option<String>,
-    pub actor_identity: Option<String>,
-    pub expected_effect: String,
-    pub observed_effect: String,
-    pub effect_match: bool,
-    pub outcome: String,
-    pub dry_run: bool,
-    pub idempotency_key: Option<String>,
-    pub transaction_status: String,
-    pub changed_surfaces: Vec<ChangedSurface>,
-    pub linked_evidence_ids: Vec<String>,
-    pub redaction_summary: RedactionSummary,
-    pub degradation_codes: Vec<String>,
-    pub hash_chain_valid: bool,
-    pub started_at: String,
-    pub finished_at: Option<String>,
-    pub duration_ms: Option<u64>,
-}
-
-/// Redaction summary for an operation.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RedactionSummary {
-    pub posture: String,
-    pub fields_redacted: u32,
-    pub patterns_applied: Vec<String>,
-}
-
-/// Report from showing an operation.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Report from showing an audit row.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditShowReport {
     pub schema: String,
-    pub operation: AuditOperationRecord,
-    pub next_commands: Vec<String>,
-    pub generated_at: String,
+    pub row: AuditTimelineEntry,
+    pub linked_snapshot: LinkedSnapshot,
+    pub hash_chain_valid: bool,
 }
 
 impl AuditShowReport {
@@ -280,94 +130,14 @@ impl AuditShowReport {
     }
 }
 
-/// Show details of an audited operation.
-pub fn show_operation(options: &AuditShowOptions) -> Result<AuditShowReport, DomainError> {
-    let now = Utc::now().to_rfc3339();
-
-    let operation = AuditOperationRecord {
-        operation_id: options.operation_id.clone(),
-        command_path: "ee remember".to_owned(),
-        command_hash: "sha256:abc123def456".to_owned(),
-        workspace_id: Some("ws_default".to_owned()),
-        actor_identity: Some("agent:claude-code".to_owned()),
-        expected_effect: AuditEffectClass::DurableMemoryWrite.as_str().to_owned(),
-        observed_effect: AuditEffectClass::DurableMemoryWrite.as_str().to_owned(),
-        effect_match: true,
-        outcome: AuditOutcome::Success.as_str().to_owned(),
-        dry_run: false,
-        idempotency_key: Some("idem_abc123".to_owned()),
-        transaction_status: "committed".to_owned(),
-        changed_surfaces: vec![
-            ChangedSurface {
-                surface_type: "db_table".to_owned(),
-                surface_name: "memories".to_owned(),
-                rows_affected: Some(1),
-                bytes_changed: Some(256),
-            },
-            ChangedSurface {
-                surface_type: "db_table".to_owned(),
-                surface_name: "audit_log".to_owned(),
-                rows_affected: Some(1),
-                bytes_changed: Some(128),
-            },
-        ],
-        linked_evidence_ids: vec!["ev_001".to_owned()],
-        redaction_summary: RedactionSummary {
-            posture: RedactionPosture::Partial.as_str().to_owned(),
-            fields_redacted: 2,
-            patterns_applied: vec!["api_key".to_owned(), "password".to_owned()],
-        },
-        degradation_codes: vec![],
-        hash_chain_valid: true,
-        started_at: now.clone(),
-        finished_at: Some(now.clone()),
-        duration_ms: Some(42),
-    };
-
-    Ok(AuditShowReport {
-        schema: AUDIT_OPERATION_SCHEMA_V1.to_owned(),
-        operation,
-        next_commands: vec![
-            format!("ee audit diff {} --json", options.operation_id),
-            "ee audit verify --json".to_owned(),
-        ],
-        generated_at: now,
-    })
-}
-
-// ============================================================================
-// Diff Operation
-// ============================================================================
-
-/// Options for showing operation diff.
-#[derive(Clone, Debug, Default)]
-pub struct AuditDiffOptions {
-    pub workspace: PathBuf,
-    pub operation_id: String,
-}
-
-/// State delta for a surface.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct StateDelta {
-    pub surface_name: String,
-    pub surface_type: String,
-    pub declared_change: String,
-    pub observed_change: String,
-    pub match_status: String,
-    pub row_count_before: Option<u32>,
-    pub row_count_after: Option<u32>,
-    pub content_hash_before: Option<String>,
-    pub content_hash_after: Option<String>,
-}
-
-/// Report from showing operation diff.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Report from showing audit mutations in a time window.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditDiffReport {
     pub schema: String,
-    pub operation_id: String,
-    pub deltas: Vec<StateDelta>,
-    pub all_match: bool,
-    pub generated_at: String,
+    pub from: String,
+    pub to: String,
+    pub entries: Vec<AuditTimelineEntry>,
+    pub row_count: u32,
 }
 
 impl AuditDiffReport {
@@ -377,89 +147,23 @@ impl AuditDiffReport {
     }
 }
 
-/// Show state deltas for an operation.
-pub fn show_diff(options: &AuditDiffOptions) -> Result<AuditDiffReport, DomainError> {
-    let now = Utc::now().to_rfc3339();
-
-    let deltas = vec![
-        StateDelta {
-            surface_name: "memories".to_owned(),
-            surface_type: "db_table".to_owned(),
-            declared_change: "insert".to_owned(),
-            observed_change: "insert".to_owned(),
-            match_status: "match".to_owned(),
-            row_count_before: Some(10),
-            row_count_after: Some(11),
-            content_hash_before: Some("sha256:aaa111".to_owned()),
-            content_hash_after: Some("sha256:bbb222".to_owned()),
-        },
-        StateDelta {
-            surface_name: "audit_log".to_owned(),
-            surface_type: "db_table".to_owned(),
-            declared_change: "insert".to_owned(),
-            observed_change: "insert".to_owned(),
-            match_status: "match".to_owned(),
-            row_count_before: Some(50),
-            row_count_after: Some(51),
-            content_hash_before: Some("sha256:ccc333".to_owned()),
-            content_hash_after: Some("sha256:ddd444".to_owned()),
-        },
-    ];
-
-    let all_match = deltas.iter().all(|d| d.match_status == "match");
-
-    Ok(AuditDiffReport {
-        schema: AUDIT_DIFF_SCHEMA_V1.to_owned(),
-        operation_id: options.operation_id.clone(),
-        deltas,
-        all_match,
-        generated_at: now,
-    })
-}
-
-// ============================================================================
-// Verify Operation
-// ============================================================================
-
-/// Options for verifying audit integrity.
-#[derive(Clone, Debug, Default)]
-pub struct AuditVerifyOptions {
-    pub workspace: PathBuf,
-    pub since: Option<String>,
-}
-
-/// Verification issue found.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Verification issue found while walking the chain.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerificationIssue {
     pub code: String,
-    pub severity: String,
+    pub audit_id: Option<String>,
     pub message: String,
-    pub operation_id: Option<String>,
-    pub next_action: String,
-}
-
-/// Verification summary.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct VerificationSummary {
-    pub operations_checked: u32,
-    pub hash_chain_valid: bool,
-    pub missing_records: u32,
-    pub malformed_entries: u32,
-    pub effect_mismatches: u32,
-    pub redaction_failures: u32,
-    pub schema_version_issues: u32,
-    pub timestamp_order_issues: u32,
 }
 
 /// Report from verifying audit integrity.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditVerifyReport {
     pub schema: String,
-    pub summary: VerificationSummary,
+    pub integrity_ok: bool,
+    pub rows: u32,
+    pub last_hash: Option<String>,
+    pub first_break: Option<String>,
     pub issues: Vec<VerificationIssue>,
-    pub overall_valid: bool,
-    pub next_actions: Vec<String>,
-    pub generated_at: String,
 }
 
 impl AuditVerifyReport {
@@ -469,102 +173,641 @@ impl AuditVerifyReport {
     }
 }
 
-/// Verify audit integrity for a window.
-pub fn verify_audit(_options: &AuditVerifyOptions) -> Result<AuditVerifyReport, DomainError> {
-    let now = Utc::now().to_rfc3339();
+/// List persisted operations in chronological order.
+pub fn list_timeline(options: &AuditTimelineOptions) -> Result<AuditTimelineReport, DomainError> {
+    let entries = load_entries(&options.workspace, options.database_path.as_deref())?;
+    let since = parse_optional_instant(options.since.as_deref(), "since")?;
+    let offset = parse_cursor(options.cursor.as_deref())?;
+    let filtered = filter_entries(entries, since, None, options.surface.as_deref())?;
+    let total_count = u32::try_from(filtered.len()).unwrap_or(u32::MAX);
+    let limit = usize::try_from(options.limit.max(1)).unwrap_or(usize::MAX);
+    let page: Vec<_> = filtered.into_iter().skip(offset).take(limit).collect();
+    let next_offset = offset.saturating_add(page.len());
+    let has_more = next_offset < usize::try_from(total_count).unwrap_or(usize::MAX);
 
-    let summary = VerificationSummary {
-        operations_checked: 15,
-        hash_chain_valid: true,
-        missing_records: 0,
-        malformed_entries: 0,
-        effect_mismatches: 0,
-        redaction_failures: 0,
-        schema_version_issues: 0,
-        timestamp_order_issues: 0,
+    Ok(AuditTimelineReport {
+        schema: AUDIT_TIMELINE_SCHEMA_V1.to_owned(),
+        pagination: TimelinePagination {
+            total_count,
+            returned_count: u32::try_from(page.len()).unwrap_or(u32::MAX),
+            has_more,
+            next_cursor: has_more.then(|| next_offset.to_string()),
+        },
+        entries: page.into_iter().map(AuditTimelineEntry::from).collect(),
+    })
+}
+
+/// Show one persisted audit row and a snapshot of its linked target when known.
+pub fn show_operation(options: &AuditShowOptions) -> Result<AuditShowReport, DomainError> {
+    let database_path =
+        resolved_database_path(&options.workspace, options.database_path.as_deref());
+    let connection = open_database(&database_path)?;
+    let row = connection
+        .get_audit(&options.audit_id)
+        .map_err(|error| storage_error("Failed to load audit row", error))?
+        .ok_or_else(|| DomainError::NotFound {
+            resource: "audit row".to_owned(),
+            id: options.audit_id.clone(),
+            repair: Some("Run `ee audit timeline --json` to list audit row IDs.".to_owned()),
+        })?;
+    let linked_snapshot = linked_snapshot(&connection, &row)?;
+    let hash_chain_valid = verify_entries(
+        &connection
+            .list_audit_entries(None, None)
+            .map_err(|error| storage_error("Failed to list audit rows", error))?,
+        None,
+        None,
+    )?
+    .integrity_ok;
+
+    Ok(AuditShowReport {
+        schema: AUDIT_SHOW_SCHEMA_V1.to_owned(),
+        row: AuditTimelineEntry::from(row),
+        linked_snapshot,
+        hash_chain_valid,
+    })
+}
+
+/// Show audit rows between two RFC 3339 timestamps.
+pub fn show_diff(options: &AuditDiffOptions) -> Result<AuditDiffReport, DomainError> {
+    let from = parse_required_instant(&options.from, "from")?;
+    let to = parse_required_instant(&options.to, "to")?;
+    if from > to {
+        return Err(DomainError::Usage {
+            message: "audit diff requires FROM to be earlier than or equal to TO".to_owned(),
+            repair: Some(
+                "Use `ee audit diff 2026-05-01T00:00:00Z 2026-05-02T00:00:00Z --json`.".to_owned(),
+            ),
+        });
+    }
+
+    let entries = load_entries(&options.workspace, options.database_path.as_deref())?;
+    let filtered = filter_entries(entries, Some(from), Some(to), None)?;
+    let row_count = u32::try_from(filtered.len()).unwrap_or(u32::MAX);
+
+    Ok(AuditDiffReport {
+        schema: AUDIT_DIFF_SCHEMA_V1.to_owned(),
+        from: options.from.clone(),
+        to: options.to.clone(),
+        entries: filtered.into_iter().map(AuditTimelineEntry::from).collect(),
+        row_count,
+    })
+}
+
+/// Verify audit hash-chain integrity for all rows or an optional time window.
+pub fn verify_audit(options: &AuditVerifyOptions) -> Result<AuditVerifyReport, DomainError> {
+    let since = parse_optional_instant(options.since.as_deref(), "since")?;
+    let until = parse_optional_instant(options.until.as_deref(), "until")?;
+    if let (Some(since), Some(until)) = (since, until) {
+        if since > until {
+            return Err(DomainError::Usage {
+                message: "audit verify requires --since to be earlier than or equal to --until"
+                    .to_owned(),
+                repair: Some("Use `ee audit verify --since 2026-05-01T00:00:00Z --until 2026-05-02T00:00:00Z --json`.".to_owned()),
+            });
+        }
+    }
+
+    let database_path =
+        resolved_database_path(&options.workspace, options.database_path.as_deref());
+    let connection = open_database(&database_path)?;
+    let entries = connection
+        .list_audit_entries(None, None)
+        .map_err(|error| storage_error("Failed to list audit rows", error))?;
+
+    verify_entries(&entries, since, until)
+}
+
+fn verify_entries(
+    entries: &[StoredAuditEntry],
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+) -> Result<AuditVerifyReport, DomainError> {
+    let mut ordered = entries.to_vec();
+    sort_entries_chronological(&mut ordered);
+    let filtered = filter_entries(ordered, since, until, None)?;
+    let mut expected_prev_hash = if since.is_some() {
+        filtered
+            .first()
+            .and_then(|entry| entry.prev_row_hash.clone())
+    } else {
+        None
     };
+    let mut issues = Vec::new();
+    let mut first_break = None;
+    let mut last_hash = None;
+
+    for entry in &filtered {
+        if entry.prev_row_hash != expected_prev_hash {
+            push_first_issue(
+                &mut issues,
+                &mut first_break,
+                "prev_hash_mismatch",
+                entry.id.clone(),
+                format!(
+                    "row {} points to {:?}, expected {:?}",
+                    entry.id, entry.prev_row_hash, expected_prev_hash
+                ),
+            );
+        }
+
+        match &entry.this_row_hash {
+            Some(stored_hash) => {
+                let computed = compute_audit_row_hash(entry);
+                if stored_hash != &computed {
+                    push_first_issue(
+                        &mut issues,
+                        &mut first_break,
+                        "row_hash_mismatch",
+                        entry.id.clone(),
+                        format!(
+                            "row {} hash mismatch: stored {}, recomputed {}",
+                            entry.id, stored_hash, computed
+                        ),
+                    );
+                }
+                expected_prev_hash = Some(stored_hash.clone());
+                last_hash = Some(stored_hash.clone());
+            }
+            None => {
+                push_first_issue(
+                    &mut issues,
+                    &mut first_break,
+                    "missing_row_hash",
+                    entry.id.clone(),
+                    format!("row {} is missing this_row_hash", entry.id),
+                );
+                expected_prev_hash = None;
+                last_hash = None;
+            }
+        }
+    }
 
     Ok(AuditVerifyReport {
         schema: AUDIT_VERIFY_SCHEMA_V1.to_owned(),
-        summary,
-        issues: vec![],
-        overall_valid: true,
-        next_actions: vec!["ee audit timeline --json".to_owned()],
-        generated_at: now,
+        integrity_ok: issues.is_empty(),
+        rows: u32::try_from(filtered.len()).unwrap_or(u32::MAX),
+        last_hash,
+        first_break,
+        issues,
     })
+}
+
+fn push_first_issue(
+    issues: &mut Vec<VerificationIssue>,
+    first_break: &mut Option<String>,
+    code: &str,
+    audit_id: String,
+    message: String,
+) {
+    if first_break.is_none() {
+        *first_break = Some(audit_id.clone());
+    }
+    issues.push(VerificationIssue {
+        code: code.to_owned(),
+        audit_id: Some(audit_id),
+        message,
+    });
+}
+
+fn load_entries(
+    workspace: &Path,
+    database_path: Option<&Path>,
+) -> Result<Vec<StoredAuditEntry>, DomainError> {
+    let database_path = resolved_database_path(workspace, database_path);
+    let connection = open_database(&database_path)?;
+    let mut entries = connection
+        .list_audit_entries(None, None)
+        .map_err(|error| storage_error("Failed to list audit rows", error))?;
+    sort_entries_chronological(&mut entries);
+    Ok(entries)
+}
+
+fn filter_entries(
+    entries: Vec<StoredAuditEntry>,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+    surface: Option<&str>,
+) -> Result<Vec<StoredAuditEntry>, DomainError> {
+    let surface = surface.map(str::trim).filter(|value| !value.is_empty());
+    let mut filtered = Vec::new();
+
+    for entry in entries {
+        let timestamp = parse_required_instant(&entry.timestamp, "audit_log.timestamp")?;
+        if since.is_some_and(|bound| timestamp < bound) {
+            continue;
+        }
+        if until.is_some_and(|bound| timestamp > bound) {
+            continue;
+        }
+        if surface.is_some_and(|wanted| entry.surface != wanted) {
+            continue;
+        }
+        filtered.push(entry);
+    }
+
+    Ok(filtered)
+}
+
+fn sort_entries_chronological(entries: &mut [StoredAuditEntry]) {
+    entries.sort_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn linked_snapshot(
+    connection: &DbConnection,
+    entry: &StoredAuditEntry,
+) -> Result<LinkedSnapshot, DomainError> {
+    let target_type = entry.target_type.clone();
+    let target_id = entry.target_id.clone();
+    let Some(target_id_ref) = target_id.as_deref() else {
+        return Ok(LinkedSnapshot {
+            target_type,
+            target_id,
+            found: false,
+            snapshot_hash: None,
+            snapshot: None,
+        });
+    };
+
+    match target_type.as_deref() {
+        Some("memory") => match connection
+            .get_memory(target_id_ref)
+            .map_err(|error| storage_error("Failed to load linked memory snapshot", error))?
+        {
+            Some(memory) => {
+                let snapshot = json!({
+                    "id": memory.id,
+                    "workspace_id": memory.workspace_id,
+                    "level": memory.level,
+                    "kind": memory.kind,
+                    "confidence": memory.confidence,
+                    "trust_class": memory.trust_class,
+                    "tombstoned_at": memory.tombstoned_at,
+                });
+                Ok(LinkedSnapshot {
+                    target_type,
+                    target_id,
+                    found: true,
+                    snapshot_hash: Some(hash_json("memory", &snapshot)),
+                    snapshot: Some(snapshot),
+                })
+            }
+            None => Ok(LinkedSnapshot {
+                target_type,
+                target_id,
+                found: false,
+                snapshot_hash: None,
+                snapshot: None,
+            }),
+        },
+        Some("rule") | Some("procedural_rule") => match connection
+            .get_procedural_rule(target_id_ref)
+            .map_err(|error| storage_error("Failed to load linked rule snapshot", error))?
+        {
+            Some(rule) => {
+                let snapshot = json!({
+                    "id": rule.id,
+                    "workspace_id": rule.workspace_id,
+                    "confidence": rule.confidence,
+                    "trust_class": rule.trust_class,
+                    "scope": rule.scope,
+                    "maturity": rule.maturity,
+                    "protected": rule.protected,
+                    "tombstoned_at": rule.tombstoned_at,
+                });
+                Ok(LinkedSnapshot {
+                    target_type,
+                    target_id,
+                    found: true,
+                    snapshot_hash: Some(hash_json("rule", &snapshot)),
+                    snapshot: Some(snapshot),
+                })
+            }
+            None => Ok(LinkedSnapshot {
+                target_type,
+                target_id,
+                found: false,
+                snapshot_hash: None,
+                snapshot: None,
+            }),
+        },
+        _ => Ok(LinkedSnapshot {
+            target_type,
+            target_id,
+            found: false,
+            snapshot_hash: None,
+            snapshot: None,
+        }),
+    }
+}
+
+fn hash_json(prefix: &str, value: &JsonValue) -> String {
+    format!(
+        "blake3:{}",
+        blake3::hash(format!("{prefix}:{value}").as_bytes()).to_hex()
+    )
+}
+
+fn open_database(database_path: &Path) -> Result<DbConnection, DomainError> {
+    DbConnection::open_file(database_path)
+        .map_err(|error| storage_error("Failed to open database", error))
+}
+
+fn resolved_database_path(workspace: &Path, database_path: Option<&Path>) -> PathBuf {
+    database_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"))
+}
+
+fn parse_cursor(cursor: Option<&str>) -> Result<usize, DomainError> {
+    let Some(raw) = cursor else {
+        return Ok(0);
+    };
+    raw.parse::<usize>().map_err(|_| DomainError::Usage {
+        message: format!("Invalid audit timeline cursor `{raw}`: expected a non-negative offset"),
+        repair: Some(
+            "Use the `next_cursor` value returned by the previous timeline response.".to_owned(),
+        ),
+    })
+}
+
+fn parse_optional_instant(
+    value: Option<&str>,
+    field: &str,
+) -> Result<Option<DateTime<Utc>>, DomainError> {
+    value
+        .map(|raw| parse_required_instant(raw, field))
+        .transpose()
+}
+
+fn parse_required_instant(value: &str, field: &str) -> Result<DateTime<Utc>, DomainError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|error| DomainError::Usage {
+            message: format!("{field} must be an RFC 3339 timestamp: {error}"),
+            repair: Some("Use timestamps such as 2026-05-01T00:00:00Z.".to_owned()),
+        })
+}
+
+fn storage_error(context: &str, error: crate::db::DbError) -> DomainError {
+    DomainError::Storage {
+        message: format!("{context}: {error}"),
+        repair: Some("Run `ee doctor --json` and verify the workspace database.".to_owned()),
+    }
+}
+
+impl From<StoredAuditEntry> for AuditTimelineEntry {
+    fn from(entry: StoredAuditEntry) -> Self {
+        Self {
+            id: entry.id,
+            timestamp: entry.timestamp,
+            actor: entry.actor,
+            surface: entry.surface,
+            mutation_kind: entry.mutation_kind,
+            before_hash: entry.before_hash,
+            after_hash: entry.after_hash,
+            prev_row_hash: entry.prev_row_hash,
+            this_row_hash: entry.this_row_hash,
+            workspace_id: entry.workspace_id,
+            target_type: entry.target_type,
+            target_id: entry.target_id,
+            details: entry
+                .details
+                .as_deref()
+                .and_then(|details| serde_json::from_str(details).ok()),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::db::{CreateAuditInput, CreateMemoryInput, CreateWorkspaceInput};
+
     use super::*;
 
     type TestResult = Result<(), String>;
 
-    #[test]
-    fn timeline_limits_entries() -> TestResult {
-        let options = AuditTimelineOptions {
-            limit: 2,
-            ..Default::default()
-        };
+    fn fixture_workspace(name: &str) -> Result<PathBuf, String> {
+        let root = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("system clock before UNIX_EPOCH: {error}"))?
+            .as_nanos();
+        let path = root
+            .join("ee-test-artifacts")
+            .join("audit")
+            .join(format!("{name}-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(path.join(".ee"))
+            .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
+        Ok(path)
+    }
 
-        let report = list_timeline(&options).map_err(|e| e.message())?;
-        assert!(report.entries.len() <= 2);
+    fn seed_entry(
+        connection: &DbConnection,
+        id: &str,
+        actor: &str,
+        action: &str,
+        target_type: &str,
+        target_id: &str,
+    ) -> Result<(), String> {
+        connection
+            .insert_audit(
+                id,
+                &CreateAuditInput {
+                    workspace_id: Some("wsp_01234567890123456789012345".to_owned()),
+                    actor: Some(actor.to_owned()),
+                    action: action.to_owned(),
+                    target_type: Some(target_type.to_owned()),
+                    target_id: Some(target_id.to_owned()),
+                    details: Some(format!(r#"{{"action":"{action}","target":"{target_id}"}}"#)),
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn seeded_workspace(name: &str) -> Result<PathBuf, String> {
+        let workspace = fixture_workspace(name)?;
+        let database = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_01234567890123456789012345",
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("audit-test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000001",
+                &CreateMemoryInput {
+                    workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Run cargo fmt --check before release.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: Some("file://AGENTS.md".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: vec![],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        seed_entry(
+            &connection,
+            "audit_00000000000000000000000001",
+            "agent-a",
+            "memory.create",
+            "memory",
+            "mem_00000000000000000000000001",
+        )?;
+        seed_entry(
+            &connection,
+            "audit_00000000000000000000000002",
+            "agent-b",
+            "rule.protect",
+            "rule",
+            "rule_missing0000000000000000001",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(workspace)
+    }
+
+    #[test]
+    fn timeline_empty_log_is_valid_json_shape() -> TestResult {
+        let workspace = fixture_workspace("empty")?;
+        let database = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = list_timeline(&AuditTimelineOptions {
+            workspace,
+            limit: 20,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.schema, AUDIT_TIMELINE_SCHEMA_V1);
+        assert!(report.entries.is_empty());
+        assert_eq!(report.pagination.total_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn timeline_filters_by_surface_and_paginates() -> TestResult {
+        let workspace = seeded_workspace("surface")?;
+        let report = list_timeline(&AuditTimelineOptions {
+            workspace,
+            surface: Some("memory".to_owned()),
+            limit: 1,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].surface, "memory");
+        assert_eq!(report.entries[0].actor.as_deref(), Some("agent-a"));
+        assert_eq!(report.pagination.total_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn show_returns_linked_memory_snapshot() -> TestResult {
+        let workspace = seeded_workspace("show")?;
+        let report = show_operation(&AuditShowOptions {
+            workspace,
+            audit_id: "audit_00000000000000000000000001".to_owned(),
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.schema, AUDIT_SHOW_SCHEMA_V1);
+        assert!(report.hash_chain_valid);
+        assert!(report.linked_snapshot.found);
         assert_eq!(
-            report.pagination.returned_count,
-            report.entries.len() as u32
+            report.linked_snapshot.target_id.as_deref(),
+            Some("mem_00000000000000000000000001")
         );
         Ok(())
     }
 
     #[test]
-    fn show_operation_returns_details() -> TestResult {
-        let options = AuditShowOptions {
-            operation_id: "op_test".to_owned(),
+    fn diff_filters_by_time_window() -> TestResult {
+        let workspace = seeded_workspace("diff")?;
+        let report = show_diff(&AuditDiffOptions {
+            workspace,
+            from: "2000-01-01T00:00:00Z".to_owned(),
+            to: "2999-01-01T00:00:00Z".to_owned(),
             ..Default::default()
-        };
+        })
+        .map_err(|error| error.message())?;
 
-        let report = show_operation(&options).map_err(|e| e.message())?;
-        assert_eq!(report.operation.operation_id, "op_test");
-        assert!(report.operation.effect_match);
+        assert_eq!(report.schema, AUDIT_DIFF_SCHEMA_V1);
+        assert_eq!(report.row_count, 2);
+        assert_eq!(report.entries[0].id, "audit_00000000000000000000000001");
         Ok(())
     }
 
     #[test]
-    fn diff_reports_all_match() -> TestResult {
-        let options = AuditDiffOptions {
-            operation_id: "op_test".to_owned(),
+    fn verify_detects_tampered_row() -> TestResult {
+        let workspace = seeded_workspace("tamper")?;
+        let database = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(
+                "UPDATE audit_log SET actor = 'tampered-agent' WHERE id = 'audit_00000000000000000000000002'",
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = verify_audit(&AuditVerifyOptions {
+            workspace,
             ..Default::default()
-        };
+        })
+        .map_err(|error| error.message())?;
 
-        let report = show_diff(&options).map_err(|e| e.message())?;
-        assert!(report.all_match);
-        assert!(!report.deltas.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn verify_returns_valid_summary() -> TestResult {
-        let options = AuditVerifyOptions::default();
-
-        let report = verify_audit(&options).map_err(|e| e.message())?;
-        assert!(report.overall_valid);
-        assert!(report.summary.hash_chain_valid);
-        assert_eq!(report.summary.missing_records, 0);
-        Ok(())
-    }
-
-    #[test]
-    fn effect_class_as_str() {
-        assert_eq!(AuditEffectClass::ReadOnly.as_str(), "read_only");
+        assert!(!report.integrity_ok);
         assert_eq!(
-            AuditEffectClass::DurableMemoryWrite.as_str(),
-            "durable_memory_write"
+            report.first_break.as_deref(),
+            Some("audit_00000000000000000000000002")
         );
+        Ok(())
     }
 
     #[test]
-    fn outcome_as_str() {
-        assert_eq!(AuditOutcome::Success.as_str(), "success");
-        assert_eq!(AuditOutcome::DryRun.as_str(), "dry_run");
+    fn verify_empty_log_is_integrity_ok() -> TestResult {
+        let workspace = fixture_workspace("verify-empty")?;
+        let database = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = verify_audit(&AuditVerifyOptions {
+            workspace,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(report.integrity_ok);
+        assert_eq!(report.rows, 0);
+        assert_eq!(report.last_hash, None);
+        Ok(())
     }
 }

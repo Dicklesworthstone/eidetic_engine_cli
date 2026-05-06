@@ -171,21 +171,29 @@ fn recorder_import_plan_fixture() -> RecorderImportPlanReport {
 fn recorder_tail_report_fixture() -> RecorderTailReport {
     RecorderTailReport {
         schema: RECORDER_TAIL_SCHEMA_V1,
-        run_id: "run_gate17".to_string(),
+        run_id: Some("run_gate17".to_string()),
         events: vec![
             RecorderEventSummary {
                 event_id: "evt_gate17_0001".to_string(),
+                run_id: "run_gate17".to_string(),
                 sequence: 1,
                 event_type: RecorderEventType::UserMessage,
                 timestamp: "2026-01-02T03:04:04Z".to_string(),
                 redacted: true,
+                redaction_status: "redacted".to_string(),
+                event_hash: "blake3:gate17tail0001".to_string(),
+                chain_status: "root".to_string(),
             },
             RecorderEventSummary {
                 event_id: "evt_gate17_0002".to_string(),
+                run_id: "run_gate17".to_string(),
                 sequence: 2,
                 event_type: RecorderEventType::ToolResult,
                 timestamp: "2026-01-02T03:04:05Z".to_string(),
                 redacted: false,
+                redaction_status: "clean".to_string(),
+                event_hash: "blake3:gate17tail0002".to_string(),
+                chain_status: "linked".to_string(),
             },
         ],
         total_events: 2,

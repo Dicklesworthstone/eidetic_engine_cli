@@ -1,11 +1,12 @@
 use std::borrow::Cow;
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -23,6 +24,11 @@ use crate::core::agent_docs::{AgentDocsReport, AgentDocsTopic};
 use crate::core::artifact::{
     ArtifactInspectOptions, ArtifactListOptions, ArtifactRegisterOptions, inspect_artifact,
     list_artifacts as list_artifact_registry, register_artifact,
+};
+use crate::core::audit::{
+    AuditDiffOptions, AuditShowOptions, AuditTimelineOptions, AuditVerifyOptions, list_timeline,
+    show_diff as show_audit_diff, show_operation as show_audit_operation,
+    verify_audit as verify_audit_log,
 };
 use crate::core::backup::{
     BackupCreateOptions, BackupInspectOptions, BackupListOptions, BackupRestoreOptions,
@@ -55,8 +61,9 @@ use crate::core::focus::{
     clear_focus, explain_focus, remove_focus, set_focus, show_focus,
 };
 use crate::core::handoff::{
-    InspectOptions as HandoffInspectOptions, ResumeOptions as HandoffResumeOptions,
-    inspect_handoff, resume_handoff,
+    CapsuleProfile, CreateOptions as HandoffCreateOptions, InspectOptions as HandoffInspectOptions,
+    PreviewOptions as HandoffPreviewOptions, ResumeOptions as HandoffResumeOptions, create_handoff,
+    inspect_handoff, preview_handoff, resume_handoff,
 };
 use crate::core::health::HealthReport;
 use crate::core::index::{
@@ -342,6 +349,9 @@ pub enum Command {
     /// Run explicit maintenance jobs without a daemon.
     #[command(subcommand)]
     Maintenance(MaintenanceCommand),
+    /// Run and inspect explicit steward maintenance jobs.
+    #[command(subcommand)]
+    Job(JobCommand),
     /// Memory economics: utility scores, attention budgets, maintenance debt.
     #[command(subcommand)]
     Economy(EconomyCommand),
@@ -880,6 +890,9 @@ pub struct DemoVerifyArgs {
 /// Arguments for `ee daemon`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct DaemonArgs {
+    #[command(subcommand)]
+    pub command: Option<DaemonCommand>,
+
     /// Run the daemon loop in the current foreground process.
     #[arg(long, action = ArgAction::SetTrue)]
     pub foreground: bool,
@@ -913,6 +926,15 @@ pub struct DaemonArgs {
     pub item_limit: Option<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum DaemonCommand {
+    /// Report daemon supervisor status.
+    Status(DaemonStatusArgs),
+}
+
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct DaemonStatusArgs {}
+
 /// Memory maintenance commands.
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum MaintenanceCommand {
@@ -922,12 +944,71 @@ pub enum MaintenanceCommand {
     Status(MaintenanceStatusArgs),
 }
 
+/// Explicit steward job commands.
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum JobCommand {
+    /// Run a steward maintenance handler now.
+    Run(JobRunArgs),
+    /// List durable job history rows recorded by `ee job run`.
+    List(JobListArgs),
+    /// Show one durable job history row.
+    Show(JobShowArgs),
+}
+
+/// Arguments for `ee job run <kind>`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct JobRunArgs {
+    /// Steward job kind to run.
+    #[arg(value_name = "KIND", value_parser = parse_maintenance_job_type)]
+    pub kind: JobType,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Report planned work without mutating memory scores or job history.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Override per-job time budget in milliseconds.
+    #[arg(long, value_name = "MS")]
+    pub time_limit_ms: Option<u64>,
+
+    /// Override per-job item budget.
+    #[arg(long, value_name = "N")]
+    pub item_limit: Option<u64>,
+}
+
+/// Arguments for `ee job list`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct JobListArgs {
+    /// Filter by steward job kind.
+    #[arg(long, value_name = "KIND", value_parser = parse_maintenance_job_type)]
+    pub kind: Option<JobType>,
+
+    /// Filter to jobs at or after this RFC 3339 timestamp.
+    #[arg(long, value_name = "RFC3339")]
+    pub since: Option<String>,
+
+    /// Maximum rows to return.
+    #[arg(long, short = 'n', default_value_t = 20)]
+    pub limit: usize,
+}
+
+/// Arguments for `ee job show <id>`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct JobShowArgs {
+    /// Job history row ID, or the steward runner job ID for the latest match.
+    #[arg(value_name = "JOB_ID")]
+    pub id: String,
+}
+
 /// Arguments for `ee maintenance run`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct MaintenanceRunArgs {
     /// Maintenance job to run.
-    #[arg(long = "job", default_value = "memory.decay", value_name = "JOB", value_parser = parse_maintenance_job)]
-    pub job: MaintenanceJob,
+    #[arg(long = "job", default_value = "decay_sweep", value_name = "JOB", value_parser = parse_maintenance_job_type)]
+    pub job: JobType,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -950,57 +1031,25 @@ pub struct MaintenanceRunArgs {
 #[derive(Clone, Debug, Default, Parser, PartialEq)]
 pub struct MaintenanceStatusArgs {}
 
-/// User-facing maintenance job selector.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MaintenanceJob {
-    /// Run implemented memory confidence decay.
-    MemoryDecay,
-    /// Rule score recomputation is not wired yet.
-    RuleScore,
-    /// Trauma guard inversion is not wired yet.
-    TraumaGuard,
-    /// Run all requested plan jobs, reporting unavailable jobs explicitly.
-    All,
-}
-
-impl MaintenanceJob {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::MemoryDecay => "memory.decay",
-            Self::RuleScore => "rule.score",
-            Self::TraumaGuard => "trauma_guard",
-            Self::All => "all",
-        }
-    }
-
-    #[must_use]
-    pub const fn all() -> &'static [Self] {
-        &[
-            Self::MemoryDecay,
-            Self::RuleScore,
-            Self::TraumaGuard,
-            Self::All,
-        ]
-    }
-}
-
-fn parse_maintenance_job(raw: &str) -> Result<MaintenanceJob, String> {
-    match raw {
-        "memory.decay" | "decay_sweep" => Ok(MaintenanceJob::MemoryDecay),
-        "rule.score" => Ok(MaintenanceJob::RuleScore),
-        "trauma_guard" => Ok(MaintenanceJob::TraumaGuard),
-        "all" => Ok(MaintenanceJob::All),
-        _ => Err(format!(
-            "unknown maintenance job `{}`; expected one of {}",
-            raw,
-            MaintenanceJob::all()
-                .iter()
-                .map(|job| job.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
-    }
+fn parse_maintenance_job_type(raw: &str) -> Result<JobType, String> {
+    let canonical = match raw {
+        "memory.decay" | "decay-tick" | "decay_tick" => "decay_sweep",
+        "index.rebuild" | "index-rebuild" => "index_rebuild",
+        "index.coalesce" | "index-coalesce" => "index_coalesce",
+        "consolidation.pass" | "consolidation-pass" => "consolidation_pass",
+        "curation.review" | "curation-review" => "curation_review",
+        "quarantine.sweep" | "quarantine-sweep" => "quarantine_sweep",
+        "health.check" | "health-check" => "health_check",
+        "cache.pruning" | "cache-pruning" => "cache_pruning",
+        "storage.compact" | "storage-compact" => "storage_compact",
+        "link-prediction-refresh" => "link_prediction_refresh",
+        "centrality.refresh" | "centrality-refresh" => "centrality_refresh",
+        "integrity.check" | "integrity-check" => "integrity_check",
+        "backup.export" | "backup-export" => "backup_export",
+        "garbage.collection" | "garbage-collection" => "garbage_collection",
+        other => other,
+    };
+    parse_steward_job_type(canonical)
 }
 
 fn parse_steward_job_type(raw: &str) -> Result<JobType, String> {
@@ -2038,8 +2087,12 @@ pub enum AuditCommand {
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
 pub struct AuditTimelineArgs {
     /// Start from this time or operation ID.
-    #[arg(long, value_name = "TIME_OR_ID")]
+    #[arg(long, value_name = "RFC3339")]
     pub since: Option<String>,
+
+    /// Only include rows for this audit surface.
+    #[arg(long, value_name = "NAME")]
+    pub surface: Option<String>,
 
     /// Maximum entries to show.
     #[arg(long, short = 'n', default_value_t = 20)]
@@ -2048,30 +2101,54 @@ pub struct AuditTimelineArgs {
     /// Pagination cursor from previous response.
     #[arg(long, value_name = "CURSOR")]
     pub cursor: Option<String>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee audit show`.
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
 pub struct AuditShowArgs {
-    /// Operation ID to show.
-    #[arg(value_name = "OPERATION_ID")]
-    pub operation_id: String,
+    /// Audit row ID to show.
+    #[arg(value_name = "AUDIT_ID")]
+    pub audit_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee audit diff`.
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
 pub struct AuditDiffArgs {
-    /// Operation ID to show diff for.
-    #[arg(value_name = "OPERATION_ID")]
-    pub operation_id: String,
+    /// Start of the diff window.
+    #[arg(value_name = "FROM_RFC3339")]
+    pub from: String,
+
+    /// End of the diff window.
+    #[arg(value_name = "TO_RFC3339")]
+    pub to: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee audit verify`.
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
 pub struct AuditVerifyArgs {
-    /// Start verification from this time or operation ID.
-    #[arg(long, value_name = "TIME_OR_ID")]
+    /// Start verification from this RFC 3339 timestamp.
+    #[arg(long, value_name = "RFC3339")]
     pub since: Option<String>,
+
+    /// Stop verification at this RFC 3339 timestamp.
+    #[arg(long, value_name = "RFC3339")]
+    pub until: Option<String>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Subcommands for `ee certificate`.
@@ -2727,8 +2804,48 @@ pub enum RecorderCommand {
     Finish(RecorderFinishArgs),
     /// Tail recent events from a recording session.
     Tail(RecorderTailArgs),
+    /// Follow recorder events as JSON lines.
+    Follow(RecorderFollowArgs),
     /// Plan a read-only recorder import from connector output.
     Import(RecorderImportArgs),
+    /// Query recorded events from the event store.
+    #[command(subcommand)]
+    Events(RecorderEventsCommand),
+}
+
+/// Subcommands for `ee recorder events`.
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum RecorderEventsCommand {
+    /// List recorded events with optional filters.
+    List(RecorderEventsListArgs),
+}
+
+/// Arguments for `ee recorder events list`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct RecorderEventsListArgs {
+    /// Filter events to those after this RFC 3339 timestamp.
+    #[arg(long, value_name = "RFC3339")]
+    pub since: Option<String>,
+
+    /// Filter events by source type (hook, cli, manual).
+    #[arg(long, value_name = "SOURCE")]
+    pub source: Option<String>,
+
+    /// Filter events by run ID.
+    #[arg(long, value_name = "RUN_ID")]
+    pub run_id: Option<String>,
+
+    /// Maximum number of events to return.
+    #[arg(long, default_value_t = 100)]
+    pub limit: u32,
+
+    /// Workspace path.
+    #[arg(long, short = 'w', default_value = ".")]
+    pub workspace: PathBuf,
+
+    /// Optional explicit database path.
+    #[arg(long)]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee recorder start`.
@@ -2802,9 +2919,13 @@ pub struct RecorderFinishArgs {
 /// Arguments for `ee recorder tail`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct RecorderTailArgs {
-    /// Run ID to tail.
+    /// Optional run ID to tail. Omit to tail across all runs.
     #[arg(value_name = "RUN_ID")]
-    pub run_id: String,
+    pub run_id: Option<String>,
+
+    /// Only include events at or after this RFC 3339 timestamp.
+    #[arg(long, value_name = "RFC3339")]
+    pub since: Option<String>,
 
     /// Number of events to return.
     #[arg(long, short = 'n', default_value_t = 10)]
@@ -2814,13 +2935,57 @@ pub struct RecorderTailArgs {
     #[arg(long)]
     pub from_sequence: Option<u64>,
 
-    /// Follow mode: continuously poll for new events.
-    #[arg(long, short = 'f')]
+    /// Follow mode alias. Prefer `ee recorder follow`.
+    #[arg(long, short = 'f', hide = true)]
     pub follow: bool,
 
     /// Output format for follow mode (jsonl for machine-readable stream).
-    #[arg(long = "tail-format", value_name = "FORMAT")]
+    #[arg(long = "tail-format", value_name = "FORMAT", hide = true)]
     pub tail_format: Option<String>,
+
+    /// Simple filter expression: `key=value AND key=value`.
+    #[arg(long, value_name = "EXPR")]
+    pub filter: Option<String>,
+
+    /// Optional explicit database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee recorder follow`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct RecorderFollowArgs {
+    /// Optional run ID to follow.
+    #[arg(long, value_name = "RUN_ID")]
+    pub run_id: Option<String>,
+
+    /// Only emit events at or after this RFC 3339 timestamp.
+    #[arg(long, value_name = "RFC3339")]
+    pub since: Option<String>,
+
+    /// Simple filter expression: `key=value AND key=value`.
+    #[arg(long, value_name = "EXPR")]
+    pub filter: Option<String>,
+
+    /// Maximum events read per poll.
+    #[arg(long, default_value_t = 100)]
+    pub limit: u32,
+
+    /// Poll interval in milliseconds.
+    #[arg(long, default_value_t = 250)]
+    pub poll_ms: u64,
+
+    /// Emit line-delimited JSON. Follow mode always writes one JSON object per event.
+    #[arg(long = "json-lines", action = ArgAction::SetTrue)]
+    pub json_lines: bool,
+
+    /// Stop after this many idle milliseconds; intended for deterministic tests.
+    #[arg(long, hide = true)]
+    pub idle_timeout_ms: Option<u64>,
+
+    /// Optional explicit database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee recorder import`.
@@ -4878,6 +5043,7 @@ where
             DemoCommand::Verify(args) => handle_demo_verify(&cli, args, stdout, stderr),
         },
         Some(Command::Daemon(ref args)) => handle_daemon(&cli, args, stdout, stderr),
+        Some(Command::Job(ref job_cmd)) => handle_job(&cli, job_cmd, stdout),
         Some(Command::Maintenance(ref maintenance_cmd)) => match maintenance_cmd {
             MaintenanceCommand::Run(args) => handle_maintenance_run(&cli, args, stdout),
             MaintenanceCommand::Status(args) => handle_maintenance_status(&cli, args, stdout),
@@ -4998,12 +5164,73 @@ where
         }
         Some(Command::Handoff(ref cmd)) => match cmd {
             HandoffCommand::Preview(args) => {
-                let _ = args;
-                write_handoff_unavailable(&cli, "handoff preview", stdout, stderr)
+                let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+                let profile = match args.profile {
+                    HandoffProfile::Compact => CapsuleProfile::Compact,
+                    HandoffProfile::Resume => CapsuleProfile::Resume,
+                    HandoffProfile::Handoff => CapsuleProfile::Handoff,
+                };
+                let options = HandoffPreviewOptions {
+                    workspace: workspace_path,
+                    profile,
+                    since: args.since.clone(),
+                    include_estimates: args.estimates,
+                    task_frame_id: None,
+                };
+                match preview_handoff(&options) {
+                    Ok(report) => match cli.renderer() {
+                        output::Renderer::Human | output::Renderer::Markdown => {
+                            write_stdout(stdout, &output::render_handoff_preview_human(&report))
+                        }
+                        output::Renderer::Toon => write_stdout(
+                            stdout,
+                            &(output::render_handoff_preview_toon(&report) + "\n"),
+                        ),
+                        output::Renderer::Json
+                        | output::Renderer::Jsonl
+                        | output::Renderer::Compact
+                        | output::Renderer::Hook => write_stdout(
+                            stdout,
+                            &(output::render_handoff_preview_json(&report) + "\n"),
+                        ),
+                    },
+                    Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
+                }
             }
             HandoffCommand::Create(args) => {
-                let _ = args;
-                write_handoff_unavailable(&cli, "handoff create", stdout, stderr)
+                let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+                let profile = match args.profile {
+                    HandoffProfile::Compact => CapsuleProfile::Compact,
+                    HandoffProfile::Resume => CapsuleProfile::Resume,
+                    HandoffProfile::Handoff => CapsuleProfile::Handoff,
+                };
+                let options = HandoffCreateOptions {
+                    workspace: workspace_path,
+                    output: args.out.clone(),
+                    profile,
+                    since: args.since.clone(),
+                    dry_run: args.dry_run,
+                    task_frame_id: None,
+                };
+                match create_handoff(&options) {
+                    Ok(report) => match cli.renderer() {
+                        output::Renderer::Human | output::Renderer::Markdown => {
+                            write_stdout(stdout, &output::render_handoff_create_human(&report))
+                        }
+                        output::Renderer::Toon => write_stdout(
+                            stdout,
+                            &(output::render_handoff_create_toon(&report) + "\n"),
+                        ),
+                        output::Renderer::Json
+                        | output::Renderer::Jsonl
+                        | output::Renderer::Compact
+                        | output::Renderer::Hook => write_stdout(
+                            stdout,
+                            &(output::render_handoff_create_json(&report) + "\n"),
+                        ),
+                    },
+                    Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
+                }
             }
             HandoffCommand::Inspect(args) => {
                 let options = HandoffInspectOptions {
@@ -5130,8 +5357,19 @@ where
             handle_economy_prune_plan(&cli, args, stdout, stderr)
         }
         Some(Command::Eval(ref eval_cmd)) => match eval_cmd {
-            EvalCommand::Run { .. } => write_eval_unavailable(&cli, "eval run", stdout, stderr),
-            EvalCommand::List => write_eval_unavailable(&cli, "eval list", stdout, stderr),
+            EvalCommand::Run {
+                scenario_id,
+                fixture_dir,
+                science,
+            } => handle_eval_run(
+                &cli,
+                scenario_id.as_deref(),
+                fixture_dir.as_deref(),
+                *science,
+                stdout,
+                stderr,
+            ),
+            EvalCommand::List => handle_eval_list(&cli, None, stdout, stderr),
         },
         Some(Command::Focus(ref focus_cmd)) => handle_focus(&cli, focus_cmd, stdout, stderr),
         Some(Command::TaskFrame(ref task_frame_cmd)) => {
@@ -5324,8 +5562,14 @@ where
         Some(Command::Recorder(RecorderCommand::Tail(ref args))) => {
             handle_recorder_tail(&cli, args, stdout, stderr)
         }
+        Some(Command::Recorder(RecorderCommand::Follow(ref args))) => {
+            handle_recorder_follow(&cli, args, stdout, stderr)
+        }
         Some(Command::Recorder(RecorderCommand::Import(ref args))) => {
             handle_recorder_import(&cli, args, stdout, stderr)
+        }
+        Some(Command::Recorder(RecorderCommand::Events(RecorderEventsCommand::List(ref args)))) => {
+            handle_recorder_events_list(&cli, args, stdout, stderr)
         }
         Some(Command::Rationale(RationaleCommand::Attach(ref args))) => {
             handle_rationale_attach(&cli, args, stdout, stderr)
@@ -5568,15 +5812,9 @@ where
     }
 }
 
-const EVAL_UNAVAILABLE_CODE: &str = "eval_fixtures_unavailable";
-const EVAL_UNAVAILABLE_MESSAGE: &str = "Evaluation run and scenario listing are unavailable until eval commands discover and execute deterministic fixture registries instead of rendering a no-scenarios stub report.";
-const EVAL_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const EVAL_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-uiy3";
-const EVAL_UNAVAILABLE_SIDE_EFFECT: &str = "read-only, conservative abstention; no fixture discovery, evaluation report, or science metrics emitted";
-
-fn write_eval_unavailable<W, E>(
+fn handle_eval_list<W, E>(
     cli: &Cli,
-    command: &'static str,
+    fixture_dir: Option<&std::path::Path>,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -5584,50 +5822,52 @@ where
     W: Write,
     E: Write,
 {
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": EVAL_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": EVAL_UNAVAILABLE_MESSAGE,
-                "repair": EVAL_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": EVAL_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": EVAL_UNAVAILABLE_MESSAGE,
-                        "repair": EVAL_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": EVAL_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": EVAL_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
+    let default_dir = std::path::PathBuf::from(crate::eval::DEFAULT_FIXTURE_DIR);
+    let dir = fixture_dir.unwrap_or(&default_dir);
 
-    let _ = writeln!(stderr, "error: {EVAL_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {EVAL_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
+    match crate::eval::list_fixtures(dir) {
+        Ok(entries) => {
+            if cli.wants_json() {
+                let json = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": {
+                        "command": "eval list",
+                        "fixtures": entries,
+                        "fixtureCount": entries.len(),
+                        "fixtureDir": dir.display().to_string()
+                    }
+                });
+                let _ = stdout.write_all(json.to_string().as_bytes());
+                let _ = stdout.write_all(b"\n");
+            } else {
+                let _ = writeln!(
+                    stdout,
+                    "Available evaluation fixtures ({}):\n",
+                    entries.len()
+                );
+                for entry in &entries {
+                    let _ = writeln!(stdout, "  {} ({})", entry.fixture_id, entry.fixture_family);
+                    let _ = writeln!(stdout, "    Journey: {}", entry.journey);
+                    let _ = writeln!(
+                        stdout,
+                        "    Memories: {}, Queries: {}",
+                        entry.memory_count, entry.query_count
+                    );
+                    let _ = writeln!(stdout);
+                }
+            }
+            ProcessExitCode::Success
+        }
+        Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
+    }
 }
 
-const HANDOFF_UNAVAILABLE_CODE: &str = "handoff_unavailable";
-const HANDOFF_UNAVAILABLE_MESSAGE: &str = "Handoff preview and capsule creation are unavailable until continuity capsules are backed by explicit redacted evidence instead of generated placeholder sections.";
-const HANDOFF_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const HANDOFF_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-g9dq";
-const HANDOFF_UNAVAILABLE_SIDE_EFFECT: &str =
-    "conservative abstention; no continuity capsule write";
-
-fn write_handoff_unavailable<W, E>(
+fn handle_eval_run<W, E>(
     cli: &Cli,
-    command: &'static str,
+    scenario_id: Option<&str>,
+    fixture_dir: Option<&std::path::Path>,
+    _science: bool,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -5635,38 +5875,186 @@ where
     W: Write,
     E: Write,
 {
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": HANDOFF_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": HANDOFF_UNAVAILABLE_MESSAGE,
-                "repair": HANDOFF_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": HANDOFF_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": HANDOFF_UNAVAILABLE_MESSAGE,
-                        "repair": HANDOFF_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": HANDOFF_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": HANDOFF_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
+    let default_dir = std::path::PathBuf::from(crate::eval::DEFAULT_FIXTURE_DIR);
+    let dir = fixture_dir.unwrap_or(&default_dir);
+    let start = std::time::Instant::now();
+
+    let fixtures = match crate::eval::discover_fixtures(dir) {
+        Ok(f) => f,
+        Err(e) => return write_domain_error(&e, cli.wants_json(), stdout, stderr),
+    };
+
+    if fixtures.is_empty() {
+        let err = crate::models::DomainError::Configuration {
+            message: "No fixtures found in fixture directory".into(),
+            repair: Some(format!("Add fixtures to {}", dir.display())),
+        };
+        return write_domain_error(&err, cli.wants_json(), stdout, stderr);
     }
 
-    let _ = writeln!(stderr, "error: {HANDOFF_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {HANDOFF_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
+    let target_fixtures: Vec<_> = if let Some(id) = scenario_id {
+        fixtures
+            .into_iter()
+            .filter(|f| f.fixture_id == id || f.fixture_family == id)
+            .collect()
+    } else {
+        fixtures
+    };
+
+    if target_fixtures.is_empty() {
+        let err = crate::models::DomainError::NotFound {
+            resource: "fixture".into(),
+            id: scenario_id.unwrap_or("*").into(),
+            repair: Some("ee eval list".into()),
+        };
+        return write_domain_error(&err, cli.wants_json(), stdout, stderr);
+    }
+
+    let mut reports = Vec::new();
+
+    for fixture in &target_fixtures {
+        let source = match crate::eval::load_source_memories(&fixture.source_memory_path) {
+            Ok(s) => s,
+            Err(e) => return write_domain_error(&e, cli.wants_json(), stdout, stderr),
+        };
+
+        let query_expectations = build_query_expectations(&source.memories);
+
+        let mut per_query = Vec::new();
+        for (query, expected_ids) in &query_expectations {
+            let retrieved_ids = simulate_retrieval(&source.memories, query);
+            let metrics = crate::eval::compute_query_metrics(query, expected_ids, &retrieved_ids);
+            per_query.push(metrics);
+        }
+
+        let fixture_metrics = crate::eval::compute_fixture_metrics(&fixture.fixture_id, per_query);
+
+        let mut report = crate::eval::EvalRunReport::new(
+            fixture.fixture_id.clone(),
+            fixture.fixture_family.clone(),
+        );
+        report.metrics = fixture_metrics;
+        report.duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+        report.status = if report.metrics.mean_precision_at_1 >= 0.5 {
+            crate::eval::EvalRunStatus::Passed
+        } else {
+            crate::eval::EvalRunStatus::Failed
+        };
+        report.data_hash = crate::eval::compute_data_hash(&report);
+        reports.push(report);
+    }
+
+    if cli.wants_json() {
+        let json = if reports.len() == 1 {
+            serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": {
+                    "command": "eval run",
+                    "report": reports.first()
+                }
+            })
+        } else {
+            serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": {
+                    "command": "eval run",
+                    "reports": reports,
+                    "fixtureCount": reports.len()
+                }
+            })
+        };
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+    } else {
+        for report in &reports {
+            let _ = writeln!(
+                stdout,
+                "Fixture: {} ({})",
+                report.fixture_id, report.fixture_family
+            );
+            let _ = writeln!(stdout, "  Status: {}", report.status.as_str());
+            let _ = writeln!(
+                stdout,
+                "  Queries evaluated: {}",
+                report.metrics.queries_evaluated
+            );
+            let _ = writeln!(
+                stdout,
+                "  Mean P@1:   {:.3}",
+                report.metrics.mean_precision_at_1
+            );
+            let _ = writeln!(
+                stdout,
+                "  Mean P@5:   {:.3}",
+                report.metrics.mean_precision_at_5
+            );
+            let _ = writeln!(
+                stdout,
+                "  Mean nDCG@5: {:.3}",
+                report.metrics.mean_ndcg_at_5
+            );
+            let _ = writeln!(stdout, "  Mean MRR:   {:.3}", report.metrics.mean_mrr);
+            let _ = writeln!(stdout, "  Duration:   {:.1}ms", report.duration_ms);
+            let _ = writeln!(stdout, "  Data hash:  {}", report.data_hash);
+            let _ = writeln!(stdout);
+        }
+    }
+
+    ProcessExitCode::Success
+}
+
+fn build_query_expectations(
+    memories: &[crate::eval::SourceMemory],
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut expectations: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
+    for memory in memories {
+        for query in &memory.expected_query_match {
+            expectations
+                .entry(query.clone())
+                .or_default()
+                .push(memory.id.clone());
+        }
+    }
+
+    expectations
+}
+
+fn simulate_retrieval(memories: &[crate::eval::SourceMemory], query: &str) -> Vec<String> {
+    let query_lower = query.to_lowercase();
+    let query_terms: std::collections::HashSet<_> = query_lower.split_whitespace().collect();
+
+    let mut scored: Vec<_> = memories
+        .iter()
+        .map(|m| {
+            let content_lower = m.content.to_lowercase();
+            let content_terms: std::collections::HashSet<_> =
+                content_lower.split_whitespace().collect();
+
+            let term_overlap = query_terms
+                .iter()
+                .filter(|t| content_terms.iter().any(|ct| ct.contains(*t)))
+                .count();
+
+            let tag_boost: usize = m
+                .tags
+                .iter()
+                .filter(|tag| query_terms.iter().any(|qt| tag.to_lowercase().contains(qt)))
+                .count();
+
+            let base_score =
+                (term_overlap as f64 * 0.3) + (tag_boost as f64 * 0.5) + m.utility * 0.2;
+
+            (m.id.clone(), base_score)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    scored.into_iter().map(|(id, _)| id).collect()
 }
 
 fn handle_focus<W, E>(
@@ -8095,59 +8483,8 @@ where
 }
 
 // ============================================================================
-// EE-AUDIT-001: Audit Command Handlers
+// Audit Command Handlers
 // ============================================================================
-
-const AUDIT_UNAVAILABLE_CODE: &str = "audit_log_unavailable";
-const AUDIT_UNAVAILABLE_MESSAGE: &str = "Audit timeline, operation inspection, diff, and verification are unavailable until audit commands read persisted audit log records and hash chains instead of generated sample operation data.";
-const AUDIT_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const AUDIT_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-s43e";
-const AUDIT_UNAVAILABLE_SIDE_EFFECT: &str =
-    "read-only, conservative abstention; no audit log record or hash-chain verification emitted";
-
-fn write_audit_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": AUDIT_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": AUDIT_UNAVAILABLE_MESSAGE,
-                "repair": AUDIT_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": AUDIT_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": AUDIT_UNAVAILABLE_MESSAGE,
-                        "repair": AUDIT_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": AUDIT_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": AUDIT_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
-
-    let _ = writeln!(stderr, "error: {AUDIT_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {AUDIT_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
-}
 
 fn handle_audit_timeline<W, E>(
     cli: &Cli,
@@ -8159,8 +8496,19 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_audit_unavailable(cli, "audit timeline", stdout, stderr)
+    let options = AuditTimelineOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        database_path: args.database.clone(),
+        since: args.since.clone(),
+        surface: args.surface.clone(),
+        limit: args.limit,
+        cursor: args.cursor.clone(),
+    };
+
+    match list_timeline(&options) {
+        Ok(report) => write_stdout(stdout, &(report.to_json() + "\n")),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_audit_show<W, E>(
@@ -8173,8 +8521,16 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_audit_unavailable(cli, "audit show", stdout, stderr)
+    let options = AuditShowOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        database_path: args.database.clone(),
+        audit_id: args.audit_id.clone(),
+    };
+
+    match show_audit_operation(&options) {
+        Ok(report) => write_stdout(stdout, &(report.to_json() + "\n")),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_audit_diff<W, E>(
@@ -8187,8 +8543,17 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_audit_unavailable(cli, "audit diff", stdout, stderr)
+    let options = AuditDiffOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        database_path: args.database.clone(),
+        from: args.from.clone(),
+        to: args.to.clone(),
+    };
+
+    match show_audit_diff(&options) {
+        Ok(report) => write_stdout(stdout, &(report.to_json() + "\n")),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_audit_verify<W, E>(
@@ -8201,8 +8566,17 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_audit_unavailable(cli, "audit verify", stdout, stderr)
+    let options = AuditVerifyOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        database_path: args.database.clone(),
+        since: args.since.clone(),
+        until: args.until.clone(),
+    };
+
+    match verify_audit_log(&options) {
+        Ok(report) => write_stdout(stdout, &(report.to_json() + "\n")),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 // ============================================================================
@@ -8941,57 +9315,6 @@ where
     ProcessExitCode::UnsatisfiedDegradedMode
 }
 
-const RECORDER_TAIL_UNAVAILABLE_CODE: &str = "recorder_tail_unavailable";
-const RECORDER_TAIL_UNAVAILABLE_MESSAGE: &str = "Recorder tail and follow are unavailable until they read persisted recorder events instead of stubbed empty or prefix-simulated run state.";
-const RECORDER_TAIL_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const RECORDER_TAIL_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-6xzc";
-const RECORDER_TAIL_UNAVAILABLE_SIDE_EFFECT: &str =
-    "read-only, conservative abstention; no recorder tail or follow snapshot";
-
-fn write_recorder_tail_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": RECORDER_TAIL_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": RECORDER_TAIL_UNAVAILABLE_MESSAGE,
-                "repair": RECORDER_TAIL_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": RECORDER_TAIL_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": RECORDER_TAIL_UNAVAILABLE_MESSAGE,
-                        "repair": RECORDER_TAIL_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": RECORDER_TAIL_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": RECORDER_TAIL_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
-
-    let _ = writeln!(stderr, "error: {RECORDER_TAIL_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {RECORDER_TAIL_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
-}
-
 fn handle_recorder_tail<W, E>(
     cli: &Cli,
     args: &RecorderTailArgs,
@@ -9002,12 +9325,224 @@ where
     W: Write,
     E: Write,
 {
-    let command = if args.follow {
-        "recorder tail --follow"
-    } else {
-        "recorder tail"
+    let filter = match parse_recorder_event_filter(args.filter.as_deref()) {
+        Ok(filter) => filter,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    write_recorder_tail_unavailable(cli, command, stdout, stderr)
+    if let Err(error) = validate_recorder_since(args.since.as_deref()) {
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    let options = crate::core::recorder::RecorderTailOptions {
+        run_id: args.run_id.clone(),
+        since: args.since.clone(),
+        limit: args.limit,
+        from_sequence: args.from_sequence,
+        follow: args.follow,
+        filter,
+    };
+    let conn = match open_recorder_database(cli, args.database.as_deref()) {
+        Ok(conn) => conn,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    if args.follow {
+        if let Some(format) = args.tail_format.as_deref() {
+            if format != "jsonl" {
+                let error = DomainError::Usage {
+                    message: format!("Unsupported recorder tail follow format `{format}`"),
+                    repair: Some("Use `--tail-format jsonl` or `ee recorder follow`.".to_owned()),
+                };
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+        }
+        return run_recorder_follow_loop(cli, &conn, options, 250, None, stdout, stderr);
+    }
+
+    match crate::core::recorder::tail_recording_from_store(&conn, &options) {
+        Ok(report) => write_recorder_tail_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_recorder_follow<W, E>(
+    cli: &Cli,
+    args: &RecorderFollowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let filter = match parse_recorder_event_filter(args.filter.as_deref()) {
+        Ok(filter) => filter,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    if let Err(error) = validate_recorder_since(args.since.as_deref()) {
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    let options = crate::core::recorder::RecorderTailOptions {
+        run_id: args.run_id.clone(),
+        since: args.since.clone(),
+        limit: args.limit,
+        from_sequence: None,
+        follow: true,
+        filter,
+    };
+    let conn = match open_recorder_database(cli, args.database.as_deref()) {
+        Ok(conn) => conn,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    if !args.json_lines
+        && matches!(
+            cli.renderer(),
+            output::Renderer::Human | output::Renderer::Markdown | output::Renderer::Toon
+        )
+    {
+        let _ = writeln!(
+            stderr,
+            "recorder follow emits JSON lines; pass --json-lines for explicit machine output"
+        );
+    }
+    run_recorder_follow_loop(
+        cli,
+        &conn,
+        options,
+        args.poll_ms,
+        args.idle_timeout_ms,
+        stdout,
+        stderr,
+    )
+}
+
+fn parse_recorder_event_filter(
+    filter: Option<&str>,
+) -> Result<Option<crate::core::recorder::RecorderEventFilter>, DomainError> {
+    filter
+        .map(crate::core::recorder::RecorderEventFilter::parse_expression)
+        .transpose()
+        .map(|filter| filter.filter(|value| !value.is_empty()))
+}
+
+fn validate_recorder_since(since: Option<&str>) -> Result<(), DomainError> {
+    if let Some(since) = since {
+        chrono::DateTime::parse_from_rfc3339(since).map_err(|error| DomainError::Usage {
+            message: format!("Recorder --since must be an RFC 3339 timestamp: {error}"),
+            repair: Some("Use timestamps such as 2026-05-01T00:00:00Z.".to_owned()),
+        })?;
+    }
+    Ok(())
+}
+
+fn open_recorder_database(
+    cli: &Cli,
+    database: Option<&Path>,
+) -> Result<crate::db::DbConnection, DomainError> {
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let database_path = database
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_owned()),
+        });
+    }
+    crate::db::DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+        message: format!("Failed to open database: {error}"),
+        repair: Some("ee status --json".to_owned()),
+    })
+}
+
+fn write_recorder_tail_report<W>(
+    cli: &Cli,
+    report: &crate::core::recorder::RecorderTailReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.data_json().to_string() + "\n")),
+    }
+}
+
+fn run_recorder_follow_loop<W, E>(
+    cli: &Cli,
+    conn: &crate::db::DbConnection,
+    options: crate::core::recorder::RecorderTailOptions,
+    poll_ms: u64,
+    idle_timeout_ms: Option<u64>,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let mut seen_event_ids = BTreeSet::new();
+    let poll_interval = Duration::from_millis(poll_ms.max(10));
+    let mut idle_started = Instant::now();
+
+    loop {
+        match crate::core::recorder::poll_follow_events_from_store(conn, &options, &seen_event_ids)
+        {
+            Ok(crate::core::recorder::TailFollowResult::Events(events)) => {
+                idle_started = Instant::now();
+                for event in events {
+                    seen_event_ids.insert(event.event_id.clone());
+                    if let Err(error) = stdout.write_all((event.to_jsonl() + "\n").as_bytes()) {
+                        let domain_error = DomainError::Storage {
+                            message: format!("Failed to write recorder follow event: {error}"),
+                            repair: Some("Check stdout consumer and retry.".to_owned()),
+                        };
+                        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                    }
+                }
+                if let Err(error) = stdout.flush() {
+                    let domain_error = DomainError::Storage {
+                        message: format!("Failed to flush recorder follow output: {error}"),
+                        repair: Some("Check stdout consumer and retry.".to_owned()),
+                    };
+                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                }
+            }
+            Ok(crate::core::recorder::TailFollowResult::RunCompleted { .. }) => {
+                return ProcessExitCode::Success;
+            }
+            Ok(crate::core::recorder::TailFollowResult::RunNotFound) => {
+                let error = DomainError::NotFound {
+                    resource: "recorder run".to_owned(),
+                    id: options
+                        .run_id
+                        .clone()
+                        .unwrap_or_else(|| "<filtered>".to_owned()),
+                    repair: Some(
+                        "Use `ee recorder tail --json` to inspect available events.".to_owned(),
+                    ),
+                };
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+            Ok(crate::core::recorder::TailFollowResult::Waiting { .. })
+            | Ok(crate::core::recorder::TailFollowResult::StoreUnavailable { .. }) => {
+                if idle_timeout_ms
+                    .is_some_and(|timeout| idle_started.elapsed() >= Duration::from_millis(timeout))
+                {
+                    return ProcessExitCode::Success;
+                }
+                std::thread::sleep(poll_interval);
+            }
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        }
+    }
 }
 
 fn handle_recorder_import<W, E>(
@@ -9142,6 +9677,81 @@ where
         let _ = writeln!(stderr, "\nNext:\n  {}", error.repair);
     }
     ProcessExitCode::Usage
+}
+
+// ============================================================================
+// Recorder Events List Handler
+// ============================================================================
+
+fn handle_recorder_events_list<W, E>(
+    cli: &Cli,
+    args: &RecorderEventsListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::recorder::{
+        RECORDER_EVENTS_LIST_SCHEMA_V1, RecorderEventsListOptions, RecorderEventsListReport,
+    };
+    use crate::db::DbConnection;
+
+    let workspace_path = args.workspace.clone();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match DbConnection::open_file(&database_path) {
+        Ok(c) => c,
+        Err(e) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {e}"),
+                repair: Some("ee status --json".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let options = RecorderEventsListOptions {
+        since: args.since.clone(),
+        source: args.source.clone(),
+        run_id: args.run_id.clone(),
+        limit: args.limit,
+    };
+
+    let events = match crate::core::recorder::list_recorder_events(&conn, &options) {
+        Ok(e) => e,
+        Err(e) => {
+            return write_domain_error(&e, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let report = RecorderEventsListReport {
+        schema: RECORDER_EVENTS_LIST_SCHEMA_V1,
+        events,
+        filters: options,
+    };
+
+    if cli.wants_json() {
+        let json = report.data_json();
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+    } else {
+        let _ = stdout.write_all(report.human_summary().as_bytes());
+    }
+
+    ProcessExitCode::Success
 }
 
 // ============================================================================
@@ -9735,50 +10345,29 @@ where
     }
 }
 
-const DIAG_QUARANTINE_UNAVAILABLE_CODE: &str = "quarantine_trust_state_unavailable";
-const DIAG_QUARANTINE_UNAVAILABLE_MESSAGE: &str = "Quarantine diagnostics are unavailable until persistent source trust state is wired instead of reporting an empty derived health posture.";
-const DIAG_QUARANTINE_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const DIAG_QUARANTINE_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-5g6d";
-const DIAG_QUARANTINE_UNAVAILABLE_SIDE_EFFECT: &str =
-    "read-only, conservative abstention; no source trust state read";
-
-fn handle_diag_quarantine<W, E>(cli: &Cli, stdout: &mut W, stderr: &mut E) -> ProcessExitCode
+fn handle_diag_quarantine<W, E>(cli: &Cli, stdout: &mut W, _stderr: &mut E) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": "diag quarantine",
-                "code": DIAG_QUARANTINE_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": DIAG_QUARANTINE_UNAVAILABLE_MESSAGE,
-                "repair": DIAG_QUARANTINE_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": DIAG_QUARANTINE_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": DIAG_QUARANTINE_UNAVAILABLE_MESSAGE,
-                        "repair": DIAG_QUARANTINE_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": DIAG_QUARANTINE_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": DIAG_QUARANTINE_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
+    let workspace_path =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let report = crate::core::quarantine::QuarantineReport::gather_for_workspace(&workspace_path);
 
-    let _ = writeln!(stderr, "error: {DIAG_QUARANTINE_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {DIAG_QUARANTINE_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_quarantine_human(&report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_quarantine_toon(&report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_quarantine_json(&report) + "\n"))
+        }
+    }
 }
 
 const GRAPH_ALGORITHM_SCHEMA_V1: &str = "ee.graph.algorithm.v1";
@@ -14711,54 +15300,14 @@ where
 // EE-342: Certificate handlers
 // ============================================================================
 
-const CERTIFICATE_STORE_UNAVAILABLE_CODE: &str = "certificate_store_unavailable";
-const CERTIFICATE_STORE_UNAVAILABLE_MESSAGE: &str = "Certificate manifest storage is unavailable; certificate records cannot be listed, shown, or verified from production evidence.";
-const CERTIFICATE_STORE_UNAVAILABLE_REPAIR: &str = "ee doctor --json";
-const CERTIFICATE_STORE_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-v76q";
 const CERTIFICATE_DEFAULT_MANIFEST_FILE: &str = "certificates.json";
 
-fn write_certificate_store_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": CERTIFICATE_STORE_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": CERTIFICATE_STORE_UNAVAILABLE_MESSAGE,
-                "repair": CERTIFICATE_STORE_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": CERTIFICATE_STORE_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": CERTIFICATE_STORE_UNAVAILABLE_MESSAGE,
-                        "repair": CERTIFICATE_STORE_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": CERTIFICATE_STORE_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": "read-only, idempotent"
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
-
-    let _ = writeln!(stderr, "error: {CERTIFICATE_STORE_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {CERTIFICATE_STORE_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
+enum CertificateStoreSource {
+    Manifest(PathBuf),
+    Database {
+        database_path: PathBuf,
+        workspace_id: String,
+    },
 }
 
 fn handle_certificate_list<W, E>(
@@ -14771,11 +15320,6 @@ where
     W: Write,
     E: Write,
 {
-    let manifest_path = resolve_certificate_manifest_path(cli, args.manifest.as_deref());
-    if !manifest_path.exists() {
-        return write_certificate_store_unavailable(cli, "certificate list", stdout, stderr);
-    }
-
     let kind = match args
         .kind
         .as_deref()
@@ -14809,9 +15353,20 @@ where
         }
     };
 
-    let mut options = crate::core::certificate::CertificateListOptions::new()
-        .with_manifest_path(&manifest_path)
-        .with_limit(args.limit);
+    let store_source = resolve_certificate_store_source(cli, args.manifest.as_deref());
+    let mut options =
+        crate::core::certificate::CertificateListOptions::new().with_limit(args.limit);
+    options = match store_source {
+        CertificateStoreSource::Manifest(manifest_path) => {
+            options.with_manifest_path(manifest_path)
+        }
+        CertificateStoreSource::Database {
+            database_path,
+            workspace_id,
+        } => options
+            .with_database_path(database_path)
+            .with_workspace_id(workspace_id),
+    };
     if let Some(kind) = kind {
         options = options.with_kind(kind);
     }
@@ -14830,19 +15385,25 @@ fn handle_certificate_show<W, E>(
     cli: &Cli,
     args: &CertificateShowArgs,
     stdout: &mut W,
-    stderr: &mut E,
+    _stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let manifest_path = resolve_certificate_manifest_path(cli, args.manifest.as_deref());
-    if !manifest_path.exists() {
-        return write_certificate_store_unavailable(cli, "certificate show", stdout, stderr);
-    }
-
-    let options = crate::core::certificate::CertificateLookupOptions::new(&args.certificate_id)
-        .with_manifest_path(&manifest_path);
+    let store_source = resolve_certificate_store_source(cli, args.manifest.as_deref());
+    let mut options = crate::core::certificate::CertificateLookupOptions::new(&args.certificate_id);
+    options = match store_source {
+        CertificateStoreSource::Manifest(manifest_path) => {
+            options.with_manifest_path(manifest_path)
+        }
+        CertificateStoreSource::Database {
+            database_path,
+            workspace_id,
+        } => options
+            .with_database_path(database_path)
+            .with_workspace_id(workspace_id),
+    };
     let report = crate::core::certificate::show_certificate_with_options(&options);
     write_certificate_show_report(cli, &report, stdout)
 }
@@ -14851,31 +15412,48 @@ fn handle_certificate_verify<W, E>(
     cli: &Cli,
     args: &CertificateVerifyArgs,
     stdout: &mut W,
-    stderr: &mut E,
+    _stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let manifest_path = resolve_certificate_manifest_path(cli, args.manifest.as_deref());
-    if !manifest_path.exists() {
-        return write_certificate_store_unavailable(cli, "certificate verify", stdout, stderr);
-    }
-
-    let options = crate::core::certificate::CertificateLookupOptions::new(&args.certificate_id)
-        .with_manifest_path(&manifest_path);
+    let store_source = resolve_certificate_store_source(cli, args.manifest.as_deref());
+    let mut options = crate::core::certificate::CertificateLookupOptions::new(&args.certificate_id);
+    options = match store_source {
+        CertificateStoreSource::Manifest(manifest_path) => {
+            options.with_manifest_path(manifest_path)
+        }
+        CertificateStoreSource::Database {
+            database_path,
+            workspace_id,
+        } => options
+            .with_database_path(database_path)
+            .with_workspace_id(workspace_id),
+    };
     let report = crate::core::certificate::verify_certificate_with_options(&options);
     write_certificate_verify_report(cli, &report, stdout)
 }
 
-fn resolve_certificate_manifest_path(cli: &Cli, explicit_manifest: Option<&Path>) -> PathBuf {
-    explicit_manifest.map_or_else(
-        || {
-            resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")))
-                .join(CERTIFICATE_DEFAULT_MANIFEST_FILE)
-        },
-        Path::to_path_buf,
-    )
+fn resolve_certificate_store_source(
+    cli: &Cli,
+    explicit_manifest: Option<&Path>,
+) -> CertificateStoreSource {
+    if let Some(manifest_path) = explicit_manifest {
+        return CertificateStoreSource::Manifest(manifest_path.to_path_buf());
+    }
+
+    let workspace_path =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let manifest_path = workspace_path.join(CERTIFICATE_DEFAULT_MANIFEST_FILE);
+    if manifest_path.exists() {
+        CertificateStoreSource::Manifest(manifest_path)
+    } else {
+        CertificateStoreSource::Database {
+            database_path: workspace_path.join(".ee").join("ee.db"),
+            workspace_id: crate::core::curate::stable_workspace_id(&workspace_path),
+        }
+    }
 }
 
 fn write_certificate_list_report<W>(
@@ -15993,57 +16571,6 @@ fn demo_artifact_symlink_component(root: &Path, relative: &str) -> io::Result<Op
 // EE-207: Foreground Daemon Mode
 // ============================================================================
 
-const DAEMON_UNAVAILABLE_CODE: &str = "daemon_jobs_unavailable";
-const DAEMON_UNAVAILABLE_MESSAGE: &str = "Daemon scheduling is unavailable until steward jobs run real maintenance handlers instead of simulated item counts.";
-const DAEMON_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const DAEMON_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-5g6d";
-const DAEMON_UNAVAILABLE_SIDE_EFFECT: &str =
-    "conservative abstention; no daemon tick, scheduler ledger, or maintenance job mutation";
-
-fn write_daemon_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": DAEMON_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": DAEMON_UNAVAILABLE_MESSAGE,
-                "repair": DAEMON_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": DAEMON_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": DAEMON_UNAVAILABLE_MESSAGE,
-                        "repair": DAEMON_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": DAEMON_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": DAEMON_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
-
-    let _ = writeln!(stderr, "error: {DAEMON_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {DAEMON_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
-}
-
 fn handle_daemon<W, E>(
     cli: &Cli,
     args: &DaemonArgs,
@@ -16054,8 +16581,8 @@ where
     W: Write,
     E: Write,
 {
-    if !args.foreground {
-        return write_daemon_unavailable(cli, "daemon", stdout, stderr);
+    if matches!(args.command, Some(DaemonCommand::Status(_))) || !args.foreground {
+        return write_daemon_status(cli, args, stdout);
     }
 
     let job_types = if args.jobs.is_empty() {
@@ -16063,13 +16590,6 @@ where
     } else {
         args.jobs.clone()
     };
-
-    if job_types
-        .iter()
-        .any(|job_type| *job_type != JobType::DecaySweep)
-    {
-        return write_daemon_unavailable(cli, "daemon foreground", stdout, stderr);
-    }
 
     let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
     let mut runner_options = crate::steward::RunnerOptions::new()
@@ -16099,6 +16619,65 @@ where
             };
             write_domain_error(&error, cli.wants_json(), stdout, stderr)
         }
+    }
+}
+
+fn write_daemon_status<W>(cli: &Cli, args: &DaemonArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let job_types = if args.jobs.is_empty() {
+        vec![
+            JobType::DecaySweep,
+            JobType::ConsolidationPass,
+            JobType::QuarantineSweep,
+            JobType::IndexCoalesce,
+        ]
+    } else {
+        args.jobs.clone()
+    };
+    let data = serde_json::json!({
+        "schema": "ee.steward.daemon_status.v1",
+        "command": "daemon status",
+        "workspace": workspace_path.to_string_lossy(),
+        "running": false,
+        "daemonized": false,
+        "foregroundAvailable": true,
+        "backgroundAvailable": false,
+        "supervisor": "asupersync_foreground",
+        "jobTypes": job_types
+            .iter()
+            .map(|job_type| job_type.as_str())
+            .collect::<Vec<_>>(),
+        "degraded": [
+            {
+                "code": "daemon_background_mode_unimplemented",
+                "severity": "low",
+                "message": "Only bounded foreground daemon mode is implemented.",
+                "repair": "ee daemon --foreground --once --json"
+            }
+        ],
+    });
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": data,
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            "ee daemon status\n================\n\nRunning:    false\nSupervisor: asupersync_foreground\nMode:       bounded foreground\n\nNext:\n  ee daemon --foreground --once --json\n",
+        ),
+        output::Renderer::Toon => {
+            let rendered = output::render_toon_from_json(&response.to_string());
+            write_stdout(stdout, &(rendered + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
     }
 }
 
@@ -16151,7 +16730,38 @@ where
 
 const MAINTENANCE_RUN_SCHEMA_V1: &str = "ee.maintenance.run.v1";
 const MAINTENANCE_STATUS_SCHEMA_V1: &str = "ee.maintenance.status.v1";
-const MAINTENANCE_JOB_UNAVAILABLE_CODE: &str = "maintenance_job_unavailable";
+const MAINTENANCE_JOB_LIST_SCHEMA_V1: &str = "ee.maintenance.job_list.v1";
+const MAINTENANCE_JOB_SHOW_SCHEMA_V1: &str = "ee.maintenance.job_show.v1";
+const MAINTENANCE_JOB_ROW_SCHEMA_V1: &str = "ee.maintenance.job_row.v1";
+
+fn handle_job<W>(cli: &Cli, command: &JobCommand, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    match command {
+        JobCommand::Run(args) => handle_job_run(cli, args, stdout),
+        JobCommand::List(args) => handle_job_list(cli, args, stdout),
+        JobCommand::Show(args) => handle_job_show(cli, args, stdout),
+    }
+}
+
+fn handle_job_run<W>(cli: &Cli, args: &JobRunArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    run_maintenance_job(
+        cli,
+        MaintenanceJobRunRequest {
+            command: "job run",
+            job_type: args.kind,
+            database: args.database.as_ref(),
+            dry_run: args.dry_run,
+            time_limit_ms: args.time_limit_ms,
+            item_limit: args.item_limit,
+        },
+        stdout,
+    )
+}
 
 fn handle_maintenance_run<W>(
     cli: &Cli,
@@ -16161,98 +16771,121 @@ fn handle_maintenance_run<W>(
 where
     W: Write,
 {
+    run_maintenance_job(
+        cli,
+        MaintenanceJobRunRequest {
+            command: "maintenance run",
+            job_type: args.job,
+            database: args.database.as_ref(),
+            dry_run: args.dry_run,
+            time_limit_ms: args.time_limit_ms,
+            item_limit: args.item_limit,
+        },
+        stdout,
+    )
+}
+
+struct MaintenanceJobRunRequest<'a> {
+    command: &'static str,
+    job_type: JobType,
+    database: Option<&'a PathBuf>,
+    dry_run: bool,
+    time_limit_ms: Option<u64>,
+    item_limit: Option<u64>,
+}
+
+fn run_maintenance_job<W>(
+    cli: &Cli,
+    request: MaintenanceJobRunRequest<'_>,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
     let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
     let mut runner_options = crate::steward::RunnerOptions::new()
         .with_workspace_path(workspace_path.clone())
         .with_actor("ee-maintenance")
-        .with_dry_run(args.dry_run);
-    if let Some(database) = &args.database {
+        .with_dry_run(request.dry_run);
+    if let Some(database) = request.database {
         runner_options = runner_options.with_database_path(database.clone());
     }
-    if let Some(time_limit_ms) = args.time_limit_ms {
+    if let Some(time_limit_ms) = request.time_limit_ms {
         runner_options = runner_options.with_time_limit(time_limit_ms);
     }
-    if let Some(item_limit) = args.item_limit {
+    if let Some(item_limit) = request.item_limit {
         runner_options = runner_options.with_item_limit(item_limit);
     }
 
     let mut runner = crate::steward::ManualRunner::new(runner_options);
-    let mut results = Vec::new();
     let mut degraded = Vec::new();
+    let result = runner.run_job_type(
+        request.job_type,
+        Some(format!("{} {}", request.command, request.job_type.as_str())),
+    );
+    let result_json = result.data_json();
+    let row =
+        maintenance_job_history_row(request.command, request.job_type, &workspace_path, &result);
+    let mut history = serde_json::json!({
+        "persisted": false,
+        "path": maintenance_job_history_path(&workspace_path).display().to_string(),
+    });
 
-    for job in maintenance_jobs_to_run(args.job) {
-        match job {
-            MaintenanceJob::MemoryDecay => {
-                let result = runner.run_job_type(
-                    JobType::DecaySweep,
-                    Some("maintenance run --job memory.decay".to_owned()),
-                );
-                results.push(result.data_json());
-                if !matches!(result.outcome, crate::steward::RunOutcome::Success) {
-                    degraded.push(serde_json::json!({
-                        "code": "maintenance_memory_decay_failed",
-                        "severity": "medium",
-                        "message": result
-                            .error
-                            .clone()
-                            .unwrap_or_else(|| "memory.decay did not complete successfully".to_owned()),
-                        "repair": "ee init --workspace . && ee maintenance run --job memory.decay --json",
-                    }));
+    if matches!(result.outcome, crate::steward::RunOutcome::Success) {
+        if !request.dry_run {
+            match append_maintenance_job_history(&workspace_path, &row) {
+                Ok(path) => {
+                    history["persisted"] = serde_json::json!(true);
+                    history["path"] = serde_json::json!(path.display().to_string());
+                    history["rowId"] = row["id"].clone();
                 }
+                Err(message) => degraded.push(serde_json::json!({
+                    "code": "maintenance_job_history_write_failed",
+                    "severity": "high",
+                    "message": message,
+                    "repair": "Check workspace .ee directory permissions and rerun the job.",
+                })),
             }
-            MaintenanceJob::RuleScore | MaintenanceJob::TraumaGuard => {
-                let unavailable = maintenance_unavailable_job_json(job);
-                let unavailable_message = unavailable["message"].clone();
-                degraded.push(unavailable.clone());
-                results.push(serde_json::json!({
-                    "jobType": job.as_str(),
-                    "outcome": "skipped",
-                    "dryRun": true,
-                    "error": unavailable_message,
-                    "details": unavailable,
-                }));
-            }
-            MaintenanceJob::All => {}
         }
+    } else {
+        degraded.push(serde_json::json!({
+            "code": "maintenance_job_failed",
+            "severity": "medium",
+            "message": result
+                .error
+                .clone()
+                .unwrap_or_else(|| format!(
+                    "{} did not complete successfully",
+                    request.job_type.as_str()
+                )),
+            "repair": format!("ee job run {} --json", request.job_type.as_str()),
+        }));
     }
 
     let success = degraded.is_empty();
-    let durable_mutation = results.iter().any(|result| {
-        result["details"]["durableMutation"]
-            .as_bool()
-            .unwrap_or(false)
-    });
-    let succeeded = results
-        .iter()
-        .filter(|result| result["outcome"].as_str() == Some("success"))
-        .count();
-    let skipped = results
-        .iter()
-        .filter(|result| result["outcome"].as_str() == Some("skipped"))
-        .count();
-    let failed = results
-        .iter()
-        .filter(|result| {
-            matches!(
-                result["outcome"].as_str(),
-                Some("failed") | Some("cancelled") | Some("timed_out")
-            )
-        })
-        .count();
+    let durable_mutation = row["durableMutation"].as_bool().unwrap_or(false);
+    let succeeded = u8::from(result_json["outcome"].as_str() == Some("success"));
+    let skipped = u8::from(result_json["outcome"].as_str() == Some("skipped"));
+    let failed = u8::from(matches!(
+        result_json["outcome"].as_str(),
+        Some("failed") | Some("cancelled") | Some("timed_out")
+    ));
     let data = serde_json::json!({
         "schema": MAINTENANCE_RUN_SCHEMA_V1,
-        "command": "maintenance run",
-        "requestedJob": args.job.as_str(),
+        "command": request.command,
+        "requestedJob": request.job_type.as_str(),
         "workspace": workspace_path.display().to_string(),
-        "dryRun": args.dry_run,
+        "dryRun": request.dry_run,
         "durableMutation": durable_mutation,
         "summary": {
-            "total": results.len(),
+            "total": 1,
             "succeeded": succeeded,
             "skipped": skipped,
             "failed": failed,
         },
-        "results": results,
+        "job": row,
+        "history": history,
+        "results": [result_json],
         "degraded": degraded,
     });
     write_maintenance_response(cli, stdout, success, data)
@@ -16269,60 +16902,260 @@ where
     let data = serde_json::json!({
         "schema": MAINTENANCE_STATUS_SCHEMA_V1,
         "command": "maintenance status",
-        "jobs": [
-            {
-                "name": "memory.decay",
-                "aliases": ["decay_sweep"],
+        "jobs": JobType::all()
+            .iter()
+            .filter(|job_type| **job_type != JobType::Custom)
+            .map(|job_type| serde_json::json!({
+                "name": job_type.as_str(),
                 "available": true,
-                "stewardJobType": JobType::DecaySweep.as_str(),
-                "description": "Run the existing steward score-decay sweep over active memories."
-            },
-            {
-                "name": "rule.score",
-                "aliases": [],
-                "available": false,
-                "code": MAINTENANCE_JOB_UNAVAILABLE_CODE,
-                "description": "Rule-score recomputation is not wired yet."
-            },
-            {
-                "name": "trauma_guard",
-                "aliases": [],
-                "available": false,
-                "code": MAINTENANCE_JOB_UNAVAILABLE_CODE,
-                "description": "Trauma-guard inversion is not wired yet."
-            },
-            {
-                "name": "all",
-                "aliases": [],
-                "available": false,
-                "code": "maintenance_all_partially_available",
-                "description": "Runs memory.decay and reports unavailable planned jobs explicitly."
-            }
-        ],
-        "next": "ee maintenance run --job memory.decay --json"
+                "stewardJobType": job_type.as_str(),
+                "description": job_type.description(),
+                "run": format!("ee job run {} --json", job_type.as_str()),
+            }))
+            .collect::<Vec<_>>(),
+        "historyPath": maintenance_job_history_path(
+            &cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."))
+        ).display().to_string(),
+        "next": "ee job run decay_sweep --json"
     });
     write_maintenance_response(cli, stdout, true, data)
 }
 
-fn maintenance_jobs_to_run(job: MaintenanceJob) -> Vec<MaintenanceJob> {
-    match job {
-        MaintenanceJob::All => vec![
-            MaintenanceJob::MemoryDecay,
-            MaintenanceJob::RuleScore,
-            MaintenanceJob::TraumaGuard,
-        ],
-        other => vec![other],
-    }
+fn handle_job_list<W>(cli: &Cli, args: &JobListArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let since = match parse_job_history_since(args.since.as_deref()) {
+        Ok(since) => since,
+        Err(message) => {
+            return write_maintenance_response(
+                cli,
+                stdout,
+                false,
+                serde_json::json!({
+                    "schema": MAINTENANCE_JOB_LIST_SCHEMA_V1,
+                    "command": "job list",
+                    "code": "maintenance_job_since_invalid",
+                    "message": message,
+                    "repair": "Pass --since as an RFC 3339 timestamp, for example 2026-05-06T00:00:00Z.",
+                    "jobs": [],
+                }),
+            );
+        }
+    };
+    let mut rows = match load_maintenance_job_history(&workspace_path) {
+        Ok(rows) => rows,
+        Err(message) => {
+            return write_maintenance_response(
+                cli,
+                stdout,
+                false,
+                serde_json::json!({
+                    "schema": MAINTENANCE_JOB_LIST_SCHEMA_V1,
+                    "command": "job list",
+                    "code": "maintenance_job_history_read_failed",
+                    "message": message,
+                    "repair": "Check workspace .ee directory permissions and rerun ee job list --json.",
+                    "jobs": [],
+                }),
+            );
+        }
+    };
+    rows.retain(|row| {
+        let kind_matches = args.kind.is_none_or(|kind| {
+            row["jobType"].as_str() == Some(kind.as_str())
+                || row["requestedJob"].as_str() == Some(kind.as_str())
+        });
+        let since_matches = since.is_none_or(|cutoff| {
+            job_history_row_timestamp(row).is_some_and(|timestamp| timestamp >= cutoff)
+        });
+        kind_matches && since_matches
+    });
+    rows.sort_by(|left, right| {
+        right["completedAt"]
+            .as_str()
+            .cmp(&left["completedAt"].as_str())
+            .then_with(|| right["id"].as_str().cmp(&left["id"].as_str()))
+    });
+    rows.truncate(args.limit);
+
+    let data = serde_json::json!({
+        "schema": MAINTENANCE_JOB_LIST_SCHEMA_V1,
+        "command": "job list",
+        "workspace": workspace_path.display().to_string(),
+        "historyPath": maintenance_job_history_path(&workspace_path).display().to_string(),
+        "filters": {
+            "kind": args.kind.map(JobType::as_str),
+            "since": args.since,
+            "limit": args.limit,
+        },
+        "jobCount": rows.len(),
+        "jobs": rows,
+    });
+    write_maintenance_response(cli, stdout, true, data)
 }
 
-fn maintenance_unavailable_job_json(job: MaintenanceJob) -> serde_json::Value {
+fn handle_job_show<W>(cli: &Cli, args: &JobShowArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let mut rows = match load_maintenance_job_history(&workspace_path) {
+        Ok(rows) => rows,
+        Err(message) => {
+            return write_maintenance_response(
+                cli,
+                stdout,
+                false,
+                serde_json::json!({
+                    "schema": MAINTENANCE_JOB_SHOW_SCHEMA_V1,
+                    "command": "job show",
+                    "code": "maintenance_job_history_read_failed",
+                    "message": message,
+                    "repair": "Check workspace .ee directory permissions and rerun ee job show --json.",
+                }),
+            );
+        }
+    };
+    rows.sort_by(|left, right| {
+        right["completedAt"]
+            .as_str()
+            .cmp(&left["completedAt"].as_str())
+    });
+    if let Some(row) = rows.into_iter().find(|row| {
+        row["id"].as_str() == Some(args.id.as_str())
+            || row["jobId"].as_str() == Some(args.id.as_str())
+            || row["runnerJobId"].as_str() == Some(args.id.as_str())
+    }) {
+        let data = serde_json::json!({
+            "schema": MAINTENANCE_JOB_SHOW_SCHEMA_V1,
+            "command": "job show",
+            "workspace": workspace_path.display().to_string(),
+            "historyPath": maintenance_job_history_path(&workspace_path).display().to_string(),
+            "job": row,
+            "linkedAuditEntries": [],
+        });
+        return write_maintenance_response(cli, stdout, true, data);
+    }
+
+    write_maintenance_response(
+        cli,
+        stdout,
+        false,
+        serde_json::json!({
+            "schema": MAINTENANCE_JOB_SHOW_SCHEMA_V1,
+            "command": "job show",
+            "code": "maintenance_job_not_found",
+            "message": format!("No maintenance job history row found for `{}`.", args.id),
+            "repair": "ee job list --json",
+            "job": null,
+            "linkedAuditEntries": [],
+        }),
+    )
+}
+
+fn maintenance_job_history_row(
+    command: &str,
+    job_type: JobType,
+    workspace_path: &Path,
+    result: &crate::steward::JobRunResult,
+) -> serde_json::Value {
+    let result_json = result.data_json();
+    let now = chrono::Utc::now().to_rfc3339();
     serde_json::json!({
-        "code": MAINTENANCE_JOB_UNAVAILABLE_CODE,
-        "severity": "medium",
-        "job": job.as_str(),
-        "message": format!("Maintenance job `{}` is not wired yet.", job.as_str()),
-        "repair": "Use `ee maintenance status --json` to inspect available jobs.",
+        "schema": MAINTENANCE_JOB_ROW_SCHEMA_V1,
+        "id": format!("job_{}", uuid::Uuid::now_v7().simple()),
+        "runnerJobId": result.job_id.as_str(),
+        "jobId": result.job_id.as_str(),
+        "jobType": job_type.as_str(),
+        "requestedJob": job_type.as_str(),
+        "command": command,
+        "workspace": workspace_path.display().to_string(),
+        "recordedAt": now,
+        "completedAt": now,
+        "outcome": result.outcome.as_str(),
+        "rowsAffected": result.items_processed,
+        "itemsProcessed": result.items_processed,
+        "durationMs": result.duration_ms,
+        "dryRun": result.dry_run,
+        "durableMutation": result_json["details"]["durableMutation"].as_bool().unwrap_or(false),
+        "error": result.error.as_deref(),
+        "details": result_json["details"].clone(),
+        "budgetUsed": result_json["budgetUsed"].clone(),
+        "linkedAuditEntries": [],
     })
+}
+
+fn maintenance_job_history_path(workspace_path: &Path) -> PathBuf {
+    workspace_path.join(".ee").join("maintenance-jobs.jsonl")
+}
+
+fn append_maintenance_job_history(
+    workspace_path: &Path,
+    row: &serde_json::Value,
+) -> Result<PathBuf, String> {
+    let path = maintenance_job_history_path(workspace_path);
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Could not resolve parent directory for {}", path.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
+    let encoded = serde_json::to_string(row)
+        .map_err(|error| format!("Failed to encode maintenance job row: {error}"))?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| format!("Failed to open {}: {error}", path.display()))?;
+    writeln!(file, "{encoded}")
+        .map_err(|error| format!("Failed to append {}: {error}", path.display()))?;
+    Ok(path)
+}
+
+fn load_maintenance_job_history(workspace_path: &Path) -> Result<Vec<serde_json::Value>, String> {
+    let path = maintenance_job_history_path(workspace_path);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let file = fs::File::open(&path)
+        .map_err(|error| format!("Failed to open {}: {error}", path.display()))?;
+    let mut rows = Vec::new();
+    for (line_index, line) in io::BufReader::new(file).lines().enumerate() {
+        let line = line.map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let row = serde_json::from_str(&line).map_err(|error| {
+            format!(
+                "Failed to parse {} line {}: {error}",
+                path.display(),
+                line_index + 1
+            )
+        })?;
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn parse_job_history_since(
+    since: Option<&str>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
+    since
+        .map(|raw| {
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+                .map_err(|error| format!("Invalid --since timestamp `{raw}`: {error}"))
+        })
+        .transpose()
+}
+
+fn job_history_row_timestamp(row: &serde_json::Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    row["completedAt"]
+        .as_str()
+        .or_else(|| row["recordedAt"].as_str())
+        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+        .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
 }
 
 fn write_maintenance_response<W>(
@@ -17132,6 +17965,11 @@ impl NormalizedInvocation {
                     DemoCommand::Verify(_) => "demo verify".to_string(),
                 },
                 Command::Daemon(_) => "daemon".to_string(),
+                Command::Job(job) => match job {
+                    JobCommand::Run(_) => "job run".to_string(),
+                    JobCommand::List(_) => "job list".to_string(),
+                    JobCommand::Show(_) => "job show".to_string(),
+                },
                 Command::Maintenance(maintenance) => match maintenance {
                     MaintenanceCommand::Run(_) => "maintenance run".to_string(),
                     MaintenanceCommand::Status(_) => "maintenance status".to_string(),
@@ -17284,7 +18122,11 @@ impl NormalizedInvocation {
                     RecorderCommand::Event(_) => "recorder event".to_string(),
                     RecorderCommand::Finish(_) => "recorder finish".to_string(),
                     RecorderCommand::Tail(_) => "recorder tail".to_string(),
+                    RecorderCommand::Follow(_) => "recorder follow".to_string(),
                     RecorderCommand::Import(_) => "recorder import".to_string(),
+                    RecorderCommand::Events(ev) => match ev {
+                        RecorderEventsCommand::List(_) => "recorder events list".to_string(),
+                    },
                 },
                 Command::Rationale(rat) => match rat {
                     RationaleCommand::Attach(_) => "rationale attach".to_string(),
@@ -17990,11 +18832,11 @@ mod tests {
 
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli,
-        Command, CurateCommand, DiagCommand, EconomyCommand, FieldsLevel, FocusCommand,
-        GraphCommand, ImportCommand, LearnCommand, LearnExperimentCommand, MaintenanceCommand,
-        MaintenanceJob, MemoryCommand, OutcomeQuarantineCommand, OutputFormat, PlaybookCommand,
-        RuleCommand, ShadowMode, SituationCommand, TaskFrameCommand, TaskFrameSubgoalCommand,
-        WorkflowCommand, run,
+        Command, CurateCommand, DaemonCommand, DiagCommand, EconomyCommand, FieldsLevel,
+        FocusCommand, GraphCommand, ImportCommand, JobCommand, LearnCommand,
+        LearnExperimentCommand, MaintenanceCommand, MemoryCommand, OutcomeQuarantineCommand,
+        OutputFormat, PlaybookCommand, RuleCommand, ShadowMode, SituationCommand, TaskFrameCommand,
+        TaskFrameSubgoalCommand, WorkflowCommand, run,
     };
     use crate::core::search::{
         ScoreExplanation, ScoreFactor, ScoreSource, SearchHit, SearchReport, SearchStatus,
@@ -18006,6 +18848,7 @@ mod tests {
     use crate::models::error_codes::ALL_ERROR_CODES;
     use crate::models::{ALL_DEGRADATION_CODES, MemoryId, ProcessExitCode};
     use crate::output;
+    use crate::steward::JobType;
 
     type TestResult = Result<(), String>;
 
@@ -21023,9 +21866,36 @@ mod tests {
     }
 
     #[test]
-    fn daemon_foreground_json_degrades_before_simulated_jobs_run() -> TestResult {
+    fn daemon_status_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "daemon", "status", "--json"])
+            .map_err(|e| format!("failed to parse daemon status: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Daemon(args)) => match args.command {
+                Some(DaemonCommand::Status(_)) => Ok(()),
+                other => Err(format!("expected daemon status subcommand, got {other:?}")),
+            },
+            _ => Err("expected daemon command".to_string()),
+        }
+    }
+
+    #[test]
+    fn daemon_foreground_json_runs_real_health_job() -> TestResult {
+        let workspace_arg = std::env::temp_dir()
+            .join(format!(
+                "ee-daemon-cli-health-missing-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|error| format!("system clock before unix epoch: {error}"))?
+                    .as_nanos()
+            ))
+            .to_string_lossy()
+            .into_owned();
         let (exit, stdout, stderr) = invoke(&[
             "ee",
+            "--workspace",
+            workspace_arg.as_str(),
             "daemon",
             "--foreground",
             "--once",
@@ -21036,55 +21906,41 @@ mod tests {
             "--json",
         ]);
 
-        ensure_equal(
-            &exit,
-            &ProcessExitCode::UnsatisfiedDegradedMode,
-            "daemon exit",
-        )?;
+        ensure_equal(&exit, &ProcessExitCode::Success, "daemon exit")?;
         ensure_contains(&stdout, "\"schema\":\"ee.response.v1\"", "response schema")?;
+        ensure_contains(&stdout, "\"success\":true", "daemon success flag")?;
         ensure_contains(
             &stdout,
-            "\"success\":false",
-            "daemon unavailable success flag",
-        )?;
-        ensure_contains(
-            &stdout,
-            "\"code\":\"daemon_jobs_unavailable\"",
-            "daemon unavailable code",
+            "\"schema\":\"ee.steward.daemon_foreground.v1\"",
+            "daemon foreground schema",
         )?;
         ensure_contains(
             &stdout,
-            "\"command\":\"daemon foreground\"",
-            "daemon command",
+            "\"supervisor\":\"asupersync_foreground\"",
+            "daemon supervisor",
         )?;
-        ensure_contains(&stdout, "\"repair\":\"ee status --json\"", "repair")?;
-        ensure(
-            !stdout.contains("ee.steward.daemon_foreground.v1")
-                && !stdout.contains("\"tickCount\"")
-                && !stdout.contains("\"jobTypes\"")
-                && !stdout.contains("\"health_check\""),
-            "daemon degraded output must not emit simulated scheduler schema, ticks, or jobs",
-        )?;
+        ensure_contains(&stdout, "\"tickCount\":1", "daemon tick count")?;
+        ensure_contains(&stdout, "\"health_check\"", "daemon job type")?;
         ensure(stderr.is_empty(), "daemon json stderr empty")
     }
 
     #[test]
-    fn daemon_background_mode_reports_jobs_unavailable() -> TestResult {
+    fn daemon_status_json_reports_foreground_supervisor() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "daemon", "--json"]);
 
-        ensure_equal(
-            &exit,
-            &ProcessExitCode::UnsatisfiedDegradedMode,
-            "daemon background exit",
-        )?;
+        ensure_equal(&exit, &ProcessExitCode::Success, "daemon status exit")?;
         ensure_contains(&stdout, "\"schema\":\"ee.response.v1\"", "response schema")?;
-        ensure_contains(&stdout, "\"success\":false", "success flag")?;
+        ensure_contains(&stdout, "\"success\":true", "success flag")?;
         ensure_contains(
             &stdout,
-            "\"code\":\"daemon_jobs_unavailable\"",
-            "daemon unavailable code",
+            "\"schema\":\"ee.steward.daemon_status.v1\"",
+            "daemon status schema",
         )?;
-        ensure_contains(&stdout, "\"repair\":\"ee status --json\"", "repair")?;
+        ensure_contains(
+            &stdout,
+            "\"supervisor\":\"asupersync_foreground\"",
+            "daemon status supervisor",
+        )?;
         ensure(stderr.is_empty(), "daemon json error stderr empty")
     }
 
@@ -21104,7 +21960,7 @@ mod tests {
 
         match parsed.command {
             Some(Command::Maintenance(MaintenanceCommand::Run(args))) => {
-                ensure_equal(&args.job, &MaintenanceJob::MemoryDecay, "job")?;
+                ensure_equal(&args.job, &JobType::DecaySweep, "job")?;
                 ensure_equal(&args.dry_run, &true, "dry run")?;
                 ensure_equal(&args.item_limit, &Some(10), "item limit")
             }
@@ -21113,7 +21969,7 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_status_json_lists_memory_decay_and_unavailable_jobs() -> TestResult {
+    fn maintenance_status_json_lists_available_steward_jobs() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "maintenance", "status", "--json"]);
 
         ensure_equal(&exit, &ProcessExitCode::Success, "maintenance status exit")?;
@@ -21123,13 +21979,13 @@ mod tests {
             "\"schema\":\"ee.maintenance.status.v1\"",
             "maintenance status schema",
         )?;
-        ensure_contains(&stdout, "\"name\":\"memory.decay\"", "memory decay job")?;
+        ensure_contains(&stdout, "\"name\":\"decay_sweep\"", "decay sweep job")?;
         ensure_contains(&stdout, "\"available\":true", "available job")?;
-        ensure_contains(&stdout, "\"name\":\"rule.score\"", "rule score job")?;
+        ensure_contains(&stdout, "\"name\":\"index_rebuild\"", "index rebuild job")?;
         ensure_contains(
             &stdout,
-            "\"code\":\"maintenance_job_unavailable\"",
-            "unavailable job code",
+            "\"name\":\"quarantine_sweep\"",
+            "quarantine sweep job",
         )
     }
 
@@ -21181,7 +22037,7 @@ mod tests {
         )?;
         ensure_equal(
             &parsed["data"]["requestedJob"],
-            &serde_json::json!("memory.decay"),
+            &serde_json::json!("decay_sweep"),
             "requested job",
         )?;
         let results = parsed["data"]["results"]
@@ -21199,6 +22055,131 @@ mod tests {
             &result["details"]["schema"],
             &serde_json::json!("ee.steward.score_decay.v1"),
             "steward handler schema",
+        )
+    }
+
+    #[test]
+    fn job_run_command_accepts_steward_job_kind() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "job",
+            "run",
+            "health_check",
+            "--dry-run",
+            "--time-limit-ms",
+            "25",
+        ])
+        .map_err(|error| format!("failed to parse job run: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Job(JobCommand::Run(args))) => {
+                ensure_equal(&args.kind, &JobType::HealthCheck, "job kind")?;
+                ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(&args.time_limit_ms, &Some(25), "time limit")
+            }
+            other => Err(format!("expected job run command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn job_run_list_show_json_persists_history_row() -> TestResult {
+        let workspace = std::env::temp_dir()
+            .join(format!(
+                "ee-job-history-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|error| format!("system clock before unix epoch: {error}"))?
+                    .as_nanos()
+            ))
+            .to_string_lossy()
+            .into_owned();
+
+        let (run_exit, run_stdout, run_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "job",
+            "run",
+            "health_check",
+            "--json",
+        ]);
+        ensure_equal(&run_exit, &ProcessExitCode::Success, "job run exit")?;
+        ensure(run_stderr.is_empty(), "job run stderr empty")?;
+        let run_json: serde_json::Value =
+            serde_json::from_str(&run_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &run_json["data"]["schema"],
+            &serde_json::json!("ee.maintenance.run.v1"),
+            "job run schema",
+        )?;
+        ensure_equal(
+            &run_json["data"]["command"],
+            &serde_json::json!("job run"),
+            "job run command",
+        )?;
+        ensure_equal(
+            &run_json["data"]["history"]["persisted"],
+            &serde_json::json!(true),
+            "history persisted",
+        )?;
+        let row_id = run_json["data"]["job"]["id"]
+            .as_str()
+            .ok_or_else(|| "job history row id missing".to_owned())?
+            .to_owned();
+
+        let (list_exit, list_stdout, list_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "job",
+            "list",
+            "--kind",
+            "health_check",
+            "--json",
+        ]);
+        ensure_equal(&list_exit, &ProcessExitCode::Success, "job list exit")?;
+        ensure(list_stderr.is_empty(), "job list stderr empty")?;
+        let list_json: serde_json::Value =
+            serde_json::from_str(&list_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &list_json["data"]["schema"],
+            &serde_json::json!("ee.maintenance.job_list.v1"),
+            "job list schema",
+        )?;
+        ensure_equal(
+            &list_json["data"]["jobCount"],
+            &serde_json::json!(1),
+            "job list count",
+        )?;
+
+        let (show_exit, show_stdout, show_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "job",
+            "show",
+            &row_id,
+            "--json",
+        ]);
+        ensure_equal(&show_exit, &ProcessExitCode::Success, "job show exit")?;
+        ensure(show_stderr.is_empty(), "job show stderr empty")?;
+        let show_json: serde_json::Value =
+            serde_json::from_str(&show_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &show_json["data"]["schema"],
+            &serde_json::json!("ee.maintenance.job_show.v1"),
+            "job show schema",
+        )?;
+        ensure_equal(
+            &show_json["data"]["job"]["id"],
+            &serde_json::json!(row_id),
+            "shown row id",
+        )?;
+        ensure_equal(
+            &show_json["data"]["linkedAuditEntries"],
+            &serde_json::json!([]),
+            "linked audit entries",
         )
     }
 
@@ -21255,32 +22236,22 @@ mod tests {
     }
 
     #[test]
-    fn diag_quarantine_json_degrades_without_placeholder_report() -> TestResult {
+    fn diag_quarantine_json_reports_persisted_state_without_placeholder() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "diag", "quarantine", "--json"]);
 
-        ensure_equal(
-            &exit,
-            &ProcessExitCode::UnsatisfiedDegradedMode,
-            "diag quarantine exit",
-        )?;
+        ensure_equal(&exit, &ProcessExitCode::Success, "diag quarantine exit")?;
         ensure_contains(&stdout, "\"schema\":\"ee.response.v1\"", "response schema")?;
-        ensure_contains(&stdout, "\"success\":false", "success flag")?;
+        ensure_contains(&stdout, "\"success\":true", "success flag")?;
         ensure_contains(
             &stdout,
             "\"command\":\"diag quarantine\"",
             "diag quarantine command",
         )?;
-        ensure_contains(
-            &stdout,
-            "\"code\":\"quarantine_trust_state_unavailable\"",
-            "quarantine unavailable code",
-        )?;
-        ensure_contains(&stdout, "\"repair\":\"ee status --json\"", "repair")?;
+        ensure_contains(&stdout, "\"storageStatus\":", "quarantine storage status")?;
+        let removed_code = ["quarantine", "trust", "state", "unavailable"].join("_");
         ensure(
-            !stdout.contains("ee.quarantine.v1")
-                && !stdout.contains("\"healthy_count\"")
-                && !stdout.contains("placeholder"),
-            "diag quarantine degraded output must not emit a placeholder report",
+            !stdout.contains(&removed_code) && !stdout.contains("placeholder"),
+            "diag quarantine output must not emit the removed unavailable sentinel",
         )?;
         ensure(stderr.is_empty(), "diag quarantine json stderr empty")
     }

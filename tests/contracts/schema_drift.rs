@@ -99,6 +99,13 @@ pub const CORE_SCHEMAS: &[SchemaEntry] = &[
     ),
 ];
 
+/// Database schemas.
+pub const DATABASE_SCHEMAS: &[SchemaEntry] = &[SchemaEntry::new(
+    "database_live_ddl",
+    "ee.database.live_ddl.v1",
+    SchemaCategory::Database,
+)];
+
 /// Handoff schemas.
 pub const HANDOFF_SCHEMAS: &[SchemaEntry] = &[
     SchemaEntry::new(
@@ -489,6 +496,7 @@ pub const BACKUP_SCHEMAS: &[SchemaEntry] = &[
 pub fn all_schemas() -> Vec<&'static SchemaEntry> {
     let mut schemas = Vec::new();
     schemas.extend(CORE_SCHEMAS.iter());
+    schemas.extend(DATABASE_SCHEMAS.iter());
     schemas.extend(HANDOFF_SCHEMAS.iter());
     schemas.extend(CONTEXT_SCHEMAS.iter());
     schemas.extend(ECONOMY_SCHEMAS.iter());
@@ -546,8 +554,296 @@ pub fn check_category_coverage(schemas: &[&SchemaEntry]) -> BTreeMap<SchemaCateg
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    use ee::db::DbConnection;
+    use sqlmodel_core::{Row, Value};
+    use sqlmodel_frankensqlite::FrankenConnection;
 
     type TestResult = Result<(), String>;
+
+    struct LiveSchemaSnapshot {
+        tables: BTreeSet<String>,
+        indexes: BTreeSet<String>,
+        columns: std::collections::BTreeMap<String, BTreeSet<String>>,
+    }
+
+    struct AppendixDivergence {
+        table: &'static str,
+        reason: &'static str,
+    }
+
+    const LIVE_SCHEMA_TABLES: &[&str] = &[
+        "agent_history_sources",
+        "agent_installations",
+        "agents",
+        "artifact_links",
+        "artifacts",
+        "audit_log",
+        "certificates",
+        "curation_candidates",
+        "curation_candidates_v029",
+        "curation_ttl_policies",
+        "ee_advisory_locks",
+        "ee_schema_migrations",
+        "evidence_spans",
+        "feedback_events",
+        "feedback_quarantine",
+        "graph_snapshots",
+        "import_ledger",
+        "learning_observations",
+        "memories",
+        "memory_links",
+        "memory_tags",
+        "model_registry",
+        "pack_items",
+        "pack_omissions",
+        "pack_records",
+        "procedural_rules",
+        "rationale_trace_links",
+        "rationale_traces",
+        "recorder_events",
+        "recorder_runs",
+        "rule_source_memories",
+        "rule_tags",
+        "search_index_jobs",
+        "sessions",
+        "task_episodes",
+        "tripwire_check_events",
+        "tripwires",
+        "trust_quarantine",
+        "workspaces",
+    ];
+
+    const CRITICAL_SCHEMA_INDEXES: &[&str] = &[
+        "idx_audit_log_chain",
+        "idx_ee_advisory_locks_holder",
+        "idx_graph_snapshots_workspace",
+        "idx_import_ledger_source",
+        "idx_learning_observations_workspace",
+        "idx_memories_trust_class",
+        "idx_memories_workspace",
+        "idx_memories_workspace_workflow",
+        "idx_pack_items_rank",
+        "idx_pack_items_trust_class",
+        "idx_recorder_runs_workspace",
+        "idx_search_index_jobs_workspace",
+        "idx_workspaces_path",
+    ];
+
+    const CRITICAL_SCHEMA_COLUMNS: &[(&str, &[&str])] = &[
+        (
+            "workspaces",
+            &[
+                "id",
+                "path",
+                "name",
+                "scope_kind",
+                "repository_root",
+                "repository_fingerprint",
+                "subproject_path",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        (
+            "memories",
+            &[
+                "id",
+                "workspace_id",
+                "level",
+                "kind",
+                "content",
+                "workflow_id",
+                "confidence",
+                "utility",
+                "importance",
+                "provenance_uri",
+                "provenance_chain_hash",
+                "provenance_chain_hash_version",
+                "provenance_verification_status",
+                "trust_class",
+                "trust_subclass",
+                "valid_from",
+                "valid_to",
+                "created_at",
+                "updated_at",
+                "tombstoned_at",
+            ],
+        ),
+        (
+            "pack_records",
+            &[
+                "id",
+                "workspace_id",
+                "query",
+                "profile",
+                "max_tokens",
+                "used_tokens",
+                "item_count",
+                "omitted_count",
+                "pack_hash",
+                "degraded_json",
+                "created_at",
+                "created_by",
+            ],
+        ),
+        (
+            "pack_items",
+            &[
+                "pack_id",
+                "memory_id",
+                "rank",
+                "section",
+                "estimated_tokens",
+                "relevance",
+                "utility",
+                "why",
+                "diversity_key",
+                "provenance_json",
+                "trust_class",
+                "trust_subclass",
+            ],
+        ),
+        (
+            "audit_log",
+            &[
+                "id",
+                "workspace_id",
+                "timestamp",
+                "actor",
+                "action",
+                "target_type",
+                "target_id",
+                "details",
+                "surface",
+                "mutation_kind",
+                "before_hash",
+                "after_hash",
+                "prev_row_hash",
+                "this_row_hash",
+            ],
+        ),
+        (
+            "procedural_rules",
+            &[
+                "id",
+                "workspace_id",
+                "content",
+                "confidence",
+                "utility",
+                "importance",
+                "trust_class",
+                "scope",
+                "scope_pattern",
+                "maturity",
+                "positive_feedback_count",
+                "negative_feedback_count",
+                "protected",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        (
+            "ee_schema_migrations",
+            &["version", "name", "checksum", "applied_at"],
+        ),
+        (
+            "learning_observations",
+            &[
+                "id",
+                "workspace_id",
+                "observation_kind",
+                "source_type",
+                "source_id",
+                "target_type",
+                "target_id",
+                "topic",
+                "signal",
+                "evidence_json",
+                "observed_at",
+                "created_at",
+            ],
+        ),
+    ];
+
+    const APPENDIX_A_ONLY_TABLES: &[AppendixDivergence] = &[
+        AppendixDivergence {
+            table: "meta",
+            reason: "metadata is currently represented by workspaces plus migration records",
+        },
+        AppendixDivergence {
+            table: "migrations",
+            reason: "the live migration ledger is ee_schema_migrations",
+        },
+        AppendixDivergence {
+            table: "embeddings",
+            reason: "semantic indexes are derived assets outside the durable DB contract",
+        },
+        AppendixDivergence {
+            table: "memory_fts",
+            reason: "Frankensearch is the retrieval layer; no in-DB FTS table is canonical",
+        },
+        AppendixDivergence {
+            table: "workflows",
+            reason: "workflow grouping is represented by memories.workflow_id in the live schema",
+        },
+        AppendixDivergence {
+            table: "actions",
+            reason: "action history has not been promoted into the live durable schema",
+        },
+        AppendixDivergence {
+            table: "diary_entries",
+            reason: "diary storage has not been promoted into the live durable schema",
+        },
+        AppendixDivergence {
+            table: "retrieval_policies",
+            reason: "retrieval policy state is not yet a durable table",
+        },
+        AppendixDivergence {
+            table: "steward_jobs",
+            reason: "steward job persistence is not yet a durable table",
+        },
+        AppendixDivergence {
+            table: "idempotency_keys",
+            reason: "idempotency keys are not yet part of the live DB contract",
+        },
+    ];
+
+    const IMPLEMENTATION_ADDED_TABLES: &[AppendixDivergence] = &[
+        AppendixDivergence {
+            table: "pack_items",
+            reason: "context pack item provenance is persisted for explainability",
+        },
+        AppendixDivergence {
+            table: "pack_omissions",
+            reason: "context pack omissions are persisted for replayable why output",
+        },
+        AppendixDivergence {
+            table: "recorder_runs",
+            reason: "recorder imports and live runs use explicit durable rows",
+        },
+        AppendixDivergence {
+            table: "recorder_events",
+            reason: "recorder event chains are persisted separately from sessions",
+        },
+        AppendixDivergence {
+            table: "certificates",
+            reason: "signed manifests and lifecycle certificates are durable records",
+        },
+        AppendixDivergence {
+            table: "trust_quarantine",
+            reason: "source trust quarantine summaries are durable records",
+        },
+        AppendixDivergence {
+            table: "learning_observations",
+            reason: "active learning observations have a dedicated ledger",
+        },
+        AppendixDivergence {
+            table: "curation_candidates_v029",
+            reason: "the retained v029 table is migration evidence for FrankenSQLite integrity",
+        },
+    ];
 
     fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
         if condition {
@@ -567,6 +863,83 @@ mod tests {
         } else {
             Err(format!("{context}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn row_text(row: &Row, index: usize, context: &str) -> Result<String, String> {
+        row.get(index)
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("{context}: expected text at column {index}"))
+    }
+
+    fn quote_identifier(identifier: &str) -> String {
+        format!("\"{}\"", identifier.replace('"', "\"\""))
+    }
+
+    fn migrated_schema_snapshot() -> Result<LiveSchemaSnapshot, String> {
+        let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+        let database_path = tempdir.path().join("schema-drift.db");
+        let migration_connection =
+            DbConnection::open_file(&database_path).map_err(|error| format!("open db: {error}"))?;
+        migration_connection
+            .migrate()
+            .map_err(|error| format!("migrate db: {error}"))?;
+        migration_connection
+            .close()
+            .map_err(|error| format!("close migrated db: {error}"))?;
+
+        let query_connection =
+            FrankenConnection::open_file(database_path.to_string_lossy().into_owned())
+                .map_err(|error| format!("open migrated db for schema read: {error}"))?;
+
+        let table_rows = query_connection
+            .query_sync(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%' \
+                 ORDER BY name",
+                &[] as &[Value],
+            )
+            .map_err(|error| format!("read sqlite_master tables: {error}"))?;
+        let tables: BTreeSet<String> = table_rows
+            .iter()
+            .map(|row| row_text(row, 0, "table name"))
+            .collect::<Result<_, _>>()?;
+
+        let index_rows = query_connection
+            .query_sync(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND name NOT LIKE 'sqlite_%' \
+                 ORDER BY name",
+                &[] as &[Value],
+            )
+            .map_err(|error| format!("read sqlite_master indexes: {error}"))?;
+        let indexes: BTreeSet<String> = index_rows
+            .iter()
+            .map(|row| row_text(row, 0, "index name"))
+            .collect::<Result<_, _>>()?;
+
+        let mut columns = std::collections::BTreeMap::new();
+        for table in &tables {
+            let sql = format!("PRAGMA table_info({})", quote_identifier(table));
+            let column_rows = query_connection
+                .query_sync(&sql, &[] as &[Value])
+                .map_err(|error| format!("read columns for {table}: {error}"))?;
+            let column_names = column_rows
+                .iter()
+                .map(|row| row_text(row, 1, table))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            columns.insert(table.clone(), column_names);
+        }
+
+        query_connection
+            .close_sync()
+            .map_err(|error| format!("close schema read db: {error}"))?;
+
+        Ok(LiveSchemaSnapshot {
+            tables,
+            indexes,
+            columns,
+        })
     }
 
     #[test]
@@ -626,6 +999,10 @@ mod tests {
             "must have Handoff category schemas",
         )?;
         ensure(
+            coverage.contains_key(&SchemaCategory::Database),
+            "must have Database category schemas",
+        )?;
+        ensure(
             coverage.contains_key(&SchemaCategory::Procedure),
             "must have Procedure category schemas",
         )?;
@@ -637,6 +1014,101 @@ mod tests {
             coverage.contains_key(&SchemaCategory::Graph),
             "must have Graph category schemas",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn database_schemas_include_live_ddl_contract() -> TestResult {
+        let versions: Vec<&str> = DATABASE_SCHEMAS.iter().map(|s| s.version).collect();
+        ensure(
+            versions.contains(&"ee.database.live_ddl.v1"),
+            "database schemas must include the live DDL migration contract",
+        )
+    }
+
+    #[test]
+    fn migrated_database_schema_matches_live_contract() -> TestResult {
+        let snapshot = migrated_schema_snapshot()?;
+        let expected_tables = LIVE_SCHEMA_TABLES
+            .iter()
+            .map(|table| (*table).to_owned())
+            .collect::<BTreeSet<_>>();
+        ensure_equal(
+            &snapshot.tables,
+            &expected_tables,
+            "freshly migrated database table set",
+        )?;
+
+        for index in CRITICAL_SCHEMA_INDEXES {
+            ensure(
+                snapshot.indexes.contains(*index),
+                format!("freshly migrated database must include critical index {index}"),
+            )?;
+        }
+
+        for (table, expected_columns) in CRITICAL_SCHEMA_COLUMNS {
+            let actual_columns = snapshot
+                .columns
+                .get(*table)
+                .ok_or_else(|| format!("missing critical table {table}"))?;
+            for column in *expected_columns {
+                ensure(
+                    actual_columns.contains(*column),
+                    format!("critical table {table} must include column {column}"),
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn appendix_a_schema_divergences_are_explicit() -> TestResult {
+        let snapshot = migrated_schema_snapshot()?;
+
+        ensure(
+            snapshot.tables.contains("ee_schema_migrations"),
+            "live schema must use ee_schema_migrations as the migration ledger",
+        )?;
+        ensure(
+            !snapshot.tables.contains("migrations"),
+            "Appendix A migrations table is intentionally superseded by ee_schema_migrations",
+        )?;
+
+        for divergence in APPENDIX_A_ONLY_TABLES {
+            ensure(
+                !divergence.reason.trim().is_empty(),
+                format!(
+                    "Appendix A divergence for {} needs a reason",
+                    divergence.table
+                ),
+            )?;
+            ensure(
+                !snapshot.tables.contains(divergence.table),
+                format!(
+                    "Appendix A table {} is now present; update the live DDL contract and divergence list",
+                    divergence.table
+                ),
+            )?;
+        }
+
+        for divergence in IMPLEMENTATION_ADDED_TABLES {
+            ensure(
+                !divergence.reason.trim().is_empty(),
+                format!(
+                    "implementation-added divergence for {} needs a reason",
+                    divergence.table
+                ),
+            )?;
+            ensure(
+                snapshot.tables.contains(divergence.table),
+                format!(
+                    "implementation-added table {} is missing; update migrations or divergence list",
+                    divergence.table
+                ),
+            )?;
+        }
+
         Ok(())
     }
 

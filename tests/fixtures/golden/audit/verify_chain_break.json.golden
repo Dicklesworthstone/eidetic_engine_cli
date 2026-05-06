@@ -1,0 +1,1 @@
+{"schema":"ee.audit.verify.v1","integrity_ok":false,"rows":2,"last_hash":"blake3:row-2","first_break":"audit_golden_000000000000000002","issues":[{"code":"row_hash_mismatch","audit_id":"audit_golden_000000000000000002","message":"row audit_golden_000000000000000002 hash mismatch: stored blake3:row-2, recomputed blake3:tampered"}]}

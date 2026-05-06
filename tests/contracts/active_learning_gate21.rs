@@ -460,18 +460,43 @@ fn gate21_close_inconclusive_json_matches_golden() -> TestResult {
 
 #[test]
 fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
-    let output = run_ee(&["--json", "learn", "agenda", "--limit", "2"])?;
+    let agenda_workspace = unique_workspace_dir("gate21-cli-agenda")?;
+    let agenda_workspace_arg = agenda_workspace.to_string_lossy().into_owned();
+
+    let init = run_ee(&[
+        "--workspace",
+        agenda_workspace_arg.as_str(),
+        "--json",
+        "init",
+    ])?;
     ensure(
-        output.status.code() == Some(6),
+        init.status.code() == Some(0),
         format!(
-            "learn agenda CLI should report degraded unavailable exit 6, got {:?}",
+            "learn agenda init should succeed, got {:?}",
+            init.status.code()
+        ),
+    )?;
+
+    let output = run_ee(&[
+        "--workspace",
+        agenda_workspace_arg.as_str(),
+        "--json",
+        "learn",
+        "agenda",
+        "--limit",
+        "2",
+    ])?;
+    ensure(
+        output.status.code() == Some(0),
+        format!(
+            "learn agenda CLI should read the persisted ledger, got {:?}",
             output.status.code()
         ),
     )?;
     ensure(
         output.stderr.is_empty(),
         format!(
-            "learn agenda --json must keep diagnostics off stderr for degraded output, got: {}",
+            "learn agenda --json must keep diagnostics off stderr, got: {}",
             String::from_utf8_lossy(&output.stderr)
         ),
     )?;
@@ -481,14 +506,14 @@ fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
         serde_json::from_str(&stdout).map_err(|error| format!("stdout must be JSON: {error}"))?;
     ensure_json_equal(
         value.get("schema"),
-        JsonValue::String("ee.response.v1".to_string()),
+        JsonValue::String(LEARN_AGENDA_SCHEMA_V1.to_string()),
         "cli schema",
     )?;
-    ensure_json_equal(value.get("success"), JsonValue::Bool(false), "cli success")?;
+    ensure_json_equal(value.get("success"), JsonValue::Bool(true), "cli success")?;
     ensure_json_equal(
-        value.pointer("/data/code"),
-        JsonValue::String("learning_records_unavailable".to_string()),
-        "agenda degraded code",
+        value.get("items"),
+        JsonValue::Array(Vec::new()),
+        "agenda empty items",
     )?;
 
     let workspace = unique_workspace_dir("gate21-cli-dry-run")?;

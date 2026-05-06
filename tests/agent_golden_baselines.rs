@@ -386,6 +386,16 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             expected_command: Some("schema"),
         },
         ContractCase {
+            name: "schema_list_json",
+            args: &["schema", "list", "--json"],
+            category: "schema",
+            golden_name: "schema_list_json",
+            format: ContractFormat::Json,
+            expected_success: true,
+            expected_schema: Some("ee.response.v1"),
+            expected_command: Some("schema list"),
+        },
+        ContractCase {
             name: "health_unavailable_json",
             args: &["--json", "health"],
             category: "agent",

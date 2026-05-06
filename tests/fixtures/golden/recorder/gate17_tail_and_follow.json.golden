@@ -6,17 +6,25 @@
     "events": [
       {
         "eventId": "evt_gate17_0001",
+        "runId": "run_gate17",
         "sequence": 1,
         "eventType": "user_message",
         "timestamp": "2026-01-02T03:04:04Z",
-        "redacted": true
+        "redacted": true,
+        "redactionStatus": "redacted",
+        "eventHash": "blake3:gate17tail0001",
+        "chainStatus": "root"
       },
       {
         "eventId": "evt_gate17_0002",
+        "runId": "run_gate17",
         "sequence": 2,
         "eventType": "tool_result",
         "timestamp": "2026-01-02T03:04:05Z",
-        "redacted": false
+        "redacted": false,
+        "redactionStatus": "clean",
+        "eventHash": "blake3:gate17tail0002",
+        "chainStatus": "linked"
       }
     ],
     "totalEvents": 2,

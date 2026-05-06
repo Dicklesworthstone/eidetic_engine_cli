@@ -91,7 +91,7 @@ mechanical sub-surface with concrete evidence.
 
 | Command Path | Current Code Anchor | Prior Risk | Current Contract / Follow-Up |
 |--------------|---------------------|------------|------------------------------|
-| `audit timeline/show/diff/verify` | `src/cli/mod.rs` `AUDIT_UNAVAILABLE_CODE` | Generated/sample audit operation data could look persisted. | Returns `audit_log_unavailable`; follow-up `eidetic_engine_cli-s43e`. |
+| `audit timeline/show/diff/verify` | `src/core/audit.rs` + `audit_log` | Generated/sample audit operation data could look persisted. | Reads persisted audit rows and verifies the chain-hashed audit log; implemented by `eidetic_engine_cli-ar5o`. |
 | `support bundle/inspect` | `src/cli/mod.rs` `SUPPORT_BUNDLE_UNAVAILABLE_CODE` | Placeholder bundle paths and unconditional inspection success. | Returns `support_bundle_unavailable`; follow-up `eidetic_engine_cli-5g6d`. |
 | `certificate list/show/verify` | `src/cli/mod.rs` `CERTIFICATE_STORE_UNAVAILABLE_CODE` | Mock certificate validity or hash verification. | Returns `certificate_store_unavailable`; follow-up claim/certificate manifest work. |
 | `claim list/show/verify` | `src/cli/mod.rs` `CLAIM_UNAVAILABLE_CODE` | Empty placeholder claim lists and zero-result verification. | Returns `claim_verification_unavailable`; follow-up `eidetic_engine_cli-v76q`. |
@@ -110,7 +110,8 @@ mechanical sub-surface with concrete evidence.
 | `review session --propose` | `src/cli/mod.rs` `REVIEW_UNAVAILABLE_CODE` | Empty generated curation proposal set. | Returns `review_evidence_unavailable`; follow-up CASS evidence import/review work. |
 | `handoff create` | `src/cli/mod.rs` `HANDOFF_UNAVAILABLE_CODE` | Placeholder continuity capsule creation. | Returns `handoff_unavailable`; follow-up `eidetic_engine_cli-g9dq`. |
 | `daemon` | `src/cli/mod.rs` `DAEMON_UNAVAILABLE_CODE` | Simulated scheduler ticks and processed item counts. | Returns `daemon_jobs_unavailable`; follow-up `eidetic_engine_cli-5g6d`. |
-| `recorder start/event/finish/tail` | `src/cli/mod.rs` recorder unavailable handlers | Generated run/event IDs and stubbed empty tail state. | Returns `recorder_store_unavailable` or `recorder_tail_unavailable`; follow-up `eidetic_engine_cli-6xzc`. |
+| `recorder start/event/finish` | `src/cli/mod.rs` recorder store unavailable handlers | Generated run/event IDs. | Returns `recorder_store_unavailable`; follow-up `eidetic_engine_cli-6xzc`. |
+| `recorder tail/follow` | `src/core/recorder.rs` + V027 `recorder_events` | Read-only persisted recorder event stream. | Reads real events with deterministic tail windows and JSONL follow output; implemented by `eidetic_engine_cli-qow7`. |
 | `demo list/run/verify` | `src/cli/mod.rs` demo handlers | Empty timestamped demo placeholders. | `list`, `run --dry-run`, and `verify` parse real `demo.yaml` / artifact evidence; non-dry-run execution returns `demo_command_execution_unavailable`; follow-up `eidetic_engine_cli-jp06.1`. |
 
 Executable coverage lives primarily in `tests/degraded_honesty.rs`, with

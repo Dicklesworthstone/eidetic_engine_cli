@@ -1180,7 +1180,7 @@ pub enum HarmFeedbackPromotionOutcome {
     /// Harm count was below the configured threshold; no candidate proposed.
     BelowThreshold { harm_count: u32, threshold: u32 },
     /// A `rule` curation candidate was prepared (not yet inserted).
-    Promoted(HarmFeedbackPromotionProposal),
+    Promoted(Box<HarmFeedbackPromotionProposal>),
 }
 
 /// Concrete proposal returned by a successful promotion attempt.
@@ -1275,14 +1275,14 @@ pub fn propose_tripwire_from_harmful_feedback(
         ttl_expires_at: None,
     };
 
-    HarmFeedbackPromotionOutcome::Promoted(HarmFeedbackPromotionProposal {
+    HarmFeedbackPromotionOutcome::Promoted(Box::new(HarmFeedbackPromotionProposal {
         candidate_id,
         input,
         condition,
         memory_id: options.memory_id.clone(),
         harm_count: options.harm_count,
         threshold: options.threshold,
-    })
+    }))
 }
 
 fn stable_promotion_candidate_id(

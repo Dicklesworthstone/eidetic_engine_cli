@@ -3,6 +3,9 @@
 //! Provides append-only recording of agent activity for outcomes,
 //! preflight feedback, replay, procedure distillation, and causal credit.
 
+use std::collections::BTreeSet;
+use std::str::FromStr;
+
 use serde_json::{Value as JsonValue, json};
 
 use crate::models::{
@@ -1028,14 +1031,120 @@ pub fn finish_recording(options: &RecorderFinishOptions, event_count: u64) -> Re
 /// Options for tailing a recording session.
 #[derive(Clone, Debug)]
 pub struct RecorderTailOptions {
-    /// Run ID to tail.
-    pub run_id: String,
+    /// Optional run ID to tail. When omitted, tail reads across all runs.
+    pub run_id: Option<String>,
+    /// Only include events at or after this RFC 3339 timestamp.
+    pub since: Option<String>,
     /// Number of events to return.
     pub limit: u32,
     /// Starting sequence number.
     pub from_sequence: Option<u64>,
     /// Follow mode: continuously poll for new events.
     pub follow: bool,
+    /// Optional simple `key=value AND key=value` filter.
+    pub filter: Option<RecorderEventFilter>,
+}
+
+/// One normalized recorder event filter term.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecorderEventFilterTerm {
+    pub key: String,
+    pub value: String,
+}
+
+/// Parsed simple recorder event filter.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RecorderEventFilter {
+    terms: Vec<RecorderEventFilterTerm>,
+}
+
+impl RecorderEventFilter {
+    /// Parse `key=value AND key=value` expressions.
+    ///
+    /// # Errors
+    ///
+    /// Returns a usage error for unsupported fields or malformed terms.
+    pub fn parse_expression(expression: &str) -> Result<Self, crate::models::DomainError> {
+        let expression = expression.trim();
+        if expression.is_empty() {
+            return Ok(Self::default());
+        }
+
+        let mut terms = Vec::new();
+        for raw_term in expression.split(" AND ") {
+            let Some((raw_key, raw_value)) = raw_term.split_once('=') else {
+                return Err(crate::models::DomainError::Usage {
+                    message: format!(
+                        "Invalid recorder filter term `{raw_term}`: expected key=value"
+                    ),
+                    repair: Some(
+                        "Use filters such as `event_type=tool_call AND redacted=false`.".to_owned(),
+                    ),
+                });
+            };
+            let key = normalize_recorder_filter_key(raw_key).ok_or_else(|| {
+                crate::models::DomainError::Usage {
+                    message: format!("Unsupported recorder filter key `{}`", raw_key.trim()),
+                    repair: Some(
+                        "Use one of: run_id, event_id, event_type, redaction_status, redacted, chain_status, source."
+                            .to_owned(),
+                    ),
+                }
+            })?;
+            let value = raw_value.trim();
+            if value.is_empty() {
+                return Err(crate::models::DomainError::Usage {
+                    message: format!("Recorder filter key `{key}` has an empty value"),
+                    repair: Some("Use filters such as `run_id=run_123`.".to_owned()),
+                });
+            }
+            if key == "redacted" && !matches!(value, "true" | "false") {
+                return Err(crate::models::DomainError::Usage {
+                    message: format!(
+                        "Recorder filter key `redacted` expects true or false, got `{value}`"
+                    ),
+                    repair: Some("Use `redacted=true` or `redacted=false`.".to_owned()),
+                });
+            }
+            terms.push(RecorderEventFilterTerm {
+                key,
+                value: value.to_owned(),
+            });
+        }
+
+        Ok(Self { terms })
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.terms.is_empty()
+    }
+
+    #[must_use]
+    pub fn first_value(&self, key: &str) -> Option<&str> {
+        self.terms
+            .iter()
+            .find(|term| term.key == key)
+            .map(|term| term.value.as_str())
+    }
+
+    #[must_use]
+    pub fn matches_summary(&self, event: &RecorderEventSummary) -> bool {
+        self.terms.iter().all(|term| match term.key.as_str() {
+            "run_id" => event.run_id == term.value,
+            "event_id" => event.event_id == term.value,
+            "event_type" => event.event_type.as_str() == term.value,
+            "redaction_status" => event.redaction_status == term.value,
+            "redacted" => match term.value.as_str() {
+                "true" => event.redacted,
+                "false" => !event.redacted,
+                _ => false,
+            },
+            "chain_status" => event.chain_status == term.value,
+            "source_type" => true,
+            _ => true,
+        })
+    }
 }
 
 /// A single follow event emitted in JSONL format.
@@ -1107,7 +1216,7 @@ pub struct RecorderFollowSnapshot {
 #[derive(Clone, Debug)]
 pub struct RecorderTailReport {
     pub schema: &'static str,
-    pub run_id: String,
+    pub run_id: Option<String>,
     pub events: Vec<RecorderEventSummary>,
     pub total_events: u64,
     pub has_more: bool,
@@ -1117,10 +1226,14 @@ pub struct RecorderTailReport {
 #[derive(Clone, Debug)]
 pub struct RecorderEventSummary {
     pub event_id: String,
+    pub run_id: String,
     pub sequence: u64,
     pub event_type: RecorderEventType,
     pub timestamp: String,
     pub redacted: bool,
+    pub redaction_status: String,
+    pub event_hash: String,
+    pub chain_status: String,
 }
 
 impl RecorderTailReport {
@@ -1133,10 +1246,14 @@ impl RecorderTailReport {
             "runId": self.run_id,
             "events": self.events.iter().map(|e| json!({
                 "eventId": e.event_id,
+                "runId": e.run_id,
                 "sequence": e.sequence,
                 "eventType": e.event_type.as_str(),
                 "timestamp": e.timestamp,
                 "redacted": e.redacted,
+                "redactionStatus": e.redaction_status,
+                "eventHash": e.event_hash,
+                "chainStatus": e.chain_status,
             })).collect::<Vec<_>>(),
             "totalEvents": self.total_events,
             "hasMore": self.has_more,
@@ -1147,7 +1264,8 @@ impl RecorderTailReport {
     #[must_use]
     pub fn human_summary(&self) -> String {
         let mut out = String::with_capacity(512);
-        out.push_str(&format!("Recording Tail: {}\n", self.run_id));
+        let scope = self.run_id.as_deref().unwrap_or("all runs");
+        out.push_str(&format!("Recording Tail: {scope}\n"));
         out.push_str("==================\n\n");
         out.push_str(&format!("Total events: {}\n\n", self.total_events));
 
@@ -1190,19 +1308,45 @@ pub fn tail_recording_from_events(
     let from_sequence = options.from_sequence.unwrap_or(0);
     let mut matching = events
         .iter()
+        .filter(|event| {
+            options
+                .run_id
+                .as_ref()
+                .is_none_or(|run_id| &event.run_id == run_id)
+        })
+        .filter(|event| {
+            options
+                .since
+                .as_ref()
+                .is_none_or(|since| timestamp_is_at_or_after(&event.timestamp, since))
+        })
         .filter(|event| event.sequence >= from_sequence)
+        .filter(|event| {
+            options
+                .filter
+                .as_ref()
+                .is_none_or(|filter| filter.matches_summary(event))
+        })
         .cloned()
         .collect::<Vec<_>>();
     matching.sort_by(|left, right| {
-        left.sequence
-            .cmp(&right.sequence)
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| left.sequence.cmp(&right.sequence))
             .then_with(|| left.event_id.cmp(&right.event_id))
     });
 
     let total_events = usize_to_u64(matching.len());
     let limit = usize::try_from(options.limit).unwrap_or(usize::MAX);
     let has_more = matching.len() > limit;
-    matching.truncate(limit);
+    if has_more {
+        if options.from_sequence.is_some() || options.since.is_some() {
+            matching.truncate(limit);
+        } else {
+            let start = matching.len().saturating_sub(limit);
+            matching = matching.split_off(start);
+        }
+    }
 
     RecorderTailReport {
         schema: RECORDER_TAIL_SCHEMA_V1,
@@ -1211,6 +1355,65 @@ pub fn tail_recording_from_events(
         total_events,
         has_more,
     }
+}
+
+fn timestamp_is_at_or_after(timestamp: &str, since: &str) -> bool {
+    match (
+        chrono::DateTime::parse_from_rfc3339(timestamp),
+        chrono::DateTime::parse_from_rfc3339(since),
+    ) {
+        (Ok(timestamp), Ok(since)) => timestamp >= since,
+        _ => timestamp >= since,
+    }
+}
+
+/// Tail events from the persisted recorder store.
+///
+/// # Errors
+///
+/// Returns a storage error when persisted rows cannot be read or contain an
+/// invalid event type.
+pub fn tail_recording_from_store(
+    conn: &crate::db::DbConnection,
+    options: &RecorderTailOptions,
+) -> Result<RecorderTailReport, crate::models::DomainError> {
+    let filter_run_id = options
+        .filter
+        .as_ref()
+        .and_then(|filter| filter.first_value("run_id"));
+    let query_run_id = options.run_id.as_deref().or(filter_run_id);
+    let query_source = options
+        .filter
+        .as_ref()
+        .and_then(|filter| filter.first_value("source_type"));
+    let stored_events = conn
+        .list_recorder_events_filtered(
+            query_run_id,
+            options.since.as_deref(),
+            query_source,
+            u32::MAX,
+        )
+        .map_err(|error| crate::models::DomainError::Storage {
+            message: format!("Failed to read recorder events: {error}"),
+            repair: Some("ee status --json".to_owned()),
+        })?;
+    let summaries = stored_events
+        .into_iter()
+        .map(recorder_event_summary_from_stored)
+        .collect::<Result<Vec<_>, _>>()?;
+    let effective_options = RecorderTailOptions {
+        run_id: options
+            .run_id
+            .clone()
+            .or_else(|| filter_run_id.map(str::to_owned)),
+        since: options.since.clone(),
+        limit: options.limit,
+        from_sequence: options.from_sequence,
+        follow: options.follow,
+        filter: options.filter.clone(),
+    };
+
+    Ok(tail_recording_from_events(&effective_options, &summaries))
 }
 
 // ============================================================================
@@ -1259,10 +1462,12 @@ pub fn poll_follow_events_from_snapshot(
 
     let tail = tail_recording_from_events(
         &RecorderTailOptions {
-            run_id: snapshot.run_id.clone(),
+            run_id: Some(snapshot.run_id.clone()),
+            since: None,
             limit,
             from_sequence: Some(from_sequence),
             follow: true,
+            filter: None,
         },
         &snapshot.events,
     );
@@ -1273,7 +1478,7 @@ pub fn poll_follow_events_from_snapshot(
             .into_iter()
             .map(|event| RecorderTailFollowEvent {
                 schema: RECORDER_TAIL_FOLLOW_EVENT_SCHEMA_V1,
-                run_id: snapshot.run_id.clone(),
+                run_id: event.run_id,
                 event_id: event.event_id,
                 sequence: event.sequence,
                 event_type: event.event_type,
@@ -1301,6 +1506,70 @@ pub fn poll_follow_events_from_snapshot(
     }
 }
 
+/// Poll the persisted recorder store once for follow-mode output.
+///
+/// # Errors
+///
+/// Returns storage errors when the recorder store cannot be read.
+pub fn poll_follow_events_from_store(
+    conn: &crate::db::DbConnection,
+    options: &RecorderTailOptions,
+    seen_event_ids: &BTreeSet<String>,
+) -> Result<TailFollowResult, crate::models::DomainError> {
+    let report = tail_recording_from_store(conn, options)?;
+    let follow_run_id = report.run_id.clone();
+    let mut max_sequence = options.from_sequence.unwrap_or(0);
+    let events = report
+        .events
+        .into_iter()
+        .inspect(|event| {
+            max_sequence = max_sequence.max(event.sequence);
+        })
+        .filter(|event| !seen_event_ids.contains(&event.event_id))
+        .map(|event| RecorderTailFollowEvent {
+            schema: RECORDER_TAIL_FOLLOW_EVENT_SCHEMA_V1,
+            run_id: event.run_id,
+            event_id: event.event_id,
+            sequence: event.sequence,
+            event_type: event.event_type,
+            timestamp: event.timestamp,
+            redacted: event.redacted,
+            payload_preview: None,
+        })
+        .collect::<Vec<_>>();
+
+    if !events.is_empty() {
+        return Ok(TailFollowResult::Events(events));
+    }
+
+    if let Some(run_id) = follow_run_id.as_deref() {
+        let Some(run) =
+            conn.get_recorder_run(run_id)
+                .map_err(|error| crate::models::DomainError::Storage {
+                    message: format!("Failed to read recorder run {run_id}: {error}"),
+                    repair: Some("ee status --json".to_owned()),
+                })?
+        else {
+            return Ok(TailFollowResult::RunNotFound);
+        };
+        let status = RecorderRunStatus::from_str(&run.status).map_err(|error| {
+            crate::models::DomainError::Storage {
+                message: format!("Recorder run {run_id} has invalid status: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            }
+        })?;
+        if status.is_terminal() {
+            return Ok(TailFollowResult::RunCompleted {
+                final_sequence: max_sequence,
+            });
+        }
+    }
+
+    Ok(TailFollowResult::Waiting {
+        last_sequence: max_sequence,
+    })
+}
+
 /// Generate a follow mode diagnostic message for stderr.
 #[must_use]
 pub fn follow_diagnostic(result: &TailFollowResult) -> Option<String> {
@@ -1323,6 +1592,50 @@ pub fn follow_diagnostic(result: &TailFollowResult) -> Option<String> {
             Some(format!("waiting (last seq: {last_sequence})"))
         }
     }
+}
+
+fn normalize_recorder_filter_key(raw: &str) -> Option<String> {
+    let normalized = raw
+        .trim()
+        .replace('-', "_")
+        .replace('.', "_")
+        .to_lowercase();
+    match normalized.as_str() {
+        "run_id" | "runid" => Some("run_id".to_owned()),
+        "event_id" | "eventid" => Some("event_id".to_owned()),
+        "event_type" | "eventtype" | "type" => Some("event_type".to_owned()),
+        "redaction_status" | "redactionstatus" => Some("redaction_status".to_owned()),
+        "redacted" => Some("redacted".to_owned()),
+        "chain_status" | "chainstatus" => Some("chain_status".to_owned()),
+        "source" | "source_type" | "sourcetype" => Some("source_type".to_owned()),
+        _ => None,
+    }
+}
+
+fn recorder_event_summary_from_stored(
+    event: crate::db::StoredRecorderEvent,
+) -> Result<RecorderEventSummary, crate::models::DomainError> {
+    let event_type = RecorderEventType::from_str(&event.event_type).map_err(|error| {
+        crate::models::DomainError::Storage {
+            message: format!(
+                "Recorder event {} has invalid event type: {error}",
+                event.event_id
+            ),
+            repair: Some("ee doctor --json".to_owned()),
+        }
+    })?;
+    let redacted = event.redaction_status != "clean";
+    Ok(RecorderEventSummary {
+        event_id: event.event_id,
+        run_id: event.run_id,
+        sequence: event.sequence,
+        event_type,
+        timestamp: event.timestamp,
+        redacted,
+        redaction_status: event.redaction_status,
+        event_hash: event.event_hash,
+        chain_status: event.chain_status,
+    })
 }
 
 // ============================================================================
@@ -1769,22 +2082,25 @@ pub fn record_and_persist_event(
     conn: &crate::db::DbConnection,
     options: &RecorderEventOptions,
 ) -> Result<RecorderEventReport, RecordPersistedEventError> {
-    validate_run_id_token(&options.run_id)
-        .map_err(RecordPersistedEventError::InvalidRunId)?;
+    validate_run_id_token(&options.run_id).map_err(RecordPersistedEventError::InvalidRunId)?;
 
     let existing = conn
         .list_recorder_events(&options.run_id)
         .map_err(|error| RecordPersistedEventError::Storage {
-            message: format!("Failed to read recorder events for run {}: {error}", options.run_id),
+            message: format!(
+                "Failed to read recorder events for run {}: {error}",
+                options.run_id
+            ),
         })?;
     let sequence = u64::try_from(existing.len()).unwrap_or(u64::MAX) + 1;
     let previous_event_hash = existing.last().map(|event| event.event_hash.clone());
 
     // Honor any explicitly-provided previous-hash by validating it agrees with the
     // tail of the persisted chain. Mismatch is a serious error: surface it.
-    if let (Some(provided), Some(actual)) =
-        (options.previous_event_hash.as_deref(), previous_event_hash.as_deref())
-    {
+    if let (Some(provided), Some(actual)) = (
+        options.previous_event_hash.as_deref(),
+        previous_event_hash.as_deref(),
+    ) {
         if provided != actual {
             return Err(RecordPersistedEventError::ChainMismatch {
                 expected: actual.to_owned(),
@@ -1797,8 +2113,8 @@ pub fn record_and_persist_event(
         previous_event_hash: previous_event_hash.clone(),
         ..options.clone()
     };
-    let report = record_event(&opts_with_chain, sequence)
-        .map_err(RecordPersistedEventError::Validation)?;
+    let report =
+        record_event(&opts_with_chain, sequence).map_err(RecordPersistedEventError::Validation)?;
 
     if !report.dry_run {
         let input = crate::db::CreateRecorderEventInput {
@@ -1832,15 +2148,22 @@ pub fn finish_and_persist_recording(
     conn: &crate::db::DbConnection,
     options: &RecorderFinishOptions,
 ) -> Result<RecorderFinishReport, crate::models::DomainError> {
-    validate_run_id_token(&options.run_id).map_err(|message| crate::models::DomainError::Usage {
-        message,
-        repair: Some("Pass a valid run id (e.g. run_<uuid>) returned by `ee recorder start`.".to_owned()),
+    validate_run_id_token(&options.run_id).map_err(|message| {
+        crate::models::DomainError::Usage {
+            message,
+            repair: Some(
+                "Pass a valid run id (e.g. run_<uuid>) returned by `ee recorder start`.".to_owned(),
+            ),
+        }
     })?;
 
     let stored_events = conn
         .list_recorder_events(&options.run_id)
         .map_err(|error| crate::models::DomainError::Storage {
-            message: format!("Failed to read recorder events for run {}: {error}", options.run_id),
+            message: format!(
+                "Failed to read recorder events for run {}: {error}",
+                options.run_id
+            ),
             repair: Some("ee status --json".to_owned()),
         })?;
     let event_count = u64::try_from(stored_events.len()).unwrap_or(u64::MAX);
@@ -2075,6 +2398,27 @@ mod tests {
             Ok(())
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
+        }
+    }
+
+    fn event_summary(
+        run_id: &str,
+        event_id: &str,
+        sequence: u64,
+        event_type: RecorderEventType,
+        timestamp: &str,
+        redacted: bool,
+    ) -> RecorderEventSummary {
+        RecorderEventSummary {
+            event_id: event_id.to_owned(),
+            run_id: run_id.to_owned(),
+            sequence,
+            event_type,
+            timestamp: timestamp.to_owned(),
+            redacted,
+            redaction_status: if redacted { "redacted" } else { "clean" }.to_owned(),
+            event_hash: format!("blake3:{event_id}"),
+            chain_status: if sequence == 1 { "root" } else { "linked" }.to_owned(),
         }
     }
 
@@ -2405,15 +2749,17 @@ mod tests {
     #[test]
     fn tail_recording_without_store_returns_empty_snapshot() {
         let options = RecorderTailOptions {
-            run_id: "run_test".to_string(),
+            run_id: Some("run_test".to_string()),
+            since: None,
             limit: 10,
             from_sequence: None,
             follow: false,
+            filter: None,
         };
 
         let report = tail_recording(&options);
 
-        assert_eq!(report.run_id, "run_test");
+        assert_eq!(report.run_id.as_deref(), Some("run_test"));
         assert!(report.events.is_empty());
         assert_eq!(report.total_events, 0);
     }
@@ -2421,40 +2767,46 @@ mod tests {
     #[test]
     fn tail_recording_from_events_filters_sorts_and_limits() {
         let options = RecorderTailOptions {
-            run_id: "run_test".to_string(),
+            run_id: Some("run_test".to_string()),
+            since: None,
             limit: 2,
             from_sequence: Some(2),
             follow: false,
+            filter: None,
         };
         let events = vec![
-            RecorderEventSummary {
-                event_id: "evt_003".to_string(),
-                sequence: 3,
-                event_type: RecorderEventType::ToolResult,
-                timestamp: "2026-01-01T00:00:03Z".to_string(),
-                redacted: false,
-            },
-            RecorderEventSummary {
-                event_id: "evt_001".to_string(),
-                sequence: 1,
-                event_type: RecorderEventType::UserMessage,
-                timestamp: "2026-01-01T00:00:01Z".to_string(),
-                redacted: false,
-            },
-            RecorderEventSummary {
-                event_id: "evt_002".to_string(),
-                sequence: 2,
-                event_type: RecorderEventType::ToolCall,
-                timestamp: "2026-01-01T00:00:02Z".to_string(),
-                redacted: true,
-            },
-            RecorderEventSummary {
-                event_id: "evt_004".to_string(),
-                sequence: 4,
-                event_type: RecorderEventType::StateChange,
-                timestamp: "2026-01-01T00:00:04Z".to_string(),
-                redacted: false,
-            },
+            event_summary(
+                "run_test",
+                "evt_003",
+                3,
+                RecorderEventType::ToolResult,
+                "2026-01-01T00:00:03Z",
+                false,
+            ),
+            event_summary(
+                "run_test",
+                "evt_001",
+                1,
+                RecorderEventType::UserMessage,
+                "2026-01-01T00:00:01Z",
+                false,
+            ),
+            event_summary(
+                "run_test",
+                "evt_002",
+                2,
+                RecorderEventType::ToolCall,
+                "2026-01-01T00:00:02Z",
+                true,
+            ),
+            event_summary(
+                "run_test",
+                "evt_004",
+                4,
+                RecorderEventType::StateChange,
+                "2026-01-01T00:00:04Z",
+                false,
+            ),
         ];
 
         let report = tail_recording_from_events(&options, &events);
@@ -2540,13 +2892,14 @@ mod tests {
         let snapshot = RecorderFollowSnapshot {
             run_id: "run_completed_abc".to_string(),
             status: RecorderFollowRunStatus::Completed,
-            events: vec![RecorderEventSummary {
-                event_id: "evt_005".to_string(),
-                sequence: 5,
-                event_type: RecorderEventType::StateChange,
-                timestamp: "2026-01-01T00:00:05Z".to_string(),
-                redacted: false,
-            }],
+            events: vec![event_summary(
+                "run_completed_abc",
+                "evt_005",
+                5,
+                RecorderEventType::StateChange,
+                "2026-01-01T00:00:05Z",
+                false,
+            )],
         };
         let result = poll_follow_events_from_snapshot(Some(&snapshot), 6, 10);
 
@@ -2576,13 +2929,14 @@ mod tests {
         let snapshot = RecorderFollowSnapshot {
             run_id: "run_active_123".to_string(),
             status: RecorderFollowRunStatus::Active,
-            events: vec![RecorderEventSummary {
-                event_id: "evt_002".to_string(),
-                sequence: 2,
-                event_type: RecorderEventType::ToolResult,
-                timestamp: "2026-01-01T00:00:02Z".to_string(),
-                redacted: true,
-            }],
+            events: vec![event_summary(
+                "run_active_123",
+                "evt_002",
+                2,
+                RecorderEventType::ToolResult,
+                "2026-01-01T00:00:02Z",
+                true,
+            )],
         };
         let result = poll_follow_events_from_snapshot(Some(&snapshot), 2, 10);
 

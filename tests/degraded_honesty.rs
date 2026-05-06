@@ -8,6 +8,7 @@ use ee::core::degraded_honesty::{
     validate_no_fake_success_output, validate_no_unsupported_evidence_claims,
     validate_repair_command,
 };
+use ee::db::{CreateAuditInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -135,6 +136,8 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "context, pack, search, why"
     } else if args.iter().any(|arg| arg == "graph") {
         "graph"
+    } else if args.iter().any(|arg| arg == "audit") {
+        "audit"
     } else if args.iter().any(|arg| arg == "memory") {
         "memory, remember"
     } else if args
@@ -144,8 +147,6 @@ fn command_boundary_matrix_row(args: &[String]) -> &'static str {
         "curate"
     } else if args.iter().any(|arg| arg == "status") {
         "capabilities, check, health, status"
-    } else if args.iter().any(|arg| arg == "audit") {
-        "audit"
     } else if args.iter().any(|arg| arg == "support") {
         "support bundle"
     } else if args.windows(2).any(
@@ -202,20 +203,20 @@ fn side_effect_class(args: &[String]) -> &'static str {
         "read-only query/explanation; storage or search error before reasoning output"
     } else if args.iter().any(|arg| arg == "graph") {
         "derived graph read/rebuild only; source database remains unchanged on missing storage"
+    } else if args.iter().any(|arg| arg == "audit") {
+        "read-only persisted audit query or hash-chain verification; no audit log mutation"
     } else if args.iter().any(|arg| arg == "memory") {
         "audited memory mutation only when storage is available; missing storage prevents mutation"
     } else if args.iter().any(|arg| arg == "curate" || arg == "rule") {
         "audited curation/rule mutation only when storage is available; missing storage prevents mutation"
     } else if args.iter().any(|arg| arg == "status") {
         "read-only capability probe; no workspace, database, index, job, or adapter mutation"
-    } else if args.iter().any(|arg| arg == "audit") {
-        "read-only, conservative abstention; no audit log record or hash-chain verification emitted"
     } else if args.iter().any(|arg| arg == "support") {
         "conservative abstention; no support bundle archive, manifest, or verification emitted"
     } else if args.windows(2).any(
         |window| matches!(window, [first, second] if first == "diag" && second == "quarantine"),
     ) {
-        "read-only, conservative abstention; no source trust state read"
+        "read-only persisted trust-state query; no source trust mutation"
     } else if args
         .iter()
         .any(|arg| arg == "capabilities" || arg == "certificate")
@@ -231,7 +232,13 @@ fn side_effect_class(args: &[String]) -> &'static str {
     } else if args.iter().any(|arg| arg == "rehearse") {
         "read-only rehearsal planning, inspection, or promotion guidance"
     } else if args.iter().any(|arg| arg == "learn") {
-        "conservative abstention; no learning agenda, uncertainty, summary, proposal, or experiment template emitted"
+        if args.iter().any(|arg| arg == "propose") {
+            "audited learning proposal candidate writes when storage is available"
+        } else if args.iter().any(|arg| arg == "run") {
+            "conservative abstention; no experiment execution without persisted registry input"
+        } else {
+            "read-only persisted learning ledger report"
+        }
     } else if args.iter().any(|arg| arg == "lab") {
         "evidence-only lab report; no behavior inference or durable mutation"
     } else if args.iter().any(|arg| arg == "economy" || arg == "causal") {
@@ -255,8 +262,8 @@ fn side_effect_class(args: &[String]) -> &'static str {
     } else if args.iter().any(|arg| arg == "daemon") {
         "conservative abstention; no daemon tick, scheduler ledger, or maintenance job mutation"
     } else if args.iter().any(|arg| arg == "recorder") {
-        if args.iter().any(|arg| arg == "tail") {
-            "read-only, conservative abstention; no recorder tail or follow snapshot"
+        if args.iter().any(|arg| arg == "tail" || arg == "follow") {
+            "read-only recorder event stream; no recorder mutation"
         } else {
             "conservative abstention; no recorder session, event, hash-chain, or finish mutation"
         }
@@ -757,142 +764,232 @@ fn retrieval_graph_memory_curate_rule_and_status_commands_have_no_fake_contract_
     Ok(())
 }
 
+fn seed_audit_cli_workspace(name: &str) -> Result<(PathBuf, PathBuf), String> {
+    let root = unique_artifact_dir(name)?;
+    let workspace = root.join("workspace");
+    let database = workspace.join(".ee").join("ee.db");
+    fs::create_dir_all(
+        database
+            .parent()
+            .ok_or_else(|| format!("database path {} has no parent", database.display()))?,
+    )
+    .map_err(|error| {
+        format!(
+            "failed to create database parent for {}: {error}",
+            database.display()
+        )
+    })?;
+
+    let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    connection.migrate().map_err(|error| error.to_string())?;
+    connection
+        .insert_workspace(
+            "wsp_auditcli000000000000000001",
+            &CreateWorkspaceInput {
+                path: workspace.to_string_lossy().into_owned(),
+                name: Some("audit-cli-contract".to_owned()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .insert_memory(
+            "mem_auditcli000000000000000001",
+            &CreateMemoryInput {
+                workspace_id: "wsp_auditcli000000000000000001".to_owned(),
+                level: "procedural".to_owned(),
+                kind: "rule".to_owned(),
+                content: "Run cargo fmt --check before release.".to_owned(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.8,
+                importance: 0.7,
+                provenance_uri: Some("file://AGENTS.md".to_owned()),
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: Some("test".to_owned()),
+                valid_from: None,
+                valid_to: None,
+                tags: vec!["audit".to_owned()],
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+    for (id, action, target_type, target_id, actor) in [
+        (
+            "audit_cli00000000000000000000001",
+            "memory.create",
+            "memory",
+            "mem_auditcli000000000000000001",
+            "cod_2",
+        ),
+        (
+            "audit_cli00000000000000000000002",
+            "rule.protect",
+            "rule",
+            "rule_auditcli000000000000000001",
+            "cod_2",
+        ),
+    ] {
+        connection
+            .insert_audit(
+                id,
+                &CreateAuditInput {
+                    workspace_id: Some("wsp_auditcli000000000000000001".to_owned()),
+                    actor: Some(actor.to_owned()),
+                    action: action.to_owned(),
+                    target_type: Some(target_type.to_owned()),
+                    target_id: Some(target_id.to_owned()),
+                    details: Some(json!({ "action": action, "target": target_id }).to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    connection.close().map_err(|error| error.to_string())?;
+    Ok((workspace, database))
+}
+
 #[test]
-fn audit_commands_degrade_instead_of_reporting_generated_operation_records() -> TestResult {
+fn audit_commands_read_persisted_rows_without_unavailable_sentinel() -> TestResult {
+    let (workspace, database) = seed_audit_cli_workspace("audit-real-cli")?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let database_arg = database.to_string_lossy().into_owned();
     let cases = [
         (
-            "audit-timeline-unavailable",
+            "audit-timeline-real",
             "audit timeline",
+            "ee.audit.timeline.v1",
             vec![
                 "--json".to_owned(),
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
                 "audit".to_owned(),
                 "timeline".to_owned(),
+                "--database".to_owned(),
+                database_arg.clone(),
+                "--surface".to_owned(),
+                "memory".to_owned(),
             ],
         ),
         (
-            "audit-show-unavailable",
+            "audit-show-real",
             "audit show",
+            "ee.audit.show.v1",
             vec![
                 "--json".to_owned(),
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
                 "audit".to_owned(),
                 "show".to_owned(),
-                "op_fixture_001".to_owned(),
+                "audit_cli00000000000000000000001".to_owned(),
+                "--database".to_owned(),
+                database_arg.clone(),
             ],
         ),
         (
-            "audit-diff-unavailable",
+            "audit-diff-real",
             "audit diff",
+            "ee.audit.diff.v1",
             vec![
                 "--json".to_owned(),
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
                 "audit".to_owned(),
                 "diff".to_owned(),
-                "op_fixture_001".to_owned(),
+                "2000-01-01T00:00:00Z".to_owned(),
+                "2999-01-01T00:00:00Z".to_owned(),
+                "--database".to_owned(),
+                database_arg.clone(),
             ],
         ),
         (
-            "audit-verify-unavailable",
+            "audit-verify-real",
             "audit verify",
-            vec!["--json".to_owned(), "audit".to_owned(), "verify".to_owned()],
+            "ee.audit.verify.v1",
+            vec![
+                "--json".to_owned(),
+                "--workspace".to_owned(),
+                workspace_arg,
+                "audit".to_owned(),
+                "verify".to_owned(),
+                "--database".to_owned(),
+                database_arg,
+            ],
         ),
     ];
 
-    for (artifact_name, command, args) in cases {
-        let result = run_ee_logged(artifact_name, None, args)?;
+    for (artifact_name, command, schema, args) in cases {
+        let result = run_ee_logged(artifact_name, Some(&workspace), args)?;
 
         ensure_equal(
             &result.exit_code,
-            &UNSATISFIED_DEGRADED_MODE_EXIT,
-            &format!("{command} unavailable exit code"),
+            &0,
+            &format!("{command} persisted audit exit code"),
         )?;
         ensure(
             result.stderr.is_empty(),
-            format!("{command} JSON degraded response must keep stderr empty"),
+            format!("{command} JSON response must keep stderr empty"),
         )?;
-        ensure_no_ansi(&result.stdout, &format!("{command} degraded stdout"))?;
+        ensure_no_ansi(&result.stdout, &format!("{command} stdout"))?;
+        ensure(
+            !result.stdout.contains("audit_log_unavailable"),
+            format!("{command} must not emit the removed unavailable sentinel"),
+        )?;
+        ensure(
+            collect_degradation_codes(&result.parsed).is_empty(),
+            format!("{command} must not emit degradation codes"),
+        )?;
         ensure_json_pointer(
             &result.parsed,
             "/schema",
-            json!("ee.response.v1"),
-            &format!("{command} degraded response schema"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/success",
-            json!(false),
-            &format!("{command} success flag"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/command",
-            json!(command),
-            &format!("{command} command label"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/code",
-            json!("audit_log_unavailable"),
-            &format!("{command} degraded code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/degraded/0/code",
-            json!("audit_log_unavailable"),
-            &format!("{command} degraded array code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/repair",
-            json!("ee status --json"),
-            &format!("{command} repair command"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/followUpBead",
-            json!("eidetic_engine_cli-s43e"),
-            &format!("{command} follow-up bead"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sideEffectClass",
-            json!(
-                "read-only, conservative abstention; no audit log record or hash-chain verification emitted"
-            ),
-            &format!("{command} side-effect class"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/evidenceIds",
-            json!([]),
-            &format!("{command} evidence ids"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sourceIds",
-            json!([]),
-            &format!("{command} source ids"),
-        )?;
-        ensure(
-            result.parsed.pointer("/entries").is_none()
-                && result.parsed.pointer("/operation").is_none()
-                && result.parsed.pointer("/deltas").is_none()
-                && result.parsed.pointer("/summary").is_none(),
-            format!("{command} must not emit generated audit records or verification summary"),
+            json!(schema),
+            &format!("{command} schema"),
         )?;
 
-        let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
-        ensure(
-            fake_success.passed,
-            format!("degraded {command} output should not be fake success: {fake_success:?}"),
-        )?;
-
-        let unsupported_claims =
-            validate_no_unsupported_evidence_claims(command, false, false, &result.stdout);
-        ensure(
-            unsupported_claims.passed,
-            format!(
-                "degraded {command} output should not count as unsupported success: {unsupported_claims:?}"
-            ),
-        )?;
+        match command {
+            "audit timeline" => {
+                ensure_json_pointer(
+                    &result.parsed,
+                    "/entries/0/surface",
+                    json!("memory"),
+                    "timeline filtered surface",
+                )?;
+                ensure(
+                    result
+                        .parsed
+                        .pointer("/entries/0/this_row_hash")
+                        .and_then(Value::as_str)
+                        .is_some_and(|hash| hash.starts_with("blake3:")),
+                    "timeline entry must expose persisted row hash",
+                )?;
+            }
+            "audit show" => {
+                ensure_json_pointer(
+                    &result.parsed,
+                    "/linked_snapshot/found",
+                    json!(true),
+                    "show linked memory snapshot",
+                )?;
+                ensure_json_pointer(
+                    &result.parsed,
+                    "/hash_chain_valid",
+                    json!(true),
+                    "show verifies the surrounding hash chain",
+                )?;
+            }
+            "audit diff" => {
+                ensure_json_pointer(&result.parsed, "/row_count", json!(2), "diff row count")?;
+            }
+            "audit verify" => {
+                ensure_json_pointer(
+                    &result.parsed,
+                    "/integrity_ok",
+                    json!(true),
+                    "verify integrity flag",
+                )?;
+                ensure_json_pointer(&result.parsed, "/rows", json!(2), "verify row count")?;
+            }
+            _ => unreachable!("unknown audit command case"),
+        }
 
         let log_text = fs::read_to_string(&result.log_path)
             .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
@@ -901,14 +998,8 @@ fn audit_commands_degrade_instead_of_reporting_generated_operation_records() -> 
         ensure_json_pointer(
             &log_json,
             "/degradationCodes",
-            json!(["audit_log_unavailable"]),
+            json!([]),
             &format!("logged {command} degradation code"),
-        )?;
-        ensure_json_pointer(
-            &log_json,
-            "/repairCommand",
-            json!("ee status --json"),
-            &format!("logged {command} repair command"),
         )?;
         ensure_json_pointer(
             &log_json,
@@ -920,7 +1011,7 @@ fn audit_commands_degrade_instead_of_reporting_generated_operation_records() -> 
             &log_json,
             "/sideEffectClass",
             json!(
-                "read-only, conservative abstention; no audit log record or hash-chain verification emitted"
+                "read-only persisted audit query or hash-chain verification; no audit log mutation"
             ),
             &format!("logged {command} side-effect class"),
         )?;
@@ -1122,11 +1213,22 @@ fn support_bundle_commands_degrade_instead_of_reporting_placeholder_archive_succ
 }
 
 #[test]
-fn certificate_verify_degrades_instead_of_reporting_mock_success() -> TestResult {
+fn certificate_verify_reports_not_found_instead_of_mock_success() -> TestResult {
+    let workspace_root = unique_artifact_dir("certificate-not-found-workspace")?;
+    let workspace = workspace_root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    let workspace_arg = workspace.display().to_string();
     let result = run_ee_logged(
-        "certificate-verify-unavailable",
-        None,
+        "certificate-verify-not-found",
+        Some(&workspace),
         vec![
+            "--workspace".to_owned(),
+            workspace_arg,
             "--json".to_owned(),
             "certificate".to_owned(),
             "verify".to_owned(),
@@ -1134,40 +1236,35 @@ fn certificate_verify_degrades_instead_of_reporting_mock_success() -> TestResult
         ],
     )?;
 
-    ensure_equal(
-        &result.exit_code,
-        &UNSATISFIED_DEGRADED_MODE_EXIT,
-        "certificate unavailable exit code",
-    )?;
+    ensure_equal(&result.exit_code, &0, "certificate read-only exit code")?;
     ensure(
         result.stderr.is_empty(),
-        "certificate JSON degraded response must keep stderr empty",
+        "certificate JSON response must keep stderr empty",
     )?;
-    ensure_no_ansi(&result.stdout, "certificate degraded stdout")?;
+    ensure_no_ansi(&result.stdout, "certificate stdout")?;
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.response.v1"),
-        "certificate degraded response schema",
+        json!("ee.certificate.verify.v1"),
+        "certificate verify response schema",
     )?;
     ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/code",
-        json!("certificate_store_unavailable"),
-        "certificate degraded code",
+        "/data/result",
+        json!("not_found"),
+        "certificate not-found result",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/degraded/0/code",
-        json!("certificate_store_unavailable"),
-        "certificate degraded array code",
+        "/data/failureCodes",
+        json!(["not_found"]),
+        "certificate not-found failure code",
     )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/followUpBead",
-        json!("eidetic_engine_cli-v76q"),
-        "certificate follow-up bead",
+    let removed_certificate_code = ["certificate", "store", "unavailable"].join("_");
+    ensure(
+        !result.stdout.contains(&removed_certificate_code),
+        "certificate verify must not emit the removed unavailable sentinel",
     )?;
 
     let fake_success =
@@ -1193,14 +1290,8 @@ fn certificate_verify_degrades_instead_of_reporting_mock_success() -> TestResult
     ensure_json_pointer(
         &log_json,
         "/degradationCodes",
-        json!(["certificate_store_unavailable"]),
-        "logged certificate degradation code",
-    )?;
-    ensure_json_pointer(
-        &log_json,
-        "/repairCommand",
-        json!("ee doctor --json"),
-        "logged certificate repair command",
+        json!([]),
+        "logged certificate degradation codes",
     )?;
     ensure_json_pointer(
         &log_json,
@@ -1386,34 +1477,41 @@ fn claim_commands_degrade_instead_of_reporting_empty_placeholder_results() -> Te
 }
 
 #[test]
-fn diag_quarantine_degrades_instead_of_reporting_placeholder_health() -> TestResult {
+fn diag_quarantine_reports_persisted_state_instead_of_placeholder_health() -> TestResult {
+    let workspace_root = unique_artifact_dir("diag-quarantine-missing-db-workspace")?;
+    let workspace = workspace_root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    let workspace_arg = workspace.display().to_string();
     let result = run_ee_logged(
-        "diag-quarantine-unavailable",
-        None,
+        "diag-quarantine-persisted-state",
+        Some(&workspace),
         vec![
+            "--workspace".to_owned(),
+            workspace_arg,
             "--json".to_owned(),
             "diag".to_owned(),
             "quarantine".to_owned(),
         ],
     )?;
 
-    ensure_equal(
-        &result.exit_code,
-        &UNSATISFIED_DEGRADED_MODE_EXIT,
-        "diag quarantine unavailable exit code",
-    )?;
+    ensure_equal(&result.exit_code, &0, "diag quarantine read-only exit code")?;
     ensure(
         result.stderr.is_empty(),
-        "diag quarantine JSON degraded response must keep stderr empty",
+        "diag quarantine JSON response must keep stderr empty",
     )?;
-    ensure_no_ansi(&result.stdout, "diag quarantine degraded stdout")?;
+    ensure_no_ansi(&result.stdout, "diag quarantine stdout")?;
     ensure_json_pointer(
         &result.parsed,
         "/schema",
         json!("ee.response.v1"),
-        "diag quarantine degraded response schema",
+        "diag quarantine response schema",
     )?;
-    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+    ensure_json_pointer(&result.parsed, "/success", json!(true), "success flag")?;
     ensure_json_pointer(
         &result.parsed,
         "/data/command",
@@ -1422,54 +1520,35 @@ fn diag_quarantine_degrades_instead_of_reporting_placeholder_health() -> TestRes
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/code",
-        json!("quarantine_trust_state_unavailable"),
-        "diag quarantine degraded code",
+        "/data/storageStatus",
+        json!("missing"),
+        "diag quarantine storage status",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/degraded/0/code",
-        json!("quarantine_trust_state_unavailable"),
-        "diag quarantine degraded array code",
+        "/data/summary/totalSources",
+        json!(0),
+        "diag quarantine source count",
     )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/followUpBead",
-        json!("eidetic_engine_cli-5g6d"),
-        "diag quarantine follow-up bead",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/sideEffectClass",
-        json!("read-only, conservative abstention; no source trust state read"),
-        "diag quarantine side-effect class",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/evidenceIds",
-        json!([]),
-        "diag quarantine evidence ids",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/sourceIds",
-        json!([]),
-        "diag quarantine source ids",
+    let removed_quarantine_code = ["quarantine", "trust", "state", "unavailable"].join("_");
+    ensure(
+        !result.stdout.contains(&removed_quarantine_code),
+        "diag quarantine must not emit the removed unavailable sentinel",
     )?;
 
     let fake_success =
-        validate_no_fake_success_output("diag quarantine", false, false, &result.stdout);
+        validate_no_fake_success_output("diag quarantine", true, false, &result.stdout);
     ensure(
         fake_success.passed,
-        format!("degraded diag quarantine output should not be fake success: {fake_success:?}"),
+        format!("diag quarantine output should not be fake success: {fake_success:?}"),
     )?;
 
     let unsupported_claims =
-        validate_no_unsupported_evidence_claims("diag quarantine", false, false, &result.stdout);
+        validate_no_unsupported_evidence_claims("diag quarantine", true, false, &result.stdout);
     ensure(
         unsupported_claims.passed,
         format!(
-            "degraded diag quarantine output should not count as unsupported success: {unsupported_claims:?}"
+            "diag quarantine output should not count as unsupported success: {unsupported_claims:?}"
         ),
     )?;
 
@@ -1480,14 +1559,8 @@ fn diag_quarantine_degrades_instead_of_reporting_placeholder_health() -> TestRes
     ensure_json_pointer(
         &log_json,
         "/degradationCodes",
-        json!(["quarantine_trust_state_unavailable"]),
+        json!(["quarantine_database_missing"]),
         "logged diag quarantine degradation code",
-    )?;
-    ensure_json_pointer(
-        &log_json,
-        "/repairCommand",
-        json!("ee status --json"),
-        "logged diag quarantine repair command",
     )?;
     ensure_json_pointer(
         &log_json,
@@ -1498,7 +1571,7 @@ fn diag_quarantine_degrades_instead_of_reporting_placeholder_health() -> TestRes
     ensure_json_pointer(
         &log_json,
         "/sideEffectClass",
-        json!("read-only, conservative abstention; no source trust state read"),
+        json!("read-only persisted trust-state query; no source trust mutation"),
         "logged diag quarantine side-effect class",
     )
 }
@@ -1775,133 +1848,113 @@ fn rehearse_commands_emit_real_sandbox_artifacts_instead_of_degraded_stub() -> T
 }
 
 #[test]
-fn learn_read_and_proposal_commands_degrade_instead_of_reporting_seed_templates() -> TestResult {
+fn learn_read_and_proposal_commands_use_persisted_ledgers() -> TestResult {
+    let (workspace, _database) = seed_audit_cli_workspace("learn-real-empty-ledger")?;
+    let workspace_arg = workspace.display().to_string();
     let commands = [
         (
-            "learn-agenda-unavailable",
+            "learn-agenda-real-empty",
             "learn agenda",
             vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
                 "--json".to_owned(),
                 "learn".to_owned(),
                 "agenda".to_owned(),
                 "--limit".to_owned(),
                 "2".to_owned(),
             ],
+            "ee.learn.agenda.v1",
+            "/items",
         ),
         (
-            "learn-uncertainty-unavailable",
+            "learn-uncertainty-real-empty",
             "learn uncertainty",
             vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
                 "--json".to_owned(),
                 "learn".to_owned(),
                 "uncertainty".to_owned(),
                 "--min-uncertainty".to_owned(),
                 "0.3".to_owned(),
             ],
+            "ee.learn.uncertainty.v1",
+            "/items",
         ),
         (
-            "learn-experiment-propose-unavailable",
+            "learn-experiment-propose-real-empty",
             "learn experiment propose",
             vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
                 "--json".to_owned(),
                 "learn".to_owned(),
                 "experiment".to_owned(),
                 "propose".to_owned(),
             ],
+            "ee.learn.experiment_proposal.v1",
+            "/proposals",
         ),
         (
-            "learn-summary-unavailable",
+            "learn-summary-real-empty",
             "learn summary",
             vec![
+                "--workspace".to_owned(),
+                workspace_arg,
                 "--json".to_owned(),
                 "learn".to_owned(),
                 "summary".to_owned(),
             ],
+            "ee.learn.summary.v1",
+            "/events",
         ),
     ];
 
-    for (artifact_name, command, args) in commands {
-        let result = run_ee_logged(artifact_name, None, args)?;
+    for (artifact_name, command, args, schema, empty_collection_pointer) in commands {
+        let result = run_ee_logged(artifact_name, Some(&workspace), args)?;
 
-        ensure_equal(
-            &result.exit_code,
-            &UNSATISFIED_DEGRADED_MODE_EXIT,
-            &format!("{command} unavailable exit code"),
-        )?;
+        ensure_equal(&result.exit_code, &0, &format!("{command} exit code"))?;
         ensure(
             result.stderr.is_empty(),
-            format!("{command} JSON degraded response must keep stderr empty"),
+            format!("{command} JSON response must keep stderr empty"),
         )?;
-        ensure_no_ansi(&result.stdout, &format!("{command} degraded stdout"))?;
+        ensure_no_ansi(&result.stdout, &format!("{command} stdout"))?;
         ensure_json_pointer(
             &result.parsed,
             "/schema",
-            json!("ee.response.v1"),
-            &format!("{command} degraded response schema"),
+            json!(schema),
+            &format!("{command} schema"),
         )?;
         ensure_json_pointer(
             &result.parsed,
             "/success",
-            json!(false),
+            json!(true),
             &format!("{command} success flag"),
         )?;
         ensure_json_pointer(
             &result.parsed,
-            "/data/code",
-            json!("learning_records_unavailable"),
-            &format!("{command} degraded code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/degraded/0/code",
-            json!("learning_records_unavailable"),
-            &format!("{command} degraded array code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/repair",
-            json!("ee learn observe <experiment-id> --dry-run --json"),
-            &format!("{command} repair command"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/followUpBead",
-            json!("eidetic_engine_cli-evah"),
-            &format!("{command} follow-up bead"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sideEffectClass",
-            json!(
-                "conservative abstention; no learning agenda, uncertainty, summary, proposal, or experiment template emitted"
-            ),
-            &format!("{command} side-effect class"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/evidenceIds",
+            empty_collection_pointer,
             json!([]),
-            &format!("{command} evidence ids"),
+            &format!("{command} empty persisted-ledger collection"),
         )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sourceIds",
-            json!([]),
-            &format!("{command} source ids"),
+        ensure(
+            !result.stdout.contains("learning_records_unavailable"),
+            format!("{command} must not report the removed learn unavailable sentinel"),
         )?;
 
-        let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
+        let fake_success = validate_no_fake_success_output(command, true, false, &result.stdout);
         ensure(
             fake_success.passed,
-            format!("degraded {command} output should not be fake success: {fake_success:?}"),
+            format!("{command} output should not be fake success: {fake_success:?}"),
         )?;
 
         let unsupported_claims =
-            validate_no_unsupported_evidence_claims(command, false, false, &result.stdout);
+            validate_no_unsupported_evidence_claims(command, true, false, &result.stdout);
         ensure(
             unsupported_claims.passed,
             format!(
-                "degraded {command} output should not count as unsupported success: {unsupported_claims:?}"
+                "{command} output should not count as unsupported success: {unsupported_claims:?}"
             ),
         )?;
 
@@ -1912,13 +1965,13 @@ fn learn_read_and_proposal_commands_degrade_instead_of_reporting_seed_templates(
         ensure_json_pointer(
             &log_json,
             "/degradationCodes",
-            json!(["learning_records_unavailable"]),
+            json!([]),
             &format!("logged {command} degradation code"),
         )?;
         ensure_json_pointer(
             &log_json,
             "/repairCommand",
-            json!("ee learn observe <experiment-id> --dry-run --json"),
+            json!(null),
             &format!("logged {command} repair command"),
         )?;
         ensure_json_pointer(
@@ -1927,14 +1980,7 @@ fn learn_read_and_proposal_commands_degrade_instead_of_reporting_seed_templates(
             json!("learn"),
             &format!("logged {command} boundary matrix row"),
         )?;
-        ensure_json_pointer(
-            &log_json,
-            "/sideEffectClass",
-            json!(
-                "conservative abstention; no learning agenda, uncertainty, summary, proposal, or experiment template emitted"
-            ),
-            &format!("logged {command} side-effect class"),
-        )?;
+        ensure_logged_contract_shape(&result, command)?;
     }
 
     let run_result = run_ee_logged(
@@ -3649,11 +3695,35 @@ fn recorder_start_event_finish_degrade_instead_of_reporting_generated_state() ->
 }
 
 #[test]
-fn recorder_tail_degrades_instead_of_reporting_stubbed_empty_events() -> TestResult {
+fn recorder_tail_reads_initialized_store_without_degraded_sentinel() -> TestResult {
+    let workspace_root = unique_artifact_dir("recorder-tail-real-workspace")?;
+    let workspace = workspace_root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    let workspace_arg = workspace.display().to_string();
+    let init_output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["--workspace", &workspace_arg, "init", "--json"])
+        .output()
+        .map_err(|error| format!("failed to initialize recorder tail workspace: {error}"))?;
+    ensure(
+        init_output.status.success(),
+        format!(
+            "workspace init for recorder tail should succeed: stdout={} stderr={}",
+            String::from_utf8_lossy(&init_output.stdout),
+            String::from_utf8_lossy(&init_output.stderr)
+        ),
+    )?;
+
     let result = run_ee_logged(
-        "recorder-tail-unavailable",
-        None,
+        "recorder-tail-real-store",
+        Some(&workspace),
         vec![
+            "--workspace".to_owned(),
+            workspace_arg,
             "--json".to_owned(),
             "recorder".to_owned(),
             "tail".to_owned(),
@@ -3663,63 +3733,50 @@ fn recorder_tail_degrades_instead_of_reporting_stubbed_empty_events() -> TestRes
 
     ensure_equal(
         &result.exit_code,
-        &UNSATISFIED_DEGRADED_MODE_EXIT,
-        "recorder tail unavailable exit code",
+        &0,
+        "recorder tail initialized store exit code",
     )?;
     ensure(
         result.stderr.is_empty(),
-        "recorder tail JSON degraded response must keep stderr empty",
+        "recorder tail JSON response must keep stderr empty",
     )?;
-    ensure_no_ansi(&result.stdout, "recorder tail degraded stdout")?;
+    ensure_no_ansi(&result.stdout, "recorder tail stdout")?;
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.response.v1"),
-        "recorder tail degraded response schema",
-    )?;
-    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/code",
-        json!("recorder_tail_unavailable"),
-        "recorder tail degraded code",
+        json!("ee.recorder.tail.v1"),
+        "recorder tail response schema",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/degraded/0/code",
-        json!("recorder_tail_unavailable"),
-        "recorder tail degraded array code",
+        "/runId",
+        json!("run_fixture_001"),
+        "recorder tail run id",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/followUpBead",
-        json!("eidetic_engine_cli-6xzc"),
-        "recorder tail follow-up bead",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/sideEffectClass",
-        json!("read-only, conservative abstention; no recorder tail or follow snapshot"),
-        "recorder tail side-effect class",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/evidenceIds",
+        "/events",
         json!([]),
-        "recorder tail evidence ids",
+        "recorder tail initialized empty events",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/sourceIds",
-        json!([]),
-        "recorder tail source ids",
+        "/totalEvents",
+        json!(0),
+        "recorder tail total events",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/hasMore",
+        json!(false),
+        "recorder tail has more flag",
     )?;
 
     let fake_success =
         validate_no_fake_success_output("recorder tail", false, false, &result.stdout);
     ensure(
         fake_success.passed,
-        format!("degraded recorder tail output should not be fake success: {fake_success:?}"),
+        format!("recorder tail output should not be fake success: {fake_success:?}"),
     )?;
 
     let unsupported_claims =
@@ -3727,7 +3784,7 @@ fn recorder_tail_degrades_instead_of_reporting_stubbed_empty_events() -> TestRes
     ensure(
         unsupported_claims.passed,
         format!(
-            "degraded recorder tail output should not count as unsupported success: {unsupported_claims:?}"
+            "recorder tail output should not count as unsupported success: {unsupported_claims:?}"
         ),
     )?;
 
@@ -3738,13 +3795,13 @@ fn recorder_tail_degrades_instead_of_reporting_stubbed_empty_events() -> TestRes
     ensure_json_pointer(
         &log_json,
         "/degradationCodes",
-        json!(["recorder_tail_unavailable"]),
-        "logged recorder tail degradation code",
+        json!([]),
+        "logged recorder tail degradation codes",
     )?;
     ensure_json_pointer(
         &log_json,
         "/repairCommand",
-        json!("ee status --json"),
+        Value::Null,
         "logged recorder tail repair command",
     )?;
     ensure_json_pointer(
@@ -3756,7 +3813,7 @@ fn recorder_tail_degrades_instead_of_reporting_stubbed_empty_events() -> TestRes
     ensure_json_pointer(
         &log_json,
         "/sideEffectClass",
-        json!("read-only, conservative abstention; no recorder tail or follow snapshot"),
+        json!("read-only recorder event stream; no recorder mutation"),
         "logged recorder tail side-effect class",
     )
 }

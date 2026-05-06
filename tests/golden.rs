@@ -122,12 +122,18 @@ pub fn assert_json_golden(category: &str, name: &str, actual: &str) -> TestResul
 }
 
 fn normalize_json_for_comparison(json: &str) -> String {
-    json.trim().to_string()
+    let mut normalized = json.trim().to_string();
+    normalized.push('\n');
+    normalized
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ee::core::audit::{
+        AuditDiffReport, AuditShowReport, AuditTimelineEntry, AuditTimelineReport,
+        AuditVerifyReport, LinkedSnapshot, TimelinePagination, VerificationIssue,
+    };
     use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
     use ee::db::{
         CreateCurationCandidateInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
@@ -212,6 +218,31 @@ mod tests {
             *target = source;
         }
         WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+    }
+
+    fn audit_entry(
+        id: &str,
+        timestamp: &str,
+        surface: &str,
+        mutation_kind: &str,
+        prev_row_hash: Option<&str>,
+        this_row_hash: &str,
+    ) -> AuditTimelineEntry {
+        AuditTimelineEntry {
+            id: id.to_owned(),
+            timestamp: timestamp.to_owned(),
+            actor: Some("cod_2".to_owned()),
+            surface: surface.to_owned(),
+            mutation_kind: mutation_kind.to_owned(),
+            before_hash: None,
+            after_hash: Some(format!("blake3:{id}:after")),
+            prev_row_hash: prev_row_hash.map(str::to_owned),
+            this_row_hash: Some(this_row_hash.to_owned()),
+            workspace_id: Some("wsp_auditgolden0000000000001".to_owned()),
+            target_type: Some(surface.to_owned()),
+            target_id: Some(format!("{surface}_auditgolden0000000001")),
+            details: Some(serde_json::json!({ "source": "golden" })),
+        }
     }
 
     fn assert_agent_stdout_golden(args: &[&str], name: &str, expect_success: bool) -> TestResult {
@@ -377,6 +408,138 @@ mod tests {
         ensure_contains(&diff, "- line2", "removed line")?;
         ensure_contains(&diff, "+ changed", "added line")?;
         ensure_contains(&diff, "  line1", "unchanged line")
+    }
+
+    #[test]
+    fn audit_json_contracts_match_goldens() -> TestResult {
+        let first = audit_entry(
+            "audit_golden_000000000000000001",
+            "2026-05-06T13:00:00Z",
+            "memory",
+            "memory.create",
+            None,
+            "blake3:row-1",
+        );
+        let second = audit_entry(
+            "audit_golden_000000000000000002",
+            "2026-05-06T13:05:00Z",
+            "rule",
+            "rule.protect",
+            Some("blake3:row-1"),
+            "blake3:row-2",
+        );
+
+        assert_json_golden(
+            "audit",
+            "verify_empty",
+            &AuditVerifyReport {
+                schema: "ee.audit.verify.v1".to_owned(),
+                integrity_ok: true,
+                rows: 0,
+                last_hash: None,
+                first_break: None,
+                issues: vec![],
+            }
+            .to_json(),
+        )?;
+
+        assert_json_golden(
+            "audit",
+            "timeline_single",
+            &AuditTimelineReport {
+                schema: "ee.audit.timeline.v1".to_owned(),
+                entries: vec![first.clone()],
+                pagination: TimelinePagination {
+                    total_count: 1,
+                    returned_count: 1,
+                    has_more: false,
+                    next_cursor: None,
+                },
+            }
+            .to_json(),
+        )?;
+
+        assert_json_golden(
+            "audit",
+            "timeline_filtered_window",
+            &AuditTimelineReport {
+                schema: "ee.audit.timeline.v1".to_owned(),
+                entries: vec![second.clone()],
+                pagination: TimelinePagination {
+                    total_count: 1,
+                    returned_count: 1,
+                    has_more: true,
+                    next_cursor: Some("2".to_owned()),
+                },
+            }
+            .to_json(),
+        )?;
+
+        assert_json_golden(
+            "audit",
+            "show_single",
+            &AuditShowReport {
+                schema: "ee.audit.show.v1".to_owned(),
+                row: first.clone(),
+                linked_snapshot: LinkedSnapshot {
+                    target_type: Some("memory".to_owned()),
+                    target_id: Some("memory_auditgolden0000000001".to_owned()),
+                    found: true,
+                    snapshot_hash: Some("blake3:memory-snapshot".to_owned()),
+                    snapshot: Some(serde_json::json!({
+                        "id": "memory_auditgolden0000000001",
+                        "level": "procedural"
+                    })),
+                },
+                hash_chain_valid: true,
+            }
+            .to_json(),
+        )?;
+
+        assert_json_golden(
+            "audit",
+            "diff_multi",
+            &AuditDiffReport {
+                schema: "ee.audit.diff.v1".to_owned(),
+                from: "2026-05-06T13:00:00Z".to_owned(),
+                to: "2026-05-06T13:10:00Z".to_owned(),
+                entries: vec![first, second],
+                row_count: 2,
+            }
+            .to_json(),
+        )?;
+
+        assert_json_golden(
+            "audit",
+            "verify_window",
+            &AuditVerifyReport {
+                schema: "ee.audit.verify.v1".to_owned(),
+                integrity_ok: true,
+                rows: 1,
+                last_hash: Some("blake3:row-2".to_owned()),
+                first_break: None,
+                issues: vec![],
+            }
+            .to_json(),
+        )?;
+
+        assert_json_golden(
+            "audit",
+            "verify_chain_break",
+            &AuditVerifyReport {
+                schema: "ee.audit.verify.v1".to_owned(),
+                integrity_ok: false,
+                rows: 2,
+                last_hash: Some("blake3:row-2".to_owned()),
+                first_break: Some("audit_golden_000000000000000002".to_owned()),
+                issues: vec![VerificationIssue {
+                    code: "row_hash_mismatch".to_owned(),
+                    audit_id: Some("audit_golden_000000000000000002".to_owned()),
+                    message: "row audit_golden_000000000000000002 hash mismatch: stored blake3:row-2, recomputed blake3:tampered".to_owned(),
+                }],
+            }
+            .to_json(),
+        )
     }
 
     #[test]

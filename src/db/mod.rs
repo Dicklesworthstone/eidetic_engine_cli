@@ -29,12 +29,14 @@ pub const PROVENANCE_STATUS_VERIFIED: &str = "verified";
 pub const PROVENANCE_STATUS_MISSING: &str = "missing";
 pub const PROVENANCE_STATUS_MISMATCH: &str = "mismatch";
 pub const PROVENANCE_STATUS_SKIPPED: &str = "skipped";
+pub const AUDIT_ROW_HASH_VERSION: &str = "ee.audit.row_hash.v1";
 pub const MIGRATION_DRIFT_ERROR_ID: &str = "EE-E040";
 pub const MIGRATION_DRIFT_ERROR_CODE: &str = "migration_drift";
 
 /// Standard audit action types for memory operations (EE-070).
 pub mod audit_actions {
     pub const ARTIFACT_REGISTER: &str = "artifact.register";
+    pub const CERTIFICATE_UPSERT: &str = "certificate.upsert";
     pub const FEEDBACK_RECORD: &str = "feedback.record";
     pub const FEEDBACK_QUARANTINE: &str = "feedback.quarantine";
     pub const FEEDBACK_QUARANTINE_RELEASE: &str = "feedback.quarantine.release";
@@ -2797,9 +2799,103 @@ CREATE INDEX idx_curation_candidates_v030_ttl_policy
     "blake3:v030_rule_curation_candidates_2026_05_05",
 );
 
-/// V031: Persist learning observation ledger rows for active learning.
-pub const V031_LEARNING_OBSERVATIONS: Migration = Migration::new(
+/// V031: Persist certificate records and source trust quarantine summaries.
+pub const V031_CERTIFICATES_AND_TRUST_QUARANTINE: Migration = Migration::new(
     31,
+    "certificates_and_trust_quarantine",
+    r#"
+CREATE TABLE certificates (
+    id TEXT PRIMARY KEY CHECK (length(trim(id)) > 0),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    target_kind TEXT NOT NULL CHECK (target_kind IN (
+        'backup', 'manifest', 'export', 'pack', 'curation', 'tail_risk',
+        'privacy_budget', 'lifecycle'
+    )),
+    target_id TEXT NOT NULL CHECK (length(trim(target_id)) > 0),
+    hash_algo TEXT NOT NULL DEFAULT 'blake3' CHECK (hash_algo IN ('blake3', 'sha256')),
+    content_hash TEXT NOT NULL CHECK (
+        content_hash GLOB 'blake3:*' OR content_hash GLOB 'sha256:*'
+    ),
+    signature TEXT CHECK (signature IS NULL OR length(trim(signature)) > 0),
+    signature_algorithm TEXT CHECK (
+        signature_algorithm IS NULL OR length(trim(signature_algorithm)) > 0
+    ),
+    signer TEXT CHECK (signer IS NULL OR length(trim(signer)) > 0),
+    signed_at TEXT CHECK (signed_at IS NULL OR length(trim(signed_at)) > 0),
+    verified_at TEXT CHECK (verified_at IS NULL OR length(trim(verified_at)) > 0),
+    status TEXT NOT NULL DEFAULT 'valid' CHECK (
+        status IN ('valid', 'pending', 'invalid', 'expired', 'revoked')
+    ),
+    manifest_path TEXT CHECK (manifest_path IS NULL OR length(trim(manifest_path)) > 0),
+    payload_path TEXT CHECK (payload_path IS NULL OR length(trim(payload_path)) > 0),
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    UNIQUE (workspace_id, target_kind, target_id, content_hash)
+);
+CREATE INDEX idx_certificates_workspace ON certificates(workspace_id, target_kind, target_id);
+CREATE INDEX idx_certificates_status ON certificates(workspace_id, status, id);
+CREATE INDEX idx_certificates_signer ON certificates(workspace_id, signer)
+    WHERE signer IS NOT NULL;
+
+CREATE TABLE trust_quarantine (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    source_uri TEXT NOT NULL CHECK (length(trim(source_uri)) > 0),
+    first_event_at TEXT NOT NULL CHECK (length(trim(first_event_at)) > 0),
+    last_event_at TEXT NOT NULL CHECK (length(trim(last_event_at)) > 0),
+    harmful_event_count INTEGER NOT NULL CHECK (harmful_event_count >= 0),
+    quarantined_until TEXT CHECK (
+        quarantined_until IS NULL OR length(trim(quarantined_until)) > 0
+    ),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (
+        status IN ('active', 'expired', 'released')
+    ),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    PRIMARY KEY (workspace_id, source_uri)
+);
+CREATE INDEX idx_trust_quarantine_active
+    ON trust_quarantine(workspace_id, status, quarantined_until, source_uri);
+CREATE INDEX idx_trust_quarantine_last_event
+    ON trust_quarantine(workspace_id, last_event_at, source_uri);
+"#,
+    "blake3:v031_certificates_and_trust_quarantine_2026_05_06",
+);
+
+/// V032: Add audit hash-chain columns for persisted audit verification.
+pub const V032_AUDIT_HASH_CHAIN: Migration = Migration::new(
+    32,
+    "audit_hash_chain",
+    r#"
+ALTER TABLE audit_log ADD COLUMN surface TEXT;
+ALTER TABLE audit_log ADD COLUMN mutation_kind TEXT;
+ALTER TABLE audit_log ADD COLUMN before_hash TEXT;
+ALTER TABLE audit_log ADD COLUMN after_hash TEXT;
+ALTER TABLE audit_log ADD COLUMN prev_row_hash TEXT;
+ALTER TABLE audit_log ADD COLUMN this_row_hash TEXT;
+
+UPDATE audit_log
+SET
+    surface = COALESCE(
+        NULLIF(target_type, ''),
+        CASE
+            WHEN instr(action, '.') > 1 THEN substr(action, 1, instr(action, '.') - 1)
+            ELSE 'global'
+        END
+    ),
+    mutation_kind = action
+WHERE surface IS NULL OR mutation_kind IS NULL;
+
+CREATE INDEX idx_audit_log_surface ON audit_log(surface, timestamp, id);
+CREATE INDEX idx_audit_log_chain ON audit_log(prev_row_hash, this_row_hash);
+"#,
+    "blake3:v032_audit_hash_chain_2026_05_06",
+);
+
+/// V033: Persist learning observation ledger rows for active learning.
+pub const V033_LEARNING_OBSERVATIONS: Migration = Migration::new(
+    33,
     "learning_observations",
     r#"
 CREATE TABLE learning_observations (
@@ -2833,7 +2929,7 @@ CREATE INDEX idx_learning_observations_target
 CREATE INDEX idx_learning_observations_signal
     ON learning_observations(workspace_id, signal, observed_at);
 "#,
-    "blake3:v031_learning_observations_2026_05_06",
+    "blake3:v033_learning_observations_2026_05_06",
 );
 
 /// All migrations in version order.
@@ -2868,7 +2964,9 @@ pub const MIGRATIONS: &[Migration] = &[
     V028_ADVISORY_LOCKS,
     V029_MEMORY_WORKFLOW_ID,
     V030_RULE_CURATION_CANDIDATES,
-    V031_LEARNING_OBSERVATIONS,
+    V031_CERTIFICATES_AND_TRUST_QUARANTINE,
+    V032_AUDIT_HASH_CHAIN,
+    V033_LEARNING_OBSERVATIONS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -3182,6 +3280,300 @@ fn stored_workspace_from_row(row: &Row) -> Result<StoredWorkspace> {
         subproject_path: optional_text(row, 6)?.map(str::to_string),
         created_at: required_text(row, 7, DbOperation::Query, "created_at")?.to_string(),
         updated_at: required_text(row, 8, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
+/// Input for creating or updating a persisted certificate row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateCertificateInput {
+    pub workspace_id: String,
+    pub target_kind: String,
+    pub target_id: String,
+    pub hash_algo: String,
+    pub content_hash: String,
+    pub signature: Option<String>,
+    pub signature_algorithm: Option<String>,
+    pub signer: Option<String>,
+    pub signed_at: Option<String>,
+    pub verified_at: Option<String>,
+    pub status: String,
+    pub manifest_path: Option<String>,
+    pub payload_path: Option<String>,
+    pub metadata_json: Option<String>,
+}
+
+/// Stored certificate verification state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCertificateRecord {
+    pub id: String,
+    pub workspace_id: String,
+    pub target_kind: String,
+    pub target_id: String,
+    pub hash_algo: String,
+    pub content_hash: String,
+    pub signature: Option<String>,
+    pub signature_algorithm: Option<String>,
+    pub signer: Option<String>,
+    pub signed_at: Option<String>,
+    pub verified_at: Option<String>,
+    pub status: String,
+    pub manifest_path: Option<String>,
+    pub payload_path: Option<String>,
+    pub metadata_json: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Input for a source-level trust quarantine summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpsertTrustQuarantineInput {
+    pub workspace_id: String,
+    pub source_uri: String,
+    pub first_event_at: String,
+    pub last_event_at: String,
+    pub harmful_event_count: u32,
+    pub quarantined_until: Option<String>,
+    pub reason: String,
+    pub status: String,
+}
+
+/// Stored source-level trust quarantine summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTrustQuarantine {
+    pub workspace_id: String,
+    pub source_uri: String,
+    pub first_event_at: String,
+    pub last_event_at: String,
+    pub harmful_event_count: u32,
+    pub quarantined_until: Option<String>,
+    pub reason: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl DbConnection {
+    /// Insert or update a certificate row without mutating target artifacts.
+    pub fn upsert_certificate(&self, id: &str, input: &CreateCertificateInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let metadata_json = input
+            .metadata_json
+            .clone()
+            .unwrap_or_else(|| "{}".to_owned());
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO certificates (id, workspace_id, target_kind, target_id, hash_algo, content_hash, signature, signature_algorithm, signer, signed_at, verified_at, status, manifest_path, payload_path, metadata_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+             ON CONFLICT(id) DO UPDATE SET
+                workspace_id = excluded.workspace_id,
+                target_kind = excluded.target_kind,
+                target_id = excluded.target_id,
+                hash_algo = excluded.hash_algo,
+                content_hash = excluded.content_hash,
+                signature = excluded.signature,
+                signature_algorithm = excluded.signature_algorithm,
+                signer = excluded.signer,
+                signed_at = excluded.signed_at,
+                verified_at = excluded.verified_at,
+                status = excluded.status,
+                manifest_path = excluded.manifest_path,
+                payload_path = excluded.payload_path,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.target_kind.clone()),
+                Value::Text(input.target_id.clone()),
+                Value::Text(input.hash_algo.clone()),
+                Value::Text(input.content_hash.clone()),
+                input
+                    .signature
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .signature_algorithm
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .signer
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .signed_at
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .verified_at
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(input.status.clone()),
+                input
+                    .manifest_path
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .payload_path
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(metadata_json),
+                Value::Text(now.clone()),
+                Value::Text(now),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get one certificate by ID.
+    pub fn get_certificate(&self, id: &str) -> Result<Option<StoredCertificateRecord>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, target_kind, target_id, hash_algo, content_hash, signature, signature_algorithm, signer, signed_at, verified_at, status, manifest_path, payload_path, metadata_json, created_at, updated_at FROM certificates WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+        rows.first().map(stored_certificate_from_row).transpose()
+    }
+
+    /// List certificates for a workspace in deterministic order.
+    pub fn list_certificates_for_workspace(
+        &self,
+        workspace_id: &str,
+        target_kind: Option<&str>,
+        status: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<StoredCertificateRecord>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, target_kind, target_id, hash_algo, content_hash, signature, signature_algorithm, signer, signed_at, verified_at, status, manifest_path, payload_path, metadata_json, created_at, updated_at FROM certificates WHERE workspace_id = ?1 AND (?2 IS NULL OR target_kind = ?2) AND (?3 IS NULL OR status = ?3) ORDER BY signed_at DESC, id ASC LIMIT ?4",
+            &[
+                Value::Text(workspace_id.to_string()),
+                target_kind.map_or(Value::Null, |value| Value::Text(value.to_string())),
+                status.map_or(Value::Null, |value| Value::Text(value.to_string())),
+                Value::BigInt(i64::from(limit)),
+            ],
+        )?;
+        rows.iter().map(stored_certificate_from_row).collect()
+    }
+
+    /// Mark a certificate as verified at a stable caller-provided timestamp.
+    pub fn mark_certificate_verified(&self, id: &str, verified_at: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE certificates SET verified_at = ?1, status = 'valid', updated_at = ?2 WHERE id = ?3",
+            &[
+                Value::Text(verified_at.to_string()),
+                Value::Text(now),
+                Value::Text(id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Insert or update source-level trust quarantine state.
+    pub fn upsert_trust_quarantine(&self, input: &UpsertTrustQuarantineInput) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO trust_quarantine (workspace_id, source_uri, first_event_at, last_event_at, harmful_event_count, quarantined_until, reason, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(workspace_id, source_uri) DO UPDATE SET
+                first_event_at = MIN(first_event_at, excluded.first_event_at),
+                last_event_at = MAX(last_event_at, excluded.last_event_at),
+                harmful_event_count = excluded.harmful_event_count,
+                quarantined_until = excluded.quarantined_until,
+                reason = excluded.reason,
+                status = excluded.status,
+                updated_at = excluded.updated_at",
+            &[
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.source_uri.clone()),
+                Value::Text(input.first_event_at.clone()),
+                Value::Text(input.last_event_at.clone()),
+                Value::BigInt(i64::from(input.harmful_event_count)),
+                input
+                    .quarantined_until
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(input.reason.clone()),
+                Value::Text(input.status.clone()),
+                Value::Text(now.clone()),
+                Value::Text(now),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get source-level trust quarantine state for one source URI.
+    pub fn get_trust_quarantine(
+        &self,
+        workspace_id: &str,
+        source_uri: &str,
+    ) -> Result<Option<StoredTrustQuarantine>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, source_uri, first_event_at, last_event_at, harmful_event_count, quarantined_until, reason, status, created_at, updated_at FROM trust_quarantine WHERE workspace_id = ?1 AND source_uri = ?2",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(source_uri.to_string()),
+            ],
+        )?;
+        rows.first()
+            .map(stored_trust_quarantine_from_row)
+            .transpose()
+    }
+
+    /// List source-level trust quarantine state in deterministic order.
+    pub fn list_trust_quarantine(
+        &self,
+        workspace_id: &str,
+        active_only: bool,
+    ) -> Result<Vec<StoredTrustQuarantine>> {
+        let status = active_only.then_some("active");
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, source_uri, first_event_at, last_event_at, harmful_event_count, quarantined_until, reason, status, created_at, updated_at FROM trust_quarantine WHERE workspace_id = ?1 AND (?2 IS NULL OR status = ?2) ORDER BY source_uri ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                status.map_or(Value::Null, |value| Value::Text(value.to_string())),
+            ],
+        )?;
+        rows.iter().map(stored_trust_quarantine_from_row).collect()
+    }
+}
+
+fn stored_certificate_from_row(row: &Row) -> Result<StoredCertificateRecord> {
+    Ok(StoredCertificateRecord {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        target_kind: required_text(row, 2, DbOperation::Query, "target_kind")?.to_string(),
+        target_id: required_text(row, 3, DbOperation::Query, "target_id")?.to_string(),
+        hash_algo: required_text(row, 4, DbOperation::Query, "hash_algo")?.to_string(),
+        content_hash: required_text(row, 5, DbOperation::Query, "content_hash")?.to_string(),
+        signature: optional_text(row, 6)?.map(str::to_string),
+        signature_algorithm: optional_text(row, 7)?.map(str::to_string),
+        signer: optional_text(row, 8)?.map(str::to_string),
+        signed_at: optional_text(row, 9)?.map(str::to_string),
+        verified_at: optional_text(row, 10)?.map(str::to_string),
+        status: required_text(row, 11, DbOperation::Query, "status")?.to_string(),
+        manifest_path: optional_text(row, 12)?.map(str::to_string),
+        payload_path: optional_text(row, 13)?.map(str::to_string),
+        metadata_json: required_text(row, 14, DbOperation::Query, "metadata_json")?.to_string(),
+        created_at: required_text(row, 15, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 16, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
+fn stored_trust_quarantine_from_row(row: &Row) -> Result<StoredTrustQuarantine> {
+    Ok(StoredTrustQuarantine {
+        workspace_id: required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string(),
+        source_uri: required_text(row, 1, DbOperation::Query, "source_uri")?.to_string(),
+        first_event_at: required_text(row, 2, DbOperation::Query, "first_event_at")?.to_string(),
+        last_event_at: required_text(row, 3, DbOperation::Query, "last_event_at")?.to_string(),
+        harmful_event_count: required_u32(row, 4, DbOperation::Query, "harmful_event_count")?,
+        quarantined_until: optional_text(row, 5)?.map(str::to_string),
+        reason: required_text(row, 6, DbOperation::Query, "reason")?.to_string(),
+        status: required_text(row, 7, DbOperation::Query, "status")?.to_string(),
+        created_at: required_text(row, 8, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 9, DbOperation::Query, "updated_at")?.to_string(),
     })
 }
 
@@ -7369,36 +7761,126 @@ pub struct StoredAuditEntry {
     pub target_type: Option<String>,
     pub target_id: Option<String>,
     pub details: Option<String>,
+    pub surface: String,
+    pub mutation_kind: String,
+    pub before_hash: Option<String>,
+    pub after_hash: Option<String>,
+    pub prev_row_hash: Option<String>,
+    pub this_row_hash: Option<String>,
 }
 
 impl DbConnection {
     /// Insert a new audit log entry.
     pub fn insert_audit(&self, id: &str, input: &CreateAuditInput) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        let surface = input
+            .target_type
+            .clone()
+            .unwrap_or_else(|| audit_surface_from_action(&input.action));
+        let mutation_kind = input.action.clone();
+        let before_hash = audit_detail_hash(
+            input.details.as_deref(),
+            &[
+                "before_hash",
+                "beforeHash",
+                "before_state_hash",
+                "beforeStateHash",
+            ],
+        );
+        let after_hash = audit_detail_hash(
+            input.details.as_deref(),
+            &[
+                "after_hash",
+                "afterHash",
+                "after_state_hash",
+                "afterStateHash",
+            ],
+        );
+        let prev_row_hash = self.latest_audit_row_hash()?;
+        let entry = StoredAuditEntry {
+            id: id.to_owned(),
+            workspace_id: input.workspace_id.clone(),
+            timestamp: now.clone(),
+            actor: input.actor.clone(),
+            action: input.action.clone(),
+            target_type: input.target_type.clone(),
+            target_id: input.target_id.clone(),
+            details: input.details.clone(),
+            surface,
+            mutation_kind,
+            before_hash,
+            after_hash,
+            prev_row_hash,
+            this_row_hash: None,
+        };
+        let this_row_hash = compute_audit_row_hash(&entry);
 
         self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO audit_log (id, workspace_id, timestamp, actor, action, target_type, target_id, details) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO audit_log (id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             &[
                 Value::Text(id.to_string()),
-                input.workspace_id.as_ref().map_or(Value::Null, |w| Value::Text(w.clone())),
-                Value::Text(now),
-                input.actor.as_ref().map_or(Value::Null, |a| Value::Text(a.clone())),
-                Value::Text(input.action.clone()),
-                input.target_type.as_ref().map_or(Value::Null, |t| Value::Text(t.clone())),
-                input.target_id.as_ref().map_or(Value::Null, |t| Value::Text(t.clone())),
-                input.details.as_ref().map_or(Value::Null, |d| Value::Text(d.clone())),
+                entry
+                    .workspace_id
+                    .as_ref()
+                    .map_or(Value::Null, |w| Value::Text(w.clone())),
+                Value::Text(entry.timestamp),
+                entry
+                    .actor
+                    .as_ref()
+                    .map_or(Value::Null, |a| Value::Text(a.clone())),
+                Value::Text(entry.action),
+                entry
+                    .target_type
+                    .as_ref()
+                    .map_or(Value::Null, |t| Value::Text(t.clone())),
+                entry
+                    .target_id
+                    .as_ref()
+                    .map_or(Value::Null, |t| Value::Text(t.clone())),
+                entry
+                    .details
+                    .as_ref()
+                    .map_or(Value::Null, |d| Value::Text(d.clone())),
+                Value::Text(entry.surface),
+                Value::Text(entry.mutation_kind),
+                entry
+                    .before_hash
+                    .as_ref()
+                    .map_or(Value::Null, |hash| Value::Text(hash.clone())),
+                entry
+                    .after_hash
+                    .as_ref()
+                    .map_or(Value::Null, |hash| Value::Text(hash.clone())),
+                entry
+                    .prev_row_hash
+                    .as_ref()
+                    .map_or(Value::Null, |hash| Value::Text(hash.clone())),
+                Value::Text(this_row_hash),
             ],
         )?;
 
         Ok(())
     }
 
+    fn latest_audit_row_hash(&self) -> Result<Option<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT this_row_hash FROM audit_log WHERE this_row_hash IS NOT NULL ORDER BY timestamp DESC, id DESC LIMIT 1",
+            &[],
+        )?;
+
+        rows.first()
+            .map(|row| optional_text(row, 0).map(|value| value.map(str::to_owned)))
+            .transpose()
+            .map(Option::flatten)
+    }
+
     /// Get an audit log entry by ID.
     pub fn get_audit(&self, id: &str) -> Result<Option<StoredAuditEntry>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details FROM audit_log WHERE id = ?1",
+            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash FROM audit_log WHERE id = ?1",
             &[Value::Text(id.to_string())],
         )?;
 
@@ -7412,7 +7894,7 @@ impl DbConnection {
         limit: Option<u32>,
     ) -> Result<Vec<StoredAuditEntry>> {
         let mut sql = String::from(
-            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details FROM audit_log",
+            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash FROM audit_log",
         );
         let mut params: Vec<Value> = Vec::new();
 
@@ -7439,7 +7921,7 @@ impl DbConnection {
         limit: Option<u32>,
     ) -> Result<Vec<StoredAuditEntry>> {
         let mut sql = String::from(
-            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details FROM audit_log WHERE target_type = ?1 AND target_id = ?2 ORDER BY timestamp DESC",
+            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash FROM audit_log WHERE target_type = ?1 AND target_id = ?2 ORDER BY timestamp DESC",
         );
 
         if let Some(lim) = limit {
@@ -7464,7 +7946,7 @@ impl DbConnection {
         limit: Option<u32>,
     ) -> Result<Vec<StoredAuditEntry>> {
         let mut sql = String::from(
-            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details FROM audit_log WHERE action = ?1 ORDER BY timestamp DESC",
+            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash FROM audit_log WHERE action = ?1 ORDER BY timestamp DESC",
         );
 
         if let Some(lim) = limit {
@@ -7477,15 +7959,81 @@ impl DbConnection {
 }
 
 fn stored_audit_from_row(row: &Row) -> Result<StoredAuditEntry> {
+    let action = required_text(row, 4, DbOperation::Query, "action")?.to_string();
+    let target_type = optional_text(row, 5)?.map(str::to_string);
+    let surface = optional_text(row, 8)?
+        .map(str::to_string)
+        .or_else(|| target_type.clone())
+        .unwrap_or_else(|| audit_surface_from_action(&action));
+    let mutation_kind = optional_text(row, 9)?
+        .map(str::to_string)
+        .unwrap_or_else(|| action.clone());
+
     Ok(StoredAuditEntry {
         id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
         workspace_id: optional_text(row, 1)?.map(str::to_string),
         timestamp: required_text(row, 2, DbOperation::Query, "timestamp")?.to_string(),
         actor: optional_text(row, 3)?.map(str::to_string),
-        action: required_text(row, 4, DbOperation::Query, "action")?.to_string(),
-        target_type: optional_text(row, 5)?.map(str::to_string),
+        action,
+        target_type,
         target_id: optional_text(row, 6)?.map(str::to_string),
         details: optional_text(row, 7)?.map(str::to_string),
+        surface,
+        mutation_kind,
+        before_hash: optional_text(row, 10)?.map(str::to_string),
+        after_hash: optional_text(row, 11)?.map(str::to_string),
+        prev_row_hash: optional_text(row, 12)?.map(str::to_string),
+        this_row_hash: optional_text(row, 13)?.map(str::to_string),
+    })
+}
+
+/// Recompute the canonical hash for an audit row.
+#[must_use]
+pub fn compute_audit_row_hash(entry: &StoredAuditEntry) -> String {
+    let payload = serde_json::json!([
+        AUDIT_ROW_HASH_VERSION,
+        entry.id,
+        entry.workspace_id,
+        entry.timestamp,
+        entry.actor,
+        entry.action,
+        entry.target_type,
+        entry.target_id,
+        entry.details,
+        entry.surface,
+        entry.mutation_kind,
+        entry.before_hash,
+        entry.after_hash,
+        entry.prev_row_hash,
+    ]);
+    format!(
+        "blake3:{}",
+        blake3::hash(payload.to_string().as_bytes()).to_hex()
+    )
+}
+
+fn audit_surface_from_action(action: &str) -> String {
+    let surface = action
+        .split_once('.')
+        .map(|(surface, _)| surface)
+        .unwrap_or("global")
+        .trim();
+    if surface.is_empty() {
+        "global".to_owned()
+    } else {
+        surface.to_owned()
+    }
+}
+
+fn audit_detail_hash(details: Option<&str>, keys: &[&str]) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(details?).ok()?;
+    keys.iter().find_map(|key| {
+        parsed
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
     })
 }
 
@@ -10262,6 +10810,53 @@ impl DbConnection {
             "SELECT event_id, run_id, sequence, event_type, timestamp, payload_hash, payload_bytes, redaction_status, redacted_bytes, previous_event_hash, event_hash, chain_status, source_span_id, source_line_start, source_line_end, created_at FROM recorder_events WHERE run_id = ?1 ORDER BY sequence ASC",
             &[Value::Text(run_id.to_string())],
         )?;
+        rows.iter().map(stored_recorder_event_from_row).collect()
+    }
+
+    /// List recorder events with optional filters.
+    pub fn list_recorder_events_filtered(
+        &self,
+        run_id: Option<&str>,
+        since: Option<&str>,
+        source: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<StoredRecorderEvent>> {
+        let mut sql = String::from(
+            "SELECT e.event_id, e.run_id, e.sequence, e.event_type, e.timestamp, e.payload_hash, e.payload_bytes, e.redaction_status, e.redacted_bytes, e.previous_event_hash, e.event_hash, e.chain_status, e.source_span_id, e.source_line_start, e.source_line_end, e.created_at FROM recorder_events e",
+        );
+
+        let mut conditions = Vec::new();
+        let mut params: Vec<Value> = Vec::new();
+
+        if run_id.is_some() || source.is_some() {
+            sql.push_str(" JOIN recorder_runs r ON e.run_id = r.run_id");
+        }
+
+        if let Some(rid) = run_id {
+            params.push(Value::Text(rid.to_string()));
+            conditions.push(format!("e.run_id = ?{}", params.len()));
+        }
+
+        if let Some(ts) = since {
+            params.push(Value::Text(ts.to_string()));
+            conditions.push(format!("e.timestamp >= ?{}", params.len()));
+        }
+
+        if let Some(src) = source {
+            params.push(Value::Text(src.to_string()));
+            conditions.push(format!("r.source_type = ?{}", params.len()));
+        }
+
+        if !conditions.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conditions.join(" AND "));
+        }
+
+        sql.push_str(" ORDER BY e.timestamp DESC, e.sequence DESC");
+        params.push(Value::from_u64_clamped(u64::from(limit)));
+        sql.push_str(&format!(" LIMIT ?{}", params.len()));
+
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
         rows.iter().map(stored_recorder_event_from_row).collect()
     }
 }
@@ -14074,6 +14669,25 @@ mod tests {
             &Some(r#"{"kind":"rule"}"#.to_string()),
             "details",
         )?;
+        ensure_equal(&audit.surface.as_str(), &"memory", "surface")?;
+        ensure_equal(
+            &audit.mutation_kind.as_str(),
+            &"memory.create",
+            "mutation_kind",
+        )?;
+        ensure(audit.prev_row_hash.is_none(), "first row has no prev hash")?;
+        ensure(
+            audit
+                .this_row_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "audit row hash is stored",
+        )?;
+        ensure_equal(
+            &audit.this_row_hash,
+            &Some(super::compute_audit_row_hash(&audit)),
+            "stored audit row hash matches recomputed row hash",
+        )?;
 
         connection.close()?;
         Ok(())
@@ -14127,6 +14741,23 @@ mod tests {
 
         let all = connection.list_audit_entries(None, None)?;
         ensure_equal(&all.len(), &2, "all entries")?;
+        let first = all
+            .iter()
+            .find(|entry| entry.id == "audit_aaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .ok_or_else(|| TestFailure::new("first audit row found"))?;
+        let second = all
+            .iter()
+            .find(|entry| entry.id == "audit_bbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .ok_or_else(|| TestFailure::new("second audit row found"))?;
+        ensure(
+            first.prev_row_hash.is_none(),
+            "first inserted audit row has no predecessor",
+        )?;
+        ensure_equal(
+            &second.prev_row_hash,
+            &first.this_row_hash,
+            "second inserted audit row points to first row hash",
+        )?;
 
         connection.close()?;
         Ok(())

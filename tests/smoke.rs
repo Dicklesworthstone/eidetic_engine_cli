@@ -6314,9 +6314,24 @@ fn pack_query_file_rejects_oversized_document_before_parse() -> TestResult {
     )
 }
 
+#[cfg(unix)]
 #[test]
-fn learn_experiment_propose_json_degrades_until_records_exist() -> TestResult {
+fn learn_experiment_propose_json_reads_empty_persisted_ledger() -> TestResult {
+    let workspace = unique_artifact_dir("learn-propose-empty")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let init = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "init"])?;
+    ensure(
+        init.status.code() == Some(0),
+        format!(
+            "learn experiment propose init failed: {:?}",
+            init.status.code()
+        ),
+    )?;
+
     let output = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
         "--json",
         "learn",
         "experiment",
@@ -6336,9 +6351,9 @@ fn learn_experiment_propose_json_degrades_until_records_exist() -> TestResult {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     ensure(
-        output.status.code() == Some(6),
+        output.status.code() == Some(0),
         format!(
-            "learn experiment propose should degrade until learning records exist; stderr: {stderr}"
+            "learn experiment propose should read persisted learning records; stderr: {stderr}"
         ),
     )?;
     ensure(
@@ -6350,30 +6365,23 @@ fn learn_experiment_propose_json_degrades_until_records_exist() -> TestResult {
         .map_err(|error| format!("learn experiment propose stdout must be JSON: {error}"))?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.learn.experiment_proposal.v1"),
         "response schema",
     )?;
-    ensure_equal(&json["success"], &serde_json::json!(false), "success flag")?;
+    ensure_equal(&json["success"], &serde_json::json!(true), "success flag")?;
     ensure_equal(
-        &json["data"]["command"],
-        &serde_json::json!("learn experiment propose"),
-        "learn command",
+        &json["returned"],
+        &serde_json::json!(0),
+        "returned proposal count",
     )?;
     ensure_equal(
-        &json["data"]["code"],
-        &serde_json::json!("learning_records_unavailable"),
-        "learn degraded code",
-    )?;
-    ensure_equal(
-        &json["data"]["repair"],
-        &serde_json::json!("ee learn observe <experiment-id> --dry-run --json"),
-        "learn repair",
+        &json["proposals"],
+        &serde_json::json!([]),
+        "empty proposal list",
     )?;
     ensure(
-        json.get("returned").is_none()
-            && json.get("proposals").is_none()
-            && json["data"].get("proposal").is_none(),
-        "learn experiment propose degraded response must not emit proposal template fields",
+        !stdout.contains("learning_records_unavailable") && json.get("data").is_none(),
+        "learn experiment propose must not emit removed unavailable sentinel or degraded envelope",
     )
 }
 

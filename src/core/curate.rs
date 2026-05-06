@@ -1165,7 +1165,7 @@ fn resolve_review_session(
         .into_iter()
         .max_by(|left, right| {
             review_session_recency_key(left)
-                .cmp(&review_session_recency_key(right))
+                .cmp(review_session_recency_key(right))
                 .then_with(|| left.cass_session_id.cmp(&right.cass_session_id))
                 .then_with(|| left.id.cmp(&right.id))
         })

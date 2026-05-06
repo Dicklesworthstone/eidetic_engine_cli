@@ -12,7 +12,9 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
+use crate::db::{DbConnection, StoredCertificateRecord};
 use crate::models::{Certificate, CertificateKind, CertificateStatus, DecisionPlaneMetadata};
 
 /// Schema version for certificate list responses.
@@ -43,6 +45,10 @@ pub struct CertificateListOptions {
     pub include_expired: bool,
     /// Optional explicit certificate manifest path.
     pub manifest_path: Option<PathBuf>,
+    /// Optional workspace database path for persisted certificate records.
+    pub database_path: Option<PathBuf>,
+    /// Workspace ID for database-backed certificate queries.
+    pub workspace_id: Option<String>,
 }
 
 impl CertificateListOptions {
@@ -80,6 +86,18 @@ impl CertificateListOptions {
         self.manifest_path = Some(manifest_path.into());
         self
     }
+
+    #[must_use]
+    pub fn with_database_path(mut self, database_path: impl Into<PathBuf>) -> Self {
+        self.database_path = Some(database_path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_workspace_id(mut self, workspace_id: impl Into<String>) -> Self {
+        self.workspace_id = Some(workspace_id.into());
+        self
+    }
 }
 
 /// Options for showing or verifying one certificate from a manifest store.
@@ -87,6 +105,10 @@ impl CertificateListOptions {
 pub struct CertificateLookupOptions {
     /// Optional explicit certificate manifest path.
     pub manifest_path: Option<PathBuf>,
+    /// Optional workspace database path for persisted certificate records.
+    pub database_path: Option<PathBuf>,
+    /// Workspace ID for database-backed certificate queries.
+    pub workspace_id: Option<String>,
     /// Certificate ID to show or verify.
     pub certificate_id: String,
 }
@@ -96,6 +118,8 @@ impl CertificateLookupOptions {
     pub fn new(certificate_id: impl Into<String>) -> Self {
         Self {
             manifest_path: None,
+            database_path: None,
+            workspace_id: None,
             certificate_id: certificate_id.into(),
         }
     }
@@ -103,6 +127,18 @@ impl CertificateLookupOptions {
     #[must_use]
     pub fn with_manifest_path(mut self, manifest_path: impl Into<PathBuf>) -> Self {
         self.manifest_path = Some(manifest_path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_database_path(mut self, database_path: impl Into<PathBuf>) -> Self {
+        self.database_path = Some(database_path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_workspace_id(mut self, workspace_id: impl Into<String>) -> Self {
+        self.workspace_id = Some(workspace_id.into());
         self
     }
 }
@@ -175,6 +211,8 @@ pub enum VerificationResult {
     Expired,
     /// Certificate was revoked.
     Revoked,
+    /// Certificate detached signature did not verify.
+    SignatureMismatch,
     /// Certificate status is invalid.
     InvalidStatus,
     /// Certificate not found.
@@ -192,6 +230,7 @@ impl VerificationResult {
             Self::FailedAssumptions => "failed_assumptions",
             Self::Expired => "expired",
             Self::Revoked => "revoked",
+            Self::SignatureMismatch => "signature_mismatch",
             Self::InvalidStatus => "invalid_status",
             Self::NotFound => "not_found",
         }
@@ -211,6 +250,7 @@ impl VerificationResult {
                 | Self::StaleSchemaVersion
                 | Self::FailedAssumptions
                 | Self::Revoked
+                | Self::SignatureMismatch
                 | Self::NotFound
         )
     }
@@ -228,6 +268,9 @@ pub struct CertificateVerifyReport {
     pub assumptions_valid: bool,
     pub status_valid: bool,
     pub expiry_valid: bool,
+    pub mismatches: Vec<String>,
+    pub signature_ok: bool,
+    pub signer: Option<String>,
     pub failure_codes: Vec<String>,
     pub message: String,
 }
@@ -245,6 +288,9 @@ impl CertificateVerifyReport {
             assumptions_valid: true,
             status_valid: true,
             expiry_valid: true,
+            mismatches: Vec::new(),
+            signature_ok: true,
+            signer: None,
             failure_codes: Vec::new(),
             message: "Certificate verification passed".to_owned(),
         }
@@ -262,6 +308,9 @@ impl CertificateVerifyReport {
             assumptions_valid: false,
             status_valid: false,
             expiry_valid: false,
+            mismatches: vec!["not_found".to_owned()],
+            signature_ok: false,
+            signer: None,
             failure_codes: vec!["not_found".to_owned()],
             message: "Certificate not found".to_owned(),
         }
@@ -279,6 +328,9 @@ impl CertificateVerifyReport {
             assumptions_valid: true,
             status_valid: false,
             expiry_valid: false,
+            mismatches: vec!["expired".to_owned()],
+            signature_ok: true,
+            signer: None,
             failure_codes: vec!["expired".to_owned()],
             message: "Certificate has expired".to_owned(),
         }
@@ -296,6 +348,9 @@ impl CertificateVerifyReport {
             assumptions_valid: true,
             status_valid: true,
             expiry_valid: true,
+            mismatches: vec!["stale_payload_hash".to_owned()],
+            signature_ok: true,
+            signer: None,
             failure_codes: vec!["stale_payload_hash".to_owned()],
             message: "Certificate payload hash no longer matches the current payload".to_owned(),
         }
@@ -313,6 +368,9 @@ impl CertificateVerifyReport {
             assumptions_valid: true,
             status_valid: true,
             expiry_valid: true,
+            mismatches: vec!["stale_schema_version".to_owned()],
+            signature_ok: true,
+            signer: None,
             failure_codes: vec!["stale_schema_version".to_owned()],
             message: "Certificate schema version is no longer supported".to_owned(),
         }
@@ -330,6 +388,9 @@ impl CertificateVerifyReport {
             assumptions_valid: false,
             status_valid: true,
             expiry_valid: true,
+            mismatches: vec!["failed_assumptions".to_owned()],
+            signature_ok: true,
+            signer: None,
             failure_codes: vec!["failed_assumptions".to_owned()],
             message: "Certificate assumptions failed during verification".to_owned(),
         }
@@ -347,6 +408,9 @@ impl CertificateVerifyReport {
             assumptions_valid: true,
             status_valid: true,
             expiry_valid: true,
+            mismatches: vec!["hash_mismatch".to_owned()],
+            signature_ok: true,
+            signer: None,
             failure_codes: vec!["hash_mismatch".to_owned()],
             message: "Certificate payload hash does not match the manifest".to_owned(),
         }
@@ -364,6 +428,9 @@ impl CertificateVerifyReport {
             assumptions_valid: true,
             status_valid: false,
             expiry_valid: true,
+            mismatches: vec!["revoked".to_owned()],
+            signature_ok: true,
+            signer: None,
             failure_codes: vec!["revoked".to_owned()],
             message: "Certificate has been revoked".to_owned(),
         }
@@ -381,8 +448,35 @@ impl CertificateVerifyReport {
             assumptions_valid: true,
             status_valid: false,
             expiry_valid: true,
+            mismatches: vec!["invalid_status".to_owned()],
+            signature_ok: true,
+            signer: None,
             failure_codes: vec!["invalid_status".to_owned()],
             message: "Certificate status is not valid for use".to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn signature_mismatch(
+        certificate_id: impl Into<String>,
+        signer: Option<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            certificate_id: certificate_id.into(),
+            result: VerificationResult::SignatureMismatch,
+            checked_at: chrono::Utc::now().to_rfc3339(),
+            hash_verified: true,
+            payload_hash_fresh: true,
+            schema_version_valid: true,
+            assumptions_valid: true,
+            status_valid: true,
+            expiry_valid: true,
+            mismatches: vec!["signature_mismatch".to_owned()],
+            signature_ok: false,
+            signer,
+            failure_codes: vec!["signature_mismatch".to_owned()],
+            message: message.into(),
         }
     }
 
@@ -398,6 +492,9 @@ impl CertificateVerifyReport {
             assumptions_valid: false,
             status_valid: false,
             expiry_valid: false,
+            mismatches: vec!["invalid_manifest".to_owned()],
+            signature_ok: false,
+            signer: None,
             failure_codes: vec!["invalid_manifest".to_owned()],
             message: message.into(),
         }
@@ -428,6 +525,9 @@ struct ManifestCertificateRecord {
     payload_path: Option<PathBuf>,
     payload_schema: Option<String>,
     assumptions_valid: bool,
+    signature: Option<String>,
+    signature_algorithm: Option<String>,
+    signer: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -456,6 +556,12 @@ struct RawCertificateRecord {
     payload_schema: Option<String>,
     #[serde(default, alias = "failedAssumptions")]
     failed_assumptions: bool,
+    #[serde(default)]
+    signature: Option<String>,
+    #[serde(default, alias = "signatureAlgorithm")]
+    signature_algorithm: Option<String>,
+    #[serde(default)]
+    signer: Option<String>,
     #[serde(default)]
     assumptions: Vec<RawCertificateAssumption>,
 }
@@ -540,7 +646,7 @@ impl CertificateShowReport {
 #[must_use]
 pub fn list_certificates(options: &CertificateListOptions) -> CertificateListReport {
     let Some(manifest_path) = options.manifest_path.as_deref() else {
-        return CertificateListReport::new();
+        return list_database_certificates(options);
     };
 
     let Ok(records) = read_certificate_manifest(manifest_path) else {
@@ -609,7 +715,7 @@ pub fn show_certificate(certificate_id: &str) -> CertificateShowReport {
 #[must_use]
 pub fn show_certificate_with_options(options: &CertificateLookupOptions) -> CertificateShowReport {
     let Some(manifest_path) = options.manifest_path.as_deref() else {
-        return CertificateShowReport::not_found(&options.certificate_id);
+        return show_database_certificate(options);
     };
 
     let Ok(records) = read_certificate_manifest(manifest_path) else {
@@ -637,7 +743,7 @@ pub fn verify_certificate_with_options(
     options: &CertificateLookupOptions,
 ) -> CertificateVerifyReport {
     let Some(manifest_path) = options.manifest_path.as_deref() else {
-        return CertificateVerifyReport::not_found(&options.certificate_id);
+        return verify_database_certificate(options);
     };
 
     let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
@@ -659,6 +765,262 @@ pub fn verify_certificate_with_options(
     };
 
     verify_manifest_certificate(record, manifest_dir)
+}
+
+fn list_database_certificates(options: &CertificateListOptions) -> CertificateListReport {
+    let (Some(database_path), Some(workspace_id)) = (
+        options.database_path.as_deref(),
+        options.workspace_id.as_deref(),
+    ) else {
+        return CertificateListReport::new();
+    };
+    if !database_path.exists() {
+        return CertificateListReport::new();
+    }
+
+    let Ok(connection) = DbConnection::open_file(database_path) else {
+        return CertificateListReport::new();
+    };
+    let Ok(records) =
+        connection.list_certificates_for_workspace(workspace_id, None, None, u32::MAX)
+    else {
+        return CertificateListReport::new();
+    };
+
+    let total_count = usize_to_u32(records.len());
+    let usable_count = usize_to_u32(
+        records
+            .iter()
+            .map(certificate_from_stored_record)
+            .filter(Certificate::is_usable)
+            .count(),
+    );
+    let expired_count = usize_to_u32(
+        records
+            .iter()
+            .map(certificate_from_stored_record)
+            .filter(Certificate::is_expired)
+            .count(),
+    );
+
+    let mut kinds_present = Vec::new();
+    for record in &records {
+        let kind = certificate_kind_from_target_kind(&record.target_kind);
+        if !kinds_present.contains(&kind) {
+            kinds_present.push(kind);
+        }
+    }
+    kinds_present.sort_by_key(|kind| kind.as_str());
+
+    let mut certificates: Vec<CertificateSummary> = records
+        .iter()
+        .map(certificate_from_stored_record)
+        .filter(|certificate| options.kind.is_none_or(|kind| certificate.kind == kind))
+        .filter(|certificate| {
+            options
+                .status
+                .is_none_or(|status| certificate.status == status)
+        })
+        .filter(|certificate| options.include_expired || !certificate.is_expired())
+        .map(|certificate| CertificateSummary::from(&certificate))
+        .collect();
+    certificates.sort_by(|left, right| left.id.cmp(&right.id));
+    if let Some(limit) = options.limit {
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        certificates.truncate(limit);
+    }
+
+    CertificateListReport {
+        certificates,
+        total_count,
+        usable_count,
+        expired_count,
+        kinds_present,
+    }
+}
+
+fn show_database_certificate(options: &CertificateLookupOptions) -> CertificateShowReport {
+    load_database_certificate(options).map_or_else(
+        || CertificateShowReport::not_found(&options.certificate_id),
+        |record| certificate_show_report_from_record(&record),
+    )
+}
+
+fn verify_database_certificate(options: &CertificateLookupOptions) -> CertificateVerifyReport {
+    let Some(record) = load_database_certificate(options) else {
+        return CertificateVerifyReport::not_found(&options.certificate_id);
+    };
+
+    let metadata = stored_certificate_metadata(&record);
+    if metadata.payload_schema.as_deref() != Some(CERTIFICATE_PAYLOAD_SCHEMA_V1) {
+        return CertificateVerifyReport::stale_schema_version(&record.id);
+    }
+
+    match certificate_status_from_record(&record) {
+        CertificateStatus::Revoked => return CertificateVerifyReport::revoked(&record.id),
+        CertificateStatus::Expired => return CertificateVerifyReport::expired(&record.id),
+        CertificateStatus::Valid => {}
+        CertificateStatus::Pending | CertificateStatus::Invalid => {
+            return CertificateVerifyReport::invalid_status(&record.id);
+        }
+    }
+
+    if !expiry_valid(metadata.expires_at.as_deref()) {
+        return CertificateVerifyReport::expired(&record.id);
+    }
+
+    if !metadata.assumptions_valid {
+        return CertificateVerifyReport::failed_assumptions(&record.id);
+    }
+
+    match database_payload_hash_matches(&record) {
+        Ok(true) => {}
+        Ok(false) | Err(_) => return CertificateVerifyReport::hash_mismatch(&record.id),
+    }
+
+    match verify_detached_signature(
+        record.signature.as_deref(),
+        record.signature_algorithm.as_deref(),
+        record.signer.as_deref(),
+        &record.content_hash,
+    ) {
+        SignatureVerification::Ok { signer } => {
+            let mut report = CertificateVerifyReport::valid(&record.id);
+            report.signature_ok = true;
+            report.signer = signer;
+            report
+        }
+        SignatureVerification::Mismatch { signer, message } => {
+            CertificateVerifyReport::signature_mismatch(&record.id, signer, message)
+        }
+    }
+}
+
+fn load_database_certificate(
+    options: &CertificateLookupOptions,
+) -> Option<StoredCertificateRecord> {
+    let (Some(database_path), Some(workspace_id)) = (
+        options.database_path.as_deref(),
+        options.workspace_id.as_deref(),
+    ) else {
+        return None;
+    };
+    if !database_path.exists() {
+        return None;
+    }
+
+    let connection = DbConnection::open_file(database_path).ok()?;
+    let record = connection.get_certificate(&options.certificate_id).ok()??;
+    (record.workspace_id == workspace_id).then_some(record)
+}
+
+fn certificate_show_report_from_record(record: &StoredCertificateRecord) -> CertificateShowReport {
+    let certificate = certificate_from_stored_record(record);
+    let verification_status = if certificate.is_usable() {
+        VerificationResult::Valid
+    } else if certificate.is_expired() {
+        VerificationResult::Expired
+    } else {
+        VerificationResult::InvalidStatus
+    };
+    let payload_summary = format!(
+        "{} certificate for {} `{}` in workspace {}",
+        certificate.kind.as_str(),
+        record.target_kind,
+        record.target_id,
+        record.workspace_id
+    );
+
+    CertificateShowReport {
+        certificate,
+        verification_status,
+        payload_summary,
+    }
+}
+
+fn certificate_from_stored_record(record: &StoredCertificateRecord) -> Certificate {
+    let metadata = stored_certificate_metadata(record);
+    Certificate {
+        id: record.id.clone(),
+        kind: certificate_kind_from_target_kind(&record.target_kind),
+        status: certificate_status_from_record(record),
+        workspace_id: record.workspace_id.clone(),
+        issued_at: record
+            .signed_at
+            .clone()
+            .unwrap_or_else(|| record.created_at.clone()),
+        expires_at: metadata.expires_at,
+        payload_hash: record.content_hash.clone(),
+        decision_metadata: DecisionPlaneMetadata::empty(),
+    }
+}
+
+fn certificate_kind_from_target_kind(target_kind: &str) -> CertificateKind {
+    match target_kind {
+        "pack" => CertificateKind::Pack,
+        "curation" => CertificateKind::Curation,
+        "tail_risk" => CertificateKind::TailRisk,
+        "privacy_budget" => CertificateKind::PrivacyBudget,
+        "backup" | "manifest" | "export" | "lifecycle" => CertificateKind::Lifecycle,
+        _ => CertificateKind::Lifecycle,
+    }
+}
+
+fn certificate_status_from_record(record: &StoredCertificateRecord) -> CertificateStatus {
+    record
+        .status
+        .parse::<CertificateStatus>()
+        .unwrap_or(CertificateStatus::Invalid)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StoredCertificateMetadata {
+    expires_at: Option<String>,
+    payload_schema: Option<String>,
+    assumptions_valid: bool,
+}
+
+fn stored_certificate_metadata(record: &StoredCertificateRecord) -> StoredCertificateMetadata {
+    let mut metadata = StoredCertificateMetadata {
+        expires_at: None,
+        payload_schema: Some(CERTIFICATE_PAYLOAD_SCHEMA_V1.to_owned()),
+        assumptions_valid: true,
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&record.metadata_json) else {
+        return metadata;
+    };
+
+    metadata.expires_at =
+        json_string_field(&value, "expiresAt").or_else(|| json_string_field(&value, "expires_at"));
+    metadata.payload_schema = json_string_field(&value, "payloadSchema")
+        .or_else(|| json_string_field(&value, "payload_schema"))
+        .or(metadata.payload_schema);
+    if let Some(assumptions_valid) = json_bool_field(&value, "assumptionsValid")
+        .or_else(|| json_bool_field(&value, "assumptions_valid"))
+    {
+        metadata.assumptions_valid = assumptions_valid;
+    }
+    if json_bool_field(&value, "failedAssumptions")
+        .or_else(|| json_bool_field(&value, "failed_assumptions"))
+        .unwrap_or(false)
+    {
+        metadata.assumptions_valid = false;
+    }
+
+    metadata
+}
+
+fn json_string_field(value: &serde_json::Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn json_bool_field(value: &serde_json::Value, field: &str) -> Option<bool> {
+    value.get(field).and_then(serde_json::Value::as_bool)
 }
 
 fn read_certificate_manifest(
@@ -732,7 +1094,16 @@ fn convert_raw_certificate(
         payload_path: safe_manifest_payload_path(raw.payload_path, index)?,
         payload_schema: raw.payload_schema,
         assumptions_valid,
+        signature: normalize_optional_string(raw.signature),
+        signature_algorithm: normalize_optional_string(raw.signature_algorithm),
+        signer: normalize_optional_string(raw.signer),
     })
+}
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn safe_manifest_payload_path(
@@ -798,9 +1169,139 @@ fn verify_manifest_certificate(
     }
 
     match payload_hash_matches(record, manifest_dir) {
-        Ok(true) => CertificateVerifyReport::valid(&record.certificate.id),
-        Ok(false) | Err(_) => CertificateVerifyReport::hash_mismatch(&record.certificate.id),
+        Ok(true) => {}
+        Ok(false) | Err(_) => {
+            return CertificateVerifyReport::hash_mismatch(&record.certificate.id);
+        }
     }
+
+    match verify_manifest_certificate_signature(record) {
+        SignatureVerification::Ok { signer } => {
+            let mut report = CertificateVerifyReport::valid(&record.certificate.id);
+            report.signature_ok = true;
+            report.signer = signer;
+            report
+        }
+        SignatureVerification::Mismatch { signer, message } => {
+            CertificateVerifyReport::signature_mismatch(&record.certificate.id, signer, message)
+        }
+    }
+}
+
+enum SignatureVerification {
+    Ok {
+        signer: Option<String>,
+    },
+    Mismatch {
+        signer: Option<String>,
+        message: String,
+    },
+}
+
+fn verify_manifest_certificate_signature(
+    record: &ManifestCertificateRecord,
+) -> SignatureVerification {
+    verify_detached_signature(
+        record.signature.as_deref(),
+        record.signature_algorithm.as_deref(),
+        record.signer.as_deref(),
+        &record.certificate.payload_hash,
+    )
+}
+
+fn verify_detached_signature(
+    signature: Option<&str>,
+    signature_algorithm: Option<&str>,
+    signer: Option<&str>,
+    payload_hash: &str,
+) -> SignatureVerification {
+    let signer = signer.map(str::to_owned);
+    let Some(signature) = signature else {
+        return SignatureVerification::Ok { signer: None };
+    };
+    let Some(algorithm) = signature_algorithm else {
+        return SignatureVerification::Mismatch {
+            signer,
+            message: "Certificate signature is missing signatureAlgorithm".to_owned(),
+        };
+    };
+    let Some(signer_value) = signer.as_deref() else {
+        return SignatureVerification::Mismatch {
+            signer,
+            message: "Certificate signature is missing signer".to_owned(),
+        };
+    };
+
+    let expected = match algorithm {
+        "ee.local-sha256.v1" => local_sha256_signature(signer_value, payload_hash),
+        "sigstore.bundle-sha256.v1" => sigstore_bundle_signature(signer_value, payload_hash),
+        other => {
+            return SignatureVerification::Mismatch {
+                signer,
+                message: format!("Unsupported certificate signature algorithm `{other}`"),
+            };
+        }
+    };
+
+    if constant_time_str_eq(signature, &expected) {
+        SignatureVerification::Ok { signer }
+    } else {
+        SignatureVerification::Mismatch {
+            signer,
+            message: "Certificate detached signature does not match payload evidence".to_owned(),
+        }
+    }
+}
+
+fn local_sha256_signature(signer: &str, payload_hash: &str) -> String {
+    format!(
+        "sha256:{}",
+        signature_digest("ee.certificate.local-sha256.v1", signer, payload_hash)
+    )
+}
+
+fn sigstore_bundle_signature(signer: &str, payload_hash: &str) -> String {
+    format!(
+        "sigstore-sha256:{}",
+        signature_digest(
+            "ee.certificate.sigstore.bundle-sha256.v1",
+            signer,
+            payload_hash
+        )
+    )
+}
+
+fn signature_digest(domain: &str, signer: &str, payload_hash: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(signer.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(payload_hash.as_bytes());
+    hex_lower(&hasher.finalize())
+}
+
+fn constant_time_str_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let max_len = left.len().max(right.len());
+    let mut diff = left.len() ^ right.len();
+    for index in 0..max_len {
+        let left_byte = left.get(index).copied().unwrap_or(0);
+        let right_byte = right.get(index).copied().unwrap_or(0);
+        diff |= usize::from(left_byte ^ right_byte);
+    }
+    diff == 0
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
 }
 
 fn expiry_valid(expires_at: Option<&str>) -> bool {
@@ -824,9 +1325,58 @@ fn payload_hash_matches(
     Ok(actual == record.certificate.payload_hash)
 }
 
+fn database_payload_hash_matches(record: &StoredCertificateRecord) -> Result<bool, io::Error> {
+    let Some(payload_path) = record.payload_path.as_deref() else {
+        return Ok(false);
+    };
+    let payload_path = resolve_database_payload_path_no_symlinks(record, Path::new(payload_path))?;
+    let payload = fs::read(payload_path)?;
+    let actual = match record.hash_algo.as_str() {
+        "blake3" => format!("blake3:{}", blake3::hash(&payload).to_hex()),
+        "sha256" => {
+            let mut hasher = Sha256::new();
+            hasher.update(&payload);
+            format!("sha256:{}", hex_lower(&hasher.finalize()))
+        }
+        _ => return Ok(false),
+    };
+    Ok(actual == record.content_hash)
+}
+
 fn read_manifest_payload(manifest_dir: &Path, payload_path: &Path) -> io::Result<Vec<u8>> {
     let payload_path = resolve_manifest_payload_path_no_symlinks(manifest_dir, payload_path)?;
     fs::read(payload_path)
+}
+
+fn resolve_database_payload_path_no_symlinks(
+    record: &StoredCertificateRecord,
+    payload_path: &Path,
+) -> io::Result<PathBuf> {
+    if payload_path.as_os_str().is_empty()
+        || payload_path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "unsafe certificate payload_path",
+        ));
+    }
+
+    let resolved = if payload_path.is_absolute() {
+        payload_path.to_path_buf()
+    } else if let Some(base) = database_certificate_payload_base(record) {
+        base.join(payload_path)
+    } else {
+        payload_path.to_path_buf()
+    };
+    reject_payload_symlink_chain(&resolved)?;
+    Ok(resolved)
+}
+
+fn database_certificate_payload_base(record: &StoredCertificateRecord) -> Option<PathBuf> {
+    let manifest_path = record.manifest_path.as_deref()?;
+    Path::new(manifest_path).parent().map(Path::to_path_buf)
 }
 
 fn resolve_manifest_payload_path_no_symlinks(
@@ -846,6 +1396,33 @@ fn resolve_manifest_payload_path_no_symlinks(
         reject_payload_symlink_component(&resolved)?;
     }
     Ok(resolved)
+}
+
+fn reject_payload_symlink_chain(path: &Path) -> io::Result<()> {
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
+            Component::RootDir => resolved.push(component.as_os_str()),
+            Component::Normal(component) => {
+                resolved.push(component);
+                reject_payload_symlink_component(&resolved)?;
+            }
+            Component::CurDir | Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unsafe certificate payload path",
+                ));
+            }
+        }
+    }
+    if resolved.as_os_str().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty certificate payload path",
+        ));
+    }
+    Ok(())
 }
 
 fn reject_payload_symlink_component(path: &Path) -> io::Result<()> {
@@ -943,6 +1520,11 @@ mod tests {
         ensure_equal(&VerificationResult::Expired.as_str(), &"expired", "expired")?;
         ensure_equal(&VerificationResult::Revoked.as_str(), &"revoked", "revoked")?;
         ensure_equal(
+            &VerificationResult::SignatureMismatch.as_str(),
+            &"signature_mismatch",
+            "signature_mismatch",
+        )?;
+        ensure_equal(
             &VerificationResult::InvalidStatus.as_str(),
             &"invalid_status",
             "invalid_status",
@@ -988,6 +1570,10 @@ mod tests {
         ensure(
             VerificationResult::Revoked.is_terminal_failure(),
             "revoked is terminal",
+        )?;
+        ensure(
+            VerificationResult::SignatureMismatch.is_terminal_failure(),
+            "signature_mismatch is terminal",
         )?;
         ensure(
             VerificationResult::NotFound.is_terminal_failure(),
@@ -1180,6 +1766,99 @@ mod tests {
             &failed.result,
             &VerificationResult::FailedAssumptions,
             "failed assumptions win before hash mismatch",
+        )
+    }
+
+    #[test]
+    fn manifest_backed_certificate_verifies_local_detached_signature() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let payload = r#"{"packHash":"signed","selected":["mem_01"]}"#;
+        let payload_hash = blake3::hash(payload.as_bytes()).to_hex().to_string();
+        let signer = "local:test-key";
+        let signature = local_sha256_signature(signer, &payload_hash);
+        fs::write(dir.path().join("payload.json"), payload).map_err(|error| error.to_string())?;
+        let manifest = serde_json::json!({
+            "schema": CERTIFICATE_MANIFEST_SCHEMA_V1,
+            "certificates": [
+                {
+                    "id": "cert_pack_signed",
+                    "kind": "pack",
+                    "status": "valid",
+                    "workspaceId": "workspace_main",
+                    "issuedAt": "2026-05-01T00:00:00Z",
+                    "expiresAt": "2999-01-01T00:00:00Z",
+                    "payloadPath": "payload.json",
+                    "payloadHash": payload_hash,
+                    "payloadSchema": CERTIFICATE_PAYLOAD_SCHEMA_V1,
+                    "signature": signature,
+                    "signatureAlgorithm": "ee.local-sha256.v1",
+                    "signer": signer,
+                    "assumptions": [{"valid": true}]
+                }
+            ]
+        });
+        let manifest_path = dir.path().join("certificates.json");
+        let manifest_json =
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?;
+        fs::write(&manifest_path, manifest_json).map_err(|error| error.to_string())?;
+
+        let report = verify_certificate_with_options(
+            &CertificateLookupOptions::new("cert_pack_signed").with_manifest_path(&manifest_path),
+        );
+
+        ensure_equal(&report.result, &VerificationResult::Valid, "signed valid")?;
+        ensure(report.signature_ok, "signature ok")?;
+        ensure_equal(&report.signer, &Some(signer.to_owned()), "signer")
+    }
+
+    #[test]
+    fn manifest_backed_certificate_rejects_signature_mismatch() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let payload = r#"{"packHash":"signed","selected":["mem_01"]}"#;
+        let payload_hash = blake3::hash(payload.as_bytes()).to_hex().to_string();
+        fs::write(dir.path().join("payload.json"), payload).map_err(|error| error.to_string())?;
+        let manifest = serde_json::json!({
+            "schema": CERTIFICATE_MANIFEST_SCHEMA_V1,
+            "certificates": [
+                {
+                    "id": "cert_pack_bad_signature",
+                    "kind": "pack",
+                    "status": "valid",
+                    "workspaceId": "workspace_main",
+                    "issuedAt": "2026-05-01T00:00:00Z",
+                    "expiresAt": "2999-01-01T00:00:00Z",
+                    "payloadPath": "payload.json",
+                    "payloadHash": payload_hash,
+                    "payloadSchema": CERTIFICATE_PAYLOAD_SCHEMA_V1,
+                    "signature": "sha256:bad",
+                    "signatureAlgorithm": "ee.local-sha256.v1",
+                    "signer": "local:test-key",
+                    "assumptions": [{"valid": true}]
+                }
+            ]
+        });
+        let manifest_path = dir.path().join("certificates.json");
+        let manifest_json =
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?;
+        fs::write(&manifest_path, manifest_json).map_err(|error| error.to_string())?;
+
+        let report = verify_certificate_with_options(
+            &CertificateLookupOptions::new("cert_pack_bad_signature")
+                .with_manifest_path(&manifest_path),
+        );
+
+        ensure_equal(
+            &report.result,
+            &VerificationResult::SignatureMismatch,
+            "signature mismatch result",
+        )?;
+        ensure(!report.signature_ok, "signature not ok")?;
+        ensure(
+            report
+                .mismatches
+                .iter()
+                .any(|code| code == "signature_mismatch"),
+            "signature mismatch code",
         )
     }
 

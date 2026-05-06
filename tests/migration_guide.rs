@@ -57,7 +57,6 @@ const REQUIRED_DEGRADED_CODES: &[&str] = &[
     "search_index_unavailable",
     "causal_evidence_unavailable",
     "causal_sample_underpowered",
-    "learning_records_unavailable",
     "experiment_registry_unavailable",
     "preflight_evidence_unavailable",
     "procedure_evidence_unavailable",

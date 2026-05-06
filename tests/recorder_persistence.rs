@@ -101,7 +101,10 @@ fn record_and_persist_event_assigns_monotonic_sequence_and_chains_hashes() {
     assert_eq!(stored.len(), 2);
     assert_eq!(stored[0].event_id, first.event_id);
     assert_eq!(stored[1].event_id, second.event_id);
-    assert_eq!(stored[1].previous_event_hash.as_deref(), Some(first.event_hash.as_str()));
+    assert_eq!(
+        stored[1].previous_event_hash.as_deref(),
+        Some(first.event_hash.as_str())
+    );
 }
 
 #[test]
@@ -117,11 +120,12 @@ fn record_and_persist_event_rejects_bad_run_id() {
 fn record_and_persist_event_rejects_chain_mismatch() {
     let conn = connect();
     let start = start_and_persist_recording(&conn, &start_options()).expect("start");
-    let _first = record_and_persist_event(&conn, &event_options(&start.run_id, Some("a")))
-        .expect("first");
+    let _first =
+        record_and_persist_event(&conn, &event_options(&start.run_id, Some("a"))).expect("first");
 
     let mut bad = event_options(&start.run_id, Some("b"));
-    bad.previous_event_hash = Some("blake3:0000000000000000000000000000000000000000000000000000000000000000".to_owned());
+    bad.previous_event_hash =
+        Some("blake3:0000000000000000000000000000000000000000000000000000000000000000".to_owned());
     let err = record_and_persist_event(&conn, &bad).expect_err("chain mismatch rejected");
     let message = format!("{err}");
     assert!(
@@ -134,12 +138,12 @@ fn record_and_persist_event_rejects_chain_mismatch() {
 fn finish_and_persist_recording_marks_run_completed_with_rolled_up_counts() {
     let conn = connect();
     let start = start_and_persist_recording(&conn, &start_options()).expect("start");
-    let _ = record_and_persist_event(&conn, &event_options(&start.run_id, Some("a")))
-        .expect("event a");
-    let _ = record_and_persist_event(&conn, &event_options(&start.run_id, Some("b")))
-        .expect("event b");
-    let _ = record_and_persist_event(&conn, &event_options(&start.run_id, Some("c")))
-        .expect("event c");
+    let _ =
+        record_and_persist_event(&conn, &event_options(&start.run_id, Some("a"))).expect("event a");
+    let _ =
+        record_and_persist_event(&conn, &event_options(&start.run_id, Some("b"))).expect("event b");
+    let _ =
+        record_and_persist_event(&conn, &event_options(&start.run_id, Some("c"))).expect("event c");
 
     let report = finish_and_persist_recording(
         &conn,
@@ -162,7 +166,11 @@ fn finish_and_persist_recording_marks_run_completed_with_rolled_up_counts() {
     assert_eq!(stored.status, RecorderRunStatus::Completed.as_str());
     assert!(stored.ended_at.is_some());
     assert_eq!(stored.event_count, 3);
-    assert!(stored.payload_bytes >= 3, "payload bytes rolled up: {}", stored.payload_bytes);
+    assert!(
+        stored.payload_bytes >= 3,
+        "payload bytes rolled up: {}",
+        stored.payload_bytes
+    );
 }
 
 #[test]
@@ -191,8 +199,8 @@ fn list_recorder_events_filters_by_run_and_since() {
     let start = start_and_persist_recording(&conn, &start_options()).expect("start");
     let _ = record_and_persist_event(&conn, &event_options(&start.run_id, Some("alpha")))
         .expect("alpha");
-    let _ = record_and_persist_event(&conn, &event_options(&start.run_id, Some("beta")))
-        .expect("beta");
+    let _ =
+        record_and_persist_event(&conn, &event_options(&start.run_id, Some("beta"))).expect("beta");
 
     let entries = list_recorder_events(
         &conn,

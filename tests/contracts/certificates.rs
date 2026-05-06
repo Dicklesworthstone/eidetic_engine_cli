@@ -11,6 +11,7 @@ use ee::core::certificate::{
     show_certificate, show_certificate_with_options, verify_certificate,
     verify_certificate_with_options,
 };
+use ee::db::{CreateCertificateInput, CreateWorkspaceInput, DbConnection};
 use ee::models::PrivacyBudgetCertificate;
 use ee::models::TailRiskCertificate;
 use ee::models::certificate::{
@@ -20,10 +21,9 @@ use ee::models::certificate::{
 use ee::output::render_certificate_verify_json;
 use ee::pack::{PackGuaranteeStatus, PackSelectionCertificate};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 type TestResult = Result<(), String>;
-
-const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 6;
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
@@ -99,6 +99,29 @@ fn parse_stdout_json(output: &std::process::Output) -> Result<Value, String> {
 
 fn hash_payload(payload: &str) -> String {
     blake3::hash(payload.as_bytes()).to_hex().to_string()
+}
+
+fn prefixed_hash_payload(payload: &str) -> String {
+    format!("blake3:{}", hash_payload(payload))
+}
+
+fn local_signature(signer: &str, payload_hash: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ee.certificate.local-sha256.v1\n");
+    hasher.update(signer.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(payload_hash.as_bytes());
+    format!("sha256:{}", hex_lower(&hasher.finalize()))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
 }
 
 fn certificate_record(
@@ -322,6 +345,117 @@ fn certificate_core_reads_file_backed_manifest_records() -> TestResult {
 }
 
 #[test]
+fn certificate_core_verifies_persisted_database_records() -> TestResult {
+    let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace_path = dir.path().join("workspace");
+    fs::create_dir_all(&workspace_path).map_err(|error| error.to_string())?;
+    let database_path = dir.path().join("ee.db");
+    let payload_path = dir.path().join("pack-payload.json");
+    let payload = r#"{"packHash":"pack_valid","selected":["mem_01"]}"#;
+    fs::write(&payload_path, payload).map_err(|error| error.to_string())?;
+
+    let conn = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    conn.migrate().map_err(|error| error.to_string())?;
+    let workspace_id = "wsp_certdb00000000000000000000";
+    conn.insert_workspace(
+        workspace_id,
+        &CreateWorkspaceInput {
+            path: workspace_path.display().to_string(),
+            name: Some("certificate-db".to_string()),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    let payload_hash = prefixed_hash_payload(payload);
+    let signer = "local-test-signer";
+    conn.upsert_certificate(
+        "cert_db_pack_valid",
+        &CreateCertificateInput {
+            workspace_id: workspace_id.to_string(),
+            target_kind: "pack".to_string(),
+            target_id: "pack_valid".to_string(),
+            hash_algo: "blake3".to_string(),
+            content_hash: payload_hash.clone(),
+            signature: Some(local_signature(signer, &payload_hash)),
+            signature_algorithm: Some("ee.local-sha256.v1".to_string()),
+            signer: Some(signer.to_string()),
+            signed_at: Some("2026-05-06T00:00:00Z".to_string()),
+            verified_at: None,
+            status: "valid".to_string(),
+            manifest_path: None,
+            payload_path: Some(payload_path.display().to_string()),
+            metadata_json: Some(
+                json!({
+                    "payloadSchema": CERTIFICATE_PAYLOAD_SCHEMA_V1,
+                    "expiresAt": "2999-01-01T00:00:00Z",
+                    "assumptionsValid": true
+                })
+                .to_string(),
+            ),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    let list = list_certificates(
+        &CertificateListOptions::new()
+            .with_database_path(&database_path)
+            .with_workspace_id(workspace_id),
+    );
+    ensure_equal(&list.total_count, &1, "database certificate total")?;
+    ensure_equal(
+        &list.certificates[0].id,
+        &"cert_db_pack_valid".to_string(),
+        "database certificate id",
+    )?;
+
+    let shown = show_certificate_with_options(
+        &CertificateLookupOptions::new("cert_db_pack_valid")
+            .with_database_path(&database_path)
+            .with_workspace_id(workspace_id),
+    );
+    ensure_equal(
+        &shown.verification_status,
+        &VerificationResult::Valid,
+        "database show status",
+    )?;
+    ensure_equal(
+        &shown.certificate.payload_hash,
+        &payload_hash,
+        "database show payload hash",
+    )?;
+
+    let verified = verify_certificate_with_options(
+        &CertificateLookupOptions::new("cert_db_pack_valid")
+            .with_database_path(&database_path)
+            .with_workspace_id(workspace_id),
+    );
+    ensure_equal(
+        &verified.result,
+        &VerificationResult::Valid,
+        "database verify result",
+    )?;
+    ensure(verified.hash_verified, "database hash verified")?;
+    ensure(verified.signature_ok, "database signature verified")?;
+    ensure_equal(
+        &verified.signer,
+        &Some(signer.to_string()),
+        "database signature signer",
+    )?;
+
+    fs::write(&payload_path, r#"{"packHash":"changed"}"#).map_err(|error| error.to_string())?;
+    let tampered = verify_certificate_with_options(
+        &CertificateLookupOptions::new("cert_db_pack_valid")
+            .with_database_path(&database_path)
+            .with_workspace_id(workspace_id),
+    );
+    ensure_equal(
+        &tampered.result,
+        &VerificationResult::HashMismatch,
+        "tampered database payload result",
+    )
+}
+
+#[test]
 fn certificate_verify_manifest_reports_explicit_failure_modes() -> TestResult {
     let (_dir, manifest_path) = write_certificate_manifest_fixture()?;
     let cases = [
@@ -422,12 +556,12 @@ fn certificate_verify_rejects_symlink_payload_evidence() -> TestResult {
 }
 
 #[test]
-fn certificate_verify_json_degrades_until_manifest_store_exists() -> TestResult {
+fn certificate_verify_json_reports_not_found_without_manifest_or_persisted_record() -> TestResult {
     let output = run_ee(&["certificate", "verify", "cert_pack_stale_schema", "--json"])?;
     ensure_equal(
         &output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "verify command unavailable exit",
+        &Some(0),
+        "verify command read-only exit",
     )?;
     ensure(
         output.stderr.is_empty(),
@@ -441,19 +575,19 @@ fn certificate_verify_json_degrades_until_manifest_store_exists() -> TestResult 
     })?;
     ensure_equal(
         &value["schema"],
-        &json!("ee.response.v1"),
+        &json!("ee.certificate.verify.v1"),
         "json response schema",
     )?;
     ensure_equal(&value["success"], &json!(false), "success flag")?;
     ensure_equal(
-        &value["data"]["code"],
-        &json!("certificate_store_unavailable"),
-        "degraded code",
+        &value["data"]["result"],
+        &json!("not_found"),
+        "not-found result",
     )?;
     ensure_equal(
-        &value["data"]["degraded"][0]["code"],
-        &json!("certificate_store_unavailable"),
-        "degraded array code",
+        &value["data"]["failureCodes"],
+        &json!(["not_found"]),
+        "not-found failure code",
     )
 }
 

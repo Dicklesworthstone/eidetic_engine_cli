@@ -483,8 +483,6 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
     let manifest = EffectManifest::build();
 
     for (command, code) in [
-        ("audit timeline", "audit_log_unavailable"),
-        ("certificate verify", "certificate_store_unavailable"),
         ("claim verify", "claim_verification_unavailable"),
         ("demo run", "demo_command_execution_unavailable"),
         ("eval list", "eval_fixtures_unavailable"),
@@ -521,6 +519,40 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
             effect.mutation_contract.degraded_code,
             Some(code),
             &format!("{command} degraded code"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn effect_manifest_tracks_certificate_and_quarantine_as_real_read_only_surfaces() -> TestResult {
+    use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
+
+    let manifest = EffectManifest::build();
+
+    for command in [
+        "certificate list",
+        "certificate show",
+        "certificate verify",
+        "diag quarantine",
+    ] {
+        let effect = manifest
+            .get(command)
+            .ok_or_else(|| format!("{command} not in manifest"))?;
+        ensure(
+            effect.default_effect,
+            EffectClass::ReadOnly,
+            &format!("{command} stays read-only"),
+        )?;
+        ensure(
+            effect.mutation_contract.side_effect_class,
+            SideEffectClass::ReadOnly,
+            &format!("{command} has read-only contract"),
+        )?;
+        ensure(
+            effect.mutation_contract.degraded_code,
+            None,
+            &format!("{command} no longer has an unavailable sentinel"),
         )?;
     }
     Ok(())

@@ -387,16 +387,23 @@ fn recorder_finish_validates_status() -> TestResult {
 }
 
 #[test]
-fn recorder_tail_degrades_until_persisted_events_exist() -> TestResult {
+fn recorder_tail_returns_empty_snapshot_from_initialized_store() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(0), "init exit")?;
+
     let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
         "recorder",
         "tail",
         "run_test_123",
         "--limit",
         "10",
-        "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(6), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(
         output.stderr.is_empty(),
@@ -405,23 +412,23 @@ fn recorder_tail_degrades_until_persisted_events_exist() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.recorder.tail.v1"),
         "recorder tail response schema",
     )?;
     ensure_equal(
-        &json["success"],
-        &serde_json::json!(false),
-        "recorder tail success flag",
+        &json["runId"],
+        &serde_json::json!("run_test_123"),
+        "recorder tail run id",
     )?;
     ensure_equal(
-        &json["data"]["code"],
-        &serde_json::json!("recorder_tail_unavailable"),
-        "recorder tail degraded code",
+        &json["events"],
+        &serde_json::json!([]),
+        "recorder tail empty events",
     )?;
     ensure_equal(
-        &json["data"]["followUpBead"],
-        &serde_json::json!("eidetic_engine_cli-6xzc"),
-        "recorder tail follow-up bead",
+        &json["totalEvents"],
+        &serde_json::json!(0),
+        "recorder tail total events",
     )
 }
 

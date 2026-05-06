@@ -366,7 +366,6 @@ ee learn experiment run --id exp_database_contract_fixture --dry-run --json
 | `context_unavailable` | medium | Context pack failed | Check storage and index |
 | `causal_evidence_unavailable` | high | No causal evidence | `ee causal trace --workspace . --json` |
 | `causal_sample_underpowered` | medium | Sample too small | Record more outcomes |
-| `learning_records_unavailable` | high | Learning ledgers empty | `ee learn observe --json` |
 | `experiment_registry_unavailable` | high | No experiment definitions | Use skill workflows |
 | `preflight_evidence_unavailable` | medium | No preflight records | `ee preflight run --workspace . --json` |
 | `procedure_evidence_unavailable` | medium | No procedure candidates | `ee procedure propose --json` |

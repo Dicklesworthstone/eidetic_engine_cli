@@ -6,13 +6,23 @@
 //! Also provides redaction leak detection (EE-254) to verify that sensitive
 //! data does not leak through command output.
 //!
+//! The runner module provides fixture discovery, loading, and retrieval
+//! quality metric computation (P@k, nDCG@k, MRR).
+//!
 //! See `docs/agent-outcome-scenarios.md` and `docs/fixture-provenance-traceability.md`
 //! for the full contract definitions.
 
 pub mod redaction;
+pub mod runner;
 
 pub use crate::models::EVAL_FIXTURE_SCHEMA_V1;
 pub use redaction::{LeakDetection, LeakPattern, RedactionLeakDetector, RedactionLeakEvaluation};
+pub use runner::{
+    DEFAULT_FIXTURE_DIR, DiscoveredFixture, EVAL_REPORT_SCHEMA_V1, EvalRunReport, EvalRunStatus,
+    FixtureListEntry, FixtureMetrics, FixtureScenario, QueryMetrics, SourceMemory,
+    SourceMemoryFile, compute_data_hash, compute_fixture_metrics, compute_query_metrics,
+    discover_fixtures, list_fixtures, load_scenario, load_source_memories,
+};
 
 /// Schema version for release gate checks.
 pub const RELEASE_GATE_SCHEMA_V1: &str = "ee.eval.release_gate.v1";

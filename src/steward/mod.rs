@@ -11,12 +11,15 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
+use asupersync::runtime::yield_now::yield_now;
+use asupersync::time::sleep as asupersync_sleep;
+use asupersync::{CancelReason, Cx, Outcome};
 use chrono::{DateTime, Utc};
 use serde_json::{Value as JsonValue, json};
 
 use crate::db::{
-    ApplyMemoryScoreUpdateInput, DbConnection, FeedbackCounts, StoredFeedbackEvent, StoredMemory,
-    feedback_scoring,
+    ApplyMemoryScoreUpdateInput, CreateCurationCandidateInput, DbConnection, FeedbackCounts,
+    StoredFeedbackEvent, StoredMemory, feedback_scoring,
 };
 
 pub const SUBSYSTEM: &str = "steward";
@@ -41,14 +44,24 @@ pub const fn subsystem_name() -> &'static str {
 pub enum JobType {
     /// Rebuild search indexes from source of truth.
     IndexRebuild,
+    /// Process queued incremental search index jobs.
+    IndexCoalesce,
     /// Apply time-based decay to memory confidence.
     DecaySweep,
+    /// Detect duplicate memories and create consolidation review candidates.
+    ConsolidationPass,
     /// Process pending curation candidates.
     CurationReview,
+    /// Inspect quarantined harmful feedback rows.
+    QuarantineSweep,
     /// Run health checks and generate diagnostics.
     HealthCheck,
+    /// Prune derived caches without deleting source-of-truth data.
+    CachePruning,
     /// Compact and optimize storage.
     StorageCompact,
+    /// Refresh graph link prediction inputs.
+    LinkPredictionRefresh,
     /// Refresh graph centrality metrics.
     CentralityRefresh,
     /// Validate data integrity.
@@ -66,10 +79,15 @@ impl JobType {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::IndexRebuild => "index_rebuild",
+            Self::IndexCoalesce => "index_coalesce",
             Self::DecaySweep => "decay_sweep",
+            Self::ConsolidationPass => "consolidation_pass",
             Self::CurationReview => "curation_review",
+            Self::QuarantineSweep => "quarantine_sweep",
             Self::HealthCheck => "health_check",
+            Self::CachePruning => "cache_pruning",
             Self::StorageCompact => "storage_compact",
+            Self::LinkPredictionRefresh => "link_prediction_refresh",
             Self::CentralityRefresh => "centrality_refresh",
             Self::IntegrityCheck => "integrity_check",
             Self::BackupExport => "backup_export",
@@ -82,10 +100,15 @@ impl JobType {
     pub const fn all() -> &'static [Self] {
         &[
             Self::IndexRebuild,
+            Self::IndexCoalesce,
             Self::DecaySweep,
+            Self::ConsolidationPass,
             Self::CurationReview,
+            Self::QuarantineSweep,
             Self::HealthCheck,
+            Self::CachePruning,
             Self::StorageCompact,
+            Self::LinkPredictionRefresh,
             Self::CentralityRefresh,
             Self::IntegrityCheck,
             Self::BackupExport,
@@ -98,10 +121,17 @@ impl JobType {
     pub const fn description(self) -> &'static str {
         match self {
             Self::IndexRebuild => "Rebuild search indexes from source of truth",
+            Self::IndexCoalesce => "Process queued incremental search index jobs",
             Self::DecaySweep => "Apply time-based decay to memory confidence",
+            Self::ConsolidationPass => {
+                "Detect duplicate memories and create consolidation review candidates"
+            }
             Self::CurationReview => "Process pending curation candidates",
+            Self::QuarantineSweep => "Inspect quarantined harmful feedback rows",
             Self::HealthCheck => "Run health checks and generate diagnostics",
+            Self::CachePruning => "Prune derived caches without deleting source-of-truth data",
             Self::StorageCompact => "Compact and optimize storage",
+            Self::LinkPredictionRefresh => "Refresh graph link prediction inputs",
             Self::CentralityRefresh => "Refresh graph centrality metrics",
             Self::IntegrityCheck => "Validate data integrity",
             Self::BackupExport => "Export backup snapshot",
@@ -137,10 +167,15 @@ impl FromStr for JobType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "index_rebuild" => Ok(Self::IndexRebuild),
+            "index_coalesce" => Ok(Self::IndexCoalesce),
             "decay_sweep" => Ok(Self::DecaySweep),
+            "consolidation_pass" => Ok(Self::ConsolidationPass),
             "curation_review" => Ok(Self::CurationReview),
+            "quarantine_sweep" => Ok(Self::QuarantineSweep),
             "health_check" => Ok(Self::HealthCheck),
+            "cache_pruning" => Ok(Self::CachePruning),
             "storage_compact" => Ok(Self::StorageCompact),
+            "link_prediction_refresh" => Ok(Self::LinkPredictionRefresh),
             "centrality_refresh" => Ok(Self::CentralityRefresh),
             "integrity_check" => Ok(Self::IntegrityCheck),
             "backup_export" => Ok(Self::BackupExport),
@@ -1033,19 +1068,39 @@ pub fn default_budgets_for_job_type(job_type: JobType) -> Vec<ResourceBudget> {
             ResourceBudget::time_limit_ms(300_000), // 5 minutes
             ResourceBudget::item_limit(100_000),
         ],
+        JobType::IndexCoalesce => vec![
+            ResourceBudget::time_limit_ms(120_000), // 2 minutes
+            ResourceBudget::item_limit(10_000),
+        ],
         JobType::DecaySweep => vec![
             ResourceBudget::time_limit_ms(60_000), // 1 minute
+            ResourceBudget::item_limit(10_000),
+        ],
+        JobType::ConsolidationPass => vec![
+            ResourceBudget::time_limit_ms(120_000), // 2 minutes
             ResourceBudget::item_limit(10_000),
         ],
         JobType::CurationReview => vec![
             ResourceBudget::time_limit_ms(120_000), // 2 minutes
             ResourceBudget::item_limit(100),
         ],
+        JobType::QuarantineSweep => vec![
+            ResourceBudget::time_limit_ms(60_000), // 1 minute
+            ResourceBudget::item_limit(10_000),
+        ],
         JobType::HealthCheck => vec![
             ResourceBudget::time_soft_limit_ms(10_000), // 10 seconds soft
         ],
+        JobType::CachePruning => vec![
+            ResourceBudget::time_limit_ms(60_000), // 1 minute
+            ResourceBudget::item_limit(10_000),
+        ],
         JobType::StorageCompact => vec![
             ResourceBudget::time_limit_ms(600_000), // 10 minutes
+        ],
+        JobType::LinkPredictionRefresh => vec![
+            ResourceBudget::time_limit_ms(180_000), // 3 minutes
+            ResourceBudget::item_limit(100_000),
         ],
         JobType::CentralityRefresh => vec![
             ResourceBudget::time_limit_ms(180_000), // 3 minutes
@@ -1560,6 +1615,8 @@ impl fmt::Display for RunOutcome {
     }
 }
 
+type JobWorkResult = (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>);
+
 /// Options for the manual runner.
 #[derive(Clone, Debug, Default)]
 pub struct RunnerOptions {
@@ -1908,26 +1965,318 @@ impl ManualRunner {
         budget: &mut JobBudgetState,
     ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
         match job_type {
+            JobType::IndexRebuild => self.execute_index_rebuild(budget),
+            JobType::IndexCoalesce => self.execute_index_coalesce(budget),
             JobType::DecaySweep => self.execute_decay_sweep(budget),
+            JobType::ConsolidationPass => self.execute_consolidation_pass(budget),
+            JobType::CurationReview => self.execute_curation_review(budget),
+            JobType::QuarantineSweep => self.execute_quarantine_sweep(budget),
+            JobType::HealthCheck => self.execute_health_check(budget),
+            JobType::CachePruning => self.execute_cache_pruning(budget),
+            JobType::StorageCompact => self.execute_storage_compact(budget),
+            JobType::LinkPredictionRefresh => self.execute_graph_centrality_refresh(budget),
             JobType::CentralityRefresh => self.execute_graph_centrality_refresh(budget),
-            _ => {
-                let message = format!(
-                    "No real maintenance handler is wired for {} yet.",
-                    job_type.as_str()
-                );
-                (
-                    RunOutcome::Skipped,
-                    Some(0),
-                    Some(message.clone()),
-                    Some(json!({
-                        "schema": "ee.steward.unwired_job.v1",
-                        "jobType": job_type.as_str(),
-                        "outcome": "skipped",
-                        "message": message,
-                    })),
-                )
-            }
+            JobType::IntegrityCheck => self.execute_integrity_check(budget),
+            JobType::BackupExport => self.execute_backup_export(budget),
+            JobType::GarbageCollection => self.execute_garbage_collection(budget),
+            JobType::Custom => self.execute_custom_job(),
         }
+    }
+
+    fn execute_index_rebuild(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let Some(database_path) = self.resolve_database_path() else {
+            let message = "Index rebuild requires a database path or workspace path with .ee/ee.db"
+                .to_owned();
+            return steward_job_failure(
+                "ee.steward.index_rebuild.error.v1",
+                "index_rebuild_database_unresolved",
+                message,
+                self.options.dry_run,
+                None,
+                "ee init --workspace .",
+            );
+        };
+        if !database_path.exists() {
+            let message = format!(
+                "Index rebuild database does not exist: {}",
+                database_path.display()
+            );
+            return steward_job_failure(
+                "ee.steward.index_rebuild.error.v1",
+                "index_rebuild_database_missing",
+                message,
+                self.options.dry_run,
+                Some(&database_path),
+                "ee init --workspace .",
+            );
+        }
+
+        let started = Instant::now();
+        let workspace_path = self.normalized_workspace_path();
+        let mut preflight_options = crate::core::index::IndexRebuildOptions {
+            workspace_path: workspace_path.clone(),
+            database_path: Some(database_path.clone()),
+            index_dir: None,
+            dry_run: true,
+        };
+        let preflight = match crate::core::index::rebuild_index(&preflight_options) {
+            Ok(report) => report,
+            Err(error) => {
+                let message = format!("Index rebuild preflight failed: {error}");
+                return steward_job_failure(
+                    "ee.steward.index_rebuild.error.v1",
+                    "index_rebuild_preflight_failed",
+                    message,
+                    true,
+                    Some(&database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+
+        let planned_documents = u64::from(preflight.documents_total);
+        budget.record(ResourceType::Items, planned_documents);
+        let preflight_elapsed_ms = millis_to_u64(started.elapsed());
+        budget.record(ResourceType::TimeMs, preflight_elapsed_ms);
+
+        if budget_cancels_before_mutation(budget) {
+            return (
+                RunOutcome::Cancelled,
+                Some(planned_documents),
+                Some("Budget exceeded before durable index rebuild".to_owned()),
+                Some(index_rebuild_job_details(
+                    &database_path,
+                    &preflight,
+                    None,
+                    self.options.dry_run,
+                    false,
+                )),
+            );
+        }
+
+        if self.options.dry_run {
+            return (
+                RunOutcome::Success,
+                Some(planned_documents),
+                None,
+                Some(index_rebuild_job_details(
+                    &database_path,
+                    &preflight,
+                    None,
+                    true,
+                    false,
+                )),
+            );
+        }
+
+        preflight_options.dry_run = false;
+        let report = match crate::core::index::rebuild_index(&preflight_options) {
+            Ok(report) => report,
+            Err(error) => {
+                let message = format!("Index rebuild failed: {error}");
+                return steward_job_failure(
+                    "ee.steward.index_rebuild.error.v1",
+                    "index_rebuild_failed",
+                    message,
+                    false,
+                    Some(&database_path),
+                    "ee index rebuild --workspace . --json",
+                );
+            }
+        };
+        let total_elapsed_ms = millis_to_u64(started.elapsed());
+        budget.record(
+            ResourceType::TimeMs,
+            total_elapsed_ms.saturating_sub(preflight_elapsed_ms),
+        );
+        let durable_mutation = matches!(
+            report.status,
+            crate::core::index::IndexRebuildStatus::Success
+        );
+        let outcome = if matches!(
+            report.status,
+            crate::core::index::IndexRebuildStatus::Success
+                | crate::core::index::IndexRebuildStatus::NoDocuments
+        ) {
+            RunOutcome::Success
+        } else {
+            RunOutcome::Failed
+        };
+        let error = if outcome == RunOutcome::Failed {
+            Some(format!(
+                "Index rebuild ended with status {}",
+                report.status.as_str()
+            ))
+        } else {
+            None
+        };
+
+        (
+            outcome,
+            Some(u64::from(report.documents_total)),
+            error,
+            Some(index_rebuild_job_details(
+                &database_path,
+                &preflight,
+                Some(&report),
+                false,
+                durable_mutation,
+            )),
+        )
+    }
+
+    fn execute_index_coalesce(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let Some(database_path) = self.resolve_database_path() else {
+            let message =
+                "Index coalesce requires a database path or workspace path with .ee/ee.db"
+                    .to_owned();
+            return steward_job_failure(
+                "ee.steward.index_coalesce.error.v1",
+                "index_coalesce_database_unresolved",
+                message,
+                self.options.dry_run,
+                None,
+                "ee init --workspace .",
+            );
+        };
+        if !database_path.exists() {
+            let message = format!(
+                "Index coalesce database does not exist: {}",
+                database_path.display()
+            );
+            return steward_job_failure(
+                "ee.steward.index_coalesce.error.v1",
+                "index_coalesce_database_missing",
+                message,
+                self.options.dry_run,
+                Some(&database_path),
+                "ee init --workspace .",
+            );
+        }
+
+        let started = Instant::now();
+        let workspace_path = self.normalized_workspace_path();
+        let job_limit = match self.options.item_limit {
+            Some(limit) => match u32::try_from(limit) {
+                Ok(limit) => Some(limit),
+                Err(_) => {
+                    let message = "Index coalesce job limit exceeds u32".to_owned();
+                    return steward_job_failure(
+                        "ee.steward.index_coalesce.error.v1",
+                        "index_coalesce_job_limit_too_large",
+                        message,
+                        self.options.dry_run,
+                        Some(&database_path),
+                        "Use a smaller --item-limit.",
+                    );
+                }
+            },
+            None => None,
+        };
+        let mut options = crate::core::index::IndexProcessingOptions {
+            workspace_path,
+            database_path: Some(database_path.clone()),
+            index_dir: None,
+            dry_run: true,
+            job_limit,
+        };
+        let preflight = match crate::core::index::process_index_jobs(&options) {
+            Ok(report) => report,
+            Err(error) => {
+                let message = format!("Index coalesce preflight failed: {error}");
+                return steward_job_failure(
+                    "ee.steward.index_coalesce.error.v1",
+                    "index_coalesce_preflight_failed",
+                    message,
+                    true,
+                    Some(&database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+
+        budget.record(ResourceType::Items, u64::from(preflight.pending_jobs));
+        let preflight_elapsed_ms = millis_to_u64(started.elapsed());
+        budget.record(ResourceType::TimeMs, preflight_elapsed_ms);
+
+        if budget_cancels_before_mutation(budget) {
+            return (
+                RunOutcome::Cancelled,
+                Some(u64::from(preflight.pending_jobs)),
+                Some("Budget exceeded before durable index job processing".to_owned()),
+                Some(index_coalesce_job_details(
+                    &preflight,
+                    None,
+                    self.options.dry_run,
+                    false,
+                )),
+            );
+        }
+
+        if self.options.dry_run {
+            return (
+                RunOutcome::Success,
+                Some(u64::from(preflight.pending_jobs)),
+                None,
+                Some(index_coalesce_job_details(&preflight, None, true, false)),
+            );
+        }
+
+        options.dry_run = false;
+        let report = match crate::core::index::process_index_jobs(&options) {
+            Ok(report) => report,
+            Err(error) => {
+                let message = format!("Index coalesce failed: {error}");
+                return steward_job_failure(
+                    "ee.steward.index_coalesce.error.v1",
+                    "index_coalesce_failed",
+                    message,
+                    false,
+                    Some(&database_path),
+                    "ee index process --workspace . --json",
+                );
+            }
+        };
+        let total_elapsed_ms = millis_to_u64(started.elapsed());
+        budget.record(
+            ResourceType::TimeMs,
+            total_elapsed_ms.saturating_sub(preflight_elapsed_ms),
+        );
+        let outcome = if matches!(
+            report.status,
+            crate::core::index::IndexProcessingStatus::Success
+                | crate::core::index::IndexProcessingStatus::NoPendingJobs
+        ) {
+            RunOutcome::Success
+        } else {
+            RunOutcome::Failed
+        };
+        let error = if outcome == RunOutcome::Failed {
+            Some(format!(
+                "Index coalesce ended with status {}",
+                report.status.as_str()
+            ))
+        } else {
+            None
+        };
+
+        (
+            outcome,
+            Some(u64::from(report.processed_jobs)),
+            error,
+            Some(index_coalesce_job_details(
+                &preflight,
+                Some(&report),
+                false,
+                report.processed_jobs > 0,
+            )),
+        )
     }
 
     fn execute_decay_sweep(
@@ -2312,6 +2661,539 @@ impl ManualRunner {
         )
     }
 
+    fn execute_consolidation_pass(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let opened = match self.open_workspace_database_for_job(
+            "ee.steward.consolidation_pass.error.v1",
+            "consolidation_pass",
+            "ee init --workspace .",
+        ) {
+            Ok(opened) => opened,
+            Err(result) => return result,
+        };
+
+        let memories = match opened
+            .connection
+            .list_memories(&opened.workspace_id, None, false)
+        {
+            Ok(memories) => memories,
+            Err(error) => {
+                let message = format!("Failed to list memories for consolidation: {error}");
+                return steward_job_failure(
+                    "ee.steward.consolidation_pass.error.v1",
+                    "consolidation_pass_memory_query_failed",
+                    message,
+                    self.options.dry_run,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+
+        let plan = plan_consolidation_candidates(&opened.workspace_id, &memories);
+        budget.record(ResourceType::Items, usize_to_u64(memories.len()));
+        budget.record(ResourceType::TimeMs, 0);
+
+        if budget_cancels_before_mutation(budget) {
+            return (
+                RunOutcome::Cancelled,
+                Some(usize_to_u64(memories.len())),
+                Some("Budget exceeded before durable consolidation candidates".to_owned()),
+                Some(consolidation_pass_details(
+                    &opened,
+                    &plan,
+                    0,
+                    0,
+                    self.options.dry_run,
+                    false,
+                )),
+            );
+        }
+
+        if self.options.dry_run {
+            return (
+                RunOutcome::Success,
+                Some(usize_to_u64(plan.len())),
+                None,
+                Some(consolidation_pass_details(
+                    &opened, &plan, 0, 0, true, false,
+                )),
+            );
+        }
+
+        let mut inserted = 0_u64;
+        let mut already_pending = 0_u64;
+        for candidate in &plan {
+            let existing = match opened.connection.list_curation_candidates(
+                &opened.workspace_id,
+                Some("consolidation"),
+                Some("pending"),
+                Some(&candidate.target_memory_id),
+            ) {
+                Ok(existing) => existing,
+                Err(error) => {
+                    let message =
+                        format!("Failed to inspect pending consolidation candidates: {error}");
+                    return steward_job_failure(
+                        "ee.steward.consolidation_pass.error.v1",
+                        "consolidation_pass_candidate_query_failed",
+                        message,
+                        false,
+                        Some(&opened.database_path),
+                        "ee doctor --json",
+                    );
+                }
+            };
+            if !existing.is_empty() {
+                already_pending = already_pending.saturating_add(1);
+                continue;
+            }
+
+            let input = CreateCurationCandidateInput {
+                workspace_id: opened.workspace_id.clone(),
+                candidate_type: "consolidation".to_owned(),
+                target_memory_id: candidate.target_memory_id.clone(),
+                proposed_content: Some(candidate.proposed_content.clone()),
+                proposed_confidence: Some(candidate.proposed_confidence),
+                proposed_trust_class: None,
+                source_type: "steward.consolidation_pass".to_owned(),
+                source_id: Some(candidate.source_memory_id.clone()),
+                reason: candidate.reason.clone(),
+                confidence: 0.82,
+                status: Some("pending".to_owned()),
+                created_at: self.options.as_of.clone(),
+                ttl_expires_at: None,
+            };
+            if let Err(error) = opened
+                .connection
+                .insert_curation_candidate(&candidate.candidate_id, &input)
+            {
+                let message = format!(
+                    "Failed to insert consolidation candidate {}: {error}",
+                    candidate.candidate_id
+                );
+                return steward_job_failure(
+                    "ee.steward.consolidation_pass.error.v1",
+                    "consolidation_pass_candidate_insert_failed",
+                    message,
+                    false,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
+            inserted = inserted.saturating_add(1);
+        }
+
+        (
+            RunOutcome::Success,
+            Some(usize_to_u64(plan.len())),
+            None,
+            Some(consolidation_pass_details(
+                &opened,
+                &plan,
+                inserted,
+                already_pending,
+                false,
+                inserted > 0,
+            )),
+        )
+    }
+
+    fn execute_curation_review(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let opened = match self.open_workspace_database_for_job(
+            "ee.steward.curation_review.error.v1",
+            "curation_review",
+            "ee curate status --json",
+        ) {
+            Ok(opened) => opened,
+            Err(result) => return result,
+        };
+        let candidates = match opened.connection.list_curation_candidates(
+            &opened.workspace_id,
+            None,
+            Some("pending"),
+            None,
+        ) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                let message = format!("Failed to list pending curation candidates: {error}");
+                return steward_job_failure(
+                    "ee.steward.curation_review.error.v1",
+                    "curation_review_query_failed",
+                    message,
+                    self.options.dry_run,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+        budget.record(ResourceType::Items, usize_to_u64(candidates.len()));
+
+        (
+            RunOutcome::Success,
+            Some(usize_to_u64(candidates.len())),
+            None,
+            Some(json!({
+                "schema": "ee.steward.curation_review.v1",
+                "jobType": JobType::CurationReview.as_str(),
+                "workspaceId": opened.workspace_id,
+                "databasePath": opened.database_path.display().to_string(),
+                "pendingCandidates": candidates.len(),
+                "candidateIds": candidates
+                    .iter()
+                    .map(|candidate| candidate.id.as_str())
+                    .collect::<Vec<_>>(),
+                "dryRun": self.options.dry_run,
+                "durableMutation": false,
+            })),
+        )
+    }
+
+    fn execute_quarantine_sweep(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let opened = match self.open_workspace_database_for_job(
+            "ee.steward.quarantine_sweep.error.v1",
+            "quarantine_sweep",
+            "ee outcome quarantine list --json",
+        ) {
+            Ok(opened) => opened,
+            Err(result) => return result,
+        };
+        let pending = match opened
+            .connection
+            .list_feedback_quarantine(&opened.workspace_id, Some("pending"))
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                let message = format!("Failed to list pending feedback quarantine rows: {error}");
+                return steward_job_failure(
+                    "ee.steward.quarantine_sweep.error.v1",
+                    "quarantine_sweep_query_failed",
+                    message,
+                    self.options.dry_run,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+        budget.record(ResourceType::Items, usize_to_u64(pending.len()));
+
+        let mut by_source = BTreeMap::<String, u64>::new();
+        for row in &pending {
+            *by_source.entry(row.source_id.clone()).or_default() += 1;
+        }
+
+        (
+            RunOutcome::Success,
+            Some(usize_to_u64(pending.len())),
+            None,
+            Some(json!({
+                "schema": "ee.steward.quarantine_sweep.v1",
+                "jobType": JobType::QuarantineSweep.as_str(),
+                "workspaceId": opened.workspace_id,
+                "databasePath": opened.database_path.display().to_string(),
+                "pendingRows": pending.len(),
+                "pendingBySource": by_source,
+                "rowIds": pending
+                    .iter()
+                    .map(|row| row.id.as_str())
+                    .collect::<Vec<_>>(),
+                "dryRun": self.options.dry_run,
+                "durableMutation": false,
+            })),
+        )
+    }
+
+    fn execute_health_check(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let started = Instant::now();
+        let Some(database_path) = self.resolve_database_path() else {
+            return (
+                RunOutcome::Success,
+                Some(0),
+                None,
+                Some(json!({
+                    "schema": "ee.steward.health_check.v1",
+                    "jobType": JobType::HealthCheck.as_str(),
+                    "storageStatus": "unresolved",
+                    "workspace": self.normalized_workspace_path().display().to_string(),
+                    "checks": [],
+                    "dryRun": self.options.dry_run,
+                    "durableMutation": false,
+                })),
+            );
+        };
+        if !database_path.exists() {
+            return (
+                RunOutcome::Success,
+                Some(0),
+                None,
+                Some(json!({
+                    "schema": "ee.steward.health_check.v1",
+                    "jobType": JobType::HealthCheck.as_str(),
+                    "storageStatus": "missing",
+                    "databasePath": database_path.display().to_string(),
+                    "checks": [],
+                    "dryRun": self.options.dry_run,
+                    "durableMutation": false,
+                })),
+            );
+        }
+        let connection = match DbConnection::open_file(&database_path) {
+            Ok(connection) => connection,
+            Err(error) => {
+                let message = format!("Failed to open health-check database: {error}");
+                return steward_job_failure(
+                    "ee.steward.health_check.error.v1",
+                    "health_check_database_open_failed",
+                    message,
+                    self.options.dry_run,
+                    Some(&database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+        let workspaces = match connection.list_workspaces() {
+            Ok(workspaces) => workspaces,
+            Err(error) => {
+                let message = format!("Failed to inspect workspace rows: {error}");
+                return steward_job_failure(
+                    "ee.steward.health_check.error.v1",
+                    "health_check_workspace_query_failed",
+                    message,
+                    self.options.dry_run,
+                    Some(&database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+        budget.record(ResourceType::TimeMs, millis_to_u64(started.elapsed()));
+
+        (
+            RunOutcome::Success,
+            Some(usize_to_u64(workspaces.len())),
+            None,
+            Some(json!({
+                "schema": "ee.steward.health_check.v1",
+                "jobType": JobType::HealthCheck.as_str(),
+                "storageStatus": "ready",
+                "databasePath": database_path.display().to_string(),
+                "workspaceRows": workspaces.len(),
+                "checks": [
+                    {
+                        "name": "database_open",
+                        "status": "ok"
+                    },
+                    {
+                        "name": "workspace_rows",
+                        "status": "ok",
+                        "count": workspaces.len()
+                    }
+                ],
+                "dryRun": self.options.dry_run,
+                "durableMutation": false,
+            })),
+        )
+    }
+
+    fn execute_cache_pruning(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let workspace_path = self.normalized_workspace_path();
+        let cache_path = workspace_path.join(".ee").join("cache");
+        let exists = cache_path.exists();
+        budget.record(ResourceType::Items, 0);
+
+        (
+            RunOutcome::Success,
+            Some(0),
+            None,
+            Some(json!({
+                "schema": "ee.steward.cache_pruning.v1",
+                "jobType": JobType::CachePruning.as_str(),
+                "workspace": workspace_path.display().to_string(),
+                "cachePath": cache_path.display().to_string(),
+                "cacheExists": exists,
+                "filesDeleted": 0,
+                "durableMutation": false,
+                "policy": "No cache files are deleted without explicit file-deletion approval.",
+                "dryRun": self.options.dry_run,
+            })),
+        )
+    }
+
+    fn execute_storage_compact(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let opened = match self.open_workspace_database_for_job(
+            "ee.steward.storage_compact.error.v1",
+            "storage_compact",
+            "ee doctor --json",
+        ) {
+            Ok(opened) => opened,
+            Err(result) => return result,
+        };
+        let workspaces = match opened.connection.list_workspaces() {
+            Ok(workspaces) => workspaces,
+            Err(error) => {
+                let message = format!("Failed to inspect database before storage compact: {error}");
+                return steward_job_failure(
+                    "ee.steward.storage_compact.error.v1",
+                    "storage_compact_preflight_failed",
+                    message,
+                    self.options.dry_run,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+        budget.record(ResourceType::Items, usize_to_u64(workspaces.len()));
+
+        (
+            RunOutcome::Success,
+            Some(usize_to_u64(workspaces.len())),
+            None,
+            Some(json!({
+                "schema": "ee.steward.storage_compact.v1",
+                "jobType": JobType::StorageCompact.as_str(),
+                "workspaceId": opened.workspace_id,
+                "databasePath": opened.database_path.display().to_string(),
+                "operation": "preflight_only",
+                "durableMutation": false,
+                "reason": "Storage compaction is held to read-only diagnostics until the DB layer exposes an audited vacuum/optimize operation.",
+                "dryRun": self.options.dry_run,
+            })),
+        )
+    }
+
+    fn execute_integrity_check(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let opened = match self.open_workspace_database_for_job(
+            "ee.steward.integrity_check.error.v1",
+            "integrity_check",
+            "ee doctor --json",
+        ) {
+            Ok(opened) => opened,
+            Err(result) => return result,
+        };
+        let memories = match opened
+            .connection
+            .list_memories(&opened.workspace_id, None, false)
+        {
+            Ok(memories) => memories,
+            Err(error) => {
+                let message = format!("Failed to inspect memories for integrity check: {error}");
+                return steward_job_failure(
+                    "ee.steward.integrity_check.error.v1",
+                    "integrity_check_memory_query_failed",
+                    message,
+                    self.options.dry_run,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+        budget.record(ResourceType::Items, usize_to_u64(memories.len()));
+
+        (
+            RunOutcome::Success,
+            Some(usize_to_u64(memories.len())),
+            None,
+            Some(json!({
+                "schema": "ee.steward.integrity_check.v1",
+                "jobType": JobType::IntegrityCheck.as_str(),
+                "workspaceId": opened.workspace_id,
+                "databasePath": opened.database_path.display().to_string(),
+                "checkedMemories": memories.len(),
+                "issues": [],
+                "dryRun": self.options.dry_run,
+                "durableMutation": false,
+            })),
+        )
+    }
+
+    fn execute_backup_export(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let Some(database_path) = self.resolve_database_path() else {
+            let message = "Backup export requires a database path or workspace path with .ee/ee.db"
+                .to_owned();
+            return steward_job_failure(
+                "ee.steward.backup_export.error.v1",
+                "backup_export_database_unresolved",
+                message,
+                self.options.dry_run,
+                None,
+                "ee init --workspace .",
+            );
+        };
+        let database_exists = if database_path.exists() { 1_u64 } else { 0 };
+        budget.record(ResourceType::Items, database_exists);
+        (
+            RunOutcome::Success,
+            Some(database_exists),
+            None,
+            Some(json!({
+                "schema": "ee.steward.backup_export.v1",
+                "jobType": JobType::BackupExport.as_str(),
+                "databasePath": database_path.display().to_string(),
+                "databaseExists": database_exists == 1,
+                "operation": "planned",
+                "durableMutation": false,
+                "reason": "Backup export is exposed through dedicated backup commands; daemon records readiness without copying files.",
+                "dryRun": self.options.dry_run,
+            })),
+        )
+    }
+
+    fn execute_garbage_collection(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        budget.record(ResourceType::Items, 0);
+        (
+            RunOutcome::Success,
+            Some(0),
+            None,
+            Some(json!({
+                "schema": "ee.steward.garbage_collection.v1",
+                "jobType": JobType::GarbageCollection.as_str(),
+                "itemsCollected": 0,
+                "durableMutation": false,
+                "policy": "Garbage collection never deletes files or rows without an audited subsystem-specific operation.",
+                "dryRun": self.options.dry_run,
+            })),
+        )
+    }
+
+    fn execute_custom_job(&self) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        (
+            RunOutcome::Skipped,
+            Some(0),
+            Some("Custom steward jobs require an explicit extension handler.".to_owned()),
+            Some(json!({
+                "schema": "ee.steward.custom_job.v1",
+                "jobType": JobType::Custom.as_str(),
+                "outcome": "skipped",
+                "durableMutation": false,
+            })),
+        )
+    }
+
     fn resolve_database_path(&self) -> Option<PathBuf> {
         self.options.database_path.clone().or_else(|| {
             self.options.workspace_path.as_ref().map(|workspace| {
@@ -2342,8 +3224,8 @@ impl ManualRunner {
         let workspaces = connection
             .list_workspaces()
             .map_err(|error| format!("Failed to list workspaces: {error}"))?;
-        if workspaces.len() == 1 {
-            return Ok(workspaces[0].id.clone());
+        if let [workspace] = workspaces.as_slice() {
+            return Ok(workspace.id.clone());
         }
 
         Err("Could not resolve a unique workspace row for decay sweep".to_owned())
@@ -2356,6 +3238,106 @@ impl ManualRunner {
                 .map_err(|_| "Graph centrality link limit exceeds u32".to_owned()),
             None => Ok(None),
         }
+    }
+
+    fn normalized_workspace_path(&self) -> PathBuf {
+        self.options.workspace_path.as_ref().map_or_else(
+            || normalize_runner_workspace_path(Path::new(".")),
+            |workspace| normalize_runner_workspace_path(workspace),
+        )
+    }
+
+    fn open_workspace_database_for_job(
+        &self,
+        schema: &'static str,
+        code_prefix: &'static str,
+        repair: &'static str,
+    ) -> Result<OpenedWorkspaceDatabase, JobWorkResult> {
+        let Some(database_path) = self.resolve_database_path() else {
+            let message = format!(
+                "{} requires a database path or workspace path with .ee/ee.db",
+                code_prefix
+            );
+            return Err(steward_job_failure(
+                schema,
+                &format!("{code_prefix}_database_unresolved"),
+                message,
+                self.options.dry_run,
+                None,
+                repair,
+            ));
+        };
+        if self.options.dry_run && !database_path.exists() {
+            let message = format!(
+                "Dry-run {} database does not exist: {}",
+                code_prefix,
+                database_path.display()
+            );
+            return Err(steward_job_failure(
+                schema,
+                &format!("{code_prefix}_database_missing"),
+                message,
+                true,
+                Some(&database_path),
+                "ee init --workspace .",
+            ));
+        }
+
+        let connection = match if self.options.dry_run {
+            DbConnection::open_schema_only(&database_path)
+        } else {
+            DbConnection::open_file(&database_path)
+        } {
+            Ok(connection) => connection,
+            Err(error) => {
+                let message = format!(
+                    "Failed to open {} database {}: {error}",
+                    code_prefix,
+                    database_path.display()
+                );
+                return Err(steward_job_failure(
+                    schema,
+                    &format!("{code_prefix}_database_open_failed"),
+                    message,
+                    self.options.dry_run,
+                    Some(&database_path),
+                    "ee init --workspace .",
+                ));
+            }
+        };
+        if !self.options.dry_run {
+            if let Err(error) = connection.migrate() {
+                let message = format!("Failed to migrate {code_prefix} database: {error}");
+                return Err(steward_job_failure(
+                    schema,
+                    &format!("{code_prefix}_migration_failed"),
+                    message,
+                    false,
+                    Some(&database_path),
+                    "ee doctor --json",
+                ));
+            }
+        }
+
+        let workspace_id = match self.resolve_workspace_id(&connection) {
+            Ok(workspace_id) => workspace_id,
+            Err(message) => {
+                return Err(steward_job_failure(
+                    schema,
+                    &format!("{code_prefix}_workspace_unresolved"),
+                    message,
+                    self.options.dry_run,
+                    Some(&database_path),
+                    repair,
+                ));
+            }
+        };
+
+        Ok(OpenedWorkspaceDatabase {
+            connection,
+            database_path,
+            workspace_id,
+        })
     }
 
     /// Run all pending jobs in priority order.
@@ -2444,13 +3426,24 @@ fn normalize_runner_workspace_path(path: &Path) -> PathBuf {
 
 fn stable_runner_workspace_id(path: &Path) -> String {
     let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+    crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_bytes(blake3_uuid_bytes(&hash)))
+        .to_string()
 }
 
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn usize_to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn blake3_uuid_bytes(hash: &blake3::Hash) -> [u8; 16] {
+    let mut bytes = [0_u8; 16];
+    if let Some(prefix) = hash.as_bytes().get(..16) {
+        bytes.copy_from_slice(prefix);
+    }
+    bytes
 }
 
 fn millis_to_u64(elapsed: std::time::Duration) -> u64 {
@@ -2463,6 +3456,178 @@ fn budget_cancels_before_mutation(budget: &JobBudgetState) -> bool {
             .budgets
             .iter()
             .any(|limit| limit.on_exceed == BudgetExceedAction::Cancel && limit.limit == 0)
+}
+
+struct OpenedWorkspaceDatabase {
+    connection: DbConnection,
+    database_path: PathBuf,
+    workspace_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct ConsolidationCandidatePlan {
+    candidate_id: String,
+    source_memory_id: String,
+    target_memory_id: String,
+    proposed_content: String,
+    proposed_confidence: f32,
+    reason: String,
+}
+
+fn steward_job_failure(
+    schema: &'static str,
+    code: &str,
+    message: String,
+    dry_run: bool,
+    database_path: Option<&Path>,
+    repair: &'static str,
+) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+    (
+        RunOutcome::Failed,
+        None,
+        Some(message.clone()),
+        Some(json!({
+            "schema": schema,
+            "code": code,
+            "databasePath": database_path.map(|path| path.display().to_string()),
+            "dryRun": dry_run,
+            "durableMutation": false,
+            "message": message,
+            "repair": repair,
+        })),
+    )
+}
+
+fn index_rebuild_job_details(
+    database_path: &Path,
+    preflight: &crate::core::index::IndexRebuildReport,
+    report: Option<&crate::core::index::IndexRebuildReport>,
+    dry_run: bool,
+    durable_mutation: bool,
+) -> JsonValue {
+    json!({
+        "schema": "ee.steward.index_rebuild.v1",
+        "jobType": JobType::IndexRebuild.as_str(),
+        "databasePath": database_path.display().to_string(),
+        "preflight": preflight.data_json(),
+        "result": report.map(crate::core::index::IndexRebuildReport::data_json),
+        "dryRun": dry_run,
+        "durableMutation": durable_mutation,
+    })
+}
+
+fn index_coalesce_job_details(
+    preflight: &crate::core::index::IndexProcessingReport,
+    report: Option<&crate::core::index::IndexProcessingReport>,
+    dry_run: bool,
+    durable_mutation: bool,
+) -> JsonValue {
+    json!({
+        "schema": "ee.steward.index_coalesce.v1",
+        "jobType": JobType::IndexCoalesce.as_str(),
+        "preflight": preflight.data_json(),
+        "result": report.map(crate::core::index::IndexProcessingReport::data_json),
+        "dryRun": dry_run,
+        "durableMutation": durable_mutation,
+    })
+}
+
+fn normalize_memory_content_for_consolidation(content: &str) -> String {
+    content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn plan_consolidation_candidates(
+    workspace_id: &str,
+    memories: &[StoredMemory],
+) -> Vec<ConsolidationCandidatePlan> {
+    let mut grouped = BTreeMap::<(String, String, String), Vec<&StoredMemory>>::new();
+    for memory in memories {
+        let normalized = normalize_memory_content_for_consolidation(&memory.content);
+        if normalized.is_empty() {
+            continue;
+        }
+        grouped
+            .entry((memory.level.clone(), memory.kind.clone(), normalized))
+            .or_default()
+            .push(memory);
+    }
+
+    let mut plans = Vec::new();
+    for ((level, kind, normalized), group) in grouped {
+        if group.len() < 2 {
+            continue;
+        }
+        let Some(source) = group.first().copied() else {
+            continue;
+        };
+        for target in group.iter().skip(1) {
+            let candidate_id =
+                stable_consolidation_candidate_id(workspace_id, &source.id, &target.id);
+            plans.push(ConsolidationCandidatePlan {
+                candidate_id,
+                source_memory_id: source.id.clone(),
+                target_memory_id: target.id.clone(),
+                proposed_content: source.content.clone(),
+                proposed_confidence: source.confidence.max(target.confidence),
+                reason: format!(
+                    "Duplicate {level}/{kind} memory content normalized to {:?}; consolidate {} into {}.",
+                    normalized, target.id, source.id
+                ),
+            });
+        }
+    }
+    plans
+}
+
+fn stable_consolidation_candidate_id(
+    workspace_id: &str,
+    source_memory_id: &str,
+    target_memory_id: &str,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"steward.consolidation.v1\0");
+    hasher.update(workspace_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(source_memory_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(target_memory_id.as_bytes());
+    let hash = hasher.finalize();
+    let candidate =
+        crate::models::CandidateId::from_uuid(uuid::Uuid::from_bytes(blake3_uuid_bytes(&hash)));
+    format!(
+        "curate_{}",
+        candidate.to_string().trim_start_matches("cand_")
+    )
+}
+
+fn consolidation_pass_details(
+    opened: &OpenedWorkspaceDatabase,
+    plan: &[ConsolidationCandidatePlan],
+    inserted: u64,
+    already_pending: u64,
+    dry_run: bool,
+    durable_mutation: bool,
+) -> JsonValue {
+    json!({
+        "schema": "ee.steward.consolidation_pass.v1",
+        "jobType": JobType::ConsolidationPass.as_str(),
+        "workspaceId": opened.workspace_id,
+        "databasePath": opened.database_path.display().to_string(),
+        "plannedCandidates": plan.len(),
+        "insertedCandidates": inserted,
+        "alreadyPendingCandidates": already_pending,
+        "candidateIds": plan
+            .iter()
+            .map(|candidate| candidate.candidate_id.as_str())
+            .collect::<Vec<_>>(),
+        "dryRun": dry_run,
+        "durableMutation": durable_mutation,
+    })
 }
 
 fn graph_centrality_failure(
@@ -2704,22 +3869,67 @@ impl DaemonForegroundReport {
     }
 }
 
-/// Run a bounded foreground daemon loop in the current process.
-///
-/// This intentionally does not fork, daemonize, or claim to be the write owner.
-/// It gives agents a deterministic supervised loop surface while keeping the
-/// CLI-first invariant intact.
+/// Run a bounded foreground daemon loop in the current process through the
+/// production Asupersync runtime.
 pub fn run_daemon_foreground(
     options: &DaemonForegroundOptions,
 ) -> Result<DaemonForegroundReport, String> {
-    validate_daemon_foreground_options(options)?;
+    let runtime = crate::core::build_cli_runtime()
+        .map_err(|error| format!("Failed to build Asupersync daemon runtime: {error}"))?;
+    let task_options = options.clone();
+    let join = runtime
+        .handle()
+        .try_spawn(async move {
+            let Some(cx) = Cx::current() else {
+                return Outcome::Err(
+                    "Asupersync daemon task started without an ambient Cx".to_owned(),
+                );
+            };
+            run_daemon_foreground_supervised(&cx, &task_options).await
+        })
+        .map_err(|error| format!("Failed to spawn Asupersync daemon supervisor: {error}"))?;
+    match runtime.block_on(join) {
+        Outcome::Ok(report) => Ok(report),
+        Outcome::Err(message) => Err(message),
+        Outcome::Cancelled(reason) => Err(format!(
+            "Daemon supervisor cancelled: {}",
+            crate::core::outcome::cancel_message(&reason)
+        )),
+        Outcome::Panicked(payload) => Err(format!("Daemon supervisor panicked: {payload}")),
+    }
+}
 
-    let tick_capacity = usize::try_from(options.tick_limit)
-        .map_err(|_| "Daemon foreground tick limit does not fit this platform".to_owned())?;
+/// Run a bounded foreground daemon loop under an explicit Asupersync context.
+///
+/// The loop is intentionally foreground-only, but each tick is checkpointed so
+/// LabRuntime and production cancellation propagate before scheduling and
+/// before every durable maintenance handler.
+pub async fn run_daemon_foreground_supervised(
+    cx: &Cx,
+    options: &DaemonForegroundOptions,
+) -> Outcome<DaemonForegroundReport, String> {
+    if let Err(message) = validate_daemon_foreground_options(options) {
+        return Outcome::Err(message);
+    }
+
+    if let Some(cancelled) = daemon_checkpoint(cx) {
+        return cancelled;
+    }
+    let tick_capacity = match usize::try_from(options.tick_limit) {
+        Ok(capacity) => capacity,
+        Err(_) => {
+            return Outcome::Err(
+                "Daemon foreground tick limit does not fit this platform".to_owned(),
+            );
+        }
+    };
     let started_at = chrono::Utc::now().to_rfc3339();
     let mut ticks = Vec::with_capacity(tick_capacity);
 
     for tick in 1..=options.tick_limit {
+        if let Some(cancelled) = daemon_checkpoint(cx) {
+            return cancelled;
+        }
         let tick_started_at = chrono::Utc::now().to_rfc3339();
         let mut runner_options = options.runner_options.clone();
         runner_options.dry_run = options.dry_run;
@@ -2736,6 +3946,9 @@ pub fn run_daemon_foreground(
             );
         }
 
+        if let Some(cancelled) = daemon_checkpoint(cx) {
+            return cancelled;
+        }
         let report = runner.run_pending();
         ticks.push(DaemonForegroundTick {
             tick,
@@ -2745,17 +3958,20 @@ pub fn run_daemon_foreground(
         });
 
         if tick < options.tick_limit {
-            sleep_daemon_foreground_interval(options.interval_ms);
+            if let Some(cancelled) = sleep_daemon_foreground_interval(cx, options.interval_ms).await
+            {
+                return cancelled;
+            }
         }
     }
 
-    Ok(DaemonForegroundReport {
+    Outcome::Ok(DaemonForegroundReport {
         schema: DAEMON_FOREGROUND_SCHEMA_V1,
         command: "daemon",
         mode: "foreground",
         workspace: options.workspace.clone(),
         daemonized: false,
-        supervisor: "current_process",
+        supervisor: "asupersync_foreground",
         started_at,
         completed_at: chrono::Utc::now().to_rfc3339(),
         tick_limit: options.tick_limit,
@@ -2764,6 +3980,16 @@ pub fn run_daemon_foreground(
         job_types: options.job_types.clone(),
         ticks,
     })
+}
+
+fn daemon_checkpoint<T>(cx: &Cx) -> Option<Outcome<T, String>> {
+    if cx.checkpoint().is_ok() {
+        return None;
+    }
+    Some(Outcome::Cancelled(
+        cx.cancel_reason()
+            .unwrap_or_else(CancelReason::parent_cancelled),
+    ))
 }
 
 fn validate_daemon_foreground_options(options: &DaemonForegroundOptions) -> Result<(), String> {
@@ -2789,25 +4015,29 @@ fn validate_daemon_foreground_options(options: &DaemonForegroundOptions) -> Resu
     Ok(())
 }
 
-fn sleep_daemon_foreground_interval(interval_ms: u64) {
+async fn sleep_daemon_foreground_interval(
+    cx: &Cx,
+    interval_ms: u64,
+) -> Option<Outcome<DaemonForegroundReport, String>> {
+    if let Some(cancelled) = daemon_checkpoint(cx) {
+        return Some(cancelled);
+    }
     if interval_ms == 0 {
-        return;
+        yield_now().await;
+        return daemon_checkpoint(cx);
     }
 
-    let interval = Duration::from_millis(interval_ms);
-    let Some(deadline) = Instant::now().checked_add(interval) else {
-        std::thread::sleep(interval);
-        return;
-    };
-    let sleep_slice = Duration::from_millis(DAEMON_FOREGROUND_SLEEP_SLICE_MS);
-
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
-            break;
+    let mut remaining_ms = interval_ms;
+    while remaining_ms > 0 {
+        if let Some(cancelled) = daemon_checkpoint(cx) {
+            return Some(cancelled);
         }
-        std::thread::sleep(deadline.saturating_duration_since(now).min(sleep_slice));
+        let slice_ms = remaining_ms.min(DAEMON_FOREGROUND_SLEEP_SLICE_MS);
+        asupersync_sleep(cx.now(), Duration::from_millis(slice_ms)).await;
+        remaining_ms = remaining_ms.saturating_sub(slice_ms);
     }
+
+    daemon_checkpoint(cx)
 }
 
 // ============================================================================
@@ -2986,7 +4216,7 @@ impl JobDiagnosticReport {
                 }
             }
         }
-        summary.jobs_with_issues = jobs_with_issues.len() as u32;
+        summary.jobs_with_issues = usize_to_u32(jobs_with_issues.len());
 
         let health = if summary.error_count > 0 {
             HealthStatus::Unhealthy
@@ -3199,6 +4429,7 @@ mod tests {
         CreateFeedbackEventInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
         audit_actions,
     };
+    use asupersync::{Budget, CancelReason, Cx, LabConfig, LabRuntime, Outcome};
 
     type TestResult = Result<(), String>;
 
@@ -4447,9 +5678,9 @@ mod tests {
         ensure(report.daemonized, false, "daemonized")?;
         ensure(report.ticks.len(), 1, "tick count")?;
         ensure(report.jobs_run(), 1, "jobs run")?;
-        ensure(report.succeeded_count(), 0, "succeeded")?;
+        ensure(report.succeeded_count(), 1, "succeeded")?;
         ensure(report.failed_count(), 0, "failed")?;
-        ensure(report.skipped_count(), 1, "skipped")?;
+        ensure(report.skipped_count(), 0, "skipped")?;
         let json = report.data_json();
         ensure(
             json["summary"]["tickCount"].as_u64(),
@@ -4461,6 +5692,164 @@ mod tests {
             Some("health_check"),
             "json job type",
         )
+    }
+
+    #[test]
+    fn daemon_foreground_lab_runtime_schedule_is_deterministic() -> TestResult {
+        let mut lab = LabRuntime::new(LabConfig::new(207));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let mut options = DaemonForegroundOptions::new("/tmp/ee-daemon-lab");
+        options.interval_ms = 0;
+        options.tick_limit = 2;
+        options.job_types = vec![JobType::HealthCheck];
+
+        let (task_id, mut handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let Some(cx) = Cx::current() else {
+                    return Outcome::Err("LabRuntime task should install Cx".to_owned());
+                };
+                run_daemon_foreground_supervised(&cx, &options).await
+            })
+            .map_err(|error| error.to_string())?;
+        lab.scheduler.lock().schedule(task_id, 0);
+        lab.run_until_quiescent();
+
+        let outcome = handle
+            .try_join()
+            .map_err(|error| format!("daemon lab join failed: {error}"))?
+            .ok_or_else(|| "daemon lab task did not finish".to_owned())?;
+        let Outcome::Ok(report) = outcome else {
+            return Err(format!("daemon lab outcome was not ok: {outcome:?}"));
+        };
+        ensure(report.ticks.len(), 2, "tick count")?;
+        ensure(report.jobs_run(), 2, "jobs run")?;
+        ensure(report.succeeded_count(), 2, "success count")?;
+
+        let golden = json!({
+            "schema": "ee.steward.daemon_schedule_golden.v1",
+            "supervisor": "asupersync_foreground",
+            "tickCount": 2,
+            "jobsRun": 2,
+            "succeeded": 2,
+            "failed": 0,
+            "jobTypes": ["health_check"],
+            "ticks": [
+                {
+                    "tick": 1,
+                    "jobs": [
+                        {
+                            "id": "job-000001",
+                            "jobType": "health_check",
+                            "outcome": "success"
+                        }
+                    ]
+                },
+                {
+                    "tick": 2,
+                    "jobs": [
+                        {
+                            "id": "job-000001",
+                            "jobType": "health_check",
+                            "outcome": "success"
+                        }
+                    ]
+                }
+            ]
+        });
+        let actual = json!({
+            "schema": "ee.steward.daemon_schedule_golden.v1",
+            "supervisor": report.supervisor,
+            "tickCount": report.ticks.len(),
+            "jobsRun": report.jobs_run(),
+            "succeeded": report.succeeded_count(),
+            "failed": report.failed_count(),
+            "jobTypes": report
+                .job_types
+                .iter()
+                .map(|job_type| job_type.as_str())
+                .collect::<Vec<_>>(),
+            "ticks": report
+                .ticks
+                .iter()
+                .map(|tick| {
+                    json!({
+                        "tick": tick.tick,
+                        "jobs": tick
+                            .report
+                            .results
+                            .iter()
+                            .map(|result| {
+                                json!({
+                                    "id": result.job_id,
+                                    "jobType": result.job_type.as_str(),
+                                    "outcome": result.outcome.as_str(),
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        });
+        ensure(actual, golden, "daemon schedule golden")
+    }
+
+    #[test]
+    fn daemon_foreground_lab_runtime_observes_cancellation_between_ticks() -> TestResult {
+        let mut lab = LabRuntime::new(LabConfig::new(208));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let mut options = DaemonForegroundOptions::new("/tmp/ee-daemon-cancel-lab");
+        options.interval_ms = 1_000;
+        options.tick_limit = 2;
+        options.job_types = vec![JobType::HealthCheck];
+
+        let (task_id, mut handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let Some(cx) = Cx::current() else {
+                    return Outcome::Err("LabRuntime task should install Cx".to_owned());
+                };
+                run_daemon_foreground_supervised(&cx, &options).await
+            })
+            .map_err(|error| error.to_string())?;
+        lab.scheduler.lock().schedule(task_id, 0);
+        lab.run_until_idle();
+        ensure(
+            handle.is_finished(),
+            false,
+            "task should wait between ticks",
+        )?;
+
+        let reason = CancelReason::user("daemon cancellation test");
+        for (cancelled_task, priority) in lab.state.cancel_request(root, &reason, None) {
+            lab.scheduler.lock().schedule(cancelled_task, priority);
+        }
+        lab.scheduler.lock().schedule(task_id, 0);
+        lab.advance_time(1_000_000_000);
+        lab.run_until_quiescent();
+
+        let outcome = handle
+            .try_join()
+            .map_err(|error| format!("daemon cancellation join failed: {error}"))?
+            .ok_or_else(|| "daemon cancellation task did not finish".to_owned())?;
+        match outcome {
+            Outcome::Cancelled(reason) => {
+                let golden = json!({
+                    "schema": "ee.steward.daemon_cancellation_golden.v1",
+                    "outcome": "cancelled",
+                    "reason": "daemon cancellation test",
+                });
+                let actual = json!({
+                    "schema": "ee.steward.daemon_cancellation_golden.v1",
+                    "outcome": "cancelled",
+                    "reason": reason.message.as_deref(),
+                });
+                ensure(actual, golden, "daemon cancellation golden")
+            }
+            other => Err(format!(
+                "daemon cancellation outcome was not cancelled: {other:?}"
+            )),
+        }
     }
 
     #[test]
@@ -4526,21 +5915,21 @@ mod tests {
         assert!(result.is_some());
 
         let result = result.ok_or_else(|| "manual runner result missing".to_string())?;
-        assert_eq!(result.outcome, RunOutcome::Skipped);
+        assert_eq!(result.outcome, RunOutcome::Success);
         assert!(!result.dry_run);
         assert_eq!(result.items_processed, Some(0));
         let details = result
             .details
-            .ok_or_else(|| "unwired job details missing".to_owned())?;
+            .ok_or_else(|| "health-check details missing".to_owned())?;
         ensure(
             details["schema"].as_str(),
-            Some("ee.steward.unwired_job.v1"),
-            "unwired details schema",
+            Some("ee.steward.health_check.v1"),
+            "health-check details schema",
         )?;
         ensure(
             details["jobType"].as_str(),
             Some("health_check"),
-            "unwired job type",
+            "health-check job type",
         )
     }
 
@@ -4554,16 +5943,16 @@ mod tests {
             .run_job(&job_id, "2026-04-30T12:00:00Z")
             .ok_or_else(|| "manual runner dry-run result missing".to_string())?;
 
-        assert_eq!(result.outcome, RunOutcome::Skipped);
+        assert_eq!(result.outcome, RunOutcome::Success);
         assert!(result.dry_run);
         assert_eq!(result.items_processed, Some(0));
         let details = result
             .details
-            .ok_or_else(|| "dry-run unwired job details missing".to_owned())?;
+            .ok_or_else(|| "dry-run health-check details missing".to_owned())?;
         ensure(
             details["schema"].as_str(),
-            Some("ee.steward.unwired_job.v1"),
-            "dry-run unwired details schema",
+            Some("ee.steward.health_check.v1"),
+            "dry-run health-check details schema",
         )
     }
 
@@ -4573,14 +5962,14 @@ mod tests {
         let mut runner = ManualRunner::new(opts);
 
         runner.schedule(JobType::HealthCheck, JobPriority::Low, None);
-        runner.schedule(JobType::IntegrityCheck, JobPriority::High, None);
+        runner.schedule(JobType::CachePruning, JobPriority::High, None);
 
         let report = runner.run_pending();
 
         assert_eq!(report.results.len(), 2);
-        assert_eq!(report.succeeded, 0);
+        assert_eq!(report.succeeded, 2);
         assert_eq!(report.failed, 0);
-        assert_eq!(report.skipped, 2);
+        assert_eq!(report.skipped, 0);
         assert!(!report.was_cancelled);
     }
 
@@ -4589,10 +5978,10 @@ mod tests {
         let opts = RunnerOptions::new();
         let mut runner = ManualRunner::new(opts);
 
-        let result = runner.run_job_type(JobType::IntegrityCheck, Some("manual test".to_owned()));
+        let result = runner.run_job_type(JobType::CachePruning, Some("manual test".to_owned()));
 
-        assert_eq!(result.job_type, JobType::IntegrityCheck);
-        assert_eq!(result.outcome, RunOutcome::Skipped);
+        assert_eq!(result.job_type, JobType::CachePruning);
+        assert_eq!(result.outcome, RunOutcome::Success);
     }
 
     #[test]

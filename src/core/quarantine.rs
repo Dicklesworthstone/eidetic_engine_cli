@@ -4,6 +4,12 @@
 //! quarantine based on accumulated negative feedback signals. Used by
 //! `ee diag quarantine --json` to surface trust decay information to agents.
 
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use crate::db::{
+    DbConnection, StoredFeedbackEvent, StoredFeedbackQuarantine, StoredTrustQuarantine,
+};
 use crate::policy::{DecayConfig, SourceTrustState, TrustAdvisory, TrustDecayCalculator};
 
 /// Report summarizing quarantine state across all tracked sources.
@@ -19,6 +25,14 @@ pub struct QuarantineReport {
     pub blocked_sources: Vec<QuarantineEntry>,
     /// Summary counts.
     pub summary: QuarantineSummary,
+    /// Whether persisted trust state was available.
+    pub storage_status: QuarantineStorageStatus,
+    /// Canonical workspace path inspected, when available.
+    pub workspace_path: Option<String>,
+    /// Database path inspected, when available.
+    pub database_path: Option<String>,
+    /// Read-only diagnostic degradations encountered while gathering state.
+    pub degraded: Vec<QuarantineDegradation>,
 }
 
 /// A single source with its quarantine status.
@@ -59,6 +73,37 @@ pub struct QuarantineSummary {
     pub total_sources: u32,
     /// Sources in healthy state.
     pub healthy_count: u32,
+}
+
+/// Storage posture for quarantine diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuarantineStorageStatus {
+    /// Feedback and quarantine tables were read successfully.
+    Ready,
+    /// No workspace database exists yet.
+    Missing,
+    /// Workspace/database state could not be inspected.
+    Unavailable,
+}
+
+impl QuarantineStorageStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Missing => "missing",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Stable diagnostic describing partial quarantine-state inspection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuarantineDegradation {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub message: String,
+    pub repair: &'static str,
 }
 
 /// Simplified advisory level for report output.
@@ -105,17 +150,147 @@ impl From<&TrustAdvisory> for AdvisoryLevel {
 impl QuarantineReport {
     /// Gather quarantine report from current trust state.
     ///
-    /// In the current implementation, this derives an empty report because no
-    /// persistent source tracking exists yet. Once EE-278's storage is wired,
-    /// this will query the feedback_events table.
+    /// This helper remains the pure in-memory default; CLI diagnostics use
+    /// `gather_for_workspace` to read persisted feedback and trust state.
     #[must_use]
     pub fn gather() -> Self {
         Self::gather_with_sources(&[])
     }
 
+    /// Gather quarantine report from persisted feedback and quarantine rows.
+    #[must_use]
+    pub fn gather_for_workspace(workspace_path: &Path) -> Self {
+        let workspace_path = match canonical_workspace_path(workspace_path) {
+            Ok(path) => path,
+            Err(message) => {
+                return Self::gather_with_storage(
+                    Vec::new(),
+                    QuarantineStorageStatus::Unavailable,
+                    None,
+                    None,
+                    vec![QuarantineDegradation {
+                        code: "quarantine_workspace_unavailable",
+                        severity: "medium",
+                        message,
+                        repair: "ee init --workspace .",
+                    }],
+                );
+            }
+        };
+        let database_path = workspace_path.join(".ee").join("ee.db");
+        if !database_path.is_file() {
+            return Self::gather_with_storage(
+                Vec::new(),
+                QuarantineStorageStatus::Missing,
+                Some(workspace_path.display().to_string()),
+                Some(database_path.display().to_string()),
+                vec![QuarantineDegradation {
+                    code: "quarantine_database_missing",
+                    severity: "medium",
+                    message: format!("No ee database was found at {}.", database_path.display()),
+                    repair: "ee init --workspace .",
+                }],
+            );
+        }
+
+        let workspace_id = super::curate::stable_workspace_id(&workspace_path);
+        let connection = match DbConnection::open_file(&database_path) {
+            Ok(connection) => connection,
+            Err(error) => {
+                return Self::gather_with_storage(
+                    Vec::new(),
+                    QuarantineStorageStatus::Unavailable,
+                    Some(workspace_path.display().to_string()),
+                    Some(database_path.display().to_string()),
+                    vec![QuarantineDegradation {
+                        code: "quarantine_database_unreadable",
+                        severity: "medium",
+                        message: format!("Failed to open quarantine database: {error}."),
+                        repair: "ee doctor --json",
+                    }],
+                );
+            }
+        };
+
+        let mut states = BTreeMap::<String, SourceTrustState>::new();
+        let mut degraded = Vec::new();
+
+        match connection.list_feedback_events(&workspace_id) {
+            Ok(events) => {
+                for event in &events {
+                    apply_feedback_event(&mut states, event);
+                }
+            }
+            Err(error) => degraded.push(QuarantineDegradation {
+                code: "quarantine_feedback_events_unreadable",
+                severity: "medium",
+                message: format!("Failed to read feedback events: {error}."),
+                repair: "ee db migrate --workspace .",
+            }),
+        }
+
+        match connection.list_feedback_quarantine(&workspace_id, None) {
+            Ok(rows) => {
+                for row in &rows {
+                    apply_quarantine_row(&mut states, row);
+                }
+            }
+            Err(error) => degraded.push(QuarantineDegradation {
+                code: "quarantine_rows_unreadable",
+                severity: "medium",
+                message: format!("Failed to read feedback quarantine rows: {error}."),
+                repair: "ee db migrate --workspace .",
+            }),
+        }
+
+        match connection.list_trust_quarantine(&workspace_id, false) {
+            Ok(rows) => {
+                for row in &rows {
+                    apply_trust_quarantine_row(&mut states, row);
+                }
+            }
+            Err(error) => degraded.push(QuarantineDegradation {
+                code: "trust_quarantine_rows_unreadable",
+                severity: "medium",
+                message: format!("Failed to read source trust quarantine rows: {error}."),
+                repair: "ee db migrate --workspace .",
+            }),
+        }
+
+        let storage_status = if degraded.is_empty() {
+            QuarantineStorageStatus::Ready
+        } else {
+            QuarantineStorageStatus::Unavailable
+        };
+        Self::gather_with_storage(
+            states.into_values().collect(),
+            storage_status,
+            Some(workspace_path.display().to_string()),
+            Some(database_path.display().to_string()),
+            degraded,
+        )
+    }
+
     /// Gather quarantine report from provided source states.
     #[must_use]
     pub fn gather_with_sources(sources: &[SourceTrustState]) -> Self {
+        Self::gather_with_storage(
+            sources.to_vec(),
+            QuarantineStorageStatus::Ready,
+            None,
+            None,
+            Vec::new(),
+        )
+    }
+
+    fn gather_with_storage(
+        mut sources: Vec<SourceTrustState>,
+        storage_status: QuarantineStorageStatus,
+        workspace_path: Option<String>,
+        database_path: Option<String>,
+        degraded: Vec<QuarantineDegradation>,
+    ) -> Self {
+        sources.sort_by(|left, right| left.source_id.cmp(&right.source_id));
         let calculator = TrustDecayCalculator::new();
         let _config = DecayConfig::default();
 
@@ -128,7 +303,7 @@ impl QuarantineReport {
         let mut blocked_count = 0u32;
         let mut healthy_count = 0u32;
 
-        for state in sources {
+        for state in &sources {
             let advisory = calculator.advisory(state);
             let level = AdvisoryLevel::from(&advisory);
             let effective_trust = calculator.effective_trust(state);
@@ -181,6 +356,10 @@ impl QuarantineReport {
                 total_sources,
                 healthy_count,
             },
+            storage_status,
+            workspace_path,
+            database_path,
+            degraded,
         }
     }
 
@@ -200,6 +379,84 @@ impl QuarantineReport {
             .saturating_add(self.summary.at_risk_count)
             .saturating_add(self.summary.blocked_count)
     }
+}
+
+fn canonical_workspace_path(path: &Path) -> Result<PathBuf, String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    absolute.canonicalize().map_err(|error| {
+        format!(
+            "Failed to resolve workspace {}: {error}",
+            absolute.display()
+        )
+    })
+}
+
+fn apply_feedback_event(
+    states: &mut BTreeMap<String, SourceTrustState>,
+    event: &StoredFeedbackEvent,
+) {
+    let Some(source_id) = normalized_source_id(event.source_id.as_deref()) else {
+        return;
+    };
+    let state = states
+        .entry(source_id.clone())
+        .or_insert_with(|| SourceTrustState::new(source_id));
+    state.record_import();
+    match event.signal.as_str() {
+        "positive" | "helpful" | "confirmation" => state.record_positive(),
+        "contradiction" => state.record_contradiction(),
+        "harmful" | "negative" => state.record_harmful(),
+        "inaccurate" | "stale" | "outdated" => state.record_inaccurate(),
+        _ => {}
+    }
+}
+
+fn apply_quarantine_row(
+    states: &mut BTreeMap<String, SourceTrustState>,
+    row: &StoredFeedbackQuarantine,
+) {
+    let Some(source_id) = normalized_source_id(Some(&row.source_id)) else {
+        return;
+    };
+    let state = states
+        .entry(source_id.clone())
+        .or_insert_with(|| SourceTrustState::new(source_id));
+    state.record_import();
+    if row.status == "pending" {
+        state.record_quarantine();
+    }
+}
+
+fn apply_trust_quarantine_row(
+    states: &mut BTreeMap<String, SourceTrustState>,
+    row: &StoredTrustQuarantine,
+) {
+    let Some(source_id) = normalized_source_id(Some(&row.source_uri)) else {
+        return;
+    };
+    let state = states
+        .entry(source_id.clone())
+        .or_insert_with(|| SourceTrustState::new(source_id));
+    for _ in 0..row.harmful_event_count {
+        state.record_import();
+        state.record_harmful();
+    }
+    if row.status == "active" {
+        state.record_quarantine();
+    }
+}
+
+fn normalized_source_id(source_id: Option<&str>) -> Option<String> {
+    source_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn advisory_message(advisory: &TrustAdvisory) -> String {
@@ -227,6 +484,9 @@ fn advisory_message(advisory: &TrustAdvisory) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    use crate::db::{CreateWorkspaceInput, UpsertTrustQuarantineInput};
     use crate::models::TrustClass;
 
     type TestResult = Result<(), String>;
@@ -348,6 +608,53 @@ mod tests {
         let report = QuarantineReport::gather_with_sources(&[state1, state2]);
 
         ensure(report.issue_count() >= 2, true, "at least 2 issues")
+    }
+
+    #[test]
+    fn gather_for_workspace_reads_persisted_trust_quarantine() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let workspace_path = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database_path = workspace_path.join(".ee").join("ee.db");
+        let workspace_id = crate::core::curate::stable_workspace_id(&workspace_path);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("quarantine test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .upsert_trust_quarantine(&UpsertTrustQuarantineInput {
+                workspace_id,
+                source_uri: "cass://bad-source".to_owned(),
+                first_event_at: "2026-05-06T00:00:00Z".to_owned(),
+                last_event_at: "2026-05-06T01:00:00Z".to_owned(),
+                harmful_event_count: 10,
+                quarantined_until: Some("2026-05-07T00:00:00Z".to_owned()),
+                reason: "harmful evidence burst".to_owned(),
+                status: "active".to_owned(),
+            })
+            .map_err(|error| error.to_string())?;
+
+        let report = QuarantineReport::gather_for_workspace(&workspace);
+
+        ensure(report.storage_status.as_str(), "ready", "storage status")?;
+        ensure(report.summary.total_sources, 1, "total sources")?;
+        ensure(report.summary.blocked_count, 1, "blocked count")?;
+        ensure(
+            report.blocked_sources[0].source_id.as_str(),
+            "cass://bad-source",
+            "blocked source id",
+        )
     }
 
     #[test]

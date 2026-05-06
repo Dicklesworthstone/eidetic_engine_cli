@@ -21,9 +21,10 @@ use crate::core::memory::{
     MemoryDetails, MemoryHistoryReport, MemoryListReport, MemoryShowReport, memory_validity,
 };
 use crate::core::outcome::{OutcomeQuarantineListReport, OutcomeQuarantineReviewReport};
-use crate::core::quarantine::{QuarantineEntry, QuarantineReport};
+use crate::core::quarantine::{QuarantineDegradation, QuarantineEntry, QuarantineReport};
 use crate::core::rule::{
-    PlaybookExtractReport, RuleAddReport, RuleListReport, RuleProtectReport, RuleShowReport,
+    PlaybookExtractReport, RULE_ADD_SCHEMA_V1, RULE_LIST_SCHEMA_V1, RULE_SHOW_SCHEMA_V1,
+    RuleAddReport, RuleListReport, RuleProtectReport, RuleShowReport,
 };
 use crate::core::status::StatusReport;
 use crate::core::why::WhyReport;
@@ -2987,6 +2988,13 @@ pub fn render_quarantine_json(report: &QuarantineReport) -> String {
     b.field_object("data", |d| {
         d.field_str("command", "diag quarantine");
         d.field_str("version", report.version);
+        d.field_str("storageStatus", report.storage_status.as_str());
+        if let Some(workspace_path) = &report.workspace_path {
+            d.field_str("workspacePath", workspace_path);
+        }
+        if let Some(database_path) = &report.database_path {
+            d.field_str("databasePath", database_path);
+        }
         d.field_object("summary", |s| {
             s.field_raw(
                 "quarantinedCount",
@@ -3012,6 +3020,7 @@ pub fn render_quarantine_json(report: &QuarantineReport) -> String {
             &report.blocked_sources,
             build_quarantine_entry,
         );
+        d.field_array_of_objects("degraded", &report.degraded, build_quarantine_degradation);
     });
     b.finish()
 }
@@ -3029,12 +3038,37 @@ fn build_quarantine_entry(obj: &mut JsonBuilder, entry: &QuarantineEntry) {
     obj.field_bool("requiresValidation", entry.requires_validation);
 }
 
+fn build_quarantine_degradation(obj: &mut JsonBuilder, degradation: &QuarantineDegradation) {
+    obj.field_str("code", degradation.code);
+    obj.field_str("severity", degradation.severity);
+    obj.field_str("message", &degradation.message);
+    obj.field_str("repair", degradation.repair);
+}
+
 /// Render a quarantine report as human-readable text.
 #[must_use]
 pub fn render_quarantine_human(report: &QuarantineReport) -> String {
     let mut output = format!("ee diag quarantine (v{})\n\n", report.version);
+    output.push_str(&format!("Storage: {}\n", report.storage_status.as_str()));
+    if let Some(workspace_path) = &report.workspace_path {
+        output.push_str(&format!("Workspace: {workspace_path}\n"));
+    }
+    if let Some(database_path) = &report.database_path {
+        output.push_str(&format!("Database: {database_path}\n"));
+    }
+    if !report.degraded.is_empty() {
+        output.push('\n');
+        output.push_str("Degraded:\n");
+        for degraded in &report.degraded {
+            output.push_str(&format!(
+                "  {}: {}\n    repair: {}\n",
+                degraded.code, degraded.message, degraded.repair
+            ));
+        }
+    }
 
     if !report.has_issues() {
+        output.push('\n');
         output.push_str("No sources require attention.\n");
         output.push_str(&format!(
             "Tracked: {} sources, {} healthy\n\n",
@@ -4488,6 +4522,7 @@ pub struct SchemaEntry {
     pub version: &'static str,
     pub description: &'static str,
     pub category: &'static str,
+    definition: fn() -> String,
 }
 
 /// All public schemas exposed by ee.
@@ -4498,72 +4533,84 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             version: "1",
             description: "Success response envelope for all ee commands",
             category: "envelope",
+            definition: response_schema_definition,
         },
         SchemaEntry {
             id: "ee.error.v1",
             version: "1",
             description: "Error response envelope with code, message, and repair",
             category: "envelope",
+            definition: error_schema_definition,
         },
         SchemaEntry {
             id: MCP_MANIFEST_SCHEMA_V1,
             version: "1",
             description: "MCP adapter manifest generated from ee's public command and schema registries",
             category: "adapter",
+            definition: mcp_manifest_schema_definition,
         },
         SchemaEntry {
             id: "ee.certificate.v1",
             version: "1",
             description: "Certificate schemas for pack, curation, tail-risk, privacy-budget, and lifecycle",
             category: "domain",
+            definition: certificate_schema_definition,
         },
         SchemaEntry {
             id: "ee.executable_id_schemas.v1",
             version: "1",
             description: "Executable claim/evidence/policy/trace/demo ID schemas",
             category: "id",
+            definition: crate::models::executable_id_schema_catalog_json,
         },
         SchemaEntry {
             id: "ee.procedure.schemas.v1",
             version: "1",
             description: "Procedure, verification, export, and render-only skill capsule schemas",
             category: "domain",
+            definition: crate::models::procedure_schema_catalog_json,
         },
         SchemaEntry {
             id: "ee.economy.schemas.v1",
             version: "1",
             description: "Utility, attention-cost, reserve, debt, recommendation, report, and simulation schemas",
             category: "domain",
+            definition: crate::models::economy_schema_catalog_json,
         },
         SchemaEntry {
             id: "ee.learning.schemas.v1",
             version: "1",
             description: "Learning question, uncertainty, experiment, observation, and outcome schemas",
             category: "domain",
+            definition: crate::models::learning_schema_catalog_json,
         },
         SchemaEntry {
-            id: "ee.rule.add.v1",
+            id: RULE_ADD_SCHEMA_V1,
             version: "1",
             description: "Procedural rule creation response data",
             category: "domain",
+            definition: rule_add_schema_definition,
         },
         SchemaEntry {
-            id: "ee.rule.list.v1",
+            id: RULE_LIST_SCHEMA_V1,
             version: "1",
             description: "Procedural rule list response data",
             category: "domain",
+            definition: rule_list_schema_definition,
         },
         SchemaEntry {
-            id: "ee.rule.show.v1",
+            id: RULE_SHOW_SCHEMA_V1,
             version: "1",
             description: "Procedural rule detail response data",
             category: "domain",
+            definition: rule_show_schema_definition,
         },
         SchemaEntry {
             id: "ee.causal.schemas.v1",
             version: "1",
             description: "Causal exposure, decision trace, uplift, confounder, and promotion-plan schemas",
             category: "domain",
+            definition: crate::models::causal_schema_catalog_json,
         },
     ]
 }
@@ -4618,31 +4665,22 @@ pub fn render_schema_export_json(schema_id: Option<&str>) -> String {
 }
 
 fn render_single_schema_export(schema_id: &str) -> String {
-    match schema_id {
-        "ee.response.v1" => response_schema_definition(),
-        "ee.error.v1" => error_schema_definition(),
-        MCP_MANIFEST_SCHEMA_V1 => mcp_manifest_schema_definition(),
-        "ee.certificate.v1" => certificate_schema_definition(),
-        "ee.executable_id_schemas.v1" => crate::models::executable_id_schema_catalog_json(),
-        "ee.procedure.schemas.v1" => crate::models::procedure_schema_catalog_json(),
-        "ee.economy.schemas.v1" => crate::models::economy_schema_catalog_json(),
-        "ee.learning.schemas.v1" => crate::models::learning_schema_catalog_json(),
-        "ee.causal.schemas.v1" => crate::models::causal_schema_catalog_json(),
-        _ => {
-            let mut b = JsonBuilder::with_capacity(256);
-            b.field_str("schema", ERROR_SCHEMA_V1);
-            b.field_object("error", |e| {
-                e.field_str("code", "schema_not_found");
-                e.field_str("message", &format!("Schema '{}' not found", schema_id));
-                e.field_str("severity", "low");
-                e.field_str("repair", "ee schema list");
-                e.field_object("details", |details| {
-                    details.field_str("schemaId", schema_id);
-                });
-            });
-            b.finish()
-        }
+    if let Some(entry) = public_schemas().iter().find(|entry| entry.id == schema_id) {
+        return (entry.definition)();
     }
+
+    let mut b = JsonBuilder::with_capacity(256);
+    b.field_str("schema", ERROR_SCHEMA_V1);
+    b.field_object("error", |e| {
+        e.field_str("code", "schema_not_found");
+        e.field_str("message", &format!("Schema '{}' not found", schema_id));
+        e.field_str("severity", "low");
+        e.field_str("repair", "ee schema list");
+        e.field_object("details", |details| {
+            details.field_str("schemaId", schema_id);
+        });
+    });
+    b.finish()
 }
 
 fn render_all_schemas_export() -> String {
@@ -4651,23 +4689,21 @@ fn render_all_schemas_export() -> String {
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "schema export");
-        d.field_raw(
-            "schemas",
-            &format!(
-                "[{},{},{},{},{},{},{},{},{}]",
-                response_schema_definition(),
-                error_schema_definition(),
-                mcp_manifest_schema_definition(),
-                certificate_schema_definition(),
-                crate::models::executable_id_schema_catalog_json(),
-                crate::models::procedure_schema_catalog_json(),
-                crate::models::economy_schema_catalog_json(),
-                crate::models::learning_schema_catalog_json(),
-                crate::models::causal_schema_catalog_json()
-            ),
-        );
+        d.field_raw("schemas", &schema_definition_array_json());
     });
     b.finish()
+}
+
+fn schema_definition_array_json() -> String {
+    let mut output = String::from("[");
+    for (index, schema) in public_schemas().iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        output.push_str(&(schema.definition)());
+    }
+    output.push(']');
+    output
 }
 
 fn response_schema_definition() -> String {
@@ -4713,11 +4749,112 @@ fn certificate_schema_definition() -> String {
     r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"ee.certificate.v1","type":"object","required":["kind","status"],"properties":{"kind":{"type":"string","enum":["pack","curation","tail_risk","privacy_budget","lifecycle"]},"status":{"type":"string","enum":["pending","active","revoked","expired"]}}}"#.to_string()
 }
 
+fn rule_add_schema_definition() -> String {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": RULE_ADD_SCHEMA_V1,
+        "type": "object",
+        "required": [
+            "schema",
+            "command",
+            "version",
+            "status",
+            "ruleId",
+            "content",
+            "maturity",
+            "lifecycle",
+            "evidence",
+            "dryRun",
+            "persisted",
+            "degraded"
+        ],
+        "properties": {
+            "schema": { "const": RULE_ADD_SCHEMA_V1 },
+            "command": { "const": "rule add" },
+            "version": { "type": "string" },
+            "status": { "type": "string" },
+            "ruleId": { "type": "string" },
+            "content": { "type": "string" },
+            "maturity": { "type": "string" },
+            "lifecycle": { "type": "object" },
+            "evidence": { "type": "object" },
+            "dryRun": { "type": "boolean" },
+            "persisted": { "type": "boolean" },
+            "degraded": { "type": "array", "items": { "type": "object" } }
+        }
+    })
+    .to_string()
+}
+
+fn rule_list_schema_definition() -> String {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": RULE_LIST_SCHEMA_V1,
+        "type": "object",
+        "required": [
+            "schema",
+            "command",
+            "version",
+            "workspaceId",
+            "totalCount",
+            "returnedCount",
+            "limit",
+            "offset",
+            "truncated",
+            "filter",
+            "rules",
+            "degraded"
+        ],
+        "properties": {
+            "schema": { "const": RULE_LIST_SCHEMA_V1 },
+            "command": { "const": "rule list" },
+            "version": { "type": "string" },
+            "workspaceId": { "type": "string" },
+            "totalCount": { "type": "integer", "minimum": 0 },
+            "returnedCount": { "type": "integer", "minimum": 0 },
+            "limit": { "type": "integer", "minimum": 0 },
+            "offset": { "type": "integer", "minimum": 0 },
+            "truncated": { "type": "boolean" },
+            "filter": { "type": "object" },
+            "rules": { "type": "array", "items": { "type": "object" } },
+            "degraded": { "type": "array", "items": { "type": "object" } }
+        }
+    })
+    .to_string()
+}
+
+fn rule_show_schema_definition() -> String {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": RULE_SHOW_SCHEMA_V1,
+        "type": "object",
+        "required": [
+            "schema",
+            "command",
+            "version",
+            "workspaceId",
+            "found",
+            "rule",
+            "degraded"
+        ],
+        "properties": {
+            "schema": { "const": RULE_SHOW_SCHEMA_V1 },
+            "command": { "const": "rule show" },
+            "version": { "type": "string" },
+            "workspaceId": { "type": "string" },
+            "found": { "type": "boolean" },
+            "rule": { "type": "object" },
+            "degraded": { "type": "array", "items": { "type": "object" } }
+        }
+    })
+    .to_string()
+}
+
 /// Render a schema export as human-readable text.
 #[must_use]
 pub fn render_schema_export_human(schema_id: Option<&str>) -> String {
     let json = render_schema_export_json(schema_id);
-    if json.contains("\"error\"") {
+    if json.contains("\"code\":\"schema_not_found\"") {
         String::from("error: Schema not found\n\nRun `ee schema list` to see available schemas.\n")
     } else {
         format!("ee schema export\n\n{}\n", json)
@@ -6293,6 +6430,7 @@ pub fn render_quarantine_json_filtered(report: &QuarantineReport, profile: Field
     b.field_object("data", |d| {
         d.field_str("command", "diag quarantine");
         d.field_str("version", report.version);
+        d.field_str("storageStatus", report.storage_status.as_str());
 
         if profile.include_summary_metrics() {
             d.field_object("summary", |s| {
@@ -6329,6 +6467,7 @@ pub fn render_quarantine_json_filtered(report: &QuarantineReport, profile: Field
             );
             d.field_array_of_objects("atRiskSources", &report.at_risk_sources, build_entry);
             d.field_array_of_objects("blockedSources", &report.blocked_sources, build_entry);
+            d.field_array_of_objects("degraded", &report.degraded, build_quarantine_degradation);
         }
     });
     b.finish()
@@ -6470,6 +6609,7 @@ pub fn render_certificate_verify_json(report: &CertificateVerifyReport) -> Strin
         d.field_str("command", "certificate verify");
         d.field_str("certificateId", &report.certificate_id);
         d.field_str("result", report.result.as_str());
+        d.field_bool("valid", report.is_valid());
         d.field_str("checkedAt", &report.checked_at);
         d.field_bool("hashVerified", report.hash_verified);
         d.field_bool("payloadHashFresh", report.payload_hash_fresh);
@@ -6477,6 +6617,14 @@ pub fn render_certificate_verify_json(report: &CertificateVerifyReport) -> Strin
         d.field_bool("assumptionsValid", report.assumptions_valid);
         d.field_bool("statusValid", report.status_valid);
         d.field_bool("expiryValid", report.expiry_valid);
+        d.field_bool("signatureOk", report.signature_ok);
+        if let Some(signer) = &report.signer {
+            d.field_str("signer", signer);
+        }
+        d.field_raw(
+            "mismatches",
+            &string_array_json(report.mismatches.iter().map(String::as_str)),
+        );
         d.field_raw(
             "failureCodes",
             &string_array_json(report.failure_codes.iter().map(String::as_str)),
@@ -6534,6 +6682,13 @@ pub fn render_certificate_verify_human(report: &CertificateVerifyReport) -> Stri
         "  Expiry Valid: {}\n",
         if report.expiry_valid { "yes" } else { "no" }
     ));
+    out.push_str(&format!(
+        "  Signature OK: {}\n",
+        if report.signature_ok { "yes" } else { "no" }
+    ));
+    if let Some(signer) = &report.signer {
+        out.push_str(&format!("  Signer: {signer}\n"));
+    }
     out.push_str(&format!("  Message: {}\n", report.message));
     out
 }
@@ -8397,14 +8552,7 @@ use crate::core::handoff::{
 /// Render an audit timeline report as JSON.
 #[must_use]
 pub fn render_audit_timeline_json(report: &AuditTimelineReport) -> String {
-    serde_json::json!({
-        "schema": report.schema,
-        "success": true,
-        "entries": report.entries,
-        "pagination": report.pagination,
-        "generatedAt": report.generated_at,
-    })
-    .to_string()
+    report.to_json()
 }
 
 /// Render an audit timeline report as human-readable text.
@@ -8419,23 +8567,26 @@ pub fn render_audit_timeline_human(report: &AuditTimelineReport) -> String {
 
     for entry in &report.entries {
         out.push_str(&format!(
-            "[{}] {} ({})\n",
-            entry.operation_id, entry.command_path, entry.outcome
+            "[{}] {} {}\n",
+            entry.id, entry.surface, entry.mutation_kind
         ));
         out.push_str(&format!(
-            "    Effect: {} | Dry-run: {}\n",
-            entry.effect_class, entry.dry_run
+            "    Actor: {} | Target: {} {}\n",
+            entry.actor.as_deref().unwrap_or("<none>"),
+            entry.target_type.as_deref().unwrap_or("<none>"),
+            entry.target_id.as_deref().unwrap_or("<none>")
         ));
-        if !entry.changed_surfaces.is_empty() {
+        if let Some(hash) = &entry.this_row_hash {
             out.push_str(&format!(
-                "    Changed: {}\n",
-                entry.changed_surfaces.join(", ")
+                "    Hash: {} | Prev: {}\n",
+                hash,
+                entry.prev_row_hash.as_deref().unwrap_or("<none>")
             ));
         }
         out.push('\n');
     }
 
-    out.push_str("Next:\n  ee audit show <operation-id> --json\n");
+    out.push_str("Next:\n  ee audit show <audit-id> --json\n");
     out
 }
 
@@ -8451,57 +8602,41 @@ pub fn render_audit_timeline_toon(report: &AuditTimelineReport) -> String {
 /// Render an audit show report as JSON.
 #[must_use]
 pub fn render_audit_show_json(report: &AuditShowReport) -> String {
-    serde_json::json!({
-        "schema": report.schema,
-        "success": true,
-        "operation": report.operation,
-        "nextCommands": report.next_commands,
-        "generatedAt": report.generated_at,
-    })
-    .to_string()
+    report.to_json()
 }
 
 /// Render an audit show report as human-readable text.
 #[must_use]
 pub fn render_audit_show_human(report: &AuditShowReport) -> String {
-    let op = &report.operation;
+    let row = &report.row;
     let mut out = String::with_capacity(1024);
-    out.push_str(&format!("Operation: {}\n\n", op.operation_id));
-    out.push_str(&format!("Command: {}\n", op.command_path));
-    out.push_str(&format!("Outcome: {}\n", op.outcome));
+    out.push_str(&format!("Audit row: {}\n\n", row.id));
+    out.push_str(&format!("Timestamp: {}\n", row.timestamp));
     out.push_str(&format!(
-        "Effect: {} (expected: {})\n",
-        op.observed_effect, op.expected_effect
+        "Actor: {}\n",
+        row.actor.as_deref().unwrap_or("<none>")
+    ));
+    out.push_str(&format!("Surface: {}\n", row.surface));
+    out.push_str(&format!("Mutation: {}\n", row.mutation_kind));
+    out.push_str(&format!(
+        "Target: {} {}\n",
+        row.target_type.as_deref().unwrap_or("<none>"),
+        row.target_id.as_deref().unwrap_or("<none>")
+    ));
+    out.push_str(&format!("Hash chain valid: {}\n", report.hash_chain_valid));
+    out.push_str(&format!(
+        "Row hash: {}\n",
+        row.this_row_hash.as_deref().unwrap_or("<missing>")
     ));
     out.push_str(&format!(
-        "Match: {}\n",
-        if op.effect_match { "yes" } else { "MISMATCH" }
-    ));
-    out.push_str(&format!("Dry-run: {}\n", op.dry_run));
-    out.push_str(&format!("Transaction: {}\n", op.transaction_status));
-    out.push_str(&format!("Hash chain valid: {}\n\n", op.hash_chain_valid));
-
-    if !op.changed_surfaces.is_empty() {
-        out.push_str("Changed Surfaces:\n");
-        for surface in &op.changed_surfaces {
-            out.push_str(&format!(
-                "  {} ({}) - {} rows\n",
-                surface.surface_name,
-                surface.surface_type,
-                surface.rows_affected.unwrap_or(0)
-            ));
+        "Linked snapshot: {}\n",
+        if report.linked_snapshot.found {
+            "found"
+        } else {
+            "not found"
         }
-    }
-
-    out.push_str(&format!(
-        "\nRedaction: {} ({} fields redacted)\n",
-        op.redaction_summary.posture, op.redaction_summary.fields_redacted
     ));
-
-    out.push_str("\nNext:\n");
-    for cmd in &report.next_commands {
-        out.push_str(&format!("  {}\n", cmd));
-    }
+    out.push_str("\nNext:\n  ee audit verify --json\n");
     out
 }
 
@@ -8509,47 +8644,32 @@ pub fn render_audit_show_human(report: &AuditShowReport) -> String {
 #[must_use]
 pub fn render_audit_show_toon(report: &AuditShowReport) -> String {
     format!(
-        "AUDIT_SHOW|{}|{}|{}|match={}",
-        report.operation.operation_id,
-        report.operation.command_path,
-        report.operation.outcome,
-        report.operation.effect_match
+        "AUDIT_SHOW|{}|surface={}|mutation={}|chain={}",
+        report.row.id, report.row.surface, report.row.mutation_kind, report.hash_chain_valid
     )
 }
 
 /// Render an audit diff report as JSON.
 #[must_use]
 pub fn render_audit_diff_json(report: &AuditDiffReport) -> String {
-    serde_json::json!({
-        "schema": report.schema,
-        "success": true,
-        "operationId": report.operation_id,
-        "deltas": report.deltas,
-        "allMatch": report.all_match,
-        "generatedAt": report.generated_at,
-    })
-    .to_string()
+    report.to_json()
 }
 
 /// Render an audit diff report as human-readable text.
 #[must_use]
 pub fn render_audit_diff_human(report: &AuditDiffReport) -> String {
     let mut out = String::with_capacity(1024);
-    out.push_str(&format!("Operation Diff: {}\n\n", report.operation_id));
     out.push_str(&format!(
-        "All match: {}\n\n",
-        if report.all_match { "yes" } else { "NO" }
+        "Audit Diff\n\nWindow: {} to {}\nRows: {}\n\n",
+        report.from, report.to, report.row_count
     ));
 
-    for delta in &report.deltas {
+    for entry in &report.entries {
         out.push_str(&format!(
-            "[{}] {} -> {}\n",
-            delta.surface_name, delta.declared_change, delta.observed_change
+            "[{}] {} {}\n",
+            entry.id, entry.surface, entry.mutation_kind
         ));
-        out.push_str(&format!("    Status: {}\n", delta.match_status));
-        if let (Some(before), Some(after)) = (delta.row_count_before, delta.row_count_after) {
-            out.push_str(&format!("    Rows: {} -> {}\n", before, after));
-        }
+        out.push_str(&format!("    Timestamp: {}\n", entry.timestamp));
         out.push('\n');
     }
 
@@ -8561,26 +8681,15 @@ pub fn render_audit_diff_human(report: &AuditDiffReport) -> String {
 #[must_use]
 pub fn render_audit_diff_toon(report: &AuditDiffReport) -> String {
     format!(
-        "AUDIT_DIFF|{}|deltas={}|all_match={}",
-        report.operation_id,
-        report.deltas.len(),
-        report.all_match
+        "AUDIT_DIFF|from={}|to={}|rows={}",
+        report.from, report.to, report.row_count
     )
 }
 
 /// Render an audit verify report as JSON.
 #[must_use]
 pub fn render_audit_verify_json(report: &AuditVerifyReport) -> String {
-    serde_json::json!({
-        "schema": report.schema,
-        "success": report.overall_valid,
-        "summary": report.summary,
-        "issues": report.issues,
-        "overallValid": report.overall_valid,
-        "nextActions": report.next_actions,
-        "generatedAt": report.generated_at,
-    })
-    .to_string()
+    report.to_json()
 }
 
 /// Render an audit verify report as human-readable text.
@@ -8590,36 +8699,21 @@ pub fn render_audit_verify_human(report: &AuditVerifyReport) -> String {
     out.push_str("Audit Verification\n\n");
     out.push_str(&format!(
         "Overall: {}\n\n",
-        if report.overall_valid {
+        if report.integrity_ok {
             "VALID"
         } else {
             "ISSUES FOUND"
         }
     ));
 
+    out.push_str(&format!("Rows checked: {}\n", report.rows));
     out.push_str(&format!(
-        "Operations checked: {}\n",
-        report.summary.operations_checked
+        "Last hash: {}\n",
+        report.last_hash.as_deref().unwrap_or("<none>")
     ));
     out.push_str(&format!(
-        "Hash chain valid: {}\n",
-        report.summary.hash_chain_valid
-    ));
-    out.push_str(&format!(
-        "Missing records: {}\n",
-        report.summary.missing_records
-    ));
-    out.push_str(&format!(
-        "Malformed entries: {}\n",
-        report.summary.malformed_entries
-    ));
-    out.push_str(&format!(
-        "Effect mismatches: {}\n",
-        report.summary.effect_mismatches
-    ));
-    out.push_str(&format!(
-        "Redaction failures: {}\n",
-        report.summary.redaction_failures
+        "First break: {}\n",
+        report.first_break.as_deref().unwrap_or("<none>")
     ));
 
     if !report.issues.is_empty() {
@@ -8627,16 +8721,14 @@ pub fn render_audit_verify_human(report: &AuditVerifyReport) -> String {
         for issue in &report.issues {
             out.push_str(&format!(
                 "  [{}] {}: {}\n",
-                issue.severity, issue.code, issue.message
+                issue.audit_id.as_deref().unwrap_or("<unknown>"),
+                issue.code,
+                issue.message
             ));
-            out.push_str(&format!("    Action: {}\n", issue.next_action));
         }
     }
 
-    out.push_str("\nNext:\n");
-    for action in &report.next_actions {
-        out.push_str(&format!("  {}\n", action));
-    }
+    out.push_str("\nNext:\n  ee audit timeline --json\n");
     out
 }
 
@@ -8644,9 +8736,9 @@ pub fn render_audit_verify_human(report: &AuditVerifyReport) -> String {
 #[must_use]
 pub fn render_audit_verify_toon(report: &AuditVerifyReport) -> String {
     format!(
-        "AUDIT_VERIFY|ops={}|valid={}|issues={}",
-        report.summary.operations_checked,
-        report.overall_valid,
+        "AUDIT_VERIFY|rows={}|integrity_ok={}|issues={}",
+        report.rows,
+        report.integrity_ok,
         report.issues.len()
     )
 }
@@ -10749,6 +10841,80 @@ mod tests {
         ensure_contains(&json, "\"severity\":\"low\"", "severity")?;
         ensure_contains(&json, "\"details\":{", "details")?;
         ensure_contains(&json, "\"schemaId\":\"ee.missing.v1\"", "schema id")
+    }
+
+    #[test]
+    fn public_schema_registry_exports_every_listed_schema_once() -> TestResult {
+        fn exported_schema_id(schema: &serde_json::Value) -> Option<&str> {
+            schema
+                .get("$id")
+                .or_else(|| schema.get("schema"))
+                .and_then(serde_json::Value::as_str)
+        }
+
+        let list_json = super::render_schema_list_json();
+        let list: serde_json::Value =
+            serde_json::from_str(&list_json).map_err(|error| error.to_string())?;
+        let listed_ids = list["data"]["schemas"]
+            .as_array()
+            .ok_or("schema list data.schemas must be an array")?
+            .iter()
+            .map(|schema| {
+                schema["id"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "schema list entry missing string id".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut unique_ids = listed_ids.clone();
+        unique_ids.sort();
+        unique_ids.dedup();
+        ensure_equal(
+            &unique_ids.len(),
+            &listed_ids.len(),
+            "schema list ids must be unique",
+        )?;
+        ensure_equal(
+            &listed_ids.len(),
+            &super::public_schemas().len(),
+            "schema list count must match public_schemas",
+        )?;
+
+        for schema_id in &listed_ids {
+            let export_json = render_schema_export_json(Some(schema_id));
+            let exported: serde_json::Value =
+                serde_json::from_str(&export_json).map_err(|error| error.to_string())?;
+            ensure(
+                exported.get("error").is_none(),
+                format!("listed schema {schema_id} must not export an error"),
+            )?;
+            ensure_equal(
+                &exported_schema_id(&exported),
+                &Some(schema_id.as_str()),
+                "single schema export id",
+            )?;
+        }
+
+        let bulk_json = render_schema_export_json(None);
+        let bulk: serde_json::Value =
+            serde_json::from_str(&bulk_json).map_err(|error| error.to_string())?;
+        let bulk_ids = bulk["data"]["schemas"]
+            .as_array()
+            .ok_or("bulk schema export data.schemas must be an array")?
+            .iter()
+            .map(|schema| {
+                exported_schema_id(schema)
+                    .map(str::to_owned)
+                    .ok_or_else(|| "bulk schema export entry missing $id/schema".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        ensure_equal(
+            &bulk_ids,
+            &listed_ids,
+            "bulk schema export must match schema list order exactly once",
+        )
     }
 
     #[test]
