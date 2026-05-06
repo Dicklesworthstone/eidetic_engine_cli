@@ -20,18 +20,20 @@ use super::{
     ImportCursor,
 };
 use crate::db::{
-    CreateEvidenceSpanInput, CreateImportLedgerInput, CreateSearchIndexJobInput,
-    CreateSessionInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, DbError,
-    SearchIndexJobType, UpdateImportLedgerInput,
+    CompleteImportLedgerInput, CreateAuditInput, CreateEvidenceSpanInput, CreateImportLedgerInput,
+    CreateSearchIndexJobInput, CreateSessionInput, CreateWorkspaceInput, DatabaseConfig,
+    DbConnection, DbError, DbOperation, SearchIndexJobType,
 };
 use crate::models::{
-    CASS_EVIDENCE_SPAN_SCHEMA_V1, CASS_SESSION_SCHEMA_V1, EvidenceId, IMPORT_CASS_SCHEMA_V1,
-    IMPORT_LEDGER_CASS_SCHEMA_V1, SessionId, WorkspaceId,
+    AuditId, CASS_EVIDENCE_SPAN_SCHEMA_V1, CASS_SESSION_SCHEMA_V1, EvidenceId,
+    IMPORT_CASS_SCHEMA_V1, IMPORT_LEDGER_CASS_SCHEMA_V1, SessionId, WorkspaceId,
 };
 
 const DEFAULT_DB_FILE: &str = "ee.db";
 const DEFAULT_VIEW_CONTEXT: u32 = 4;
 const IMPORT_SOURCE_KIND: &str = "cass";
+const CASS_REDACTION_AUDIT_SCHEMA_V1: &str = "ee.cass.redaction_audit.v1";
+const CASS_REDACTION_AUDIT_ACTION: &str = "cass.evidence.redacted";
 
 /// Options for one `ee import cass` run.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -482,39 +484,72 @@ fn persist_session_import_if_absent(
 
         connection.insert_session(&session_id, &session_input(workspace_id, session))?;
         for span in spans {
+            let evidence_id = stable_evidence_id(&session_id, &span.cass_span_id);
             connection.insert_evidence_span(
-                &stable_evidence_id(&session_id, &span.cass_span_id),
+                &evidence_id,
                 &evidence_input(workspace_id, &session_id, span),
             )?;
+            if span.redacted {
+                connection.insert_audit(
+                    &stable_cass_redaction_audit_id(&evidence_id),
+                    &cass_redaction_audit_input(workspace_id, &session_id, &evidence_id, span),
+                )?;
+            }
         }
         connection.insert_search_index_job(
             &index_job_id,
             &search_index_job_input(workspace_id, &session_id),
         )?;
         Ok(SessionImportPersistResult::Imported {
-            session_id,
-            index_job_id,
+            session_id: session_id.clone(),
+            index_job_id: index_job_id.clone(),
         })
     })
 }
 
 fn with_import_session_transaction<T>(
     connection: &DbConnection,
-    operation: impl FnOnce() -> Result<T, DbError>,
+    mut operation: impl FnMut() -> Result<T, DbError>,
 ) -> Result<T, DbError> {
-    begin_import_session_transaction(connection)?;
-    match operation() {
-        Ok(result) => match connection.commit() {
-            Ok(()) => Ok(result),
+    const MAX_ATTEMPTS: usize = 16;
+    let mut last_retryable_error = None;
+
+    for attempt in 0..MAX_ATTEMPTS {
+        begin_import_session_transaction(connection)?;
+        match operation() {
+            Ok(result) => match connection.commit() {
+                Ok(()) => return Ok(result),
+                Err(error) if import_session_transaction_error_is_retryable(&error) => {
+                    let _ = connection.rollback();
+                    last_retryable_error = Some(error);
+                }
+                Err(error) => {
+                    let _ = connection.rollback();
+                    return Err(error);
+                }
+            },
+            Err(error) if import_session_transaction_error_is_retryable(&error) => {
+                let _ = connection.rollback();
+                last_retryable_error = Some(error);
+            }
             Err(error) => {
                 let _ = connection.rollback();
-                Err(error)
+                return Err(error);
             }
-        },
-        Err(error) => {
-            let _ = connection.rollback();
-            Err(error)
         }
+
+        if attempt + 1 < MAX_ATTEMPTS {
+            std::thread::sleep(import_session_transaction_retry_delay(attempt));
+        }
+    }
+
+    match last_retryable_error {
+        Some(error) => Err(error),
+        None => Err(DbError::MalformedRow {
+            operation: DbOperation::CommitTransaction,
+            message: "import session transaction retry loop exhausted without a retryable error"
+                .to_string(),
+        }),
     }
 }
 
@@ -780,6 +815,8 @@ struct CassViewSpanForImport {
     role: Option<CassRole>,
     excerpt: String,
     content_hash: String,
+    redacted: bool,
+    redacted_reasons: Vec<String>,
 }
 
 fn parse_view_json(
@@ -811,7 +848,15 @@ fn parse_view_json(
             })?;
         let content = required_string(line, "content", "view")?;
         let (span_kind, role) = classify_line(&content);
-        let excerpt = truncate_excerpt(&content, 65_536);
+        let raw_excerpt = truncate_excerpt(&content, 65_536);
+        let redaction = crate::policy::redact_secret_like_content(&raw_excerpt);
+        let redacted = redaction.redacted;
+        let redacted_reasons = redaction
+            .redacted_reasons
+            .iter()
+            .map(|reason| (*reason).to_string())
+            .collect();
+        let excerpt = redaction.content;
         spans.push(CassViewSpanForImport {
             cass_span_id: format!("{source_path}:{line_number}"),
             span_kind,
@@ -820,6 +865,8 @@ fn parse_view_json(
             role,
             content_hash: blake3_hex(&excerpt),
             excerpt,
+            redacted,
+            redacted_reasons,
         });
     }
     Ok(spans)
@@ -918,28 +965,8 @@ fn ensure_running_ledger(
     source_id: &str,
 ) -> Result<String, DbError> {
     let now = Utc::now().to_rfc3339();
-    if let Some(existing) =
-        connection.get_import_ledger_by_source(workspace_id, IMPORT_SOURCE_KIND, source_id)?
-    {
-        let _ = connection.update_import_ledger(
-            &existing.id,
-            &UpdateImportLedgerInput {
-                status: "running".to_string(),
-                cursor_json: existing.cursor_json,
-                imported_session_count: existing.imported_session_count,
-                imported_span_count: existing.imported_span_count,
-                attempt_count: existing.attempt_count.saturating_add(1),
-                error_code: None,
-                error_message: None,
-                started_at: Some(now),
-                completed_at: None,
-            },
-        )?;
-        return Ok(existing.id);
-    }
-
     let id = stable_import_id(source_id);
-    connection.insert_import_ledger(
+    let ledger = connection.upsert_running_import_ledger(
         &id,
         &CreateImportLedgerInput {
             workspace_id: workspace_id.to_string(),
@@ -957,7 +984,7 @@ fn ensure_running_ledger(
             metadata_json: Some(json!({"schema": IMPORT_LEDGER_CASS_SCHEMA_V1}).to_string()),
         },
     )?;
-    Ok(id)
+    Ok(ledger.id)
 }
 
 fn complete_ledger(
@@ -974,22 +1001,9 @@ fn complete_ledger(
         "completed"
     };
     let now = Utc::now().to_rfc3339();
-    // Preserve the attempt_count that `ensure_running_ledger` just bumped.
-    // Re-read the row instead of overwriting with a hard-coded value, otherwise
-    // the retry counter resets on every completion and never reflects reality.
-    let existing = connection.get_import_ledger(ledger_id)?;
-    let attempt_count = existing.as_ref().map_or(1, |ledger| ledger.attempt_count);
-    let imported_session_count = existing.as_ref().map_or(imported_sessions, |ledger| {
-        ledger
-            .imported_session_count
-            .saturating_add(imported_sessions)
-    });
-    let imported_span_count = existing.as_ref().map_or(imported_spans, |ledger| {
-        ledger.imported_span_count.saturating_add(imported_spans)
-    });
-    let _ = connection.update_import_ledger(
+    let _ = connection.complete_import_ledger_attempt(
         ledger_id,
-        &UpdateImportLedgerInput {
+        &CompleteImportLedgerInput {
             status: status.to_string(),
             cursor_json: Some(
                 json!({
@@ -1003,12 +1017,10 @@ fn complete_ledger(
                 })
                 .to_string(),
             ),
-            imported_session_count,
-            imported_span_count,
-            attempt_count,
+            imported_session_delta: imported_sessions,
+            imported_span_delta: imported_spans,
             error_code: error.map(|err| error_code(err).to_string()),
             error_message: error.map(ToString::to_string),
-            started_at: None,
             completed_at: Some(now),
         },
     )?;
@@ -1069,7 +1081,38 @@ fn evidence_input(
         role: span.role.map(|role| role.as_str().to_string()),
         excerpt: span.excerpt.clone(),
         content_hash: span.content_hash.clone(),
-        metadata_json: Some(json!({"schema": CASS_EVIDENCE_SPAN_SCHEMA_V1}).to_string()),
+        metadata_json: Some(
+            json!({
+                "schema": CASS_EVIDENCE_SPAN_SCHEMA_V1,
+                "redactionStatus": if span.redacted { "redacted" } else { "clean" },
+                "redactionClasses": span.redacted_reasons,
+            })
+            .to_string(),
+        ),
+    }
+}
+
+fn cass_redaction_audit_input(
+    workspace_id: &str,
+    session_id: &str,
+    evidence_id: &str,
+    span: &CassViewSpanForImport,
+) -> CreateAuditInput {
+    CreateAuditInput {
+        workspace_id: Some(workspace_id.to_string()),
+        actor: Some("ee import cass".to_string()),
+        action: CASS_REDACTION_AUDIT_ACTION.to_string(),
+        target_type: Some("evidence_span".to_string()),
+        target_id: Some(evidence_id.to_string()),
+        details: Some(
+            json!({
+                "schema": CASS_REDACTION_AUDIT_SCHEMA_V1,
+                "sessionId": session_id,
+                "cassSpanId": span.cass_span_id,
+                "redactionClasses": span.redacted_reasons,
+            })
+            .to_string(),
+        ),
     }
 }
 
@@ -1238,6 +1281,10 @@ fn stable_session_id(source_path: &str) -> String {
 
 fn stable_evidence_id(session_id: &str, span_id: &str) -> String {
     EvidenceId::from_uuid(stable_uuid(&format!("evidence:{session_id}:{span_id}"))).to_string()
+}
+
+fn stable_cass_redaction_audit_id(evidence_id: &str) -> String {
+    AuditId::from_uuid(stable_uuid(&format!("audit:cass-redaction:{evidence_id}"))).to_string()
 }
 
 fn stable_search_index_job_id(workspace_id: &str, session_id: &str) -> String {
@@ -1855,6 +1902,7 @@ mod tests {
         let workspace_id = stable_workspace_id("/tmp/work");
         let session_id = stable_session_id("/tmp/session.jsonl");
         let evidence_id = stable_evidence_id(&session_id, "span-1");
+        let audit_id = stable_cass_redaction_audit_id(&evidence_id);
         let import_id = stable_import_id("cass://sessions?workspace=/tmp/work&limit=10");
         let since_source_id = source_id(Path::new("/tmp/work"), 10, Some("2026-04-01T00:00:00Z"));
         let index_job_id = stable_search_index_job_id(&workspace_id, &session_id);
@@ -1870,6 +1918,10 @@ mod tests {
         ensure(
             evidence_id.starts_with("ev_") && evidence_id.len() == 29,
             "evidence id shape",
+        )?;
+        ensure(
+            audit_id.starts_with("audit_") && audit_id.len() == 32,
+            "audit id shape",
         )?;
         ensure(
             import_id.starts_with("imp_") && import_id.len() == 30,

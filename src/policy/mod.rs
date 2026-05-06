@@ -472,17 +472,19 @@ pub fn redact_secret_like_content(content: &str) -> SecretRedactionReport {
     let (without_raw_tokens, raw_token_redacted) =
         redact_raw_api_tokens(&without_pem_blocks, &mut reasons);
     let (without_jwt, jwt_redacted) = redact_jwt_tokens(&without_raw_tokens, &mut reasons);
+    let (without_pii, pii_redacted) = redact_pii_values(&without_jwt, &mut reasons);
 
     reasons.sort_unstable();
     reasons.dedup();
 
     SecretRedactionReport {
-        content: without_jwt,
+        content: without_pii,
         redacted: key_value_redacted
             || url_password_redacted
             || pem_block_redacted
             || raw_token_redacted
-            || jwt_redacted,
+            || jwt_redacted
+            || pii_redacted,
         redacted_reasons: reasons,
     }
 }
@@ -829,6 +831,60 @@ fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
 
     if changed {
         output.push_str(&input[emit_start..]);
+        (output, true)
+    } else {
+        (input.to_owned(), false)
+    }
+}
+
+fn redact_pii_values(input: &str, reasons: &mut Vec<&'static str>) -> (String, bool) {
+    let (without_emails, email_redacted) = redact_regex_matches(
+        input,
+        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+        "email_address",
+        reasons,
+    );
+    let (without_ssns, ssn_redacted) =
+        redact_regex_matches(&without_emails, r"\b\d{3}-\d{2}-\d{4}\b", "ssn", reasons);
+    let (without_phones, phone_redacted) = redact_regex_matches(
+        &without_ssns,
+        r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b",
+        "phone_number",
+        reasons,
+    );
+    (
+        without_phones,
+        email_redacted || ssn_redacted || phone_redacted,
+    )
+}
+
+fn redact_regex_matches(
+    input: &str,
+    pattern: &str,
+    reason: &'static str,
+    reasons: &mut Vec<&'static str>,
+) -> (String, bool) {
+    let Ok(regex) = regex_lite::Regex::new(pattern) else {
+        return (input.to_owned(), false);
+    };
+
+    let placeholder = redaction_placeholder(reason);
+    let mut output = String::new();
+    let mut emit_start = 0;
+    let mut changed = false;
+    for matched in regex.find_iter(input) {
+        if !changed {
+            output = String::with_capacity(input.len());
+        }
+        output.push_str(&input[emit_start..matched.start()]);
+        output.push_str(&placeholder);
+        emit_start = matched.end();
+        changed = true;
+    }
+
+    if changed {
+        output.push_str(&input[emit_start..]);
+        reasons.push(reason);
         (output, true)
     } else {
         (input.to_owned(), false)
@@ -1473,6 +1529,34 @@ mod tests {
                 .contains(&redaction_placeholder("bearer_token"))
         );
         assert!(!report.content.contains(jwt));
+    }
+
+    #[test]
+    fn secret_redactor_masks_pii_values() {
+        let email = ["cass-redaction", "@", "example", ".", "test"].concat();
+        let ssn = ["123", "-45", "-6789"].concat();
+        let phone = ["212", "-", "555", "-", "0199"].concat();
+        let report =
+            redact_secret_like_content(&format!("Contact {email}; ssn {ssn}; phone {phone}."));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"email_address"));
+        assert!(report.redacted_reasons.contains(&"ssn"));
+        assert!(report.redacted_reasons.contains(&"phone_number"));
+        assert!(
+            report
+                .content
+                .contains(&redaction_placeholder("email_address"))
+        );
+        assert!(report.content.contains(&redaction_placeholder("ssn")));
+        assert!(
+            report
+                .content
+                .contains(&redaction_placeholder("phone_number"))
+        );
+        assert!(!report.content.contains(&email));
+        assert!(!report.content.contains(&ssn));
+        assert!(!report.content.contains(&phone));
     }
 
     #[test]

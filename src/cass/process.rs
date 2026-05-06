@@ -30,6 +30,7 @@ use super::error::CassError;
 
 const ALLOWLISTED_CASS_EXECUTABLE: &str = "cass";
 const TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const SPAWN_RETRY_ATTEMPTS: usize = 6;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CassSpawnTarget {
@@ -223,17 +224,8 @@ impl CassInvocation {
             return self.run_with_timeout(command, started, timeout);
         }
 
-        let output = command.output().map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                CassError::BinaryNotFound {
-                    binary: self.binary.clone(),
-                }
-            } else {
-                CassError::Io {
-                    message: error.to_string(),
-                }
-            }
-        })?;
+        let output =
+            retry_cass_spawn(|| command.output()).map_err(|error| cass_spawn_error(self, error))?;
         let elapsed = started.elapsed();
         let exit_code = output.status.code();
         let stdout = output.stdout;
@@ -255,17 +247,8 @@ impl CassInvocation {
         timeout: Duration,
     ) -> Result<CassOutcome, CassError> {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                CassError::BinaryNotFound {
-                    binary: self.binary.clone(),
-                }
-            } else {
-                CassError::Io {
-                    message: error.to_string(),
-                }
-            }
-        })?;
+        let mut child =
+            retry_cass_spawn(|| command.spawn()).map_err(|error| cass_spawn_error(self, error))?;
 
         let mut stdout = child.stdout.take().ok_or_else(|| CassError::Io {
             message: "cass subprocess stdout pipe was not available".to_owned(),
@@ -339,6 +322,60 @@ impl CassInvocation {
                 .to_string(),
         })
     }
+}
+
+fn retry_cass_spawn<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut last_retryable_error = None;
+    for attempt in 0..SPAWN_RETRY_ATTEMPTS {
+        match spawn() {
+            Ok(result) => return Ok(result),
+            Err(error) if cass_spawn_error_is_retryable(&error) => {
+                last_retryable_error = Some(error);
+                if attempt + 1 < SPAWN_RETRY_ATTEMPTS {
+                    thread::sleep(cass_spawn_retry_delay(attempt));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    match last_retryable_error {
+        Some(error) => Err(error),
+        None => Err(std::io::Error::other(
+            "CASS spawn retry loop exhausted without a retryable error",
+        )),
+    }
+}
+
+fn cass_spawn_error(invocation: &CassInvocation, error: std::io::Error) -> CassError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        CassError::BinaryNotFound {
+            binary: invocation.binary.clone(),
+        }
+    } else {
+        CassError::Io {
+            message: error.to_string(),
+        }
+    }
+}
+
+fn cass_spawn_error_is_retryable(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        const TEXT_FILE_BUSY: i32 = 26;
+        if error.raw_os_error() == Some(TEXT_FILE_BUSY) {
+            return true;
+        }
+    }
+    false
+}
+
+fn cass_spawn_retry_delay(attempt: usize) -> Duration {
+    const BASE_DELAY_MS: u64 = 2;
+    const MAX_DELAY_MS: u64 = 50;
+
+    let multiplier = 1_u64 << attempt.min(5);
+    Duration::from_millis(BASE_DELAY_MS.saturating_mul(multiplier).min(MAX_DELAY_MS))
 }
 
 fn validate_absolute_cass_binary(path: &Path) -> Result<(), CassError> {

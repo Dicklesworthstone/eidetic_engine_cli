@@ -1,11 +1,15 @@
+use std::cell::Cell;
 use std::error::Error;
 use std::fmt;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
+#[cfg(unix)]
+use rustix::fs::{FlockOperation, flock};
 use serde::{Deserialize, Serialize};
 use sqlmodel_core::{IsolationLevel, Row, Value};
 use sqlmodel_frankensqlite::FrankenConnection;
@@ -130,10 +134,86 @@ fn file_write_owner_gate() -> &'static Mutex<()> {
     FILE_WRITE_OWNER_GATE.get_or_init(|| Mutex::new(()))
 }
 
-fn lock_file_write_owner_gate() -> MutexGuard<'static, ()> {
-    file_write_owner_gate()
+thread_local! {
+    static FILE_WRITE_OWNER_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+struct FileWriteOwnerGuard {
+    _process_guard: Option<MutexGuard<'static, ()>>,
+    _lock_file: Option<File>,
+    active: bool,
+}
+
+impl Drop for FileWriteOwnerGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+
+        FILE_WRITE_OWNER_DEPTH.with(|depth| {
+            let current = depth.get();
+            debug_assert!(current > 0);
+            depth.set(current.saturating_sub(1));
+        });
+    }
+}
+
+fn lock_file_write_owner_gate(location: &DatabaseLocation) -> Result<FileWriteOwnerGuard> {
+    let nested = FILE_WRITE_OWNER_DEPTH.with(|depth| {
+        let current = depth.get();
+        if current == 0 {
+            false
+        } else {
+            depth.set(current.saturating_add(1));
+            true
+        }
+    });
+    if nested {
+        return Ok(FileWriteOwnerGuard {
+            _process_guard: None,
+            _lock_file: None,
+            active: true,
+        });
+    }
+
+    let process_guard = file_write_owner_gate()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lock_file = match location {
+        DatabaseLocation::Memory => None,
+        DatabaseLocation::File(path) => Some(lock_database_write_file(path)?),
+    };
+
+    FILE_WRITE_OWNER_DEPTH.with(|depth| depth.set(1));
+
+    Ok(FileWriteOwnerGuard {
+        _process_guard: Some(process_guard),
+        _lock_file: lock_file,
+        active: true,
+    })
+}
+
+fn lock_database_write_file(database_path: &Path) -> Result<File> {
+    let lock_path = database_path.with_extension("write.lock");
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| DbError::InvalidPath {
+            operation: DbOperation::BeginTransaction,
+            path: lock_path.clone(),
+            message: format!("could not open database write lock: {error}"),
+        })?;
+
+    #[cfg(unix)]
+    flock(&lock_file, FlockOperation::LockExclusive).map_err(|error| DbError::InvalidPath {
+        operation: DbOperation::BeginTransaction,
+        path: lock_path,
+        message: format!("could not acquire database write lock: {error}"),
+    })?;
+
+    Ok(lock_file)
 }
 
 impl DbConnection {
@@ -246,7 +326,7 @@ impl DbConnection {
     {
         let _write_owner = match self.location {
             DatabaseLocation::Memory => None,
-            DatabaseLocation::File(_) => Some(lock_file_write_owner_gate()),
+            DatabaseLocation::File(_) => Some(lock_file_write_owner_gate(&self.location)?),
         };
 
         self.begin_write_transaction()?;
@@ -620,6 +700,7 @@ impl DbConnection {
     fn execute_raw_for(&self, operation: DbOperation, sql: &str) -> Result<()> {
         if matches!(self.location, DatabaseLocation::File(_)) {
             return retry_sqlite_contention(|| {
+                let _write_owner = lock_file_write_owner_gate(&self.location)?;
                 self.inner
                     .execute_raw(sql)
                     .map_err(|source| DbError::sqlmodel(operation, source))
@@ -634,6 +715,7 @@ impl DbConnection {
     fn execute_for(&self, operation: DbOperation, sql: &str, params: &[Value]) -> Result<u64> {
         if matches!(self.location, DatabaseLocation::File(_)) {
             return retry_sqlite_contention(|| {
+                let _write_owner = lock_file_write_owner_gate(&self.location)?;
                 self.inner
                     .execute_sync(sql, params)
                     .map_err(|source| DbError::sqlmodel(operation, source))
@@ -4257,6 +4339,18 @@ pub struct UpdateImportLedgerInput {
     pub completed_at: Option<String>,
 }
 
+/// Input for completing one import ledger attempt.
+#[derive(Debug, Clone)]
+pub struct CompleteImportLedgerInput {
+    pub status: String,
+    pub cursor_json: Option<String>,
+    pub imported_session_delta: u32,
+    pub imported_span_delta: u32,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub completed_at: Option<String>,
+}
+
 /// A stored import_ledger row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredImportLedger {
@@ -4325,6 +4419,68 @@ impl DbConnection {
         )?;
 
         Ok(())
+    }
+
+    /// Insert a running import ledger or atomically reopen the existing source row.
+    pub fn upsert_running_import_ledger(
+        &self,
+        id: &str,
+        input: &CreateImportLedgerInput,
+    ) -> Result<StoredImportLedger> {
+        let now = Utc::now().to_rfc3339();
+
+        self.with_transaction(|| {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO import_ledger (id, workspace_id, source_kind, source_id, status, cursor_json, imported_session_count, imported_span_count, attempt_count, error_code, error_message, started_at, completed_at, metadata_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) ON CONFLICT(workspace_id, source_kind, source_id) DO UPDATE SET status = 'running', attempt_count = import_ledger.attempt_count + 1, error_code = NULL, error_message = NULL, started_at = excluded.started_at, completed_at = NULL, updated_at = excluded.updated_at",
+                &[
+                    Value::Text(id.to_string()),
+                    Value::Text(input.workspace_id.clone()),
+                    Value::Text(input.source_kind.clone()),
+                    Value::Text(input.source_id.clone()),
+                    Value::Text(input.status.clone()),
+                    input
+                        .cursor_json
+                        .as_ref()
+                        .map_or(Value::Null, |cursor| Value::Text(cursor.clone())),
+                    Value::BigInt(i64::from(input.imported_session_count)),
+                    Value::BigInt(i64::from(input.imported_span_count)),
+                    Value::BigInt(i64::from(input.attempt_count)),
+                    input
+                        .error_code
+                        .as_ref()
+                        .map_or(Value::Null, |code| Value::Text(code.clone())),
+                    input
+                        .error_message
+                        .as_ref()
+                        .map_or(Value::Null, |message| Value::Text(message.clone())),
+                    input
+                        .started_at
+                        .as_ref()
+                        .map_or(Value::Null, |started| Value::Text(started.clone())),
+                    input
+                        .completed_at
+                        .as_ref()
+                        .map_or(Value::Null, |completed| Value::Text(completed.clone())),
+                    input
+                        .metadata_json
+                        .as_ref()
+                        .map_or(Value::Null, |metadata| Value::Text(metadata.clone())),
+                    Value::Text(now.clone()),
+                    Value::Text(now.clone()),
+                ],
+            )?;
+
+            self.get_import_ledger_by_source(
+                &input.workspace_id,
+                &input.source_kind,
+                &input.source_id,
+            )?
+            .ok_or_else(|| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "running import ledger upsert did not return a source row".to_string(),
+            })
+        })
     }
 
     /// Get an import ledger row by its ee import ID.
@@ -4424,6 +4580,46 @@ impl DbConnection {
         )?;
 
         Ok(affected > 0)
+    }
+
+    /// Complete one import attempt while preserving concurrently bumped attempts.
+    pub fn complete_import_ledger_attempt(
+        &self,
+        id: &str,
+        input: &CompleteImportLedgerInput,
+    ) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        self.with_transaction(|| {
+            let affected = self.execute_for(
+                DbOperation::Execute,
+                "UPDATE import_ledger SET status = ?1, cursor_json = ?2, imported_session_count = imported_session_count + ?3, imported_span_count = imported_span_count + ?4, error_code = ?5, error_message = ?6, started_at = NULL, completed_at = ?7, updated_at = ?8 WHERE id = ?9",
+                &[
+                    Value::Text(input.status.clone()),
+                    input
+                        .cursor_json
+                        .as_ref()
+                        .map_or(Value::Null, |cursor| Value::Text(cursor.clone())),
+                    Value::BigInt(i64::from(input.imported_session_delta)),
+                    Value::BigInt(i64::from(input.imported_span_delta)),
+                    input
+                        .error_code
+                        .as_ref()
+                        .map_or(Value::Null, |code| Value::Text(code.clone())),
+                    input
+                        .error_message
+                        .as_ref()
+                        .map_or(Value::Null, |message| Value::Text(message.clone())),
+                    input
+                        .completed_at
+                        .as_ref()
+                        .map_or(Value::Null, |completed| Value::Text(completed.clone())),
+                    Value::Text(now.clone()),
+                    Value::Text(id.to_string()),
+                ],
+            )?;
+
+            Ok(affected > 0)
+        })
     }
 }
 
@@ -9047,41 +9243,16 @@ impl DbConnection {
 
         let resource_key = lock_id.canonical_key();
 
-        self.begin_transaction(IsolationLevel::RepeatableRead)?;
-        let result = self.acquire_advisory_lock_in_transaction(
-            lock_id,
-            holder_id,
-            reason,
-            &now,
-            expires_at.as_deref(),
-            &resource_key,
-        );
-
-        match result {
-            Ok(result) => match self.commit() {
-                Ok(()) => Ok(result),
-                Err(error) => {
-                    self.rollback_advisory_lock_transaction("commit", &error);
-                    Err(error)
-                }
-            },
-            Err(error) => {
-                self.rollback_advisory_lock_transaction("operation", &error);
-                Err(error)
-            }
-        }
-    }
-
-    fn rollback_advisory_lock_transaction(&self, phase: &str, original_error: &DbError) {
-        if let Err(rollback_error) = self.rollback() {
-            tracing::error!(
-                target: "ee::db",
-                phase,
-                error = %original_error,
-                rollback_error = %rollback_error,
-                "advisory lock transaction rollback failed"
-            );
-        }
+        self.with_transaction(|| {
+            self.acquire_advisory_lock_in_transaction(
+                lock_id,
+                holder_id,
+                reason,
+                &now,
+                expires_at.as_deref(),
+                &resource_key,
+            )
+        })
     }
 
     fn acquire_advisory_lock_in_transaction(
@@ -12240,6 +12411,95 @@ mod tests {
             },
         )?;
         ensure(!missing, "missing import ledger update reports false")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn upsert_running_import_ledger_reopens_source_atomically() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let mut input = import_ledger_input("cass://session-upsert", "running");
+        input.imported_session_count = 0;
+        input.imported_span_count = 0;
+        input.attempt_count = 1;
+        let first =
+            connection.upsert_running_import_ledger("imp_02234567890123456789012345", &input)?;
+        ensure_equal(&first.status.as_str(), &"running", "first status")?;
+        ensure_equal(&first.attempt_count, &1, "first attempt count")?;
+
+        let _ = connection.update_import_ledger(
+            "imp_02234567890123456789012345",
+            &super::UpdateImportLedgerInput {
+                status: "completed".to_string(),
+                cursor_json: Some(r#"{"complete":true}"#.to_string()),
+                imported_session_count: 1,
+                imported_span_count: 1,
+                attempt_count: 1,
+                error_code: None,
+                error_message: None,
+                started_at: None,
+                completed_at: Some("2026-04-29T20:10:00Z".to_string()),
+            },
+        )?;
+
+        let reopened =
+            connection.upsert_running_import_ledger("imp_02234567890123456789012345", &input)?;
+        ensure_equal(&reopened.status.as_str(), &"running", "reopened status")?;
+        ensure_equal(&reopened.attempt_count, &2, "reopened attempt count")?;
+        ensure_equal(
+            &reopened.imported_session_count,
+            &1,
+            "reopened keeps imported session count",
+        )?;
+        ensure_equal(
+            &reopened.imported_span_count,
+            &1,
+            "reopened keeps imported span count",
+        )?;
+        ensure_equal(
+            &reopened.completed_at,
+            &None,
+            "reopened clears completed_at",
+        )?;
+
+        let completed = connection.complete_import_ledger_attempt(
+            "imp_02234567890123456789012345",
+            &super::CompleteImportLedgerInput {
+                status: "completed".to_string(),
+                cursor_json: Some(r#"{"complete":true,"second":true}"#.to_string()),
+                imported_session_delta: 3,
+                imported_span_delta: 5,
+                error_code: None,
+                error_message: None,
+                completed_at: Some("2026-04-29T20:15:00Z".to_string()),
+            },
+        )?;
+        ensure(completed, "completion update must affect the ledger row")?;
+        let completed_ledger = connection
+            .get_import_ledger("imp_02234567890123456789012345")?
+            .ok_or_else(|| TestFailure::new("completed import ledger not found"))?;
+        ensure_equal(
+            &completed_ledger.attempt_count,
+            &2,
+            "completion preserves attempt count",
+        )?;
+        ensure_equal(
+            &completed_ledger.imported_session_count,
+            &4,
+            "completion adds imported session delta",
+        )?;
+        ensure_equal(
+            &completed_ledger.imported_span_count,
+            &6,
+            "completion adds imported span delta",
+        )?;
+
+        let ledgers = connection.list_import_ledgers("wsp_01234567890123456789012345")?;
+        ensure_equal(&ledgers.len(), &1, "upsert keeps one source ledger")?;
 
         connection.close()?;
         Ok(())

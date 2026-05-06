@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, CreateSearchIndexJobInput, DbConnection, DbError,
@@ -19,6 +19,7 @@ const INDEX_RETAINED_SUFFIX: &str = ".previous";
 
 /// Lock TTL for index publish operations (5 minutes).
 const INDEX_PUBLISH_LOCK_TTL_SECS: u64 = 300;
+const INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS: usize = 200;
 
 /// Generate a unique holder ID for advisory locks.
 fn generate_index_holder_id() -> String {
@@ -41,21 +42,45 @@ fn acquire_index_publish_lock(
     }
 
     let lock_id = AdvisoryLockId::index(workspace_id);
-    match db.acquire_advisory_lock(
-        &lock_id,
-        holder_id,
-        Some(INDEX_PUBLISH_LOCK_TTL_SECS),
-        Some("index publish"),
-    )? {
-        AcquireLockResult::Acquired(_) | AcquireLockResult::Expired { .. } => Ok(()),
-        AcquireLockResult::AlreadyHeld {
-            holder_id: other,
-            acquired_at,
-        } => Err(IndexRebuildError::Index(format!(
-            "Index publish lock held by {other} since {acquired_at}. \
-             Another index operation may be in progress."
-        ))),
+    let mut last_holder = None;
+    for attempt in 0..INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS {
+        match db.acquire_advisory_lock(
+            &lock_id,
+            holder_id,
+            Some(INDEX_PUBLISH_LOCK_TTL_SECS),
+            Some("index publish"),
+        )? {
+            AcquireLockResult::Acquired(_) | AcquireLockResult::Expired { .. } => return Ok(()),
+            AcquireLockResult::AlreadyHeld {
+                holder_id: other,
+                acquired_at,
+            } => {
+                last_holder = Some((other, acquired_at));
+                if attempt + 1 < INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS {
+                    std::thread::sleep(index_publish_lock_retry_delay(attempt));
+                }
+            }
+        }
     }
+
+    let (other, acquired_at) = last_holder.unwrap_or_else(|| {
+        (
+            "<unknown holder>".to_owned(),
+            "<unknown acquisition time>".to_owned(),
+        )
+    });
+    Err(IndexRebuildError::Index(format!(
+        "Index publish lock held by {other} since {acquired_at}. \
+         Another index operation may be in progress."
+    )))
+}
+
+fn index_publish_lock_retry_delay(attempt: usize) -> Duration {
+    const BASE_DELAY_MS: u64 = 5;
+    const MAX_DELAY_MS: u64 = 50;
+
+    let multiplier = 1_u64 << attempt.min(4);
+    Duration::from_millis(BASE_DELAY_MS.saturating_mul(multiplier).min(MAX_DELAY_MS))
 }
 
 /// Release the index publish lock (best-effort, errors are logged but not propagated).

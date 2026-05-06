@@ -5,7 +5,7 @@ use std::fmt;
 use std::time::Duration;
 
 #[cfg(any(feature = "graph", test))]
-use crate::db::{AcquireLockResult, AdvisoryLockId, CreateGraphSnapshotInput};
+use crate::db::{AcquireLockResult, AdvisoryLockId, CreateGraphSnapshotInput, DbOperation};
 use crate::db::{
     DbConnection, DbError, GraphSnapshotStatus, GraphSnapshotType, StoredGraphSnapshot,
     StoredMemoryLink,
@@ -13,8 +13,6 @@ use crate::db::{
 #[cfg(any(feature = "graph", test))]
 use crate::models::MemoryId;
 use crate::models::{CapabilityStatus, GRAPH_MODULE_SCHEMA_V1};
-#[cfg(any(feature = "graph", test))]
-use sqlmodel_core::IsolationLevel;
 
 #[cfg(feature = "graph")]
 pub use fnx_algorithms::{
@@ -1405,27 +1403,9 @@ fn refresh_graph_snapshot_locked(
 ) -> GraphResult<GraphRefreshJobReport> {
     let write_owner = acquire_graph_snapshot_write_owner(conn, workspace_id)?;
 
-    conn.begin_transaction(IsolationLevel::RepeatableRead)
-        .map_err(|error| GraphError::storage("begin graph snapshot refresh transaction", error))?;
-
-    let result = refresh_graph_snapshot_in_transaction(conn, workspace_id, options, &write_owner);
-
-    match result {
-        Ok(report) => match conn.commit() {
-            Ok(()) => Ok(report),
-            Err(error) => {
-                rollback_graph_snapshot_transaction(conn, "commit", &error);
-                Err(GraphError::storage(
-                    "commit graph snapshot refresh transaction",
-                    error,
-                ))
-            }
-        },
-        Err(error) => {
-            rollback_graph_snapshot_transaction(conn, "operation", &error);
-            Err(error)
-        }
-    }
+    with_graph_snapshot_transaction(conn, "graph snapshot refresh transaction", || {
+        refresh_graph_snapshot_in_transaction(conn, workspace_id, options, &write_owner)
+    })
 }
 
 #[cfg(feature = "graph")]
@@ -1531,43 +1511,33 @@ fn persist_graph_snapshot(
 ) -> GraphResult<GraphRefreshSnapshot> {
     let write_owner = acquire_graph_snapshot_write_owner(conn, workspace_id)?;
 
-    conn.begin_transaction(IsolationLevel::RepeatableRead)
-        .map_err(|error| GraphError::storage("begin graph snapshot transaction", error))?;
-
-    let result = persist_graph_snapshot_in_transaction(conn, workspace_id, input, &write_owner);
-
-    match result {
-        Ok(snapshot) => match conn.commit() {
-            Ok(()) => Ok(snapshot),
-            Err(error) => {
-                rollback_graph_snapshot_transaction(conn, "commit", &error);
-                Err(GraphError::storage(
-                    "commit graph snapshot transaction",
-                    error,
-                ))
-            }
-        },
-        Err(error) => {
-            rollback_graph_snapshot_transaction(conn, "operation", &error);
-            Err(error)
-        }
-    }
+    with_graph_snapshot_transaction(conn, "graph snapshot transaction", || {
+        persist_graph_snapshot_in_transaction(conn, workspace_id, input, &write_owner)
+    })
 }
 
 #[cfg(any(feature = "graph", test))]
-fn rollback_graph_snapshot_transaction<E: fmt::Display>(
+fn with_graph_snapshot_transaction<T>(
     conn: &DbConnection,
-    phase: &str,
-    original_error: &E,
-) {
-    if let Err(rollback_error) = conn.rollback() {
-        tracing::error!(
-            target: "ee::graph",
-            phase,
-            error = %original_error,
-            rollback_error = %rollback_error,
-            "graph snapshot transaction rollback failed"
-        );
+    operation: &'static str,
+    write: impl FnOnce() -> GraphResult<T>,
+) -> GraphResult<T> {
+    let mut graph_error = None;
+    match conn.with_transaction(|| match write() {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            graph_error = Some(error);
+            Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!("{operation} failed"),
+            })
+        }
+    }) {
+        Ok(value) => Ok(value),
+        Err(error) => match graph_error {
+            Some(error) => Err(error),
+            None => Err(GraphError::storage(operation, error)),
+        },
     }
 }
 
