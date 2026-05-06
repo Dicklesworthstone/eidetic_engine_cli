@@ -1997,9 +1997,11 @@ It answers:
 
 ### 21.6 Repair UX
 
+The `ee doctor --fix-plan --json` command returns this shape inside the
+canonical `ee.response.v1` `data` payload:
+
 ```json
 {
-  "schema": "ee.doctor.fix_plan.v1",
   "repairs": [
     {
       "id": "repair_index_rebuild",
@@ -2380,9 +2382,11 @@ Metrics:
 
 Output:
 
+The `ee eval run --json` command returns this shape inside the canonical
+`ee.response.v1` `data` payload:
+
 ```json
 {
-  "schema": "ee.eval.v1",
   "fixture": "release_failure",
   "passed": true,
   "metrics": {
@@ -3394,14 +3398,26 @@ CREATE TABLE idempotency_keys (
 
 ## Appendix B — JSON output contracts
 
-All `--json` output has `schema: "ee.<noun>.v<N>"` and `version: <int>`. Examples:
-
-### B.1 `ee context`
+All command `--json` stdout uses the stable response envelope:
 
 ```json
 {
-  "schema": "ee.context.v1",
-  "version": 1,
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": { "command": "context" },
+  "degraded": []
+}
+```
+
+Failures use `ee.error.v1`. Domain-specific schema IDs are either exported by
+`ee schema list --json` / `ee schema export <SCHEMA_ID> --json` or are
+implementation sketches inside the response `data` object. The examples below
+show representative `data` payloads, not top-level stdout objects.
+
+### B.1 `ee context` data payload
+
+```json
+{
   "pack_id": "pack_01HXX...",
   "workspace": { "id": "ws_01HXX...", "root": "/data/projects/example" },
   "query": { "text": "fix failing release workflow", "max_tokens": 4000 },
@@ -3440,12 +3456,10 @@ All `--json` output has `schema: "ee.<noun>.v<N>"` and `version: <int>`. Example
 }
 ```
 
-### B.2 `ee search`
+### B.2 `ee search` data payload
 
 ```json
 {
-  "schema": "ee.search.v1",
-  "version": 1,
   "query": "release failed branch stale",
   "elapsed_ms": 87,
   "phase": "default",
@@ -3473,12 +3487,10 @@ All `--json` output has `schema: "ee.<noun>.v<N>"` and `version: <int>`. Example
 }
 ```
 
-### B.3 `ee curate candidates`
+### B.3 `ee curate candidates` data payload
 
 ```json
 {
-  "schema": "ee.curate.candidates.v1",
-  "version": 1,
   "candidates": [
     {
       "id": "cand_01HXX...",
@@ -3493,12 +3505,10 @@ All `--json` output has `schema: "ee.<noun>.v<N>"` and `version: <int>`. Example
 }
 ```
 
-### B.4 `ee why`
+### B.4 `ee why` data payload
 
 ```json
 {
-  "schema": "ee.why.v1",
-  "version": 1,
   "target": { "type": "memory", "id": "mem_01HXX..." },
   "creation": {
     "created_at": "2026-04-15T...",
@@ -3518,12 +3528,10 @@ All `--json` output has `schema: "ee.<noun>.v<N>"` and `version: <int>`. Example
 }
 ```
 
-### B.5 `ee doctor --fix-plan`
+### B.5 `ee doctor --fix-plan` data payload
 
 ```json
 {
-  "schema": "ee.doctor.fix_plan.v1",
-  "version": 1,
   "repairs": [
     {
       "id": "repair_index_rebuild",
@@ -3537,12 +3545,10 @@ All `--json` output has `schema: "ee.<noun>.v<N>"` and `version: <int>`. Example
 }
 ```
 
-### B.6 `ee eval run`
+### B.6 `ee eval run` data payload
 
 ```json
 {
-  "schema": "ee.eval.v1",
-  "version": 1,
   "fixture": "release_failure",
   "passed": true,
   "metrics": {

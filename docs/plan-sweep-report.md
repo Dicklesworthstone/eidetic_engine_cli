@@ -9,7 +9,8 @@
 | Status | Count | Percentage |
 |--------|-------|------------|
 | Implemented (verified) | 18 | 56% |
-| Implemented (unverified) | 7 | 22% |
+| Partially verified | 1 | 3% |
+| Implemented (unverified) | 6 | 19% |
 | Stubbed | 5 | 16% |
 | Missing | 2 | 6% |
 | **Total sections** | 32 | 100% |
@@ -35,9 +36,20 @@
 **Evidence:** Local-first, harness-agnostic, deterministic, explainable retrieval all present.
 
 ### §4. North Star acceptance scenarios
-**Status:** ⚠ Implemented (unverified)  
-**Evidence:** CLI commands exist but scenario coverage untested.  
-**Action:** File test bead for acceptance scenario coverage.
+**Status:** ⚠ Partially verified
+**Evidence:** Related executable tests and fixture contracts exist, but the eight Plan §4 North Star scenarios are not all covered by exact command-flow tests. `tests/agent_outcome_scenario_pack.rs` verifies the six-scenario agent journey matrix, not the full Plan §4 matrix.
+**Action:** Follow-up beads filed for exact context-command coverage (`eidetic_engine_cli-axyb`) and procedural distillation flow coverage (`eidetic_engine_cli-lpb5`).
+
+| Plan §4 scenario | Coverage status | Concrete evidence | Remaining gap / follow-up |
+|------------------|-----------------|-------------------|----------------------------|
+| 1. Release memory saves bad release | Partial executable E2E | `tests/usr002_pre_task_brief_scenario.rs`, `tests/advanced_e2e.rs::release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean`, release fixtures in `tests/eval_fixtures.rs` | Exact Plan command, CASS-imported prior release failures, and branch/publishing traps need pinned assertions in `eidetic_engine_cli-axyb`. |
+| 2. Async migration honors real runtime model | Fixture contract only | `tests/eval_fixtures.rs::async_migration_scenario_contract_is_complete`, `fx.async_migration.v1` fixtures | No live `ee context "replace a tokio service with asupersync" --json` E2E yet; covered by `eidetic_engine_cli-axyb`. |
+| 3. Repeated CI failure becomes procedural memory | Partial plumbing; flow unproven | CASS import/redaction E2E, post-task machine-data checks, and `eidetic_engine_cli-zj46` review implementation closure | Full `import cass` -> `search` -> `review session --propose` -> `curate apply` rule-creation flow depends on learn/procedure/audit surfaces; covered by `eidetic_engine_cli-lpb5`. |
+| 4. New repository onboarding without web UI | Partial executable E2E | `tests/usr002_pre_task_brief_scenario.rs`, `tests/smoke.rs::workspace_continuity_scenario_keeps_context_scoped` | Exact onboarding command with conventions, tooling, prior high-value sessions, and degraded warnings needs pinned assertions in `eidetic_engine_cli-axyb`. |
+| 5. Catastrophic mistake avoidance | Partial executable/contract coverage | `tests/usr003_in_task_scenario.rs`, `tests/contracts/preflight_tripwires.rs`, dangerous-cleanup fixtures in `tests/eval_fixtures.rs` | Exact cleanup-context command with safer alternatives, approval rules, and provenance needs pinned assertions in `eidetic_engine_cli-axyb`. |
+| 6. Offline degraded mode still helps | Partial degraded-diagnostics coverage | `tests/usr005_degraded_scenario.rs`, `tests/degraded_honesty.rs` | Exact explicit-memory-only offline `ee context "run tests before release" --json` flow needs lexical-only and no-false-attribution assertions in `eidetic_engine_cli-axyb`. |
+| 7. Post-session distillation is auditable | Shape coverage only | `tests/advanced_e2e.rs::post_task_outcome_scenario_commands_emit_machine_data`, learning/procedure golden tests | Full `review` -> `curate validate` -> `curate apply` -> `memory show` -> `why` flow with audit/search-index assertions is covered by `eidetic_engine_cli-lpb5`. |
+| 8. Multi-agent local work does not corrupt memory | Verified executable E2E | `tests/e2e_multi_process_write.rs::concurrent_remember_processes_serialize_durable_writes`, `tests/write_owner.rs::file_backed_two_writers_are_serialized` | No §4 follow-up needed from this audit. |
 
 ### §5. Non-goals for v1
 **Status:** ✓ Implemented (verified)  
@@ -157,19 +169,19 @@
 ## Appendix Cross-Checks
 
 ### Appendix A — full SQL schema
-**Status:** ⚠ Needs verification  
-**Method:** Compare `ee schema export --format sql` vs Appendix A.  
-**Action:** File test bead for schema parity.
+**Status:** ✓ Documented divergence; follow-up completed
+**Evidence:** Appendix A now states that the live DDL contract is the ordered migration set in `src/db/mod.rs` plus `ee_schema_migrations`, and that Appendix A is a design-source snapshot until explicitly reconciled. `tests/contracts/schema_drift.rs` now captures the live migrated FrankenSQLite table, column, and index set under `ee.database.live_ddl.v1`.
+**Action:** `eidetic_engine_cli-t9ko` closed with a live DDL parity gate and explicit Appendix A divergence assertions.
 
 ### Appendix B — JSON output contracts  
-**Status:** ⚠ Needs verification  
-**Method:** Compare `ee schema list` output vs Appendix B contracts.  
-**Action:** File test bead for JSON contract parity.
+**Status:** ✓ Reconciled by follow-up
+**Evidence:** Appendix B now defines `ee.response.v1` as the canonical success envelope, `ee.error.v1` as the failure envelope, and treats command-specific examples as representative `data` payload sketches. `src/output/mod.rs::public_schemas()` is the single list/export registry, including the rule schemas listed by `ee schema list --json`.
+**Action:** `eidetic_engine_cli-5mra` added schema-list golden coverage and a registry self-consistency test that exports every listed schema exactly once.
 
 ### Appendix C — example end-to-end agent flow
-**Status:** ⚠ Needs verification  
-**Method:** Execute flow against fixture workspace.  
-**Action:** File test bead for e2e flow coverage.
+**Status:** ⚠ Partially covered; follow-up filed
+**Evidence:** Existing tests cover pieces of the flow: `tests/e2e_core_workflow.rs`, `tests/cli_loop_e2e.rs`, and `tests/no_mocks_e2e.rs` cover init/remember/search/context/why; CASS import tests cover imported sessions and evidence spans; curate smoke tests cover candidates/apply; outcome golden tests cover feedback/audit shape. No single test pins the exact Appendix C setup, import, task-start, during-work, end-of-work curation, rule promotion, and outcome-feedback trace or documents intentional command/output drift.
+**Action:** `eidetic_engine_cli-oxt2` covers the exact Appendix C agent-flow parity scenario.
 
 ---
 
@@ -180,17 +192,17 @@
 | §16 Curation | Stubbed | eidetic_engine_cli-zj46 (existing) |
 | §17 Procedural | Stubbed | eidetic_engine_cli-hssh (existing) |
 | §24 MCP | Stubbed | eidetic_engine_cli-phje (existing) |
-| §4 Scenarios | Unverified | (needs test bead) |
+| §4 Scenarios | Partially verified | eidetic_engine_cli-lac7; follow-ups eidetic_engine_cli-axyb, eidetic_engine_cli-lpb5 |
 | §7 Contracts | Unverified | (needs test bead) |
 | §11 Data model | Unverified | (needs schema parity bead) |
-| Appendix A | Unverified | (needs schema parity bead) |
-| Appendix B | Unverified | (needs JSON contract bead) |
-| Appendix C | Unverified | (needs e2e flow bead) |
+| Appendix A | Documented divergence | eidetic_engine_cli-t9ko |
+| Appendix B | Reconciled | eidetic_engine_cli-5mra |
+| Appendix C | Partially covered | eidetic_engine_cli-oxt2 |
 
 ---
 
 ## Next Steps
 
-1. File test beads for unverified sections (§4, §7, §11, Appendix A/B/C)
+1. Complete §4 and Appendix follow-up beads; file test beads for remaining unverified sections (§7, §11)
 2. Monitor existing implements-surface beads for stubbed sections
 3. Re-run sweep after Wave 3 beads close
