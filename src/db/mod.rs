@@ -3078,6 +3078,39 @@ CREATE INDEX idx_procedure_events_workspace
     "blake3:v034_procedure_store_2026_05_06",
 );
 
+/// V035: Plan recipes store for decisioning (eidetic_engine_cli-jfd9).
+/// Stores reusable plan recipes that can be recommended for tasks.
+pub const V035_PLAN_RECIPES: Migration = Migration::new(
+    35,
+    "plan_recipes",
+    r#"
+CREATE TABLE plan_recipes (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'plrec_*' AND length(trim(id)) > 6),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    when_to_use TEXT NOT NULL CHECK (length(trim(when_to_use)) > 0),
+    steps_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(steps_json)),
+    evidence_uris_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(evidence_uris_json)),
+    maturity TEXT NOT NULL DEFAULT 'draft' CHECK (
+        maturity IN ('draft', 'validated', 'promoted')
+    ),
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    helpful_count INTEGER NOT NULL DEFAULT 0 CHECK (helpful_count >= 0),
+    harmful_count INTEGER NOT NULL DEFAULT 0 CHECK (harmful_count >= 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    last_recommended_at TEXT CHECK (last_recommended_at IS NULL OR length(trim(last_recommended_at)) > 0)
+);
+CREATE INDEX idx_plan_recipes_workspace_maturity
+    ON plan_recipes(workspace_id, maturity, updated_at, id);
+CREATE INDEX idx_plan_recipes_name
+    ON plan_recipes(workspace_id, name, id);
+CREATE INDEX idx_plan_recipes_updated
+    ON plan_recipes(updated_at, id);
+"#,
+    "blake3:v035_plan_recipes_2026_05_06",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -3114,6 +3147,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V032_AUDIT_HASH_CHAIN,
     V033_LEARNING_OBSERVATIONS,
     V034_PROCEDURE_STORE,
+    V035_PLAN_RECIPES,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
