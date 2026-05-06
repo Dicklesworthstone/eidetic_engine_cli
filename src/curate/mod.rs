@@ -168,6 +168,160 @@ fn push_optional_embedding_line(lines: &mut Vec<String>, label: &str, value: Opt
     }
 }
 
+/// Schema for deterministic Hebbian graph-edge reinforcement plans.
+pub const HEBBIAN_REINFORCEMENT_SCHEMA_V1: &str = "ee.curate.hebbian_reinforcement.v1";
+
+/// Plan-specified edge weight increment for co-retrieved memories.
+pub const HEBBIAN_REINFORCEMENT_INCREMENT: f32 = 0.05;
+
+/// Maximum edge weight after repeated Hebbian reinforcement.
+pub const HEBBIAN_REINFORCEMENT_MAX_WEIGHT: f32 = 1.0;
+
+/// Existing graph edge considered for Hebbian reinforcement.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HebbianReinforcementEdge {
+    pub link_id: String,
+    pub src_memory_id: String,
+    pub dst_memory_id: String,
+    pub weight: f32,
+    pub evidence_count: u32,
+}
+
+/// Configuration for one co-retrieval reinforcement pass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HebbianReinforcementConfig {
+    pub increment: f32,
+    pub max_weight: f32,
+}
+
+impl Default for HebbianReinforcementConfig {
+    fn default() -> Self {
+        Self {
+            increment: HEBBIAN_REINFORCEMENT_INCREMENT,
+            max_weight: HEBBIAN_REINFORCEMENT_MAX_WEIGHT,
+        }
+    }
+}
+
+/// Planned update for a graph edge traversed by a co-retrieval event.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HebbianReinforcementUpdate {
+    pub link_id: String,
+    pub src_memory_id: String,
+    pub dst_memory_id: String,
+    pub previous_weight: f32,
+    pub new_weight: f32,
+    pub weight_delta: f32,
+    pub previous_evidence_count: u32,
+    pub new_evidence_count: u32,
+}
+
+/// Deterministic report for one Hebbian co-retrieval reinforcement pass.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HebbianReinforcementReport {
+    pub schema: &'static str,
+    pub co_retrieved_memory_ids: Vec<String>,
+    pub increment: f32,
+    pub max_weight: f32,
+    pub updates: Vec<HebbianReinforcementUpdate>,
+}
+
+impl HebbianReinforcementReport {
+    #[must_use]
+    pub fn updated_edge_count(&self) -> usize {
+        self.updates.len()
+    }
+}
+
+/// Compute graph-edge increments for memories selected together by retrieval.
+///
+/// This is deliberately a pure planner: callers persist the returned updates
+/// through the storage layer that owns `memory_links`, preserving the existing
+/// single-write-owner and audit boundaries.
+#[must_use]
+pub fn plan_hebbian_reinforcement(
+    co_retrieved_memory_ids: &[String],
+    edges: &[HebbianReinforcementEdge],
+    config: HebbianReinforcementConfig,
+) -> HebbianReinforcementReport {
+    let config = normalized_hebbian_config(config);
+    let co_retrieved: BTreeSet<String> = co_retrieved_memory_ids
+        .iter()
+        .filter_map(|memory_id| {
+            let trimmed = memory_id.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        })
+        .collect();
+
+    let mut updates = Vec::new();
+    if co_retrieved.len() >= 2 {
+        updates = edges
+            .iter()
+            .filter(|edge| {
+                edge.src_memory_id != edge.dst_memory_id
+                    && co_retrieved.contains(&edge.src_memory_id)
+                    && co_retrieved.contains(&edge.dst_memory_id)
+            })
+            .map(|edge| hebbian_update_for_edge(edge, config))
+            .collect();
+        updates.sort_by(compare_hebbian_updates);
+    }
+
+    HebbianReinforcementReport {
+        schema: HEBBIAN_REINFORCEMENT_SCHEMA_V1,
+        co_retrieved_memory_ids: co_retrieved.into_iter().collect(),
+        increment: config.increment,
+        max_weight: config.max_weight,
+        updates,
+    }
+}
+
+fn normalized_hebbian_config(config: HebbianReinforcementConfig) -> HebbianReinforcementConfig {
+    let increment = if config.increment.is_finite() && config.increment > 0.0 {
+        config.increment
+    } else {
+        HEBBIAN_REINFORCEMENT_INCREMENT
+    };
+    let max_weight = if config.max_weight.is_finite() && config.max_weight > 0.0 {
+        config.max_weight
+    } else {
+        HEBBIAN_REINFORCEMENT_MAX_WEIGHT
+    };
+
+    HebbianReinforcementConfig {
+        increment,
+        max_weight,
+    }
+}
+
+fn hebbian_update_for_edge(
+    edge: &HebbianReinforcementEdge,
+    config: HebbianReinforcementConfig,
+) -> HebbianReinforcementUpdate {
+    let previous_weight = edge.weight.clamp(0.0, config.max_weight);
+    let new_weight = (previous_weight + config.increment).min(config.max_weight);
+    HebbianReinforcementUpdate {
+        link_id: edge.link_id.clone(),
+        src_memory_id: edge.src_memory_id.clone(),
+        dst_memory_id: edge.dst_memory_id.clone(),
+        previous_weight,
+        new_weight,
+        weight_delta: new_weight - previous_weight,
+        previous_evidence_count: edge.evidence_count,
+        new_evidence_count: edge.evidence_count.saturating_add(1),
+    }
+}
+
+fn compare_hebbian_updates(
+    left: &HebbianReinforcementUpdate,
+    right: &HebbianReinforcementUpdate,
+) -> Ordering {
+    left.src_memory_id
+        .cmp(&right.src_memory_id)
+        .then_with(|| left.dst_memory_id.cmp(&right.dst_memory_id))
+        .then_with(|| left.link_id.cmp(&right.link_id))
+}
+
 /// Type of curation action being proposed.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CandidateType {
@@ -3822,6 +3976,30 @@ mod tests {
         }
     }
 
+    fn hebbian_edge(
+        link_id: &str,
+        src_memory_id: &str,
+        dst_memory_id: &str,
+        weight: f32,
+        evidence_count: u32,
+    ) -> super::HebbianReinforcementEdge {
+        super::HebbianReinforcementEdge {
+            link_id: link_id.to_owned(),
+            src_memory_id: src_memory_id.to_owned(),
+            dst_memory_id: dst_memory_id.to_owned(),
+            weight,
+            evidence_count,
+        }
+    }
+
+    fn assert_f32_close(actual: f32, expected: f32, context: &str) -> Result<(), String> {
+        if (actual - expected).abs() <= f32::EPSILON {
+            Ok(())
+        } else {
+            Err(format!("{context}: expected {expected}, got {actual}"))
+        }
+    }
+
     #[test]
     fn subsystem_name_is_stable() {
         assert_eq!(subsystem_name(), "curate");
@@ -3855,6 +4033,90 @@ mod tests {
         );
         assert_ne!(json, "{}");
         Ok(())
+    }
+
+    #[test]
+    fn hebbian_reinforcement_increments_co_retrieved_edges() -> Result<(), String> {
+        let co_retrieved = vec![
+            "mem_b".to_owned(),
+            "mem_a".to_owned(),
+            "mem_b".to_owned(),
+            "mem_c".to_owned(),
+        ];
+        let edges = vec![
+            hebbian_edge("link_ba", "mem_b", "mem_a", 0.40, 2),
+            hebbian_edge("link_ax", "mem_a", "mem_x", 0.40, 9),
+            hebbian_edge("link_ac", "mem_a", "mem_c", 0.80, 4),
+        ];
+
+        let report = super::plan_hebbian_reinforcement(
+            &co_retrieved,
+            &edges,
+            super::HebbianReinforcementConfig::default(),
+        );
+
+        assert_eq!(report.schema, super::HEBBIAN_REINFORCEMENT_SCHEMA_V1);
+        assert_eq!(
+            report.co_retrieved_memory_ids,
+            vec!["mem_a".to_owned(), "mem_b".to_owned(), "mem_c".to_owned()]
+        );
+        assert_eq!(report.updated_edge_count(), 2);
+        let first_update = report
+            .updates
+            .first()
+            .ok_or_else(|| "first Hebbian update missing".to_owned())?;
+        assert_eq!(first_update.link_id, "link_ac");
+        assert_f32_close(first_update.previous_weight, 0.80, "previous weight")?;
+        assert_f32_close(first_update.new_weight, 0.85, "new weight")?;
+        assert_f32_close(first_update.weight_delta, 0.05, "weight delta")?;
+        assert_eq!(first_update.previous_evidence_count, 4);
+        assert_eq!(first_update.new_evidence_count, 5);
+
+        let second_update = report
+            .updates
+            .get(1)
+            .ok_or_else(|| "second Hebbian update missing".to_owned())?;
+        assert_eq!(second_update.link_id, "link_ba");
+        assert_f32_close(second_update.new_weight, 0.45, "second new weight")?;
+        assert_eq!(second_update.new_evidence_count, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn hebbian_reinforcement_caps_weight_and_saturates_evidence() -> Result<(), String> {
+        let co_retrieved = vec!["mem_a".to_owned(), "mem_b".to_owned()];
+        let edges = vec![hebbian_edge("link_ab", "mem_a", "mem_b", 0.99, u32::MAX)];
+
+        let report = super::plan_hebbian_reinforcement(
+            &co_retrieved,
+            &edges,
+            super::HebbianReinforcementConfig::default(),
+        );
+
+        assert_eq!(report.updated_edge_count(), 1);
+        let update = report
+            .updates
+            .first()
+            .ok_or_else(|| "capped Hebbian update missing".to_owned())?;
+        assert_f32_close(update.new_weight, 1.0, "capped weight")?;
+        assert_f32_close(update.weight_delta, 0.01, "capped delta")?;
+        assert_eq!(update.new_evidence_count, u32::MAX);
+        Ok(())
+    }
+
+    #[test]
+    fn hebbian_reinforcement_requires_distinct_co_retrieved_memories() {
+        let co_retrieved = vec!["mem_a".to_owned(), "mem_a".to_owned(), " ".to_owned()];
+        let edges = vec![hebbian_edge("link_ab", "mem_a", "mem_b", 0.30, 1)];
+
+        let report = super::plan_hebbian_reinforcement(
+            &co_retrieved,
+            &edges,
+            super::HebbianReinforcementConfig::default(),
+        );
+
+        assert!(report.updates.is_empty());
+        assert_eq!(report.co_retrieved_memory_ids, vec!["mem_a".to_owned()]);
     }
 
     #[test]
