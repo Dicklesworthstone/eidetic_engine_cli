@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 
@@ -309,26 +310,15 @@ pub fn remember_memory(
         documents_total: 1,
     };
 
-    connection
-        .with_transaction(|| {
-            connection.insert_memory(&memory_id, &memory_input)?;
-            connection.insert_audit(
-                &audit_id,
-                &CreateAuditInput {
-                    workspace_id: Some(memory_input.workspace_id.clone()),
-                    actor: Some("ee remember".to_owned()),
-                    action: audit_actions::MEMORY_CREATE.to_owned(),
-                    target_type: Some("memory".to_owned()),
-                    target_id: Some(memory_id.clone()),
-                    details: Some(audit_details.clone()),
-                },
-            )?;
-            connection.insert_search_index_job(&index_job_id, &index_input)
-        })
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to store memory: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
+    store_remembered_memory_with_retry(
+        &connection,
+        &memory_id,
+        &audit_id,
+        &index_job_id,
+        &memory_input,
+        &audit_details,
+        &index_input,
+    )?;
 
     append_remember_audit_jsonl(&prepared, &audit_id, &memory_id, &memory_input)?;
 
@@ -838,20 +828,128 @@ fn ensure_workspace(
         return Ok(());
     }
 
-    connection
-        .insert_workspace(
-            workspace_id,
-            &CreateWorkspaceInput {
-                path,
-                name: workspace_path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned()),
-            },
-        )
-        .map_err(|error| DomainError::Storage {
+    let input = CreateWorkspaceInput {
+        path: path.clone(),
+        name: workspace_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned()),
+    };
+
+    match connection.insert_workspace(workspace_id, &input) {
+        Ok(()) => Ok(()),
+        Err(error) if workspace_insert_lost_race(&error) => {
+            if connection
+                .get_workspace_by_path(&path)
+                .map_err(|query_error| DomainError::Storage {
+                    message: format!("Failed to query raced workspace: {query_error}"),
+                    repair: Some("ee doctor".to_owned()),
+                })?
+                .is_some()
+            {
+                Ok(())
+            } else {
+                Err(DomainError::Storage {
+                    message: format!("Failed to register workspace after insert race: {error}"),
+                    repair: Some("ee doctor".to_owned()),
+                })
+            }
+        }
+        Err(error) => Err(DomainError::Storage {
             message: format!("Failed to register workspace: {error}"),
             repair: Some("ee doctor".to_owned()),
+        }),
+    }
+}
+
+fn workspace_insert_lost_race(error: &impl ToString) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("unique constraint failed: workspaces.path")
+        || message.contains("unique constraint failed: workspaces.id")
+}
+
+fn store_remembered_memory_with_retry(
+    connection: &DbConnection,
+    memory_id: &str,
+    audit_id: &str,
+    index_job_id: &str,
+    memory_input: &CreateMemoryInput,
+    audit_details: &str,
+    index_input: &CreateSearchIndexJobInput,
+) -> Result<(), DomainError> {
+    const MAX_ATTEMPTS: usize = 8;
+
+    for attempt in 0..MAX_ATTEMPTS {
+        match connection.with_transaction(|| {
+            connection.insert_memory(memory_id, memory_input)?;
+            connection.insert_audit(
+                audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(memory_input.workspace_id.clone()),
+                    actor: Some("ee remember".to_owned()),
+                    action: audit_actions::MEMORY_CREATE.to_owned(),
+                    target_type: Some("memory".to_owned()),
+                    target_id: Some(memory_id.to_owned()),
+                    details: Some(audit_details.to_owned()),
+                },
+            )?;
+            connection.insert_search_index_job(index_job_id, index_input)
+        }) {
+            Ok(()) => return Ok(()),
+            Err(error) if remember_write_contention_is_retryable(&error) => {
+                let _ = connection.rollback();
+                if memory_exists_after_commit_ambiguity(connection, memory_id)? {
+                    return Ok(());
+                }
+                if attempt + 1 < MAX_ATTEMPTS {
+                    std::thread::sleep(remember_write_retry_delay(attempt));
+                } else {
+                    return Err(DomainError::Storage {
+                        message: format!(
+                            "Failed to store memory after contention retries: {error}"
+                        ),
+                        repair: Some("ee doctor".to_string()),
+                    });
+                }
+            }
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!("Failed to store memory: {error}"),
+                    repair: Some("ee doctor".to_string()),
+                });
+            }
+        }
+    }
+
+    Err(DomainError::Storage {
+        message: "Failed to store memory: retry loop exhausted".to_owned(),
+        repair: Some("ee doctor".to_string()),
+    })
+}
+
+fn memory_exists_after_commit_ambiguity(
+    connection: &DbConnection,
+    memory_id: &str,
+) -> Result<bool, DomainError> {
+    connection
+        .get_memory(memory_id)
+        .map(|memory| memory.is_some())
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query memory after write contention: {error}"),
+            repair: Some("ee doctor".to_string()),
         })
+}
+
+fn remember_write_contention_is_retryable(error: &impl ToString) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("database is busy")
+        || message.contains("snapshot conflict")
+        || message.contains("database is locked")
+        || message.contains("sqlite_busy")
+}
+
+fn remember_write_retry_delay(attempt: usize) -> Duration {
+    let capped = attempt.min(6) as u64;
+    Duration::from_millis(10 * (1 << capped))
 }
 
 fn stable_workspace_id(path: &Path) -> String {
