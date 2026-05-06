@@ -574,11 +574,16 @@ impl CounterfactualCandidateReport {
             *action_counts.entry(c.suggested_action).or_insert(0u32) += 1;
         }
 
+        let mut by_type: Vec<_> = type_counts.into_iter().collect();
+        by_type.sort_by_key(|(candidate_type, _count)| candidate_type.as_str());
+        let mut by_action: Vec<_> = action_counts.into_iter().collect();
+        by_action.sort_by_key(|(action, _count)| action.as_str());
+
         Self {
             entries_analyzed: entries_analyzed as u32,
             candidates_generated: candidates.len() as u32,
-            by_type: type_counts.into_iter().collect(),
-            by_action: action_counts.into_iter().collect(),
+            by_type,
+            by_action,
             mode: Some(mode),
         }
     }
@@ -892,6 +897,71 @@ mod tests {
                 (RegretCategory::Misinformation, 1),
                 (RegretCategory::MissingKnowledge, 2),
                 (RegretCategory::Other, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn counterfactual_report_orders_type_and_action_counts() {
+        fn candidate(
+            candidate_type: super::super::CandidateType,
+            suggested_action: SuggestedCurationAction,
+        ) -> CounterfactualCandidate {
+            CounterfactualCandidate {
+                schema: COUNTERFACTUAL_CANDIDATE_SCHEMA_V1,
+                regret_entry_id: "reg".to_string(),
+                episode_id: "ep".to_string(),
+                workspace_id: "workspace".to_string(),
+                target_memory_id: None,
+                candidate_type,
+                suggested_action,
+                reason: "test".to_string(),
+                confidence: 0.8,
+                regret_score: 0.7,
+                category: RegretCategory::Other,
+                dry_run: true,
+            }
+        }
+
+        let candidates = vec![
+            candidate(
+                super::super::CandidateType::Supersede,
+                SuggestedCurationAction::SupersedeMemory,
+            ),
+            candidate(
+                super::super::CandidateType::Consolidate,
+                SuggestedCurationAction::AddMemory,
+            ),
+            candidate(
+                super::super::CandidateType::Promote,
+                SuggestedCurationAction::PromoteConfidence,
+            ),
+            candidate(
+                super::super::CandidateType::Consolidate,
+                SuggestedCurationAction::AddMemory,
+            ),
+        ];
+
+        let report = CounterfactualCandidateReport::from_candidates(
+            4,
+            &candidates,
+            CounterfactualMode::DryRun,
+        );
+
+        assert_eq!(
+            report.by_type,
+            vec![
+                (super::super::CandidateType::Consolidate, 2),
+                (super::super::CandidateType::Promote, 1),
+                (super::super::CandidateType::Supersede, 1),
+            ]
+        );
+        assert_eq!(
+            report.by_action,
+            vec![
+                (SuggestedCurationAction::AddMemory, 2),
+                (SuggestedCurationAction::PromoteConfidence, 1),
+                (SuggestedCurationAction::SupersedeMemory, 1),
             ]
         );
     }
