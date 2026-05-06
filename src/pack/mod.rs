@@ -1259,7 +1259,11 @@ impl PackItemRedaction {
 
 impl PackDraftItem {
     #[must_use]
-    fn from_selected_candidate(rank: u32, candidate: PackCandidate) -> Self {
+    fn from_selected_candidate(
+        rank: u32,
+        candidate: PackCandidate,
+        redactions: Vec<PackItemRedaction>,
+    ) -> Self {
         let PackCandidate {
             memory_id,
             section,
@@ -1272,7 +1276,6 @@ impl PackDraftItem {
             diversity_key,
             trust,
         } = candidate;
-        let (content, redactions) = redact_pack_item_content(content);
         Self {
             rank,
             memory_id,
@@ -1296,6 +1299,42 @@ impl PackDraftItem {
             .map(PackProvenance::rendered)
             .collect()
     }
+}
+
+fn redact_pack_candidate(candidate: PackCandidate) -> (PackCandidate, Vec<PackItemRedaction>) {
+    let PackCandidate {
+        memory_id,
+        section,
+        content,
+        estimated_tokens,
+        relevance,
+        utility,
+        provenance,
+        why,
+        diversity_key,
+        trust,
+    } = candidate;
+    let (content, redactions) = redact_pack_item_content(content);
+    let estimated_tokens = if redactions.is_empty() {
+        estimated_tokens
+    } else {
+        estimate_tokens_default(&content)
+    };
+    (
+        PackCandidate {
+            memory_id,
+            section,
+            content,
+            estimated_tokens,
+            relevance,
+            utility,
+            provenance,
+            why,
+            diversity_key,
+            trust,
+        },
+        redactions,
+    )
 }
 
 fn redact_pack_item_content(content: String) -> (String, Vec<PackItemRedaction>) {
@@ -1585,8 +1624,11 @@ fn assemble_mmr_draft(
                 });
                 used_tokens = total;
                 let candidate = selection.candidate;
+                let redactions = selection.redactions;
                 selected_signatures.push(selection.signature);
-                items.push(PackDraftItem::from_selected_candidate(rank, candidate));
+                items.push(PackDraftItem::from_selected_candidate(
+                    rank, candidate, redactions,
+                ));
             }
             _ => omitted.push(PackOmission {
                 memory_id: selection.candidate.memory_id,
@@ -1687,12 +1729,13 @@ fn assemble_facility_location_draft(
         }
 
         let profile_index = remaining_indices.remove(candidate_index);
-        let Some(candidate) = candidates
-            .get_mut(profile_index)
-            .and_then(|profile| profile.candidate.take())
-        else {
+        let Some(profile) = candidates.get_mut(profile_index) else {
             continue;
         };
+        let Some(candidate) = profile.candidate.take() else {
+            continue;
+        };
+        let redactions = std::mem::take(&mut profile.redactions);
         let rank = next_rank;
         next_rank = next_rank
             .checked_add(1)
@@ -1710,7 +1753,9 @@ fn assemble_facility_location_draft(
             feasible: true,
             covered_features,
         });
-        items.push(PackDraftItem::from_selected_candidate(rank, candidate));
+        items.push(PackDraftItem::from_selected_candidate(
+            rank, candidate, redactions,
+        ));
     }
 
     Ok(PackDraft {
@@ -1791,14 +1836,17 @@ impl From<&PackCandidate> for CandidateSignature {
 struct MmrCandidate {
     candidate: PackCandidate,
     signature: CandidateSignature,
+    redactions: Vec<PackItemRedaction>,
 }
 
 impl From<PackCandidate> for MmrCandidate {
     fn from(candidate: PackCandidate) -> Self {
+        let (candidate, redactions) = redact_pack_candidate(candidate);
         let signature = CandidateSignature::from(&candidate);
         Self {
             candidate,
             signature,
+            redactions,
         }
     }
 }
@@ -1808,16 +1856,19 @@ struct FacilityCandidateProfile {
     candidate: Option<PackCandidate>,
     signature: CandidateSignature,
     weight: f32,
+    redactions: Vec<PackItemRedaction>,
 }
 
 impl From<PackCandidate> for FacilityCandidateProfile {
     fn from(candidate: PackCandidate) -> Self {
+        let (candidate, redactions) = redact_pack_candidate(candidate);
         let signature = CandidateSignature::from(&candidate);
         let weight = facility_candidate_weight(&candidate);
         Self {
             candidate: Some(candidate),
             signature,
             weight,
+            redactions,
         }
     }
 }
@@ -3880,14 +3931,20 @@ mod tests {
     fn assemble_draft_redacts_secret_like_content_before_emit() -> TestResult {
         let budget =
             TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
-        let key_name = concat!("api", "_", "key");
-        let raw_value = concat!("sk", "_", "pack", "_", "secret", "_", "123");
-        let content = format!("Preserve the note but mask {key_name}={raw_value}.");
+        let raw_value = format!("{}{}", concat!("sk", "-ant", "-api03", "-"), "A".repeat(52));
+        let original_estimate = 80;
+        let content = format!("Preserve the note but mask {raw_value}.");
 
         let draft = assemble_draft(
             "protect context pack secrets",
             budget,
-            vec![candidate_with_content(42, 1.0, 0.8, 12, content)?],
+            vec![candidate_with_content(
+                42,
+                1.0,
+                0.8,
+                original_estimate,
+                content,
+            )?],
         )
         .map_err(|error| format!("draft rejected: {error:?}"))?;
         let item = draft
@@ -3896,17 +3953,59 @@ mod tests {
             .ok_or_else(|| "expected selected item".to_string())?;
 
         ensure(
-            !item.content.contains(raw_value),
+            !item.content.contains(&raw_value),
             "selected pack item should not retain raw secret-like value",
         )?;
         ensure_contains(
             &item.content,
-            &crate::policy::redaction_placeholder("api_key"),
+            &crate::policy::redaction_placeholder("anthropic_api_key"),
             "selected pack item includes deterministic redaction placeholder",
+        )?;
+        let expected_rendered_tokens = estimate_tokens_default(&item.content);
+        ensure_equal(
+            &item.estimated_tokens,
+            &expected_rendered_tokens,
+            "selected pack item token estimate matches rendered content",
+        )?;
+        ensure(
+            item.estimated_tokens < original_estimate,
+            "redacted pack item should not keep pre-redaction token estimate",
+        )?;
+        ensure_equal(
+            &draft.used_tokens,
+            &expected_rendered_tokens,
+            "draft used tokens match rendered selected content",
+        )?;
+        ensure_equal(
+            &draft.selection_certificate.budget_used,
+            &expected_rendered_tokens,
+            "selection certificate budget uses rendered selected content",
+        )?;
+        let selected_token_cost = draft
+            .selection_certificate
+            .selected_items
+            .first()
+            .map(|item| item.token_cost)
+            .ok_or_else(|| "expected selected certificate item".to_string())?;
+        ensure_equal(
+            &selected_token_cost,
+            &expected_rendered_tokens,
+            "selection certificate selected token cost uses rendered content",
+        )?;
+        let step_token_cost = draft
+            .selection_certificate
+            .steps
+            .first()
+            .map(|step| step.token_cost)
+            .ok_or_else(|| "expected selection certificate step".to_string())?;
+        ensure_equal(
+            &step_token_cost,
+            &expected_rendered_tokens,
+            "selection certificate step token cost uses rendered content",
         )?;
         ensure_equal(
             &item.redactions,
-            &vec![PackItemRedaction::new("api_key")],
+            &vec![PackItemRedaction::new("anthropic_api_key")],
             "selected pack item records redaction reason",
         )
     }
