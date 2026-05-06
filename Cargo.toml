@@ -72,6 +72,7 @@ tiktoken-rs = { version = "0.11.0", default-features = false }
 toon = { package = "tru", version = "0.2.2", path = "/data/projects/toon_rust", default-features = false }
 toml_edit = { version = "0.25.11", default-features = false, features = ["parse"] }
 tracing = { version = "0.1.44" }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]

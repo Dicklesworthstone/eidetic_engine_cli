@@ -1646,11 +1646,7 @@ pub fn follow_diagnostic(result: &TailFollowResult) -> Option<String> {
 }
 
 fn normalize_recorder_filter_key(raw: &str) -> Option<String> {
-    let normalized = raw
-        .trim()
-        .replace('-', "_")
-        .replace('.', "_")
-        .to_lowercase();
+    let normalized = raw.trim().replace(['-', '.'], "_").to_lowercase();
     match normalized.as_str() {
         "run_id" | "runid" => Some("run_id".to_owned()),
         "event_id" | "eventid" => Some("event_id".to_owned()),

@@ -1049,6 +1049,7 @@ dependencies = [
  "tiktoken-rs",
  "toml_edit",
  "tracing",
+ "tracing-subscriber",
  "tru",
  "uuid",
 ]
