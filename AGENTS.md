@@ -173,6 +173,23 @@ cargo fmt --check
 
 If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
 
+### Full Verification (Recommended)
+
+For complete readiness-gate verification, run the central orchestrator:
+
+```bash
+./scripts/verify.sh
+```
+
+This runs all gates in the correct order with per-stage exit codes and durations:
+1. Forbidden dependency check (`./scripts/check-forbidden-deps.sh`)
+2. Unit, contract, and golden tests (`cargo test --workspace --all-targets`)
+3. Basic E2E (`./scripts/e2e_test.sh`)
+4. Advanced E2E (`./scripts/e2e_advanced.sh`)
+5. Boundary migration E2E (`./scripts/e2e_boundary_migration.sh`)
+
+The script fails fast on the first failing gate.
+
 ---
 
 ## Testing
@@ -461,6 +478,16 @@ The CI must enforce, at minimum:
 - UBS static analysis on changed Rust files
 
 Coverage thresholds, performance budgets, and benchmark gates should be added milestone-by-milestone as the corresponding subsystems land. Documented thresholds in this file must stay in sync with the workflow — add a `coverage_threshold_docs` test as soon as coverage gates exist.
+
+### Quick Verify
+
+Run all readiness gates with a single command:
+
+```bash
+./scripts/verify.sh
+```
+
+This runs forbidden-dep audit, cargo tests, and all E2E harnesses in order, reporting per-gate results and artifact paths. See `docs/testing-strategy.md` for gate details.
 
 ---
 

@@ -300,6 +300,25 @@ That's the core loop.
 
 ---
 
+## Development & Verification
+
+To run the full verification suite before committing or pushing:
+
+```bash
+./scripts/verify.sh
+```
+
+This orchestrates all readiness gates in order, failing fast on the first failure:
+1. Forbidden dependency audit (no tokio, rusqlite, petgraph, etc.)
+2. Unit, contract, and golden tests
+3. Basic E2E tests
+4. Advanced E2E tests
+5. Boundary migration tests
+
+Each gate reports exit code and elapsed time.
+
+---
+
 ## Command Reference
 
 `ee` is organized into core commands and command groups. Run `ee <command> --help` or `ee <group> --help` for full details.
