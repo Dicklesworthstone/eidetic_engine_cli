@@ -45,6 +45,12 @@ const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/s
 // ============================================================================
 
 /// Category of task situation.
+///
+/// `Deployment` covers infrastructure-level rollout (staging/production
+/// rollouts, server bringup); `Release` is the version-cut + changelog +
+/// release-workflow flavor and is its own variant per `eidetic_engine_cli-oofg`.
+/// `Exploration` is open-ended discovery (no failing test or incident yet);
+/// `IncidentResponse` is reactive triage of a live failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SituationCategory {
     BugFix,
@@ -55,6 +61,9 @@ pub enum SituationCategory {
     Testing,
     Configuration,
     Deployment,
+    Release,
+    Exploration,
+    IncidentResponse,
     Review,
     Unknown,
 }
@@ -71,6 +80,9 @@ impl SituationCategory {
             Self::Testing => "testing",
             Self::Configuration => "configuration",
             Self::Deployment => "deployment",
+            Self::Release => "release",
+            Self::Exploration => "exploration",
+            Self::IncidentResponse => "incident_response",
             Self::Review => "review",
             Self::Unknown => "unknown",
         }
@@ -86,7 +98,10 @@ impl SituationCategory {
             Self::Documentation => "Writing or updating documentation",
             Self::Testing => "Adding or modifying tests",
             Self::Configuration => "Changing configuration or settings",
-            Self::Deployment => "Deploying or releasing changes",
+            Self::Deployment => "Deploying or rolling out infrastructure changes",
+            Self::Release => "Cutting a release: version bump, changelog, tag, release workflow",
+            Self::Exploration => "Open-ended exploration to understand the system or design space",
+            Self::IncidentResponse => "Reactive triage of a live failure or production incident",
             Self::Review => "Reviewing code or design",
             Self::Unknown => "Situation category could not be determined",
         }
@@ -102,6 +117,9 @@ impl SituationCategory {
         Self::Testing,
         Self::Configuration,
         Self::Deployment,
+        Self::Release,
+        Self::Exploration,
+        Self::IncidentResponse,
         Self::Review,
         Self::Unknown,
     ];
@@ -122,17 +140,22 @@ impl FromStr for SituationCategory {
             "bug_fix" | "bugfix" | "fix" => Ok(Self::BugFix),
             "feature" | "feat" => Ok(Self::Feature),
             "refactor" | "refactoring" => Ok(Self::Refactor),
-            "investigation" | "investigate" | "debug" => Ok(Self::Investigation),
+            "investigation" | "investigate" | "debug" | "debugging" => Ok(Self::Investigation),
             "documentation" | "docs" | "doc" => Ok(Self::Documentation),
             "testing" | "test" | "tests" => Ok(Self::Testing),
             "configuration" | "config" | "cfg" => Ok(Self::Configuration),
-            "deployment" | "deploy" | "release" => Ok(Self::Deployment),
+            "deployment" | "deploy" | "rollout" => Ok(Self::Deployment),
+            "release" | "releasing" | "cut_release" | "version_bump" => Ok(Self::Release),
+            "exploration" | "explore" | "discovery" | "research" | "spike" => Ok(Self::Exploration),
+            "incident_response" | "incident" | "outage" | "incident-response" | "oncall" => {
+                Ok(Self::IncidentResponse)
+            }
             "review" | "code_review" => Ok(Self::Review),
             "unknown" => Ok(Self::Unknown),
             _ => Err(ParseSituationValueError::new(
                 "situation_category",
                 input,
-                "bug_fix, feature, refactor, investigation, documentation, testing, configuration, deployment, review, unknown",
+                "bug_fix, feature, refactor, investigation, documentation, testing, configuration, deployment, release, exploration, incident_response, review, unknown",
             )),
         }
     }
