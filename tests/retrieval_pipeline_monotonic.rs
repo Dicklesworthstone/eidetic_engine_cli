@@ -1,5 +1,7 @@
 //! Integration coverage for the eight-stage retrieval pipeline in plan section 13.
 
+use std::path::Path;
+use std::process::{Command, Output};
 use std::str::FromStr;
 
 use ee::models::{MemoryId, ProvenanceUri, UnitScore};
@@ -10,6 +12,7 @@ use ee::pack::{
 use ee::search::scoring::{
     RetrievalMaturity, SearchScoreComponents, SearchScoringConfig, SearchScoringSignals,
 };
+use serde_json::Value;
 use uuid::Uuid;
 
 type TestResult = Result<(), String>;
@@ -49,6 +52,113 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     } else {
         Err(message.into())
     }
+}
+
+fn run_ee(args: &[&str]) -> Result<Output, String> {
+    Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(args)
+        .output()
+        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn run_ee_json(args: &[&str]) -> Result<Value, String> {
+    let output = run_ee(args)?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("ee {} stdout was not UTF-8: {error}", args.join(" ")))?;
+    let stderr = String::from_utf8(output.stderr)
+        .map_err(|error| format!("ee {} stderr was not UTF-8: {error}", args.join(" ")))?;
+    ensure(
+        output.status.success(),
+        format!(
+            "ee {} should succeed; status={:?}; stdout={stdout}; stderr={stderr}",
+            args.join(" "),
+            output.status.code()
+        ),
+    )?;
+    ensure(
+        stderr.is_empty(),
+        format!(
+            "ee {} JSON stderr must be empty, got {stderr:?}",
+            args.join(" ")
+        ),
+    )?;
+    serde_json::from_str(&stdout).map_err(|error| {
+        format!(
+            "ee {} stdout must be JSON: {error}; stdout={stdout:?}",
+            args.join(" ")
+        )
+    })
+}
+
+fn json_array_len(value: &Value, pointer: &str) -> Result<usize, String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .ok_or_else(|| format!("JSON pointer {pointer} must be an array"))
+}
+
+fn json_array<'a>(value: &'a Value, pointer: &str) -> Result<&'a [Value], String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("JSON pointer {pointer} must be an array"))
+}
+
+fn source_uri(workspace: &Path, filename: &str) -> String {
+    format!("file://{}#L1", workspace.join(filename).display())
+}
+
+fn assert_search_results_have_why_and_provenance(results: &[Value]) -> TestResult {
+    ensure(
+        !results.is_empty(),
+        "search should return at least one result",
+    )?;
+    for result in results {
+        let doc_id = result
+            .get("docId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("search result missing docId: {result:?}"))?;
+        ensure(
+            result
+                .get("why")
+                .and_then(Value::as_str)
+                .is_some_and(|why| !why.trim().is_empty()),
+            format!("search result {doc_id} missing non-empty why"),
+        )?;
+        ensure(
+            result
+                .get("provenance")
+                .and_then(Value::as_array)
+                .is_some_and(|provenance| !provenance.is_empty()),
+            format!("search result {doc_id} missing provenance"),
+        )?;
+    }
+    Ok(())
+}
+
+fn assert_context_items_have_why_and_provenance(items: &[Value]) -> TestResult {
+    ensure(!items.is_empty(), "context should return at least one item")?;
+    for item in items {
+        let memory_id = item
+            .get("memoryId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("context item missing memoryId: {item:?}"))?;
+        ensure(
+            item.get("why")
+                .and_then(Value::as_str)
+                .is_some_and(|why| !why.trim().is_empty()),
+            format!("context item {memory_id} missing non-empty why"),
+        )?;
+        ensure(
+            item.get("provenance")
+                .and_then(Value::as_array)
+                .is_some_and(|provenance| !provenance.is_empty()),
+            format!("context item {memory_id} missing provenance"),
+        )?;
+    }
+    Ok(())
 }
 
 fn score(value: f32) -> Result<UnitScore, String> {
@@ -313,9 +423,9 @@ fn stage_7_mmr(policy_filtered: &[ScoredFixture]) -> Result<Vec<MemoryId>, Strin
         })
         .collect();
     let draft = assemble_draft_with_profile(
-        ContextPackProfile::Balanced,
+        ContextPackProfile::Compact,
         "prepare release",
-        TokenBudget::new(24).map_err(|error| format!("{error:?}"))?,
+        TokenBudget::new(40).map_err(|error| format!("{error:?}"))?,
         candidates?,
     )
     .map_err(|error| format!("{error:?}"))?;
@@ -416,5 +526,129 @@ fn retrieval_pipeline_narrows_monotonically_across_eight_stages() -> TestResult 
     ensure(
         stage_8 == vec![memory_id(1), memory_id(2)],
         format!("unexpected final top-k order: {stage_8:?}"),
+    )
+}
+
+#[test]
+fn real_binary_search_context_pipeline_narrows_and_preserves_explanations() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace_path = tempdir.path();
+    let workspace = workspace_path.to_string_lossy().into_owned();
+    run_ee_json(&["--workspace", &workspace, "--json", "init"])?;
+
+    let memories = [
+        (
+            "Run cargo fmt --check before release to keep generated artifacts stable.",
+            "procedural",
+            "rule",
+            source_uri(workspace_path, "release-fmt.md"),
+        ),
+        (
+            "Run cargo clippy --all-targets -- -D warnings before release.",
+            "procedural",
+            "rule",
+            source_uri(workspace_path, "release-clippy.md"),
+        ),
+        (
+            "A prior release failed when context provenance was missing from search results.",
+            "episodic",
+            "failure",
+            source_uri(workspace_path, "release-provenance.md"),
+        ),
+        (
+            "Unrelated note about database backup windows.",
+            "semantic",
+            "decision",
+            source_uri(workspace_path, "backup-window.md"),
+        ),
+    ];
+
+    for (content, level, kind, source) in &memories {
+        run_ee_json(&[
+            "--workspace",
+            &workspace,
+            "remember",
+            content,
+            "--level",
+            level,
+            "--kind",
+            kind,
+            "--source",
+            source,
+            "--json",
+        ])?;
+    }
+
+    let rebuild = run_ee_json(&["--workspace", &workspace, "index", "rebuild", "--json"])?;
+    ensure(
+        rebuild
+            .pointer("/data/memories_indexed")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count >= 4),
+        format!("index rebuild should index remembered memories: {rebuild:?}"),
+    )?;
+
+    let broad_search = run_ee_json(&[
+        "--workspace",
+        &workspace,
+        "search",
+        "release",
+        "--limit",
+        "10",
+        "--explain",
+        "--json",
+    ])?;
+    let broad_results = json_array(&broad_search, "/data/results")?;
+    assert_search_results_have_why_and_provenance(broad_results)?;
+
+    let narrowed_search = run_ee_json(&[
+        "--workspace",
+        &workspace,
+        "search",
+        "cargo fmt release",
+        "--limit",
+        "2",
+        "--explain",
+        "--json",
+    ])?;
+    let narrowed_results = json_array(&narrowed_search, "/data/results")?;
+    assert_search_results_have_why_and_provenance(narrowed_results)?;
+
+    let context = run_ee_json(&[
+        "--workspace",
+        &workspace,
+        "context",
+        "cargo fmt release",
+        "--candidate-pool",
+        "2",
+        "--max-tokens",
+        "160",
+        "--profile",
+        "compact",
+        "--json",
+    ])?;
+    let context_items = json_array(&context, "/data/pack/items")?;
+    assert_context_items_have_why_and_provenance(context_items)?;
+
+    let stored_count = memories.len();
+    let broad_count = broad_results.len();
+    let narrowed_count = narrowed_results.len();
+    let context_count = context_items.len();
+
+    ensure(
+        broad_count <= stored_count,
+        format!("search widened beyond stored memories: {broad_count} > {stored_count}"),
+    )?;
+    ensure(
+        narrowed_count <= broad_count,
+        format!("narrowed search widened result set: {narrowed_count} > {broad_count}"),
+    )?;
+    ensure(
+        context_count <= narrowed_count,
+        format!("context pack widened candidates: {context_count} > {narrowed_count}"),
+    )?;
+    ensure(
+        json_array_len(&context, "/data/pack/provenanceFooter/entries")? >= context_count,
+        "context provenance footer should cover packed items",
     )
 }
