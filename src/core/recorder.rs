@@ -2128,60 +2128,73 @@ pub fn record_and_persist_event(
 ) -> Result<RecorderEventReport, RecordPersistedEventError> {
     validate_run_id_token(&options.run_id).map_err(RecordPersistedEventError::InvalidRunId)?;
 
-    let existing = conn
-        .list_recorder_events(&options.run_id)
-        .map_err(|error| RecordPersistedEventError::Storage {
-            message: format!(
-                "Failed to read recorder events for run {}: {error}",
-                options.run_id
-            ),
+    let mut recorder_error = None;
+    let report = conn
+        .with_transaction(|| {
+            let existing = conn.list_recorder_events(&options.run_id)?;
+            let sequence = u64::try_from(existing.len()).unwrap_or(u64::MAX) + 1;
+            let previous_event_hash = existing.last().map(|event| event.event_hash.clone());
+
+            // Honor any explicitly-provided previous-hash by validating it agrees with the
+            // tail of the persisted chain. Mismatch is a serious error: surface it.
+            if let (Some(provided), Some(actual)) = (
+                options.previous_event_hash.as_deref(),
+                previous_event_hash.as_deref(),
+            ) {
+                if provided != actual {
+                    recorder_error = Some(RecordPersistedEventError::ChainMismatch {
+                        expected: actual.to_owned(),
+                        provided: provided.to_owned(),
+                    });
+                    return Err(crate::db::DbError::MalformedRow {
+                        operation: crate::db::DbOperation::Query,
+                        message: "recorder previous_event_hash mismatch".to_owned(),
+                    });
+                }
+            }
+
+            let opts_with_chain = RecorderEventOptions {
+                previous_event_hash: previous_event_hash.clone(),
+                ..options.clone()
+            };
+            let report = match record_event(&opts_with_chain, sequence) {
+                Ok(report) => report,
+                Err(error) => {
+                    recorder_error = Some(RecordPersistedEventError::Validation(error));
+                    return Err(crate::db::DbError::MalformedRow {
+                        operation: crate::db::DbOperation::Query,
+                        message: "recorder event validation failed".to_owned(),
+                    });
+                }
+            };
+
+            if !report.dry_run {
+                let input = crate::db::CreateRecorderEventInput {
+                    run_id: report.run_id.clone(),
+                    sequence: report.sequence,
+                    event_type: report.event_type.as_str().to_owned(),
+                    timestamp: report.timestamp.clone(),
+                    payload_hash: report.payload_hash.clone(),
+                    payload_bytes: report.payload_bytes,
+                    redaction_status: report.redaction_status.as_db_str().to_owned(),
+                    redacted_bytes: report.redacted_bytes,
+                    previous_event_hash: report.previous_event_hash.clone(),
+                    event_hash: report.event_hash.clone(),
+                    chain_status: report.chain_status.as_str().to_owned(),
+                    source_span_id: None,
+                    source_line_start: None,
+                    source_line_end: None,
+                };
+                conn.insert_recorder_event(&report.event_id, &input)?;
+            }
+
+            Ok(report)
+        })
+        .map_err(|error| {
+            recorder_error.unwrap_or_else(|| RecordPersistedEventError::Storage {
+                message: format!("Failed to persist recorder event transaction: {error}"),
+            })
         })?;
-    let sequence = u64::try_from(existing.len()).unwrap_or(u64::MAX) + 1;
-    let previous_event_hash = existing.last().map(|event| event.event_hash.clone());
-
-    // Honor any explicitly-provided previous-hash by validating it agrees with the
-    // tail of the persisted chain. Mismatch is a serious error: surface it.
-    if let (Some(provided), Some(actual)) = (
-        options.previous_event_hash.as_deref(),
-        previous_event_hash.as_deref(),
-    ) {
-        if provided != actual {
-            return Err(RecordPersistedEventError::ChainMismatch {
-                expected: actual.to_owned(),
-                provided: provided.to_owned(),
-            });
-        }
-    }
-
-    let opts_with_chain = RecorderEventOptions {
-        previous_event_hash: previous_event_hash.clone(),
-        ..options.clone()
-    };
-    let report =
-        record_event(&opts_with_chain, sequence).map_err(RecordPersistedEventError::Validation)?;
-
-    if !report.dry_run {
-        let input = crate::db::CreateRecorderEventInput {
-            run_id: report.run_id.clone(),
-            sequence: report.sequence,
-            event_type: report.event_type.as_str().to_owned(),
-            timestamp: report.timestamp.clone(),
-            payload_hash: report.payload_hash.clone(),
-            payload_bytes: report.payload_bytes,
-            redaction_status: report.redaction_status.as_db_str().to_owned(),
-            redacted_bytes: report.redacted_bytes,
-            previous_event_hash: report.previous_event_hash.clone(),
-            event_hash: report.event_hash.clone(),
-            chain_status: report.chain_status.as_str().to_owned(),
-            source_span_id: None,
-            source_line_start: None,
-            source_line_end: None,
-        };
-        conn.insert_recorder_event(&report.event_id, &input)
-            .map_err(|error| RecordPersistedEventError::Storage {
-                message: format!("Failed to persist recorder event: {error}"),
-            })?;
-    }
 
     Ok(report)
 }
@@ -3447,7 +3460,9 @@ mod tests {
             .execute_raw("PRAGMA foreign_keys = ON")
             .map_err(|e| e.to_string())?;
         connection
-            .execute_raw(&format!("DELETE FROM recorder_runs WHERE run_id = '{run_id}'"))
+            .execute_raw(&format!(
+                "DELETE FROM recorder_runs WHERE run_id = '{run_id}'"
+            ))
             .map_err(|e| {
                 format!("recorder_runs DELETE must succeed despite append-only trigger: {e}")
             })?;

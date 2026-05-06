@@ -12,6 +12,9 @@ use ee::core::recorder::{
 };
 use ee::db::DbConnection;
 use ee::models::{RecorderEventType, RecorderRunStatus};
+use std::collections::HashSet;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 const DEFAULT_MAX_PAYLOAD: usize = 64 * 1024;
 
@@ -105,6 +108,70 @@ fn record_and_persist_event_assigns_monotonic_sequence_and_chains_hashes() {
         stored[1].previous_event_hash.as_deref(),
         Some(first.event_hash.as_str())
     );
+}
+
+#[test]
+fn record_and_persist_event_serializes_parallel_writers_for_one_run() {
+    const WRITER_COUNT: usize = 12;
+
+    let dir = tempfile::tempdir().expect("temp db dir");
+    let db_path = dir.path().join("recorder-parallel.db");
+    let conn = DbConnection::open_file(db_path.clone()).expect("open file db");
+    conn.migrate().expect("apply migrations");
+    let start = start_and_persist_recording(&conn, &start_options()).expect("start");
+
+    let barrier = Arc::new(Barrier::new(WRITER_COUNT));
+    let mut handles = Vec::with_capacity(WRITER_COUNT);
+    for writer_index in 0..WRITER_COUNT {
+        let db_path = db_path.clone();
+        let run_id = start.run_id.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            let conn = DbConnection::open_file(db_path)
+                .unwrap_or_else(|error| panic!("writer {writer_index} open db: {error}"));
+            barrier.wait();
+            let payload = format!("parallel-event-{writer_index}");
+            record_and_persist_event(&conn, &event_options(&run_id, Some(&payload)))
+                .map_err(|error| format!("writer {writer_index} failed: {error}"))
+        }));
+    }
+
+    let mut reports = Vec::with_capacity(WRITER_COUNT);
+    for handle in handles {
+        reports.push(
+            handle
+                .join()
+                .expect("writer thread joins")
+                .expect("writer records event without UNIQUE race"),
+        );
+    }
+
+    let unique_sequences: HashSet<u64> = reports.iter().map(|report| report.sequence).collect();
+    assert_eq!(
+        unique_sequences.len(),
+        WRITER_COUNT,
+        "parallel writers must receive distinct sequences"
+    );
+
+    let stored = conn.list_recorder_events(&start.run_id).expect("list");
+    assert_eq!(stored.len(), WRITER_COUNT, "all parallel events persisted");
+    for (index, event) in stored.iter().enumerate() {
+        let expected_sequence = u64::try_from(index + 1).expect("test sequence fits in u64");
+        assert_eq!(event.sequence, expected_sequence);
+        if index == 0 {
+            assert!(
+                event.previous_event_hash.is_none(),
+                "first event starts the chain"
+            );
+        } else {
+            assert_eq!(
+                event.previous_event_hash.as_deref(),
+                Some(stored[index - 1].event_hash.as_str()),
+                "event {} chains from previous row",
+                event.sequence
+            );
+        }
+    }
 }
 
 #[test]
