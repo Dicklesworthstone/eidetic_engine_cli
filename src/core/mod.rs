@@ -38,6 +38,7 @@ pub mod model;
 pub mod outcome;
 pub mod plan;
 pub mod preflight;
+pub mod preflight_guard;
 pub mod procedure;
 pub mod quarantine;
 pub mod recorder;
