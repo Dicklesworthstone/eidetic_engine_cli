@@ -74,7 +74,7 @@ $ ee init --workspace .
 $ ee remember --workspace . --level procedural --kind rule \
     --tags rust,ci \
     "This project treats clippy warnings as errors with pedantic and nursery enabled."
-✓ memory mem_01HQ3K5Z stored (procedural · rule · confidence 0.55)
+✓ memory mem_01HQ3K5Z stored (procedural · rule · confidence 0.80)
 ✓ indexed in 14ms
 
 # 3. Pull session evidence from your cass history
