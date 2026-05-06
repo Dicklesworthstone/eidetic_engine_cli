@@ -8141,8 +8141,9 @@ impl DbConnection {
 
     fn insert_pack_items(&self, items: &[CreatePackItemInput]) -> Result<()> {
         for chunk in items.chunks(PACK_ITEM_INSERT_BATCH_ROWS) {
-            let mut sql =
-                String::from("INSERT INTO pack_items (pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key, provenance_json, trust_class, trust_subclass) VALUES ");
+            let mut sql = String::from(
+                "INSERT INTO pack_items (pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key, provenance_json, trust_class, trust_subclass) VALUES ",
+            );
             append_multi_row_placeholders(&mut sql, chunk.len(), PACK_ITEM_INSERT_VALUE_COUNT);
 
             let mut params = Vec::with_capacity(chunk.len() * PACK_ITEM_INSERT_VALUE_COUNT);
@@ -15848,11 +15849,23 @@ mod tests {
 
     fn setup_pack_test_memory(connection: &DbConnection) -> TestResult {
         setup_workspace(connection)?;
+        insert_pack_test_memory(
+            connection,
+            "mem_00000000000000000000pack01",
+            "Run cargo fmt before commit",
+        )
+    }
+
+    fn insert_pack_test_memory(
+        connection: &DbConnection,
+        memory_id: &str,
+        content: &str,
+    ) -> TestResult {
         let input = super::CreateMemoryInput {
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             level: "procedural".to_string(),
             kind: "rule".to_string(),
-            content: "Run cargo fmt before commit".to_string(),
+            content: content.to_string(),
             workflow_id: None,
             confidence: 0.9,
             utility: 0.8,
@@ -15864,8 +15877,34 @@ mod tests {
             valid_from: None,
             valid_to: None,
         };
-        connection.insert_memory("mem_00000000000000000000pack01", &input)?;
+        connection.insert_memory(memory_id, &input)?;
         Ok(())
+    }
+
+    fn pack_item_input(pack_id: &str, memory_id: &str, rank: u32) -> super::CreatePackItemInput {
+        super::CreatePackItemInput {
+            pack_id: pack_id.to_string(),
+            memory_id: memory_id.to_string(),
+            rank,
+            section: "procedural_rules".to_string(),
+            estimated_tokens: 50,
+            relevance: 0.95,
+            utility: 0.8,
+            why: format!("Selected memory {rank} for cargo formatting"),
+            diversity_key: Some(format!("memory-{rank}")),
+            provenance_json: r#"{"schema":"ee.pack_item.provenance.v1","entries":[{"uri":"file://AGENTS.md#L42","note":"project release rule"}]}"#.to_string(),
+            trust_class: "human_explicit".to_string(),
+            trust_subclass: Some("project-rule".to_string()),
+        }
+    }
+
+    fn pack_omission_input(pack_id: &str, memory_id: &str) -> super::CreatePackOmissionInput {
+        super::CreatePackOmissionInput {
+            pack_id: pack_id.to_string(),
+            memory_id: memory_id.to_string(),
+            estimated_tokens: 50,
+            reason: "token_budget_exceeded".to_string(),
+        }
     }
 
     #[test]
@@ -15942,6 +15981,149 @@ mod tests {
             "pack item trust subclass",
         )?;
 
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_pack_record_batches_child_rows_by_execute_count() -> TestResult {
+        ensure_equal(
+            &super::pack_record_insert_statement_count(0, 0),
+            &1_usize,
+            "empty pack writes only the pack record",
+        )?;
+        ensure_equal(
+            &super::pack_record_insert_statement_count(3, 2),
+            &3_usize,
+            "non-empty items and omissions use one batch each",
+        )?;
+        ensure_equal(
+            &super::pack_record_insert_statement_count(
+                super::PACK_ITEM_INSERT_BATCH_ROWS + 1,
+                super::PACK_OMISSION_INSERT_BATCH_ROWS + 1,
+            ),
+            &5_usize,
+            "oversized inputs add one execute per extra chunk",
+        )
+    }
+
+    #[test]
+    fn insert_pack_record_persists_batched_items_and_omissions() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        insert_pack_test_memory(
+            &connection,
+            "mem_00000000000000000000btch01",
+            "Run cargo fmt before commit",
+        )?;
+        insert_pack_test_memory(
+            &connection,
+            "mem_00000000000000000000btch02",
+            "Run cargo clippy before commit",
+        )?;
+        insert_pack_test_memory(
+            &connection,
+            "mem_00000000000000000000btch03",
+            "Run cargo test before commit",
+        )?;
+        insert_pack_test_memory(
+            &connection,
+            "mem_00000000000000000000btch04",
+            "Skip memories that exceed the token budget",
+        )?;
+
+        let pack_id = "pack_000000000000000000000hu8s1";
+        let input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: "cargo verification".to_string(),
+            profile: "balanced".to_string(),
+            max_tokens: 4000,
+            used_tokens: 150,
+            item_count: 3,
+            omitted_count: 1,
+            pack_hash: "blake3:hu8s-batched".to_string(),
+            degraded_json: None,
+            created_by: Some("test".to_string()),
+        };
+        let items = vec![
+            pack_item_input(pack_id, "mem_00000000000000000000btch01", 1),
+            pack_item_input(pack_id, "mem_00000000000000000000btch02", 2),
+            pack_item_input(pack_id, "mem_00000000000000000000btch03", 3),
+        ];
+        let omissions = vec![pack_omission_input(
+            pack_id,
+            "mem_00000000000000000000btch04",
+        )];
+
+        connection.insert_pack_record(pack_id, &input, &items, &omissions)?;
+
+        let pack_items = connection.get_pack_items(pack_id)?;
+        ensure_equal(&pack_items.len(), &3_usize, "batched pack items")?;
+        ensure_equal(&pack_items[0].rank, &1_u32, "first item rank")?;
+        ensure_equal(&pack_items[2].rank, &3_u32, "last item rank")?;
+
+        let omission_rows = connection.query(
+            "SELECT memory_id, reason FROM pack_omissions WHERE pack_id = ?1 ORDER BY memory_id ASC",
+            &[Value::Text(pack_id.to_string())],
+        )?;
+        ensure_equal(&omission_rows.len(), &1_usize, "batched omissions")?;
+        let omission_reason =
+            super::required_text(&omission_rows[0], 1, DbOperation::Query, "reason")?;
+        ensure_equal(
+            &omission_reason,
+            &"token_budget_exceeded",
+            "omission reason",
+        )?;
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_pack_record_rolls_back_batched_children_on_error() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_pack_test_memory(&connection)?;
+        insert_pack_test_memory(
+            &connection,
+            "mem_00000000000000000000btch05",
+            "Invalid omission should roll back",
+        )?;
+
+        let pack_id = "pack_000000000000000000000hu8s2";
+        let input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: "cargo rollback".to_string(),
+            profile: "balanced".to_string(),
+            max_tokens: 4000,
+            used_tokens: 150,
+            item_count: 1,
+            omitted_count: 1,
+            pack_hash: "blake3:hu8s-rollback".to_string(),
+            degraded_json: None,
+            created_by: Some("test".to_string()),
+        };
+        let items = vec![pack_item_input(
+            pack_id,
+            "mem_00000000000000000000pack01",
+            1,
+        )];
+        let omissions = vec![super::CreatePackOmissionInput {
+            reason: "invalid_reason".to_string(),
+            ..pack_omission_input(pack_id, "mem_00000000000000000000btch05")
+        }];
+
+        let result = connection.insert_pack_record(pack_id, &input, &items, &omissions);
+        ensure(result.is_err(), "invalid omission reason must fail")?;
+        ensure(
+            connection.get_pack_record(pack_id)?.is_none(),
+            "failed child insert rolls back pack record",
+        )?;
+        ensure_equal(
+            &connection.get_pack_items(pack_id)?.len(),
+            &0_usize,
+            "failed child insert rolls back pack items",
+        )?;
         connection.close()?;
         Ok(())
     }
