@@ -1049,6 +1049,7 @@ pub fn default_budgets_for_job_type(job_type: JobType) -> Vec<ResourceBudget> {
         ],
         JobType::CentralityRefresh => vec![
             ResourceBudget::time_limit_ms(180_000), // 3 minutes
+            ResourceBudget::item_limit(100_000),
         ],
         JobType::IntegrityCheck => vec![
             ResourceBudget::time_limit_ms(300_000), // 5 minutes
@@ -1100,6 +1101,11 @@ pub fn create_custom_budget(
 
 /// Schema identifier for score decay job reports.
 pub const SCORE_DECAY_JOB_SCHEMA_V1: &str = "ee.steward.score_decay.v1";
+
+/// Schema identifier for steward-managed graph centrality refresh reports.
+pub const GRAPH_CENTRALITY_JOB_SCHEMA_V1: &str = "ee.steward.graph_centrality_refresh.v1";
+
+const GRAPH_CENTRALITY_ERROR_SCHEMA_V1: &str = "ee.steward.graph_centrality_refresh.error.v1";
 
 /// Default age after which a memory becomes eligible for time-based decay.
 pub const DEFAULT_SCORE_DECAY_STALE_AFTER_DAYS: u32 = 30;
@@ -1903,6 +1909,7 @@ impl ManualRunner {
     ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
         match job_type {
             JobType::DecaySweep => self.execute_decay_sweep(budget),
+            JobType::CentralityRefresh => self.execute_graph_centrality_refresh(budget),
             _ => {
                 let message = format!(
                     "No real maintenance handler is wired for {} yet.",
@@ -2079,7 +2086,7 @@ impl ManualRunner {
         let preflight_elapsed_ms = millis_to_u64(started.elapsed());
         budget.record(ResourceType::TimeMs, preflight_elapsed_ms);
 
-        if budget_cancels_before_decay_mutation(budget) {
+        if budget_cancels_before_mutation(budget) {
             return (
                 RunOutcome::Cancelled,
                 Some(scanned_count),
@@ -2126,6 +2133,182 @@ impl ManualRunner {
         )
     }
 
+    fn execute_graph_centrality_refresh(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let Some(database_path) = self.resolve_database_path() else {
+            let message = "Graph centrality refresh requires a database path or workspace path with .ee/ee.db".to_owned();
+            return graph_centrality_failure(
+                "graph_centrality_database_unresolved",
+                message,
+                self.options.dry_run,
+                None,
+            );
+        };
+
+        if self.options.dry_run && !database_path.exists() {
+            let message = format!(
+                "Dry-run graph centrality database does not exist: {}",
+                database_path.display()
+            );
+            return graph_centrality_failure(
+                "graph_centrality_database_missing",
+                message,
+                true,
+                Some(&database_path),
+            );
+        }
+
+        let started = Instant::now();
+        let connection = match if self.options.dry_run {
+            DbConnection::open_schema_only(&database_path)
+        } else {
+            DbConnection::open_file(&database_path)
+        } {
+            Ok(connection) => connection,
+            Err(error) => {
+                let message = format!(
+                    "Failed to open graph centrality database {}: {error}",
+                    database_path.display()
+                );
+                return graph_centrality_failure(
+                    "graph_centrality_database_open_failed",
+                    message,
+                    self.options.dry_run,
+                    Some(&database_path),
+                );
+            }
+        };
+
+        if !self.options.dry_run {
+            if let Err(error) = connection.migrate() {
+                let message = format!("Failed to migrate graph centrality database: {error}");
+                return graph_centrality_failure(
+                    "graph_centrality_migration_failed",
+                    message,
+                    false,
+                    Some(&database_path),
+                );
+            }
+        }
+
+        let workspace_id = match self.resolve_workspace_id(&connection) {
+            Ok(workspace_id) => workspace_id,
+            Err(message) => {
+                return graph_centrality_failure(
+                    "graph_centrality_workspace_unresolved",
+                    message,
+                    self.options.dry_run,
+                    Some(&database_path),
+                );
+            }
+        };
+        let link_limit = match self.graph_link_limit() {
+            Ok(link_limit) => link_limit,
+            Err(message) => {
+                return graph_centrality_failure(
+                    "graph_centrality_link_limit_too_large",
+                    message,
+                    self.options.dry_run,
+                    Some(&database_path),
+                );
+            }
+        };
+
+        let mut refresh_options = crate::graph::CentralityRefreshOptions {
+            dry_run: true,
+            min_weight: None,
+            min_confidence: None,
+            link_limit,
+        };
+        let preflight = match crate::graph::refresh_graph_snapshot(
+            &connection,
+            &workspace_id,
+            &refresh_options,
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                let message = format!("Graph centrality dry-run preflight failed: {error}");
+                return graph_centrality_failure(
+                    "graph_centrality_preflight_failed",
+                    message,
+                    true,
+                    Some(&database_path),
+                );
+            }
+        };
+
+        let preflight_edge_count = usize_to_u64(preflight.centrality.edge_count);
+        budget.record(ResourceType::Items, preflight_edge_count);
+        let preflight_elapsed_ms = millis_to_u64(started.elapsed());
+        budget.record(ResourceType::TimeMs, preflight_elapsed_ms);
+
+        if budget_cancels_before_mutation(budget) {
+            return (
+                RunOutcome::Cancelled,
+                Some(preflight_edge_count),
+                Some("Budget exceeded before durable graph snapshot mutation".to_owned()),
+                Some(graph_centrality_job_details(
+                    &workspace_id,
+                    &preflight,
+                    None,
+                    false,
+                )),
+            );
+        }
+
+        if self.options.dry_run {
+            return (
+                RunOutcome::Success,
+                Some(preflight_edge_count),
+                None,
+                Some(graph_centrality_job_details(
+                    &workspace_id,
+                    &preflight,
+                    None,
+                    false,
+                )),
+            );
+        }
+
+        refresh_options.dry_run = false;
+        let report = match crate::graph::refresh_graph_snapshot(
+            &connection,
+            &workspace_id,
+            &refresh_options,
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                let message = format!("Graph centrality refresh failed: {error}");
+                return graph_centrality_failure(
+                    "graph_centrality_refresh_failed",
+                    message,
+                    false,
+                    Some(&database_path),
+                );
+            }
+        };
+        let total_elapsed_ms = millis_to_u64(started.elapsed());
+        budget.record(
+            ResourceType::TimeMs,
+            total_elapsed_ms.saturating_sub(preflight_elapsed_ms),
+        );
+        let durable_mutation = report.snapshot.is_some();
+
+        (
+            RunOutcome::Success,
+            Some(usize_to_u64(report.centrality.edge_count)),
+            None,
+            Some(graph_centrality_job_details(
+                &workspace_id,
+                &preflight,
+                Some(&report),
+                durable_mutation,
+            )),
+        )
+    }
+
     fn resolve_database_path(&self) -> Option<PathBuf> {
         self.options.database_path.clone().or_else(|| {
             self.options.workspace_path.as_ref().map(|workspace| {
@@ -2161,6 +2344,15 @@ impl ManualRunner {
         }
 
         Err("Could not resolve a unique workspace row for decay sweep".to_owned())
+    }
+
+    fn graph_link_limit(&self) -> Result<Option<u32>, String> {
+        match self.options.item_limit {
+            Some(limit) => u32::try_from(limit)
+                .map(Some)
+                .map_err(|_| "Graph centrality link limit exceeds u32".to_owned()),
+            None => Ok(None),
+        }
     }
 
     /// Run all pending jobs in priority order.
@@ -2262,12 +2454,73 @@ fn millis_to_u64(elapsed: std::time::Duration) -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn budget_cancels_before_decay_mutation(budget: &JobBudgetState) -> bool {
+fn budget_cancels_before_mutation(budget: &JobBudgetState) -> bool {
     budget.should_cancel()
         || budget
             .budgets
             .iter()
             .any(|limit| limit.on_exceed == BudgetExceedAction::Cancel && limit.limit == 0)
+}
+
+fn graph_centrality_failure(
+    code: &'static str,
+    message: String,
+    dry_run: bool,
+    database_path: Option<&Path>,
+) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+    (
+        RunOutcome::Failed,
+        None,
+        Some(message.clone()),
+        Some(graph_centrality_error_details(
+            code,
+            message,
+            dry_run,
+            database_path,
+        )),
+    )
+}
+
+fn graph_centrality_error_details(
+    code: &'static str,
+    message: String,
+    dry_run: bool,
+    database_path: Option<&Path>,
+) -> JsonValue {
+    let mut details = json!({
+        "schema": GRAPH_CENTRALITY_ERROR_SCHEMA_V1,
+        "code": code,
+        "command": "steward graph-centrality-refresh",
+        "dryRun": dry_run,
+        "durableMutation": false,
+        "message": message,
+        "repair": "ee init --workspace . && ee daemon --foreground --once --job centrality_refresh --dry-run --json",
+    });
+    if let (Some(object), Some(path)) = (details.as_object_mut(), database_path) {
+        object.insert(
+            "databasePath".to_owned(),
+            JsonValue::String(path.display().to_string()),
+        );
+    }
+    details
+}
+
+fn graph_centrality_job_details(
+    workspace_id: &str,
+    preflight: &crate::graph::GraphRefreshJobReport,
+    result: Option<&crate::graph::GraphRefreshJobReport>,
+    durable_mutation: bool,
+) -> JsonValue {
+    json!({
+        "schema": GRAPH_CENTRALITY_JOB_SCHEMA_V1,
+        "command": "steward graph-centrality-refresh",
+        "workspaceId": workspace_id,
+        "dryRun": result.is_none(),
+        "durableMutation": durable_mutation,
+        "sideEffectClass": if durable_mutation { "derived_graph_snapshot" } else { "report_only" },
+        "preflight": preflight.data_json(),
+        "result": result.map(crate::graph::GraphRefreshJobReport::data_json),
+    })
 }
 
 // ============================================================================
@@ -3404,6 +3657,26 @@ mod tests {
     }
 
     #[test]
+    fn default_budgets_for_graph_centrality_bound_time_and_links() -> TestResult {
+        let budgets = default_budgets_for_job_type(JobType::CentralityRefresh);
+
+        ensure(
+            budgets
+                .iter()
+                .any(|budget| budget.resource == ResourceType::TimeMs && budget.limit == 180_000),
+            true,
+            "graph centrality time budget",
+        )?;
+        ensure(
+            budgets
+                .iter()
+                .any(|budget| budget.resource == ResourceType::Items && budget.limit == 100_000),
+            true,
+            "graph centrality link budget",
+        )
+    }
+
+    #[test]
     fn create_job_budget_uses_defaults() {
         let state = create_job_budget("job-006", JobType::DecaySweep, "2026-04-30T12:00:00Z");
         assert!(!state.budgets.is_empty());
@@ -3978,6 +4251,166 @@ mod tests {
             details["code"].as_str(),
             Some("decay_sweep_database_missing"),
             "missing db code",
+        )?;
+        ensure(details["dryRun"].as_bool(), Some(true), "dry-run detail")?;
+        ensure(
+            details["durableMutation"].as_bool(),
+            Some(false),
+            "durable mutation detail",
+        )
+    }
+
+    #[test]
+    fn manual_runner_graph_centrality_dry_run_uses_budgeted_handler() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        {
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            connection
+                .insert_workspace(
+                    SCORE_WORKSPACE_ID,
+                    &CreateWorkspaceInput {
+                        path: temp.path().to_string_lossy().into_owned(),
+                        name: Some("graph-centrality-runner".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path)
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_dry_run(true)
+            .with_item_limit(7);
+        let mut runner = ManualRunner::new(opts);
+        let result =
+            runner.run_job_type(JobType::CentralityRefresh, Some("graph dry-run".to_owned()));
+
+        ensure(result.job_type, JobType::CentralityRefresh, "job type")?;
+        ensure(result.outcome, RunOutcome::Success, "outcome")?;
+        ensure(result.error, None, "error")?;
+        let details = result
+            .details
+            .ok_or_else(|| "graph centrality details missing".to_owned())?;
+        ensure(
+            details["schema"].as_str(),
+            Some(GRAPH_CENTRALITY_JOB_SCHEMA_V1),
+            "details schema",
+        )?;
+        ensure(details["dryRun"].as_bool(), Some(true), "details dry-run")?;
+        ensure(
+            details["durableMutation"].as_bool(),
+            Some(false),
+            "no durable mutation",
+        )?;
+        ensure(
+            details["preflight"]["command"].as_str(),
+            Some("graph centrality refresh"),
+            "preflight command",
+        )?;
+        ensure(details["result"].is_null(), true, "dry-run result absent")?;
+        let budget = result
+            .budget_summary
+            .ok_or_else(|| "budget summary missing".to_owned())?;
+        ensure(
+            budget
+                .resources
+                .iter()
+                .any(|resource| resource.resource == ResourceType::Items && resource.limit == 7),
+            true,
+            "runner link limit budget",
+        )
+    }
+
+    #[test]
+    fn manual_runner_graph_centrality_zero_budget_cancels_before_mutation() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        {
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            connection
+                .insert_workspace(
+                    SCORE_WORKSPACE_ID,
+                    &CreateWorkspaceInput {
+                        path: temp.path().to_string_lossy().into_owned(),
+                        name: Some("graph-zero-budget".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path)
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_time_limit(0);
+        let mut runner = ManualRunner::new(opts);
+        let result = runner.run_job_type(
+            JobType::CentralityRefresh,
+            Some("zero graph budget".to_owned()),
+        );
+
+        ensure(result.job_type, JobType::CentralityRefresh, "job type")?;
+        ensure(result.outcome, RunOutcome::Cancelled, "outcome")?;
+        ensure(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("before durable graph snapshot mutation")),
+            true,
+            "cancel reason",
+        )?;
+        let details = result
+            .details
+            .ok_or_else(|| "graph budget details missing".to_owned())?;
+        ensure(
+            details["durableMutation"].as_bool(),
+            Some(false),
+            "cancelled before mutation",
+        )?;
+        ensure(
+            details["result"].is_null(),
+            true,
+            "cancelled before non-dry-run result",
+        )
+    }
+
+    #[test]
+    fn manual_runner_graph_centrality_dry_run_missing_db_does_not_create_file() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("missing-graph-ee.db");
+        ensure(database_path.exists(), false, "database initially absent")?;
+
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_dry_run(true);
+        let mut runner = ManualRunner::new(opts);
+        let result = runner.run_job_type(
+            JobType::CentralityRefresh,
+            Some("dry-run missing graph db".to_owned()),
+        );
+
+        ensure(result.job_type, JobType::CentralityRefresh, "job type")?;
+        ensure(result.outcome, RunOutcome::Failed, "missing db outcome")?;
+        ensure(database_path.exists(), false, "dry-run must not create db")?;
+        let details = result
+            .details
+            .ok_or_else(|| "missing-db graph details missing".to_owned())?;
+        ensure(
+            details["schema"].as_str(),
+            Some(GRAPH_CENTRALITY_ERROR_SCHEMA_V1),
+            "error schema",
+        )?;
+        ensure(
+            details["code"].as_str(),
+            Some("graph_centrality_database_missing"),
+            "error code",
         )?;
         ensure(details["dryRun"].as_bool(), Some(true), "dry-run detail")?;
         ensure(
