@@ -374,6 +374,100 @@ fn why_retrieval_section_exposes_numeric_scores() -> TestResult {
 }
 
 #[test]
+fn why_graph_retrieval_features_are_complete_when_snapshot_is_missing() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(0), "init exit")?;
+
+    let remember = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "Graph retrieval explanation field coverage memory.",
+        "--level",
+        "episodic",
+        "--kind",
+        "fact",
+        "--json",
+    ])?;
+    ensure_equal(&remember.status.code(), &Some(0), "remember exit")?;
+    let remember_json = stdout_json(&remember)?;
+    let memory_id = remember_json["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "memory_id must be a string".to_string())?;
+
+    let why = run_ee(&["--workspace", &workspace, "why", memory_id, "--json"])?;
+    persist_artifact("graph_retrieval_missing_snapshot_why", &why);
+    ensure_equal(&why.status.code(), &Some(0), "why exit")?;
+
+    let why_json = stdout_json(&why)?;
+    persist_json_artifact("graph_retrieval_missing_snapshot_why", &why_json);
+    let graph = &why_json["data"]["graphRetrievalFeatures"];
+
+    ensure(graph.is_object(), "graphRetrievalFeatures must be present")?;
+    ensure_equal(
+        &graph["status"],
+        &serde_json::json!("scores_unavailable"),
+        "graph status",
+    )?;
+    ensure(
+        graph["centralityScore"].as_f64().is_some(),
+        "centralityScore must be numeric",
+    )?;
+    ensure(
+        graph["authorityScore"].as_f64().is_some(),
+        "authorityScore must be numeric",
+    )?;
+    ensure(
+        graph["hubScore"].as_f64().is_some(),
+        "hubScore must be numeric",
+    )?;
+    ensure(
+        graph["communityId"].is_null(),
+        "communityId must be explicit null when unavailable",
+    )?;
+    ensure(
+        graph["distanceToQuerySeed"].is_null(),
+        "distanceToQuerySeed must be explicit null when unavailable",
+    )?;
+    ensure(
+        graph["sameClusterAsTopResult"].is_null(),
+        "sameClusterAsTopResult must be explicit null when unavailable",
+    )?;
+    ensure(
+        graph["evidenceSupportCount"].as_u64().is_some(),
+        "evidenceSupportCount must be numeric",
+    )?;
+    ensure(
+        graph["contradictionCount"].as_u64().is_some(),
+        "contradictionCount must be numeric",
+    )?;
+    ensure(
+        graph["orphanPenalty"].as_f64().is_some(),
+        "orphanPenalty must be numeric",
+    )?;
+    ensure(
+        graph["staleBridgePenalty"].as_f64().is_some(),
+        "staleBridgePenalty must be numeric",
+    )?;
+    ensure(graph["pagerank"].is_object(), "pagerank metric must exist")?;
+    ensure(
+        graph["betweenness"].is_object(),
+        "betweenness metric must exist",
+    )?;
+    ensure(
+        graph["degraded"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item["code"] == "graph_snapshot_missing")
+        }),
+        "missing graph snapshot must be explained",
+    )
+}
+
+#[test]
 fn why_selection_section_exposes_score_formula() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let workspace = tempdir.path().to_string_lossy().to_string();

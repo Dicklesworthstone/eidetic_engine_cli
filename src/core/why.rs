@@ -57,6 +57,100 @@ pub struct RetrievalExplanation {
     pub kind: String,
 }
 
+/// Graph-derived retrieval features used to explain why a memory may be ranked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphRetrievalExplanation {
+    /// Availability status for graph-derived features.
+    pub status: String,
+    /// Pinned source for the graph feature state.
+    pub source: GraphRetrievalSourceExplanation,
+    /// Combined graph centrality score used as the retrieval feature.
+    pub centrality_score: f64,
+    /// Authority proxy. Uses normalized PageRank until HITS authority is available.
+    pub authority_score: f64,
+    /// Hub proxy. Uses normalized PageRank until HITS hub scores are available.
+    pub hub_score: f64,
+    /// Optional graph community identifier when community detection is available.
+    pub community_id: Option<String>,
+    /// Distance from this memory to the query seed, when query-seed expansion is available.
+    pub distance_to_query_seed: Option<u32>,
+    /// Whether this memory is in the same cluster as the top result.
+    pub same_cluster_as_top_result: Option<bool>,
+    /// Count of supporting evidence edges incident to this memory.
+    pub evidence_support_count: u32,
+    /// Count of contradiction edges or feedback events incident to this memory.
+    pub contradiction_count: u32,
+    /// Penalty applied when a memory is graph-isolated.
+    pub orphan_penalty: f64,
+    /// Penalty applied when an expired memory is a bridge in the graph.
+    pub stale_bridge_penalty: f64,
+    /// Raw PageRank score from the graph snapshot.
+    pub pagerank: GraphMetricExplanation,
+    /// Raw betweenness score from the graph snapshot.
+    pub betweenness: GraphMetricExplanation,
+    /// Human-readable graph labels.
+    pub labels: Vec<String>,
+    /// Human-readable graph reasons.
+    pub reasons: Vec<String>,
+    /// Stable formula for centrality_score.
+    pub centrality_formula: String,
+    /// Stable formula for orphan_penalty.
+    pub orphan_penalty_formula: String,
+    /// Stable formula for stale_bridge_penalty.
+    pub stale_bridge_penalty_formula: String,
+    /// Graph-specific degradations. These do not make `ee why` fail.
+    pub degraded: Vec<WhyDegradation>,
+}
+
+/// Source metadata for graph retrieval features.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphRetrievalSourceExplanation {
+    /// Source kind: graph_snapshot, live_centrality, or unavailable.
+    pub kind: String,
+    /// Workspace used for graph feature lookup.
+    pub workspace_id: Option<String>,
+    /// Graph type used for the feature lookup.
+    pub graph_type: Option<String>,
+    /// Snapshot witness when graph features came from persisted graph state.
+    pub snapshot: Option<GraphRetrievalSnapshotExplanation>,
+}
+
+/// Snapshot witness for graph retrieval features.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphRetrievalSnapshotExplanation {
+    /// Snapshot ID.
+    pub id: String,
+    /// Snapshot schema version.
+    pub schema_version: String,
+    /// Monotonic snapshot version.
+    pub snapshot_version: u32,
+    /// Source generation captured by the snapshot.
+    pub source_generation: u32,
+    /// Snapshot status.
+    pub status: String,
+    /// Snapshot content hash.
+    pub content_hash: String,
+    /// Snapshot creation timestamp.
+    pub created_at: String,
+}
+
+/// One graph metric used by retrieval explanation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphMetricExplanation {
+    /// Raw metric value.
+    pub raw: f64,
+    /// Normalized metric value.
+    pub normalized: f64,
+    /// One-based rank when available.
+    pub rank: Option<usize>,
+    /// Metric weight in the centrality formula.
+    pub weight: f64,
+    /// Weighted contribution.
+    pub contribution: f64,
+    /// Stable formula for this contribution.
+    pub formula: String,
+}
+
 /// Why a memory would be selected for a context pack.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SelectionExplanation {
@@ -245,6 +339,8 @@ pub struct WhyReport {
     pub storage: Option<StorageExplanation>,
     /// Retrieval explanation.
     pub retrieval: Option<RetrievalExplanation>,
+    /// Graph-derived retrieval features and gaps.
+    pub graph_retrieval: Option<GraphRetrievalExplanation>,
     /// Selection explanation.
     pub selection: Option<SelectionExplanation>,
     /// Contradiction feedback recorded against this memory (EE-263).
@@ -274,6 +370,7 @@ impl WhyReport {
             found: true,
             storage: Some(storage),
             retrieval: Some(retrieval),
+            graph_retrieval: None,
             selection: Some(selection),
             contradictions: Vec::new(),
             links: Vec::new(),
@@ -292,6 +389,7 @@ impl WhyReport {
             found: false,
             storage: None,
             retrieval: None,
+            graph_retrieval: None,
             selection: None,
             contradictions: Vec::new(),
             links: Vec::new(),
@@ -310,6 +408,7 @@ impl WhyReport {
             found: false,
             storage: None,
             retrieval: None,
+            graph_retrieval: None,
             selection: None,
             contradictions: Vec::new(),
             links: Vec::new(),
@@ -337,6 +436,13 @@ impl WhyReport {
     #[must_use]
     pub fn with_links(mut self, links: Vec<MemoryLinkSummary>) -> Self {
         self.links = links;
+        self
+    }
+
+    /// Add graph-derived retrieval feature explanation to the report.
+    #[must_use]
+    pub fn with_graph_retrieval(mut self, graph_retrieval: GraphRetrievalExplanation) -> Self {
+        self.graph_retrieval = Some(graph_retrieval);
         self
     }
 
@@ -415,6 +521,14 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     let rationale_traces = fetch_rationale_traces(&conn, &memory.workspace_id, memory_id);
 
     let validity = memory_validity(&memory.valid_from, &memory.valid_to);
+    let graph_retrieval = build_graph_retrieval_explanation(
+        &conn,
+        &memory.workspace_id,
+        memory_id,
+        &links,
+        &contradictions,
+        &validity.status,
+    );
     let storage = StorageExplanation {
         origin: determine_origin(&memory.trust_class),
         trust_class: memory.trust_class.clone(),
@@ -457,6 +571,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
                     contradictions,
                     links,
                     rationale_traces,
+                    graph_retrieval,
                 },
             );
             return report.with_degradation(WhyDegradation {
@@ -480,6 +595,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
             contradictions,
             links,
             rationale_traces,
+            graph_retrieval,
         },
     )
 }
@@ -499,6 +615,7 @@ struct ReportSelectionInputs {
     contradictions: Vec<ContradictionMetadata>,
     links: Vec<MemoryLinkSummary>,
     rationale_traces: Vec<RationaleTraceSummary>,
+    graph_retrieval: GraphRetrievalExplanation,
 }
 
 fn build_report(
@@ -524,7 +641,255 @@ fn build_report(
     WhyReport::found(memory_id.to_string(), storage, retrieval, selection)
         .with_contradictions(selection_inputs.contradictions)
         .with_links(selection_inputs.links)
+        .with_graph_retrieval(selection_inputs.graph_retrieval)
         .with_rationale_traces(selection_inputs.rationale_traces)
+}
+
+fn build_graph_retrieval_explanation(
+    conn: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+    links: &[MemoryLinkSummary],
+    contradictions: &[ContradictionMetadata],
+    validity_status: &str,
+) -> GraphRetrievalExplanation {
+    let options = crate::graph::GraphFeatureEnrichmentOptions {
+        max_features: usize::MAX,
+        min_combined_score: 0.0,
+        ..crate::graph::GraphFeatureEnrichmentOptions::default()
+    };
+
+    let report = match conn
+        .get_latest_graph_snapshot(workspace_id, crate::db::GraphSnapshotType::MemoryLinks)
+    {
+        Ok(snapshot) => crate::graph::enrich_graph_features_from_graph_snapshot(
+            snapshot.as_ref(),
+            workspace_id,
+            crate::db::GraphSnapshotType::MemoryLinks,
+            &options,
+        ),
+        Err(error) => {
+            return graph_retrieval_unavailable(
+                workspace_id,
+                "graph_snapshot_query_failed",
+                "medium",
+                format!("Failed to query graph snapshot: {error}"),
+                "ee graph centrality-refresh",
+                links,
+                contradictions,
+            );
+        }
+    };
+
+    let feature = report
+        .features
+        .iter()
+        .find(|feature| feature.memory_id == memory_id);
+    let pagerank = feature.map_or_else(default_graph_metric, |feature| GraphMetricExplanation {
+        raw: round_graph_score(feature.pagerank),
+        normalized: round_graph_score(feature.pagerank_normalized),
+        rank: feature.pagerank_rank,
+        weight: 0.6,
+        contribution: round_graph_score(feature.pagerank_normalized * 0.6),
+        formula: "pagerank_contribution = pagerank.normalized * 0.6".to_owned(),
+    });
+    let betweenness = feature.map_or_else(default_graph_metric, |feature| GraphMetricExplanation {
+        raw: round_graph_score(feature.betweenness),
+        normalized: round_graph_score(feature.betweenness_normalized),
+        rank: feature.betweenness_rank,
+        weight: 0.4,
+        contribution: round_graph_score(feature.betweenness_normalized * 0.4),
+        formula: "betweenness_contribution = betweenness.normalized * 0.4".to_owned(),
+    });
+    let mut degraded = graph_degradations_from_report(&report);
+    let status = if feature.is_some() {
+        "available".to_owned()
+    } else if report.status == crate::graph::GraphFeatureEnrichmentStatus::Enriched {
+        degraded.push(WhyDegradation {
+            code: "graph_memory_not_in_snapshot",
+            severity: "low",
+            message: "Graph snapshot exists, but this memory has no graph score.".to_owned(),
+            repair: Some("ee graph centrality-refresh".to_owned()),
+        });
+        "memory_not_in_graph_snapshot".to_owned()
+    } else {
+        report.status.as_str().to_owned()
+    };
+    degraded.push(WhyDegradation {
+        code: "graph_query_relative_features_unavailable",
+        severity: "low",
+        message: "Community and query-seed graph features are present as stable fields but unavailable without community detection and query-seed expansion."
+            .to_owned(),
+        repair: Some("ee graph communities && ee search --explain".to_owned()),
+    });
+
+    let evidence_support_count = evidence_support_count(links);
+    let contradiction_count = contradiction_count(links, contradictions);
+    let orphan_penalty = orphan_penalty(links);
+    let stale_bridge_penalty = stale_bridge_penalty(validity_status, betweenness.normalized);
+
+    GraphRetrievalExplanation {
+        status,
+        source: graph_retrieval_source_from_report(&report),
+        centrality_score: round_graph_score(feature.map_or(0.0, |feature| feature.combined_score)),
+        authority_score: pagerank.normalized,
+        hub_score: pagerank.normalized,
+        community_id: None,
+        distance_to_query_seed: None,
+        same_cluster_as_top_result: None,
+        evidence_support_count,
+        contradiction_count,
+        orphan_penalty,
+        stale_bridge_penalty,
+        pagerank,
+        betweenness,
+        labels: feature.map_or_else(Vec::new, |feature| feature.labels.clone()),
+        reasons: feature.map_or_else(Vec::new, |feature| feature.reasons.clone()),
+        centrality_formula: "centrality_score = 0.6 * pagerank.normalized + 0.4 * betweenness.normalized"
+            .to_owned(),
+        orphan_penalty_formula: "orphan_penalty = 1.0 when no incident memory_links exist, else 0.0"
+            .to_owned(),
+        stale_bridge_penalty_formula:
+            "stale_bridge_penalty = betweenness.normalized when validity_status is expired, else 0.0"
+                .to_owned(),
+        degraded,
+    }
+}
+
+fn graph_retrieval_unavailable(
+    workspace_id: &str,
+    code: &'static str,
+    severity: &'static str,
+    message: String,
+    repair: &'static str,
+    links: &[MemoryLinkSummary],
+    contradictions: &[ContradictionMetadata],
+) -> GraphRetrievalExplanation {
+    let pagerank = default_graph_metric();
+    let betweenness = default_graph_metric();
+    GraphRetrievalExplanation {
+        status: code.to_owned(),
+        source: GraphRetrievalSourceExplanation {
+            kind: "graph_snapshot".to_owned(),
+            workspace_id: Some(workspace_id.to_owned()),
+            graph_type: Some(crate::db::GraphSnapshotType::MemoryLinks.as_str().to_owned()),
+            snapshot: None,
+        },
+        centrality_score: 0.0,
+        authority_score: 0.0,
+        hub_score: 0.0,
+        community_id: None,
+        distance_to_query_seed: None,
+        same_cluster_as_top_result: None,
+        evidence_support_count: evidence_support_count(links),
+        contradiction_count: contradiction_count(links, contradictions),
+        orphan_penalty: orphan_penalty(links),
+        stale_bridge_penalty: 0.0,
+        pagerank,
+        betweenness,
+        labels: Vec::new(),
+        reasons: Vec::new(),
+        centrality_formula: "centrality_score = 0.6 * pagerank.normalized + 0.4 * betweenness.normalized"
+            .to_owned(),
+        orphan_penalty_formula: "orphan_penalty = 1.0 when no incident memory_links exist, else 0.0"
+            .to_owned(),
+        stale_bridge_penalty_formula:
+            "stale_bridge_penalty = betweenness.normalized when validity_status is expired, else 0.0"
+                .to_owned(),
+        degraded: vec![WhyDegradation {
+            code,
+            severity,
+            message,
+            repair: Some(repair.to_owned()),
+        }],
+    }
+}
+
+fn graph_degradations_from_report(
+    report: &crate::graph::GraphFeatureEnrichmentReport,
+) -> Vec<WhyDegradation> {
+    report
+        .degraded
+        .iter()
+        .map(|entry| WhyDegradation {
+            code: entry.code,
+            severity: entry.severity,
+            message: entry.message.clone(),
+            repair: Some(entry.repair.clone()),
+        })
+        .collect()
+}
+
+fn graph_retrieval_source_from_report(
+    report: &crate::graph::GraphFeatureEnrichmentReport,
+) -> GraphRetrievalSourceExplanation {
+    GraphRetrievalSourceExplanation {
+        kind: report.source.kind.to_owned(),
+        workspace_id: report.source.workspace_id.clone(),
+        graph_type: report.source.graph_type.clone(),
+        snapshot: report.source.snapshot.as_ref().map(|snapshot| {
+            GraphRetrievalSnapshotExplanation {
+                id: snapshot.id.clone(),
+                schema_version: snapshot.schema_version.clone(),
+                snapshot_version: snapshot.snapshot_version,
+                source_generation: snapshot.source_generation,
+                status: snapshot.status.clone(),
+                content_hash: snapshot.content_hash.clone(),
+                created_at: snapshot.created_at.clone(),
+            }
+        }),
+    }
+}
+
+fn default_graph_metric() -> GraphMetricExplanation {
+    GraphMetricExplanation {
+        raw: 0.0,
+        normalized: 0.0,
+        rank: None,
+        weight: 0.0,
+        contribution: 0.0,
+        formula: "metric unavailable".to_owned(),
+    }
+}
+
+fn evidence_support_count(links: &[MemoryLinkSummary]) -> u32 {
+    links
+        .iter()
+        .filter(|link| link.relation == "supports")
+        .map(|link| link.evidence_count.max(1))
+        .fold(0_u32, u32::saturating_add)
+}
+
+fn contradiction_count(
+    links: &[MemoryLinkSummary],
+    contradictions: &[ContradictionMetadata],
+) -> u32 {
+    let link_count = links
+        .iter()
+        .filter(|link| link.relation == "contradicts")
+        .map(|link| link.evidence_count.max(1))
+        .fold(0_u32, u32::saturating_add);
+    link_count.saturating_add(u32::try_from(contradictions.len()).unwrap_or(u32::MAX))
+}
+
+fn orphan_penalty(links: &[MemoryLinkSummary]) -> f64 {
+    if links.is_empty() { 1.0 } else { 0.0 }
+}
+
+fn stale_bridge_penalty(validity_status: &str, betweenness_normalized: f64) -> f64 {
+    if validity_status == "expired" {
+        round_graph_score(betweenness_normalized.clamp(0.0, 1.0))
+    } else {
+        0.0
+    }
+}
+
+fn round_graph_score(value: f64) -> f64 {
+    if value.is_finite() {
+        (value * 10_000.0).round() / 10_000.0
+    } else {
+        0.0
+    }
 }
 
 fn determine_origin(trust_class: &str) -> String {
@@ -808,6 +1173,15 @@ mod tests {
                 contradictions: Vec::new(),
                 links: Vec::new(),
                 rationale_traces: Vec::new(),
+                graph_retrieval: graph_retrieval_unavailable(
+                    "wsp_01234567890123456789012345",
+                    "graph_snapshot_missing",
+                    "medium",
+                    "No persisted graph snapshot exists for feature enrichment.".to_string(),
+                    "ee graph centrality-refresh",
+                    &[],
+                    &[],
+                ),
             },
         );
 

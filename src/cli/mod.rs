@@ -11783,6 +11783,24 @@ fn format_why_human(report: &crate::core::why::WhyReport) -> String {
         output.push('\n');
     }
 
+    if let Some(ref graph) = report.graph_retrieval {
+        output.push_str("Graph retrieval features:\n");
+        output.push_str(&format!("  Status: {}\n", graph.status));
+        output.push_str(&format!(
+            "  Centrality: {:.4}, authority: {:.4}, hub: {:.4}\n",
+            graph.centrality_score, graph.authority_score, graph.hub_score
+        ));
+        output.push_str(&format!(
+            "  Evidence support: {}, contradictions: {}\n",
+            graph.evidence_support_count, graph.contradiction_count
+        ));
+        output.push_str(&format!(
+            "  Orphan penalty: {:.4}, stale bridge penalty: {:.4}\n",
+            graph.orphan_penalty, graph.stale_bridge_penalty
+        ));
+        output.push('\n');
+    }
+
     if let Some(ref selection) = report.selection {
         output.push_str("Selection:\n");
         output.push_str(&format!("  Score: {:.2}\n", selection.selection_score));
@@ -11933,6 +11951,74 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
         })
     });
 
+    let graph_retrieval = report.graph_retrieval.as_ref().map(|graph| {
+        let snapshot = graph.source.snapshot.as_ref().map(|snapshot| {
+            serde_json::json!({
+                "id": snapshot.id,
+                "schemaVersion": snapshot.schema_version,
+                "snapshotVersion": snapshot.snapshot_version,
+                "sourceGeneration": snapshot.source_generation,
+                "status": snapshot.status,
+                "contentHash": snapshot.content_hash,
+                "createdAt": snapshot.created_at,
+            })
+        });
+        let degraded: Vec<serde_json::Value> = graph
+            .degraded
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "code": entry.code,
+                    "severity": entry.severity,
+                    "message": entry.message,
+                    "repair": entry.repair,
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "status": graph.status,
+            "source": {
+                "kind": graph.source.kind,
+                "workspaceId": graph.source.workspace_id,
+                "graphType": graph.source.graph_type,
+                "snapshot": snapshot,
+            },
+            "centralityScore": graph_score_json_value(graph.centrality_score),
+            "authorityScore": graph_score_json_value(graph.authority_score),
+            "hubScore": graph_score_json_value(graph.hub_score),
+            "communityId": graph.community_id,
+            "distanceToQuerySeed": graph.distance_to_query_seed,
+            "sameClusterAsTopResult": graph.same_cluster_as_top_result,
+            "evidenceSupportCount": graph.evidence_support_count,
+            "contradictionCount": graph.contradiction_count,
+            "orphanPenalty": graph_score_json_value(graph.orphan_penalty),
+            "staleBridgePenalty": graph_score_json_value(graph.stale_bridge_penalty),
+            "pagerank": {
+                "raw": graph_score_json_value(graph.pagerank.raw),
+                "normalized": graph_score_json_value(graph.pagerank.normalized),
+                "rank": graph.pagerank.rank,
+                "weight": graph_score_json_value(graph.pagerank.weight),
+                "contribution": graph_score_json_value(graph.pagerank.contribution),
+                "formula": graph.pagerank.formula,
+            },
+            "betweenness": {
+                "raw": graph_score_json_value(graph.betweenness.raw),
+                "normalized": graph_score_json_value(graph.betweenness.normalized),
+                "rank": graph.betweenness.rank,
+                "weight": graph_score_json_value(graph.betweenness.weight),
+                "contribution": graph_score_json_value(graph.betweenness.contribution),
+                "formula": graph.betweenness.formula,
+            },
+            "labels": graph.labels,
+            "reasons": graph.reasons,
+            "centralityFormula": graph.centrality_formula,
+            "orphanPenaltyFormula": graph.orphan_penalty_formula,
+            "staleBridgePenaltyFormula": graph.stale_bridge_penalty_formula,
+            "degraded": degraded,
+        })
+    });
+
     let selection = report.selection.as_ref().map(|s| {
         let pack = s.latest_pack_selection.as_ref().map(|pack| {
             serde_json::json!({
@@ -12015,6 +12101,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "found": report.found,
             "storage": storage,
             "retrieval": retrieval,
+            "graphRetrievalFeatures": graph_retrieval,
             "selection": selection,
             "contradictions": contradictions,
             "links": links,
@@ -12027,6 +12114,15 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
 
 fn score_json_value(value: f32) -> serde_json::Value {
     let rounded = (f64::from(value) * 10_000.0).round() / 10_000.0;
+    serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
+}
+
+fn graph_score_json_value(value: f64) -> serde_json::Value {
+    let rounded = if value.is_finite() {
+        (value * 10_000.0).round() / 10_000.0
+    } else {
+        return serde_json::Value::Null;
+    };
     serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
 }
 
