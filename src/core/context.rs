@@ -558,15 +558,68 @@ fn compute_pack_hash(
     format!("blake3:{}", hasher.finalize().to_hex())
 }
 
+#[allow(clippy::type_complexity)]
 fn candidates_from_search(
     connection: &DbConnection,
     search_report: &crate::core::search::SearchReport,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Vec<PackCandidate> {
-    let mut candidates = Vec::new();
+    // Phase 1: Resolve all memory IDs from hits (including artifact links).
+    // This still does per-hit artifact link lookups but avoids O(k) memory/tag lookups.
+    let mut hit_resolutions: Vec<(
+        &crate::core::search::SearchHit,
+        Option<(MemoryId, Option<String>)>,
+    )> = Vec::new();
     for hit in &search_report.results {
-        match candidate_from_hit(connection, hit, &search_report.query, degraded) {
-            Some(candidate) => candidates.push(candidate),
+        let resolution = match MemoryId::from_str(&hit.doc_id) {
+            Ok(id) => Some((id, None)),
+            Err(_) => artifact_linked_memory_id(connection, hit, degraded),
+        };
+        hit_resolutions.push((hit, resolution));
+    }
+
+    // Collect unique memory IDs for batch loading.
+    let memory_ids: Vec<String> = hit_resolutions
+        .iter()
+        .filter_map(|(_, res)| res.as_ref().map(|(mid, _)| mid.to_string()))
+        .collect();
+    let memory_ids_refs: Vec<&str> = memory_ids.iter().map(|s| s.as_str()).collect();
+
+    // Phase 2: Batch load all memories and tags.
+    let memories = connection
+        .get_memories_batch(&memory_ids_refs)
+        .unwrap_or_default();
+    let tags_map = connection
+        .get_memory_tags_batch(&memory_ids_refs)
+        .unwrap_or_default();
+
+    // Phase 3: Build candidates from preloaded data.
+    let mut candidates = Vec::new();
+    for (hit, resolution) in hit_resolutions {
+        match resolution {
+            Some((memory_id, artifact_id)) => {
+                match candidate_from_hit_preloaded(
+                    &memories,
+                    &tags_map,
+                    hit,
+                    &search_report.query,
+                    memory_id,
+                    artifact_id,
+                    degraded,
+                ) {
+                    Some(candidate) => candidates.push(candidate),
+                    None => push_degradation(
+                        degraded,
+                        "context_candidate_skipped",
+                        ContextResponseSeverity::Low,
+                        format!(
+                            "Search hit {} could not be converted into a pack candidate.",
+                            hit.doc_id
+                        ),
+                        Some("ee index rebuild --workspace .".to_string()),
+                    ),
+                }
+            }
             None => push_degradation(
                 degraded,
                 "context_candidate_skipped",
@@ -580,6 +633,50 @@ fn candidates_from_search(
         }
     }
     candidates
+}
+
+fn candidate_from_hit_preloaded(
+    memories: &std::collections::BTreeMap<String, StoredMemory>,
+    tags_map: &std::collections::BTreeMap<String, Vec<String>>,
+    hit: &crate::core::search::SearchHit,
+    query: &str,
+    memory_id: MemoryId,
+    artifact_id: Option<String>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Option<PackCandidate> {
+    let memory = match memories.get(&memory_id.to_string()) {
+        Some(memory) if memory.tombstoned_at.is_none() => memory,
+        _ => return None,
+    };
+    let tags = tags_map.get(&memory.id).cloned().unwrap_or_default();
+    let provenance = provenance_for_memory(memory, memory_id, degraded)?;
+    let relevance = unit_score(hit.score)?;
+    let utility = unit_score(memory.utility)?;
+    let content = memory.content.clone();
+    let why = candidate_selection_why(
+        query,
+        hit.source.as_str(),
+        hit.score,
+        memory.utility,
+        artifact_id.as_deref(),
+    );
+    let candidate = PackCandidate::new(PackCandidateInput {
+        memory_id,
+        section: section_for_memory(memory),
+        content,
+        estimated_tokens: estimate_tokens_default(&memory.content),
+        relevance,
+        utility,
+        provenance: vec![provenance],
+        why,
+    })
+    .ok()?;
+
+    Some(
+        candidate
+            .with_diversity_key(diversity_key_for_memory(memory, &tags))
+            .with_trust_signal(trust_signal_for_memory(memory, memory_id, degraded)),
+    )
 }
 
 fn focus_candidates_from_state(
@@ -735,63 +832,6 @@ fn focus_candidate_why(
         focus_state.capacity,
         item.reason,
         item.provenance.join(",")
-    )
-}
-
-fn candidate_from_hit(
-    connection: &DbConnection,
-    hit: &crate::core::search::SearchHit,
-    query: &str,
-    degraded: &mut Vec<ContextResponseDegradation>,
-) -> Option<PackCandidate> {
-    let (memory_id, artifact_id) = match MemoryId::from_str(&hit.doc_id) {
-        Ok(id) => (id, None),
-        Err(_) => artifact_linked_memory_id(connection, hit, degraded)?,
-    };
-    let memory = match connection.get_memory(&memory_id.to_string()) {
-        Ok(Some(memory)) if memory.tombstoned_at.is_none() => memory,
-        Ok(_) | Err(_) => return None,
-    };
-    let tags = match connection.get_memory_tags(&memory.id) {
-        Ok(tags) => tags,
-        Err(error) => {
-            push_degradation(
-                degraded,
-                "context_memory_tags_unavailable",
-                ContextResponseSeverity::Low,
-                format!("Tags for memory {} could not be loaded: {error}", memory.id),
-                Some(format!("ee memory show {} --json", memory.id)),
-            );
-            Vec::new()
-        }
-    };
-    let provenance = provenance_for_memory(&memory, memory_id, degraded)?;
-    let relevance = unit_score(hit.score)?;
-    let utility = unit_score(memory.utility)?;
-    let content = memory.content.clone();
-    let why = candidate_selection_why(
-        query,
-        hit.source.as_str(),
-        hit.score,
-        memory.utility,
-        artifact_id.as_deref(),
-    );
-    let candidate = PackCandidate::new(PackCandidateInput {
-        memory_id,
-        section: section_for_memory(&memory),
-        content,
-        estimated_tokens: estimate_tokens_default(&memory.content),
-        relevance,
-        utility,
-        provenance: vec![provenance],
-        why,
-    })
-    .ok()?;
-
-    Some(
-        candidate
-            .with_diversity_key(diversity_key_for_memory(&memory, &tags))
-            .with_trust_signal(trust_signal_for_memory(&memory, memory_id, degraded)),
     )
 }
 

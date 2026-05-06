@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,19 @@ pub const DEFAULT_FOCUS_CAPACITY: usize = 7;
 pub const FOCUS_STATE_RELATIVE_PATH: &str = ".ee/focus/state.json";
 
 const UNSET_FOCUS_TIMESTAMP: &str = "1970-01-01T00:00:00Z";
+
+/// Cached focus state to avoid re-reading unchanged files on every context request.
+struct FocusCacheEntry {
+    path: PathBuf,
+    mtime: SystemTime,
+    state: FocusState,
+}
+
+static FOCUS_CACHE: OnceLock<Mutex<Option<FocusCacheEntry>>> = OnceLock::new();
+
+fn get_focus_cache() -> &'static Mutex<Option<FocusCacheEntry>> {
+    FOCUS_CACHE.get_or_init(|| Mutex::new(None))
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FocusScope {
@@ -632,6 +647,9 @@ pub fn explain_focus(options: &FocusExplainOptions) -> Result<FocusReport, Domai
 
 /// Read the active focus state if the workspace has one.
 ///
+/// Uses an mtime-based cache to avoid re-reading and re-parsing the focus
+/// state file on every context request when it hasn't changed.
+///
 /// # Errors
 ///
 /// Returns a storage/configuration error if the state artifact exists but
@@ -639,10 +657,40 @@ pub fn explain_focus(options: &FocusExplainOptions) -> Result<FocusReport, Domai
 pub fn read_active_focus_state(workspace_path: &Path) -> Result<Option<FocusState>, DomainError> {
     let workspace_path = normalize_workspace_path(workspace_path);
     let storage_path = focus_state_path(&workspace_path);
-    if !storage_path.exists() {
-        return Ok(None);
+
+    let metadata = match fs::metadata(&storage_path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(DomainError::Storage {
+                message: format!("Failed to stat focus state {}: {e}", storage_path.display()),
+                repair: Some("Check workspace .ee/focus permissions.".to_owned()),
+            });
+        }
+    };
+
+    let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+    let cache = get_focus_cache();
+    if let Ok(guard) = cache.lock() {
+        if let Some(entry) = guard.as_ref() {
+            if entry.path == storage_path && entry.mtime == mtime {
+                return Ok(Some(entry.state.clone()));
+            }
+        }
     }
-    read_focus_state(&storage_path).map(Some)
+
+    let state = read_focus_state(&storage_path)?;
+
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some(FocusCacheEntry {
+            path: storage_path,
+            mtime,
+            state: state.clone(),
+        });
+    }
+
+    Ok(Some(state))
 }
 
 #[must_use]
@@ -736,10 +784,23 @@ fn write_focus_state(path: &Path, state: &FocusState) -> Result<(), DomainError>
             repair: Some("Report the focus serialization failure.".to_owned()),
         })?;
     body.push('\n');
-    fs::write(path, body).map_err(|error| DomainError::Storage {
+    fs::write(path, &body).map_err(|error| DomainError::Storage {
         message: format!("Failed to write focus state {}: {error}", path.display()),
         repair: Some("Check workspace .ee/focus permissions.".to_owned()),
-    })
+    })?;
+
+    // Update cache with new state to avoid stale reads
+    if let Ok(mtime) = fs::metadata(path).and_then(|m| m.modified()) {
+        if let Ok(mut guard) = get_focus_cache().lock() {
+            *guard = Some(FocusCacheEntry {
+                path: path.to_path_buf(),
+                mtime,
+                state: state.clone(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn stored_focus_state_to_domain(stored: StoredFocusState) -> Result<FocusState, DomainError> {

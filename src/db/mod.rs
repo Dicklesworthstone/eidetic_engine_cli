@@ -5735,6 +5735,59 @@ impl DbConnection {
             .collect()
     }
 
+    /// Batch-load memories by IDs, returning a map from ID to memory.
+    /// Preserves deterministic iteration order via BTreeMap.
+    pub fn get_memories_batch(
+        &self,
+        ids: &[&str],
+    ) -> Result<std::collections::BTreeMap<String, StoredMemory>> {
+        if ids.is_empty() {
+            return Ok(std::collections::BTreeMap::new());
+        }
+        let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE id IN ({}) ORDER BY id ASC",
+            placeholders.join(", ")
+        );
+        let params: Vec<Value> = ids.iter().map(|id| Value::Text(id.to_string())).collect();
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        let mut result = std::collections::BTreeMap::new();
+        for row in &rows {
+            let memory = stored_memory_from_row(row)?;
+            result.insert(memory.id.clone(), memory);
+        }
+        Ok(result)
+    }
+
+    /// Batch-load tags for multiple memories, returning a map from memory ID to tags.
+    /// Preserves deterministic iteration order via BTreeMap.
+    pub fn get_memory_tags_batch(
+        &self,
+        memory_ids: &[&str],
+    ) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
+        if memory_ids.is_empty() {
+            return Ok(std::collections::BTreeMap::new());
+        }
+        let placeholders: Vec<String> = (1..=memory_ids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT memory_id, tag FROM memory_tags WHERE memory_id IN ({}) ORDER BY memory_id ASC, tag ASC",
+            placeholders.join(", ")
+        );
+        let params: Vec<Value> = memory_ids
+            .iter()
+            .map(|id| Value::Text(id.to_string()))
+            .collect();
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        let mut result: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for row in &rows {
+            let memory_id = required_text(row, 0, DbOperation::Query, "memory_id")?.to_string();
+            let tag = required_text(row, 1, DbOperation::Query, "tag")?.to_string();
+            result.entry(memory_id).or_default().push(tag);
+        }
+        Ok(result)
+    }
+
     /// Add tags to a memory (idempotent).
     pub fn add_memory_tags(&self, memory_id: &str, tags: &[String]) -> Result<()> {
         let mut changed = false;
@@ -8032,6 +8085,14 @@ pub struct StoredPackOmission {
     pub reason: String,
 }
 
+const PACK_INSERT_MAX_BIND_PARAMS: usize = 900;
+const PACK_ITEM_INSERT_VALUE_COUNT: usize = 12;
+const PACK_OMISSION_INSERT_VALUE_COUNT: usize = 4;
+const PACK_ITEM_INSERT_BATCH_ROWS: usize =
+    PACK_INSERT_MAX_BIND_PARAMS / PACK_ITEM_INSERT_VALUE_COUNT;
+const PACK_OMISSION_INSERT_BATCH_ROWS: usize =
+    PACK_INSERT_MAX_BIND_PARAMS / PACK_OMISSION_INSERT_VALUE_COUNT;
+
 impl DbConnection {
     /// Insert a pack record with its items and omissions.
     pub fn insert_pack_record(
@@ -8043,6 +8104,19 @@ impl DbConnection {
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
 
+        self.with_transaction(|| {
+            self.insert_pack_record_row(id, input, &now)?;
+            self.insert_pack_items(items)?;
+            self.insert_pack_omissions(omissions)
+        })
+    }
+
+    fn insert_pack_record_row(
+        &self,
+        id: &str,
+        input: &CreatePackRecordInput,
+        now: &str,
+    ) -> Result<()> {
         self.execute_for(
             DbOperation::Execute,
             "INSERT INTO pack_records (id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, created_at, created_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
@@ -8057,45 +8131,66 @@ impl DbConnection {
                 Value::BigInt(i64::from(input.omitted_count)),
                 Value::Text(input.pack_hash.clone()),
                 input.degraded_json.as_ref().map_or(Value::Null, |json| Value::Text(json.clone())),
-                Value::Text(now),
+                Value::Text(now.to_string()),
                 input.created_by.as_ref().map_or(Value::Null, |by| Value::Text(by.clone())),
             ],
         )?;
 
-        for item in items {
-            self.execute_for(
-                DbOperation::Execute,
-                "INSERT INTO pack_items (pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key, provenance_json, trust_class, trust_subclass) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                &[
-                    Value::Text(item.pack_id.clone()),
-                    Value::Text(item.memory_id.clone()),
-                    Value::BigInt(i64::from(item.rank)),
-                    Value::Text(item.section.clone()),
-                    Value::BigInt(i64::from(item.estimated_tokens)),
-                    Value::Float(item.relevance),
-                    Value::Float(item.utility),
-                    Value::Text(item.why.clone()),
-                    item.diversity_key.as_ref().map_or(Value::Null, |key| Value::Text(key.clone())),
-                    Value::Text(item.provenance_json.clone()),
-                    Value::Text(item.trust_class.clone()),
+        Ok(())
+    }
+
+    fn insert_pack_items(&self, items: &[CreatePackItemInput]) -> Result<()> {
+        for chunk in items.chunks(PACK_ITEM_INSERT_BATCH_ROWS) {
+            let mut sql =
+                String::from("INSERT INTO pack_items (pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key, provenance_json, trust_class, trust_subclass) VALUES ");
+            append_multi_row_placeholders(&mut sql, chunk.len(), PACK_ITEM_INSERT_VALUE_COUNT);
+
+            let mut params = Vec::with_capacity(chunk.len() * PACK_ITEM_INSERT_VALUE_COUNT);
+            for item in chunk {
+                params.push(Value::Text(item.pack_id.clone()));
+                params.push(Value::Text(item.memory_id.clone()));
+                params.push(Value::BigInt(i64::from(item.rank)));
+                params.push(Value::Text(item.section.clone()));
+                params.push(Value::BigInt(i64::from(item.estimated_tokens)));
+                params.push(Value::Float(item.relevance));
+                params.push(Value::Float(item.utility));
+                params.push(Value::Text(item.why.clone()));
+                params.push(
+                    item.diversity_key
+                        .as_ref()
+                        .map_or(Value::Null, |key| Value::Text(key.clone())),
+                );
+                params.push(Value::Text(item.provenance_json.clone()));
+                params.push(Value::Text(item.trust_class.clone()));
+                params.push(
                     item.trust_subclass
                         .as_ref()
                         .map_or(Value::Null, |subclass| Value::Text(subclass.clone())),
-                ],
-            )?;
+                );
+            }
+
+            self.execute_for(DbOperation::Execute, &sql, &params)?;
         }
 
-        for omission in omissions {
-            self.execute_for(
-                DbOperation::Execute,
-                "INSERT INTO pack_omissions (pack_id, memory_id, estimated_tokens, reason) VALUES (?1, ?2, ?3, ?4)",
-                &[
-                    Value::Text(omission.pack_id.clone()),
-                    Value::Text(omission.memory_id.clone()),
-                    Value::BigInt(i64::from(omission.estimated_tokens)),
-                    Value::Text(omission.reason.clone()),
-                ],
-            )?;
+        Ok(())
+    }
+
+    fn insert_pack_omissions(&self, omissions: &[CreatePackOmissionInput]) -> Result<()> {
+        for chunk in omissions.chunks(PACK_OMISSION_INSERT_BATCH_ROWS) {
+            let mut sql = String::from(
+                "INSERT INTO pack_omissions (pack_id, memory_id, estimated_tokens, reason) VALUES ",
+            );
+            append_multi_row_placeholders(&mut sql, chunk.len(), PACK_OMISSION_INSERT_VALUE_COUNT);
+
+            let mut params = Vec::with_capacity(chunk.len() * PACK_OMISSION_INSERT_VALUE_COUNT);
+            for omission in chunk {
+                params.push(Value::Text(omission.pack_id.clone()));
+                params.push(Value::Text(omission.memory_id.clone()));
+                params.push(Value::BigInt(i64::from(omission.estimated_tokens)));
+                params.push(Value::Text(omission.reason.clone()));
+            }
+
+            self.execute_for(DbOperation::Execute, &sql, &params)?;
         }
 
         Ok(())
@@ -8143,6 +8238,35 @@ impl DbConnection {
             })
             .collect()
     }
+}
+
+fn append_multi_row_placeholders(sql: &mut String, row_count: usize, values_per_row: usize) {
+    for row_index in 0..row_count {
+        if row_index > 0 {
+            sql.push_str(", ");
+        }
+        sql.push('(');
+        for value_index in 0..values_per_row {
+            if value_index > 0 {
+                sql.push_str(", ");
+            }
+            let parameter_index = row_index * values_per_row + value_index + 1;
+            sql.push('?');
+            sql.push_str(&parameter_index.to_string());
+        }
+        sql.push(')');
+    }
+}
+
+#[cfg(test)]
+fn pack_record_insert_statement_count(item_count: usize, omission_count: usize) -> usize {
+    1 + pack_insert_chunk_count(item_count, PACK_ITEM_INSERT_BATCH_ROWS)
+        + pack_insert_chunk_count(omission_count, PACK_OMISSION_INSERT_BATCH_ROWS)
+}
+
+#[cfg(test)]
+fn pack_insert_chunk_count(row_count: usize, chunk_size: usize) -> usize {
+    row_count.div_ceil(chunk_size)
 }
 
 fn stored_pack_record_from_row(row: &Row) -> Result<StoredPackRecord> {
