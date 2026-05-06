@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
 use crate::search::{
     Embedder, HashEmbedder, SpeedMode, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
 };
@@ -46,6 +47,7 @@ pub struct SearchReport {
     pub results: Vec<SearchHit>,
     pub elapsed_ms: f64,
     pub errors: Vec<String>,
+    pub degraded: Vec<SearchDegradation>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -112,6 +114,51 @@ pub struct ScoreFactor {
     pub contribution: String,
     pub source_field: String,
     pub formula: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchDegradation {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    pub repair: Option<String>,
+}
+
+impl SearchDegradation {
+    #[must_use]
+    fn stale_index(db_generation: Option<u64>, index_generation: Option<u64>) -> Self {
+        let generation_detail = match (db_generation, index_generation) {
+            (Some(db_generation), Some(index_generation)) => format!(
+                " Database generation is {db_generation}; index generation is {index_generation}."
+            ),
+            (Some(db_generation), None) => {
+                format!(" Database generation is {db_generation}; index generation is unavailable.")
+            }
+            (None, Some(index_generation)) => format!(
+                " Index generation is {index_generation}; database generation is unavailable."
+            ),
+            (None, None) => String::new(),
+        };
+
+        Self {
+            code: "search_index_stale".to_string(),
+            severity: "medium".to_string(),
+            message: format!(
+                "Search index is stale; returning lexical fallback results from the current index.{generation_detail} Newer memories may be omitted until the index is rebuilt."
+            ),
+            repair: Some("ee index rebuild --workspace .".to_string()),
+        }
+    }
+
+    #[must_use]
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "code": self.code,
+            "severity": self.severity,
+            "message": self.message,
+            "repair": self.repair,
+        })
+    }
 }
 
 impl ScoreFactor {
@@ -237,6 +284,13 @@ impl SearchReport {
             }
         }
 
+        if !self.degraded.is_empty() {
+            output.push_str("\nDegraded:\n");
+            for degraded in &self.degraded {
+                output.push_str(&format!("  - {}: {}\n", degraded.code, degraded.message));
+            }
+        }
+
         output
     }
 
@@ -305,6 +359,7 @@ impl SearchReport {
             "elapsedMs": self.elapsed_ms,
             "metrics": self.retrieval_metrics().data_json(),
             "errors": self.errors,
+            "degraded": self.degraded.iter().map(SearchDegradation::data_json).collect::<Vec<_>>(),
         })
     }
 }
@@ -621,6 +676,8 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
         return Err(SearchError::NoIndex);
     }
 
+    let degraded = search_degradations(options, &index_dir);
+
     let search_result = search_sync(
         &index_dir,
         &options.query,
@@ -646,6 +703,7 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                 results: hits,
                 elapsed_ms,
                 errors,
+                degraded,
             })
         }
         Err(e) => Ok(SearchReport {
@@ -655,7 +713,28 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
             results: Vec::new(),
             elapsed_ms,
             errors: vec![e],
+            degraded,
         }),
+    }
+}
+
+fn search_degradations(options: &SearchOptions, index_dir: &Path) -> Vec<SearchDegradation> {
+    let status_options = IndexStatusOptions {
+        workspace_path: options.workspace_path.clone(),
+        database_path: options.database_path.clone(),
+        index_dir: Some(index_dir.to_path_buf()),
+    };
+
+    let Ok(index_status) = get_index_status(&status_options) else {
+        return Vec::new();
+    };
+
+    match index_status.health {
+        IndexHealth::Stale => vec![SearchDegradation::stale_index(
+            index_status.db_generation,
+            index_status.index_generation,
+        )],
+        IndexHealth::Ready | IndexHealth::Missing | IndexHealth::Corrupt => Vec::new(),
     }
 }
 
@@ -791,6 +870,7 @@ mod tests {
             }],
             elapsed_ms: 12.3,
             errors: Vec::new(),
+            degraded: Vec::new(),
         };
 
         let json = report.data_json();
@@ -911,6 +991,7 @@ mod tests {
             }],
             elapsed_ms: 5.2,
             errors: Vec::new(),
+            degraded: Vec::new(),
         };
 
         let json = report.data_json();
@@ -952,6 +1033,7 @@ mod tests {
             results: vec![hit],
             elapsed_ms: 1.0,
             errors: Vec::new(),
+            degraded: Vec::new(),
         };
 
         let json = report.data_json();
@@ -995,6 +1077,7 @@ mod tests {
             }],
             elapsed_ms: 1.0,
             errors: Vec::new(),
+            degraded: Vec::new(),
         };
 
         let json = report.data_json();
@@ -1043,6 +1126,7 @@ mod tests {
             ],
             elapsed_ms: 2.345_678_9,
             errors: vec!["semantic tier unavailable".to_string()],
+            degraded: Vec::new(),
         };
 
         let metrics = report.retrieval_metrics();
@@ -1084,6 +1168,7 @@ mod tests {
             results: Vec::new(),
             elapsed_ms: 0.0,
             errors: Vec::new(),
+            degraded: Vec::new(),
         };
 
         let json = report.data_json();
@@ -1202,6 +1287,7 @@ mod tests {
             results: vec![hit],
             elapsed_ms: 2.0,
             errors: Vec::new(),
+            degraded: Vec::new(),
         };
 
         let json = report.data_json();
@@ -1254,6 +1340,7 @@ mod tests {
             results: vec![hit],
             elapsed_ms: 1.5,
             errors: Vec::new(),
+            degraded: Vec::new(),
         };
 
         let summary = report.human_summary();

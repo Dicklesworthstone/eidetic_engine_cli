@@ -18253,6 +18253,7 @@ mod tests {
             }],
             elapsed_ms: 12.34,
             errors: Vec::new(),
+            degraded: Vec::new(),
         }
     }
 

@@ -65,6 +65,7 @@ fn search_report_data_json_uses_camel_case_fields() -> TestResult {
         }],
         elapsed_ms: 12.5,
         errors: Vec::new(),
+        degraded: Vec::new(),
     };
 
     let json = report.data_json();
@@ -204,6 +205,7 @@ fn search_hit_fields_are_camel_case_when_populated() -> TestResult {
         }],
         elapsed_ms: 3.0,
         errors: Vec::new(),
+        degraded: Vec::new(),
     };
 
     let json = report.data_json();
@@ -284,6 +286,7 @@ fn field_naming_contract_is_stable() -> TestResult {
         }],
         elapsed_ms: 1.0,
         errors: Vec::new(),
+        degraded: Vec::new(),
     };
 
     let json = report.data_json();
@@ -364,6 +367,7 @@ fn optional_hit_fields_absent_when_none() -> TestResult {
         }],
         elapsed_ms: 1.0,
         errors: Vec::new(),
+        degraded: Vec::new(),
     };
 
     let json = report.data_json();
