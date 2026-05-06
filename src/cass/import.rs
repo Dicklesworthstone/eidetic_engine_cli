@@ -246,6 +246,62 @@ impl From<DbError> for CassImportError {
     }
 }
 
+/// Bounded summary of CASS import parser output for fuzzing and parser
+/// contract checks without exposing private storage-row construction types.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CassImportParseSummary {
+    pub accepted_items: u32,
+    pub max_line: u32,
+    pub max_excerpt_bytes: usize,
+}
+
+/// Parse CASS `sessions --json` bytes through the same import parser used by
+/// the real importer, returning bounded public facts for fuzz harnesses.
+///
+/// # Errors
+///
+/// Returns [`CassImportError::InvalidJson`] when CASS emits malformed or
+/// structurally invalid session discovery JSON.
+pub fn parse_sessions_json_summary(
+    input: &[u8],
+) -> Result<CassImportParseSummary, CassImportError> {
+    let sessions = parse_sessions_json(input)?;
+    Ok(CassImportParseSummary {
+        accepted_items: saturating_len(sessions.len()),
+        max_line: 0,
+        max_excerpt_bytes: 0,
+    })
+}
+
+/// Parse CASS `view --json` bytes through the same import parser used by the
+/// real importer, returning bounded public facts for fuzz harnesses.
+///
+/// # Errors
+///
+/// Returns [`CassImportError::InvalidJson`] when CASS emits malformed or
+/// structurally invalid view JSON.
+pub fn parse_view_json_summary(
+    input: &[u8],
+    source_path: &str,
+) -> Result<CassImportParseSummary, CassImportError> {
+    let spans = parse_view_json(input, source_path)?;
+    let max_line = spans
+        .iter()
+        .map(|span| span.end_line)
+        .max()
+        .unwrap_or_default();
+    let max_excerpt_bytes = spans
+        .iter()
+        .map(|span| span.excerpt.len())
+        .max()
+        .unwrap_or_default();
+    Ok(CassImportParseSummary {
+        accepted_items: saturating_len(spans.len()),
+        max_line,
+        max_excerpt_bytes,
+    })
+}
+
 /// Run one CASS import operation.
 ///
 /// # Errors

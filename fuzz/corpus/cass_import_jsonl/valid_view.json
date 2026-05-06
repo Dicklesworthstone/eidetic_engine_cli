@@ -1,0 +1,1 @@
+{"lines":[{"line":1,"content":"{\"type\":\"tool_call\",\"message\":{\"role\":\"assistant\"},\"name\":\"cargo\"}"},{"line":2,"content":"plain transcript text"}]}

@@ -48,8 +48,9 @@ pub use contract::{
 pub use error::CassError;
 pub use health::{CassDbHealth, CassHealth, CassIndexHealth};
 pub use import::{
-    CassImportError, CassImportOptions, CassImportReport, ImportSessionStatus, ImportedCassSession,
-    import_cass_sessions, parse_import_since_duration,
+    CassImportError, CassImportOptions, CassImportParseSummary, CassImportReport,
+    ImportSessionStatus, ImportedCassSession, import_cass_sessions, parse_import_since_duration,
+    parse_sessions_json_summary, parse_view_json_summary,
 };
 pub use process::{CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassExitClass, CassInvocation, CassOutcome};
 pub use session::{
