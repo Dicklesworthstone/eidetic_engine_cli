@@ -247,6 +247,108 @@ fn follow_poll_emits_multiple_new_events_once() -> TestResult {
 }
 
 #[test]
+fn tail_caps_sql_fetch_to_caller_limit_when_no_client_filters() -> TestResult {
+    // Regression for eidetic_engine_cli-yv29: tail_recording_from_store used to pass
+    // u32::MAX to the SQL LIMIT, materialising every row in recorder_events even
+    // when the caller asked for `--limit 5`. After the fix the SQL LIMIT tracks
+    // `options.limit + 1` (no client-side filter terms, so no headroom is needed),
+    // bounding both DB IO and the in-memory `total_events` count.
+    let conn = connect()?;
+    insert_run(&conn, "run_huge", "active")?;
+    let total_inserted: u64 = 200;
+    for sequence in 1..=total_inserted {
+        insert_event(
+            &conn,
+            "run_huge",
+            sequence,
+            "tool_call",
+            &format!("2026-05-06T10:{:02}:{:02}Z", sequence / 60, sequence % 60),
+            "clean",
+        )?;
+    }
+
+    let options = RecorderTailOptions {
+        run_id: Some("run_huge".to_owned()),
+        since: None,
+        limit: 5,
+        from_sequence: None,
+        follow: false,
+        filter: None,
+    };
+
+    let report =
+        tail_recording_from_store(&conn, &options).map_err(|error| error.message())?;
+
+    assert_eq!(report.events.len(), 5);
+    assert!(report.has_more);
+    // Without the fix `total_events` would equal 200 (every row materialised).
+    // With the fix the SQL fetched at most `limit + 1 = 6` rows.
+    assert!(
+        report.total_events <= u64::from(options.limit) + 1,
+        "expected SQL fetch bounded by caller limit, got total_events={} for limit={}",
+        report.total_events,
+        options.limit,
+    );
+    // The events returned must still be the most recent slice in chronological order.
+    assert_eq!(report.events[0].sequence, total_inserted - 4);
+    assert_eq!(
+        report.events[report.events.len() - 1].sequence,
+        total_inserted
+    );
+    Ok(())
+}
+
+#[test]
+fn tail_applies_headroom_when_client_only_filter_terms_present() -> TestResult {
+    // With a client-only filter term (`event_type`), the SQL fetch must include
+    // headroom so the post-filter limit can still be satisfied — but it must
+    // remain bounded (4 * limit, capped at 10_000), not u32::MAX.
+    let conn = connect()?;
+    insert_run(&conn, "run_filter_headroom", "active")?;
+    // 20 events alternating between tool_call and tool_result.
+    for sequence in 1..=20u64 {
+        let event_type = if sequence % 2 == 0 {
+            "tool_result"
+        } else {
+            "tool_call"
+        };
+        insert_event(
+            &conn,
+            "run_filter_headroom",
+            sequence,
+            event_type,
+            &format!("2026-05-06T10:00:{:02}Z", sequence),
+            "clean",
+        )?;
+    }
+
+    let filter = RecorderEventFilter::parse_expression("event_type=tool_call")
+        .map_err(|error| error.message())?;
+    let options = RecorderTailOptions {
+        run_id: Some("run_filter_headroom".to_owned()),
+        since: None,
+        limit: 3,
+        from_sequence: None,
+        follow: false,
+        filter: Some(filter),
+    };
+
+    let report =
+        tail_recording_from_store(&conn, &options).map_err(|error| error.message())?;
+
+    // SQL was bounded at 4*3 + 1 = 13, of which roughly half match the filter,
+    // so total_events stays well under the 20 inserted rows.
+    assert!(
+        report.total_events <= 13,
+        "expected SQL bounded by headroom, got total_events={}",
+        report.total_events,
+    );
+    assert!(report.events.iter().all(|event| event.event_type.as_str() == "tool_call"));
+    assert_eq!(report.events.len(), 3);
+    Ok(())
+}
+
+#[test]
 fn follow_idle_timeout_exits_without_hanging() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     fs::create_dir_all(tempdir.path().join(".ee")).map_err(|error| error.to_string())?;
