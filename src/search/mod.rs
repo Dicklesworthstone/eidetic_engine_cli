@@ -14,8 +14,8 @@ pub use frankensearch::{
 };
 pub use query::{ParsedSearchQuery, SearchQueryClause, parse_search_query};
 pub use scoring::{
-    RetrievalMaturity, SearchScoreComponents, SearchScoringConfig, SearchScoringSignals,
-    final_score,
+    ParseSpeedModeError, RetrievalMaturity, SearchScoreComponents, SearchScoringConfig,
+    SearchScoringSignals, SpeedMode, final_score,
 };
 
 pub const SUBSYSTEM: &str = "search";

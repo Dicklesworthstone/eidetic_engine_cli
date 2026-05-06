@@ -75,6 +75,115 @@ impl RetrievalMaturity {
     }
 }
 
+/// Speed mode for retrieval (latency vs quality tradeoff).
+///
+/// Maps to TwoTier budget configuration without exposing embedding model names.
+/// Model selection is owned by Frankensearch (ADR-0016).
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum SpeedMode {
+    /// Lexical only. No embedding computation. Fastest, lowest quality.
+    Instant,
+    /// Hybrid retrieval with reasonable latency. Balanced tradeoff.
+    #[default]
+    Default,
+    /// Full semantic retrieval. Highest quality, slowest.
+    Quality,
+}
+
+impl SpeedMode {
+    /// Stable string form for config and JSON output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Instant => "instant",
+            Self::Default => "default",
+            Self::Quality => "quality",
+        }
+    }
+
+    /// All speed mode variants for iteration.
+    #[must_use]
+    pub const fn all() -> [Self; 3] {
+        [Self::Instant, Self::Default, Self::Quality]
+    }
+
+    /// Whether this mode uses embedding-based retrieval.
+    #[must_use]
+    pub const fn uses_embeddings(self) -> bool {
+        !matches!(self, Self::Instant)
+    }
+
+    /// Suggested candidate limit for this speed mode.
+    ///
+    /// Lower limits for faster modes, higher for quality modes.
+    #[must_use]
+    pub const fn candidate_limit(self) -> usize {
+        match self {
+            Self::Instant => 50,
+            Self::Default => 100,
+            Self::Quality => 200,
+        }
+    }
+
+    /// Suggested rerank depth for MMR/diversity.
+    ///
+    /// Quality mode does deeper reranking for better diversity.
+    #[must_use]
+    pub const fn rerank_depth(self) -> usize {
+        match self {
+            Self::Instant => 10,
+            Self::Default => 25,
+            Self::Quality => 50,
+        }
+    }
+}
+
+impl std::fmt::Display for SpeedMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for SpeedMode {
+    type Err = ParseSpeedModeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "instant" => Ok(Self::Instant),
+            "default" => Ok(Self::Default),
+            "quality" => Ok(Self::Quality),
+            _ => Err(ParseSpeedModeError {
+                input: s.to_owned(),
+            }),
+        }
+    }
+}
+
+/// Error when parsing an invalid speed mode string.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseSpeedModeError {
+    input: String,
+}
+
+impl ParseSpeedModeError {
+    /// The input string that failed to parse.
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+}
+
+impl std::fmt::Display for ParseSpeedModeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unknown speed mode `{}`; expected one of instant, default, quality",
+            self.input
+        )
+    }
+}
+
+impl std::error::Error for ParseSpeedModeError {}
+
 /// Signals supplied by the retrieval pipeline for one candidate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SearchScoringSignals {
@@ -232,7 +341,7 @@ fn finite_positive(value: f32) -> Option<f32> {
 mod tests {
     use super::{
         DEFAULT_GRAPH_CENTRALITY_WEIGHT, DEFAULT_RECENCY_TAU_DAYS, RetrievalMaturity,
-        SearchScoreComponents, SearchScoringConfig, SearchScoringSignals, final_score,
+        SearchScoreComponents, SearchScoringConfig, SearchScoringSignals, SpeedMode, final_score,
     };
 
     fn assert_close(actual: f32, expected: f32) {
@@ -393,5 +502,38 @@ mod tests {
         assert_close(components.graph_centrality, 1.0);
         assert_close(components.redundancy, 1.0);
         assert_close(components.final_score, 0.0);
+    }
+
+    #[test]
+    fn speed_mode_strings() {
+        assert_eq!(SpeedMode::Instant.as_str(), "instant");
+        assert_eq!(SpeedMode::Default.as_str(), "default");
+        assert_eq!(SpeedMode::Quality.as_str(), "quality");
+    }
+
+    #[test]
+    fn speed_mode_parse() {
+        assert_eq!("instant".parse::<SpeedMode>().unwrap(), SpeedMode::Instant);
+        assert_eq!("default".parse::<SpeedMode>().unwrap(), SpeedMode::Default);
+        assert_eq!("quality".parse::<SpeedMode>().unwrap(), SpeedMode::Quality);
+        assert!("fast".parse::<SpeedMode>().is_err());
+    }
+
+    #[test]
+    fn speed_mode_properties() {
+        assert!(!SpeedMode::Instant.uses_embeddings());
+        assert!(SpeedMode::Default.uses_embeddings());
+        assert!(SpeedMode::Quality.uses_embeddings());
+
+        assert!(SpeedMode::Instant.candidate_limit() < SpeedMode::Default.candidate_limit());
+        assert!(SpeedMode::Default.candidate_limit() < SpeedMode::Quality.candidate_limit());
+
+        assert!(SpeedMode::Instant.rerank_depth() < SpeedMode::Default.rerank_depth());
+        assert!(SpeedMode::Default.rerank_depth() < SpeedMode::Quality.rerank_depth());
+    }
+
+    #[test]
+    fn speed_mode_default() {
+        assert_eq!(SpeedMode::default(), SpeedMode::Default);
     }
 }
