@@ -2016,8 +2016,8 @@ fn content_overlap_similarity_terms(
     if left_terms.is_empty() || right_terms.is_empty() {
         return 0.0;
     }
-    let intersection = left_terms.intersection(&right_terms).count();
-    let union = left_terms.union(&right_terms).count();
+    let intersection = left_terms.intersection(right_terms).count();
+    let union = left_terms.union(right_terms).count();
     if union == 0 {
         0.0
     } else {

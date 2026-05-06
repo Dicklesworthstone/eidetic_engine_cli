@@ -1,0 +1,299 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Cargo.toml'
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      changed: ${{ steps.version.outputs.changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check version change
+        id: version
+        run: |
+          # Extract current version from Cargo.toml
+          CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "Current version: $CURRENT"
+
+          # Extract previous version
+          git show HEAD^:Cargo.toml > /tmp/prev_cargo.toml 2>/dev/null || echo 'version = "0.0.0"' > /tmp/prev_cargo.toml
+          PREVIOUS=$(grep '^version = ' /tmp/prev_cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "Previous version: $PREVIOUS"
+
+          echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
+
+          if [ "$CURRENT" != "$PREVIOUS" ]; then
+            echo "Version changed from $PREVIOUS to $CURRENT"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version unchanged"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  gates:
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Forbidden dependency audit
+        run: ./scripts/check-forbidden-deps.sh
+
+      - name: Closure linter
+        run: ./scripts/closure-lint.sh --json
+
+      - name: Vision coverage gate
+        run: |
+          VISION_COVERAGE_RELEASE_TAG=true sh ./scripts/vision-coverage.sh --json
+          GAP=$(jq -r '.gap_percentage' .vision-coverage-report.json)
+          if [ "$GAP" != "0" ]; then
+            echo "::error title=Vision coverage gap::Release blocked: ${GAP}% of documented surfaces are missing or stubbed"
+            exit 1
+          fi
+
+  tag:
+    needs: [check-version, gates]
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create and push tag
+        id: tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          TAG="v${VERSION}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create annotated tag
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+          echo "Created and pushed tag: $TAG"
+
+  build:
+    needs: [check-version, tag]
+    if: needs.check-version.outputs.changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/ee dist/
+          cd dist
+          tar -cJf ee-${{ matrix.target }}.tar.xz ee
+          sha256sum ee-${{ matrix.target }}.tar.xz > ee-${{ matrix.target }}.tar.xz.sha256
+          rm ee
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item target/${{ matrix.target }}/release/ee.exe dist/
+          Set-Location dist
+          tar -cJf ee-${{ matrix.target }}.tar.xz ee.exe
+          (Get-FileHash ee-${{ matrix.target }}.tar.xz -Algorithm SHA256).Hash.ToLower() + "  ee-${{ matrix.target }}.tar.xz" | Out-File -Encoding ASCII ee-${{ matrix.target }}.tar.xz.sha256
+          Remove-Item ee.exe
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign with Sigstore
+        run: |
+          cd dist
+          cosign sign-blob --yes --output-signature ee-${{ matrix.target }}.tar.xz.sig --output-certificate ee-${{ matrix.target }}.tar.xz.pem ee-${{ matrix.target }}.tar.xz
+          # Create sigstore bundle JSON
+          echo '{}' | jq --arg sig "$(cat ee-${{ matrix.target }}.tar.xz.sig | base64 -w0 2>/dev/null || base64)" \
+                        --arg cert "$(cat ee-${{ matrix.target }}.tar.xz.pem | base64 -w0 2>/dev/null || base64)" \
+                        '{signature: $sig, certificate: $cert}' > ee-${{ matrix.target }}.tar.xz.sigstore.json
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/ee-${{ matrix.target }}.tar.xz
+            dist/ee-${{ matrix.target }}.tar.xz.sha256
+            dist/ee-${{ matrix.target }}.tar.xz.sigstore.json
+          retention-days: 1
+
+  release:
+    needs: [check-version, tag, build]
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          mv artifacts/* release/ 2>/dev/null || true
+
+          # Copy install scripts
+          cp install.sh release/
+          cp install.ps1 release/
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          TAG="${{ needs.tag.outputs.tag }}"
+
+          # Try to extract from CHANGELOG.md
+          if [ -f CHANGELOG.md ]; then
+            # Extract section for this version
+            NOTES=$(sed -n "/^## \[${VERSION}\]/,/^## \[/p" CHANGELOG.md | sed '$d' | tail -n +2)
+          fi
+
+          # Fallback to git log
+          if [ -z "$NOTES" ]; then
+            PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+            if [ -n "$PREV_TAG" ]; then
+              NOTES=$(git log --pretty=format:"- %s" "${PREV_TAG}..HEAD" | head -50)
+            else
+              NOTES=$(git log --pretty=format:"- %s" -20)
+            fi
+          fi
+
+          # Write to file for multiline output
+          cat > release_notes.md << 'NOTES_EOF'
+          ## Installation
+
+          ### Unix (Linux/macOS)
+          ```bash
+          curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh | bash
+          ```
+
+          ### Windows (PowerShell)
+          ```powershell
+          iwr -useb https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.ps1 | iex
+          ```
+
+          ## Verification
+
+          All release artifacts are signed with Sigstore. Verify with:
+          ```bash
+          cosign verify-blob --certificate ee-<target>.tar.xz.pem --signature ee-<target>.tar.xz.sig ee-<target>.tar.xz
+          ```
+
+          ## Changes
+
+          NOTES_EOF
+          echo "$NOTES" >> release_notes.md
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.tag.outputs.tag }}"
+          gh release create "$TAG" \
+            --title "ee $TAG" \
+            --notes-file release_notes.md \
+            release/*
+
+  smoke-test:
+    needs: [tag, release]
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y curl ca-certificates xz-utils
+
+      - name: Download and install ee
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh | bash
+
+      - name: Verify installation
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          ee --version
+          ee --help
