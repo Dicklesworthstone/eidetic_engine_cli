@@ -3111,6 +3111,80 @@ CREATE INDEX idx_plan_recipes_updated
     "blake3:v035_plan_recipes_2026_05_06",
 );
 
+/// V036: Append-only triggers on recorder_events and audit_log
+/// (eidetic_engine_cli-is96).
+///
+/// Defense in depth on top of the chain-hash detection layer
+/// (V012/V027/V033). Both tables ship with row-level chain hashes that
+/// `core::audit::verify_audit` and the recorder chain status code recompute
+/// post-hoc, but detection only fires when those verifiers are run. Between
+/// a tamper and the next verify pass, every read sees the rewritten history
+/// as truth. These triggers close that window for the common case (a stray
+/// migration script or admin SQL session) by blocking the mutation at the
+/// engine.
+///
+/// Choices:
+/// - `recorder_events` — block UPDATE only. The table is the child of
+///   `recorder_runs` via `ON DELETE CASCADE`; SQLite fires `BEFORE DELETE`
+///   triggers on cascaded deletes, so a blanket DELETE block would also
+///   break legitimate run lifecycle. Lifecycle deletion is governed at the
+///   `recorder_runs` level (which has no chain-hash invariant).
+/// - `audit_log` — block UPDATE and DELETE, with one carve-out: the
+///   `workspaces ON DELETE SET NULL` foreign-key action performs an UPDATE
+///   that flips `workspace_id` from a value to NULL while leaving every
+///   other column identical. The UPDATE trigger's `WHEN` clause permits
+///   exactly that transition and nothing else.
+///
+/// An attacker with raw SQL access can still `DROP TRIGGER` first and then
+/// tamper, but that act is itself a forensically visible schema mutation
+/// and would also break the chain hash on the next verify pass.
+pub const V036_APPEND_ONLY_TRIGGERS: Migration = Migration::new(
+    36,
+    "append_only_triggers",
+    r#"
+-- recorder_events: append-only at the engine. DELETE is permitted so the
+-- existing recorder_runs ON DELETE CASCADE can run; UPDATE is never legitimate.
+CREATE TRIGGER recorder_events_no_update
+BEFORE UPDATE ON recorder_events
+BEGIN
+    SELECT RAISE(ABORT, 'recorder_events is append-only: UPDATE not allowed (eidetic_engine_cli-is96)');
+END;
+
+-- audit_log: append-only at the engine. The only UPDATE we permit is the
+-- workspaces ON DELETE SET NULL foreign-key action, which flips
+-- workspace_id from a value to NULL and leaves every other column alone.
+CREATE TRIGGER audit_log_no_update
+BEFORE UPDATE ON audit_log
+WHEN NOT (
+    OLD.workspace_id IS NOT NULL
+    AND NEW.workspace_id IS NULL
+    AND OLD.id IS NEW.id
+    AND OLD.timestamp IS NEW.timestamp
+    AND OLD.actor IS NEW.actor
+    AND OLD.action IS NEW.action
+    AND OLD.target_type IS NEW.target_type
+    AND OLD.target_id IS NEW.target_id
+    AND OLD.details IS NEW.details
+    AND OLD.surface IS NEW.surface
+    AND OLD.mutation_kind IS NEW.mutation_kind
+    AND OLD.before_hash IS NEW.before_hash
+    AND OLD.after_hash IS NEW.after_hash
+    AND OLD.prev_row_hash IS NEW.prev_row_hash
+    AND OLD.this_row_hash IS NEW.this_row_hash
+)
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only: UPDATE not allowed (eidetic_engine_cli-is96)');
+END;
+
+CREATE TRIGGER audit_log_no_delete
+BEFORE DELETE ON audit_log
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only: DELETE not allowed (eidetic_engine_cli-is96)');
+END;
+"#,
+    "blake3:v036_append_only_triggers_2026_05_06",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -3148,6 +3222,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V033_AUDIT_HASH_CHAIN,
     V034_PROCEDURE_STORE,
     V035_PLAN_RECIPES,
+    V036_APPEND_ONLY_TRIGGERS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {

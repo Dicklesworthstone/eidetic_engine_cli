@@ -1128,6 +1128,16 @@ impl RecorderEventFilter {
             .map(|term| term.value.as_str())
     }
 
+    /// True if any term must be evaluated client-side because it isn't pushed
+    /// down into `list_recorder_events_filtered` (which currently only applies
+    /// `run_id` and `source_type` from the filter expression).
+    #[must_use]
+    pub fn has_client_only_terms(&self) -> bool {
+        self.terms
+            .iter()
+            .any(|term| !matches!(term.key.as_str(), "run_id" | "source_type"))
+    }
+
     #[must_use]
     pub fn matches_summary(&self, event: &RecorderEventSummary) -> bool {
         self.terms.iter().all(|term| match term.key.as_str() {
@@ -1367,6 +1377,39 @@ fn timestamp_is_at_or_after(timestamp: &str, since: &str) -> bool {
     }
 }
 
+/// Headroom multiplier for the SQL `LIMIT` when extra client-side filtering
+/// (terms beyond `run_id`/`source_type`, or `from_sequence`) needs slack to
+/// still surface enough matching rows after the in-memory filter pass.
+const TAIL_STORE_HEADROOM_MULTIPLIER: u32 = 4;
+
+/// Absolute cap on the SQL `LIMIT` for the headroom branch.
+const TAIL_STORE_HEADROOM_CAP: u32 = 10_000;
+
+/// Decide how many rows to ask the SQL layer for when servicing
+/// `tail_recording_from_store`. Always returns at least `options.limit + 1`
+/// (the `+1` lets `tail_recording_from_events` set `has_more` correctly without
+/// a separate `COUNT(*)` round-trip), and applies headroom when the filter
+/// requires post-fetch evaluation.
+fn tail_recording_store_sql_limit(options: &RecorderTailOptions) -> u32 {
+    let needs_extra_filtering = options.from_sequence.is_some()
+        || options
+            .filter
+            .as_ref()
+            .is_some_and(RecorderEventFilter::has_client_only_terms);
+
+    let base = if needs_extra_filtering {
+        options
+            .limit
+            .saturating_mul(TAIL_STORE_HEADROOM_MULTIPLIER)
+            .min(TAIL_STORE_HEADROOM_CAP)
+            .max(options.limit)
+    } else {
+        options.limit
+    };
+
+    base.saturating_add(1)
+}
+
 /// Tail events from the persisted recorder store.
 ///
 /// # Errors
@@ -1386,12 +1429,13 @@ pub fn tail_recording_from_store(
         .filter
         .as_ref()
         .and_then(|filter| filter.first_value("source_type"));
+    let sql_limit = tail_recording_store_sql_limit(options);
     let stored_events = conn
         .list_recorder_events_filtered(
             query_run_id,
             options.since.as_deref(),
             query_source,
-            u32::MAX,
+            sql_limit,
         )
         .map_err(|error| crate::models::DomainError::Storage {
             message: format!("Failed to read recorder events: {error}"),
@@ -3273,5 +3317,107 @@ mod tests {
         ensure(json.get("startedAt").is_some(), true, "startedAt present")?;
         ensure(json.get("endedAt").is_some(), true, "endedAt present")?;
         ensure(json.get("warnings").is_some(), true, "warnings present")
+    }
+
+    /// Helper: import a tiny recorder run with two events so trigger
+    /// tests have something to mutate.
+    fn import_two_event_run(connection: &crate::db::DbConnection) -> Result<String, String> {
+        let input = json!({
+            "lines": [
+                {"line": 1, "content": "{\"type\":\"message\",\"role\":\"user\"}"},
+                {"line": 2, "content": "{\"type\":\"tool_use\",\"name\":\"shell\"}"}
+            ]
+        });
+        let options = RecorderImportOptions {
+            source_type: ImportSourceType::Cass,
+            source_id: "cass://trigger-test".to_string(),
+            input_json: Some(input.to_string()),
+            input_path: Some("/sessions/trigger-test.jsonl".to_string()),
+            agent_id: Some("trigger-test-agent".to_string()),
+            session_id: Some("trigger-session".to_string()),
+            workspace_id: None,
+            max_events: DEFAULT_RECORDER_IMPORT_LIMIT,
+            redact: false,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: false,
+        };
+        let result = execute_recorder_import(&options, connection).map_err(|e| e.message)?;
+        Ok(result.run_id)
+    }
+
+    /// V036 / eidetic_engine_cli-is96 — append-only trigger on
+    /// recorder_events blocks raw UPDATE attempts. Tampering with a
+    /// persisted event would otherwise rewrite the chain hash basis
+    /// silently between insert and the next chain-status pass.
+    #[test]
+    fn append_only_trigger_blocks_recorder_events_update() -> TestResult {
+        use crate::db::DbConnection;
+        let connection = DbConnection::open_memory().map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+
+        let run_id = import_two_event_run(&connection)?;
+        let stored = connection
+            .list_recorder_events(&run_id)
+            .map_err(|e| e.to_string())?;
+        ensure(stored.len(), 2, "two events persisted")?;
+
+        let outcome = connection.execute_raw(
+            "UPDATE recorder_events SET event_type = 'error' WHERE event_type IN ('user_message','tool_call')",
+        );
+        let error = outcome.expect_err("trigger should reject UPDATE on recorder_events");
+        let message = error.to_string().to_lowercase();
+        ensure(
+            message.contains("recorder_events") && message.contains("append-only"),
+            true,
+            "trigger error mentions recorder_events + append-only",
+        )?;
+
+        // The block must leave the events untouched.
+        let after = connection
+            .list_recorder_events(&run_id)
+            .map_err(|e| e.to_string())?;
+        ensure(after.len(), 2, "events still present after blocked UPDATE")?;
+        ensure(
+            after.iter().all(|event| event.event_type != "error"),
+            true,
+            "no event was rewritten to 'error'",
+        )
+    }
+
+    /// V036 / eidetic_engine_cli-is96 — DELETE on recorder_events is NOT
+    /// blocked, because recorder_runs uses ON DELETE CASCADE. Deleting a
+    /// run must still cascade-delete its events.
+    #[test]
+    fn deleting_recorder_run_still_cascades_to_events() -> TestResult {
+        use crate::db::DbConnection;
+        let connection = DbConnection::open_memory().map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+
+        let run_id = import_two_event_run(&connection)?;
+        let before = connection
+            .list_recorder_events(&run_id)
+            .map_err(|e| e.to_string())?;
+        ensure(before.len(), 2, "two events persisted before cascade")?;
+
+        // Foreign keys may not be on by default in an in-memory connection;
+        // re-enable them explicitly so the cascade fires (matches the
+        // production open_file pragmas).
+        connection
+            .execute_raw("PRAGMA foreign_keys = ON")
+            .map_err(|e| e.to_string())?;
+        connection
+            .execute_raw(&format!("DELETE FROM recorder_runs WHERE run_id = '{run_id}'"))
+            .map_err(|e| {
+                format!("recorder_runs DELETE must succeed despite append-only trigger: {e}")
+            })?;
+
+        let after = connection
+            .list_recorder_events(&run_id)
+            .map_err(|e| e.to_string())?;
+        ensure(
+            after.is_empty(),
+            true,
+            "recorder_events cascade-deleted with parent run",
+        )
     }
 }

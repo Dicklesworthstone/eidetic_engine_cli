@@ -770,6 +770,15 @@ mod tests {
         let workspace = seeded_workspace("tamper")?;
         let database = workspace.join(".ee").join("ee.db");
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        // V036 (eidetic_engine_cli-is96) installs an append-only trigger on
+        // audit_log that blocks UPDATEs at the engine. To exercise the
+        // post-hoc detection layer we have to bypass the trigger first —
+        // an attacker who managed the same would leave a forensically
+        // visible DROP TRIGGER in the schema, but the chain hash check
+        // below still catches the underlying row tamper.
+        connection
+            .execute_raw("DROP TRIGGER IF EXISTS audit_log_no_update")
+            .map_err(|error| error.to_string())?;
         connection
             .execute_raw(
                 "UPDATE audit_log SET actor = 'tampered-agent' WHERE id = 'audit_00000000000000000000000002'",
@@ -787,6 +796,90 @@ mod tests {
         assert_eq!(
             report.first_break.as_deref(),
             Some("audit_00000000000000000000000002")
+        );
+        Ok(())
+    }
+
+    /// V036 / eidetic_engine_cli-is96 — append-only trigger on audit_log
+    /// blocks raw UPDATE attempts before they touch the row.
+    #[test]
+    fn append_only_trigger_blocks_audit_log_update() -> TestResult {
+        let workspace = seeded_workspace("trigger-update")?;
+        let database = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+
+        let outcome = connection.execute_raw(
+            "UPDATE audit_log SET actor = 'tampered-agent' WHERE id = 'audit_00000000000000000000000001'",
+        );
+
+        connection.close().map_err(|error| error.to_string())?;
+
+        let error = outcome.expect_err("trigger should reject UPDATE on audit_log");
+        let message = error.to_string().to_lowercase();
+        assert!(
+            message.contains("audit_log") && message.contains("append-only"),
+            "trigger error should mention audit_log + append-only, got: {error}"
+        );
+        Ok(())
+    }
+
+    /// V036 / eidetic_engine_cli-is96 — append-only trigger on audit_log
+    /// blocks raw DELETE attempts.
+    #[test]
+    fn append_only_trigger_blocks_audit_log_delete() -> TestResult {
+        let workspace = seeded_workspace("trigger-delete")?;
+        let database = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+
+        let outcome = connection.execute_raw(
+            "DELETE FROM audit_log WHERE id = 'audit_00000000000000000000000001'",
+        );
+
+        connection.close().map_err(|error| error.to_string())?;
+
+        let error = outcome.expect_err("trigger should reject DELETE on audit_log");
+        let message = error.to_string().to_lowercase();
+        assert!(
+            message.contains("audit_log") && message.contains("append-only"),
+            "trigger error should mention audit_log + append-only, got: {error}"
+        );
+        Ok(())
+    }
+
+    /// V036 / eidetic_engine_cli-is96 — the trigger's WHEN clause must
+    /// permit the workspaces ON DELETE SET NULL foreign-key action so that
+    /// deleting a workspace doesn't cascade into a trigger abort. The
+    /// chain hash will report a break afterward (because workspace_id
+    /// participates in the row hash and the cascade flips it to NULL),
+    /// but that is a pre-existing design tension between V001's FK and
+    /// V033's hash chain — not a regression introduced by V036.
+    #[test]
+    fn append_only_trigger_allows_workspace_set_null_cascade() -> TestResult {
+        let workspace = seeded_workspace("trigger-cascade")?;
+        let database = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+
+        // Workspaces FK on audit_log is ON DELETE SET NULL, so deleting
+        // the workspace performs an UPDATE on audit_log.workspace_id.
+        // Without the WHEN-clause carve-out this would trip the trigger.
+        connection
+            .execute_raw("DELETE FROM workspaces WHERE id = 'wsp_01234567890123456789012345'")
+            .map_err(|error| {
+                format!("workspace delete must succeed despite append-only trigger: {error}")
+            })?;
+
+        connection.close().map_err(|error| error.to_string())?;
+
+        // Audit log rows should still exist; the cascade should not have
+        // deleted them.
+        let report = verify_audit(&AuditVerifyOptions {
+            workspace,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(
+            report.rows, 2,
+            "audit rows preserved after FK SET NULL cascade"
         );
         Ok(())
     }
