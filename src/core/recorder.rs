@@ -31,6 +31,9 @@ pub const RECORDER_IMPORT_PLAN_SCHEMA_V1: &str = "ee.recorder.import_plan.v1";
 /// Schema for recorder import execution results.
 pub const RECORDER_IMPORT_RESULT_SCHEMA_V1: &str = "ee.recorder.import_result.v1";
 
+/// Schema for recorder events list response.
+pub const RECORDER_EVENTS_LIST_SCHEMA_V1: &str = "ee.recorder.events_list.v1";
+
 /// Default maximum recorder event payload size accepted by the CLI.
 pub const DEFAULT_MAX_RECORDER_PAYLOAD_BYTES: usize = 64 * 1024;
 
@@ -1706,6 +1709,355 @@ pub fn execute_recorder_import(
         ended_at,
         warnings: plan.warnings,
     })
+}
+
+// ============================================================================
+// Persistence helpers (EE-ibw4)
+//
+// These wrap the in-memory `start_recording` / `record_event` / `finish_recording`
+// logic with calls to the persisted recorder store (V027 schema). They open a
+// `&DbConnection` that the caller has already acquired and convert any DB error
+// into a `DomainError::Storage`.
+//
+// The CLI handlers in `src/cli/mod.rs` call these helpers directly so the
+// `RECORDER_STORE_UNAVAILABLE_CODE` abstention can be deleted. We expose a
+// stable surface here so the CLI side stays thin.
+// ============================================================================
+
+/// Persist a new recorder run row alongside the in-memory start report.
+///
+/// The caller has already opened a connection (typically against the workspace's
+/// `.ee/ee.db`) and validated workspace existence. We do not persist anything
+/// when `options.dry_run` is true.
+pub fn start_and_persist_recording(
+    conn: &crate::db::DbConnection,
+    options: &RecorderStartOptions,
+) -> Result<RecorderStartReport, crate::models::DomainError> {
+    let report = start_recording(options);
+
+    if !options.dry_run {
+        let input = crate::db::CreateRecorderRunInput {
+            workspace_id: options.workspace_id.clone(),
+            agent_id: report.agent_id.clone(),
+            session_id: options.session_id.clone(),
+            // Live recordings use the DB CHECK alias 'live'; the ImportSourceType
+            // enum models the import-side connectors (cass/eidetic_legacy/recorder/manual)
+            // and does not carry a 'live' variant.
+            source_type: "live".to_owned(),
+            source_id: None,
+            status: crate::models::RecorderRunStatus::Active.as_str().to_owned(),
+            started_at: report.started_at.clone(),
+            ended_at: None,
+            event_count: 0,
+            redacted_count: 0,
+            payload_bytes: 0,
+            chain_complete: true,
+        };
+        conn.insert_recorder_run(&report.run_id, &input)
+            .map_err(|error| crate::models::DomainError::Storage {
+                message: format!("Failed to persist recorder run: {error}"),
+                repair: Some("ee status --json".to_owned()),
+            })?;
+    }
+
+    Ok(report)
+}
+
+/// Persist a recorder event row, deriving sequence + previous-hash from the
+/// already-persisted events for the same run.
+pub fn record_and_persist_event(
+    conn: &crate::db::DbConnection,
+    options: &RecorderEventOptions,
+) -> Result<RecorderEventReport, RecordPersistedEventError> {
+    validate_run_id_token(&options.run_id)
+        .map_err(RecordPersistedEventError::InvalidRunId)?;
+
+    let existing = conn
+        .list_recorder_events(&options.run_id)
+        .map_err(|error| RecordPersistedEventError::Storage {
+            message: format!("Failed to read recorder events for run {}: {error}", options.run_id),
+        })?;
+    let sequence = u64::try_from(existing.len()).unwrap_or(u64::MAX) + 1;
+    let previous_event_hash = existing.last().map(|event| event.event_hash.clone());
+
+    // Honor any explicitly-provided previous-hash by validating it agrees with the
+    // tail of the persisted chain. Mismatch is a serious error: surface it.
+    if let (Some(provided), Some(actual)) =
+        (options.previous_event_hash.as_deref(), previous_event_hash.as_deref())
+    {
+        if provided != actual {
+            return Err(RecordPersistedEventError::ChainMismatch {
+                expected: actual.to_owned(),
+                provided: provided.to_owned(),
+            });
+        }
+    }
+
+    let opts_with_chain = RecorderEventOptions {
+        previous_event_hash: previous_event_hash.clone(),
+        ..options.clone()
+    };
+    let report = record_event(&opts_with_chain, sequence)
+        .map_err(RecordPersistedEventError::Validation)?;
+
+    if !report.dry_run {
+        let input = crate::db::CreateRecorderEventInput {
+            run_id: report.run_id.clone(),
+            sequence: report.sequence,
+            event_type: report.event_type.as_str().to_owned(),
+            timestamp: report.timestamp.clone(),
+            payload_hash: report.payload_hash.clone(),
+            payload_bytes: report.payload_bytes,
+            redaction_status: report.redaction_status.as_db_str().to_owned(),
+            redacted_bytes: report.redacted_bytes,
+            previous_event_hash: report.previous_event_hash.clone(),
+            event_hash: report.event_hash.clone(),
+            chain_status: report.chain_status.as_str().to_owned(),
+            source_span_id: None,
+            source_line_start: None,
+            source_line_end: None,
+        };
+        conn.insert_recorder_event(&report.event_id, &input)
+            .map_err(|error| RecordPersistedEventError::Storage {
+                message: format!("Failed to persist recorder event: {error}"),
+            })?;
+    }
+
+    Ok(report)
+}
+
+/// Mark a persisted recorder run as finished and stamp its end timestamp +
+/// rolled-up event count. Returns the corresponding `RecorderFinishReport`.
+pub fn finish_and_persist_recording(
+    conn: &crate::db::DbConnection,
+    options: &RecorderFinishOptions,
+) -> Result<RecorderFinishReport, crate::models::DomainError> {
+    validate_run_id_token(&options.run_id).map_err(|message| crate::models::DomainError::Usage {
+        message,
+        repair: Some("Pass a valid run id (e.g. run_<uuid>) returned by `ee recorder start`.".to_owned()),
+    })?;
+
+    let stored_events = conn
+        .list_recorder_events(&options.run_id)
+        .map_err(|error| crate::models::DomainError::Storage {
+            message: format!("Failed to read recorder events for run {}: {error}", options.run_id),
+            repair: Some("ee status --json".to_owned()),
+        })?;
+    let event_count = u64::try_from(stored_events.len()).unwrap_or(u64::MAX);
+    let payload_bytes: u64 = stored_events.iter().map(|e| e.payload_bytes).sum();
+    let redacted_count: u64 = stored_events
+        .iter()
+        .filter(|e| e.redaction_status != "clean")
+        .count() as u64;
+    let chain_complete = stored_events.iter().all(|e| e.chain_status != "broken");
+
+    let report = finish_recording(options, event_count);
+
+    if !options.dry_run {
+        let sql = format!(
+            "UPDATE recorder_runs SET status = '{status}', ended_at = '{ended}', event_count = {events}, payload_bytes = {payload}, redacted_count = {redacted}, chain_complete = {chain} WHERE run_id = '{run}'",
+            status = options.status.as_str(),
+            ended = report.ended_at,
+            events = event_count,
+            payload = payload_bytes,
+            redacted = redacted_count,
+            chain = i64::from(chain_complete),
+            run = options.run_id,
+        );
+        conn.execute_raw(&sql)
+            .map_err(|error| crate::models::DomainError::Storage {
+                message: format!("Failed to mark recorder run finished: {error}"),
+                repair: Some("ee status --json".to_owned()),
+            })?;
+    }
+
+    Ok(report)
+}
+
+/// Validate that `run_id` matches the constraint enforced by the recorder_runs
+/// CHECK clause: `GLOB 'run_*' AND length >= 8`, ASCII alphanumerics + `_-`. We
+/// reject anything else so the inline-string SQL in `finish_and_persist_recording`
+/// cannot be coaxed into injection.
+fn validate_run_id_token(run_id: &str) -> Result<(), String> {
+    if !run_id.starts_with("run_") {
+        return Err(format!(
+            "Invalid recorder run id `{run_id}`: must start with `run_`"
+        ));
+    }
+    if run_id.len() < 8 || run_id.len() > 80 {
+        return Err(format!(
+            "Invalid recorder run id `{run_id}`: length out of range (8..=80)"
+        ));
+    }
+    if !run_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "Invalid recorder run id `{run_id}`: only [A-Za-z0-9_-] allowed"
+        ));
+    }
+    Ok(())
+}
+
+/// Errors returned by [`record_and_persist_event`].
+#[derive(Debug)]
+pub enum RecordPersistedEventError {
+    /// The supplied run id did not match the recorder_runs CHECK constraint.
+    InvalidRunId(String),
+    /// `record_event` rejected the inputs (usually payload too large).
+    Validation(RecorderEventError),
+    /// The caller asserted a previous-event-hash that disagrees with persisted chain.
+    ChainMismatch { expected: String, provided: String },
+    /// The underlying database operation failed.
+    Storage { message: String },
+}
+
+impl std::fmt::Display for RecordPersistedEventError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidRunId(message) | Self::Storage { message } => f.write_str(message),
+            Self::Validation(error) => write!(f, "{error}"),
+            Self::ChainMismatch { expected, provided } => write!(
+                f,
+                "previous_event_hash mismatch: expected {expected}, got {provided}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RecordPersistedEventError {}
+
+// ============================================================================
+// Events List
+// ============================================================================
+
+/// Options for listing recorder events.
+#[derive(Clone, Debug, Default)]
+pub struct RecorderEventsListOptions {
+    /// Filter events after this RFC 3339 timestamp.
+    pub since: Option<String>,
+    /// Filter events by source type.
+    pub source: Option<String>,
+    /// Filter events by run ID.
+    pub run_id: Option<String>,
+    /// Maximum number of events to return.
+    pub limit: u32,
+}
+
+/// A recorder event entry for listing.
+#[derive(Clone, Debug)]
+pub struct RecorderEventEntry {
+    pub event_id: String,
+    pub run_id: String,
+    pub sequence: u64,
+    pub event_type: String,
+    pub timestamp: String,
+    pub payload_hash: Option<String>,
+    pub payload_bytes: u64,
+    pub redaction_status: String,
+    pub event_hash: String,
+    pub chain_status: String,
+    pub created_at: String,
+}
+
+/// Report from listing recorder events.
+#[derive(Clone, Debug)]
+pub struct RecorderEventsListReport {
+    pub schema: &'static str,
+    pub events: Vec<RecorderEventEntry>,
+    pub filters: RecorderEventsListOptions,
+}
+
+impl RecorderEventsListReport {
+    /// Render as JSON.
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "schema": self.schema,
+            "command": "recorder events list",
+            "count": self.events.len(),
+            "filters": {
+                "since": self.filters.since,
+                "source": self.filters.source,
+                "runId": self.filters.run_id,
+                "limit": self.filters.limit,
+            },
+            "events": self.events.iter().map(|e| json!({
+                "eventId": e.event_id,
+                "runId": e.run_id,
+                "sequence": e.sequence,
+                "eventType": e.event_type,
+                "timestamp": e.timestamp,
+                "payloadHash": e.payload_hash,
+                "payloadBytes": e.payload_bytes,
+                "redactionStatus": e.redaction_status,
+                "eventHash": e.event_hash,
+                "chainStatus": e.chain_status,
+                "createdAt": e.created_at,
+            })).collect::<Vec<_>>()
+        })
+    }
+
+    /// Render as human-readable string.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut out = String::with_capacity(512);
+        out.push_str("Recorder Events\n");
+        out.push_str(&format!("  Count: {}\n", self.events.len()));
+        if let Some(ref since) = self.filters.since {
+            out.push_str(&format!("  Since: {since}\n"));
+        }
+        if let Some(ref source) = self.filters.source {
+            out.push_str(&format!("  Source: {source}\n"));
+        }
+        if let Some(ref run_id) = self.filters.run_id {
+            out.push_str(&format!("  Run ID: {run_id}\n"));
+        }
+        out.push('\n');
+        for event in &self.events {
+            out.push_str(&format!(
+                "  [{:>4}] {} {} ({})\n",
+                event.sequence, event.timestamp, event.event_type, event.event_id
+            ));
+        }
+        out
+    }
+}
+
+/// List recorder events with optional filters.
+pub fn list_recorder_events(
+    conn: &crate::db::DbConnection,
+    options: &RecorderEventsListOptions,
+) -> Result<Vec<RecorderEventEntry>, crate::models::DomainError> {
+    let stored_events = conn
+        .list_recorder_events_filtered(
+            options.run_id.as_deref(),
+            options.since.as_deref(),
+            options.source.as_deref(),
+            options.limit,
+        )
+        .map_err(|e| crate::models::DomainError::Storage {
+            message: format!("Failed to list recorder events: {e}"),
+            repair: Some("ee status --json".to_string()),
+        })?;
+
+    Ok(stored_events
+        .into_iter()
+        .map(|e| RecorderEventEntry {
+            event_id: e.event_id,
+            run_id: e.run_id,
+            sequence: e.sequence,
+            event_type: e.event_type,
+            timestamp: e.timestamp,
+            payload_hash: e.payload_hash,
+            payload_bytes: e.payload_bytes,
+            redaction_status: e.redaction_status,
+            event_hash: e.event_hash,
+            chain_status: e.chain_status,
+            created_at: e.created_at,
+        })
+        .collect())
 }
 
 // ============================================================================
