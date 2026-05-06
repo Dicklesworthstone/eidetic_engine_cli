@@ -31,7 +31,8 @@ use crate::core::{VERSION_PROVENANCE_SCHEMA_V1, VersionReport};
 use crate::eval::{EvaluationReport, EvaluationStatus, ScenarioValidationResult};
 use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
 use crate::models::{
-    DomainError, ERROR_SCHEMA_V1, InstallCheckReport, InstallPlanReport, RESPONSE_SCHEMA_V1,
+    DomainError, ERROR_SCHEMA_V1, InstallCheckReport, InstallPlanReport, RESPONSE_SCHEMA_V0,
+    RESPONSE_SCHEMA_V1,
 };
 use crate::pack::{
     ContextResponse, PackAdvisoryBanner, PackAdvisoryNote, PackDraftItem, PackItemProvenance,
@@ -52,6 +53,13 @@ pub enum Renderer {
     Compact,
     Hook,
     Markdown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ResponseSchemaVersion {
+    V0,
+    #[default]
+    V1,
 }
 
 impl Renderer {
@@ -1138,6 +1146,50 @@ impl Default for JsonBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Convert a current `ee.response.v1` envelope into the retained v0 shape.
+#[must_use]
+pub fn render_response_json_for_schema_version(
+    json: &str,
+    schema_version: ResponseSchemaVersion,
+) -> String {
+    match schema_version {
+        ResponseSchemaVersion::V1 => json.to_owned(),
+        ResponseSchemaVersion::V0 => render_response_json_v0(json),
+    }
+}
+
+fn render_response_json_v0(json: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return json.to_owned();
+    };
+    let Some(object) = value.as_object() else {
+        return json.to_owned();
+    };
+    if object.get("schema").and_then(serde_json::Value::as_str) != Some(RESPONSE_SCHEMA_V1) {
+        return json.to_owned();
+    }
+
+    let mut b = JsonBuilder::with_capacity(json.len());
+    b.field_str("schema", RESPONSE_SCHEMA_V0);
+    b.field_bool(
+        "ok",
+        object
+            .get("success")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+    );
+    if let Some(fields) = object.get("fields") {
+        b.field_raw("fields", &fields.to_string());
+    }
+    if let Some(data) = object.get("data") {
+        b.field_raw("result", &data.to_string());
+    }
+    if let Some(meta) = object.get("meta") {
+        b.field_raw("meta", &meta.to_string());
+    }
+    b.finish()
 }
 
 pub struct ResponseEnvelope {

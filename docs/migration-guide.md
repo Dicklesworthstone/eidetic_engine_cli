@@ -19,6 +19,25 @@ into:
 | Mock/sample/seed data passed as real | Explicit degraded codes with repair commands | Transparent unavailability |
 | Opaque "recommendations" | Evidence + interpretation clearly separated | Explainable outputs |
 
+## Response Schema Compatibility Window
+
+`ee.response.v1` remains the default success envelope:
+
+```json
+{"schema":"ee.response.v1","success":true,"data":{}}
+```
+
+For agents pinned to the previous envelope shape, `--schema-version v0` or
+`--legacy-schema` emits `ee.response.v0`:
+
+```json
+{"schema":"ee.response.v0","ok":true,"result":{}}
+```
+
+The v0 response envelope is retained for the full `0.1.x` minor-version cycle.
+It may be removed when the project cuts `0.2.0`. New integrations should consume
+the default v1 envelope.
+
 ## Core Documents
 
 - [Mechanical Boundary Command Inventory](./mechanical-boundary-command-inventory.md) — full command matrix

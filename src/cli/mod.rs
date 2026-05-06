@@ -166,6 +166,14 @@ pub struct Cli {
     #[arg(long, global = true, action = ArgAction::SetTrue)]
     pub schema: bool,
 
+    /// Select the response envelope schema version for JSON renderers.
+    #[arg(long, global = true, value_enum, default_value_t = SchemaVersion::V1)]
+    pub schema_version: SchemaVersion,
+
+    /// Shortcut for `--schema-version v0` during the v0 compatibility window.
+    #[arg(long, global = true, action = ArgAction::SetTrue)]
+    pub legacy_schema: bool,
+
     /// Print JSON-formatted help and exit.
     #[arg(long, global = true, action = ArgAction::SetTrue)]
     pub help_json: bool,
@@ -241,6 +249,18 @@ impl Cli {
     #[must_use]
     pub const fn cards_level(&self) -> CardsLevel {
         self.cards
+    }
+
+    #[must_use]
+    pub const fn response_schema_version(&self) -> output::ResponseSchemaVersion {
+        if self.legacy_schema {
+            output::ResponseSchemaVersion::V0
+        } else {
+            match self.schema_version {
+                SchemaVersion::V0 => output::ResponseSchemaVersion::V0,
+                SchemaVersion::V1 => output::ResponseSchemaVersion::V1,
+            }
+        }
     }
 
     #[must_use]
@@ -4375,6 +4395,13 @@ impl OutputFormat {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum SchemaVersion {
+    V0,
+    #[default]
+    V1,
+}
+
 /// Shadow mode for decision plane tracking.
 ///
 /// - `Off`: No shadow tracking (default).
@@ -5275,6 +5302,10 @@ where
                     } else {
                         output::render_status_json_filtered(&report, profile)
                     };
+                    let rendered = output::render_response_json_for_schema_version(
+                        &rendered,
+                        cli.response_schema_version(),
+                    );
                     write_stdout(stdout, &(rendered + "\n"))
                 }
             }

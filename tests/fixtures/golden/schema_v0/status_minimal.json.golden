@@ -1,0 +1,22 @@
+{
+  "schema": "ee.response.v0",
+  "ok": true,
+  "fields": "minimal",
+  "result": {
+    "command": "status",
+    "version": "0.1.0",
+    "workspace": {
+      "source": "explicit",
+      "root": "[WORKSPACE]",
+      "configDir": "[WORKSPACE]/.ee",
+      "markerPresent": false,
+      "canonicalRoot": "[WORKSPACE]",
+      "fingerprint": "[HASH]",
+      "scopeKind": "standalone",
+      "repositoryRoot": null,
+      "repositoryFingerprint": null,
+      "subprojectPath": null,
+      "diagnostics": []
+    }
+  }
+}
