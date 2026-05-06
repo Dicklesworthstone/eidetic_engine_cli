@@ -148,7 +148,7 @@ All primary data lives on your machine. No cloud dependency is required. Remote 
 
 ### 3. CLI First, Daemon Later
 
-Every essential feature works as a one-shot CLI command. The daemon (`ee daemon`) is opt-in and adds background indexing, scheduled steward jobs, and a write owner for high-contention multi-agent workloads. No core command requires it.
+Every essential feature works as a one-shot CLI command. The daemon (`ee daemon`) is opt-in; the current slice provides supervised foreground/write-owner plumbing, while scheduled steward jobs report a degraded status until real maintenance handlers land. No core command requires it.
 
 ### 4. Deterministic By Default
 
