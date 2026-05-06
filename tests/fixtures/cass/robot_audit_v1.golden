@@ -1,0 +1,38 @@
+{
+  "schema": "ee.cass.normalized_status_audit.v1",
+  "command": "cass status --json",
+  "cass_crate_version": "0.4.1",
+  "status": "unhealthy",
+  "healthy": false,
+  "initialized": true,
+  "index": {
+    "exists": true,
+    "status": "stale",
+    "fresh": false,
+    "stale": true,
+    "reason": "lexical index is older than the stale threshold",
+    "documents": 14167
+  },
+  "database": {
+    "exists": true,
+    "opened": true,
+    "conversations": 98,
+    "messages": 14170
+  },
+  "pending": {
+    "sessions": 0,
+    "watch_active": false,
+    "orphaned": false
+  },
+  "audit_fields": [
+    "status",
+    "healthy",
+    "initialized",
+    "recommended_action",
+    "index.status",
+    "index.fresh",
+    "database.opened",
+    "pending.sessions"
+  ],
+  "recommended_action": "Run 'cass index' to refresh the index"
+}
