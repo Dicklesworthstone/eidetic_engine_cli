@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -123,6 +124,18 @@ pub struct DbConnection {
     mode: DatabaseOpenMode,
 }
 
+static FILE_WRITE_OWNER_GATE: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn file_write_owner_gate() -> &'static Mutex<()> {
+    FILE_WRITE_OWNER_GATE.get_or_init(|| Mutex::new(()))
+}
+
+fn lock_file_write_owner_gate() -> MutexGuard<'static, ()> {
+    file_write_owner_gate()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl DbConnection {
     pub fn open(config: DatabaseConfig) -> Result<Self> {
         if matches!(config.location(), DatabaseLocation::File(_)) {
@@ -231,7 +244,12 @@ impl DbConnection {
     where
         F: FnOnce() -> Result<T>,
     {
-        self.begin()?;
+        let _write_owner = match self.location {
+            DatabaseLocation::Memory => None,
+            DatabaseLocation::File(_) => Some(lock_file_write_owner_gate()),
+        };
+
+        self.begin_write_transaction()?;
         match f() {
             Ok(result) => {
                 self.commit()?;
@@ -240,6 +258,38 @@ impl DbConnection {
             Err(err) => {
                 let _ = self.rollback();
                 Err(err)
+            }
+        }
+    }
+
+    fn begin_write_transaction(&self) -> Result<()> {
+        match self.location {
+            DatabaseLocation::Memory => self.begin(),
+            DatabaseLocation::File(_) => {
+                const MAX_ATTEMPTS: usize = 16;
+                let mut last_retryable_error = None;
+
+                for attempt in 0..MAX_ATTEMPTS {
+                    match self.begin_transaction(IsolationLevel::RepeatableRead) {
+                        Ok(()) => return Ok(()),
+                        Err(error) if db_error_is_transient_sqlite_contention(&error) => {
+                            last_retryable_error = Some(error);
+                            if attempt + 1 < MAX_ATTEMPTS {
+                                std::thread::sleep(advisory_lock_retry_delay(attempt));
+                            }
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+
+                match last_retryable_error {
+                    Some(error) => Err(error),
+                    None => Err(DbError::MalformedRow {
+                        operation: DbOperation::BeginTransaction,
+                        message: "write owner retry loop exhausted without a retryable error"
+                            .to_string(),
+                    }),
+                }
             }
         }
     }
@@ -568,12 +618,28 @@ impl DbConnection {
     }
 
     fn execute_raw_for(&self, operation: DbOperation, sql: &str) -> Result<()> {
+        if matches!(self.location, DatabaseLocation::File(_)) {
+            return retry_sqlite_contention(|| {
+                self.inner
+                    .execute_raw(sql)
+                    .map_err(|source| DbError::sqlmodel(operation, source))
+            });
+        }
+
         self.inner
             .execute_raw(sql)
             .map_err(|source| DbError::sqlmodel(operation, source))
     }
 
     fn execute_for(&self, operation: DbOperation, sql: &str, params: &[Value]) -> Result<u64> {
+        if matches!(self.location, DatabaseLocation::File(_)) {
+            return retry_sqlite_contention(|| {
+                self.inner
+                    .execute_sync(sql, params)
+                    .map_err(|source| DbError::sqlmodel(operation, source))
+            });
+        }
+
         self.inner
             .execute_sync(sql, params)
             .map_err(|source| DbError::sqlmodel(operation, source))
@@ -593,6 +659,32 @@ fn enable_foreign_key_enforcement(inner: &FrankenConnection) -> Result<()> {
 }
 
 const FILE_DATABASE_OPEN_MAX_ATTEMPTS: usize = 8;
+const SQLITE_CONTENTION_MAX_ATTEMPTS: usize = 16;
+
+fn retry_sqlite_contention<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut last_retryable_error = None;
+
+    for attempt in 0..SQLITE_CONTENTION_MAX_ATTEMPTS {
+        match operation() {
+            Ok(result) => return Ok(result),
+            Err(error) if db_error_is_transient_sqlite_contention(&error) => {
+                last_retryable_error = Some(error);
+                if attempt + 1 < SQLITE_CONTENTION_MAX_ATTEMPTS {
+                    std::thread::sleep(advisory_lock_retry_delay(attempt));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    match last_retryable_error {
+        Some(error) => Err(error),
+        None => Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "SQLite contention retry loop exhausted without a retryable error".to_string(),
+        }),
+    }
+}
 
 fn retry_file_database_open<T>(mut open_once: impl FnMut() -> Result<T>) -> Result<T> {
     let mut last_retryable_error = None;
@@ -631,6 +723,14 @@ fn database_open_error_is_retryable(error: &DbError) -> bool {
     ) {
         return false;
     }
+
+    sqlmodel_error_is_transient_sqlite_contention(source.as_ref())
+}
+
+fn db_error_is_transient_sqlite_contention(error: &DbError) -> bool {
+    let DbError::SqlModel { source, .. } = error else {
+        return false;
+    };
 
     sqlmodel_error_is_transient_sqlite_contention(source.as_ref())
 }
