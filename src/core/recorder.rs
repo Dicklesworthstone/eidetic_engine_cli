@@ -1036,6 +1036,11 @@ pub struct RecorderTailOptions {
     /// Only include events at or after this RFC 3339 timestamp.
     pub since: Option<String>,
     /// Number of events to return.
+    ///
+    /// A zero value is a literal empty tail request: the public tail report
+    /// returns no events, but can still set `has_more` when matching events
+    /// exist. This intentionally differs from `RecorderEventsListOptions`,
+    /// where zero means "unbounded".
     pub limit: u32,
     /// Starting sequence number.
     pub from_sequence: Option<u64>,
@@ -1389,7 +1394,9 @@ const TAIL_STORE_HEADROOM_CAP: u32 = 10_000;
 /// `tail_recording_from_store`. Always returns at least `options.limit + 1`
 /// (the `+1` lets `tail_recording_from_events` set `has_more` correctly without
 /// a separate `COUNT(*)` round-trip), and applies headroom when the filter
-/// requires post-fetch evaluation.
+/// requires post-fetch evaluation. With `limit = 0`, this still fetches one row
+/// so the public tail report can return zero events while distinguishing
+/// "matching data exists" from "no matching data".
 fn tail_recording_store_sql_limit(options: &RecorderTailOptions) -> u32 {
     let needs_extra_filtering = options.from_sequence.is_some()
         || options
@@ -2322,6 +2329,10 @@ pub struct RecorderEventsListOptions {
     /// Filter events by run ID.
     pub run_id: Option<String>,
     /// Maximum number of events to return.
+    ///
+    /// A zero value means "unbounded" and returns every matching event. This
+    /// intentionally differs from `RecorderTailOptions`, where zero means an
+    /// explicitly empty tail snapshot with `has_more` still computed.
     pub limit: u32,
 }
 
