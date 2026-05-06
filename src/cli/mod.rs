@@ -10073,13 +10073,27 @@ where
         return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
             Ok(input) => {
                 let result = fnx_algorithms::k_core(&input.undirected, args.k);
+                let mut sorted_nodes = result.nodes.clone();
+                sorted_nodes.sort();
+                let mut sorted_edges: Vec<_> = result
+                    .edges
+                    .iter()
+                    .map(|(left, right)| {
+                        if left <= right {
+                            (left.clone(), right.clone())
+                        } else {
+                            (right.clone(), left.clone())
+                        }
+                    })
+                    .collect();
+                sorted_edges.sort();
                 let data = graph_metric_data(
                     "graph k-core",
                     &input,
                     serde_json::json!({
                         "k": args.k,
-                        "nodes": result.nodes,
-                        "edges": result.edges.iter().map(|(left, right)| {
+                        "nodes": sorted_nodes,
+                        "edges": sorted_edges.iter().map(|(left, right)| {
                             serde_json::json!({"left": left, "right": right})
                         }).collect::<Vec<_>>(),
                         "witness": graph_witness_json(&result.witness),
@@ -10118,11 +10132,13 @@ where
         return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
             Ok(input) => {
                 let result = fnx_algorithms::articulation_points(&input.undirected);
+                let mut sorted_nodes = result.nodes.clone();
+                sorted_nodes.sort();
                 let data = graph_metric_data(
                     "graph articulation",
                     &input,
                     serde_json::json!({
-                        "articulationPoints": result.nodes,
+                        "articulationPoints": sorted_nodes,
                         "witness": graph_witness_json(&result.witness),
                     }),
                 );
@@ -10512,10 +10528,22 @@ fn graph_communities_data(
 ) -> serde_json::Value {
     let total = communities.len();
     let limited = limit.is_some_and(|limit| communities.len() > limit);
+    let mut sorted_communities: Vec<Vec<String>> = communities
+        .into_iter()
+        .map(|mut nodes| {
+            nodes.sort();
+            nodes
+        })
+        .collect();
+    sorted_communities.sort_by(|a, b| {
+        b.len()
+            .cmp(&a.len())
+            .then_with(|| a.first().cmp(&b.first()))
+    });
     let communities = if let Some(limit) = limit {
-        communities.into_iter().take(limit).collect::<Vec<_>>()
+        sorted_communities.into_iter().take(limit).collect::<Vec<_>>()
     } else {
-        communities
+        sorted_communities
     };
     graph_metric_data(
         command,
