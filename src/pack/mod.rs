@@ -1585,75 +1585,106 @@ fn assemble_facility_location_draft(
     let query = trim_required(query.into(), PackValidationError::EmptyQuery)?;
     let mut candidates: Vec<PackCandidate> = candidates.into_iter().collect();
     candidates.sort_by(compare_candidates);
-    let universe = candidates.clone();
+    let mut candidates: Vec<FacilityCandidateProfile> = candidates
+        .into_iter()
+        .map(FacilityCandidateProfile::from)
+        .collect();
+    let mut remaining_indices: Vec<usize> = (0..candidates.len()).collect();
+    let mut current_coverages = vec![0.0_f32; candidates.len()];
     let candidate_count = candidates.len();
 
     let quotas = SectionQuotas::for_profile(profile, budget.max_tokens());
 
     let mut used_tokens = 0_u32;
     let mut next_rank = 1_u32;
-    let mut selected_signatures = Vec::new();
     let mut items: Vec<PackDraftItem> = Vec::new();
     let mut omitted = Vec::new();
     let mut steps = Vec::new();
     let mut objective_value = 0.0_f32;
 
-    while !candidates.is_empty() {
+    while !remaining_indices.is_empty() {
         let Some((candidate_index, marginal_gain)) = select_facility_candidate_index(
+            &remaining_indices,
             &candidates,
-            &selected_signatures,
-            &universe,
+            &current_coverages,
             used_tokens,
             budget,
             &quotas,
             &items,
         ) else {
-            omitted.extend(candidates.drain(..).map(|candidate| PackOmission {
-                memory_id: candidate.memory_id,
-                estimated_tokens: candidate.estimated_tokens,
-                reason: PackOmissionReason::TokenBudgetExceeded,
+            omitted.extend(remaining_indices.drain(..).filter_map(|profile_index| {
+                let candidate = candidates.get(profile_index)?.candidate.as_ref()?;
+                PackOmission {
+                    memory_id: candidate.memory_id,
+                    estimated_tokens: candidate.estimated_tokens,
+                    reason: PackOmissionReason::TokenBudgetExceeded,
+                }
+                .into()
             }));
             break;
         };
 
         if marginal_gain <= FACILITY_LOCATION_EPSILON {
-            omitted.extend(candidates.drain(..).map(|candidate| PackOmission {
-                memory_id: candidate.memory_id,
-                estimated_tokens: candidate.estimated_tokens,
-                reason: PackOmissionReason::RedundantCandidate,
+            omitted.extend(remaining_indices.drain(..).filter_map(|profile_index| {
+                let candidate = candidates.get(profile_index)?.candidate.as_ref()?;
+                PackOmission {
+                    memory_id: candidate.memory_id,
+                    estimated_tokens: candidate.estimated_tokens,
+                    reason: PackOmissionReason::RedundantCandidate,
+                }
+                .into()
             }));
             break;
         }
 
-        let candidate = candidates.remove(candidate_index);
+        let profile_index = remaining_indices.remove(candidate_index);
+        let Some(candidate) = candidates
+            .get_mut(profile_index)
+            .and_then(|profile| profile.candidate.take())
+        else {
+            continue;
+        };
         let rank = next_rank;
         next_rank = next_rank
             .checked_add(1)
             .ok_or(PackValidationError::CandidateRankOverflow)?;
         used_tokens = used_tokens.saturating_add(candidate.estimated_tokens);
-        selected_signatures.push(CandidateSignature::from(&candidate));
-        objective_value = facility_location_value(&selected_signatures, &universe);
+        update_facility_coverages(&mut current_coverages, &candidates, profile_index);
+        objective_value = facility_location_value_from_coverages(&candidates, &current_coverages);
+        let covered_features = certificate_features(&candidate);
+        let PackCandidate {
+            memory_id,
+            section,
+            content,
+            estimated_tokens,
+            relevance,
+            utility,
+            provenance,
+            why,
+            diversity_key,
+            trust,
+        } = candidate;
         steps.push(PackSelectionStep {
             rank,
-            memory_id: candidate.memory_id,
+            memory_id,
             marginal_gain,
             objective_value,
-            token_cost: candidate.estimated_tokens,
+            token_cost: estimated_tokens,
             feasible: true,
-            covered_features: certificate_features(&candidate),
+            covered_features,
         });
         items.push(PackDraftItem {
             rank,
-            memory_id: candidate.memory_id,
-            section: candidate.section,
-            content: candidate.content,
-            estimated_tokens: candidate.estimated_tokens,
-            relevance: candidate.relevance,
-            utility: candidate.utility,
-            provenance: candidate.provenance,
-            why: candidate.why,
-            diversity_key: candidate.diversity_key,
-            trust: candidate.trust,
+            memory_id,
+            section,
+            content,
+            estimated_tokens,
+            relevance,
+            utility,
+            provenance,
+            why,
+            diversity_key,
+            trust,
         });
     }
 
@@ -1747,6 +1778,25 @@ impl From<PackCandidate> for MmrCandidate {
     }
 }
 
+#[derive(Clone, Debug)]
+struct FacilityCandidateProfile {
+    candidate: Option<PackCandidate>,
+    signature: CandidateSignature,
+    weight: f32,
+}
+
+impl From<PackCandidate> for FacilityCandidateProfile {
+    fn from(candidate: PackCandidate) -> Self {
+        let signature = CandidateSignature::from(&candidate);
+        let weight = facility_candidate_weight(&candidate);
+        Self {
+            candidate: Some(candidate),
+            signature,
+            weight,
+        }
+    }
+}
+
 fn select_next_candidate_index(
     candidates: &[MmrCandidate],
     selected: &[CandidateSignature],
@@ -1792,32 +1842,24 @@ fn max_selected_similarity(candidate: &CandidateSignature, selected: &[Candidate
 }
 
 fn select_facility_candidate_index(
-    candidates: &[PackCandidate],
-    selected: &[CandidateSignature],
-    universe: &[PackCandidate],
+    remaining_indices: &[usize],
+    universe: &[FacilityCandidateProfile],
+    current_coverages: &[f32],
     used_tokens: u32,
     budget: TokenBudget,
     quotas: &SectionQuotas,
     items: &[PackDraftItem],
 ) -> Option<(usize, f32)> {
     let remaining_budget = budget.max_tokens().saturating_sub(used_tokens);
-    let mut best: Option<(usize, f32, f32)> = None;
+    let mut best: Option<(usize, usize, f32, f32)> = None;
 
-    let current_coverages: Vec<f32> = universe
-        .iter()
-        .map(|universe_candidate| {
-            if selected.is_empty() {
-                0.0
-            } else {
-                selected
-                    .iter()
-                    .map(|signature| facility_similarity(universe_candidate, signature))
-                    .fold(0.0_f32, f32::max)
-            }
-        })
-        .collect();
-
-    for (candidate_index, candidate) in candidates.iter().enumerate() {
+    for (candidate_index, &profile_index) in remaining_indices.iter().enumerate() {
+        let Some(profile) = universe.get(profile_index) else {
+            continue;
+        };
+        let Some(candidate) = profile.candidate.as_ref() else {
+            continue;
+        };
         if candidate.estimated_tokens > remaining_budget {
             continue;
         }
@@ -1831,38 +1873,71 @@ fn select_facility_candidate_index(
             continue;
         }
 
-        let candidate_signature = CandidateSignature::from(candidate);
         let marginal_gain: f32 = universe
             .iter()
             .zip(current_coverages.iter())
-            .map(|(universe_candidate, &current_coverage)| {
-                let candidate_sim = facility_similarity(universe_candidate, &candidate_signature);
+            .map(|(universe_profile, &current_coverage)| {
+                let candidate_sim =
+                    facility_signature_similarity(&universe_profile.signature, &profile.signature);
                 let new_coverage = current_coverage.max(candidate_sim);
                 let gain = new_coverage - current_coverage;
-                facility_candidate_weight(universe_candidate) * gain
+                universe_profile.weight * gain
             })
             .sum();
 
         let gain_ratio = marginal_gain / candidate.estimated_tokens as f32;
         match best {
-            None => best = Some((candidate_index, marginal_gain, gain_ratio)),
-            Some((best_index, best_gain, best_ratio)) => {
-                let best_candidate = &candidates[best_index];
+            None => best = Some((candidate_index, profile_index, marginal_gain, gain_ratio)),
+            Some((_, best_profile_index, best_gain, best_ratio)) => {
+                let Some(best_candidate) = universe
+                    .get(best_profile_index)
+                    .and_then(|profile| profile.candidate.as_ref())
+                else {
+                    continue;
+                };
                 if gain_ratio
                     .total_cmp(&best_ratio)
                     .then_with(|| marginal_gain.total_cmp(&best_gain))
                     .then_with(|| compare_candidates(best_candidate, candidate))
                     == Ordering::Greater
                 {
-                    best = Some((candidate_index, marginal_gain, gain_ratio));
+                    best = Some((candidate_index, profile_index, marginal_gain, gain_ratio));
                 }
             }
         }
     }
 
-    best.map(|(candidate_index, marginal_gain, _)| (candidate_index, marginal_gain))
+    best.map(|(candidate_index, _, marginal_gain, _)| (candidate_index, marginal_gain))
 }
 
+fn update_facility_coverages(
+    current_coverages: &mut [f32],
+    universe: &[FacilityCandidateProfile],
+    selected_index: usize,
+) {
+    let Some(selected) = universe.get(selected_index) else {
+        return;
+    };
+    for (current_coverage, universe_profile) in current_coverages.iter_mut().zip(universe.iter()) {
+        let selected_coverage =
+            facility_signature_similarity(&universe_profile.signature, &selected.signature);
+        *current_coverage = (*current_coverage).max(selected_coverage);
+    }
+}
+
+fn facility_location_value_from_coverages(
+    universe: &[FacilityCandidateProfile],
+    current_coverages: &[f32],
+) -> f32 {
+    debug_assert_eq!(universe.len(), current_coverages.len());
+    universe
+        .iter()
+        .zip(current_coverages.iter())
+        .map(|(candidate, &coverage)| candidate.weight * coverage)
+        .sum()
+}
+
+#[cfg(test)]
 pub(crate) fn facility_location_value(
     selected: &[CandidateSignature],
     universe: &[PackCandidate],
@@ -1870,14 +1945,19 @@ pub(crate) fn facility_location_value(
     if selected.is_empty() {
         return 0.0;
     }
+    let universe: Vec<FacilityCandidateProfile> = universe
+        .iter()
+        .cloned()
+        .map(FacilityCandidateProfile::from)
+        .collect();
     universe
         .iter()
         .map(|candidate| {
             let coverage = selected
                 .iter()
-                .map(|signature| facility_similarity(candidate, signature))
+                .map(|signature| facility_signature_similarity(&candidate.signature, signature))
                 .fold(0.0_f32, f32::max);
-            facility_candidate_weight(candidate) * coverage
+            candidate.weight * coverage
         })
         .sum()
 }
@@ -1900,12 +1980,20 @@ fn facility_candidate_weight(candidate: &PackCandidate) -> f32 {
 /// only the diversity_key is a coarse bucket hint, not evidence of literal
 /// duplication, so the Jaccard signal is allowed to override the floor when
 /// the texts genuinely overlap.
+#[cfg(test)]
 fn facility_similarity(candidate: &PackCandidate, selected: &CandidateSignature) -> f32 {
+    let candidate = CandidateSignature::from(candidate);
+    facility_signature_similarity(&candidate, selected)
+}
+
+fn facility_signature_similarity(
+    candidate: &CandidateSignature,
+    selected: &CandidateSignature,
+) -> f32 {
     if candidate.memory_id == selected.memory_id {
         return 1.0;
     }
-    let candidate_normalized_content = normalize_redundancy_content(&candidate.content);
-    if candidate_normalized_content == selected.normalized_content {
+    if candidate.normalized_content == selected.normalized_content {
         return 1.0;
     }
 
@@ -1915,9 +2003,8 @@ fn facility_similarity(candidate: &PackCandidate, selected: &CandidateSignature)
     {
         similarity = similarity.max(FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR);
     }
-    let candidate_terms = normalized_terms(&candidate_normalized_content);
     similarity.max(content_overlap_similarity_terms(
-        &candidate_terms,
+        &candidate.content_terms,
         &selected.content_terms,
     ))
 }
@@ -3919,6 +4006,45 @@ mod tests {
             &super::normalized_terms_call_count(),
             &8,
             "MMR tokenizes once per candidate instead of during pairwise similarity checks",
+        )
+    }
+
+    #[test]
+    fn submodular_profile_precomputes_candidate_terms_once() -> TestResult {
+        let budget =
+            TokenBudget::new(1_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let candidates = (1_u128..=8)
+            .map(|seed| {
+                let relevance = 1.0 - (seed as f32 * 0.01);
+                candidate_with_content(
+                    seed,
+                    relevance,
+                    0.5,
+                    10,
+                    format!("release workflow step {seed} facility location shared term"),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        super::reset_normalized_terms_call_count();
+        let draft = assemble_draft_with_profile(
+            ContextPackProfile::Submodular,
+            "prepare release",
+            budget,
+            candidates,
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        ensure_equal(
+            &draft.selection_certificate.candidate_count,
+            &8,
+            "candidate count",
+        )?;
+        ensure_equal(&draft.items.len(), &8, "all candidates fit the budget")?;
+        ensure_equal(
+            &super::normalized_terms_call_count(),
+            &8,
+            "submodular facility-location tokenizes once per candidate instead of during each universe comparison",
         )
     }
 
