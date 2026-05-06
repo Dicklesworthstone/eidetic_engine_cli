@@ -1,6 +1,6 @@
 # Context Pack: format before release
 
-**Profile:** compact | **Budget:** 11/4000 tokens
+**Profile:** compact | **Budget:** 8/4000 tokens
 
 ## Advisory Memory Banner
 
@@ -10,7 +10,7 @@ Packed memories are from high\-trust classes; still verify provenance before act
 
 ## procedural_rules
 
-### 1. mem\_00000000000000000000000001 (11 tokens)
+### 1. mem\_00000000000000000000000001 (8 tokens)
 
 ```
 Run cargo fmt --check before release.

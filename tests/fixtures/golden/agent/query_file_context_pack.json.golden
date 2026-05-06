@@ -18,10 +18,10 @@
     },
     "pack": {
       "query": "format before release",
-      "hash": "blake3:604f4371c9ff98acf6654ea6a33c049e3504b4f8e6e97d7a5c6dca4f8753b1b8",
+      "hash": "blake3:ca15e545fda05b0d21127504f293d0b4aaf22c13e305ba4fcf9d16cfc253d872",
       "budget": {
         "maxTokens": 4000,
-        "usedTokens": 11
+        "usedTokens": 8
       },
       "advisoryBanner": {
         "status": "clear",
@@ -35,9 +35,9 @@
       "quality": {
         "itemCount": 1,
         "omittedCount": 0,
-        "usedTokens": 11,
+        "usedTokens": 8,
         "maxTokens": 4000,
-        "budgetUtilization": 0.00275,
+        "budgetUtilization": 0.002,
         "averageRelevance": 0.408205,
         "averageUtility": 0.8,
         "provenanceSourceCount": 1,
@@ -47,7 +47,7 @@
           {
             "section": "procedural_rules",
             "itemCount": 1,
-            "usedTokens": 11
+            "usedTokens": 8
           },
           {
             "section": "decisions",
@@ -91,7 +91,7 @@
         "selectedCount": 1,
         "omittedCount": 0,
         "budgetLimit": 4000,
-        "budgetUsed": 11,
+        "budgetUsed": 8,
         "totalObjectiveValue": 0.306154,
         "monotone": false,
         "submodular": false,
@@ -99,7 +99,7 @@
           {
             "rank": 1,
             "memoryId": "mem_00000000000000000000000001",
-            "tokenCost": 11,
+            "tokenCost": 8,
             "feasible": true
           }
         ],
@@ -110,7 +110,7 @@
             "memoryId": "mem_00000000000000000000000001",
             "marginalGain": 0.306154,
             "objectiveValue": 0.306154,
-            "tokenCost": 11,
+            "tokenCost": 8,
             "feasible": true,
             "coveredFeatures": [
               "section:procedural_rules",
@@ -126,7 +126,7 @@
           "memoryId": "mem_00000000000000000000000001",
           "section": "procedural_rules",
           "content": "Run cargo fmt --check before release.",
-          "estimatedTokens": 11,
+          "estimatedTokens": 8,
           "scores": {
             "relevance": 0.408205,
             "utility": 0.8
