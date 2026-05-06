@@ -6,7 +6,20 @@ rust-version = "1.85"
 license = "MIT"
 description = "Durable, local-first, explainable memory for coding agents."
 repository = "https://github.com/Dicklesworthstone/eidetic_engine_cli"
+homepage = "https://github.com/Dicklesworthstone/eidetic_engine_cli"
+documentation = "https://docs.rs/ee"
+readme = "README.md"
+keywords = ["memory", "agents", "cli", "local-first", "search"]
+categories = ["command-line-utilities", "database", "development-tools"]
 default-run = "ee"
+publish = false
+exclude = [
+    "tests/fixtures/*",
+    "tests/golden/*",
+    ".beads/*",
+    "perf.data",
+    "*.profraw",
+]
 
 [lib]
 name = "ee"
