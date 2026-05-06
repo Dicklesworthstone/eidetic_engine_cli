@@ -18,6 +18,8 @@ type TestResult = Result<(), String>;
 
 const WORKSPACE_ID: &str = "wsp_searchgolden00000000000001";
 const QUERY: &str = "cargo test before release";
+const TIE_WORKSPACE_ID: &str = "wsp_searchtie00000000000000001";
+const TIE_QUERY: &str = "stable equal ranking tie release check";
 const GOLDEN_CATEGORY: &str = "agent";
 const GOLDEN_NAME: &str = "search_deterministic_ranking.json";
 
@@ -276,7 +278,81 @@ fn seed_search_workspace(workspace: &Path, database: &Path) -> TestResult {
     connection.close().map_err(|error| error.to_string())
 }
 
-fn rebuild_search_index(workspace: &Path, database: &Path, index_dir: &Path) -> TestResult {
+fn seed_tie_workspace(workspace: &Path, database: &Path) -> TestResult {
+    if let Some(parent) = database.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create database parent {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+    connection.migrate().map_err(|error| error.to_string())?;
+    connection
+        .insert_workspace(
+            TIE_WORKSPACE_ID,
+            &CreateWorkspaceInput {
+                path: workspace.to_string_lossy().into_owned(),
+                name: Some("search-tie-determinism".to_owned()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+    let memory_ids = [
+        "mem_00000000000000000000020005",
+        "mem_00000000000000000000020002",
+        "mem_00000000000000000000020004",
+        "mem_00000000000000000000020001",
+        "mem_00000000000000000000020003",
+    ];
+
+    for id in memory_ids {
+        connection
+            .insert_memory(
+                id,
+                &CreateMemoryInput {
+                    workspace_id: TIE_WORKSPACE_ID.to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: TIE_QUERY.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.80,
+                    utility: 0.80,
+                    importance: 0.80,
+                    provenance_uri: Some("fixture://tests/search_deterministic_golden".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: Some("search-tie-determinism".to_owned()),
+                    tags: ["release", "tie", "determinism"]
+                        .iter()
+                        .map(|tag| (*tag).to_owned())
+                        .collect(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    connection
+        .execute_raw(
+            "UPDATE memories \
+             SET created_at = '2026-04-30T12:00:00+00:00', \
+                 updated_at = '2026-04-30T12:00:00+00:00' \
+             WHERE workspace_id = 'wsp_searchtie00000000000000001'",
+        )
+        .map_err(|error| error.to_string())?;
+
+    connection.close().map_err(|error| error.to_string())
+}
+
+fn rebuild_search_index_with_expected(
+    workspace: &Path,
+    database: &Path,
+    index_dir: &Path,
+    expected_documents: u32,
+) -> TestResult {
     let report = rebuild_index(&IndexRebuildOptions {
         workspace_path: workspace.to_path_buf(),
         database_path: Some(database.to_path_buf()),
@@ -290,7 +366,15 @@ fn rebuild_search_index(workspace: &Path, database: &Path, index_dir: &Path) -> 
         &IndexRebuildStatus::Success,
         "index rebuild status",
     )?;
-    ensure_equal(&report.documents_total, &3, "indexed document count")
+    ensure_equal(
+        &report.documents_total,
+        &expected_documents,
+        "indexed document count",
+    )
+}
+
+fn rebuild_search_index(workspace: &Path, database: &Path, index_dir: &Path) -> TestResult {
+    rebuild_search_index_with_expected(workspace, database, index_dir, 3)
 }
 
 fn assert_hash_embedder_determinism() -> TestResult {
@@ -305,18 +389,28 @@ fn assert_hash_embedder_determinism() -> TestResult {
 }
 
 fn run_search_json(workspace: &Path, database: &Path, index_dir: &Path) -> Result<String, String> {
+    run_search_json_for_query(workspace, database, index_dir, QUERY, 3)
+}
+
+fn run_search_json_for_query(
+    workspace: &Path,
+    database: &Path,
+    index_dir: &Path,
+    query: &str,
+    limit: u32,
+) -> Result<String, String> {
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
         .arg("--json")
         .arg("--workspace")
         .arg(workspace)
         .arg("search")
-        .arg(QUERY)
+        .arg(query)
         .arg("--database")
         .arg(database)
         .arg("--index-dir")
         .arg(index_dir)
         .arg("--limit")
-        .arg("3")
+        .arg(limit.to_string())
         .arg("--explain")
         .output()
         .map_err(|error| format!("failed to run ee search --json: {error}"))?;
@@ -348,6 +442,36 @@ fn run_search_json(workspace: &Path, database: &Path, index_dir: &Path) -> Resul
     )?;
 
     Ok(stdout)
+}
+
+fn search_doc_ids(value: &JsonValue) -> Result<Vec<String>, String> {
+    value["data"]["results"]
+        .as_array()
+        .ok_or_else(|| "search results must be an array".to_owned())?
+        .iter()
+        .map(|result| {
+            result["docId"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "search result docId must be a string".to_owned())
+        })
+        .collect()
+}
+
+fn assert_equal_result_scores(value: &JsonValue) -> TestResult {
+    let results = value["data"]["results"]
+        .as_array()
+        .ok_or_else(|| "search results must be an array".to_owned())?;
+    let first_score = results
+        .first()
+        .map(|result| result["score"].clone())
+        .ok_or_else(|| "search results must not be empty".to_owned())?;
+
+    for result in results {
+        ensure_equal(&result["score"], &first_score, "equal-score fixture score")?;
+    }
+
+    Ok(())
 }
 
 fn canonicalize_search_json(stdout: &str) -> Result<String, String> {
@@ -535,4 +659,62 @@ fn search_json_deterministic_ranking_matches_golden() -> TestResult {
         serde_json::from_str(&first).map_err(|error| format!("canonical JSON invalid: {error}"))?;
     assert_search_contract(&value)?;
     assert_golden(GOLDEN_CATEGORY, GOLDEN_NAME, &first)
+}
+
+#[test]
+fn equal_score_search_ties_order_by_memory_id_across_runs() -> TestResult {
+    let artifact_dir = unique_artifact_dir("search-equal-score-ties")?;
+    let workspace = artifact_dir.join("workspace");
+    let database = workspace.join(".ee").join("ee.db");
+    let index_dir = workspace.join(".ee").join("index");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+
+    seed_tie_workspace(&workspace, &database)?;
+    rebuild_search_index_with_expected(&workspace, &database, &index_dir, 5)?;
+
+    let expected_doc_ids = vec![
+        "mem_00000000000000000000020001".to_owned(),
+        "mem_00000000000000000000020002".to_owned(),
+        "mem_00000000000000000000020003".to_owned(),
+        "mem_00000000000000000000020004".to_owned(),
+        "mem_00000000000000000000020005".to_owned(),
+    ];
+    let mut first_canonical = None;
+
+    for run in 0..10 {
+        let canonical = canonicalize_search_json(&run_search_json_for_query(
+            &workspace, &database, &index_dir, TIE_QUERY, 5,
+        )?)?;
+        let value: JsonValue = serde_json::from_str(&canonical)
+            .map_err(|error| format!("run {run}: canonical JSON invalid: {error}"))?;
+
+        ensure_equal(
+            &value["data"]["resultCount"],
+            &serde_json::json!(5),
+            &format!("run {run} search result count"),
+        )?;
+        assert_equal_result_scores(&value)?;
+        ensure_equal(
+            &search_doc_ids(&value)?,
+            &expected_doc_ids,
+            &format!("run {run} equal-score docId ordering"),
+        )?;
+
+        if let Some(first) = &first_canonical {
+            ensure_equal(
+                &canonical,
+                first,
+                &format!("run {run} canonical search JSON stability"),
+            )?;
+        } else {
+            first_canonical = Some(canonical);
+        }
+    }
+
+    Ok(())
 }

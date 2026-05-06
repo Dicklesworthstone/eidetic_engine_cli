@@ -696,7 +696,7 @@ fn search_sync(
 
             let converted = match search_result {
                 Ok((results, _metrics)) => {
-                    let hits: Vec<SearchHit> = results
+                    let mut hits: Vec<SearchHit> = results
                         .into_iter()
                         .map(|r| {
                             let source = match r.source {
@@ -727,6 +727,12 @@ fn search_sync(
                             hit
                         })
                         .collect();
+                    hits.sort_by(|left, right| {
+                        right
+                            .score
+                            .total_cmp(&left.score)
+                            .then_with(|| left.doc_id.cmp(&right.doc_id))
+                    });
                     Ok((hits, Vec::new()))
                 }
                 Err(e) => Err(format!("Search failed: {e}")),

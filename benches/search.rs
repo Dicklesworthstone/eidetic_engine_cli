@@ -20,6 +20,7 @@ use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
 use ee::core::search::{SearchOptions, run_search};
 use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 use ee::models::WorkspaceId;
+use ee::search::SpeedMode;
 
 const BENCH_GROUP_NAME: &str = "ee_search";
 const BASELINE_OPERATION_KEY: &str = "ee_search";
@@ -244,6 +245,7 @@ fn quick_stats_for_scale(count: usize) -> QuickStats {
         index_dir: Some(index_dir),
         query: query_for_scale(count).to_owned(),
         limit: 20,
+        speed: SpeedMode::Default,
         explain: false,
     };
 
@@ -408,6 +410,7 @@ fn run_criterion_mode() {
                 index_dir: Some(index_dir),
                 query: query_for_scale(n).to_owned(),
                 limit: 20,
+                speed: SpeedMode::Default,
                 explain: false,
             };
 

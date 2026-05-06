@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ee::db::{CreateMemoryLinkInput, DatabaseConfig, DbConnection, MemoryLinkRelation, MemoryLinkSource};
+use ee::db::{
+    CreateMemoryLinkInput, DatabaseConfig, DbConnection, MemoryLinkRelation, MemoryLinkSource,
+};
 use ee::models::MemoryLinkId;
 use serde_json::Value;
 use uuid::Uuid;
@@ -90,12 +92,16 @@ fn seed_graph_workspace() -> Result<(PathBuf, Vec<String>), String> {
 
     let mut memory_ids = Vec::new();
     for i in 0..5 {
-        let id = remember(&workspace_arg, &format!("Memory {i} for graph determinism test."))?;
+        let id = remember(
+            &workspace_arg,
+            &format!("Memory {i} for graph determinism test."),
+        )?;
         memory_ids.push(id);
     }
 
     let db_path = workspace.join(".ee").join("ee.db");
-    let connection = DbConnection::open(DatabaseConfig::file(&db_path)).map_err(|e| e.to_string())?;
+    let connection =
+        DbConnection::open(DatabaseConfig::file(&db_path)).map_err(|e| e.to_string())?;
 
     for i in 0..4 {
         let input = CreateMemoryLinkInput {
@@ -142,13 +148,7 @@ fn run_graph_command(workspace: &PathBuf, subcommand: &str) -> Result<String, St
     let workspace_arg = workspace
         .to_str()
         .ok_or_else(|| "workspace path must be UTF-8".to_string())?;
-    let output = run_ee(&[
-        "--workspace",
-        workspace_arg,
-        "--json",
-        "graph",
-        subcommand,
-    ])?;
+    let output = run_ee(&["--workspace", workspace_arg, "--json", "graph", subcommand])?;
     if !output.status.success() {
         return Err(format!(
             "graph {} failed: stderr={}",
@@ -187,10 +187,7 @@ fn graph_communities_output_is_deterministic() -> TestResult {
         let nodes = community["nodes"]
             .as_array()
             .ok_or_else(|| "nodes field missing".to_string())?;
-        let node_strs: Vec<&str> = nodes
-            .iter()
-            .filter_map(Value::as_str)
-            .collect();
+        let node_strs: Vec<&str> = nodes.iter().filter_map(Value::as_str).collect();
         let mut sorted = node_strs.clone();
         sorted.sort();
         if node_strs != sorted {
@@ -268,16 +265,11 @@ fn graph_articulation_output_is_deterministic() -> TestResult {
 
     let parsed: Value = serde_json::from_str(&first).map_err(|e| e.to_string())?;
     if let Some(nodes) = parsed["data"]["articulationPoints"].as_array() {
-        let node_strs: Vec<&str> = nodes
-            .iter()
-            .filter_map(Value::as_str)
-            .collect();
+        let node_strs: Vec<&str> = nodes.iter().filter_map(Value::as_str).collect();
         let mut sorted = node_strs.clone();
         sorted.sort();
         if node_strs != sorted {
-            return Err(format!(
-                "articulation points are not sorted: {node_strs:?}"
-            ));
+            return Err(format!("articulation points are not sorted: {node_strs:?}"));
         }
     }
 
@@ -305,10 +297,7 @@ fn graph_k_core_output_is_deterministic() -> TestResult {
 
     let parsed: Value = serde_json::from_str(&first).map_err(|e| e.to_string())?;
     if let Some(nodes) = parsed["data"]["nodes"].as_array() {
-        let node_strs: Vec<&str> = nodes
-            .iter()
-            .filter_map(Value::as_str)
-            .collect();
+        let node_strs: Vec<&str> = nodes.iter().filter_map(Value::as_str).collect();
         let mut sorted = node_strs.clone();
         sorted.sort();
         if node_strs != sorted {

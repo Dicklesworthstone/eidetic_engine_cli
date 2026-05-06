@@ -23,6 +23,7 @@ use tempfile::TempDir;
 use ee::core::context::{ContextPackOptions, run_context_pack};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::DbConnection;
+use ee::search::SpeedMode;
 
 /// Performance budget from plan §28 (README "Performance" table).
 /// p50 must stay under 95ms, p99 under 240ms.
@@ -108,6 +109,7 @@ fn bench_context(c: &mut Criterion) {
                         database_path: Some(db_path.clone()),
                         index_dir: None,
                         query: "prepare for release deployment and testing".to_string(),
+                        speed: SpeedMode::Default,
                         filters: Default::default(),
                         profile: None,
                         max_tokens: Some(tokens),
@@ -145,6 +147,7 @@ fn bench_context_memory_scales(c: &mut Criterion) {
                     database_path: Some(db_path.clone()),
                     index_dir: None,
                     query: "release testing security".to_string(),
+                    speed: SpeedMode::Default,
                     filters: Default::default(),
                     profile: None,
                     max_tokens: Some(4000),

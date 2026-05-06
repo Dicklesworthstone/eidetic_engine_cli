@@ -10541,7 +10541,10 @@ fn graph_communities_data(
             .then_with(|| a.first().cmp(&b.first()))
     });
     let communities = if let Some(limit) = limit {
-        sorted_communities.into_iter().take(limit).collect::<Vec<_>>()
+        sorted_communities
+            .into_iter()
+            .take(limit)
+            .collect::<Vec<_>>()
     } else {
         sorted_communities
     };
