@@ -88,21 +88,22 @@ $ ee import cass --workspace . --limit 50 --json | jq '.summary'
 
 # 4. Ask for context before working
 $ ee context "fix the failing release workflow" --workspace . --profile thorough
-## Project Rules
-- Run `cargo fmt --check` before tagging  (mem_01HQ3K5Z · confidence 0.71)
-- Push release changes to main after verification  (mem_01HPCC3T · confidence 0.92)
+## procedural_rules
 
-## Prior Failures
-- Release v0.2.13 failed because release artifacts were generated from stale branch state
-  evidence: cass session 7f4e · 2026-03-12
+### 1. mem_01HQ3K5Z (42 tokens)
 
-## Verification Commands
-  cargo test --lib && cargo clippy -- -D warnings && ./scripts/e2e_test.sh
+**Why:** procedural rule matched release workflow query
 
-## Warnings
-⚠  HIGH  Forced pushes around release time have caused user-visible installer staleness
+**Trust:** `procedural` / `accepted`
 
-provenance footer: 14 memories, 3 sessions, 1 graph snapshot, pack hash 4b1c…7e90
+**Provenance:**
+- `cass-session://7f4e` (cass-session)
+
+## failures
+
+### 2. mem_01HPCC3T (58 tokens)
+
+**Why:** prior failure linked to release artifacts
 
 # 5. Ask why a memory was selected
 $ ee why mem_01HPCC3T --json | jq '.data | {retrieval, graphRetrievalFeatures}'
