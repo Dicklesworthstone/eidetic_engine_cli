@@ -2533,8 +2533,8 @@ mod tests {
 
         let key_path = key_dir.join("test_workspace.ed25519");
         let rng = ring::rand::SystemRandom::new();
-        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
-            .map_err(|e| e.to_string())?;
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|e| e.to_string())?;
         fs::write(&key_path, pkcs8.as_ref()).map_err(|e| e.to_string())?;
 
         let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
@@ -2564,8 +2564,8 @@ mod tests {
 
         let key_path = key_dir.join("test_workspace.ed25519");
         let rng = ring::rand::SystemRandom::new();
-        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
-            .map_err(|e| e.to_string())?;
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|e| e.to_string())?;
         fs::write(&key_path, pkcs8.as_ref()).map_err(|e| e.to_string())?;
 
         let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
@@ -2594,8 +2594,8 @@ mod tests {
 
         let key_path = key_dir.join("test_workspace.ed25519");
         let rng = ring::rand::SystemRandom::new();
-        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
-            .map_err(|e| e.to_string())?;
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|e| e.to_string())?;
         fs::write(&key_path, pkcs8.as_ref()).map_err(|e| e.to_string())?;
 
         let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
@@ -2626,8 +2626,8 @@ mod tests {
 
         let victim_key_path = key_dir.join("victim.ed25519");
         let rng = ring::rand::SystemRandom::new();
-        let victim_pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
-            .map_err(|e| e.to_string())?;
+        let victim_pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|e| e.to_string())?;
         fs::write(&victim_key_path, victim_pkcs8.as_ref()).map_err(|e| e.to_string())?;
 
         let victim_keypair = ring::signature::Ed25519KeyPair::from_pkcs8(victim_pkcs8.as_ref())
@@ -2638,15 +2638,19 @@ mod tests {
 
         let payload_hash = "sensitive_data_hash";
 
-        let attacker_pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
-            .map_err(|e| e.to_string())?;
+        let attacker_pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|e| e.to_string())?;
         let attacker_keypair = ring::signature::Ed25519KeyPair::from_pkcs8(attacker_pkcs8.as_ref())
             .map_err(|e| e.to_string())?;
         let attacker_sig = attacker_keypair.sign(payload_hash.as_bytes());
         let forged_signature = format!("ed25519:{}", hex_lower(attacker_sig.as_ref()));
 
-        let result =
-            verify_ed25519_signature(&forged_signature, &victim_signer, payload_hash, Some(&key_dir));
+        let result = verify_ed25519_signature(
+            &forged_signature,
+            &victim_signer,
+            payload_hash,
+            Some(&key_dir),
+        );
         match result {
             AttestationVerification::Mismatch { .. } => Ok(()),
             AttestationVerification::Ok { .. } => Err(

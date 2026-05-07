@@ -12159,7 +12159,11 @@ mod tests {
                 ),
             )?;
         }
-        ensure_equal(&versions.first(), &Some(&1), "MIGRATIONS must start at V001")?;
+        ensure_equal(
+            &versions.first(),
+            &Some(&1),
+            "MIGRATIONS must start at V001",
+        )?;
         let expected_last = u32::try_from(versions.len()).unwrap();
         ensure_equal(
             &versions.last(),

@@ -106,6 +106,9 @@ use crate::core::outcome::{
     OutcomeQuarantineReviewReport, OutcomeRecordOptions, list_feedback_quarantine, record_outcome,
     review_feedback_quarantine,
 };
+use crate::core::preflight_guard::{
+    BypassTokenInput, PreflightGuardOptions, PreflightGuardRegistry, run_preflight_guard,
+};
 use crate::core::rehearse::{
     CommandSpec, RehearsalProfile, RehearseInspectOptions, RehearsePlanOptions,
     RehearsePromotePlanOptions, RehearseRunOptions, inspect_rehearsal, plan_rehearsal,
@@ -127,9 +130,6 @@ use crate::core::tripwire::{
     CheckOptions as TripwireCheckOptions, CheckReport as TripwireCheckReport,
     ListOptions as TripwireListOptions, ListReport as TripwireListReport, TripwireEventPayload,
     check_tripwire, list_tripwires,
-};
-use crate::core::preflight_guard::{
-    BypassTokenInput, PreflightGuardOptions, PreflightGuardRegistry, run_preflight_guard,
 };
 use crate::core::why::{WhyOptions, explain_memory};
 use crate::core::workspace as workspace_core;

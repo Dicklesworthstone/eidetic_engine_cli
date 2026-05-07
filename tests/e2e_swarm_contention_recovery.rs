@@ -127,7 +127,11 @@ fn swarm_read_only_burst_no_contention() -> TestResult {
             let l = Arc::clone(&logs);
             thread::spawn(move || {
                 b.wait();
-                let log = run_ee_logged(&ws, ["search", "memory", "--json"], &format!("reader-{index}"));
+                let log = run_ee_logged(
+                    &ws,
+                    ["search", "memory", "--json"],
+                    &format!("reader-{index}"),
+                );
                 l.lock().unwrap().push(log);
             })
         })
@@ -188,7 +192,15 @@ fn swarm_mixed_read_write_contention() -> TestResult {
             b.wait();
             let log = run_ee_logged(
                 &ws,
-                ["remember", "--json", "--level", "episodic", "--kind", "observation", &content],
+                [
+                    "remember",
+                    "--json",
+                    "--level",
+                    "episodic",
+                    "--kind",
+                    "observation",
+                    &content,
+                ],
                 &format!("writer-{index}"),
             );
             l.lock().unwrap().push(log);
@@ -208,7 +220,9 @@ fn swarm_mixed_read_write_contention() -> TestResult {
     }
 
     for handle in handles {
-        handle.join().map_err(|_| "mixed contention thread panicked")?;
+        handle
+            .join()
+            .map_err(|_| "mixed contention thread panicked")?;
     }
 
     let process_logs = logs.lock().unwrap().clone();
@@ -216,7 +230,10 @@ fn swarm_mixed_read_write_contention() -> TestResult {
     let total_duration_ms = process_logs.iter().map(|l| l.duration_ms).sum();
     let lock_error_count = process_logs
         .iter()
-        .filter(|l| l.stderr_preview.contains("database is locked") || l.stderr_preview.contains("SQLITE_BUSY"))
+        .filter(|l| {
+            l.stderr_preview.contains("database is locked")
+                || l.stderr_preview.contains("SQLITE_BUSY")
+        })
         .count();
 
     // Writers must succeed (serialized via FrankenSQLite WAL) - check before move
@@ -240,7 +257,10 @@ fn swarm_mixed_read_write_contention() -> TestResult {
         degradations: if lock_error_count == 0 {
             Vec::new()
         } else {
-            vec![format!("{} processes encountered lock contention", lock_error_count)]
+            vec![format!(
+                "{} processes encountered lock contention",
+                lock_error_count
+            )]
         },
     };
 
@@ -277,7 +297,11 @@ fn swarm_index_rebuild_during_readers() -> TestResult {
             b.wait();
             // Small delay to let rebuild start
             thread::sleep(Duration::from_millis(50));
-            let log = run_ee_logged(&ws, ["search", "test", "--json"], &format!("reader-{index}"));
+            let log = run_ee_logged(
+                &ws,
+                ["search", "test", "--json"],
+                &format!("reader-{index}"),
+            );
             l.lock().unwrap().push(log);
         }));
     }
@@ -330,7 +354,10 @@ fn swarm_index_rebuild_during_readers() -> TestResult {
         degradations: if reader_degradation_count == 0 {
             Vec::new()
         } else {
-            vec![format!("{} readers saw degraded results during rebuild", reader_degradation_count)]
+            vec![format!(
+                "{} readers saw degraded results during rebuild",
+                reader_degradation_count
+            )]
         },
     };
 
@@ -360,7 +387,8 @@ fn swarm_recovery_after_simulated_crash() -> TestResult {
     }
 
     // After "crash", search should degrade gracefully
-    let search_degraded = run_ee_logged(&workspace, ["search", "test", "--json"], "search-degraded");
+    let search_degraded =
+        run_ee_logged(&workspace, ["search", "test", "--json"], "search-degraded");
     // Search may fail or return degraded - both are acceptable
     let degraded_ok = search_degraded.success
         || search_degraded.stderr_preview.contains("index_not_found")
@@ -412,7 +440,15 @@ fn swarm_deterministic_json_under_contention() -> TestResult {
     let seed_content = "determinism test seed memory for hash stability";
     run_ee_logged(
         &workspace,
-        ["remember", "--json", "--level", "procedural", "--kind", "rule", seed_content],
+        [
+            "remember",
+            "--json",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            seed_content,
+        ],
         "seed",
     );
 
@@ -468,7 +504,10 @@ fn swarm_deterministic_json_under_contention() -> TestResult {
 
     ensure(
         determinism_ok,
-        format!("concurrent status outputs should be identical; hashes: {:?}", hashes),
+        format!(
+            "concurrent status outputs should be identical; hashes: {:?}",
+            hashes
+        ),
     )?;
 
     Ok(())
@@ -509,7 +548,10 @@ fn unique_run_id() -> Result<String, String> {
 fn setup_workspace(workspace: &Path) -> TestResult {
     fs::create_dir_all(workspace).map_err(|err| format!("failed to create workspace: {err}"))?;
     let init = run_ee_logged(workspace, ["init"], "init");
-    ensure(init.success, format!("workspace init failed: {:?}", init.error_message))
+    ensure(
+        init.success,
+        format!("workspace init failed: {:?}", init.error_message),
+    )
 }
 
 fn seed_memories(workspace: &Path, count: usize) -> TestResult {
@@ -517,11 +559,22 @@ fn seed_memories(workspace: &Path, count: usize) -> TestResult {
         let content = format!("seed memory {index} for swarm testing");
         let log = run_ee_logged(
             workspace,
-            ["remember", "--json", "--level", "episodic", "--kind", "observation", &content],
+            [
+                "remember",
+                "--json",
+                "--level",
+                "episodic",
+                "--kind",
+                "observation",
+                &content,
+            ],
             &format!("seed-{index}"),
         );
         if !log.success {
-            return Err(format!("failed to seed memory {index}: {:?}", log.error_message));
+            return Err(format!(
+                "failed to seed memory {index}: {:?}",
+                log.error_message
+            ));
         }
     }
     Ok(())
@@ -598,7 +651,11 @@ where
 
 fn ee_binary_path() -> PathBuf {
     let cargo_target = env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_owned());
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     PathBuf::from(cargo_target).join(profile).join("ee")
 }
 
