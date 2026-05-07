@@ -81,6 +81,20 @@ fn start_and_persist_recording_dry_run_does_not_insert() {
 }
 
 #[test]
+fn recorder_store_list_empty_store_returns_empty() {
+    let conn = connect();
+    let entries = list_recorder_events(
+        &conn,
+        &RecorderEventsListOptions {
+            limit: 100,
+            ..RecorderEventsListOptions::default()
+        },
+    )
+    .expect("list empty store");
+    assert!(entries.is_empty());
+}
+
+#[test]
 fn record_and_persist_event_assigns_monotonic_sequence_and_chains_hashes() {
     let conn = connect();
     let start = start_and_persist_recording(&conn, &start_options()).expect("start");
@@ -241,7 +255,7 @@ fn finish_and_persist_recording_marks_run_completed_with_rolled_up_counts() {
 }
 
 #[test]
-fn appending_many_events_yields_matching_row_count() {
+fn recorder_store_appending_many_events_yields_matching_row_count() {
     // Bead acceptance: "Appending 1000 events through hook API yields 1000 rows."
     let conn = connect();
     let start = start_and_persist_recording(&conn, &start_options()).expect("start");
@@ -260,7 +274,7 @@ fn appending_many_events_yields_matching_row_count() {
 }
 
 #[test]
-fn list_recorder_events_filters_across_multiple_sources() {
+fn recorder_store_list_filters_across_multiple_sources() {
     let conn = connect();
     let live = start_and_persist_recording(&conn, &start_options()).expect("live start");
     let _ = record_and_persist_event(&conn, &event_options(&live.run_id, Some("live event")))
@@ -331,28 +345,110 @@ fn list_recorder_events_filters_across_multiple_sources() {
 }
 
 #[test]
-fn list_recorder_events_filters_by_run_and_since() {
+fn recorder_store_list_filters_by_run_and_time_window() {
     let conn = connect();
-    let start = start_and_persist_recording(&conn, &start_options()).expect("start");
-    let _ = record_and_persist_event(&conn, &event_options(&start.run_id, Some("alpha")))
-        .expect("alpha");
-    let _ =
-        record_and_persist_event(&conn, &event_options(&start.run_id, Some("beta"))).expect("beta");
+    let run_id = "run_window_001";
+    conn.insert_recorder_run(
+        run_id,
+        &CreateRecorderRunInput {
+            workspace_id: None,
+            agent_id: "agent_window".to_owned(),
+            session_id: None,
+            source_type: "synthetic".to_owned(),
+            source_id: Some("fixture://window".to_owned()),
+            status: "imported".to_owned(),
+            started_at: "2026-01-01T00:00:00Z".to_owned(),
+            ended_at: None,
+            event_count: 3,
+            redacted_count: 0,
+            payload_bytes: 0,
+            chain_complete: true,
+        },
+    )
+    .expect("insert window run");
+
+    for (event_id, sequence, timestamp, event_hash, previous_event_hash) in [
+        (
+            "evt_window_001",
+            1,
+            "2026-01-01T00:00:00Z",
+            "blake3:window001",
+            None,
+        ),
+        (
+            "evt_window_002",
+            2,
+            "2026-01-01T00:01:00Z",
+            "blake3:window002",
+            Some("blake3:window001"),
+        ),
+        (
+            "evt_window_003",
+            3,
+            "2026-01-01T00:02:00Z",
+            "blake3:window003",
+            Some("blake3:window002"),
+        ),
+    ] {
+        conn.insert_recorder_event(
+            event_id,
+            &CreateRecorderEventInput {
+                run_id: run_id.to_owned(),
+                sequence,
+                event_type: "tool_call".to_owned(),
+                timestamp: timestamp.to_owned(),
+                payload_hash: None,
+                payload_bytes: 0,
+                redaction_status: "clean".to_owned(),
+                redacted_bytes: 0,
+                previous_event_hash: previous_event_hash.map(str::to_owned),
+                event_hash: event_hash.to_owned(),
+                chain_status: if previous_event_hash.is_some() {
+                    "linked".to_owned()
+                } else {
+                    "root".to_owned()
+                },
+                source_span_id: None,
+                source_line_start: None,
+                source_line_end: None,
+            },
+        )
+        .expect("insert window event");
+    }
 
     let entries = list_recorder_events(
         &conn,
         &RecorderEventsListOptions {
-            run_id: Some(start.run_id.clone()),
-            since: None,
-            source: Some("live".to_owned()),
+            run_id: Some(run_id.to_owned()),
+            since: Some("2026-01-01T00:01:00Z".to_owned()),
+            source: Some("synthetic".to_owned()),
             limit: 100,
         },
     )
     .expect("list filtered");
 
     assert_eq!(entries.len(), 2);
-    assert!(entries.iter().all(|e| e.run_id == start.run_id));
+    assert_eq!(entries[0].event_id, "evt_window_003");
+    assert_eq!(entries[1].event_id, "evt_window_002");
+    assert!(entries.iter().all(|e| e.run_id == run_id));
     assert!(entries.iter().all(|e| e.event_hash.starts_with("blake3:")));
+}
+
+#[test]
+fn recorder_store_rejects_malformed_payload_without_persisting() {
+    let conn = connect();
+    let start = start_and_persist_recording(&conn, &start_options()).expect("start");
+    let mut options = event_options(&start.run_id, Some("too-large"));
+    options.max_payload_bytes = 3;
+
+    let err = record_and_persist_event(&conn, &options).expect_err("payload rejected");
+    let message = err.to_string();
+    assert!(
+        message.contains("exceeding the 3 byte limit"),
+        "expected payload size validation, got {message}"
+    );
+    let stored = conn.list_recorder_events(&start.run_id).expect("list");
+    assert!(stored.is_empty(), "rejected payload must not persist");
 }
 
 #[test]
