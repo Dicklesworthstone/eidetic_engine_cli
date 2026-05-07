@@ -1103,6 +1103,10 @@ impl EffectManifest {
                 "preflight_evidence_unavailable",
                 "Preflight close abstains until stored preflight runs exist",
             ),
+            CommandEffect::read_only(
+                "preflight guard",
+                "Checks command against preflight guard rules",
+            ),
             CommandEffect::read_only("plan goal", "Recommends recipes for goals"),
             CommandEffect::read_only("plan explain", "Explains recipe selection"),
             CommandEffect::read_only("plan recommend", "Recommends recipes for tasks"),

@@ -1,0 +1,20 @@
+---
+source: src/core/preflight_guard.rs
+assertion: preflight guard evaluates commands against evidence-matched rules
+schema:
+  guard: ee.preflight.guard.v1
+contracts:
+  - preflight guard checks command against builtin rules from AGENTS.md
+  - preflight guard checks command against workspace rules from .ee/preflight_rules.toml
+  - preflight guard returns exit code 0 when no halt rules match
+  - preflight guard returns exit code 7 (PolicyDenied) when any halt rule matches
+  - preflight guard supports BLAKE3 keyed-hash bypass tokens per (rule_id, command)
+  - preflight guard warns but does not halt for action=warn rules
+  - preflight guard citations include rule source (builtin, workspace_file, etc)
+evidence:
+  - PreflightGuardReport.exit_code
+  - PreflightGuardReport.matches
+  - GuardMatch.rule_id
+  - GuardMatch.resolution
+  - MatchResolution::Enforced
+  - MatchResolution::BypassedWithToken
